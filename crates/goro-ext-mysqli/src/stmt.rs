@@ -237,7 +237,16 @@ pub fn mysqli_stmt_init(vm: &mut Vm, f: &Func, args: &[Value]) -> Value {
 /// mysqli_stmt::__construct
 pub fn mysqli_stmt_ctor(vm: &mut Vm, f: &Func, args: &[Value]) -> Value {
     sync_globals(vm);
-    let a = match parse(vm, f, "O|s!", &[b"mysqli"], args) {
+    let a = match parse(
+        vm,
+        &Func {
+            is_method: false,
+            ..f.clone()
+        },
+        "O|s!",
+        &[b"mysqli"],
+        args,
+    ) {
         Ok(a) => a,
         Err(()) => return Value::Null,
     };

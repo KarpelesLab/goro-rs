@@ -192,6 +192,11 @@ pub fn create_object(vm: &mut Vm, o: &Obj) {
     let cl = o.borrow().class_name.to_ascii_lowercase();
     if let Some(b) = base_of(vm, &cl) {
         attach(o, b);
+        // object_properties_init: the declared properties with a default
+        if b == Base::Driver && !o.borrow().has_property(b"report_mode") {
+            o.borrow_mut()
+                .set_property(b"report_mode".to_vec(), Value::Long(0));
+        }
     }
 }
 

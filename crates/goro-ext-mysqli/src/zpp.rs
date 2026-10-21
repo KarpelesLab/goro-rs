@@ -166,10 +166,9 @@ impl Func {
         throw(vm, b"TypeError", &m);
     }
 
-    /// zend_argument_count_error
+    /// zend_argument_count_error (the message carries no function name)
     pub fn count_error(&self, vm: &mut Vm, msg: &str) {
-        let m = format!("{}(): {}", self.name, msg);
-        throw(vm, b"ArgumentCountError", &m);
+        throw(vm, b"ArgumentCountError", msg);
     }
 }
 
@@ -314,6 +313,11 @@ pub fn parse(vm: &mut Vm, f: &Func, spec: &str, classes: &[&[u8]], args: &[Value
             'C' => {
                 let name = match &raw {
                     Value::String(s) => s.as_bytes().to_vec(),
+                    // try_convert_to_string(): objects throw rather than TypeError
+                    Value::Object(_) => match vm.value_to_string_checked(&raw) {
+                        Ok(s) => s.as_bytes().to_vec(),
+                        Err(_) => return Err(()),
+                    },
                     other => match vm.zpp_coerce_scalar(T_STRING, other, strict, line) {
                         Ok(Some(Value::String(s))) => s.as_bytes().to_vec(),
                         Ok(_) => {

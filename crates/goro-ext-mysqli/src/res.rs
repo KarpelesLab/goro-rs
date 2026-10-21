@@ -304,12 +304,41 @@ fn make_object(
         .classes
         .get(ce)
         .and_then(|c| c.get_method(b"__construct"))
-        .is_some();
-    if ctor {
+        .map(|m| {
+            let op = &m.op_array;
+            let implicit = u32::from(op.cv_names.first().map(|n| n.as_slice()) == Some(b"this"));
+            let variadic = op.variadic_param.is_some()
+                || op.param_count.saturating_sub(implicit) > op.required_param_count;
+            (
+                op.required_param_count as usize,
+                variadic,
+                m.declaring_class.clone(),
+            )
+        });
+    if let Some((required, variadic, declaring)) = ctor {
         let params: Vec<Value> = match &ctor_params {
             Some(p) => p.borrow().iter().map(|(_, v)| v.clone()).collect(),
             None => Vec::new(),
         };
+        // zend_call_function() checks the count like a userland call
+        if params.len() < required {
+            let cname = vm
+                .classes
+                .get(&declaring)
+                .map(|c| String::from_utf8_lossy(&c.name).into_owned())
+                .unwrap_or_else(|| String::from_utf8_lossy(&declaring).into_owned());
+            let msg = format!(
+                "Too few arguments to function {}::__construct(), {} passed and {} {} expected",
+                cname,
+                params.len(),
+                if variadic { "at least" } else { "exactly" },
+                required
+            );
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"ArgumentCountError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Value::Null;
+        }
         let _ = vm.call_object_method(&ov, b"__construct", &params);
         if vm.current_exception.is_some() {
             return Value::Null;
@@ -609,7 +638,16 @@ pub fn mysqli_data_seek(vm: &mut Vm, f: &Func, args: &[Value]) -> Value {
 /// mysqli_result::__construct
 pub fn mysqli_result_ctor(vm: &mut Vm, f: &Func, args: &[Value]) -> Value {
     sync_globals(vm);
-    let a = match parse(vm, f, "O|l", &[b"mysqli"], args) {
+    let a = match parse(
+        vm,
+        &Func {
+            is_method: false,
+            ..f.clone()
+        },
+        "O|l",
+        &[b"mysqli"],
+        args,
+    ) {
         Ok(a) => a,
         Err(()) => return Value::Null,
     };

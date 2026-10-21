@@ -469,7 +469,7 @@ impl Conn {
                     Some(slot) => match slot.take() {
                         Some(r) if r.field_count == n32 => r,
                         Some(mut r) => {
-                            r.free_result(true);
+                            r.free_result_with(self, true);
                             Box::new(ResultSet::new(n32))
                         }
                         None => Box::new(ResultSet::new(n32)),

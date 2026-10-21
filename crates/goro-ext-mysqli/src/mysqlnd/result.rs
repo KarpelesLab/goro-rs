@@ -253,7 +253,10 @@ impl ResultSet {
         if self.stored.is_some() {
             return self.buffered_fetch_row(want);
         }
-        if self.unbuf.is_some() {
+        if let Some(u) = &self.unbuf {
+            if u.eof_reached {
+                return Ok(None);
+            }
             let conn = match &self.conn {
                 Some(c) => c.clone(),
                 None => return Err(()),

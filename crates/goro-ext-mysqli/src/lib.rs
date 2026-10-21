@@ -393,6 +393,24 @@ const METHODS: &[(&str, &str, Impl, bool)] = &[
     ),
 ];
 
+/// The #[\Deprecated] functions and methods: "since, message"
+fn deprecation(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "mysqli_execute" => "8.5, use mysqli_stmt_execute() instead",
+        "mysqli_kill" | "mysqli::kill" => "8.4, use KILL CONNECTION/QUERY SQL statement instead",
+        "mysqli_ping" => {
+            "8.4, because the reconnect feature has been removed in PHP 8.2 and this function is now redundant"
+        }
+        "mysqli::ping" => {
+            "8.4, because the reconnect feature has been removed in PHP 8.2 and this method is now redundant"
+        }
+        "mysqli_refresh" | "mysqli::refresh" => "8.4, use FLUSH SQL statement instead",
+        "mysqli::get_client_info" => "8.1, use mysqli_get_client_info() instead",
+        "mysqli::init" => "8.1, replace calls to parent::init() with parent::__construct()",
+        _ => return None,
+    })
+}
+
 fn sql_exception_get_sql_state(vm: &mut Vm, f: &Func, args: &[Value]) -> Value {
     if zpp::parse(vm, f, "", &[], args).is_err() {
         return Value::Null;
@@ -422,7 +440,16 @@ fn has_method(class: &[u8], method: &[u8], _is_static: bool) -> bool {
             .unwrap_or(false)
             || matches!(method, b"current" | b"key" | b"next" | b"valid" | b"rewind");
     }
-    find_method(class, &method.to_ascii_lowercase()).is_some()
+    // constructors are run through object_construct_handlers
+    let m = method.to_ascii_lowercase();
+    if m == b"__construct" {
+        return false;
+    }
+    match find_method(class, &m) {
+        // a static call only finds static methods
+        Some(e) => !_is_static || e.3,
+        None => false,
+    }
 }
 
 fn this_obj(this: Option<&Value>) -> Option<zpp::Obj> {
@@ -469,6 +496,12 @@ fn call_method(
         return Value::Null;
     }
     let f = Func::method(m.0, m.1, if m.3 { None } else { this_o.clone() });
+    if let Some(d) = deprecation(&f.name) {
+        vm.emit_deprecated(&format!("Method {}() is deprecated since {}", f.name, d));
+        if vm.current_exception.is_some() {
+            return Value::Null;
+        }
+    }
     // When invoked from the engine there may be no call frame yet.
     let mut pushed = false;
     if let Some(_o) = &this_o {
@@ -558,6 +591,12 @@ macro_rules! wrap {
             fn $name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let fname = &stringify!($name)[2..];
                 let f = Func::function(fname);
+                if let Some(d) = deprecation(fname) {
+                    vm.emit_deprecated(&format!("Function {}() is deprecated since {}", fname, d));
+                    if vm.current_exception.is_some() {
+                        return Ok(Value::Null);
+                    }
+                }
                 Ok($imp(vm, &f, args))
             }
         )*
@@ -1109,20 +1148,8 @@ pub fn register(vm: &mut Vm) {
             .insert(name.as_bytes().to_vec(), ini_set_hook);
     }
 
-    // classes
-    let mut driver = ClassEntry::new(b"mysqli_driver".to_vec());
-    driver.is_final = true;
-    vm.classes.insert(b"mysqli_driver".to_vec(), driver);
-    let mysqli = ClassEntry::new(b"mysqli".to_vec());
-    vm.classes.insert(b"mysqli".to_vec(), mysqli);
-    let mut result = ClassEntry::new(b"mysqli_result".to_vec());
-    result.interfaces.push(b"IteratorAggregate".to_vec());
-    vm.classes.insert(b"mysqli_result".to_vec(), result);
-    let st = ClassEntry::new(b"mysqli_stmt".to_vec());
-    vm.classes.insert(b"mysqli_stmt".to_vec(), st);
-    let mut w = ClassEntry::new(b"mysqli_warning".to_vec());
-    w.is_final = true;
-    vm.classes.insert(b"mysqli_warning".to_vec(), w);
+    // classes: the VM knows internal classes by name (their shape comes from
+    // the stubs); only the exception needs an entry for its property.
     let mut se = ClassEntry::new(b"mysqli_sql_exception".to_vec());
     se.parent = Some(b"RuntimeException".to_vec());
     se.is_final = true;
@@ -1145,6 +1172,7 @@ pub fn register(vm: &mut Vm) {
     };
     for c in [
         &b"mysqli"[..],
+        b"mysqli_driver",
         b"mysqli_result",
         b"mysqli_stmt",
         b"mysqli_warning",
