@@ -5224,6 +5224,45 @@ impl Vm {
         self.execute_op_array(op_array, cvs)
     }
 
+    /// zend_lazy_object_realize(): the object stops being lazy without
+    /// running its initializer (all its properties became non-lazy).
+    pub fn lazy_realize(&mut self, obj: &Rc<RefCell<PhpObject>>) {
+        {
+            let mut ob = obj.borrow_mut();
+            ob.remove_property(b"__lazy_state");
+            ob.remove_property(b"__lazy_initializer");
+            ob.remove_property(b"__lazy_skipped");
+            ob.remove_property(b"__lazy_flags");
+        }
+        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let has_destruct = self.classes.get(&class_lower).map(|c| c.methods.contains_key(&b"__destruct".to_vec())).unwrap_or(false);
+        if has_destruct && !self.destructible_objects.iter().any(|v| matches!(v, Value::Object(o) if Rc::ptr_eq(o, obj))) {
+            self.destructible_objects.push(Value::Object(obj.clone()));
+        }
+    }
+
+    /// True if `obj` is an uninitialized lazy object (ghost, or proxy
+    /// without instance yet).
+    pub fn is_uninit_lazy(obj: &Rc<RefCell<PhpObject>>) -> bool {
+        let ob = obj.borrow();
+        match ob.get_property(b"__lazy_state") {
+            Value::String(s) if s.as_bytes() == b"ghost" => true,
+            Value::String(s) if s.as_bytes() == b"proxy" => !ob.has_property(b"__lazy_real"),
+            _ => false,
+        }
+    }
+
+    /// Number of properties of an uninitialized lazy object that are still
+    /// lazy (declared, non-virtual, not skipped/initialized out of band).
+    pub fn lazy_props_remaining(&self, obj: &Rc<RefCell<PhpObject>>) -> usize {
+        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        self.ordered_instance_prop_defs(&class_lower)
+            .iter()
+            .filter(|d| !(d.is_virtual && (d.has_get_hook || d.has_set_hook)))
+            .filter(|d| !is_prop_skipped(obj, &d.name))
+            .count()
+    }
+
     /// True while the initializer of the lazy object `object_id` is running.
     pub fn is_lazy_init_in_progress(&self, object_id: u64) -> bool {
         self.lazy_init_in_progress.contains(&object_id)
@@ -8009,6 +8048,7 @@ impl Vm {
                 b"getvalue" | b"setvalue"
                     | b"getattributes"
                     | b"skiplazyinitialization"
+                    | b"islazy"
                     | b"setrawvaluewithoutlazyinitialization"
                     | b"setrawvalue"
                     | b"getrawvalue"
@@ -34625,7 +34665,7 @@ fn vm_ymd_to_days(year: i64, month: u32, day: u32) -> i64 {
 /// Check if a property on an object has been marked as "skipped" for lazy
 /// initialization via `ReflectionProperty::skipLazyInitialization()`. The
 /// skipped names are stored as a NUL-separated string in __lazy_skipped.
-fn is_prop_skipped(obj: &Rc<RefCell<PhpObject>>, prop_name: &[u8]) -> bool {
+pub fn is_prop_skipped(obj: &Rc<RefCell<PhpObject>>, prop_name: &[u8]) -> bool {
     let ob = obj.borrow();
     match ob.get_property(b"__lazy_skipped") {
         Value::String(s) => s.as_bytes().split(|b| *b == 0).any(|n| n == prop_name),

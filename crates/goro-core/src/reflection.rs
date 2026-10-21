@@ -4539,60 +4539,83 @@ pub fn reflection_property_method(
     }
 }
 
-/// ReflectionProperty methods with args
-/// Shared logic for `skipLazyInitialization` and
-/// `setRawValueWithoutLazyInitialization`: adds the property name to the
-/// object's `__lazy_skipped` list, optionally sets the property to a value,
-/// and clears the lazy state when all declared non-static properties have
-/// been skipped.
-fn mark_prop_skipped(
-    vm: &mut Vm,
-    target: &Value,
-    class_lower: &[u8],
-    prop_name: &[u8],
-    value: Option<Value>,
-) {
-    let target_obj = match target {
-        Value::Object(o) => o,
-        _ => return,
+/// Find a property declaration (static or not) on `class_lower` or its
+/// ancestors.
+fn find_prop_decl(vm: &Vm, class_lower: &[u8], prop: &[u8]) -> Option<crate::object::PropertyDef> {
+    let mut cur = class_lower.to_vec();
+    for _ in 0..64 {
+        let c = vm.classes.get(&cur)?;
+        if let Some(p) = c.properties.iter().find(|p| p.name == prop) {
+            return Some(p.clone());
+        }
+        cur = c.parent.as_ref()?.iter().map(|b| b.to_ascii_lowercase()).collect();
+    }
+    None
+}
+
+fn class_display(vm: &Vm, class_lower: &[u8]) -> String {
+    vm.classes.get(class_lower).map(|c| crate::value::display_class_name(&c.name))
+        .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string())
+}
+
+/// Z_PARAM_OBJ_OF_CLASS(object, intern->ce) for ReflectionProperty methods.
+fn reflection_property_object_arg(vm: &mut Vm, target: &Value, class_lower: &[u8], method: &str) -> Option<Rc<RefCell<PhpObject>>> {
+    if let Value::Object(o) = target {
+        let ol: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        if ol == class_lower || vm.class_extends(&ol, class_lower) {
+            return Some(o.clone());
+        }
+    }
+    let given = match target {
+        Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name),
+        other => crate::vm::Vm::value_type_name(other),
     };
-    let all_props: Vec<Vec<u8>> = vm.classes.get(class_lower)
-        .map(|c| c.properties.iter()
-            .filter(|p| !p.is_static)
-            .map(|p| p.name.clone())
-            .collect())
-        .unwrap_or_default();
-    let mut ob = target_obj.borrow_mut();
-    // Append to __lazy_skipped (NUL-separated list of property names).
-    let prev = ob.get_property(b"__lazy_skipped");
-    let mut names: Vec<u8> = match prev {
-        Value::String(s) => s.as_bytes().to_vec(),
+    let msg = format!("ReflectionProperty::{}(): Argument #1 ($object) must be of type {}, {} given", method, class_display(vm, class_lower), given);
+    let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    None
+}
+
+/// reflection_property_check_lazy_compatible()
+fn reflection_property_check_lazy_compatible(vm: &mut Vm, decl: &Option<crate::object::PropertyDef>, class_lower: &[u8], prop: &[u8], method: &str) -> bool {
+    let prop_s = String::from_utf8_lossy(prop).to_string();
+    let msg = match decl {
+        None => Some(format!("Can not use {} on dynamic property {}::${}", method, class_display(vm, class_lower), prop_s)),
+        Some(d) if d.is_static => Some(format!("Can not use {} on static property {}::${}", method, class_display(vm, &d.declaring_class), prop_s)),
+        Some(d) if d.is_virtual && (d.has_get_hook || d.has_set_hook) => {
+            Some(format!("Can not use {} on virtual property {}::${}", method, class_display(vm, &d.declaring_class), prop_s))
+        }
+        _ => None,
+    };
+    if let Some(m) = msg {
+        let exc = vm.create_exception(b"ReflectionException", &m, vm.current_line);
+        vm.current_exception = Some(exc);
+        return false;
+    }
+    true
+}
+
+/// Add/remove `prop` from the object's non-lazy (`__lazy_skipped`) list.
+fn set_prop_lazy_flag(obj: &Rc<RefCell<PhpObject>>, prop: &[u8], lazy: bool) {
+    let mut ob = obj.borrow_mut();
+    let mut names: Vec<Vec<u8>> = match ob.get_property(b"__lazy_skipped") {
+        Value::String(s) => s.as_bytes().split(|b| *b == 0).filter(|n| !n.is_empty()).map(|n| n.to_vec()).collect(),
         _ => Vec::new(),
     };
-    // De-dupe
-    if !names.split(|b| *b == 0).any(|n| n == prop_name) {
-        if !names.is_empty() {
-            names.push(b'\0');
-        }
-        names.extend_from_slice(prop_name);
+    names.retain(|n| n != prop);
+    if !lazy {
+        names.push(prop.to_vec());
     }
-    ob.set_property(
-        b"__lazy_skipped".to_vec(),
-        Value::String(PhpString::from_vec(names.clone())),
-    );
-    if let Some(v) = value {
-        ob.set_property(prop_name.to_vec(), v);
-    }
-    // If every declared non-static property is now in the skipped list,
-    // the object is effectively initialized — clear the lazy state.
-    let all_skipped = all_props.iter().all(|p| {
-        names.split(|b| *b == 0).any(|n| n == p.as_slice())
-    });
-    if all_skipped && !all_props.is_empty() {
-        ob.remove_property(b"__lazy_state");
-        ob.remove_property(b"__lazy_initializer");
+    if names.is_empty() {
         ob.remove_property(b"__lazy_skipped");
+    } else {
+        ob.set_property(b"__lazy_skipped".to_vec(), Value::String(PhpString::from_vec(names.join(&0u8))));
     }
+}
+
+/// True if `prop` of the (proxy-resolved) object is still lazy.
+fn prop_is_lazy(obj: &Rc<RefCell<PhpObject>>, prop: &[u8]) -> bool {
+    Vm::is_uninit_lazy(obj) && !crate::vm::is_prop_skipped(obj, prop)
 }
 
 /// ReflectionClass::SKIP_INITIALIZATION_ON_SERIALIZE (ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE)
@@ -4716,25 +4739,61 @@ pub fn reflection_property_docall(
             }
             b"setrawvaluewithoutlazyinitialization" => {
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
-                let value = args.get(2).cloned().unwrap_or(Value::Null);
-                // If the target is an initialized lazy proxy, write directly
-                // to the backing real object.
-                if let Value::Object(target_obj) = &target {
-                    let is_init_proxy = {
-                        let ob = target_obj.borrow();
-                        matches!(ob.get_property(b"__lazy_state"),
-                            Value::String(ref s) if s.as_bytes() == b"proxy")
-                            && ob.has_property(b"__lazy_real")
-                    };
-                    if is_init_proxy {
-                        if let Value::Object(real) = target_obj.borrow().get_property(b"__lazy_real") {
-                            real.borrow_mut().set_property(prop_name.as_bytes().to_vec(), value);
-                            return Some(Value::Null);
-                        }
+                let mut value = args.get(2).cloned().unwrap_or(Value::Null);
+                let mname = "setRawValueWithoutLazyInitialization";
+                let Some(tobj) = reflection_property_object_arg(vm, &target, &class_lower, mname) else { return Some(Value::Null) };
+                let tobj = vm.proxy_redirect(&tobj);
+                let pn = prop_name.as_bytes();
+                let decl = find_prop_decl(vm, &class_lower, pn);
+                if !reflection_property_check_lazy_compatible(vm, &decl, &class_lower, pn, mname) {
+                    return Some(Value::Null);
+                }
+                let decl = decl.unwrap();
+                let prop_was_lazy = prop_is_lazy(&tobj, pn);
+                if prop_was_lazy {
+                    set_prop_lazy_flag(&tobj, pn, false);
+                }
+                // Write with the reflected class as scope: readonly and type
+                // checks apply, hooks and lazy initialization don't.
+                let decl_disp = class_display(vm, &decl.declaring_class);
+                let cur = tobj.borrow().get_property(pn);
+                let mut err: Option<(&[u8], String)> = None;
+                if decl.is_readonly && !matches!(cur, Value::Undef) {
+                    err = Some((b"Error", format!("Cannot modify readonly property {}::${}", decl_disp, prop_name)));
+                } else if let Some(pt) = decl.property_type.as_ref() {
+                    crate::vm::Vm::coerce_value_to_type(&mut value, pt, false);
+                    if !vm.value_matches_type(&value, pt) {
+                        err = Some((b"TypeError", format!("Cannot assign {} to property {}::${} of type {}",
+                            crate::vm::Vm::value_type_name(&value), decl_disp, prop_name, vm.param_type_name(pt))));
                     }
                 }
-                mark_prop_skipped(vm, &target, &class_lower, prop_name.as_bytes(), Some(value));
+                if let Some((cls, m)) = err {
+                    let exc = vm.create_exception(cls, &m, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    // Mark property as lazy again if an exception prevented update
+                    if prop_was_lazy && matches!(tobj.borrow().get_property(pn), Value::Undef) && Vm::is_uninit_lazy(&tobj) {
+                        set_prop_lazy_flag(&tobj, pn, true);
+                    }
+                } else {
+                    tobj.borrow_mut().set_property(pn.to_vec(), value);
+                }
+                // Object becomes non-lazy if this was the last lazy prop
+                if prop_was_lazy && !prop_is_lazy(&tobj, pn) && Vm::is_uninit_lazy(&tobj) && vm.lazy_props_remaining(&tobj) == 0 {
+                    vm.lazy_realize(&tobj);
+                }
                 Some(Value::Null)
+            }
+            b"islazy" => {
+                let target = args.get(1).cloned().unwrap_or(Value::Null);
+                let Some(tobj) = reflection_property_object_arg(vm, &target, &class_lower, "isLazy") else { return Some(Value::Null) };
+                let pn = prop_name.as_bytes();
+                match find_prop_decl(vm, &class_lower, pn) {
+                    Some(d) if !d.is_static && !(d.is_virtual && (d.has_get_hook || d.has_set_hook)) => {
+                        let tobj = vm.proxy_redirect(&tobj);
+                        Some(if prop_is_lazy(&tobj, pn) { Value::True } else { Value::False })
+                    }
+                    _ => Some(Value::False),
+                }
             }
             b"isinitialized" => {
                 // isInitialized($obj): returns true if the property has been
@@ -4770,17 +4829,27 @@ pub fn reflection_property_docall(
                 Some(Value::Null)
             }
             b"skiplazyinitialization" => {
-                // skipLazyInitialization($obj): mark this property as already
-                // initialized on the given lazy object. We store the skipped
-                // names in __lazy_skipped and apply the property's default
-                // value. Once all declared props are skipped, we clear the
-                // lazy state so var_dump shows a normal object.
+                // Mark property as non-lazy, and initialize to default value.
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
-                let default = vm.classes.get(&class_lower)
-                    .and_then(|c| c.properties.iter().find(|p| p.name == prop_name.as_bytes()))
-                    .map(|p| p.default.clone());
-                let resolved_default = default.map(|d| vm.resolve_deferred_value(&d));
-                mark_prop_skipped(vm, &target, &class_lower, prop_name.as_bytes(), resolved_default);
+                let mname = "skipLazyInitialization";
+                let Some(tobj) = reflection_property_object_arg(vm, &target, &class_lower, mname) else { return Some(Value::Null) };
+                let pn = prop_name.as_bytes();
+                let decl = find_prop_decl(vm, &class_lower, pn);
+                if !reflection_property_check_lazy_compatible(vm, &decl, &class_lower, pn, mname) {
+                    return Some(Value::Null);
+                }
+                let decl = decl.unwrap();
+                let tobj = vm.proxy_redirect(&tobj);
+                if !prop_is_lazy(&tobj, pn) {
+                    // No effect on non-lazy properties
+                    return Some(Value::Null);
+                }
+                let default = vm.resolve_deferred_value(&decl.default);
+                set_prop_lazy_flag(&tobj, pn, false);
+                tobj.borrow_mut().set_property(pn.to_vec(), default);
+                if vm.lazy_props_remaining(&tobj) == 0 {
+                    vm.lazy_realize(&tobj);
+                }
                 Some(Value::Null)
             }
             _ => None,
