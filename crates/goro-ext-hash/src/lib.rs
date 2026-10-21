@@ -1,11 +1,22 @@
-use goro_core::array::PhpArray;
+//! ext/hash: a port of php-src's ext/hash (hash.c and the hash_*.c
+//! algorithm implementations), plus md5()/sha1()/crc32() and their _file()
+//! variants from ext/standard.
+
+use goro_core::array::{ArrayKey, PhpArray};
+use goro_core::object::{ClassEntry, NativeData, PhpObject};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::vm::{Vm, VmError};
+use goro_core::vm::{NativeClassHandler, NativeObjectHandlers, Vm, VmError};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 mod algos;
+mod ops;
+mod tables;
+
+use ops::{Ctx, InitArgs, Ops, fetch_ops};
+
+const PHP_HASH_HMAC: i64 = 1;
 
 /// Register all hash extension functions
 pub fn register(vm: &mut Vm) {
@@ -13,23 +24,23 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"crc32", crc32_fn);
     vm.register_function(b"md5", md5_fn);
     vm.register_function(b"sha1", sha1_fn);
-    vm.register_function(b"hash", hash_fn);
-    vm.register_function(b"hash_algos", hash_algos_fn);
-    vm.register_function(b"hash_equals", hash_equals_fn);
-    vm.register_function(b"hash_hmac", hash_hmac_fn);
-    vm.register_function(b"hash_init", hash_init_fn);
-    vm.register_function(b"hash_update", hash_update_fn);
-    vm.register_function(b"hash_final", hash_final_fn);
-    vm.register_function(b"hash_copy", hash_copy_fn);
-    vm.register_function(b"hash_pbkdf2", hash_pbkdf2_fn);
-    vm.register_function(b"hash_hmac_algos", hash_hmac_algos_fn);
-    vm.register_function(b"hash_file", hash_file_fn);
-    vm.register_function(b"hash_hkdf", hash_hkdf_fn);
     vm.register_function(b"md5_file", md5_file_fn);
     vm.register_function(b"sha1_file", sha1_file_fn);
+    vm.register_function(b"hash", hash_fn);
+    vm.register_function(b"hash_file", hash_file_fn);
+    vm.register_function(b"hash_hmac", hash_hmac_fn);
     vm.register_function(b"hash_hmac_file", hash_hmac_file_fn);
+    vm.register_function(b"hash_init", hash_init_fn);
+    vm.register_function(b"hash_update", hash_update_fn);
     vm.register_function(b"hash_update_stream", hash_update_stream_fn);
     vm.register_function(b"hash_update_file", hash_update_file_fn);
+    vm.register_function(b"hash_final", hash_final_fn);
+    vm.register_function(b"hash_copy", hash_copy_fn);
+    vm.register_function(b"hash_algos", hash_algos_fn);
+    vm.register_function(b"hash_hmac_algos", hash_hmac_algos_fn);
+    vm.register_function(b"hash_pbkdf2", hash_pbkdf2_fn);
+    vm.register_function(b"hash_equals", hash_equals_fn);
+    vm.register_function(b"hash_hkdf", hash_hkdf_fn);
 
     // Register parameter types for strict_types enforcement + null-deprecation
     use goro_core::opcode::ParamType;
@@ -51,2598 +62,1228 @@ pub fn register(vm: &mut Vm) {
     );
     vm.register_builtin_param_types(b"hash_hmac", vec![s(), s(), s(), b()]);
     vm.register_builtin_param_types(b"hash_pbkdf2", vec![s(), s(), s(), i(), i(), b()]);
-    vm.register_builtin_param_types(b"hash_equals", vec![s(), s()]);
 
     // Register parameter names (for deprecation messages that mention $filename, etc.)
-    vm.builtin_param_names.insert(
-        b"md5_file".to_vec(),
-        vec![b"filename".to_vec(), b"binary".to_vec()],
-    );
-    vm.builtin_param_names.insert(
-        b"sha1_file".to_vec(),
-        vec![b"filename".to_vec(), b"binary".to_vec()],
-    );
-    vm.builtin_param_names.insert(
-        b"md5".to_vec(),
-        vec![b"string".to_vec(), b"binary".to_vec()],
-    );
-    vm.builtin_param_names.insert(
-        b"sha1".to_vec(),
-        vec![b"string".to_vec(), b"binary".to_vec()],
-    );
+    let names = |l: &[&str]| l.iter().map(|n| n.as_bytes().to_vec()).collect::<Vec<_>>();
+    vm.builtin_param_names
+        .insert(b"md5_file".to_vec(), names(&["filename", "binary"]));
+    vm.builtin_param_names
+        .insert(b"sha1_file".to_vec(), names(&["filename", "binary"]));
+    vm.builtin_param_names
+        .insert(b"md5".to_vec(), names(&["string", "binary"]));
+    vm.builtin_param_names
+        .insert(b"sha1".to_vec(), names(&["string", "binary"]));
     vm.builtin_param_names.insert(
         b"hash".to_vec(),
-        vec![
-            b"algo".to_vec(),
-            b"data".to_vec(),
-            b"binary".to_vec(),
-            b"options".to_vec(),
-        ],
+        names(&["algo", "data", "binary", "options"]),
     );
     vm.builtin_param_names.insert(
         b"hash_file".to_vec(),
-        vec![
-            b"algo".to_vec(),
-            b"filename".to_vec(),
-            b"binary".to_vec(),
-            b"options".to_vec(),
-        ],
+        names(&["algo", "filename", "binary", "options"]),
     );
     vm.builtin_param_names.insert(
         b"hash_hmac".to_vec(),
-        vec![
-            b"algo".to_vec(),
-            b"data".to_vec(),
-            b"key".to_vec(),
-            b"binary".to_vec(),
-        ],
+        names(&["algo", "data", "key", "binary"]),
     );
     vm.builtin_param_names.insert(
         b"hash_equals".to_vec(),
-        vec![b"known_string".to_vec(), b"user_string".to_vec()],
+        names(&["known_string", "user_string"]),
     );
+
+    register_hash_context(vm);
 }
 
-fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let data = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = data.as_bytes();
-    // CRC32B (standard CRC32 used by PHP's crc32() function)
-    let crc = crc32b_compute(bytes);
-    // PHP 64-bit returns unsigned 32-bit value as positive integer
-    Ok(Value::Long(crc as i64))
+// ===========================================================================
+// Helpers
+
+fn throw<T>(vm: &mut Vm, class: &[u8], msg: &str) -> Result<T, VmError> {
+    let exc = vm.create_exception(class, msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: msg.to_string(),
+        line: vm.current_line,
+    })
 }
 
-fn md5_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let data = args.first().unwrap_or(&Value::Null).to_php_string();
-    let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
-    let digest = md5_hash(data.as_bytes());
+/// Propagate an exception thrown while running an algorithm init function.
+fn pending_exception(vm: &mut Vm) -> Result<(), VmError> {
+    if vm.current_exception.is_some() {
+        return Err(VmError {
+            message: "exception".into(),
+            line: vm.current_line,
+        });
+    }
+    Ok(())
+}
+
+fn hex(digest: &[u8]) -> Value {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(digest.len() * 2);
+    for b in digest {
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 0xf) as usize]);
+    }
+    Value::String(PhpString::from_vec(out))
+}
+
+fn digest_value(digest: Vec<u8>, raw: bool) -> Value {
     if raw {
-        Ok(Value::String(PhpString::from_vec(digest.to_vec())))
+        Value::String(PhpString::from_vec(digest))
     } else {
-        let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-        Ok(Value::String(PhpString::from_string(hex)))
+        hex(&digest)
     }
 }
 
-fn sha1_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let data = args.first().unwrap_or(&Value::Null).to_php_string();
-    let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
-    let digest = sha1_hash(data.as_bytes());
-    if raw {
-        Ok(Value::String(PhpString::from_vec(digest.to_vec())))
-    } else {
-        let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-        Ok(Value::String(PhpString::from_string(hex)))
-    }
+fn arg(args: &[Value], i: usize) -> Value {
+    args.get(i).map(|v| v.deref()).unwrap_or(Value::Null)
 }
 
-fn compute_hash(algo: &str, data: &[u8]) -> Option<Vec<u8>> {
-    match algo {
-        "md5" => Some(md5_hash(data).to_vec()),
-        "sha1" | "sha-1" => Some(sha1_hash(data).to_vec()),
-        "sha256" | "sha-256" => Some(sha256_hash(data).to_vec()),
-        "sha384" | "sha-384" => Some(sha384_hash(data)),
-        "sha512" | "sha-512" => Some(sha512_hash(data)),
-        "sha224" | "sha-224" => Some(sha224_hash(data).to_vec()),
-        "sha512/224" => Some(sha512_224_hash(data)),
-        "sha512/256" => Some(sha512_256_hash(data)),
-        "sha3-224" => Some(sha3_hash(data, 224)),
-        "sha3-256" => Some(sha3_hash(data, 256)),
-        "sha3-384" => Some(sha3_hash(data, 384)),
-        "sha3-512" => Some(sha3_hash(data, 512)),
-        "ripemd128" => Some(ripemd128_hash(data).to_vec()),
-        "ripemd160" => Some(ripemd160_hash(data).to_vec()),
-        "ripemd256" => Some(ripemd256_hash(data).to_vec()),
-        "ripemd320" => Some(ripemd320_hash(data).to_vec()),
-        "joaat" => Some(joaat_hash(data).to_be_bytes().to_vec()),
-        "crc32" => Some(crc32_compute(data).to_le_bytes().to_vec()),
-        "crc32b" => Some(crc32b_compute(data).to_be_bytes().to_vec()),
-        "crc32c" => Some(crc32c_compute(data).to_be_bytes().to_vec()),
-        "adler32" => Some(adler32_compute(data).to_be_bytes().to_vec()),
-        "fnv132" => Some(fnv1_32(data).to_be_bytes().to_vec()),
-        "fnv1a32" => Some(fnv1a_32(data).to_be_bytes().to_vec()),
-        "fnv164" => Some(fnv1_64(data).to_be_bytes().to_vec()),
-        "fnv1a64" => Some(fnv1a_64(data).to_be_bytes().to_vec()),
-        "md4" => Some(md4_hash(data).to_vec()),
-        "md2" => Some(algos::md2_hash(data)),
-        "whirlpool" => Some(algos::whirlpool_hash(data)),
-        "gost" => Some(algos::gost_hash(data)),
-        "gost-crypto" => Some(algos::gost_crypto_hash(data)),
-        "tiger128,3" => {
-            let h = algos::tiger_3pass(data);
-            Some(h[..16].to_vec())
-        }
-        "tiger160,3" => {
-            let h = algos::tiger_3pass(data);
-            Some(h[..20].to_vec())
-        }
-        "tiger192,3" => Some(algos::tiger_3pass(data)),
-        // tiger 4-pass: the `tiger` crate only implements 3-pass so we use that as a fallback.
-        // Output sizes are correct but actual hash values won't match PHP's 4-pass Tiger.
-        "tiger128,4" => {
-            let h = algos::tiger_3pass(data);
-            Some(h[..16].to_vec())
-        }
-        "tiger160,4" => {
-            let h = algos::tiger_3pass(data);
-            Some(h[..20].to_vec())
-        }
-        "tiger192,4" => Some(algos::tiger_3pass(data)),
-        "murmur3a" => Some(algos::murmur3a_hash(data, 0).to_be_bytes().to_vec()),
-        "murmur3c" => Some(algos::murmur3c_hash(data, 0).to_vec()),
-        "murmur3f" => Some(algos::murmur3f_hash(data, 0).to_vec()),
-        "xxh32" => Some(algos::xxh32_hash(data, 0).to_be_bytes().to_vec()),
-        "xxh64" => Some(algos::xxh64_hash(data, 0).to_be_bytes().to_vec()),
-        "xxh3" => Some(algos::xxh3_64_hash(data, 0).to_be_bytes().to_vec()),
-        "xxh128" => Some(algos::xxh3_128_hash(data, 0).to_be_bytes().to_vec()),
+fn arg_str(args: &[Value], i: usize) -> PhpString {
+    arg(args, i).to_php_string()
+}
+
+fn arg_bool(args: &[Value], i: usize) -> bool {
+    args.get(i).map(|v| v.is_truthy()).unwrap_or(false)
+}
+
+/// The `HashTable *args` (options) argument: None when omitted / null.
+fn arg_options(args: &[Value], i: usize) -> Option<Rc<RefCell<PhpArray>>> {
+    match arg(args, i) {
+        Value::Array(a) => Some(a),
         _ => None,
     }
 }
 
-fn hash_block_size(algo: &str) -> usize {
-    match algo {
-        "md5" | "md4" | "md2" => 64,
-        "sha1" | "sha-1" | "sha256" | "sha-256" | "sha224" | "sha-224" => 64,
-        "sha384" | "sha-384" | "sha512" | "sha-512" | "sha512/224" | "sha512/256" => 128,
-        "sha3-224" => 144,
-        "sha3-256" => 136,
-        "sha3-384" => 104,
-        "sha3-512" => 72,
-        "ripemd128" | "ripemd160" | "ripemd256" | "ripemd320" => 64,
-        "whirlpool" => 64,
-        "tiger128,3" | "tiger160,3" | "tiger192,3" | "tiger128,4" | "tiger160,4" | "tiger192,4" => {
-            64
+/// Create a context, running the algorithm's init with the options array.
+fn new_ctx(
+    vm: &mut Vm,
+    ops: &'static Ops,
+    options: Option<&Rc<RefCell<PhpArray>>>,
+    fname: &str,
+) -> Box<dyn Ctx> {
+    match options {
+        Some(a) => {
+            let arr = a.borrow().clone();
+            let mut ia = InitArgs {
+                vm,
+                args: &arr,
+                fname,
+            };
+            ops.new_ctx(Some(&mut ia))
         }
-        "gost" | "gost-crypto" => 32,
-        _ => 64,
+        None => ops.new_ctx(None),
     }
 }
 
-/// Returns true if the algorithm is a cryptographic hash usable with HMAC.
-fn is_crypto_algo(algo: &str) -> bool {
-    matches!(
-        algo,
-        "md2"
-            | "md4"
-            | "md5"
-            | "sha1"
-            | "sha-1"
-            | "sha224"
-            | "sha-224"
-            | "sha256"
-            | "sha-256"
-            | "sha384"
-            | "sha-384"
-            | "sha512"
-            | "sha-512"
-            | "sha512/224"
-            | "sha512/256"
-            | "sha3-224"
-            | "sha3-256"
-            | "sha3-384"
-            | "sha3-512"
-            | "ripemd128"
-            | "ripemd160"
-            | "ripemd256"
-            | "ripemd320"
-            | "whirlpool"
-            | "tiger128,3"
-            | "tiger160,3"
-            | "tiger192,3"
-            | "tiger128,4"
-            | "tiger160,4"
-            | "tiger192,4"
-            | "gost"
-            | "gost-crypto"
-    )
+fn finish(ops: &Ops, mut ctx: Box<dyn Ctx>) -> Vec<u8> {
+    let mut out = vec![0u8; ops.digest_size];
+    ctx.finish(&mut out);
+    out
 }
 
-fn hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let raw = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
-    let algo_lower = algo.to_ascii_lowercase();
+/// zend_zval_value_name()
+fn zval_value_name(v: &Value) -> String {
+    match v {
+        Value::Null | Value::Undef => "null".into(),
+        Value::True => "true".into(),
+        Value::False => "false".into(),
+        Value::Long(_) => "int".into(),
+        Value::Double(_) => "float".into(),
+        Value::String(_) => "string".into(),
+        Value::Array(_) => "array".into(),
+        Value::Object(o) => {
+            goro_core::value::display_class_name(&o.borrow().class_name).to_string()
+        }
+        Value::Generator(_) => "Generator".into(),
+        Value::Resource(_) => "resource".into(),
+        Value::Reference(r) => zval_value_name(&r.borrow()),
+    }
+}
 
-    match compute_hash(&algo_lower, data.as_bytes()) {
-        Some(digest) => {
-            if raw {
-                Ok(Value::String(PhpString::from_vec(digest)))
-            } else {
-                let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-                Ok(Value::String(PhpString::from_string(hex)))
+// ---------------------------------------------------------------- streams
+
+/// Call a builtin (stream) function of ext/standard.
+fn call_builtin(vm: &mut Vm, name: &[u8], args: &[Value]) -> Option<Result<Value, VmError>> {
+    let f = vm.functions.get(name).copied()?;
+    Some(f(vm, args))
+}
+
+/// php_stream_open_wrapper_ex(path, "rb", REPORT_ERRORS, NULL, context):
+/// open through fopen(), reporting its warnings under `fname`.
+fn open_stream(
+    vm: &mut Vm,
+    fname: &str,
+    path: &PhpString,
+    context: &Value,
+) -> Result<Option<Value>, VmError> {
+    let mut fargs = vec![
+        Value::String(path.clone()),
+        Value::String(PhpString::from_bytes(b"rb")),
+        Value::False,
+    ];
+    if !matches!(context, Value::Null | Value::Undef) {
+        fargs.push(context.clone());
+    }
+    let prev = vm.warning_capture.replace(Vec::new());
+    let r = call_builtin(vm, b"fopen", &fargs);
+    let captured = std::mem::replace(&mut vm.warning_capture, prev).unwrap_or_default();
+    for w in captured {
+        // "fopen(x): msg" -> "fname(x): msg"
+        let msg = match w.find('(') {
+            Some(i)
+                if w[..i]
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_') =>
+            {
+                format!("{}{}", fname, &w[i..])
             }
-        }
-        None => {
-            let msg = "hash(): Argument #1 ($algo) must be a valid hashing algorithm".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, 0);
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            })
-        }
+            _ => w,
+        };
+        vm.emit_warning(&msg);
     }
-}
-
-fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let key = args.get(2).unwrap_or(&Value::Null).to_php_string();
-    let raw = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
-
-    // hash_hmac requires a cryptographic algorithm
-    if !is_crypto_algo(&algo) {
-        let msg =
-            "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
-                .to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-
-    let block_size = hash_block_size(&algo);
-
-    // HMAC implementation
-    let mut key_bytes = key.as_bytes().to_vec();
-    if key_bytes.len() > block_size {
-        key_bytes = match compute_hash(&algo, &key_bytes) {
-            Some(h) => h,
-            None => {
-                let msg = "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm".to_string();
-                let exc = vm.create_exception(b"ValueError", &msg, 0);
-                vm.current_exception = Some(exc);
+    match r {
+        Some(Ok(v @ Value::Resource(_))) => Ok(Some(v)),
+        Some(Err(e)) => Err(e),
+        _ => {
+            if vm.current_exception.is_some() {
                 return Err(VmError {
-                    message: msg,
+                    message: "exception".into(),
                     line: vm.current_line,
                 });
             }
-        };
-    }
-    while key_bytes.len() < block_size {
-        key_bytes.push(0);
-    }
-
-    let mut i_key_pad = vec![0u8; block_size];
-    let mut o_key_pad = vec![0u8; block_size];
-    for i in 0..block_size {
-        i_key_pad[i] = key_bytes[i] ^ 0x36;
-        o_key_pad[i] = key_bytes[i] ^ 0x5c;
-    }
-
-    // inner hash
-    let mut inner_data = i_key_pad;
-    inner_data.extend_from_slice(data.as_bytes());
-    let inner_hash = match compute_hash(&algo, &inner_data) {
-        Some(h) => h,
-        None => {
-            let msg =
-                "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
-                    .to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, 0);
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
+            Ok(None)
         }
-    };
-
-    // outer hash
-    let mut outer_data = o_key_pad;
-    outer_data.extend_from_slice(&inner_hash);
-    let digest = match compute_hash(&algo, &outer_data) {
-        Some(h) => h,
-        None => {
-            let msg =
-                "hash_hmac(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
-                    .to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, 0);
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    };
-
-    if raw {
-        Ok(Value::String(PhpString::from_vec(digest)))
-    } else {
-        let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-        Ok(Value::String(PhpString::from_string(hex)))
     }
 }
 
-/// hash_init(): Create a HashContext object (we use an Object with algo + data properties)
-fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let options = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    // Emit deprecated if key arg is explicitly null
-    if matches!(args.get(2), Some(Value::Null)) {
-        vm.emit_deprecated(
-            "hash_init(): Passing null to parameter #3 ($key) of type string is deprecated",
+/// php_stream_read() of up to `n` bytes: None at EOF / on error.
+fn stream_read(vm: &mut Vm, stream: &Value, n: usize) -> Result<Option<Vec<u8>>, VmError> {
+    match call_builtin(vm, b"fread", &[stream.clone(), Value::Long(n as i64)]) {
+        Some(Ok(Value::String(s))) if !s.as_bytes().is_empty() => Ok(Some(s.as_bytes().to_vec())),
+        Some(Err(e)) => Err(e),
+        _ => Ok(None),
+    }
+}
+
+fn stream_close(vm: &mut Vm, stream: &Value) {
+    let _ = call_builtin(vm, b"fclose", std::slice::from_ref(stream));
+}
+
+/// Feed a whole stream to `ctx` in 1024-byte reads, then close it.
+fn pump_stream(vm: &mut Vm, stream: &Value, ctx: &mut dyn Ctx) -> Result<(), VmError> {
+    loop {
+        match stream_read(vm, stream, 1024) {
+            Ok(Some(buf)) => ctx.update(&buf),
+            Ok(None) => break,
+            Err(e) => {
+                stream_close(vm, stream);
+                return Err(e);
+            }
+        }
+    }
+    stream_close(vm, stream);
+    Ok(())
+}
+
+// ===========================================================================
+// md5(), sha1(), crc32() and friends (ext/standard)
+
+fn crc32_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let data = arg_str(args, 0);
+    let crc = !algos::simple::crc32b_update(!0, data.as_bytes());
+    Ok(Value::Long(crc as i64))
+}
+
+fn md5_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let data = arg_str(args, 0);
+    let digest = algos::md::md5(data.as_bytes());
+    Ok(digest_value(digest.to_vec(), arg_bool(args, 1)))
+}
+
+fn sha1_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let data = arg_str(args, 0);
+    let digest = algos::sha::sha1(data.as_bytes());
+    Ok(digest_value(digest.to_vec(), arg_bool(args, 1)))
+}
+
+fn file_digest(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+    ops: &'static Ops,
+) -> Result<Value, VmError> {
+    let filename = arg_str(args, 0);
+    if filename.as_bytes().is_empty() {
+        return throw(vm, b"ValueError", "Path must not be empty");
+    }
+    if filename.as_bytes().contains(&0) {
+        return throw(
+            vm,
+            b"ValueError",
+            &format!(
+                "{}(): Argument #1 ($filename) must not contain any null bytes",
+                fname
+            ),
         );
     }
-    let key = args.get(2).map(|v| v.to_php_string());
+    let Some(stream) = open_stream(vm, fname, &filename, &Value::Null)? else {
+        return Ok(Value::False);
+    };
+    let mut ctx = ops.new_ctx(None);
+    pump_stream(vm, &stream, ctx.as_mut())?;
+    Ok(digest_value(finish(ops, ctx), arg_bool(args, 1)))
+}
 
-    // Verify algorithm is valid
-    if compute_hash(&algo, b"").is_none() {
-        let msg = "hash_init(): Argument #1 ($algo) must be a valid hashing algorithm".to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: 0,
-        });
-    }
+fn md5_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    file_digest(vm, args, "md5_file", &ops::MD5)
+}
 
-    // HASH_HMAC = 1: must be cryptographic algo and key must not be empty
-    if options & 1 != 0 {
-        if !is_crypto_algo(&algo) {
-            let msg = "hash_init(): Argument #1 ($algo) must be a cryptographic hashing algorithm if HMAC is requested".to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, 0);
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: 0,
-            });
-        }
-        let key_empty = match &key {
-            Some(s) => s.as_bytes().is_empty(),
-            None => true,
-        };
-        if key_empty {
-            let msg = "hash_init(): Argument #3 ($key) must not be empty when HMAC is requested"
-                .to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, 0);
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: 0,
-            });
-        }
-    }
+fn sha1_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    file_digest(vm, args, "sha1_file", &ops::SHA1)
+}
 
-    let obj_id = vm.next_object_id();
-    let mut obj = goro_core::object::PhpObject::new(b"HashContext".to_vec(), obj_id);
-    obj.set_property(
-        b"algo".to_vec(),
-        Value::String(PhpString::from_string(algo.clone())),
-    );
-    obj.set_property(
-        b"__hash_data".to_vec(),
-        Value::String(PhpString::from_vec(Vec::new())),
-    );
+// ===========================================================================
+// hash(), hash_file()
 
-    // HASH_HMAC = 1
-    if options & 1 != 0 {
-        if let Some(k) = key {
-            let block_size = hash_block_size(&algo);
-            let mut key_bytes = k.as_bytes().to_vec();
-            if key_bytes.len() > block_size {
-                key_bytes = compute_hash(&algo, &key_bytes).unwrap_or_default();
-            }
-            while key_bytes.len() < block_size {
-                key_bytes.push(0);
-            }
-            obj.set_property(
-                b"__hmac_key".to_vec(),
-                Value::String(PhpString::from_vec(key_bytes)),
+fn do_hash(vm: &mut Vm, args: &[Value], fname: &str, is_file: bool) -> Result<Value, VmError> {
+    let algo = arg_str(args, 0);
+    let data = arg_str(args, 1);
+    let raw = arg_bool(args, 2);
+    let options = arg_options(args, 3);
+    let Some(ops) = fetch_ops(algo.as_bytes()) else {
+        return throw(
+            vm,
+            b"ValueError",
+            &format!(
+                "{}(): Argument #1 ($algo) must be a valid hashing algorithm",
+                fname
+            ),
+        );
+    };
+    let mut stream = None;
+    if is_file {
+        if data.as_bytes().contains(&0) {
+            return throw(
+                vm,
+                b"ValueError",
+                &format!(
+                    "{}(): Argument #1 ($algo) must not contain any null bytes",
+                    fname
+                ),
             );
-            obj.set_property(b"__hash_is_hmac".to_vec(), Value::True);
+        }
+        match open_stream(vm, fname, &data, &Value::Null)? {
+            Some(s) => stream = Some(s),
+            None => return Ok(Value::False),
         }
     }
+    let mut ctx = new_ctx(vm, ops, options.as_ref(), fname);
+    if let Some(s) = stream {
+        pump_stream(vm, &s, ctx.as_mut())?;
+    } else {
+        ctx.update(data.as_bytes());
+    }
+    pending_exception(vm)?;
+    Ok(digest_value(finish(ops, ctx), raw))
+}
 
-    Ok(Value::Object(Rc::new(RefCell::new(obj))))
+fn hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    do_hash(vm, args, "hash", false)
+}
+
+fn hash_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    do_hash(vm, args, "hash_file", true)
+}
+
+// ===========================================================================
+// HMAC
+
+/// php_hash_hmac_prep_key(): the key padded to the block size, XOR 0x36.
+fn hmac_prep_key(ops: &'static Ops, key: &[u8]) -> Vec<u8> {
+    let mut k = vec![0u8; ops.block_size];
+    if key.len() > ops.block_size {
+        let d = ops.digest(key);
+        k[..d.len()].copy_from_slice(&d);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    for b in k.iter_mut() {
+        *b ^= 0x36;
+    }
+    k
+}
+
+/// php_hash_hmac_round()
+fn hmac_round(ops: &'static Ops, key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut c = ops.new_ctx(None);
+    c.update(&key[..ops.block_size]);
+    c.update(data);
+    finish(ops, c)
+}
+
+fn xor_6a(k: &mut [u8]) {
+    for b in k.iter_mut() {
+        *b ^= 0x6A;
+    }
+}
+
+fn do_hash_hmac(vm: &mut Vm, args: &[Value], fname: &str, is_file: bool) -> Result<Value, VmError> {
+    let algo = arg_str(args, 0);
+    let data = arg_str(args, 1);
+    let key = arg_str(args, 2);
+    let raw = arg_bool(args, 3);
+    let ops = match fetch_ops(algo.as_bytes()) {
+        Some(o) if o.is_crypto => o,
+        _ => {
+            return throw(
+                vm,
+                b"ValueError",
+                &format!(
+                    "{}(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm",
+                    fname
+                ),
+            );
+        }
+    };
+    let mut stream = None;
+    if is_file {
+        if data.as_bytes().contains(&0) {
+            return throw(
+                vm,
+                b"ValueError",
+                &format!(
+                    "{}(): Argument #2 ($filename) must not contain any null bytes",
+                    fname
+                ),
+            );
+        }
+        match open_stream(vm, fname, &data, &Value::Null)? {
+            Some(s) => stream = Some(s),
+            None => return Ok(Value::False),
+        }
+    }
+    let mut k = hmac_prep_key(ops, key.as_bytes());
+    let digest = if let Some(s) = stream {
+        let mut c = ops.new_ctx(None);
+        c.update(&k);
+        pump_stream(vm, &s, c.as_mut())?;
+        finish(ops, c)
+    } else {
+        hmac_round(ops, &k, data.as_bytes())
+    };
+    xor_6a(&mut k);
+    let digest = hmac_round(ops, &k, &digest);
+    Ok(digest_value(digest, raw))
+}
+
+fn hash_hmac_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    do_hash_hmac(vm, args, "hash_hmac", false)
+}
+
+fn hash_hmac_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    do_hash_hmac(vm, args, "hash_hmac_file", true)
+}
+
+// ===========================================================================
+// HashContext
+
+/// php_hashcontext_object (minus the zend_object).
+#[derive(Clone)]
+struct HashObj {
+    ops: Option<&'static Ops>,
+    /// None once finalized (or before initialization).
+    ctx: Option<Box<dyn Ctx>>,
+    options: i64,
+    /// The HMAC key (block_size bytes, XOR ipad).
+    key: Option<Vec<u8>>,
+}
+
+type Shared = RefCell<HashObj>;
+
+static HASH_CONTEXT_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    clone_obj: Some(hash_context_clone),
+    get_properties: Some(hc_get_properties),
+    ..NativeObjectHandlers::EMPTY
+};
+
+/// var_dump()/print_r() go through HashContext::__debugInfo().
+fn hc_get_properties(_vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, purpose: u8) -> Option<PhpArray> {
+    if purpose != 0 {
+        return None;
+    }
+    Some(debug_info(obj))
+}
+
+fn debug_info(obj: &Rc<RefCell<PhpObject>>) -> PhpArray {
+    let mut arr = PhpArray::new();
+    if let Some(st) = state_of(obj) {
+        if let Some(ops) = st.borrow().ops {
+            arr.set(
+                ArrayKey::String(PhpString::from_bytes(b"algo")),
+                Value::String(PhpString::from_bytes(ops.algo.as_bytes())),
+            );
+        }
+    }
+    arr
+}
+
+fn attach(obj: &Rc<RefCell<PhpObject>>, state: HashObj) {
+    obj.borrow_mut().native = Some(NativeData {
+        data: Rc::new(RefCell::new(state)),
+        handlers: &HASH_CONTEXT_HANDLERS,
+    });
+}
+
+fn state_of(obj: &Rc<RefCell<PhpObject>>) -> Option<Rc<Shared>> {
+    let data = obj.borrow().native.as_ref()?.data.clone();
+    data.downcast::<Shared>().ok()
+}
+
+fn is_hash_context(obj: &Rc<RefCell<PhpObject>>) -> bool {
+    obj.borrow().class_name.eq_ignore_ascii_case(b"HashContext")
+}
+
+fn register_hash_context(vm: &mut Vm) {
+    let mut ce = ClassEntry::new(b"HashContext".to_vec());
+    ce.is_final = true;
+    // The private constructor (from the stub): `new HashContext` fails with
+    // the usual visibility error.
+    if let Some(stub) = goro_core::stubs::class_entry(vm, b"HashContext") {
+        if let Some(m) = stub.methods.get(b"__construct".as_slice()) {
+            ce.methods.insert(b"__construct".to_vec(), m.clone());
+        }
+    }
+    vm.classes.insert(b"hashcontext".to_vec(), ce);
+    vm.native_class_handlers.insert(
+        b"hashcontext".to_vec(),
+        NativeClassHandler {
+            has_method: hc_has_method,
+            call: hc_call_method,
+            prop_added: None,
+            prop_write: None,
+            compare_check: None,
+            prop_read: None,
+            param_names: Some(hc_param_names),
+        },
+    );
+    vm.object_create_handlers
+        .insert(b"hashcontext".to_vec(), hc_create_object);
+}
+
+fn hc_create_object(_vm: &mut Vm, o: &Rc<RefCell<PhpObject>>) {
+    if o.borrow().native.is_none() {
+        attach(
+            o,
+            HashObj {
+                ops: None,
+                ctx: None,
+                options: 0,
+                key: None,
+            },
+        );
+    }
+}
+
+fn hc_canon(method: &[u8]) -> Option<&'static str> {
+    let l = method.to_ascii_lowercase();
+    Some(match l.as_slice() {
+        b"__serialize" => "__serialize",
+        b"__unserialize" => "__unserialize",
+        b"__debuginfo" => "__debugInfo",
+        _ => return None,
+    })
+}
+
+fn hc_has_method(_class: &[u8], method: &[u8], _is_static: bool) -> bool {
+    hc_canon(method).is_some()
+}
+
+fn hc_param_names(_class: &[u8], method: &[u8]) -> Option<&'static [&'static str]> {
+    match hc_canon(method)? {
+        "__unserialize" => Some(&["data"]),
+        _ => Some(&[]),
+    }
+}
+
+fn throw_value(vm: &mut Vm, class: &[u8], msg: &str) -> Value {
+    let exc = vm.create_exception(class, msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    Value::Null
+}
+
+fn hc_call_method(
+    vm: &mut Vm,
+    _class: &[u8],
+    method: &[u8],
+    _called: &[u8],
+    this: Option<&Value>,
+    args: &[Value],
+) -> Value {
+    let Some(m) = hc_canon(method) else {
+        return Value::Null;
+    };
+    let obj = match this.map(|t| t.deref()) {
+        Some(Value::Object(o)) => o,
+        _ => {
+            return throw_value(
+                vm,
+                b"Error",
+                &format!(
+                    "Non-static method HashContext::{}() cannot be called statically",
+                    m
+                ),
+            );
+        }
+    };
+    match m {
+        "__serialize" => {
+            if !args.is_empty() {
+                return throw_value(
+                    vm,
+                    b"ArgumentCountError",
+                    &format!(
+                        "HashContext::__serialize() expects exactly 0 arguments, {} given",
+                        args.len()
+                    ),
+                );
+            }
+            hc_serialize(vm, &obj)
+        }
+        "__unserialize" => {
+            let data = match args.first().map(|a| a.deref()) {
+                Some(Value::Array(a)) => a,
+                Some(other) => {
+                    let msg = format!(
+                        "HashContext::__unserialize(): Argument #1 ($data) must be of type array, {} given",
+                        zval_value_name(&other)
+                    );
+                    return throw_value(vm, b"TypeError", &msg);
+                }
+                None => {
+                    return throw_value(
+                        vm,
+                        b"ArgumentCountError",
+                        "HashContext::__unserialize() expects exactly 1 argument, 0 given",
+                    );
+                }
+            };
+            hc_unserialize(vm, &obj, &data)
+        }
+        _ => Value::Array(Rc::new(RefCell::new(debug_info(&obj)))),
+    }
+}
+
+/// HashContext::__serialize()
+fn hc_serialize(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) -> Value {
+    let Some(st) = state_of(obj) else {
+        return throw_value(
+            vm,
+            b"Exception",
+            "HashContext for algorithm \"\" cannot be serialized",
+        );
+    };
+    let st = st.borrow();
+    let Some(ops) = st.ops else {
+        return throw_value(
+            vm,
+            b"Exception",
+            "HashContext for algorithm \"\" cannot be serialized",
+        );
+    };
+    if st.options & PHP_HASH_HMAC != 0 {
+        return throw_value(
+            vm,
+            b"Exception",
+            "HashContext with HASH_HMAC option cannot be serialized",
+        );
+    }
+    let state = match (ops.spec, st.ctx.as_ref()) {
+        (Some(spec), Some(ctx)) => ops::serialize_spec(&ctx.image(), ops.context_size, spec),
+        _ => None,
+    };
+    let Some(state) = state else {
+        return throw_value(
+            vm,
+            b"Exception",
+            &format!(
+                "HashContext for algorithm \"{}\" cannot be serialized",
+                ops.algo
+            ),
+        );
+    };
+    let mut arr = PhpArray::new();
+    arr.push(Value::String(PhpString::from_bytes(ops.algo.as_bytes())));
+    arr.push(Value::Long(st.options));
+    arr.push(Value::Array(Rc::new(RefCell::new(state))));
+    arr.push(Value::Long(ops.magic));
+    let mut members = PhpArray::new();
+    for (k, v) in obj.borrow().properties.iter() {
+        members.set(ArrayKey::String(PhpString::from_vec(k.clone())), v.clone());
+    }
+    arr.push(Value::Array(Rc::new(RefCell::new(members))));
+    Value::Array(Rc::new(RefCell::new(arr)))
+}
+
+/// HashContext::__unserialize()
+fn hc_unserialize(
+    vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    data: &Rc<RefCell<PhpArray>>,
+) -> Value {
+    if let Some(st) = state_of(obj) {
+        if st.borrow().ctx.is_some() {
+            return throw_value(
+                vm,
+                b"Exception",
+                "HashContext::__unserialize called on initialized object",
+            );
+        }
+    }
+    let (algo, options, hash_zv, magic, members) = {
+        let d = data.borrow();
+        let get = |i: i64| d.get(&ArrayKey::Int(i)).map(|v| v.deref());
+        let algo = get(0);
+        let options = get(1);
+        let hash_zv = get(2);
+        let magic = get(3);
+        let members = get(4);
+        match (algo, options, hash_zv, magic, members) {
+            (
+                Some(Value::String(a)),
+                Some(Value::Long(o)),
+                Some(h),
+                Some(Value::Long(m)),
+                Some(Value::Array(mem)),
+            ) => (a, o, h, m, mem),
+            _ => {
+                return throw_value(
+                    vm,
+                    b"Exception",
+                    "Incomplete or ill-formed serialization data",
+                );
+            }
+        }
+    };
+    if options & PHP_HASH_HMAC != 0 {
+        return throw_value(
+            vm,
+            b"Exception",
+            "HashContext with HASH_HMAC option cannot be serialized",
+        );
+    }
+    let Some(ops) = fetch_ops(algo.as_bytes()) else {
+        return throw_value(vm, b"Exception", "Unknown hash algorithm");
+    };
+    let mut ctx = ops.new_ctx(None);
+    let mut result = ops::HASH_SPEC_FAILURE;
+    if let Some(spec) = ops.spec {
+        if magic == ops.magic {
+            let mut img = ctx.image();
+            img.resize(ops.context_size, 0);
+            result = ops::unserialize_spec(&mut img, ops.context_size, &hash_zv, spec);
+            if result == 0 {
+                ctx.set_image(&img);
+                if !ctx.valid() {
+                    result = ops::CONTEXT_VALIDATION_FAILURE;
+                }
+            }
+        }
+    }
+    if result != 0 {
+        attach(
+            obj,
+            HashObj {
+                ops: Some(ops),
+                ctx: None,
+                options,
+                key: None,
+            },
+        );
+        return throw_value(
+            vm,
+            b"Exception",
+            &format!(
+                "Incomplete or ill-formed serialization data (\"{}\" code {})",
+                ops.algo, result
+            ),
+        );
+    }
+    attach(
+        obj,
+        HashObj {
+            ops: Some(ops),
+            ctx: Some(ctx),
+            options,
+            key: None,
+        },
+    );
+    // object_properties_load()
+    let members: Vec<(ArrayKey, Value)> = members
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    for (k, v) in members {
+        let name = match k {
+            ArrayKey::String(s) => s.as_bytes().to_vec(),
+            ArrayKey::Int(i) => i.to_string().into_bytes(),
+        };
+        if !obj.borrow().has_property(&name) {
+            vm.emit_deprecated(&format!(
+                "Creation of dynamic property HashContext::${} is deprecated",
+                String::from_utf8_lossy(&name)
+            ));
+        }
+        obj.borrow_mut().set_property(name, v);
+    }
+    Value::Null
+}
+
+/// php_hashcontext_clone()
+fn hash_context_clone(vm: &mut Vm, src: &Rc<RefCell<PhpObject>>, dst: &Rc<RefCell<PhpObject>>) {
+    let old = state_of(src).map(|s| s.borrow().clone());
+    match old {
+        Some(HashObj {
+            ops: Some(ops),
+            ctx: Some(ctx),
+            options,
+            key,
+        }) => attach(
+            dst,
+            HashObj {
+                ops: Some(ops),
+                ctx: Some(ctx.box_clone()),
+                options,
+                key,
+            },
+        ),
+        old => {
+            attach(
+                dst,
+                HashObj {
+                    ops: old.and_then(|o| o.ops),
+                    ctx: None,
+                    options: 0,
+                    key: None,
+                },
+            );
+            let exc = vm.create_exception(
+                b"ValueError",
+                "Cannot clone a finalized HashContext",
+                vm.current_line,
+            );
+            vm.current_exception = Some(exc);
+        }
+    }
+}
+
+/// Fetch the HashContext argument #1 of `fname` (Z_PARAM_OBJ_OF_CLASS) and
+/// check it is not finalized (PHP_HASHCONTEXT_VERIFY).
+fn context_arg(
+    vm: &mut Vm,
+    args: &[Value],
+    fname: &str,
+) -> Result<(Rc<RefCell<PhpObject>>, Rc<Shared>), VmError> {
+    let v = arg(args, 0);
+    let obj = match &v {
+        Value::Object(o) if is_hash_context(o) => o.clone(),
+        _ => {
+            let msg = format!(
+                "{}(): Argument #1 ($context) must be of type HashContext, {} given",
+                fname,
+                zval_value_name(&v)
+            );
+            return throw(vm, b"TypeError", &msg);
+        }
+    };
+    let st = state_of(&obj).filter(|s| s.borrow().ctx.is_some());
+    match st {
+        Some(s) => Ok((obj, s)),
+        None => {
+            let msg = format!(
+                "{}(): Argument #1 ($context) must be a valid, non-finalized HashContext",
+                fname
+            );
+            throw(vm, b"TypeError", &msg)
+        }
+    }
+}
+
+fn hash_init_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let algo = arg_str(args, 0);
+    let options = arg(args, 1).to_long();
+    let key = match arg(args, 2) {
+        Value::Null | Value::Undef => None,
+        v => Some(v.to_php_string()),
+    };
+    let opts = arg_options(args, 3);
+    let Some(ops) = fetch_ops(algo.as_bytes()) else {
+        return throw(
+            vm,
+            b"ValueError",
+            "hash_init(): Argument #1 ($algo) must be a valid hashing algorithm",
+        );
+    };
+    if options & PHP_HASH_HMAC != 0 {
+        if !ops.is_crypto {
+            return throw(
+                vm,
+                b"ValueError",
+                "hash_init(): Argument #1 ($algo) must be a cryptographic hashing algorithm if HMAC is requested",
+            );
+        }
+        if key.as_ref().is_none_or(|k| k.as_bytes().is_empty()) {
+            return throw(
+                vm,
+                b"ValueError",
+                "hash_init(): Argument #3 ($key) must not be empty when HMAC is requested",
+            );
+        }
+    }
+    let id = vm.next_object_id();
+    let obj = Rc::new(RefCell::new(PhpObject::new(b"HashContext".to_vec(), id)));
+    let mut ctx = new_ctx(vm, ops, opts.as_ref(), "hash_init");
+    let mut hmac_key = None;
+    if options & PHP_HASH_HMAC != 0 {
+        let key = key.unwrap_or_else(|| PhpString::from_bytes(b""));
+        let key = key.as_bytes();
+        let mut k = vec![0u8; ops.block_size];
+        if key.len() > ops.block_size {
+            ctx.update(key);
+            let d = finish(ops, ctx);
+            k[..d.len()].copy_from_slice(&d);
+            ctx = new_ctx(vm, ops, opts.as_ref(), "hash_init");
+        } else {
+            k[..key.len()].copy_from_slice(key);
+        }
+        for b in k.iter_mut() {
+            *b ^= 0x36;
+        }
+        ctx.update(&k);
+        hmac_key = Some(k);
+    }
+    attach(
+        &obj,
+        HashObj {
+            ops: Some(ops),
+            ctx: Some(ctx),
+            options,
+            key: hmac_key,
+        },
+    );
+    pending_exception(vm)?;
+    Ok(Value::Object(obj))
 }
 
 fn hash_update_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Object(obj)) = args.first() {
-        let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
-        let mut obj_mut = obj.borrow_mut();
-        // Check if context is already finalized
-        if obj_mut.get_property(b"__hash_finalized").is_truthy() {
-            drop(obj_mut);
-            let msg =
-                "hash_update(): Argument #1 ($context) must be a valid, non-finalized HashContext"
-                    .to_string();
-            let exc = vm.create_exception(b"Error", &msg, 0);
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: 0,
-            });
-        }
-        let existing = obj_mut.get_property(b"__hash_data").to_php_string();
-        let mut combined = existing.as_bytes().to_vec();
-        combined.extend_from_slice(data.as_bytes());
-        obj_mut.set_property(
-            b"__hash_data".to_vec(),
-            Value::String(PhpString::from_vec(combined)),
-        );
-        return Ok(Value::True);
+    let (_, st) = context_arg(vm, args, "hash_update")?;
+    let data = arg_str(args, 1);
+    if let Some(c) = st.borrow_mut().ctx.as_mut() {
+        c.update(data.as_bytes());
     }
-    Ok(Value::False)
+    Ok(Value::True)
+}
+
+fn hash_update_stream_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let (_, st) = context_arg(vm, args, "hash_update_stream")?;
+    let stream = arg(args, 1);
+    if !matches!(stream, Value::Resource(_)) {
+        let msg = format!(
+            "hash_update_stream(): Argument #2 ($stream) must be of type resource, {} given",
+            zval_value_name(&stream)
+        );
+        return throw(vm, b"TypeError", &msg);
+    }
+    let mut length = match args.get(2) {
+        Some(v) => v.deref().to_long(),
+        None => -1,
+    };
+    let mut didread: i64 = 0;
+    while length != 0 {
+        let mut toread: i64 = 1024;
+        if length > 0 && toread > length {
+            toread = length;
+        }
+        let Some(buf) = stream_read(vm, &stream, toread as usize)? else {
+            break;
+        };
+        if let Some(c) = st.borrow_mut().ctx.as_mut() {
+            c.update(&buf);
+        }
+        length -= buf.len() as i64;
+        didread += buf.len() as i64;
+    }
+    Ok(Value::Long(didread))
+}
+
+fn hash_update_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let (_, st) = context_arg(vm, args, "hash_update_file")?;
+    let filename = arg_str(args, 1);
+    if filename.as_bytes().contains(&0) {
+        return throw(
+            vm,
+            b"ValueError",
+            "hash_update_file(): Argument #2 ($filename) must not contain any null bytes",
+        );
+    }
+    let context = arg(args, 2);
+    let Some(stream) = open_stream(vm, "hash_update_file", &filename, &context)? else {
+        return Ok(Value::False);
+    };
+    let mut ctx = st.borrow_mut().ctx.take();
+    let r = match ctx.as_mut() {
+        Some(c) => pump_stream(vm, &stream, c.as_mut()),
+        None => Ok(()),
+    };
+    st.borrow_mut().ctx = ctx;
+    r?;
+    Ok(Value::True)
 }
 
 fn hash_final_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Object(obj)) = args.first() {
-        let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
-        let obj_borrow = obj.borrow();
-        // Check if context is already finalized
-        if obj_borrow.get_property(b"__hash_finalized").is_truthy() {
-            drop(obj_borrow);
-            let msg =
-                "hash_final(): Argument #1 ($context) must be a valid, non-finalized HashContext"
-                    .to_string();
-            let exc = vm.create_exception(b"Error", &msg, 0);
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: 0,
-            });
-        }
-        let algo = obj_borrow
-            .get_property(b"algo")
-            .to_php_string()
-            .to_string_lossy()
-            .to_ascii_lowercase();
-        let data = obj_borrow.get_property(b"__hash_data").to_php_string();
-        let is_hmac = obj_borrow.get_property(b"__hash_is_hmac").is_truthy();
-        let hmac_key_val = obj_borrow.get_property(b"__hmac_key");
-        let hmac_key = hmac_key_val.to_php_string();
-        drop(obj_borrow);
-        // Mark context as finalized
-        obj.borrow_mut()
-            .set_property(b"__hash_finalized".to_vec(), Value::True);
-
-        let digest = if is_hmac {
-            let block_size = hash_block_size(&algo);
-            let key_bytes = hmac_key.as_bytes();
-
-            let mut i_key_pad = vec![0u8; block_size];
-            let mut o_key_pad = vec![0u8; block_size];
-            for i in 0..block_size {
-                let kb = if i < key_bytes.len() { key_bytes[i] } else { 0 };
-                i_key_pad[i] = kb ^ 0x36;
-                o_key_pad[i] = kb ^ 0x5c;
-            }
-
-            let mut inner_data = i_key_pad;
-            inner_data.extend_from_slice(data.as_bytes());
-            let inner_hash = compute_hash(&algo, &inner_data).unwrap_or_default();
-
-            let mut outer_data = o_key_pad;
-            outer_data.extend_from_slice(&inner_hash);
-            compute_hash(&algo, &outer_data).unwrap_or_default()
-        } else {
-            compute_hash(&algo, data.as_bytes()).unwrap_or_default()
-        };
-
-        if raw {
-            return Ok(Value::String(PhpString::from_vec(digest)));
-        } else {
-            let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-            return Ok(Value::String(PhpString::from_string(hex)));
+    let (_, st) = context_arg(vm, args, "hash_final")?;
+    let raw = arg_bool(args, 1);
+    let mut s = st.borrow_mut();
+    let ops = s.ops.expect("initialized context");
+    let ctx = s.ctx.take().expect("non-finalized context");
+    let mut digest = finish(ops, ctx);
+    if s.options & PHP_HASH_HMAC != 0 {
+        if let Some(mut k) = s.key.take() {
+            xor_6a(&mut k);
+            digest = hmac_round(ops, &k, &digest);
         }
     }
-    Ok(Value::False)
+    Ok(digest_value(digest, raw))
 }
 
 fn hash_copy_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Object(obj)) = args.first() {
-        let obj_borrow = obj.borrow();
-        if obj_borrow.get_property(b"__hash_finalized").is_truthy() {
-            drop(obj_borrow);
-            let msg =
-                "hash_copy(): Argument #1 ($context) must be a valid, non-finalized HashContext"
-                    .to_string();
-            let exc = vm.create_exception(b"ValueError", &msg, 0);
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: 0,
-            });
-        }
-        let algo = obj_borrow.get_property(b"algo");
-        let data = obj_borrow.get_property(b"__hash_data");
-        let is_hmac = obj_borrow.get_property(b"__hash_is_hmac");
-        let hmac_key = obj_borrow.get_property(b"__hmac_key");
-        drop(obj_borrow);
-
-        let new_id = vm.next_object_id();
-        let mut new_obj = goro_core::object::PhpObject::new(b"HashContext".to_vec(), new_id);
-        new_obj.set_property(b"algo".to_vec(), algo);
-        new_obj.set_property(b"__hash_data".to_vec(), data);
-        new_obj.set_property(b"__hash_is_hmac".to_vec(), is_hmac);
-        new_obj.set_property(b"__hmac_key".to_vec(), hmac_key);
-        return Ok(Value::Object(Rc::new(RefCell::new(new_obj))));
+    let (obj, st) = context_arg(vm, args, "hash_copy")?;
+    let id = vm.next_object_id();
+    let mut copy = PhpObject::new(obj.borrow().class_name.clone(), id);
+    for (k, v) in obj.borrow().properties.iter() {
+        copy.set_property(k.clone(), v.clone());
     }
-    Ok(Value::False)
-}
-
-fn hash_pbkdf2_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let password = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let salt = args.get(2).unwrap_or(&Value::Null).to_php_string();
-    let iterations_raw = args.get(3).map(|v| v.to_long()).unwrap_or(1);
-    let length_raw = args.get(4).map(|v| v.to_long()).unwrap_or(0);
-    let raw = args.get(5).map(|v| v.is_truthy()).unwrap_or(false);
-
-    let hash_len = compute_hash(&algo, b"").map(|h| h.len()).unwrap_or(0);
-    // hash_pbkdf2() requires a cryptographic algorithm. Reject the known
-    // non-cryptographic ones (CRC, FNV, adler, joaat, MurmurHash, xxhash).
-    let non_cryptographic = matches!(
-        algo.as_str(),
-        "adler32"
-            | "crc32"
-            | "crc32b"
-            | "crc32c"
-            | "fnv132"
-            | "fnv1a32"
-            | "fnv164"
-            | "fnv1a64"
-            | "joaat"
-            | "murmur3a"
-            | "murmur3c"
-            | "murmur3f"
-            | "xxh32"
-            | "xxh64"
-            | "xxh3"
-            | "xxh128"
-    );
-    if hash_len == 0 || non_cryptographic {
-        let msg =
-            "hash_pbkdf2(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
-                .to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-    // Validate iterations: must be > 0. Without this check, negative values
-    // wrap around to usize::MAX and the iterations loop spins effectively
-    // forever.
-    if iterations_raw <= 0 {
-        let msg = "hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0".to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-    // Validate length: must be >= 0.
-    if length_raw < 0 {
-        let msg =
-            "hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0".to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-    let iterations = iterations_raw as usize;
-    let length = length_raw as usize;
-
-    let output_len = if length == 0 {
-        hash_len
-    } else if raw {
-        length
-    } else {
-        length.div_ceil(2)
-    };
-
-    // PBKDF2 implementation
-    let block_size = hash_block_size(&algo);
-    let mut key_bytes = password.as_bytes().to_vec();
-    if key_bytes.len() > block_size {
-        key_bytes = compute_hash(&algo, &key_bytes).unwrap_or_default();
-    }
-    while key_bytes.len() < block_size {
-        key_bytes.push(0);
-    }
-
-    let hmac = |data: &[u8]| -> Vec<u8> {
-        let mut i_pad = vec![0u8; block_size];
-        let mut o_pad = vec![0u8; block_size];
-        for i in 0..block_size {
-            i_pad[i] = key_bytes[i] ^ 0x36;
-            o_pad[i] = key_bytes[i] ^ 0x5c;
-        }
-        let mut inner = i_pad;
-        inner.extend_from_slice(data);
-        let inner_hash = compute_hash(&algo, &inner).unwrap_or_default();
-        let mut outer = o_pad;
-        outer.extend_from_slice(&inner_hash);
-        compute_hash(&algo, &outer).unwrap_or_default()
-    };
-
-    let mut result = Vec::new();
-    let blocks = output_len.div_ceil(hash_len);
-
-    for block in 1..=blocks {
-        let mut salt_block = salt.as_bytes().to_vec();
-        salt_block.extend_from_slice(&(block as u32).to_be_bytes());
-        let mut u = hmac(&salt_block);
-        let mut t = u.clone();
-        for _ in 1..iterations {
-            u = hmac(&u);
-            for j in 0..t.len() {
-                t[j] ^= u[j];
-            }
-        }
-        result.extend_from_slice(&t);
-    }
-
-    result.truncate(output_len);
-
-    if raw {
-        Ok(Value::String(PhpString::from_vec(result)))
-    } else {
-        let hex: String = result.iter().map(|b| format!("{:02x}", b)).collect();
-        let hex = if length > 0 && hex.len() > length {
-            hex[..length].to_string()
-        } else {
-            hex
-        };
-        Ok(Value::String(PhpString::from_string(hex)))
-    }
-}
-
-fn hash_hmac_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let mut result = PhpArray::new();
-    for algo in &[
-        "md2",
-        "md4",
-        "md5",
-        "sha1",
-        "sha224",
-        "sha256",
-        "sha384",
-        "sha512/224",
-        "sha512/256",
-        "sha512",
-        "sha3-224",
-        "sha3-256",
-        "sha3-384",
-        "sha3-512",
-        "ripemd128",
-        "ripemd160",
-        "ripemd256",
-        "ripemd320",
-        "whirlpool",
-        "tiger128,3",
-        "tiger160,3",
-        "tiger192,3",
-        "tiger128,4",
-        "tiger160,4",
-        "tiger192,4",
-        "snefru",
-        "snefru256",
-        "gost",
-        "gost-crypto",
-        "haval128,3",
-        "haval160,3",
-        "haval192,3",
-        "haval224,3",
-        "haval256,3",
-        "haval128,4",
-        "haval160,4",
-        "haval192,4",
-        "haval224,4",
-        "haval256,4",
-        "haval128,5",
-        "haval160,5",
-        "haval192,5",
-        "haval224,5",
-        "haval256,5",
-    ] {
-        result.push(Value::String(PhpString::from_bytes(algo.as_bytes())));
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
+    let copy = Rc::new(RefCell::new(copy));
+    let s = st.borrow().clone();
+    attach(&copy, s);
+    Ok(Value::Object(copy))
 }
 
 fn hash_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
-    for algo in &[
-        "md2",
-        "md4",
-        "md5",
-        "sha1",
-        "sha224",
-        "sha256",
-        "sha384",
-        "sha512/224",
-        "sha512/256",
-        "sha512",
-        "sha3-224",
-        "sha3-256",
-        "sha3-384",
-        "sha3-512",
-        "ripemd128",
-        "ripemd160",
-        "ripemd256",
-        "ripemd320",
-        "whirlpool",
-        "tiger128,3",
-        "tiger160,3",
-        "tiger192,3",
-        "tiger128,4",
-        "tiger160,4",
-        "tiger192,4",
-        "snefru",
-        "snefru256",
-        "gost",
-        "gost-crypto",
-        "adler32",
-        "crc32",
-        "crc32b",
-        "crc32c",
-        "fnv132",
-        "fnv1a32",
-        "fnv164",
-        "fnv1a64",
-        "joaat",
-        "murmur3a",
-        "murmur3c",
-        "murmur3f",
-        "xxh32",
-        "xxh64",
-        "xxh3",
-        "xxh128",
-        "haval128,3",
-        "haval160,3",
-        "haval192,3",
-        "haval224,3",
-        "haval256,3",
-        "haval128,4",
-        "haval160,4",
-        "haval192,4",
-        "haval224,4",
-        "haval256,4",
-        "haval128,5",
-        "haval160,5",
-        "haval192,5",
-        "haval224,5",
-        "haval256,5",
-    ] {
-        result.push(Value::String(PhpString::from_bytes(algo.as_bytes())));
+    for (name, _) in ops::REGISTRY {
+        result.push(Value::String(PhpString::from_bytes(name.as_bytes())));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn hash_equals_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let known_val = args.first().unwrap_or(&Value::Null);
-    let user_val = args.get(1).unwrap_or(&Value::Null);
-    // hash_equals requires both arguments to be strings
-    if !matches!(known_val, Value::String(_)) {
-        let type_name = match known_val {
-            Value::Long(_) => "int",
-            Value::Double(_) => "float",
-            Value::True | Value::False => "bool",
-            Value::Null | Value::Undef => "null",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
-            _ => "unknown",
-        };
-        let msg = format!(
-            "hash_equals(): Argument #1 ($known_string) must be of type string, {} given",
-            type_name
-        );
-        let exc = vm.create_exception(b"TypeError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
+fn hash_hmac_algos_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    for (name, o) in ops::REGISTRY {
+        if o.is_crypto {
+            result.push(Value::String(PhpString::from_bytes(name.as_bytes())));
+        }
     }
-    if !matches!(user_val, Value::String(_)) {
-        let type_name = match user_val {
-            Value::Long(_) => "int",
-            Value::Double(_) => "float",
-            Value::True | Value::False => "bool",
-            Value::Null | Value::Undef => "null",
-            Value::Array(_) => "array",
-            Value::Object(_) => "object",
-            _ => "unknown",
-        };
-        let msg = format!(
-            "hash_equals(): Argument #2 ($user_string) must be of type string, {} given",
-            type_name
-        );
-        let exc = vm.create_exception(b"TypeError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-    let known = known_val.to_php_string();
-    let user = user_val.to_php_string();
-    Ok(if known.as_bytes() == user.as_bytes() {
-        Value::True
-    } else {
-        Value::False
-    })
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-// --- CRC32 variants ---
-
-/// CRC32 (bzip2 variant) - used by hash('crc32', ...)
-fn crc32_compute(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFFFFFF;
-    for &byte in data {
-        crc ^= (byte as u32) << 24;
-        for _ in 0..8 {
-            if crc & 0x80000000 != 0 {
-                crc = (crc << 1) ^ 0x04C11DB7;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-    crc ^ 0xFFFFFFFF
-}
-
-/// CRC32B (ISO 3309 / ITU-T V.42) - used by PHP's crc32() function and hash('crc32b', ...)
-fn crc32b_compute(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFFFFFF;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    crc ^ 0xFFFFFFFF
-}
-
-/// CRC32C (Castagnoli) - used by hash('crc32c', ...)
-fn crc32c_compute(data: &[u8]) -> u32 {
-    let mut crc: u32 = 0xFFFFFFFF;
-    for &byte in data {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0x82F63B78;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    crc ^ 0xFFFFFFFF
-}
-
-// --- ADLER32 ---
-
-fn adler32_compute(data: &[u8]) -> u32 {
-    let mut a: u32 = 1;
-    let mut b: u32 = 0;
-    for &byte in data {
-        a = (a + byte as u32) % 65521;
-        b = (b + a) % 65521;
-    }
-    (b << 16) | a
-}
-
-// --- FNV hash algorithms ---
-
-fn fnv1_32(data: &[u8]) -> u32 {
-    let mut hash: u32 = 0x811c9dc5;
-    for &byte in data {
-        hash = hash.wrapping_mul(0x01000193);
-        hash ^= byte as u32;
-    }
-    hash
-}
-
-fn fnv1a_32(data: &[u8]) -> u32 {
-    let mut hash: u32 = 0x811c9dc5;
-    for &byte in data {
-        hash ^= byte as u32;
-        hash = hash.wrapping_mul(0x01000193);
-    }
-    hash
-}
-
-fn fnv1_64(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in data {
-        hash = hash.wrapping_mul(0x00000100000001B3);
-        hash ^= byte as u64;
-    }
-    hash
-}
-
-fn fnv1a_64(data: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf29ce484222325;
-    for &byte in data {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x00000100000001B3);
-    }
-    hash
-}
-
-// --- MD4 hash implementation ---
-
-fn md4_hash(data: &[u8]) -> [u8; 16] {
-    let mut a0: u32 = 0x67452301;
-    let mut b0: u32 = 0xefcdab89;
-    let mut c0: u32 = 0x98badcfe;
-    let mut d0: u32 = 0x10325476;
-
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_le_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut x = [0u32; 16];
-        for i in 0..16 {
-            x[i] = u32::from_le_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
-
-        // Round 1
-        for &i in &[0, 4, 8, 12] {
-            a = a
-                .wrapping_add((b & c) | ((!b) & d))
-                .wrapping_add(x[i])
-                .rotate_left(3);
-            d = d
-                .wrapping_add((a & b) | ((!a) & c))
-                .wrapping_add(x[i + 1])
-                .rotate_left(7);
-            c = c
-                .wrapping_add((d & a) | ((!d) & b))
-                .wrapping_add(x[i + 2])
-                .rotate_left(11);
-            b = b
-                .wrapping_add((c & d) | ((!c) & a))
-                .wrapping_add(x[i + 3])
-                .rotate_left(19);
-        }
-
-        // Round 2
-        for &i in &[0, 1, 2, 3] {
-            a = a
-                .wrapping_add((b & c) | (b & d) | (c & d))
-                .wrapping_add(x[i])
-                .wrapping_add(0x5A827999)
-                .rotate_left(3);
-            d = d
-                .wrapping_add((a & b) | (a & c) | (b & c))
-                .wrapping_add(x[i + 4])
-                .wrapping_add(0x5A827999)
-                .rotate_left(5);
-            c = c
-                .wrapping_add((d & a) | (d & b) | (a & b))
-                .wrapping_add(x[i + 8])
-                .wrapping_add(0x5A827999)
-                .rotate_left(9);
-            b = b
-                .wrapping_add((c & d) | (c & a) | (d & a))
-                .wrapping_add(x[i + 12])
-                .wrapping_add(0x5A827999)
-                .rotate_left(13);
-        }
-
-        // Round 3
-        for &i in &[0, 2, 1, 3] {
-            a = a
-                .wrapping_add(b ^ c ^ d)
-                .wrapping_add(x[i])
-                .wrapping_add(0x6ED9EBA1)
-                .rotate_left(3);
-            d = d
-                .wrapping_add(a ^ b ^ c)
-                .wrapping_add(x[i + 8])
-                .wrapping_add(0x6ED9EBA1)
-                .rotate_left(9);
-            c = c
-                .wrapping_add(d ^ a ^ b)
-                .wrapping_add(x[i + 4])
-                .wrapping_add(0x6ED9EBA1)
-                .rotate_left(11);
-            b = b
-                .wrapping_add(c ^ d ^ a)
-                .wrapping_add(x[i + 12])
-                .wrapping_add(0x6ED9EBA1)
-                .rotate_left(15);
-        }
-
-        a0 = a0.wrapping_add(a);
-        b0 = b0.wrapping_add(b);
-        c0 = c0.wrapping_add(c);
-        d0 = d0.wrapping_add(d);
-    }
-
-    let mut result = [0u8; 16];
-    result[0..4].copy_from_slice(&a0.to_le_bytes());
-    result[4..8].copy_from_slice(&b0.to_le_bytes());
-    result[8..12].copy_from_slice(&c0.to_le_bytes());
-    result[12..16].copy_from_slice(&d0.to_le_bytes());
-    result
-}
-
-/// MD5 hash implementation (RFC 1321)
-fn md5_hash(data: &[u8]) -> [u8; 16] {
-    let mut a0: u32 = 0x67452301;
-    let mut b0: u32 = 0xefcdab89;
-    let mut c0: u32 = 0x98badcfe;
-    let mut d0: u32 = 0x10325476;
-
-    // Pre-processing: adding padding bits
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_le_bytes());
-
-    // Per-round shift amounts
-    let s: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
-        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
-    ];
-    let k: [u32; 64] = [
-        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,
-        0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193,
-        0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d,
-        0x02441453, 0xd8a1e681, 0xe7d3fbc8, 0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed,
-        0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122,
-        0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
-        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665, 0xf4292244,
-        0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
-        0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb,
-        0xeb86d391,
-    ];
-
-    for chunk in msg.chunks(64) {
-        let mut m = [0u32; 16];
-        for i in 0..16 {
-            m[i] = u32::from_le_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        let (mut a, mut b, mut c, mut d) = (a0, b0, c0, d0);
-        for i in 0..64 {
-            let (f, g) = match i {
-                0..=15 => ((b & c) | ((!b) & d), i),
-                16..=31 => ((d & b) | ((!d) & c), (5 * i + 1) % 16),
-                32..=47 => (b ^ c ^ d, (3 * i + 5) % 16),
-                _ => (c ^ (b | (!d)), (7 * i) % 16),
-            };
-            let temp = d;
-            d = c;
-            c = b;
-            b = b.wrapping_add(
-                (a.wrapping_add(f).wrapping_add(k[i]).wrapping_add(m[g])).rotate_left(s[i]),
-            );
-            a = temp;
-        }
-        a0 = a0.wrapping_add(a);
-        b0 = b0.wrapping_add(b);
-        c0 = c0.wrapping_add(c);
-        d0 = d0.wrapping_add(d);
-    }
-
-    let mut result = [0u8; 16];
-    result[0..4].copy_from_slice(&a0.to_le_bytes());
-    result[4..8].copy_from_slice(&b0.to_le_bytes());
-    result[8..12].copy_from_slice(&c0.to_le_bytes());
-    result[12..16].copy_from_slice(&d0.to_le_bytes());
-    result
-}
-
-/// SHA1 hash implementation (FIPS 180-1)
-#[allow(clippy::needless_range_loop)] // index loop mirrors the reference implementation
-fn sha1_hash(data: &[u8]) -> [u8; 20] {
-    let mut h0: u32 = 0x67452301;
-    let mut h1: u32 = 0xEFCDAB89;
-    let mut h2: u32 = 0x98BADCFE;
-    let mut h3: u32 = 0x10325476;
-    let mut h4: u32 = 0xC3D2E1F0;
-
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 80];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..80 {
-            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
-        for i in 0..80 {
-            let (f, k) = match i {
-                0..=19 => ((b & c) | ((!b) & d), 0x5A827999u32),
-                20..=39 => (b ^ c ^ d, 0x6ED9EBA1u32),
-                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDCu32),
-                _ => (b ^ c ^ d, 0xCA62C1D6u32),
-            };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(w[i]);
-            e = d;
-            d = c;
-            c = b.rotate_left(30);
-            b = a;
-            a = temp;
-        }
-        h0 = h0.wrapping_add(a);
-        h1 = h1.wrapping_add(b);
-        h2 = h2.wrapping_add(c);
-        h3 = h3.wrapping_add(d);
-        h4 = h4.wrapping_add(e);
-    }
-
-    let mut result = [0u8; 20];
-    result[0..4].copy_from_slice(&h0.to_be_bytes());
-    result[4..8].copy_from_slice(&h1.to_be_bytes());
-    result[8..12].copy_from_slice(&h2.to_be_bytes());
-    result[12..16].copy_from_slice(&h3.to_be_bytes());
-    result[16..20].copy_from_slice(&h4.to_be_bytes());
-    result
-}
-
-/// SHA-256 hash implementation (FIPS 180-4)
-fn sha256_hash(data: &[u8]) -> [u8; 32] {
-    let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-
-    let k: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(k[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    let mut result = [0u8; 32];
-    for i in 0..8 {
-        result[i * 4..(i + 1) * 4].copy_from_slice(&h[i].to_be_bytes());
-    }
-    result
-}
-
-/// SHA-224 hash (truncated SHA-256 with different IVs)
-fn sha224_hash(data: &[u8]) -> [u8; 28] {
-    let mut h: [u32; 8] = [
-        0xc1059ed8, 0x367cd507, 0x3070dd17, 0xf70e5939, 0xffc00b31, 0x68581511, 0x64f98fa7,
-        0xbefa4fa4,
-    ];
-
-    let k: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 {
-            w[i] = u32::from_be_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(k[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    let mut result = [0u8; 28];
-    for i in 0..7 {
-        result[i * 4..(i + 1) * 4].copy_from_slice(&h[i].to_be_bytes());
-    }
-    result
-}
-
-/// SHA-512 hash implementation (FIPS 180-4)
-fn sha512_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(
-        data,
-        &[
-            0x6a09e667f3bcc908,
-            0xbb67ae8584caa73b,
-            0x3c6ef372fe94f82b,
-            0xa54ff53a5f1d36f1,
-            0x510e527fade682d1,
-            0x9b05688c2b3e6c1f,
-            0x1f83d9abfb41bd6b,
-            0x5be0cd19137e2179,
-        ],
-        64,
-    )
-}
-
-/// SHA-384 hash (truncated SHA-512 with different IVs)
-fn sha384_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(
-        data,
-        &[
-            0xcbbb9d5dc1059ed8,
-            0x629a292a367cd507,
-            0x9159015a3070dd17,
-            0x152fecd8f70e5939,
-            0x67332667ffc00b31,
-            0x8eb44a8768581511,
-            0xdb0c2e0d64f98fa7,
-            0x47b5481dbefa4fa4,
-        ],
-        48,
-    )
-}
-
-fn sha512_core(data: &[u8], init: &[u64; 8], output_len: usize) -> Vec<u8> {
-    let mut h = *init;
-
-    let k: [u64; 80] = [
-        0x428a2f98d728ae22,
-        0x7137449123ef65cd,
-        0xb5c0fbcfec4d3b2f,
-        0xe9b5dba58189dbbc,
-        0x3956c25bf348b538,
-        0x59f111f1b605d019,
-        0x923f82a4af194f9b,
-        0xab1c5ed5da6d8118,
-        0xd807aa98a3030242,
-        0x12835b0145706fbe,
-        0x243185be4ee4b28c,
-        0x550c7dc3d5ffb4e2,
-        0x72be5d74f27b896f,
-        0x80deb1fe3b1696b1,
-        0x9bdc06a725c71235,
-        0xc19bf174cf692694,
-        0xe49b69c19ef14ad2,
-        0xefbe4786384f25e3,
-        0x0fc19dc68b8cd5b5,
-        0x240ca1cc77ac9c65,
-        0x2de92c6f592b0275,
-        0x4a7484aa6ea6e483,
-        0x5cb0a9dcbd41fbd4,
-        0x76f988da831153b5,
-        0x983e5152ee66dfab,
-        0xa831c66d2db43210,
-        0xb00327c898fb213f,
-        0xbf597fc7beef0ee4,
-        0xc6e00bf33da88fc2,
-        0xd5a79147930aa725,
-        0x06ca6351e003826f,
-        0x142929670a0e6e70,
-        0x27b70a8546d22ffc,
-        0x2e1b21385c26c926,
-        0x4d2c6dfc5ac42aed,
-        0x53380d139d95b3df,
-        0x650a73548baf63de,
-        0x766a0abb3c77b2a8,
-        0x81c2c92e47edaee6,
-        0x92722c851482353b,
-        0xa2bfe8a14cf10364,
-        0xa81a664bbc423001,
-        0xc24b8b70d0f89791,
-        0xc76c51a30654be30,
-        0xd192e819d6ef5218,
-        0xd69906245565a910,
-        0xf40e35855771202a,
-        0x106aa07032bbd1b8,
-        0x19a4c116b8d2d0c8,
-        0x1e376c085141ab53,
-        0x2748774cdf8eeb99,
-        0x34b0bcb5e19b48a8,
-        0x391c0cb3c5c95a63,
-        0x4ed8aa4ae3418acb,
-        0x5b9cca4f7763e373,
-        0x682e6ff3d6b2b8a3,
-        0x748f82ee5defb2fc,
-        0x78a5636f43172f60,
-        0x84c87814a1f0ab72,
-        0x8cc702081a6439ec,
-        0x90befffa23631e28,
-        0xa4506cebde82bde9,
-        0xbef9a3f7b2c67915,
-        0xc67178f2e372532b,
-        0xca273eceea26619c,
-        0xd186b8c721c0c207,
-        0xeada7dd6cde0eb1e,
-        0xf57d4f7fee6ed178,
-        0x06f067aa72176fba,
-        0x0a637dc5a2c898a6,
-        0x113f9804bef90dae,
-        0x1b710b35131c471b,
-        0x28db77f523047d84,
-        0x32caab7b40c72493,
-        0x3c9ebe0a15c9bebc,
-        0x431d67c49c100d4c,
-        0x4cc5d4becb3e42b6,
-        0x597f299cfc657e2a,
-        0x5fcb6fab3ad6faec,
-        0x6c44198c4a475817,
-    ];
-
-    let bit_len = (data.len() as u128) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 128 != 112 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_be_bytes());
-
-    for chunk in msg.chunks(128) {
-        let mut w = [0u64; 80];
-        for i in 0..16 {
-            w[i] = u64::from_be_bytes([
-                chunk[i * 8],
-                chunk[i * 8 + 1],
-                chunk[i * 8 + 2],
-                chunk[i * 8 + 3],
-                chunk[i * 8 + 4],
-                chunk[i * 8 + 5],
-                chunk[i * 8 + 6],
-                chunk[i * 8 + 7],
-            ]);
-        }
-        for i in 16..80 {
-            let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
-            let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
-            w[i] = w[i - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[i - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
-
-        for i in 0..80 {
-            let s1 = e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh
-                .wrapping_add(s1)
-                .wrapping_add(ch)
-                .wrapping_add(k[i])
-                .wrapping_add(w[i]);
-            let s0 = a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-
-            hh = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(temp1);
-            d = c;
-            c = b;
-            b = a;
-            a = temp1.wrapping_add(temp2);
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(f);
-        h[6] = h[6].wrapping_add(g);
-        h[7] = h[7].wrapping_add(hh);
-    }
-
-    let mut result = Vec::with_capacity(64);
-    for val in &h {
-        result.extend_from_slice(&val.to_be_bytes());
-    }
-    result.truncate(output_len);
-    result
-}
-
-fn hash_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let filename = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let raw = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
-
-    // Validate algorithm
-    if compute_hash(&algo, b"").is_none() {
-        let msg = "hash_file(): Argument #1 ($algo) must be a valid hashing algorithm".to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: 0,
-        });
-    }
-
-    match std::fs::read(&filename) {
-        Ok(data) => match compute_hash(&algo, &data) {
-            Some(digest) => {
-                if raw {
-                    Ok(Value::String(PhpString::from_vec(digest)))
-                } else {
-                    let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-                    Ok(Value::String(PhpString::from_string(hex)))
-                }
-            }
-            None => Ok(Value::False),
-        },
-        Err(_) => {
-            vm.emit_warning(&format!(
-                "hash_file({}): Failed to open stream: No such file or directory",
-                filename
-            ));
-            Ok(Value::False)
-        }
-    }
-}
+// ===========================================================================
+// Key derivation
 
 fn hash_hkdf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let algo = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let ikm = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let length = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    let info = args.get(3).unwrap_or(&Value::Null).to_php_string();
-    let salt = args.get(4).unwrap_or(&Value::Null).to_php_string();
-
-    if !is_crypto_algo(&algo) {
-        let msg =
-            "hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
-                .to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: 0,
-        });
-    }
-    let hash_len = compute_hash(&algo, b"").map(|h| h.len()).unwrap_or(0);
-    if hash_len == 0 {
-        let msg =
-            "hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
-                .to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: 0,
-        });
-    }
-
+    let algo = arg_str(args, 0);
+    let ikm = arg_str(args, 1);
+    let length = args.get(2).map(|v| v.deref().to_long()).unwrap_or(0);
+    let info = arg_str(args, 3);
+    let salt = arg_str(args, 4);
+    let ops = match fetch_ops(algo.as_bytes()) {
+        Some(o) if o.is_crypto => o,
+        _ => {
+            return throw(
+                vm,
+                b"ValueError",
+                "hash_hkdf(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm",
+            );
+        }
+    };
     if ikm.as_bytes().is_empty() {
-        let msg = "hash_hkdf(): Argument #2 ($key) must not be empty";
-        let exc = vm.create_exception(b"ValueError", msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg.to_string(),
-            line: 0,
-        });
+        return throw(
+            vm,
+            b"ValueError",
+            "hash_hkdf(): Argument #2 ($key) must not be empty",
+        );
     }
-
-    if length < 0 {
-        let msg = "hash_hkdf(): Argument #3 ($length) must be greater than or equal to 0";
-        let exc = vm.create_exception(b"ValueError", msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg.to_string(),
-            line: 0,
-        });
-    }
-
-    let output_len = if length == 0 {
-        hash_len
+    let length = if length < 0 {
+        return throw(
+            vm,
+            b"ValueError",
+            "hash_hkdf(): Argument #3 ($length) must be greater than or equal to 0",
+        );
+    } else if length == 0 {
+        ops.digest_size
+    } else if length as u64 > (ops.digest_size * 255) as u64 {
+        return throw(
+            vm,
+            b"ValueError",
+            &format!(
+                "hash_hkdf(): Argument #3 ($length) must be less than or equal to {}",
+                ops.digest_size * 255
+            ),
+        );
     } else {
         length as usize
     };
-    if output_len > 255 * hash_len {
-        let msg = format!(
-            "hash_hkdf(): Argument #3 ($length) must be less than or equal to {}",
-            255 * hash_len
+
+    // Extract
+    let mut k = hmac_prep_key(ops, salt.as_bytes());
+    let prk = hmac_round(ops, &k, ikm.as_bytes());
+    xor_6a(&mut k);
+    let prk = hmac_round(ops, &k, &prk);
+
+    // Expand
+    let mut out = Vec::with_capacity(length);
+    let rounds = (length - 1) / ops.digest_size + 1;
+    let mut digest: Vec<u8> = Vec::new();
+    for i in 1..=rounds {
+        let mut k = hmac_prep_key(ops, &prk);
+        let mut c = ops.new_ctx(None);
+        c.update(&k);
+        if i > 1 {
+            c.update(&digest);
+        }
+        if !info.as_bytes().is_empty() {
+            c.update(info.as_bytes());
+        }
+        c.update(&[(i & 0xff) as u8]);
+        digest = finish(ops, c);
+        xor_6a(&mut k);
+        digest = hmac_round(ops, &k, &digest);
+        let n = if i == rounds {
+            length - (i - 1) * ops.digest_size
+        } else {
+            ops.digest_size
+        };
+        out.extend_from_slice(&digest[..n]);
+    }
+    Ok(Value::String(PhpString::from_vec(out)))
+}
+
+fn hash_pbkdf2_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let algo = arg_str(args, 0);
+    let pass = arg_str(args, 1);
+    let salt = arg_str(args, 2);
+    let iterations = arg(args, 3).to_long();
+    let mut length = args.get(4).map(|v| v.deref().to_long()).unwrap_or(0);
+    let raw = arg_bool(args, 5);
+    let opts = arg_options(args, 6);
+    let ops = match fetch_ops(algo.as_bytes()) {
+        Some(o) if o.is_crypto => o,
+        _ => {
+            return throw(
+                vm,
+                b"ValueError",
+                "hash_pbkdf2(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm",
+            );
+        }
+    };
+    if salt.as_bytes().len() > i32::MAX as usize - 4 {
+        return throw(
+            vm,
+            b"ValueError",
+            "hash_pbkdf2(): Argument #3 ($salt) must be less than or equal to INT_MAX - 4 bytes",
         );
-        let exc = vm.create_exception(b"ValueError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: 0,
-        });
     }
+    if iterations <= 0 {
+        return throw(
+            vm,
+            b"ValueError",
+            "hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0",
+        );
+    }
+    if length < 0 {
+        return throw(
+            vm,
+            b"ValueError",
+            "hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0",
+        );
+    }
+    // ops->hash_init(context, args): only for its side effects (deprecations)
+    let _ = new_ctx(vm, ops, opts.as_ref(), "hash_pbkdf2");
+    pending_exception(vm)?;
 
-    // HKDF-Extract: PRK = HMAC-Hash(salt, IKM)
-    let salt_bytes = if salt.as_bytes().is_empty() {
-        vec![0u8; hash_len]
+    let k1 = hmac_prep_key(ops, pass.as_bytes());
+    let mut k2 = k1.clone();
+    xor_6a(&mut k2);
+
+    if length == 0 {
+        length = ops.digest_size as i64;
+        if !raw {
+            length *= 2;
+        }
+    }
+    let digest_length = if raw {
+        length
     } else {
-        salt.as_bytes().to_vec()
+        ((length as f32) / 2.0).ceil() as i64
     };
-    let prk = compute_hmac(&algo, &salt_bytes, ikm.as_bytes());
+    let loops = ((digest_length as f32) / (ops.digest_size as f32)).ceil() as i64;
 
-    // HKDF-Expand
-    let mut okm = Vec::with_capacity(output_len);
-    let mut t = Vec::new();
-    let mut counter: u8 = 1;
-    while okm.len() < output_len {
-        let mut input = t.clone();
-        input.extend_from_slice(info.as_bytes());
-        input.push(counter);
-        t = compute_hmac(&algo, &prk, &input);
-        okm.extend_from_slice(&t);
-        counter += 1;
+    let mut result = Vec::with_capacity(loops as usize * ops.digest_size);
+    let mut computed_salt = salt.as_bytes().to_vec();
+    let salt_len = computed_salt.len();
+    computed_salt.extend_from_slice(&[0; 4]);
+    for i in 1..=loops {
+        computed_salt[salt_len..].copy_from_slice(&(i as u32).to_be_bytes());
+        let mut digest = hmac_round(ops, &k1, &computed_salt);
+        digest = hmac_round(ops, &k2, &digest);
+        let mut temp = digest.clone();
+        for _ in 1..iterations {
+            digest = hmac_round(ops, &k1, &digest);
+            digest = hmac_round(ops, &k2, &digest);
+            for (t, d) in temp.iter_mut().zip(digest.iter()) {
+                *t ^= d;
+            }
+        }
+        result.extend_from_slice(&temp);
     }
-    okm.truncate(output_len);
-
-    Ok(Value::String(PhpString::from_vec(okm)))
-}
-
-fn compute_hmac(algo: &str, key: &[u8], data: &[u8]) -> Vec<u8> {
-    let block_size = hash_block_size(algo);
-    let key_block = if key.len() > block_size {
-        let mut k = compute_hash(algo, key).unwrap_or_default();
-        k.resize(block_size, 0);
-        k
+    let length = length as usize;
+    let out = if raw {
+        result.truncate(length);
+        result
     } else {
-        let mut k = key.to_vec();
-        k.resize(block_size, 0);
-        k
+        let h = hex(&result[..(digest_length as usize).min(result.len())]);
+        let mut s = h.to_php_string().as_bytes().to_vec();
+        s.truncate(length);
+        s
     };
-
-    let mut ipad = vec![0x36u8; block_size];
-    let mut opad = vec![0x5cu8; block_size];
-    for i in 0..block_size {
-        ipad[i] ^= key_block[i];
-        opad[i] ^= key_block[i];
-    }
-
-    let mut inner_data = ipad;
-    inner_data.extend_from_slice(data);
-    let inner_hash = compute_hash(algo, &inner_data).unwrap_or_default();
-
-    let mut outer_data = opad;
-    outer_data.extend_from_slice(&inner_hash);
-    compute_hash(algo, &outer_data).unwrap_or_default()
+    Ok(Value::String(PhpString::from_vec(out)))
 }
 
-fn md5_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
-    if filename.is_empty() {
-        let msg = "Path must not be empty".to_string();
-        let exc = _vm.create_exception(b"ValueError", &msg, 0);
-        _vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: _vm.current_line,
-        });
-    }
-    match std::fs::read(&filename) {
-        Ok(data) => {
-            let digest = md5_hash(&data);
-            if raw {
-                Ok(Value::String(PhpString::from_vec(digest.to_vec())))
-            } else {
-                let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-                Ok(Value::String(PhpString::from_string(hex)))
-            }
-        }
-        Err(e) => {
-            let err_msg = match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    "Failed to open stream: No such file or directory".to_string()
-                }
-                std::io::ErrorKind::PermissionDenied => {
-                    "Failed to open stream: Permission denied".to_string()
-                }
-                _ => format!("Failed to open stream: {}", e),
-            };
-            _vm.emit_warning(&format!("md5_file({}): {}", filename, err_msg));
-            Ok(Value::False)
-        }
-    }
-}
-
-// --- SHA-512/224 and SHA-512/256 ---
-
-fn sha512_224_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(
-        data,
-        &[
-            0x8C3D37C819544DA2,
-            0x73E1996689DCD4D6,
-            0x1DFAB7AE32FF9C82,
-            0x679DD514582F9FCF,
-            0x0F6D2B697BD44DA8,
-            0x77E36F7304C48942,
-            0x3F9D85A86A1D36C8,
-            0x1112E6AD91D692A1,
-        ],
-        28,
-    )
-}
-
-fn sha512_256_hash(data: &[u8]) -> Vec<u8> {
-    sha512_core(
-        data,
-        &[
-            0x22312194FC2BF72C,
-            0x9F555FA3C84C64C2,
-            0x2393B86B6F53B151,
-            0x963877195940EABD,
-            0x96283EE2A88EFFE3,
-            0xBE5E1E2553863992,
-            0x2B0199FC2C85B8AA,
-            0x0EB72DDC81C52CA2,
-        ],
-        32,
-    )
-}
-
-// --- SHA-3 (Keccak) ---
-
-fn sha3_hash(data: &[u8], bits: usize) -> Vec<u8> {
-    let rate = 1600 - 2 * bits;
-    let rate_bytes = rate / 8;
-    let output_bytes = bits / 8;
-    keccak_sponge(data, rate_bytes, output_bytes, 0x06)
-}
-
-#[allow(clippy::needless_range_loop)] // index loop mirrors the reference implementation
-fn keccak_sponge(data: &[u8], rate_bytes: usize, output_bytes: usize, suffix: u8) -> Vec<u8> {
-    let mut state = [0u64; 25];
-
-    // Absorb
-    let mut offset = 0;
-    while offset + rate_bytes <= data.len() {
-        for i in 0..rate_bytes / 8 {
-            let word = u64::from_le_bytes([
-                data[offset + i * 8],
-                data[offset + i * 8 + 1],
-                data[offset + i * 8 + 2],
-                data[offset + i * 8 + 3],
-                data[offset + i * 8 + 4],
-                data[offset + i * 8 + 5],
-                data[offset + i * 8 + 6],
-                data[offset + i * 8 + 7],
-            ]);
-            state[i] ^= word;
-        }
-        keccak_f1600(&mut state);
-        offset += rate_bytes;
-    }
-
-    // Pad and absorb last block
-    let remaining = data.len() - offset;
-    let mut last_block = vec![0u8; rate_bytes];
-    last_block[..remaining].copy_from_slice(&data[offset..]);
-    last_block[remaining] = suffix;
-    last_block[rate_bytes - 1] |= 0x80;
-
-    for i in 0..rate_bytes / 8 {
-        let word = u64::from_le_bytes([
-            last_block[i * 8],
-            last_block[i * 8 + 1],
-            last_block[i * 8 + 2],
-            last_block[i * 8 + 3],
-            last_block[i * 8 + 4],
-            last_block[i * 8 + 5],
-            last_block[i * 8 + 6],
-            last_block[i * 8 + 7],
-        ]);
-        state[i] ^= word;
-    }
-    keccak_f1600(&mut state);
-
-    // Squeeze
-    let mut output = Vec::with_capacity(output_bytes);
-    let mut squeezed = 0;
-    while squeezed < output_bytes {
-        let to_take = (output_bytes - squeezed).min(rate_bytes);
-        for i in 0..to_take / 8 {
-            let bytes = state[i].to_le_bytes();
-            let remaining_needed = output_bytes - squeezed;
-            let copy_len = 8.min(remaining_needed - i * 8);
-            output.extend_from_slice(&bytes[..copy_len]);
-        }
-        // Handle partial last word
-        let full_words = to_take / 8;
-        let partial = to_take % 8;
-        if partial > 0 {
-            let bytes = state[full_words].to_le_bytes();
-            output.extend_from_slice(&bytes[..partial]);
-        }
-        squeezed += to_take;
-        if squeezed < output_bytes {
-            keccak_f1600(&mut state);
-        }
-    }
-    output.truncate(output_bytes);
-    output
-}
-
-#[allow(clippy::needless_range_loop)] // index loop mirrors the reference implementation
-fn keccak_f1600(state: &mut [u64; 25]) {
-    const RC: [u64; 24] = [
-        0x0000000000000001,
-        0x0000000000008082,
-        0x800000000000808A,
-        0x8000000080008000,
-        0x000000000000808B,
-        0x0000000080000001,
-        0x8000000080008081,
-        0x8000000000008009,
-        0x000000000000008A,
-        0x0000000000000088,
-        0x0000000080008009,
-        0x000000008000000A,
-        0x000000008000808B,
-        0x800000000000008B,
-        0x8000000000008089,
-        0x8000000000008003,
-        0x8000000000008002,
-        0x8000000000000080,
-        0x000000000000800A,
-        0x800000008000000A,
-        0x8000000080008081,
-        0x8000000000008080,
-        0x0000000080000001,
-        0x8000000080008008,
-    ];
-
-    // The rotation offsets for rho, indexed as [x + 5*y]
-    const ROTATIONS: [u32; 25] = [
-        0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56,
-        14,
-    ];
-
-    for round in 0..24 {
-        // Theta
-        let mut c = [0u64; 5];
-        for x in 0..5 {
-            c[x] = state[x] ^ state[x + 5] ^ state[x + 10] ^ state[x + 15] ^ state[x + 20];
-        }
-        let mut d = [0u64; 5];
-        for x in 0..5 {
-            d[x] = c[(x + 4) % 5] ^ c[(x + 1) % 5].rotate_left(1);
-        }
-        for i in 0..25 {
-            state[i] ^= d[i % 5];
-        }
-
-        // Rho and Pi combined
-        let mut b = [0u64; 25];
-        for x in 0..5 {
-            for y in 0..5 {
-                let src = x + 5 * y;
-                // Pi mapping: (x, y) -> (y, 2*x + 3*y mod 5)
-                let dst = y + 5 * ((2 * x + 3 * y) % 5);
-                b[dst] = state[src].rotate_left(ROTATIONS[src]);
-            }
-        }
-
-        // Chi
-        for y in 0..5 {
-            for x in 0..5 {
-                state[x + 5 * y] =
-                    b[x + 5 * y] ^ ((!b[(x + 1) % 5 + 5 * y]) & b[(x + 2) % 5 + 5 * y]);
-            }
-        }
-
-        // Iota
-        state[0] ^= RC[round];
-    }
-}
-
-// --- RIPEMD-128 ---
-fn ripemd128_hash(data: &[u8]) -> [u8; 16] {
-    let mut h0: u32 = 0x67452301;
-    let mut h1: u32 = 0xefcdab89;
-    let mut h2: u32 = 0x98badcfe;
-    let mut h3: u32 = 0x10325476;
-
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_le_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut x = [0u32; 16];
-        for i in 0..16 {
-            x[i] = u32::from_le_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        let (mut a, mut b, mut c, mut d) = (h0, h1, h2, h3);
-        let (mut aa, mut bb, mut cc, mut dd) = (h0, h1, h2, h3);
-
-        // Left rounds
-        let rl = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0,
-            9, 5, 2, 14, 11, 8, 3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10,
-            0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
-        ];
-        let sl = [
-            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7,
-            12, 15, 9, 11, 7, 13, 12, 11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11,
-            12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
-        ];
-        let rr = [
-            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14,
-            15, 8, 12, 4, 9, 1, 2, 15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4,
-            1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
-        ];
-        let sr = [
-            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7,
-            7, 12, 7, 6, 15, 13, 11, 9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5,
-            8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
-        ];
-        let kl: [u32; 4] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC];
-        let kr: [u32; 4] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x00000000];
-
-        for j in 0..64 {
-            let round = j / 16;
-            let f = match round {
-                0 => b ^ c ^ d,
-                1 => (b & c) | (!b & d),
-                2 => (b | !c) ^ d,
-                3 => (b & d) | (c & !d),
-                _ => unreachable!(),
-            };
-            let t = a
-                .wrapping_add(f)
-                .wrapping_add(x[rl[j]])
-                .wrapping_add(kl[round])
-                .rotate_left(sl[j])
-                .wrapping_add(0u32);
-            a = d;
-            d = c;
-            c = b;
-            b = t;
-
-            let ff = match round {
-                0 => (bb & dd) | (cc & !dd),
-                1 => (bb | !cc) ^ dd,
-                2 => (bb & cc) | (!bb & dd),
-                3 => bb ^ cc ^ dd,
-                _ => unreachable!(),
-            };
-            let tt = aa
-                .wrapping_add(ff)
-                .wrapping_add(x[rr[j]])
-                .wrapping_add(kr[round])
-                .rotate_left(sr[j])
-                .wrapping_add(0u32);
-            aa = dd;
-            dd = cc;
-            cc = bb;
-            bb = tt;
-        }
-
-        let t = h1.wrapping_add(c).wrapping_add(dd);
-        h1 = h2.wrapping_add(d).wrapping_add(aa);
-        h2 = h3.wrapping_add(a).wrapping_add(bb);
-        h3 = h0.wrapping_add(b).wrapping_add(cc);
-        h0 = t;
-    }
-
-    let mut result = [0u8; 16];
-    result[0..4].copy_from_slice(&h0.to_le_bytes());
-    result[4..8].copy_from_slice(&h1.to_le_bytes());
-    result[8..12].copy_from_slice(&h2.to_le_bytes());
-    result[12..16].copy_from_slice(&h3.to_le_bytes());
-    result
-}
-
-// --- RIPEMD-160 ---
-fn ripemd160_hash(data: &[u8]) -> [u8; 20] {
-    let mut h0: u32 = 0x67452301;
-    let mut h1: u32 = 0xefcdab89;
-    let mut h2: u32 = 0x98badcfe;
-    let mut h3: u32 = 0x10325476;
-    let mut h4: u32 = 0xc3d2e1f0;
-
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_le_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut x = [0u32; 16];
-        for i in 0..16 {
-            x[i] = u32::from_le_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
-        let (mut aa, mut bb, mut cc, mut dd, mut ee) = (h0, h1, h2, h3, h4);
-
-        let rl = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0,
-            9, 5, 2, 14, 11, 8, 3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10,
-            0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2, 4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6,
-            15, 13,
-        ];
-        let sl = [
-            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7,
-            12, 15, 9, 11, 7, 13, 12, 11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11,
-            12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12, 9, 15, 5, 11, 6, 8, 13, 12, 5, 12,
-            13, 14, 11, 8, 5, 6,
-        ];
-        let rr = [
-            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14,
-            15, 8, 12, 4, 9, 1, 2, 15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4,
-            1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14, 12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14,
-            0, 3, 9, 11,
-        ];
-        let sr = [
-            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7,
-            7, 12, 7, 6, 15, 13, 11, 9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5,
-            8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8, 8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6,
-            5, 15, 13, 11, 11,
-        ];
-        let kl: [u32; 5] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xA953FD4E];
-        let kr: [u32; 5] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x7A6D76E9, 0x00000000];
-
-        for j in 0..80 {
-            let round = j / 16;
-            let f = match round {
-                0 => b ^ c ^ d,
-                1 => (b & c) | (!b & d),
-                2 => (b | !c) ^ d,
-                3 => (b & d) | (c & !d),
-                4 => b ^ (c | !d),
-                _ => unreachable!(),
-            };
-            let t = a
-                .wrapping_add(f)
-                .wrapping_add(x[rl[j]])
-                .wrapping_add(kl[round])
-                .rotate_left(sl[j])
-                .wrapping_add(e);
-            a = e;
-            e = d;
-            d = c.rotate_left(10);
-            c = b;
-            b = t;
-
-            let ff = match round {
-                0 => bb ^ (cc | !dd),
-                1 => (bb & dd) | (cc & !dd),
-                2 => (bb | !cc) ^ dd,
-                3 => (bb & cc) | (!bb & dd),
-                4 => bb ^ cc ^ dd,
-                _ => unreachable!(),
-            };
-            let tt = aa
-                .wrapping_add(ff)
-                .wrapping_add(x[rr[j]])
-                .wrapping_add(kr[round])
-                .rotate_left(sr[j])
-                .wrapping_add(ee);
-            aa = ee;
-            ee = dd;
-            dd = cc.rotate_left(10);
-            cc = bb;
-            bb = tt;
-        }
-
-        let t = h1.wrapping_add(c).wrapping_add(dd);
-        h1 = h2.wrapping_add(d).wrapping_add(ee);
-        h2 = h3.wrapping_add(e).wrapping_add(aa);
-        h3 = h4.wrapping_add(a).wrapping_add(bb);
-        h4 = h0.wrapping_add(b).wrapping_add(cc);
-        h0 = t;
-    }
-
-    let mut result = [0u8; 20];
-    result[0..4].copy_from_slice(&h0.to_le_bytes());
-    result[4..8].copy_from_slice(&h1.to_le_bytes());
-    result[8..12].copy_from_slice(&h2.to_le_bytes());
-    result[12..16].copy_from_slice(&h3.to_le_bytes());
-    result[16..20].copy_from_slice(&h4.to_le_bytes());
-    result
-}
-
-// --- RIPEMD-256 ---
-fn ripemd256_hash(data: &[u8]) -> [u8; 32] {
-    // RIPEMD-256 is an extension of RIPEMD-128 with 256-bit output
-    let mut h = [
-        0x67452301u32,
-        0xefcdab89,
-        0x98badcfe,
-        0x10325476,
-        0x76543210,
-        0xfedcba98,
-        0x89abcdef,
-        0x01234567,
-    ];
-
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_le_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut x = [0u32; 16];
-        for i in 0..16 {
-            x[i] = u32::from_le_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        let (mut a, mut b, mut c, mut d) = (h[0], h[1], h[2], h[3]);
-        let (mut aa, mut bb, mut cc, mut dd) = (h[4], h[5], h[6], h[7]);
-
-        let rl = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0,
-            9, 5, 2, 14, 11, 8, 3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10,
-            0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2,
-        ];
-        let sl = [
-            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7,
-            12, 15, 9, 11, 7, 13, 12, 11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11,
-            12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12,
-        ];
-        let rr = [
-            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14,
-            15, 8, 12, 4, 9, 1, 2, 15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4,
-            1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14,
-        ];
-        let sr = [
-            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7,
-            7, 12, 7, 6, 15, 13, 11, 9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5,
-            8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8,
-        ];
-        let kl: [u32; 4] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC];
-        let kr: [u32; 4] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x00000000];
-
-        for j in 0..64 {
-            let round = j / 16;
-            let f = match round {
-                0 => b ^ c ^ d,
-                1 => (b & c) | (!b & d),
-                2 => (b | !c) ^ d,
-                3 => (b & d) | (c & !d),
-                _ => unreachable!(),
-            };
-            let t = a
-                .wrapping_add(f)
-                .wrapping_add(x[rl[j]])
-                .wrapping_add(kl[round])
-                .rotate_left(sl[j]);
-            a = d;
-            d = c;
-            c = b;
-            b = t;
-            let ff = match round {
-                0 => (bb & dd) | (cc & !dd),
-                1 => (bb | !cc) ^ dd,
-                2 => (bb & cc) | (!bb & dd),
-                3 => bb ^ cc ^ dd,
-                _ => unreachable!(),
-            };
-            let tt = aa
-                .wrapping_add(ff)
-                .wrapping_add(x[rr[j]])
-                .wrapping_add(kr[round])
-                .rotate_left(sr[j]);
-            aa = dd;
-            dd = cc;
-            cc = bb;
-            bb = tt;
-
-            // Swap after each round of 16
-            if j == 15 {
-                std::mem::swap(&mut a, &mut aa);
-            } else if j == 31 {
-                std::mem::swap(&mut b, &mut bb);
-            } else if j == 47 {
-                std::mem::swap(&mut c, &mut cc);
-            } else if j == 63 {
-                std::mem::swap(&mut d, &mut dd);
-            }
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(aa);
-        h[5] = h[5].wrapping_add(bb);
-        h[6] = h[6].wrapping_add(cc);
-        h[7] = h[7].wrapping_add(dd);
-    }
-
-    let mut result = [0u8; 32];
-    for i in 0..8 {
-        result[i * 4..(i + 1) * 4].copy_from_slice(&h[i].to_le_bytes());
-    }
-    result
-}
-
-// --- RIPEMD-320 ---
-fn ripemd320_hash(data: &[u8]) -> [u8; 40] {
-    // RIPEMD-320 is an extension of RIPEMD-160 with 320-bit output
-    let mut h = [
-        0x67452301u32,
-        0xefcdab89,
-        0x98badcfe,
-        0x10325476,
-        0xc3d2e1f0,
-        0x76543210,
-        0xfedcba98,
-        0x89abcdef,
-        0x01234567,
-        0x3c2d1e0f,
-    ];
-
-    let bit_len = (data.len() as u64) * 8;
-    let mut msg = data.to_vec();
-    msg.push(0x80);
-    while msg.len() % 64 != 56 {
-        msg.push(0);
-    }
-    msg.extend_from_slice(&bit_len.to_le_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut x = [0u32; 16];
-        for i in 0..16 {
-            x[i] = u32::from_le_bytes([
-                chunk[i * 4],
-                chunk[i * 4 + 1],
-                chunk[i * 4 + 2],
-                chunk[i * 4 + 3],
-            ]);
-        }
-        let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-        let (mut aa, mut bb, mut cc, mut dd, mut ee) = (h[5], h[6], h[7], h[8], h[9]);
-
-        let rl = [
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 7, 4, 13, 1, 10, 6, 15, 3, 12, 0,
-            9, 5, 2, 14, 11, 8, 3, 10, 14, 4, 9, 15, 8, 1, 2, 7, 0, 6, 13, 11, 5, 12, 1, 9, 11, 10,
-            0, 8, 12, 4, 13, 3, 7, 15, 14, 5, 6, 2, 4, 0, 5, 9, 7, 12, 2, 10, 14, 1, 3, 8, 11, 6,
-            15, 13,
-        ];
-        let sl = [
-            11, 14, 15, 12, 5, 8, 7, 9, 11, 13, 14, 15, 6, 7, 9, 8, 7, 6, 8, 13, 11, 9, 7, 15, 7,
-            12, 15, 9, 11, 7, 13, 12, 11, 13, 6, 7, 14, 9, 13, 15, 14, 8, 13, 6, 5, 12, 7, 5, 11,
-            12, 14, 15, 14, 15, 9, 8, 9, 14, 5, 6, 8, 6, 5, 12, 9, 15, 5, 11, 6, 8, 13, 12, 5, 12,
-            13, 14, 11, 8, 5, 6,
-        ];
-        let rr = [
-            5, 14, 7, 0, 9, 2, 11, 4, 13, 6, 15, 8, 1, 10, 3, 12, 6, 11, 3, 7, 0, 13, 5, 10, 14,
-            15, 8, 12, 4, 9, 1, 2, 15, 5, 1, 3, 7, 14, 6, 9, 11, 8, 12, 2, 10, 0, 4, 13, 8, 6, 4,
-            1, 3, 11, 15, 0, 5, 12, 2, 13, 9, 7, 10, 14, 12, 15, 10, 4, 1, 5, 8, 7, 6, 2, 13, 14,
-            0, 3, 9, 11,
-        ];
-        let sr = [
-            8, 9, 9, 11, 13, 15, 15, 5, 7, 7, 8, 11, 14, 14, 12, 6, 9, 13, 15, 7, 12, 8, 9, 11, 7,
-            7, 12, 7, 6, 15, 13, 11, 9, 7, 15, 11, 8, 6, 6, 14, 12, 13, 5, 14, 13, 13, 7, 5, 15, 5,
-            8, 11, 14, 14, 6, 14, 6, 9, 12, 9, 12, 5, 15, 8, 8, 5, 12, 9, 12, 5, 14, 6, 8, 13, 6,
-            5, 15, 13, 11, 11,
-        ];
-        let kl: [u32; 5] = [0x00000000, 0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xA953FD4E];
-        let kr: [u32; 5] = [0x50A28BE6, 0x5C4DD124, 0x6D703EF3, 0x7A6D76E9, 0x00000000];
-
-        for j in 0..80 {
-            let round = j / 16;
-            let f = match round {
-                0 => b ^ c ^ d,
-                1 => (b & c) | (!b & d),
-                2 => (b | !c) ^ d,
-                3 => (b & d) | (c & !d),
-                4 => b ^ (c | !d),
-                _ => unreachable!(),
-            };
-            let t = a
-                .wrapping_add(f)
-                .wrapping_add(x[rl[j]])
-                .wrapping_add(kl[round])
-                .rotate_left(sl[j])
-                .wrapping_add(e);
-            a = e;
-            e = d;
-            d = c.rotate_left(10);
-            c = b;
-            b = t;
-            let ff = match round {
-                0 => bb ^ (cc | !dd),
-                1 => (bb & dd) | (cc & !dd),
-                2 => (bb | !cc) ^ dd,
-                3 => (bb & cc) | (!bb & dd),
-                4 => bb ^ cc ^ dd,
-                _ => unreachable!(),
-            };
-            let tt = aa
-                .wrapping_add(ff)
-                .wrapping_add(x[rr[j]])
-                .wrapping_add(kr[round])
-                .rotate_left(sr[j])
-                .wrapping_add(ee);
-            aa = ee;
-            ee = dd;
-            dd = cc.rotate_left(10);
-            cc = bb;
-            bb = tt;
-
-            if j == 15 {
-                std::mem::swap(&mut b, &mut bb);
-            } else if j == 31 {
-                std::mem::swap(&mut d, &mut dd);
-            } else if j == 47 {
-                std::mem::swap(&mut a, &mut aa);
-            } else if j == 63 {
-                std::mem::swap(&mut c, &mut cc);
-            } else if j == 79 {
-                std::mem::swap(&mut e, &mut ee);
-            }
-        }
-
-        h[0] = h[0].wrapping_add(a);
-        h[1] = h[1].wrapping_add(b);
-        h[2] = h[2].wrapping_add(c);
-        h[3] = h[3].wrapping_add(d);
-        h[4] = h[4].wrapping_add(e);
-        h[5] = h[5].wrapping_add(aa);
-        h[6] = h[6].wrapping_add(bb);
-        h[7] = h[7].wrapping_add(cc);
-        h[8] = h[8].wrapping_add(dd);
-        h[9] = h[9].wrapping_add(ee);
-    }
-
-    let mut result = [0u8; 40];
-    for i in 0..10 {
-        result[i * 4..(i + 1) * 4].copy_from_slice(&h[i].to_le_bytes());
-    }
-    result
-}
-
-// --- Jenkins' one-at-a-time (joaat) ---
-fn joaat_hash(data: &[u8]) -> u32 {
-    let mut hash: u32 = 0;
-    for &byte in data {
-        hash = hash.wrapping_add(byte as u32);
-        hash = hash.wrapping_add(hash << 10);
-        hash ^= hash >> 6;
-    }
-    hash = hash.wrapping_add(hash << 3);
-    hash ^= hash >> 11;
-    hash = hash.wrapping_add(hash << 15);
-    hash
-}
-
-fn sha1_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let raw = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
-    if filename.is_empty() {
-        let msg = "Path must not be empty".to_string();
-        let exc = _vm.create_exception(b"ValueError", &msg, 0);
-        _vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: _vm.current_line,
-        });
-    }
-    match std::fs::read(&filename) {
-        Ok(data) => {
-            let digest = sha1_hash(&data);
-            if raw {
-                Ok(Value::String(PhpString::from_vec(digest.to_vec())))
-            } else {
-                let hex: String = digest.iter().map(|b| format!("{:02x}", b)).collect();
-                Ok(Value::String(PhpString::from_string(hex)))
-            }
-        }
-        Err(e) => {
-            let err_msg = match e.kind() {
-                std::io::ErrorKind::NotFound => {
-                    "Failed to open stream: No such file or directory".to_string()
-                }
-                std::io::ErrorKind::PermissionDenied => {
-                    "Failed to open stream: Permission denied".to_string()
-                }
-                _ => format!("Failed to open stream: {}", e),
-            };
-            _vm.emit_warning(&format!("sha1_file({}): {}", filename, err_msg));
-            Ok(Value::False)
-        }
-    }
-}
-
-fn hash_hmac_file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.len() < 3 {
+fn hash_equals_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let known = arg(args, 0);
+    let user = arg(args, 1);
+    let Value::String(k) = &known else {
+        let msg = format!(
+            "hash_equals(): Argument #1 ($known_string) must be of type string, {} given",
+            zval_value_name(&known)
+        );
+        return throw(vm, b"TypeError", &msg);
+    };
+    let Value::String(u) = &user else {
+        let msg = format!(
+            "hash_equals(): Argument #2 ($user_string) must be of type string, {} given",
+            zval_value_name(&user)
+        );
+        return throw(vm, b"TypeError", &msg);
+    };
+    // php_safe_bcmp(): constant time for equal lengths
+    let (a, b) = (k.as_bytes(), u.as_bytes());
+    if a.len() != b.len() {
         return Ok(Value::False);
     }
-    let algo = args[0]
-        .to_php_string()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    let filename_str = args[1].to_php_string();
-    let filename_bytes = filename_str.as_bytes();
-    let key = args[2].to_php_string();
-    let raw = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
-
-    // Validate algorithm first
-    if !is_crypto_algo(&algo) {
-        let msg =
-            "hash_hmac_file(): Argument #1 ($algo) must be a valid cryptographic hashing algorithm"
-                .to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: 0,
-        });
+    let mut r = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        r |= x ^ y;
     }
-
-    // Check for null bytes in filename
-    if filename_bytes.contains(&0u8) {
-        let msg =
-            "hash_hmac_file(): Argument #2 ($filename) must not contain any null bytes".to_string();
-        let exc = vm.create_exception(b"ValueError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: 0,
-        });
-    }
-
-    let filename = String::from_utf8_lossy(filename_bytes).to_string();
-    match std::fs::read(&filename) {
-        Ok(data) => {
-            let data_val = Value::String(PhpString::from_vec(data));
-            let algo_val = Value::String(PhpString::from_string(algo));
-            let key_val = Value::String(key);
-            let raw_val = if raw { Value::True } else { Value::False };
-            hash_hmac_fn(vm, &[algo_val, data_val, key_val, raw_val])
-        }
-        Err(_) => {
-            vm.emit_warning(&format!(
-                "hash_hmac_file({}): Failed to open stream: No such file or directory",
-                filename
-            ));
-            Ok(Value::False)
-        }
-    }
-}
-
-fn hash_update_stream_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // hash_update_stream(HashContext $context, resource $stream, int $length = -1): int
-    // Stub: file handle access is in a different crate, so we can't read from streams here
-    Ok(Value::Long(0))
-}
-
-fn hash_update_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // hash_update_file(HashContext $context, string $filename, ?resource $stream_context = null): bool
-    // Stub
-    Ok(Value::False)
+    Ok(if r == 0 { Value::True } else { Value::False })
 }
