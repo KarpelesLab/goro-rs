@@ -96,6 +96,11 @@ pub struct PhpGenerator {
     pub has_returned: bool,
     /// Whether the generator has been advanced past the first yield (for rewind check)
     pub advanced_past_first: bool,
+    /// Calls whose arguments were being evaluated when the generator yielded
+    /// (`f($a, yield)`); restored onto the VM's call stack on resume.
+    pub(crate) saved_calls: Vec<crate::vm::PendingCall>,
+    /// Registered with the cycle collector.
+    pub(crate) gc_tracked: std::cell::Cell<bool>,
 }
 
 impl PhpGenerator {
@@ -133,7 +138,63 @@ impl PhpGenerator {
             force_closed: false,
             has_returned: false,
             advanced_past_first: false,
+            saved_calls: Vec::new(),
+            gc_tracked: std::cell::Cell::new(false),
         }
+    }
+
+    /// Values owned by the suspended generator frame (for the cycle collector).
+    pub(crate) fn for_each_gc_child(&self, f: &mut dyn FnMut(&Value)) {
+        for v in self
+            .cvs
+            .iter()
+            .chain(self.tmps.iter())
+            .chain(self.args.iter())
+        {
+            f(v);
+        }
+        for v in [
+            &self.current_value,
+            &self.current_key,
+            &self.send_value,
+            &self.return_value,
+        ] {
+            f(v);
+        }
+        for v in self
+            .yield_from_source
+            .iter()
+            .chain(self.pending_return.iter())
+            .chain(self.pending_exception.iter())
+        {
+            f(v);
+        }
+        for c in &self.saved_calls {
+            for v in c.args.iter().chain(c.named_args.iter().map(|(_, v)| v)) {
+                f(v);
+            }
+        }
+    }
+
+    /// Detach everything the frame owns (the generator is garbage).
+    pub(crate) fn take_gc_children(&mut self) -> Vec<Value> {
+        let mut out: Vec<Value> = Vec::new();
+        out.extend(std::mem::take(&mut self.cvs));
+        out.extend(std::mem::take(&mut self.tmps));
+        out.extend(std::mem::take(&mut self.args));
+        out.push(std::mem::replace(&mut self.current_value, Value::Null));
+        out.push(std::mem::replace(&mut self.current_key, Value::Null));
+        out.push(std::mem::replace(&mut self.send_value, Value::Null));
+        out.push(std::mem::replace(&mut self.return_value, Value::Null));
+        out.extend(self.yield_from_source.take());
+        out.extend(self.pending_return.take());
+        out.extend(self.pending_exception.take());
+        for c in std::mem::take(&mut self.saved_calls) {
+            out.extend(c.args);
+            out.extend(c.named_args.into_iter().map(|(_, v)| v));
+        }
+        self.state = GeneratorState::Completed;
+        out
     }
 
     /// Force-close the generator, running any finally blocks.
@@ -388,6 +449,28 @@ impl PhpGenerator {
 
     /// Inner resume implementation (depth check is done by the caller)
     fn resume_inner(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
+        if self.state == GeneratorState::Created {
+            if let Some(i) = self.op_array.cv_names.iter().position(|n| n == b"GLOBALS") {
+                if let Some(slot) = self.cvs.get_mut(i) {
+                    *slot = Value::Array(vm.globals_array());
+                }
+            }
+        }
+        // The generator body is a function frame, whatever frame resumes it.
+        let was_global = vm.is_global_scope_flag();
+        vm.set_global_scope_flag(false);
+        let depth = vm.pending_calls_depth();
+        vm.restore_pending_calls(std::mem::take(&mut self.saved_calls));
+        let result = self.resume_body(vm);
+        let leftover = vm.take_pending_calls_from(depth);
+        if self.state != GeneratorState::Completed {
+            self.saved_calls = leftover;
+        }
+        vm.set_global_scope_flag(was_global);
+        result
+    }
+
+    fn resume_body(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
         let op_array = self.op_array.clone();
         let mut ip = self.ip;
 
@@ -807,12 +890,63 @@ impl PhpGenerator {
 
                 OpCode::Assign => {
                     let val = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.op1, val);
+                    let released = match op.op1 {
+                        OperandType::Cv(i) => matches!(
+                            self.cvs.get(i as usize),
+                            Some(Value::Object(_) | Value::Array(_))
+                        ),
+                        _ => false,
+                    };
+                    if matches!(op.result, OperandType::Tmp(_)) {
+                        self.write_operand(&op.op1, val);
+                        let stored = match op.op1 {
+                            OperandType::Cv(i) => self
+                                .cvs
+                                .get(i as usize)
+                                .map(|v| v.deref())
+                                .unwrap_or(Value::Null),
+                            _ => Value::Null,
+                        };
+                        self.write_operand(&op.result, stored);
+                    } else {
+                        self.write_operand(&op.op1, val);
+                    }
+                    // The source temporary is consumed by the assignment.
+                    if let OperandType::Tmp(t) = op.op2 {
+                        if let Some(slot) = self.tmps.get_mut(t as usize) {
+                            *slot = Value::Undef;
+                        }
+                    }
+                    if released {
+                        // The previous value may have lost its last holder.
+                        let had = vm.current_exception.is_some();
+                        vm.run_pending_destructors_pub();
+                        if !had && vm.current_exception.is_some() {
+                            if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: "Uncaught exception from destructor".into(),
+                                line: op.line,
+                            });
+                        }
+                    }
                 }
 
                 OpCode::LoadConst => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     self.write_operand(&op.result, val);
+                }
+
+                OpCode::QmAssign => {
+                    let v = self.read_operand(&op.op1, &op_array.literals);
+                    let v = if matches!(v, Value::Undef) {
+                        Value::Null
+                    } else {
+                        v.deref()
+                    };
+                    self.write_operand(&op.result, v);
                 }
 
                 OpCode::AssignRef
@@ -1567,11 +1701,12 @@ impl PhpGenerator {
                 OpCode::BindGlobal => {
                     let name_val = self.read_operand(&op.op2, &op_array.literals);
                     let name = name_val.to_php_string().as_bytes().to_vec();
-                    if let Some(val) = vm.get_global(&name) {
-                        self.write_operand(&op.op1, val);
-                    }
+                    // The CV becomes a reference to the global (ZEND_BIND_GLOBAL).
                     if let OperandType::Cv(cv_idx) = op.op1 {
-                        self.global_cv_keys.insert(cv_idx, name);
+                        let cell = vm.global_cell(&name);
+                        if let Some(slot) = self.cvs.get_mut(cv_idx as usize) {
+                            *slot = Value::Reference(cell);
+                        }
                     }
                 }
 
@@ -1911,9 +2046,25 @@ impl PhpGenerator {
                 }
 
                 OpCode::UnsetCv => {
+                    let mut released = false;
                     if let OperandType::Cv(idx) = op.op1 {
                         if let Some(slot) = self.cvs.get_mut(idx as usize) {
+                            released = matches!(slot, Value::Object(_) | Value::Array(_));
                             *slot = Value::Undef;
+                        }
+                    }
+                    if released {
+                        let had = vm.current_exception.is_some();
+                        vm.run_pending_destructors_pub();
+                        if !had && vm.current_exception.is_some() {
+                            if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: "Uncaught exception from destructor".into(),
+                                line: op.line,
+                            });
                         }
                     }
                 }
@@ -2365,7 +2516,20 @@ impl PhpGenerator {
                             obj.set_property(name, default);
                         }
                     }
+                    // Destructible objects are tracked like in the VM's NewObject;
+                    // the destructor is armed once the constructor call completes.
+                    let has_destruct = vm
+                        .classes
+                        .get(&class_lower)
+                        .map(|c| c.methods.contains_key(&b"__destruct".to_vec()))
+                        .unwrap_or(false);
+                    if has_destruct {
+                        obj.set_property(b"__ctor_pending".to_vec(), Value::True);
+                    }
                     let obj_val = Value::Object(Rc::new(RefCell::new(obj)));
+                    if has_destruct {
+                        vm.destructible_objects.push(obj_val.clone());
+                    }
                     self.write_operand(&op.result, obj_val);
                     // Note: constructor call will be set up by the subsequent InitMethodCall opcode
                 }

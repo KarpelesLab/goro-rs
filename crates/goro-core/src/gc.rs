@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::rc::{Rc, Weak};
 
 use crate::array::PhpArray;
+use crate::generator::PhpGenerator;
 use crate::object::PhpObject;
 use crate::value::Value;
 
@@ -59,6 +60,8 @@ struct RootBuf {
 }
 
 thread_local! {
+    /// Generators created by the VM (candidates like objects).
+    static TRACKED_GENERATORS: RefCell<Vec<Weak<RefCell<PhpGenerator>>>> = const { RefCell::new(Vec::new()) };
     /// Objects seen by the VM (each registered once).
     static TRACKED_OBJECTS: RefCell<Vec<Weak<RefCell<PhpObject>>>> = const { RefCell::new(Vec::new()) };
     static PRUNE_AT: Cell<usize> = const { Cell::new(4096) };
@@ -90,6 +93,21 @@ pub fn track_object(rc: &Rc<RefCell<PhpObject>>) {
             t.retain(|w| w.strong_count() > 0);
             PRUNE_AT.with(|p| p.set((t.len() * 2).max(4096)));
         }
+    });
+}
+
+/// Register a generator as a cycle-collection candidate.
+pub fn track_generator(rc: &Rc<RefCell<PhpGenerator>>) {
+    match rc.try_borrow() {
+        Ok(b) if !b.gc_tracked.get() => b.gc_tracked.set(true),
+        _ => return,
+    }
+    let _ = TRACKED_GENERATORS.try_with(|t| {
+        let mut t = t.borrow_mut();
+        if t.len() >= 4096 && t.len().is_power_of_two() {
+            t.retain(|w| w.strong_count() > 0);
+        }
+        t.push(Rc::downgrade(rc));
     });
 }
 
@@ -207,6 +225,7 @@ enum Node {
     Obj(Rc<RefCell<PhpObject>>),
     Arr(Rc<RefCell<PhpArray>>),
     Ref(Rc<RefCell<Value>>),
+    Gen(Rc<RefCell<PhpGenerator>>),
 }
 
 impl Node {
@@ -215,6 +234,7 @@ impl Node {
             Node::Obj(o) => Rc::as_ptr(o) as *const u8 as usize,
             Node::Arr(a) => Rc::as_ptr(a) as *const u8 as usize,
             Node::Ref(r) => Rc::as_ptr(r) as *const u8 as usize,
+            Node::Gen(g) => Rc::as_ptr(g) as *const u8 as usize,
         }
     }
     fn strong(&self) -> usize {
@@ -222,6 +242,7 @@ impl Node {
             Node::Obj(o) => Rc::strong_count(o),
             Node::Arr(a) => Rc::strong_count(a),
             Node::Ref(r) => Rc::strong_count(r),
+            Node::Gen(g) => Rc::strong_count(g),
         }
     }
     fn of(v: &Value) -> Option<Node> {
@@ -229,6 +250,7 @@ impl Node {
             Value::Object(o) => Some(Node::Obj(o.clone())),
             Value::Array(a) => Some(Node::Arr(a.clone())),
             Value::Reference(r) => Some(Node::Ref(r.clone())),
+            Value::Generator(g) => Some(Node::Gen(g.clone())),
             _ => None,
         }
     }
@@ -237,6 +259,7 @@ impl Node {
             Value::Object(o) => Some(Rc::as_ptr(o) as *const u8 as usize),
             Value::Array(a) => Some(Rc::as_ptr(a) as *const u8 as usize),
             Value::Reference(r) => Some(Rc::as_ptr(r) as *const u8 as usize),
+            Value::Generator(g) => Some(Rc::as_ptr(g) as *const u8 as usize),
             _ => None,
         }
     }
@@ -346,6 +369,17 @@ impl Graph {
                 }
                 Err(_) => false,
             },
+            Node::Gen(g) => match g.try_borrow() {
+                Ok(b) if !b.is_running => {
+                    b.for_each_gc_child(&mut |v| {
+                        if let Some(c) = self.add_value(v) {
+                            kids.push(c);
+                        }
+                    });
+                    true
+                }
+                _ => false,
+            },
         };
         drop(node);
         if !ok {
@@ -387,6 +421,16 @@ fn analyze(
     // gc_collect_cycles() also scans every tracked object.
     for o in objs {
         g.add(Node::Obj(o));
+    }
+    if limit.is_none() {
+        let gens: Vec<Rc<RefCell<PhpGenerator>>> = TRACKED_GENERATORS.with(|t| {
+            let mut t = t.borrow_mut();
+            t.retain(|w| w.strong_count() > 0);
+            t.iter().filter_map(|w| w.upgrade()).collect()
+        });
+        for gr in gens {
+            g.add(Node::Gen(gr));
+        }
     }
     let roots: Vec<WeakNode> = POSSIBLE_ROOTS.with(|r| {
         let mut r = r.borrow_mut();
@@ -451,6 +495,7 @@ fn analyze(
                 Node::Obj(o) => format!("obj#{}", o.try_borrow().map(|b| b.object_id).unwrap_or(0)),
                 Node::Arr(_) => "arr".into(),
                 Node::Ref(_) => "ref".into(),
+                Node::Gen(_) => "gen".into(),
             };
             eprintln!(
                 "gc node {} {} strong={} internal={} extra={} opaque={} live={} kids={:?}",
@@ -557,6 +602,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         let mut dead_props: Vec<Vec<(Vec<u8>, Value)>> = Vec::new();
         let mut dead_arrays: Vec<PhpArray> = Vec::new();
         let mut dead_vals: Vec<Value> = Vec::new();
+        let mut dead_gens: Vec<Vec<Value>> = Vec::new();
         if !ptrs.is_empty() {
             host.gc_forget_objects(&ptrs);
             for idx in 0..len {
@@ -586,6 +632,11 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                             dead_vals.push(std::mem::replace(&mut *b, Value::Null));
                         }
                     }
+                    Node::Gen(gr) => {
+                        if let Ok(mut b) = gr.try_borrow_mut() {
+                            dead_gens.push(b.take_gc_children());
+                        }
+                    }
                 }
             }
         }
@@ -593,6 +644,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         // where the cycles actually get freed.
         drop(an);
         drop(dead_vals);
+        drop(dead_gens);
         drop(dead_arrays);
         drop(dead_props);
         total += count;
@@ -633,7 +685,11 @@ impl GcHost for crate::vm::Vm {
         let Ok(b) = obj.try_borrow() else {
             return false;
         };
-        if matches!(b.get_property(b"__destructed"), Value::True) {
+        if matches!(b.get_property(b"__destructed"), Value::True)
+            || matches!(b.get_property(b"__ctor_pending"), Value::True)
+        {
+            // Destructed already, or `new` was interrupted before its
+            // constructor ran (no destructor then).
             return false;
         }
         let lower: Vec<u8> = b

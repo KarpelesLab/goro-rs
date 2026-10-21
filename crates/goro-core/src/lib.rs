@@ -30,6 +30,7 @@ pub mod spl_stubs;
 pub mod string;
 pub mod stub_sigs;
 pub mod stubs;
+pub mod symtab;
 pub mod uncaught;
 pub mod uri;
 pub mod value;

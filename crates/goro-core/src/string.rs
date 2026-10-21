@@ -51,6 +51,18 @@ impl PhpString {
         }
     }
 
+    /// A string not counted by memory_get_usage() (like PHP's interned
+    /// strings, e.g. compiled variable names).
+    pub fn from_bytes_untracked(data: &[u8]) -> Self {
+        Self {
+            inner: Rc::new(PhpStringInner {
+                data: data.to_vec(),
+                hash: std::cell::Cell::new(None),
+                tracked_bytes: 0,
+            }),
+        }
+    }
+
     pub fn from_vec(data: Vec<u8>) -> Self {
         let bytes = data.len() + STRING_OVERHEAD;
         if !memory_alloc(bytes) {

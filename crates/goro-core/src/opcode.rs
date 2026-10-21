@@ -362,6 +362,10 @@ pub enum OpCode {
     /// op1 = container (CV or tmp array), op2 = key (Unused = append),
     /// result = tmp holding the (vivified, separated) element array.
     ArrayGetW,
+    /// Copy op1's value (dereferenced, no undefined-variable warning) into
+    /// the result tmp: snapshots an operand that a magic method could change
+    /// between two uses (`$o->$name ?? x` calls __isset then __get).
+    QmAssign,
 }
 
 /// A compiled function / script

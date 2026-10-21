@@ -137,6 +137,8 @@ pub struct Compiler {
     pub warnings: Vec<(String, u32)>,
     /// Whether the current expression's result will be discarded (for #[\NoDiscard])
     is_discarding_result: bool,
+    /// The assignment being compiled is an expression statement (its value is unused).
+    assign_result_discarded: bool,
     /// True when compiling inside a function/method/closure body (reserved for future use).
     pub is_in_function_body: bool,
     /// True when compiling inside the body of a *class method* (not a plain function or
@@ -310,6 +312,7 @@ impl Compiler {
             is_in_trait: false,
             warnings: Vec::new(),
             is_discarding_result: false,
+            assign_result_discarded: false,
             is_in_function_body: false,
             is_in_class_method: false,
             is_top_level: false,
@@ -1800,6 +1803,12 @@ impl Compiler {
                 );
                 if is_call {
                     self.is_discarding_result = true;
+                }
+                if matches!(
+                    expr.kind,
+                    ExprKind::Assign { .. } | ExprKind::AssignRef { .. }
+                ) {
+                    self.assign_result_discarded = true;
                 }
                 let tmp_start = self.op_array.temp_count;
                 self.compile_expr(expr)?;
@@ -8062,9 +8071,11 @@ impl Compiler {
             nullsafe: false,
         } = &expr.kind
         {
-            if matches!(&property.kind, ExprKind::Identifier(_)) {
+            {
                 let base = self.compile_isset_prop_chain(object, line, patches)?;
+                let base = self.snapshot_cv(base, line);
                 let prop_op = self.compile_property_name(property)?;
+                let prop_op = self.snapshot_cv(prop_op, line);
                 let isset_tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
                     opcode: OpCode::PropertyIsset,
@@ -8093,6 +8104,33 @@ impl Compiler {
             }
         }
         self.compile_expr(expr)
+    }
+
+    /// Copy a plain variable operand into a tmp so that a magic method run
+    /// between two uses of it (offsetExists/__isset, then offsetGet/__get)
+    /// cannot change what the second use sees.
+    fn snapshot_cv(&mut self, op: OperandType, line: u32) -> OperandType {
+        if let OperandType::Cv(i) = op {
+            let name = self
+                .op_array
+                .cv_names
+                .get(i as usize)
+                .cloned()
+                .unwrap_or_default();
+            if name == b"this" || name == b"GLOBALS" || crate::vm::is_auto_global_name(&name) {
+                return op;
+            }
+            let t = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::QmAssign,
+                op1: op,
+                op2: OperandType::Unused,
+                result: OperandType::Tmp(t),
+                line,
+            });
+            return OperandType::Tmp(t);
+        }
+        op
     }
 
     fn list_has_ref(elems: &[ArrayElement]) -> bool {
@@ -8793,6 +8831,7 @@ impl Compiler {
             }
 
             ExprKind::Assign { target, value } => {
+                let result_discarded = std::mem::take(&mut self.assign_result_discarded);
                 // Check for nullsafe in write context
                 if matches!(
                     &target.kind,
@@ -8845,18 +8884,63 @@ impl Compiler {
                         }
                     }
                 }
-                let val = self.compile_expr(value)?;
+                let mut val = self.compile_expr(value)?;
+                // The value of `$o->p = $v` is the value assigned, even if a
+                // magic method / lazy initializer run by the store changes $v:
+                // read the variable once.
+                let simple = |e: &Expr| {
+                    matches!(
+                        e.kind,
+                        ExprKind::Variable(_)
+                            | ExprKind::Identifier(_)
+                            | ExprKind::Int(_)
+                            | ExprKind::String(_)
+                    )
+                };
+                let target_simple = match &target.kind {
+                    ExprKind::PropertyAccess {
+                        object, property, ..
+                    } => simple(object) && simple(property),
+                    ExprKind::ArrayAccess { array, index } => {
+                        simple(array) && index.as_ref().map_or(true, |i| simple(i))
+                    }
+                    ExprKind::StaticPropertyAccess { class, .. } => simple(class),
+                    ExprKind::DynamicVariable(inner) => simple(inner),
+                    _ => false,
+                };
+                if !result_discarded && matches!(val, OperandType::Cv(_)) && target_simple {
+                    let t = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(t),
+                        op2: val,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                    val = OperandType::Tmp(t);
+                }
                 match &target.kind {
                     ExprKind::Variable(name) => {
                         let cv = self.op_array.get_or_create_cv(name);
+                        // The value of `$a = v` is the assigned value, even if a
+                        // destructor run by the assignment changes $a (GH-10168).
+                        let result = if result_discarded {
+                            OperandType::Unused
+                        } else {
+                            OperandType::Tmp(self.op_array.alloc_temp())
+                        };
                         self.op_array.emit(Op {
                             opcode: OpCode::Assign,
                             op1: OperandType::Cv(cv),
                             op2: val,
-                            result: OperandType::Unused,
+                            result,
                             line: expr.span.line,
                         });
-                        Ok(OperandType::Cv(cv))
+                        Ok(if result_discarded {
+                            OperandType::Cv(cv)
+                        } else {
+                            result
+                        })
                     }
                     ExprKind::ArrayAccess { array, index } => {
                         // $arr[$key] = $val  →  ArraySet
@@ -10116,11 +10200,13 @@ impl Compiler {
                     chain.reverse();
 
                     let base_op = self.compile_expr(base_expr)?;
+                    let base_op = self.snapshot_cv(base_op, expr.span.line);
                     let mut jmp_to_right: Vec<usize> = Vec::new();
                     let mut current = base_op;
 
                     for idx_expr in chain.iter() {
                         let idx = self.compile_expr(idx_expr)?;
+                        let idx = self.snapshot_cv(idx, expr.span.line);
 
                         // Check offsetExists first
                         let isset_tmp = self.op_array.alloc_temp();
@@ -10226,8 +10312,13 @@ impl Compiler {
                 // $a->b->c ?? d: property fetches in the chain go through
                 // __isset before __get (FETCH_OBJ_IS semantics).
                 let mut isset_patches: Vec<u32> = Vec::new();
-                let left_val = if matches!(&left.kind, ExprKind::PropertyAccess { nullsafe: false, property, .. } if matches!(property.kind, ExprKind::Identifier(_)))
-                {
+                let left_val = if matches!(
+                    &left.kind,
+                    ExprKind::PropertyAccess {
+                        nullsafe: false,
+                        ..
+                    }
+                ) {
                     self.compile_isset_prop_chain(left, expr.span.line, &mut isset_patches)?
                 } else {
                     self.compile_expr(left)?
@@ -11588,6 +11679,7 @@ impl Compiler {
                     chain.reverse();
 
                     let base_op = self.compile_expr(base_expr)?;
+                    let base_op = self.snapshot_cv(base_op, expr.span.line);
                     let result_tmp = self.op_array.alloc_temp();
                     let mut jmp_to_true: Vec<usize> = Vec::new(); // jumps when exists=false -> empty=true
                     let mut current = base_op;
@@ -11595,6 +11687,7 @@ impl Compiler {
                     for (i, idx_expr) in chain.iter().enumerate() {
                         let _is_last = i == chain.len() - 1;
                         let idx = self.compile_expr(idx_expr)?;
+                        let idx = self.snapshot_cv(idx, expr.span.line);
 
                         // Check offsetExists
                         let isset_tmp = self.op_array.alloc_temp();
@@ -11687,6 +11780,62 @@ impl Compiler {
                     return Ok(OperandType::Tmp(result_tmp));
                 }
 
+                if matches!(
+                    &inner.kind,
+                    ExprKind::PropertyAccess {
+                        nullsafe: false,
+                        ..
+                    }
+                ) {
+                    // empty($o->p): __isset first, then __get (FETCH_OBJ_IS).
+                    let line = expr.span.line;
+                    let mut patches: Vec<u32> = Vec::new();
+                    let val = self.compile_isset_prop_chain(inner, line, &mut patches)?;
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::BooleanNot,
+                        op1: val,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(tmp),
+                        line,
+                    });
+                    let jmp_end = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let fail_label = self.op_array.current_offset();
+                    for p in &patches {
+                        self.op_array.ops[*p as usize].op2 = OperandType::JmpTarget(fail_label);
+                    }
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let true_lit = self.op_array.add_literal(Value::True);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(tmp),
+                        op2: OperandType::Const(true_lit),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp_end, end);
+                    return Ok(OperandType::Tmp(tmp));
+                }
                 let val = self.compile_expr(inner)?;
                 self.op_array.emit(Op {
                     opcode: OpCode::ErrorRestore,
@@ -13318,6 +13467,7 @@ impl Compiler {
             }
 
             ExprKind::AssignRef { target, value } => {
+                let result_discarded = std::mem::take(&mut self.assign_result_discarded);
                 // Check for nullsafe chain in reference context
                 if Self::expr_contains_nullsafe(value) {
                     return Err(CompileError {
@@ -13506,14 +13656,23 @@ impl Compiler {
                         let val = self.compile_expr(value)?;
                         self.emit_assign_ref_call_notice(value, expr.span.line);
                         let target_cv = self.op_array.get_or_create_cv(target_name);
+                        let result = if result_discarded {
+                            OperandType::Unused
+                        } else {
+                            OperandType::Tmp(self.op_array.alloc_temp())
+                        };
                         self.op_array.emit(Op {
                             opcode: OpCode::Assign,
                             op1: OperandType::Cv(target_cv),
                             op2: val,
-                            result: OperandType::Unused,
+                            result,
                             line: expr.span.line,
                         });
-                        Ok(OperandType::Cv(target_cv))
+                        Ok(if result_discarded {
+                            OperandType::Cv(target_cv)
+                        } else {
+                            result
+                        })
                     }
                     (ExprKind::ArrayAccess { array, index }, ExprKind::Variable(value_name)) => {
                         // $arr[key] = &$var — store reference into array element

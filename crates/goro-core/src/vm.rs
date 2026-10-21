@@ -235,12 +235,6 @@ impl Vm {
         true
     }
 }
-/// Pointer to the CV name table of the op_array whose CVs are stashed in
-/// `Vm::global_cv_stash`. The op_array outlives the stash (it is only set for
-/// the duration of a call made from that op_array's frame).
-#[derive(Clone, Copy)]
-pub struct CvNamesPtr(pub *const Vec<Vec<u8>>);
-
 /// Type alias for the class map (used by external crates)
 pub type ClassMap = IndexMap<Vec<u8>, ClassEntry>;
 
@@ -260,11 +254,12 @@ impl std::fmt::Display for VmError {
 impl std::error::Error for VmError {}
 
 /// Pending function call being assembled
+#[derive(Debug, Clone)]
 pub(crate) struct PendingCall {
     pub(crate) name: PhpString,
     pub(crate) args: Vec<Value>,
     /// Named arguments: (param_name, value) pairs to be reordered at call time
-    named_args: Vec<(Vec<u8>, Value)>,
+    pub(crate) named_args: Vec<(Vec<u8>, Value)>,
 }
 
 impl PendingCall {
@@ -423,10 +418,12 @@ pub struct Vm {
     pub ob_deactivated: bool,
     pub ob_pending_fatal: Option<VmError>,
     pub ob_fname: Option<String>,
-    /// The global frame's CVs while it is suspended in a builtin call (so
-    /// user callbacks invoked by the builtin see and update the live values
-    /// through `global $x`).
-    pub global_cv_stash: Option<(Vec<Value>, CvNamesPtr)>,
+    /// Bumped whenever an entry of the global symbol table is added,
+    /// removed or rebound (see symtab.rs).
+    pub(crate) globals_gen: u64,
+    /// The next executed op_array is a global-scope frame (main script,
+    /// include/eval at global scope) whose CVs live in the symbol table.
+    pub(crate) bind_next_frame: bool,
     /// Registered built-in functions
     pub functions: HashMap<Vec<u8>, BuiltinFn>,
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
@@ -437,8 +434,8 @@ pub struct Vm {
     pending_calls: Vec<PendingCall>,
     /// Static variable storage (keyed by "funcname::varname")
     static_vars: HashMap<Vec<u8>, Value>,
-    /// Global variables
-    globals: HashMap<Vec<u8>, Value>,
+    /// The global symbol table (also the value of `$GLOBALS`, see symtab.rs)
+    pub(crate) globals: Rc<RefCell<PhpArray>>,
     /// Class table (preserves insertion order)
     pub classes: IndexMap<Vec<u8>, ClassEntry>,
     /// Next object ID
@@ -451,7 +448,7 @@ pub struct Vm {
     /// Pending class definitions (from compiler, indexed by position)
     pub(crate) pending_classes: Vec<ClassEntry>,
     /// Whether we're executing the top-level script (vs a function)
-    is_global_scope: bool,
+    pub(crate) is_global_scope: bool,
     /// User-defined constants (from define())
     pub constants: HashMap<Vec<u8>, Value>,
     /// Attributes attached to user-defined constants
@@ -712,13 +709,14 @@ impl Vm {
             ob_deactivated: false,
             ob_pending_fatal: None,
             ob_fname: None,
-            global_cv_stash: None,
+            globals_gen: 0,
+            bind_next_frame: false,
             functions: HashMap::new(),
             builtin_param_names: HashMap::new(),
             user_functions: HashMap::new(),
             pending_calls: Vec::new(),
             static_vars: HashMap::new(),
-            globals: HashMap::new(),
+            globals: Rc::new(RefCell::new(PhpArray::new())),
             classes: IndexMap::new(),
             next_object_id: 1,
             free_object_ids: Vec::new(),
@@ -3613,31 +3611,6 @@ impl Vm {
         ))
     }
 
-    /// Value of a global variable held in the suspended global frame (if any).
-    fn global_stash_get(&self, name: &[u8]) -> Option<Value> {
-        let (cvs, names) = self.global_cv_stash.as_ref()?;
-        // SAFETY: the pointed-to op_array outlives the stash (see CvNamesPtr).
-        let names = unsafe { &*names.0 };
-        let i = names.iter().position(|n| n.as_slice() == name)?;
-        match cvs.get(i) {
-            Some(Value::Undef) | None => None,
-            Some(v) => Some(v.clone()),
-        }
-    }
-
-    /// Write a global variable back into the suspended global frame (if any).
-    fn global_stash_set(&mut self, name: &[u8], val: &Value) {
-        if let Some((cvs, names)) = self.global_cv_stash.as_mut() {
-            // SAFETY: see global_stash_get.
-            let names = unsafe { &*names.0 };
-            if let Some(i) = names.iter().position(|n| n.as_slice() == name) {
-                if let Some(slot) = cvs.get_mut(i) {
-                    *slot = val.clone();
-                }
-            }
-        }
-    }
-
     /// zendi_try_get_long() for an already type-checked operand: floats are
     /// converted modularly with the "not representable" warning or the
     /// "loses precision" deprecation, float strings are capped.
@@ -4998,10 +4971,7 @@ impl Vm {
                     },
                     None => {
                         if self.is_global_scope {
-                            self.globals
-                                .get(n)
-                                .map(|v| v.deref())
-                                .filter(|v| !matches!(v, Value::Undef))
+                            self.global_lookup(n)
                         } else {
                             None
                         }
@@ -5442,6 +5412,7 @@ impl Vm {
         if op_array.is_generator {
             let generator = crate::generator::PhpGenerator::new(op_array.clone(), func_cvs);
             let gen_rc = Rc::new(RefCell::new(generator));
+            crate::gc::track_generator(&gen_rc);
             return Ok(Value::Generator(gen_rc));
         }
 
@@ -13322,6 +13293,7 @@ impl Vm {
                         // Store args for func_get_args() support
                         generator.args = args.to_vec();
                         let gen_rc = Rc::new(RefCell::new(generator));
+                        crate::gc::track_generator(&gen_rc);
                         return Some(Value::Generator(gen_rc));
                     }
                     self.called_class_stack.push(class_lower.clone());
@@ -13784,14 +13756,10 @@ impl Vm {
     /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
-        let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
-        // The main script's CVs are the global symbol table: pick up variables
-        // registered at request startup (e.g. $argv / $argc).
-        for (i, name) in op_array.cv_names.iter().enumerate() {
-            if let Some(v) = self.globals.get(name) {
-                cvs[i] = v.clone();
-            }
-        }
+        // The main script's CVs are the global symbol table (bound in
+        // execute_op_array_inner).
+        let cvs = vec![Value::Undef; op_array.cv_names.len()];
+        self.bind_next_frame = true;
         let result = self.execute_op_array(op_array, cvs);
 
         // The Return path in global scope force-closes outstanding generator CVs
@@ -14011,8 +13979,13 @@ impl Vm {
     /// Bind a superglobal (e.g. `$_SESSION`) to `val` in the global symbol
     /// table, including the suspended global frame when called from it.
     pub fn bind_superglobal(&mut self, name: &[u8], val: Value) {
-        self.global_stash_set(name, &val);
-        self.globals.insert(name.to_vec(), val);
+        match val {
+            Value::Reference(r) => self.global_bind_ref(name, r),
+            v => {
+                self.global_unset(name);
+                self.global_assign(name, v);
+            }
+        }
     }
 
     /// Run __destruct on all destructible objects in reverse creation order.
@@ -14137,6 +14110,7 @@ impl Vm {
         self.call_depth += 1;
         if self.call_depth > 100 {
             self.call_depth -= 1;
+            self.bind_next_frame = false;
             return Err(VmError {
                 message: "Maximum call depth exceeded (possible infinite recursion)".into(),
                 line: self.current_line,
@@ -14144,7 +14118,10 @@ impl Vm {
         }
         // Backtraces show the current values of the parameters.
         let cv_frame = self.register_cv_frame(op_array);
+        let prev_global = self.is_global_scope;
+        self.is_global_scope = std::mem::take(&mut self.bind_next_frame);
         let result = self.execute_op_array_inner(op_array, cvs, cv_frame);
+        self.is_global_scope = prev_global;
         if cv_frame {
             self.cv_frames.pop();
         }
@@ -14278,59 +14255,36 @@ impl Vm {
         let mut exception_handlers: Vec<(u32, u32, u32, usize, usize)> = Vec::new();
         // Saved pending_calls depth to restore when entering a catch block
         let mut pending_calls_catch_depth: Option<usize> = None;
-        // Maps CV index -> global var name (for saving back on write)
-        let mut global_cv_keys: HashMap<u32, Vec<u8>> = HashMap::new();
-
-        // Initialize $GLOBALS superglobal if referenced
-        for (i, cv_name) in op_array.cv_names.iter().enumerate() {
-            // $_SESSION is a reference to the global symbol table entry.
-            if cv_name == b"_SESSION" {
-                if let (Some(Value::Undef), Some(Value::Reference(r))) =
-                    (cvs.get(i), self.globals.get(cv_name.as_slice()))
+        // $GLOBALS is the symbol table itself.
+        let globals_cv: Option<u32> = op_array
+            .cv_names
+            .iter()
+            .position(|n| n == b"GLOBALS")
+            .map(|i| i as u32);
+        if let Some(i) = globals_cv {
+            if let Some(slot) = cvs.get_mut(i as usize) {
+                *slot = Value::Array(self.globals.clone());
+            }
+        }
+        // Global-scope frames: every CV is bound to the symbol table entry
+        // of the same name (see symtab.rs).
+        let global_bound = self.is_global_scope;
+        let mut gbind = crate::symtab::GlobalBinding::new(if global_bound { cvs.len() } else { 0 });
+        if global_bound {
+            self.symtab_rebind_all(&mut cvs, &op_array.cv_names, &mut gbind);
+        } else {
+            // Bind auto-global CVs ($_SERVER, $_GET, ...) to the shared global
+            // slot so reads, writes and unset of elements act on the real global.
+            for (i, cv_name) in op_array.cv_names.iter().enumerate() {
+                if is_auto_global_name(cv_name)
+                    && matches!(cvs.get(i), Some(Value::Undef))
+                    && self.global_exists(cv_name)
                 {
-                    cvs[i] = Value::Reference(r.clone());
-                }
-            }
-            if cv_name == b"GLOBALS" {
-                // Build an array from current globals
-                let mut globals_arr = PhpArray::new();
-                for (k, v) in &self.globals {
-                    globals_arr.set(ArrayKey::String(PhpString::from_vec(k.clone())), v.clone());
-                }
-                // A global frame suspended in a builtin call (e.g. a callback
-                // invoked by a builtin) holds the current global values.
-                if let Some((stash_cvs, names)) = self.global_cv_stash.as_ref() {
-                    // SAFETY: see global_stash_get.
-                    let names = unsafe { &*names.0 };
-                    for (n, v) in names.iter().zip(stash_cvs.iter()) {
-                        if !matches!(v, Value::Undef) && n.as_slice() != b"GLOBALS" {
-                            globals_arr
-                                .set(ArrayKey::String(PhpString::from_vec(n.clone())), v.clone());
-                        }
-                    }
-                }
-                if i < cvs.len() {
-                    cvs[i] = Value::Array(Rc::new(RefCell::new(globals_arr)));
+                    cvs[i] = Value::Reference(self.global_cell(cv_name));
                 }
             }
         }
-        // Bind auto-global CVs ($_SERVER, $_GET, ...) to the shared global
-        // slot so reads, writes and unset of elements act on the real global.
-        for (i, cv_name) in op_array.cv_names.iter().enumerate() {
-            if is_auto_global_name(cv_name) && matches!(cvs.get(i), Some(Value::Undef)) {
-                if let Some(gv) = self.globals.get_mut(cv_name.as_slice()) {
-                    let r = match gv {
-                        Value::Reference(r) => r.clone(),
-                        other => {
-                            let r = Rc::new(RefCell::new(std::mem::replace(other, Value::Null)));
-                            *other = Value::Reference(r.clone());
-                            r
-                        }
-                    };
-                    cvs[i] = Value::Reference(r);
-                }
-            }
-        }
+        let mut prev_op: Option<usize> = None;
 
         if cv_frame {
             self.set_cv_frame_vars(&cvs);
@@ -14345,12 +14299,61 @@ impl Vm {
                 return Ok(Value::Undef);
             }
 
+            if let Some(p) = prev_op {
+                // A write to $GLOBALS[...] may have changed the table's shape.
+                let pop = &op_array.ops[p];
+                if let Some(g) = globals_cv {
+                    let g = OperandType::Cv(g);
+                    if (pop.op1 == g || pop.op2 == g || pop.result == g)
+                        && !matches!(pop.opcode, OpCode::ArrayGet | OpCode::ArrayIsset)
+                    {
+                        self.globals_gen = self.globals_gen.wrapping_add(1);
+                    }
+                }
+            }
+            if global_bound {
+                if let Some(p) = prev_op {
+                    let pop = &op_array.ops[p];
+                    for o in [&pop.op1, &pop.op2, &pop.result] {
+                        if let OperandType::Cv(i) = o {
+                            self.symtab_fix_cv(
+                                *i as usize,
+                                &mut cvs,
+                                &op_array.cv_names,
+                                &mut gbind,
+                            );
+                        }
+                    }
+                    if Self::op_writes_many_cvs(pop.opcode) {
+                        for i in 0..cvs.len() {
+                            self.symtab_fix_cv(i, &mut cvs, &op_array.cv_names, &mut gbind);
+                        }
+                    }
+                }
+                if gbind.seen_gen != self.globals_gen {
+                    self.symtab_rebind_all(&mut cvs, &op_array.cv_names, &mut gbind);
+                }
+            }
+
             let op = &op_array.ops[ip];
             ip += 1;
             self.current_line = op.line;
+            if global_bound || globals_cv.is_some() {
+                prev_op = Some(ip - 1);
+            }
 
             match op.opcode {
                 OpCode::Nop => {}
+
+                OpCode::QmAssign => {
+                    let v = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let v = if matches!(v, Value::Undef) {
+                        Value::Null
+                    } else {
+                        v.deref()
+                    };
+                    self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                }
 
                 OpCode::FreeTmps => {
                     if let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) {
@@ -14392,21 +14395,7 @@ impl Vm {
                     }
                     match self.value_to_string_checked(&val) {
                         Ok(s) => {
-                            if !self.ob_stack.is_empty()
-                                && self.is_global_scope
-                                && self.global_cv_stash.is_none()
-                            {
-                                self.global_cv_stash = Some((
-                                    std::mem::take(&mut cvs),
-                                    CvNamesPtr(&op_array.cv_names),
-                                ));
-                                self.write_output(s.as_bytes());
-                                if let Some((saved, _)) = self.global_cv_stash.take() {
-                                    cvs = saved;
-                                }
-                            } else {
-                                self.write_output(s.as_bytes());
-                            }
+                            self.write_output(s.as_bytes());
                             if let Some(e) = self.ob_pending_fatal.take() {
                                 return Err(e);
                             }
@@ -14447,21 +14436,7 @@ impl Vm {
                     }
                     match self.value_to_string_checked(&val) {
                         Ok(s) => {
-                            if !self.ob_stack.is_empty()
-                                && self.is_global_scope
-                                && self.global_cv_stash.is_none()
-                            {
-                                self.global_cv_stash = Some((
-                                    std::mem::take(&mut cvs),
-                                    CvNamesPtr(&op_array.cv_names),
-                                ));
-                                self.write_output(s.as_bytes());
-                                if let Some((saved, _)) = self.global_cv_stash.take() {
-                                    cvs = saved;
-                                }
-                            } else {
-                                self.write_output(s.as_bytes());
-                            }
+                            self.write_output(s.as_bytes());
                             if let Some(e) = self.ob_pending_fatal.take() {
                                 return Err(e);
                             }
@@ -14512,23 +14487,29 @@ impl Vm {
                             *slot = Value::Undef;
                         }
                     }
-                    if self.is_global_scope {
-                        if let OperandType::Cv(idx) = op.op1 {
-                            if let Some(name) = op_array.cv_names.get(idx as usize) {
-                                if matches!(val, Value::Undef | Value::Null) {
-                                    self.globals.remove(name);
-                                } else {
-                                    // Mirror the value actually stored in the CV (arrays are
-                                    // copied on assignment) so the original temporary is
-                                    // released instead of being kept alive here.
-                                    let stored = match cvs.get(idx as usize) {
-                                        Some(Value::Reference(r)) => r.borrow().clone(),
-                                        Some(v) => v.clone(),
-                                        None => val,
-                                    };
-                                    self.globals.insert(name.clone(), stored);
-                                }
+                    if let OperandType::Tmp(r) = op.result {
+                        // The expression's value: the value stored in the variable.
+                        let stored = match &op.op1 {
+                            OperandType::Cv(i) => {
+                                cvs.get(*i as usize).map(|v| v.deref()).unwrap_or(val)
                             }
+                            _ => val,
+                        };
+                        if let Some(slot) = tmps.get_mut(r as usize) {
+                            *slot = stored;
+                        }
+                    } else {
+                        drop(val);
+                    }
+                    if global_bound {
+                        // Publish the new variable before destructors can observe it.
+                        if let OperandType::Cv(idx) = op.op1 {
+                            self.symtab_fix_cv(
+                                idx as usize,
+                                &mut cvs,
+                                &op_array.cv_names,
+                                &mut gbind,
+                            );
                         }
                     }
                     let had_exc = self.current_exception.is_some();
@@ -14561,9 +14542,17 @@ impl Vm {
                                 let vi = value_idx as usize;
                                 // Get or create a reference cell for the value variable
                                 if let Value::Reference(r) = &cvs[vi] {
+                                    if matches!(*r.borrow(), Value::Undef) {
+                                        *r.borrow_mut() = Value::Null;
+                                    }
                                     r.clone()
                                 } else {
-                                    let r = Rc::new(RefCell::new(cvs[vi].clone()));
+                                    // `$a = &$b` defines $b (as NULL when unset).
+                                    let v = match &cvs[vi] {
+                                        Value::Undef => Value::Null,
+                                        v => v.clone(),
+                                    };
+                                    let r = Rc::new(RefCell::new(v));
                                     cvs[vi] = Value::Reference(r.clone());
                                     r
                                 }
@@ -21370,15 +21359,6 @@ impl Vm {
                             ));
                         }
 
-                        let stashed_globals = if self.is_global_scope
-                            && self.global_cv_stash.is_none()
-                        {
-                            self.global_cv_stash =
-                                Some((std::mem::take(&mut cvs), CvNamesPtr(&op_array.cv_names)));
-                            true
-                        } else {
-                            false
-                        };
                         // call_user_func()/call_user_func_array() have no frame of their
                         // own in php-src (ZEND_INIT_USER_CALL).
                         let is_direct_ucf = func_name_lower == b"call_user_func"
@@ -21398,11 +21378,6 @@ impl Vm {
                             self.pop_builtin_frame();
                         } else {
                             self.ucf_call_line = None;
-                        }
-                        if stashed_globals {
-                            if let Some((saved, _)) = self.global_cv_stash.take() {
-                                cvs = saved;
-                            }
                         }
                         match builtin_result {
                             Ok(result) => {
@@ -22403,6 +22378,7 @@ impl Vm {
                                 generator.class_scope = Some(defining_class);
                             }
                             let gen_rc = Rc::new(RefCell::new(generator));
+                            crate::gc::track_generator(&gen_rc);
                             self.write_operand(
                                 &op.result,
                                 Value::Generator(gen_rc),
@@ -22411,16 +22387,6 @@ impl Vm {
                                 &static_cv_keys,
                             );
 
-                            // Reload globals
-                            if self.is_global_scope {
-                                for (i, name) in op_array.cv_names.iter().enumerate() {
-                                    if let Some(val) = self.globals.get(name)
-                                        && i < cvs.len()
-                                    {
-                                        cvs[i] = val.clone();
-                                    }
-                                }
-                            }
                             // Pop the early-pushed call stack entry for the generator function
                             self.call_stack.pop();
                             continue;
@@ -22527,17 +22493,6 @@ impl Vm {
                         } else {
                             false
                         };
-
-                        // Save caller's globals before the call
-                        if was_global {
-                            for (i, cv) in cvs.iter().enumerate() {
-                                if !matches!(cv, Value::Undef)
-                                    && let Some(name) = op_array.cv_names.get(i)
-                                {
-                                    self.globals.insert(name.clone(), cv.clone());
-                                }
-                            }
-                        }
 
                         // Auto-inject $this for parent:: / non-static method calls in instance context
                         // When calling ClassName::method() (e.g. parent::show()), the method expects
@@ -22802,16 +22757,6 @@ impl Vm {
                                         }
                                         self.current_exception = Some(exc);
                                         ip = catch_target as usize;
-                                        // Reload globals
-                                        if was_global {
-                                            for (i, name) in op_array.cv_names.iter().enumerate() {
-                                                if let Some(val) = self.globals.get(name)
-                                                    && i < cvs.len()
-                                                {
-                                                    cvs[i] = val.clone();
-                                                }
-                                            }
-                                        }
                                         continue;
                                     } else {
                                         self.current_exception = Some(exc);
@@ -22847,26 +22792,6 @@ impl Vm {
                             }
                         };
 
-                        // Reload globals into caller's CVs after the function returns
-                        if was_global {
-                            for (i, name) in op_array.cv_names.iter().enumerate() {
-                                if let Some(val) = self.globals.get(name)
-                                    && i < cvs.len()
-                                {
-                                    cvs[i] = val.clone();
-                                }
-                            }
-                        } else {
-                            // In a non-global calling scope, reload any global-bound CVs
-                            for (cv_idx, name) in &global_cv_keys {
-                                if let Some(val) = self.globals.get(name)
-                                    && (*cv_idx as usize) < cvs.len()
-                                {
-                                    cvs[*cv_idx as usize] = val.clone();
-                                }
-                            }
-                        }
-
                         self.write_operand(
                             &op.result,
                             result,
@@ -22878,6 +22803,14 @@ impl Vm {
                         // If it's a constructor call and the class has no __construct, silently succeed
                         let name_bytes = call.name.as_bytes();
                         if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
+                            if let Some(Value::Object(obj_rc)) = call.args.first() {
+                                if obj_rc.borrow().has_property(b"__ctor_pending") {
+                                    obj_rc
+                                        .borrow_mut()
+                                        .properties
+                                        .retain(|(k, _)| k != b"__ctor_pending");
+                                }
+                            }
                             // If $this isn't already first arg (e.g. parent::__construct from method
                             // body) and we're inside an instance method, inject it.
                             // Forwarding calls (parent::/self::) never carry $this
@@ -26615,28 +26548,14 @@ impl Vm {
                     // Also clear any pending deferred return/jump (this explicit return supersedes it)
                     self.pending_return = None;
                     self.pending_finally_jump = None;
-                    // Save global-bound CVs back to globals
-                    for (cv_idx, name) in &global_cv_keys {
-                        if let Some(cv_val) = cvs.get(*cv_idx as usize) {
-                            self.global_stash_set(name, cv_val);
-                            self.globals.insert(name.clone(), cv_val.clone());
-                        }
-                    }
-                    // In global scope, save all CVs as globals AND force-close any
-                    // suspended generators so their finally blocks run on script exit
+                    // At the end of the main script, force-close any suspended
+                    // generators so their finally blocks run on script exit
                     // (matches PHP's "shutdown" semantics).
-                    if self.is_global_scope {
-                        for (i, cv) in cvs.iter().enumerate() {
-                            if !matches!(cv, Value::Undef)
-                                && let Some(name) = op_array.cv_names.get(i)
-                            {
-                                self.globals.insert(name.clone(), cv.clone());
-                            }
-                        }
+                    if global_bound && self.call_depth == 1 {
                         // Close any generator CVs (top-level script ending). Any
                         // exception they produce is surfaced as a Fatal error below.
                         for cv in cvs.iter() {
-                            if let Value::Generator(gen_rc) = cv {
+                            if let Value::Generator(gen_rc) = &cv.deref() {
                                 if let Ok(mut g) = gen_rc.try_borrow_mut() {
                                     let prev_caller = self.generator_caller.take();
                                     g.close(self);
@@ -27088,32 +27007,6 @@ impl Vm {
                                 _ => None,
                             }
                         };
-                        // $GLOBALS['name'] = v inside a function writes the global
-                        // symbol table (the $GLOBALS CV is a snapshot array).
-                        if !self.is_global_scope {
-                            if let (OperandType::Cv(ci), ArrayKey::String(name)) = (&op.op1, &key) {
-                                if op_array.cv_names.get(*ci as usize).map(|n| n.as_slice())
-                                    == Some(b"GLOBALS".as_slice())
-                                {
-                                    let plain = match &val {
-                                        Value::Reference(vr) => vr.borrow().clone(),
-                                        v => v.clone(),
-                                    };
-                                    let gname = name.as_bytes().to_vec();
-                                    let target_ref = match self.globals.get(&gname) {
-                                        Some(Value::Reference(r)) => Some(r.clone()),
-                                        _ => None,
-                                    };
-                                    match target_ref {
-                                        Some(r) => *r.borrow_mut() = plain.clone(),
-                                        None => {
-                                            self.globals.insert(gname.clone(), plain.clone());
-                                        }
-                                    }
-                                    self.global_stash_set(&gname, &plain);
-                                }
-                            }
-                        }
                         match existing_ref {
                             Some(r) => {
                                 *r.borrow_mut() = val;
@@ -27533,8 +27426,8 @@ impl Vm {
                                         | b"_ENV"
                                         | b"GLOBALS"
                                 ) {
-                                    if let Some(global_val) = self.globals.get(name.as_slice()) {
-                                        arr_val = global_val.clone().deref();
+                                    if let Some(global_val) = self.global_lookup(name.as_slice()) {
+                                        arr_val = global_val;
                                     }
                                 }
                             }
@@ -29443,11 +29336,6 @@ impl Vm {
                                         if let Some(slot) = cvs.get_mut(ci as usize) {
                                             *slot = ref_val.clone();
                                         }
-                                        if self.is_global_scope {
-                                            if let Some(name) = op_array.cv_names.get(ci as usize) {
-                                                self.globals.insert(name.clone(), ref_val);
-                                            }
-                                        }
                                     } else {
                                         self.write_operand(
                                             &op.result,
@@ -29481,30 +29369,27 @@ impl Vm {
                 OpCode::BindGlobal => {
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name = name_val.to_php_string().as_bytes().to_vec();
-                    // Load the current global value into the CV (from the suspended
-                    // global frame when a builtin called us from it)
-                    let stashed_val = self.global_stash_get(&name);
-                    if let Some(val) = stashed_val.as_ref().or_else(|| self.globals.get(&name)) {
-                        self.write_operand(
-                            &op.op1,
-                            val.clone(),
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
-                    } else if !self.is_global_scope {
-                        // `global $x` creates the global as NULL when missing.
-                        self.write_operand(
-                            &op.op1,
-                            Value::Null,
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
-                    }
-                    // Register this CV as global so writes are synced
+                    // ZEND_BIND_GLOBAL: the CV becomes a reference to the
+                    // symbol table entry (created as NULL when missing).
                     if let OperandType::Cv(cv_idx) = op.op1 {
-                        global_cv_keys.insert(cv_idx, name);
+                        let same_cv =
+                            global_bound && op_array.cv_names.get(cv_idx as usize) == Some(&name);
+                        if !same_cv {
+                            let cell = self.global_cell(&name);
+                            if let Some(slot) = cvs.get_mut(cv_idx as usize) {
+                                let old = std::mem::replace(slot, Value::Reference(cell));
+                                if matches!(
+                                    old,
+                                    Value::Object(_) | Value::Array(_) | Value::Reference(_)
+                                ) {
+                                    crate::gc::possible_root(&old);
+                                }
+                                drop(old);
+                            }
+                        } else if !matches!(cvs.get(cv_idx as usize), Some(Value::Reference(_))) {
+                            let cell = self.global_cell(&name);
+                            cvs[cv_idx as usize] = Value::Reference(cell);
+                        }
                     }
                 }
 
@@ -31725,24 +31610,8 @@ impl Vm {
                                                 vec![Value::Undef; inc_op_array.cv_names.len()];
 
                                             if self.is_global_scope {
-                                                // Save caller's CVs to globals first
-                                                for (i, cv) in cvs.iter().enumerate() {
-                                                    if !matches!(cv, Value::Undef) {
-                                                        if let Some(name) = op_array.cv_names.get(i)
-                                                        {
-                                                            self.globals
-                                                                .insert(name.clone(), cv.clone());
-                                                        }
-                                                    }
-                                                }
-                                                // Initialize include CVs from globals
-                                                for (inc_idx, inc_name) in
-                                                    inc_op_array.cv_names.iter().enumerate()
-                                                {
-                                                    if let Some(val) = self.globals.get(inc_name) {
-                                                        inc_cvs[inc_idx] = val.clone();
-                                                    }
-                                                }
+                                                // The included file's CVs are bound to the symbol table.
+                                                self.bind_next_frame = true;
                                             } else {
                                                 // Copy caller's variables into included file's scope by name
                                                 for (inc_idx, inc_name) in
@@ -31788,20 +31657,6 @@ impl Vm {
 
                                             // Restore outer pending_classes
                                             self.pending_classes = saved_pending;
-
-                                            if self.is_global_scope {
-                                                // After include, refresh caller's CVs from globals
-                                                // (included file may have set new variables)
-                                                for (i, cv_name) in
-                                                    op_array.cv_names.iter().enumerate()
-                                                {
-                                                    if let Some(val) = self.globals.get(cv_name) {
-                                                        if i < cvs.len() {
-                                                            cvs[i] = val.clone();
-                                                        }
-                                                    }
-                                                }
-                                            }
 
                                             result
                                         }
@@ -31951,23 +31806,8 @@ impl Vm {
                                             vec![Value::Undef; eval_op_array.cv_names.len()];
 
                                         if self.is_global_scope {
-                                            // Save caller's CVs to globals first
-                                            for (i, cv) in cvs.iter().enumerate() {
-                                                if !matches!(cv, Value::Undef) {
-                                                    if let Some(name) = op_array.cv_names.get(i) {
-                                                        self.globals
-                                                            .insert(name.clone(), cv.clone());
-                                                    }
-                                                }
-                                            }
-                                            // Initialize eval CVs from globals
-                                            for (eval_idx, eval_name) in
-                                                eval_op_array.cv_names.iter().enumerate()
-                                            {
-                                                if let Some(val) = self.globals.get(eval_name) {
-                                                    eval_cvs[eval_idx] = val.clone();
-                                                }
-                                            }
+                                            // eval'd code at global scope uses the symbol table.
+                                            self.bind_next_frame = true;
                                         } else {
                                             // Copy caller's variables into eval's scope by name
                                             for (eval_idx, eval_name) in
@@ -32017,18 +31857,6 @@ impl Vm {
 
                                         // Restore outer pending_classes
                                         self.pending_classes = eval_saved_pending;
-
-                                        if self.is_global_scope {
-                                            // After eval, refresh caller's CVs from globals
-                                            for (i, cv_name) in op_array.cv_names.iter().enumerate()
-                                            {
-                                                if let Some(val) = self.globals.get(cv_name) {
-                                                    if i < cvs.len() {
-                                                        cvs[i] = val.clone();
-                                                    }
-                                                }
-                                            }
-                                        }
 
                                         eval_result
                                     }
@@ -32197,7 +32025,7 @@ impl Vm {
                                             }
                                             _ => true,
                                         },
-                                        None => vm.globals.contains_key(n),
+                                        None => vm.global_exists(n),
                                     }
                                 };
                                 // Determine the target variable name (None = skip).
@@ -32291,17 +32119,11 @@ impl Vm {
                                             r
                                         }
                                     };
+                                    // (A global-scope CV rebinds its symbol-table entry
+                                    // after the opcode, see symtab.rs.)
                                     match cv_idx {
                                         Some(i) => cvs[i] = Value::Reference(r.clone()),
-                                        None => {
-                                            self.globals.insert(
-                                                target.clone(),
-                                                Value::Reference(r.clone()),
-                                            );
-                                        }
-                                    }
-                                    if self.is_global_scope && cv_idx.is_some() {
-                                        self.globals.insert(target.clone(), Value::Reference(r));
+                                        None => self.global_bind_ref(&target, r.clone()),
                                     }
                                 } else {
                                     let mut v = entry.deref();
@@ -32317,20 +32139,7 @@ impl Vm {
                                                 cvs[i] = v.clone();
                                             }
                                         }
-                                        None => match self.globals.get(target.as_slice()) {
-                                            Some(Value::Reference(r)) => {
-                                                *r.borrow_mut() = v.clone();
-                                            }
-                                            _ => {
-                                                self.globals.insert(target.clone(), v.clone());
-                                            }
-                                        },
-                                    }
-                                    if self.is_global_scope && cv_idx.is_some() {
-                                        if let Some(i) = cv_idx {
-                                            let cur = cvs[i].clone();
-                                            self.globals.insert(target.clone(), cur);
-                                        }
+                                        None => self.global_assign(&target, v.clone()),
                                     }
                                 }
                                 count += 1;
@@ -33303,9 +33112,16 @@ impl Vm {
                 OpCode::UnsetCv => {
                     // Directly replace the CV slot with Undef (breaks reference links)
                     if let OperandType::Cv(idx) = op.op1 {
-                        if let Some(name) = op_array.cv_names.get(idx as usize) {
+                        if global_bound {
+                            self.symtab_unbind_cv(
+                                idx as usize,
+                                &mut cvs,
+                                &op_array.cv_names,
+                                &mut gbind,
+                            );
+                        } else if let Some(name) = op_array.cv_names.get(idx as usize) {
                             if is_auto_global_name(name) {
-                                self.globals.remove(name.as_slice());
+                                self.global_unset(name);
                             }
                         }
                         if let Some(slot) = cvs.get_mut(idx as usize) {
@@ -33400,9 +33216,6 @@ impl Vm {
                                 *slot = Value::Undef;
                             }
                         }
-                        if let Some(name) = op_array.cv_names.get(idx as usize) {
-                            self.globals.remove(name);
-                        }
                     }
                     let had_exc = self.current_exception.is_some();
                     self.run_pending_destructors();
@@ -33435,6 +33248,13 @@ impl Vm {
                         OperandType::Cv(idx) => cvs.get(*idx as usize).cloned(),
                         OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned(),
                         _ => None,
+                    };
+                    // unset($ref[$k]) on a reference to an object acts on the object.
+                    let arr_val = match arr_val {
+                        Some(Value::Reference(r)) if matches!(&*r.borrow(), Value::Object(_)) => {
+                            Some(r.borrow().clone())
+                        }
+                        v => v,
                     };
                     if let Some(Value::Array(arr)) = arr_val {
                         let key = Self::value_to_array_key(key_val.clone());
@@ -34121,8 +33941,8 @@ impl Vm {
                         }
                     }
                     if matches!(found, Value::Null | Value::Undef) {
-                        if let Some(val) = self.globals.get(name_bytes) {
-                            found = val.clone();
+                        if let Some(val) = self.global_lookup(name_bytes) {
+                            found = val;
                             defined = true;
                         }
                     }
@@ -34156,7 +33976,7 @@ impl Vm {
                         }
                     }
                     if !wrote {
-                        self.globals.insert(name_bytes, value);
+                        self.global_assign(&name_bytes, value);
                     }
                 }
 
@@ -34993,8 +34813,8 @@ impl Vm {
                                         | b"_ENV"
                                         | b"GLOBALS"
                                 ) {
-                                    if let Some(global_val) = self.globals.get(name.as_slice()) {
-                                        val = global_val.clone().deref();
+                                    if let Some(global_val) = self.global_lookup(name.as_slice()) {
+                                        val = global_val;
                                     }
                                 }
                             }
@@ -35027,8 +34847,8 @@ impl Vm {
                                         | b"_ENV"
                                         | b"GLOBALS"
                                 ) {
-                                    if let Some(global_val) = self.globals.get(name.as_slice()) {
-                                        arr_val = global_val.clone().deref();
+                                    if let Some(global_val) = self.global_lookup(name.as_slice()) {
+                                        arr_val = global_val;
                                     }
                                 }
                             }
@@ -35059,6 +34879,12 @@ impl Vm {
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val);
                         match arr.borrow().get(&key) {
+                            Some(Value::Reference(r))
+                                if !matches!(*r.borrow(), Value::Null | Value::Undef) =>
+                            {
+                                Value::True
+                            }
+                            Some(Value::Reference(_)) => Value::False,
                             Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
                             _ => Value::False,
                         }
@@ -40859,11 +40685,13 @@ impl Vm {
                             .get(&name_lower)
                             .map(|c| c.methods.contains_key(&b"__construct".to_vec()))
                             .unwrap_or(false);
-                        if has_ctor {
-                            if let Value::Object(ref rc) = obj_value {
-                                rc.borrow_mut()
-                                    .set_property(b"__ctor_pending".to_vec(), Value::True);
-                            }
+                        // Without a constructor the flag is cleared once the
+                        // (empty) constructor call completes: `new C(f(), yield)`
+                        // abandoned while evaluating arguments is never destructed.
+                        let _ = has_ctor;
+                        if let Value::Object(ref rc) = obj_value {
+                            rc.borrow_mut()
+                                .set_property(b"__ctor_pending".to_vec(), Value::True);
                         }
                         self.destructible_objects.push(obj_value.clone());
                     }
@@ -45214,8 +45042,8 @@ impl Vm {
                             || name == b"GLOBALS"
                         {
                             // Try to load the superglobal from vm globals
-                            if let Some(global_val) = self.globals.get(name.as_slice()) {
-                                return global_val.clone().deref();
+                            if let Some(global_val) = self.global_lookup(name.as_slice()) {
+                                return global_val;
                             }
                             if is_auto_global_name(name) {
                                 let varname = String::from_utf8_lossy(name);
@@ -45237,6 +45065,11 @@ impl Vm {
     }
 
     /// Read a CV value without dereferencing (keeps Reference wrapper)
+    /// Opcodes that may store into CV slots other than their operands.
+    fn op_writes_many_cvs(opcode: OpCode) -> bool {
+        matches!(opcode, OpCode::Extract | OpCode::VarVarSet)
+    }
+
     fn read_operand_raw(cvs: &[Value], operand: &OperandType) -> Value {
         match operand {
             OperandType::Cv(idx) => cvs.get(*idx as usize).cloned().unwrap_or(Value::Null),
@@ -45266,7 +45099,7 @@ impl Vm {
                         if name.as_slice() != b"this" && name.as_slice() != b"GLOBALS" {
                             let varname = String::from_utf8_lossy(name);
                             if is_auto_global_name(name) {
-                                if !self.globals.contains_key(name.as_slice()) {
+                                if !self.global_exists(name.as_slice()) {
                                     self.emit_warning_at(
                                         &format!("Undefined global variable ${}", varname),
                                         line,
@@ -45295,6 +45128,8 @@ impl Vm {
     ) {
         if let Value::Object(o) = &value {
             crate::gc::track_object(o);
+        } else if let Value::Generator(g) = &value {
+            crate::gc::track_generator(g);
         }
         match operand {
             OperandType::Cv(idx) => {
@@ -45309,9 +45144,12 @@ impl Vm {
                         // [name, captures...]; their by-ref captures must stay bound.
                         let is_closure = matches!(copy.values().next(), Some(Value::String(s))
                             if { let b = s.as_bytes(); b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_") });
+                        // A copy of $GLOBALS sees the variables' values, not the
+                        // cells that bind them to global-scope CVs.
+                        let max_rc = if Rc::ptr_eq(arr, &self.globals) { 3 } else { 2 };
                         for (_, v) in copy.iter_mut().filter(|_| !is_closure) {
                             let single =
-                                matches!(v, Value::Reference(r) if Rc::strong_count(r) == 2);
+                                matches!(v, Value::Reference(r) if Rc::strong_count(r) <= max_rc);
                             if single {
                                 let inner = v.deref();
                                 if !matches!(&inner, Value::Array(a) if Rc::ptr_eq(a, arr)) {
@@ -45377,6 +45215,24 @@ impl Vm {
         self.call_depth -= 1;
     }
 
+    /// Calls being assembled above `depth` (a generator suspending inside
+    /// a call's argument list keeps them with its frame).
+    pub(crate) fn take_pending_calls_from(&mut self, depth: usize) -> Vec<PendingCall> {
+        if self.pending_calls.len() > depth {
+            self.pending_calls.split_off(depth)
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub(crate) fn pending_calls_depth(&self) -> usize {
+        self.pending_calls.len()
+    }
+
+    pub(crate) fn restore_pending_calls(&mut self, calls: Vec<PendingCall>) {
+        self.pending_calls.extend(calls);
+    }
+
     /// Initialize a function call from generator context
     pub fn generator_init_fcall(&mut self, name_val: Value) {
         let name_val = name_val.unwrap_closure();
@@ -45423,6 +45279,33 @@ impl Vm {
 
     /// Execute a pending function call from generator context
     pub fn generator_do_fcall(&mut self, line: u32, strict: bool) -> Result<Value, VmError> {
+        // `new C(...)` from a generator: the destructor is armed once the
+        // constructor call returns.
+        let ctor_obj = match self.pending_calls.last() {
+            Some(c)
+                if c.name.as_bytes().len() >= 13
+                    && c.name.as_bytes()[c.name.as_bytes().len() - 13..]
+                        .eq_ignore_ascii_case(b"::__construct") =>
+            {
+                match c.args.first() {
+                    Some(Value::Object(o)) => Some(o.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let r = self.generator_do_fcall_inner(line, strict);
+        if let (Ok(_), Some(o)) = (&r, ctor_obj) {
+            if o.borrow().has_property(b"__ctor_pending") {
+                o.borrow_mut()
+                    .properties
+                    .retain(|(k, _)| k != b"__ctor_pending");
+            }
+        }
+        r
+    }
+
+    fn generator_do_fcall_inner(&mut self, line: u32, strict: bool) -> Result<Value, VmError> {
         let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
             message: "no pending function call".into(),
             line,
@@ -45683,6 +45566,7 @@ impl Vm {
                 generator.call_file = self.current_file.clone();
                 generator.call_line = line;
                 let gen_rc = Rc::new(RefCell::new(generator));
+                crate::gc::track_generator(&gen_rc);
                 Ok(Value::Generator(gen_rc))
             } else {
                 let was_global = self.is_global_scope;
@@ -45958,12 +45842,12 @@ impl Vm {
 
     /// Get a global variable value
     pub fn get_global(&self, name: &[u8]) -> Option<Value> {
-        self.globals.get(name).cloned()
+        self.global_lookup(name)
     }
 
     /// Set a global variable value
     pub fn set_global(&mut self, name: Vec<u8>, value: Value) {
-        self.globals.insert(name, value);
+        self.global_assign(&name, value);
     }
 
     /// Dispatch a Fiber instance method (start, resume, throw)
