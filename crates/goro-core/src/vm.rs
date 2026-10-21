@@ -20579,6 +20579,7 @@ impl Vm {
                             String::from_utf8_lossy(call.name.as_bytes()).into_owned()
                         };
                         let is_method = method_sep.is_some();
+                        let call_frame_depth = self.call_stack.len();
                         self.call_stack.push((
                             display,
                             self.current_file.clone(),
@@ -20674,9 +20675,8 @@ impl Vm {
                                         saved_pending_calls,
                                     )) = exception_handlers.pop()
                                     {
-                                        if call_failed {
-                                            self.call_stack.pop();
-                                        }
+                                        // (with the frames of the calls the exception left)
+                                        self.call_stack.truncate(call_frame_depth);
                                         self.pending_calls.truncate(saved_pending_calls);
                                         while self.error_reporting_stack.len() > saved_depth {
                                             if let Some(saved) = self.error_reporting_stack.pop() {
@@ -24282,6 +24282,7 @@ impl Vm {
                             };
                             call.args.iter().skip(skip).cloned().collect::<Vec<_>>()
                         };
+                        let call_frame_depth = self.call_stack.len();
                         self.call_stack.push((
                             early_call_display,
                             self.current_file.clone(),
@@ -25179,9 +25180,8 @@ impl Vm {
                                     )) = exception_handlers.pop()
                                     {
                                         // Exception caught - pop call stack frame
-                                        if call_failed {
-                                            self.call_stack.pop();
-                                        }
+                                        // (with the frames of the calls the exception left)
+                                        self.call_stack.truncate(call_frame_depth);
                                         // Restore pending_calls to the depth at TryBegin
                                         self.pending_calls.truncate(saved_pending_calls);
                                         // Restore error_reporting to the depth when the try/catch was set up
@@ -25202,9 +25202,8 @@ impl Vm {
                                 if let Some(exc) = self.current_exception.take() {
                                     if !exception_handlers.is_empty() {
                                         // Exception caught - pop call stack frame
-                                        if call_failed {
-                                            self.call_stack.pop();
-                                        }
+                                        // (with the frames of the calls the exception left)
+                                        self.call_stack.truncate(call_frame_depth);
                                         self.current_exception = Some(exc);
                                         let (catch_target, _, _, saved_depth, saved_pending_calls) =
                                             exception_handlers.pop().unwrap();
