@@ -4316,6 +4316,11 @@ impl Vm {
                     self.fiber_destroy(obj_rc);
                     continue;
                 }
+                // zend_objects_destroy_object(): lazy objects (uninitialized
+                // ghosts, and proxies even once initialized) are not destructed.
+                if matches!(obj_rc.borrow().get_property(b"__lazy_state"), Value::String(_)) {
+                    continue;
+                }
                 let destruct_info = self.classes.get(&class_lower)
                     .and_then(|c| c.get_method(b"__destruct"))
                     .map(|m| {
@@ -4472,8 +4477,18 @@ impl Vm {
             Value::String(s) => s.as_bytes().to_vec(),
             _ => return false,
         };
-        // Proxy: if already initialized, don't re-init.
+        // Proxy: if already initialized, don't re-init; but its instance may
+        // itself have been made lazy again (resetAsLazy*()): initialize it.
         if state_bytes == b"proxy" && already_real {
+            let real = obj.borrow().get_property(b"__lazy_real");
+            if let Value::Object(real) = real {
+                if !Rc::ptr_eq(&real, obj) && !self.lazy_init_in_progress.contains(&object_id) {
+                    self.lazy_init_in_progress.insert(object_id);
+                    let r = self.maybe_run_lazy_init(&real);
+                    self.lazy_init_in_progress.remove(&object_id);
+                    return r;
+                }
+            }
             return false;
         }
         // Recursion guard: don't re-enter initialization for the same object.
@@ -4489,6 +4504,7 @@ impl Vm {
                 .map(|ce| {
                     ce.properties.iter()
                         .filter(|p| !p.is_static && !p.is_virtual)
+                        .filter(|p| !is_prop_skipped(obj, &p.name))
                         .map(|p| (p.name.clone(), p.default.clone()))
                         .collect()
                 })
@@ -4522,6 +4538,8 @@ impl Vm {
         {
             let mut ob = obj.borrow_mut();
             ob.remove_property(b"__lazy_initializer");
+            ob.remove_property(b"__lazy_skipped");
+            ob.remove_property(b"__lazy_flags");
         }
         // Track for destruction: for ghost objects, the lazy object itself
         // becomes a regular object on init and should get __destruct called
@@ -4584,14 +4602,28 @@ impl Vm {
     /// If `obj` is an initialized proxy, return the real backing object.
     /// Otherwise returns the original object.
     pub fn proxy_redirect(&self, obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpObject>> {
-        let ob = obj.borrow();
-        let state = ob.get_property(b"__lazy_state");
-        if matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy") {
-            if let Value::Object(real) = ob.get_property(b"__lazy_real") {
-                return real;
+        // Follow chains of initialized proxies (the instance of a proxy may
+        // itself be an initialized proxy).
+        let mut cur = obj.clone();
+        for _ in 0..32 {
+            let next = {
+                let ob = cur.borrow();
+                let state = ob.get_property(b"__lazy_state");
+                if matches!(state, Value::String(ref s) if s.as_bytes() == b"proxy") {
+                    match ob.get_property(b"__lazy_real") {
+                        Value::Object(real) => Some(real),
+                        _ => None,
+                    }
+                } else {
+                    None
+                }
+            };
+            match next {
+                Some(n) if !Rc::ptr_eq(&n, &cur) => cur = n,
+                _ => break,
             }
         }
-        obj.clone()
+        cur
     }
 
     /// Convert an object to an array (as `(array)$obj`).
@@ -5190,6 +5222,54 @@ impl Vm {
     /// Public wrapper for execute_op_array (used by reflection invoke)
     pub fn execute_op_array_pub(&mut self, op_array: &OpArray, cvs: Vec<Value>) -> Result<Value, VmError> {
         self.execute_op_array(op_array, cvs)
+    }
+
+    /// True while the initializer of the lazy object `object_id` is running.
+    pub fn is_lazy_init_in_progress(&self, object_id: u64) -> bool {
+        self.lazy_init_in_progress.contains(&object_id)
+    }
+
+    /// Call `__destruct` on a live object now (used by resetAsLazy*()),
+    /// unless its destructor already ran. The object stays destructible:
+    /// the "destructor called" mark is not kept. Returns false if the
+    /// destructor threw.
+    pub fn call_destructor_now(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        if matches!(obj.borrow().get_property(b"__destructed"), Value::True) {
+            return true;
+        }
+        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let Some(m) = self.classes.get(&class_lower).and_then(|c| c.get_method(b"__destruct")) else {
+            return true;
+        };
+        let destruct_op = m.op_array.clone();
+        let class_name_orig = obj.borrow().class_name.clone();
+        let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
+        if !fn_cvs.is_empty() {
+            fn_cvs[0] = Value::Object(obj.clone());
+        }
+        let had_exc = self.current_exception.is_some();
+        self.call_stack.push((
+            format!("{}->__destruct", String::from_utf8_lossy(&class_name_orig)),
+            String::new(),
+            0,
+            Vec::new(),
+            true,
+        ));
+        self.called_class_stack.push(class_name_orig);
+        self.class_scope_stack.push(class_lower);
+        let was_global = self.is_global_scope;
+        self.is_global_scope = false;
+        let _ = self.execute_op_array(&destruct_op, fn_cvs);
+        self.is_global_scope = was_global;
+        self.class_scope_stack.pop();
+        self.called_class_stack.pop();
+        self.call_stack.pop();
+        let ok = had_exc || self.current_exception.is_none();
+        if !ok {
+            // The destructor threw: it counts as called (never run again).
+            obj.borrow_mut().set_property(b"__destructed".to_vec(), Value::True);
+        }
+        ok
     }
 
     /// Access static_vars (read-only, for reflection)
@@ -9849,8 +9929,8 @@ impl Vm {
                     b"IS_EXPLICIT_ABSTRACT" => Some(Value::Long(0x40)),
                     b"IS_FINAL" => Some(Value::Long(0x20)),
                     b"IS_READONLY" => Some(Value::Long(0x10000)),
-                    b"SKIP_INITIALIZATION_ON_SERIALIZE" => Some(Value::Long(1)),
-                    b"SKIP_DESTRUCTOR" => Some(Value::Long(2)),
+                    b"SKIP_INITIALIZATION_ON_SERIALIZE" => Some(Value::Long(8)),
+                    b"SKIP_DESTRUCTOR" => Some(Value::Long(16)),
                     _ => None,
                 }
             }
@@ -11439,6 +11519,11 @@ impl Vm {
                     .collect();
                 if class_lower == b"fiber" {
                     self.fiber_destroy(obj_rc);
+                    continue;
+                }
+                // zend_objects_destroy_object(): lazy objects (uninitialized
+                // ghosts, and proxies even once initialized) are not destructed.
+                if matches!(obj_rc.borrow().get_property(b"__lazy_state"), Value::String(_)) {
                     continue;
                 }
                 let destruct_vis = self

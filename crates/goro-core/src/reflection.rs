@@ -2425,73 +2425,124 @@ pub fn reflection_class_docall(
                 Some(new_val)
             }
             b"resetaslazyghost" | b"resetaslazyproxy" => {
-                // Reset an existing object to the uninitialized lazy state.
+                // zend_object_make_lazy() on an existing object.
                 let target = args.get(1).cloned().unwrap_or(Value::Null);
                 let initializer = args.get(2).cloned().unwrap_or(Value::Null);
                 let options = args.get(3).map(|v| v.to_long()).unwrap_or(0);
                 let is_proxy = method == b"resetaslazyproxy";
-                // Validate options:
-                //   - resetAsLazyGhost: only SKIP_INITIALIZATION_ON_SERIALIZE (1) allowed
-                //   - resetAsLazyProxy: SKIP_INITIALIZATION_ON_SERIALIZE (1) | SKIP_DESTRUCTOR (2)
-                let valid_mask = if is_proxy { 3 } else { 1 };
-                if options & !valid_mask != 0 {
-                    let method_name = if is_proxy { "resetAsLazyProxy" } else { "resetAsLazyGhost" };
-                    let err_msg = format!(
-                        "ReflectionClass::{}(): Argument #3 ($options) contains invalid flags",
-                        method_name
-                    );
-                    let exc = vm.create_exception(b"ReflectionException", &err_msg, 0);
+                let method_name = if is_proxy { "resetAsLazyProxy" } else { "resetAsLazyGhost" };
+                let Value::Object(obj) = &target else { return Some(Value::Null) };
+                let obj_class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                if obj_class_lower != class_lower && !vm.class_extends(&obj_class_lower, &class_lower) {
+                    let ce_disp = vm.classes.get(&class_lower).map(|c| crate::value::display_class_name(&c.name)).unwrap_or_default();
+                    let given = crate::value::display_class_name(&obj.borrow().class_name);
+                    let err_msg = format!("ReflectionClass::{}(): Argument #1 ($object) must be of type {}, {} given", method_name, ce_disp, given);
+                    let exc = vm.create_exception(b"TypeError", &err_msg, vm.current_line);
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
-                if let Value::Object(obj) = &target {
-                    // PHP: classes with no declared instance properties are never lazy
-                    // — resetAsLazy*() is a no-op (object remains non-lazy).
-                    let decl_prop_count = vm.classes.get(&class_lower)
-                        .map(|ce| ce.properties.iter().filter(|p| !p.is_static).count())
-                        .unwrap_or(0);
-                    if decl_prop_count == 0 {
-                        // Still wipe dynamic properties to match expected behavior
-                        let mut ob = obj.borrow_mut();
-                        let names: Vec<Vec<u8>> = ob.properties.iter()
-                            .filter(|(n, _)| !n.starts_with(b"__lazy_"))
-                            .map(|(n, _)| n.clone())
-                            .collect();
-                        for n in names {
-                            ob.remove_property(&n);
-                        }
-                        ob.remove_property(b"__lazy_state");
-                        ob.remove_property(b"__lazy_initializer");
-                        ob.remove_property(b"__lazy_real");
+                // ZEND_LAZY_OBJECT_USER_MASK = SKIP_INITIALIZATION_ON_SERIALIZE | SKIP_DESTRUCTOR
+                if options & !(LAZY_SKIP_INIT_ON_SERIALIZE | LAZY_SKIP_DESTRUCTOR) != 0 {
+                    let err_msg = format!("ReflectionClass::{}(): Argument #3 ($options) contains invalid flags", method_name);
+                    let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                let (state, has_real) = {
+                    let ob = obj.borrow();
+                    (ob.get_property(b"__lazy_state"), ob.has_property(b"__lazy_real"))
+                };
+                let is_lazy = matches!(state, Value::String(_));
+                let is_init_proxy = matches!(&state, Value::String(s) if s.as_bytes() == b"proxy") && has_real;
+                // While its initializer runs, an object is no longer lazy but
+                // can't be reset either.
+                if vm.is_lazy_init_in_progress(obj.borrow().object_id) {
+                    let exc = vm.create_exception(b"Error", "Can not reset an object while it is being initialized", vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                if is_lazy && !is_init_proxy {
+                    let exc = vm.create_exception(b"ReflectionException", "Object is already lazy", vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
+                }
+                if is_init_proxy {
+                    let mut ob = obj.borrow_mut();
+                    ob.remove_property(b"__lazy_real");
+                    ob.remove_property(b"__lazy_state");
+                    ob.remove_property(b"__lazy_initializer");
+                    ob.remove_property(b"__lazy_skipped");
+                    ob.remove_property(b"__lazy_flags");
+                } else {
+                    let oid = obj.borrow().object_id;
+                    if vm.is_lazy_init_in_progress(oid) {
+                        let exc = vm.create_exception(b"Error", "Can not reset an object while it is being initialized", vm.current_line);
+                        vm.current_exception = Some(exc);
                         return Some(Value::Null);
                     }
+                    if options & LAZY_SKIP_DESTRUCTOR == 0 && !vm.call_destructor_now(obj) {
+                        return Some(Value::Null);
+                    }
+                }
+                obj.borrow_mut().remove_property(b"__destructed");
+                // Unset dynamic properties, then the declared properties of the
+                // reflected class (initialized readonly props of final
+                // classes/props are kept and stay non-lazy).
+                let obj_final = vm.classes.get(&obj_class_lower).map(|c| c.is_final).unwrap_or(false);
+                let ce_defs = vm.ordered_instance_prop_defs(&class_lower);
+                let obj_defs = vm.ordered_instance_prop_defs(&obj_class_lower);
+                let mut removed: Vec<Value> = Vec::new();
+                let mut skipped: Vec<Vec<u8>> = Vec::new();
+                let mut lazy_count = 0usize;
+                {
                     let mut ob = obj.borrow_mut();
-                    // Clear existing state
-                    ob.remove_property(b"__lazy_real");
-                    // Wipe all user properties and re-seed as Undef in declaration order
-                    let names: Vec<Vec<u8>> = ob.properties.iter()
-                        .filter(|(n, _)| !n.starts_with(b"__lazy_"))
+                    let dyn_names: Vec<Vec<u8>> = ob.properties.iter()
+                        .filter(|(n, _)| !n.starts_with(b"__") && !obj_defs.iter().any(|d| &d.name == n))
                         .map(|(n, _)| n.clone())
                         .collect();
-                    for n in names {
-                        ob.remove_property(&n);
+                    for n in dyn_names.iter().rev() {
+                        removed.push(ob.get_property(n));
+                        ob.remove_property(n);
                     }
-                    if let Some(ce) = vm.classes.get(&class_lower) {
-                        let decl_props: Vec<_> = ce.properties.iter()
-                            .filter(|p| !p.is_static)
-                            .map(|p| p.name.clone())
-                            .collect();
-                        for n in decl_props {
-                            ob.set_property(n, Value::Undef);
+                    for d in &obj_defs {
+                        if d.is_virtual && (d.has_get_hook || d.has_set_hook) {
+                            continue;
                         }
+                        let in_ce = ce_defs.iter().any(|c| c.name == d.name);
+                        if !in_ce {
+                            skipped.push(d.name.clone());
+                            continue;
+                        }
+                        let cur = ob.get_property(&d.name);
+                        if !matches!(cur, Value::Undef) && d.is_readonly && (obj_final || d.is_final) {
+                            skipped.push(d.name.clone());
+                            continue;
+                        }
+                        removed.push(cur);
+                        ob.set_property(d.name.clone(), Value::Undef);
+                        lazy_count += 1;
                     }
+                }
+                // Release the old values now (may run nested destructors).
+                drop(removed);
+                vm.run_pending_destructors_pub();
+                if lazy_count > 0 {
+                    let mut ob = obj.borrow_mut();
                     ob.set_property(
                         b"__lazy_state".to_vec(),
-                        Value::String(PhpString::from_bytes(
-                            if is_proxy { b"proxy" } else { b"ghost" },
-                        )),
+                        Value::String(PhpString::from_bytes(if is_proxy { b"proxy" } else { b"ghost" })),
                     );
                     ob.set_property(b"__lazy_initializer".to_vec(), initializer);
+                    if !skipped.is_empty() {
+                        ob.set_property(b"__lazy_skipped".to_vec(), Value::String(PhpString::from_vec(skipped.join(&0u8))));
+                    } else {
+                        ob.remove_property(b"__lazy_skipped");
+                    }
+                    if options & LAZY_SKIP_INIT_ON_SERIALIZE != 0 {
+                        ob.set_property(b"__lazy_flags".to_vec(), Value::Long(options));
+                    } else {
+                        ob.remove_property(b"__lazy_flags");
+                    }
                 }
                 Some(Value::Null)
             }
@@ -2550,9 +2601,9 @@ pub fn reflection_class_docall(
                 // Validate options: only SKIP_INITIALIZATION_ON_SERIALIZE (1)
                 // is allowed for newLazyGhost/newLazyProxy. SKIP_DESTRUCTOR (2)
                 // is only allowed on resetAsLazyProxy.
-                if options & !1 != 0 {
+                if options & !LAZY_SKIP_INIT_ON_SERIALIZE != 0 {
                     let method_name = if is_proxy { "newLazyProxy" } else { "newLazyGhost" };
-                    let err_msg = if options & 2 != 0 && options & !3 == 0 {
+                    let err_msg = if options & LAZY_SKIP_DESTRUCTOR != 0 && options & !(LAZY_SKIP_INIT_ON_SERIALIZE | LAZY_SKIP_DESTRUCTOR) == 0 {
                         format!(
                             "ReflectionClass::{}(): Argument #2 ($options) does not accept ReflectionClass::SKIP_DESTRUCTOR",
                             method_name
@@ -2600,6 +2651,9 @@ pub fn reflection_class_docall(
                     )),
                 );
                 new_obj.set_property(b"__lazy_initializer".to_vec(), initializer);
+                if options & LAZY_SKIP_INIT_ON_SERIALIZE != 0 {
+                    new_obj.set_property(b"__lazy_flags".to_vec(), Value::Long(options));
+                }
                 Some(Value::Object(Rc::new(RefCell::new(new_obj))))
             }
             b"initializelazyobject" => {
@@ -4540,6 +4594,11 @@ fn mark_prop_skipped(
         ob.remove_property(b"__lazy_skipped");
     }
 }
+
+/// ReflectionClass::SKIP_INITIALIZATION_ON_SERIALIZE (ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE)
+pub const LAZY_SKIP_INIT_ON_SERIALIZE: i64 = 1 << 3;
+/// ReflectionClass::SKIP_DESTRUCTOR (ZEND_LAZY_OBJECT_SKIP_DESTRUCTOR)
+pub const LAZY_SKIP_DESTRUCTOR: i64 = 1 << 4;
 
 pub fn reflection_property_docall(
     vm: &mut Vm,
