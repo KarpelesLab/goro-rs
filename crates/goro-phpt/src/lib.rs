@@ -1406,6 +1406,9 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     for class in compiled_classes {
         vm.register_class(class);
     }
+    // Startup messages are printed before the request (SAPI) is activated.
+    vm.headers_sent = false;
+    vm.output_start = None;
     goro_ext_standard::ob::request_startup(&mut vm);
 
     // Request startup: superglobals, $argv/$argc, php://input (main FILE only).
@@ -1426,6 +1429,9 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             ini_settings.iter().rev().find(|(a, _)| a == k).map(|(_, v)| v.clone())
         };
         goro_ext_standard::request::startup(&mut vm, &req.info, &ini_lookup);
+    }
+    for hook in vm.request_startup_hooks.clone() {
+        hook(&mut vm);
     }
 
     // Provide a minimal $_SERVER superglobal ONLY when the test depends on

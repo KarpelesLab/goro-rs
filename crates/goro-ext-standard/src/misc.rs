@@ -10333,7 +10333,52 @@ pub fn take_response_code() -> i64 {
     })
 }
 
+/// sapi_header_op(): headers cannot be modified once output started.
+/// Emits PHP's warning and returns true when the headers were already sent.
+pub fn headers_already_sent_error(vm: &mut Vm) -> bool {
+    if !vm.headers_sent {
+        return false;
+    }
+    let msg = match vm.output_start.clone() {
+        Some((f, l)) => format!("Cannot modify header information - headers already sent by (output started at {}:{})", f, l),
+        None => "Cannot modify header information - headers already sent".to_string(),
+    };
+    vm.emit_warning(&msg);
+    true
+}
+
+/// sapi_add_header_ex() for extensions: add a raw "Name: value" header line.
+pub fn sapi_add_header(line: &[u8], replace: bool) {
+    let colon = match line.iter().position(|&c| c == b':') {
+        Some(c) => c,
+        None => return,
+    };
+    let name = String::from_utf8_lossy(&line[..colon]).trim().as_bytes().to_vec();
+    let mut v = &line[colon + 1..];
+    while let Some((&b' ', rest)) = v.split_first() {
+        v = rest;
+    }
+    let value = v.to_vec();
+    SENT_HEADERS.with(|h| {
+        let mut hh = h.borrow_mut();
+        if replace {
+            hh.retain(|(k, _)| !k.eq_ignore_ascii_case(&name));
+        }
+        hh.push((name, value));
+    });
+}
+
+/// SAPI_HEADER_DELETE_PREFIX: remove headers `name` whose value starts with `value_prefix`.
+pub fn sapi_delete_header_prefix(name: &[u8], value_prefix: &[u8]) {
+    SENT_HEADERS.with(|h| {
+        h.borrow_mut().retain(|(k, v)| !(k.eq_ignore_ascii_case(name) && v.starts_with(value_prefix)));
+    });
+}
+
 fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if headers_already_sent_error(_vm) {
+        return Ok(Value::Null);
+    }
     let header = args.first().unwrap_or(&Value::Null).to_php_string();
     let replace = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     let response_code = args.get(2).map(|v| v.to_long()).unwrap_or(0);
@@ -10416,13 +10461,23 @@ fn setcookie_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             cookie.push_str(&format!("; expires=t{}", exp));
         }
     }
+    if headers_already_sent_error(_vm) {
+        return Ok(Value::False);
+    }
     SENT_HEADERS.with(|h| {
         h.borrow_mut().push((b"Set-Cookie".to_vec(), cookie.into_bytes()));
     });
     Ok(Value::True)
 }
-fn headers_sent_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+fn headers_sent_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let (file, line) = vm.output_start.clone().unwrap_or_default();
+    if let Some(Value::Reference(r)) = args.first() {
+        *r.borrow_mut() = Value::String(PhpString::from_string(file));
+    }
+    if let Some(Value::Reference(r)) = args.get(1) {
+        *r.borrow_mut() = Value::Long(line as i64);
+    }
+    Ok(if vm.headers_sent { Value::True } else { Value::False })
 }
 
 fn header_remove_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

@@ -337,6 +337,11 @@ impl PhpGenerator {
         let mut ip = self.ip;
 
         loop {
+            if vm.exit_requested {
+                self.state = GeneratorState::Completed;
+                self.ip = ip;
+                return Ok(false);
+            }
             if ip >= op_array.ops.len() {
                 self.state = GeneratorState::Completed;
                 self.has_returned = true;

@@ -280,6 +280,9 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
         let ini = |_k: &str| -> Option<String> { None };
         goro_ext_standard::request::startup(&mut vm, &info, &ini);
     }
+    for hook in vm.request_startup_hooks.clone() {
+        hook(&mut vm);
+    }
 
     match vm.execute(&op_array) {
         Ok(_) => {

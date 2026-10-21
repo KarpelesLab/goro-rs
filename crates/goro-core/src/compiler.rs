@@ -205,6 +205,8 @@ impl Compiler {
                     (b"str_ireplace", 3) => true,
                     // similar_text($str1, $str2, &$percent)
                     (b"similar_text", 2) => true,
+                    // headers_sent(&$filename, &$line)
+                    (b"headers_sent", 0) | (b"headers_sent", 1) => true,
                     // settype(&$var, $type)
                     (b"settype", 0) => true,
                     // getopt($short, $long, &$rest_index)

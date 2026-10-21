@@ -144,6 +144,9 @@ impl Vm {
     /// Buffered write (php_output_write).
     pub fn ob_write(&mut self, data: &[u8]) {
         if self.ob_deactivated || self.ob_stack.is_empty() {
+            if !data.is_empty() {
+                self.mark_output_started();
+            }
             if self.output.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
                 self.output.extend_from_slice(data);
             }
@@ -420,6 +423,9 @@ impl Vm {
             ctx.out = Some(data.to_vec());
         }
         if let Some(out) = ctx.out {
+            if !out.is_empty() {
+                self.mark_output_started();
+            }
             if !out.is_empty() && self.output.len() + out.len() <= Self::MAX_OUTPUT_SIZE {
                 self.output.extend_from_slice(&out);
             }

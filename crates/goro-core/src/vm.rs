@@ -504,6 +504,18 @@ pub struct Vm {
     /// Extension startup handlers, run by the SAPI once the INI settings
     /// are in place and before the script runs.
     pub startup_hooks: Vec<fn(&mut Vm)>,
+    /// Extension request-startup handlers (RINIT), run by the SAPI after the
+    /// request superglobals have been registered.
+    pub request_startup_hooks: Vec<fn(&mut Vm)>,
+    /// Extension request-shutdown handlers (RSHUTDOWN), run once at the end
+    /// of `execute()` after shutdown functions and destructors.
+    pub request_shutdown_hooks: Vec<fn(&mut Vm)>,
+    /// SG(headers_sent): set once output reaches the SAPI.
+    pub headers_sent: bool,
+    /// Constants registered by extensions with CONST_DEPRECATED: name -> message.
+    pub internal_deprecated_constants: HashMap<Vec<u8>, String>,
+    /// OG(output_start_filename/lineno): where output started.
+    pub output_start: Option<(String, u32)>,
     /// Whether the current caller has strict_types=1 (set before calling builtins)
     pub caller_strict_types: bool,
     pub stored_attr_op_arrays: Vec<OpArray>,
@@ -1406,6 +1418,11 @@ impl Vm {
             builtin_param_types: HashMap::new(),
             ini_set_hooks: HashMap::new(),
             startup_hooks: Vec::new(),
+            request_startup_hooks: Vec::new(),
+            request_shutdown_hooks: Vec::new(),
+            headers_sent: false,
+            internal_deprecated_constants: HashMap::new(),
+            output_start: None,
             caller_strict_types: false,
             stored_attr_op_arrays: Vec::new(),
             weak_refs: HashMap::new(),
@@ -2047,6 +2064,18 @@ impl Vm {
                                 if let Some(method) = class.methods.get(&method_lower) {
                                     let op = method.op_array.clone();
                                     return self.execute_fn_with_named_args(&op, args.to_vec(), vec![], Some(Value::Object(obj.clone())));
+                                }
+                            }
+                            // Methods of extension-provided (native) classes.
+                            if let Some((native, h)) = self.find_native_class_handler(&class_lower) {
+                                if (h.has_method)(&native, &method_lower, false) {
+                                    let called = obj.borrow().class_name.clone();
+                                    let had_exc = self.current_exception.is_some();
+                                    let r = (h.call)(self, &native, &method_lower, &called, Some(&vals[0]), args);
+                                    if !had_exc && self.current_exception.is_some() {
+                                        return Err(VmError { message: "Uncaught exception".into(), line: self.current_line });
+                                    }
+                                    return Ok(r);
                                 }
                             }
                         }
@@ -15799,9 +15828,20 @@ impl Vm {
             self.report_uncaught(&e2);
         }
 
-        // Call shutdown functions (before destructors, like PHP does)
+        // Call shutdown functions (before destructors, like PHP does).
+        // Functions registered while shutting down run too; exit() in one
+        // stops the remaining ones.
+        let exited = self.exit_requested;
+        self.exit_requested = false;
+        'shutdown: loop {
         let shutdown_fns = std::mem::take(&mut self.shutdown_functions);
+        if shutdown_fns.is_empty() {
+            break;
+        }
         for (callback, extra_args) in shutdown_fns {
+            if self.exit_requested {
+                break 'shutdown;
+            }
             let shutdown_result = self.call_callback(&callback, &extra_args);
             if shutdown_result.is_err() && self.exception_handler.is_some() && self.current_exception.is_some() {
                 let handler = self.exception_handler.take().unwrap();
@@ -15809,17 +15849,51 @@ impl Vm {
                 let _ = self.call_callback(&handler, &[exc]);
             }
         }
+        }
 
         // Call __destruct on all tracked objects in reverse creation order.
         // A real fatal error (not an uncaught exception) marks all objects as
         // destructed (php_error_cb → zend_objects_store_mark_destructed).
+        let exited = exited || self.exit_requested;
+        self.exit_requested = false;
         if real_fatal {
             self.destructible_objects.clear();
         } else {
             self.run_shutdown_destructors();
         }
 
+        // Module request shutdown (RSHUTDOWN), e.g. session write.
+        self.exit_requested = false;
+        let hooks = std::mem::take(&mut self.request_shutdown_hooks);
+        for hook in hooks {
+            hook(self);
+        }
+        self.exit_requested = exited || self.exit_requested;
+
         result
+    }
+
+    /// php_output_header(): the first output reaching the SAPI marks the
+    /// headers as sent and records where output started.
+    pub fn mark_output_started(&mut self) {
+        if !self.headers_sent {
+            if self.output_start.is_none() && !self.current_file.is_empty() {
+                self.output_start = Some((self.current_file.clone(), self.current_line));
+            }
+            self.headers_sent = true;
+        }
+    }
+
+    /// Track an object with __destruct for shutdown-time destruction.
+    pub fn register_destructible(&mut self, obj: Value) {
+        self.destructible_objects.push(obj);
+    }
+
+    /// Bind a superglobal (e.g. `$_SESSION`) to `val` in the global symbol
+    /// table, including the suspended global frame when called from it.
+    pub fn bind_superglobal(&mut self, name: &[u8], val: Value) {
+        self.global_stash_set(name, &val);
+        self.globals.insert(name.to_vec(), val);
     }
 
     /// Run __destruct on all destructible objects in reverse creation order.
@@ -15907,6 +15981,9 @@ impl Vm {
         let result = self.execute_op_array_inner(op_array, cvs);
         self.call_depth -= 1;
         self.last_call_by_ref = op_array.returns_by_ref;
+        if self.exit_requested {
+            return result.map(|_| Value::Null);
+        }
         self.run_pending_destructors();
 
         // Check return type if declared
@@ -16005,6 +16082,12 @@ impl Vm {
 
         // Initialize $GLOBALS superglobal if referenced
         for (i, cv_name) in op_array.cv_names.iter().enumerate() {
+            // $_SESSION is a reference to the global symbol table entry.
+            if cv_name == b"_SESSION" {
+                if let (Some(Value::Undef), Some(Value::Reference(r))) = (cvs.get(i), self.globals.get(cv_name.as_slice())) {
+                    cvs[i] = Value::Reference(r.clone());
+                }
+            }
             if cv_name == b"GLOBALS" {
                 // Build an array from current globals
                 let mut globals_arr = PhpArray::new();
@@ -16017,7 +16100,6 @@ impl Vm {
                 if i < cvs.len() {
                     cvs[i] = Value::Array(Rc::new(RefCell::new(globals_arr)));
                 }
-                break;
             }
         }
         // Bind auto-global CVs ($_SERVER, $_GET, ...) to the shared global
@@ -16039,6 +16121,10 @@ impl Vm {
         }
 
         'exec: loop {
+            // exit() unwinds every frame (zend_throw_unwind_exit).
+            if self.exit_requested {
+                return Ok(Value::Null);
+            }
             if ip >= op_array.ops.len() {
                 // Implicit return - use Undef to signal "none returned" for return type checks
                 return Ok(Value::Undef);
@@ -27305,6 +27391,11 @@ impl Vm {
                                         line: op.line,
                                     });
                                 }
+                            }
+                        }
+                        if !self.internal_deprecated_constants.is_empty() {
+                            if let Some(m) = self.internal_deprecated_constants.get(name_bytes).cloned() {
+                                self.emit_deprecated_at(&m, op.line);
                             }
                         }
                         // Emit deprecation for E_STRICT (deprecated since PHP 8.4)
