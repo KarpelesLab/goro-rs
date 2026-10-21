@@ -329,7 +329,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_all", array_all_fn);
     vm.register_function(b"array_any", array_any_fn);
     vm.register_function(b"array_multisort", array_multisort_fn);
-    vm.register_function(b"highlight_string", highlight_string_fn);
     vm.register_function(b"exec", exec_fn);
     vm.register_function(b"system", system_fn);
     vm.register_function(b"shell_exec", shell_exec_fn);
@@ -595,9 +594,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"pclose", pclose_fn);
     vm.register_function(b"rewinddir", rewinddir_fn);
     vm.register_function(b"error_log", error_log_fn);
-    vm.register_function(b"highlight_file", highlight_file_fn);
-    vm.register_function(b"show_source", highlight_file_fn);
-    vm.register_function(b"php_strip_whitespace", php_strip_whitespace_fn);
     vm.register_function(b"disk_free_space", disk_free_space_fn);
     vm.register_function(b"diskfreespace", diskfreespace_fn);
     vm.register_function(b"disk_total_space", disk_total_space_fn);
@@ -9377,21 +9373,6 @@ fn php_compare_for_sort(a: &Value, b: &Value, sort_type: i64) -> std::cmp::Order
     php_sort_cmp_flags(a, b, sort_type)
 }
 
-fn highlight_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Very basic stub - just returns the code wrapped in HTML
-    let code = args.first().unwrap_or(&Value::Null).to_php_string();
-    let ret = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
-    let html = format!(
-        "<code><span style=\"color: #000000\">{}</span>\n</code>",
-        code.to_string_lossy()
-    );
-    if ret {
-        Ok(Value::String(PhpString::from_string(html)))
-    } else {
-        vm.write_output(html.as_bytes());
-        Ok(Value::True)
-    }
-}
 
 // ============= File I/O implementation using thread-local file handle storage =============
 
@@ -13212,7 +13193,7 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn resolve_with_include_path(vm: &Vm, filename: &str, use_include_path: bool) -> String {
+pub(crate) fn resolve_with_include_path(vm: &Vm, filename: &str, use_include_path: bool) -> String {
     if !use_include_path
         || filename.contains("://")
         || filename.starts_with('/')
@@ -17342,26 +17323,7 @@ fn error_log_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn highlight_file_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let ret = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
-    match std::fs::read_to_string(&*path.to_string_lossy()) {
-        Ok(content) => {
-            let output = format!("<code><span style=\"color: #000000\">{}</span></code>",
-                content.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;"));
-            if ret { Ok(Value::String(PhpString::from_string(output))) } else { Ok(Value::True) }
-        }
-        Err(_) => Ok(Value::False),
-    }
-}
 
-fn php_strip_whitespace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    match std::fs::read_to_string(&*path.to_string_lossy()) {
-        Ok(content) => Ok(Value::String(PhpString::from_string(content))),
-        Err(_) => Ok(Value::String(PhpString::from_bytes(b""))),
-    }
-}
 
 fn disk_space_impl(vm: &mut Vm, args: &[Value], fn_name: &str, total: bool, called_as: &str) -> Result<Value, VmError> {
     let path_val = args.first().cloned().unwrap_or(Value::Null);

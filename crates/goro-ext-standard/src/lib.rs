@@ -2,6 +2,7 @@ pub mod basedir_guard;
 pub mod crypt;
 mod crypt_blowfish_tables;
 pub mod filters;
+pub mod highlight;
 pub mod html;
 pub mod ini_parser;
 pub mod image;
@@ -34,6 +35,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     type_funcs::register(vm);
     math::register(vm);
     misc::register(vm);
+    highlight::register(vm);
     ob::register(vm);
     arrdiff::register(vm);
     html::register(vm);
@@ -377,6 +379,10 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"set_time_limit", b"seconds");
     params!(b"ini_set", b"option", b"value");
     params!(b"ini_get", b"option");
+    params!(b"highlight_string", b"string", b"return");
+    params!(b"highlight_file", b"filename", b"return");
+    params!(b"show_source", b"filename", b"return");
+    params!(b"php_strip_whitespace", b"filename");
     params!(b"ini_restore", b"option");
     params!(b"register_shutdown_function", b"callback", b"args");
     params!(b"memory_get_usage", b"real_usage");
