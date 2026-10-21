@@ -47,8 +47,41 @@ fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut seen = DUMPING.with(|d| d.borrow().clone());
     for arg in args {
         var_dump_value(vm, arg, 0, &mut seen);
+        if vm.fatal_bailout {
+            return Err(VmError {
+                message: String::new(),
+                line: vm.current_line,
+            });
+        }
     }
     Ok(Value::Null)
+}
+
+/// A property-table key as php_object_property_dump() shows it: mangled
+/// names display their visibility.
+fn write_mangled_dump_key(vm: &mut Vm, prefix: &str, b: &[u8]) {
+    let mangled = if b.first() == Some(&0u8) {
+        b[1..]
+            .iter()
+            .position(|&c| c == 0)
+            .map(|e| (&b[1..1 + e], &b[2 + e..]))
+    } else {
+        None
+    };
+    let out = match mangled {
+        Some((b"*", name)) => [prefix.as_bytes(), b"  [\"", name, b"\":protected]=>\n"].concat(),
+        Some((cls, name)) => [
+            prefix.as_bytes(),
+            b"  [\"",
+            name,
+            b"\":\"",
+            cls,
+            b"\":private]=>\n",
+        ]
+        .concat(),
+        None => [prefix.as_bytes(), b"  [\"", b, b"\"]=>\n"].concat(),
+    };
+    vm.write_output(&out);
 }
 
 thread_local! {
@@ -745,6 +778,35 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     Some(Value::Reference(r)) => Some(r.borrow().clone()),
                     other => other,
                 };
+                // zend_std_get_debug_info(): null is deprecated (an empty
+                // table), anything else but an array is fatal.
+                let debug_result = match debug_result {
+                    Some(Value::Null) if vm.current_exception.is_none() => {
+                        let cname = class_name.to_string();
+                        drop(obj_borrow);
+                        let line = vm.current_line;
+                        vm.emit_deprecated_at(
+                            &format!(
+                                "Returning null from {}::__debugInfo() is deprecated, return an empty array instead",
+                                cname
+                            ),
+                            line,
+                        );
+                        obj_borrow = obj.borrow();
+                        Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
+                            goro_core::array::PhpArray::new(),
+                        ))))
+                    }
+                    Some(Value::Array(a)) => Some(Value::Array(a)),
+                    Some(_) if vm.current_exception.is_none() => {
+                        drop(obj_borrow);
+                        let line = vm.current_line;
+                        vm.emit_fatal_at("__debuginfo() must return an array", line);
+                        vm.fatal_bailout = true;
+                        return;
+                    }
+                    other => other,
+                };
                 if let Some(Value::Array(debug_arr)) = debug_result {
                     let arr_borrow = debug_arr.borrow();
                     let count = arr_borrow.len();
@@ -773,10 +835,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                                 vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
                             }
                             goro_core::array::ArrayKey::String(s) => {
-                                vm.write_output(
-                                    &[prefix.as_bytes(), b"  [\"", s.as_bytes(), b"\"]=>\n"]
-                                        .concat(),
-                                );
+                                write_mangled_dump_key(vm, &prefix, s.as_bytes());
                             }
                         }
                         var_dump_value(vm, value, indent + 2, seen);
