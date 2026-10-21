@@ -428,13 +428,16 @@ pub struct Vm {
     pub ob_fname: Option<String>,
     /// Bumped whenever an entry of the global symbol table is added,
     /// removed or rebound (see symtab.rs).
-    pub(crate) globals_gen: u64,
+    pub(crate) globals_gen: Rc<std::cell::Cell<u64>>,
     /// Globals made PHP references by `global $x` (IS_REFERENCE in the
     /// symbol table: skipped by the shutdown symbol-table pass).
     pub(crate) global_ref_names: std::collections::HashSet<Vec<u8>>,
     /// The next executed op_array is a global-scope frame (main script,
     /// include/eval at global scope) whose CVs live in the symbol table.
     pub(crate) bind_next_frame: bool,
+    /// The next executed op_array runs in a function's scope (include /
+    /// eval inside a function): its CVs are bound to this local table.
+    pub(crate) bind_next_tab: Option<crate::symtab::SymTab>,
     /// Call depth of a by-ref function whose result is fetched for writing
     /// (`$x = &f()`): that frame returns the reference itself.
     pub(crate) keep_ref_depth: Option<u32>,
@@ -803,9 +806,10 @@ impl Vm {
             ob_deactivated: false,
             ob_pending_fatal: None,
             ob_fname: None,
-            globals_gen: 0,
+            globals_gen: Rc::new(std::cell::Cell::new(0)),
             global_ref_names: std::collections::HashSet::new(),
             bind_next_frame: false,
+            bind_next_tab: None,
             keep_ref_depth: None,
             str_offset_wb: None,
             str_wb_pending: None,
@@ -5453,6 +5457,7 @@ impl Vm {
         pos: u32,
         cvs: &[Value],
         op_array: &OpArray,
+        tab: Option<&crate::symtab::SymTab>,
         stack: &mut Vec<usize>,
         line: u32,
     ) {
@@ -5472,18 +5477,9 @@ impl Vm {
                     }
                     return;
                 }
-                let found = match op_array.cv_names.iter().position(|c| c.as_slice() == n) {
-                    Some(i) => match cvs[i].deref() {
-                        Value::Undef => None,
-                        v => Some(v),
-                    },
-                    None => {
-                        if self.is_global_scope {
-                            self.global_lookup(n)
-                        } else {
-                            None
-                        }
-                    }
+                let found = match tab {
+                    Some(t) => t.lookup(n),
+                    None => Self::varvar_cv_lookup(cvs, &op_array.cv_names, n),
                 };
                 match found {
                     Some(mut v) => {
@@ -5517,7 +5513,7 @@ impl Vm {
                     if self.current_exception.is_some() {
                         break;
                     }
-                    self.compact_var(result, &it, pos, cvs, op_array, stack, line);
+                    self.compact_var(result, &it, pos, cvs, op_array, tab, stack, line);
                 }
                 stack.pop();
             }
@@ -14903,7 +14899,7 @@ impl Vm {
                     continue;
                 }
                 let old = self.globals.borrow_mut().remove(&k);
-                self.globals_gen = self.globals_gen.wrapping_add(1);
+                self.bump_globals_gen();
                 drop(old);
                 if let Some(p) = pos {
                     let v = self.destructible_objects.remove(p);
@@ -15062,6 +15058,7 @@ impl Vm {
         if self.call_depth > 100 {
             self.call_depth -= 1;
             self.bind_next_frame = false;
+            self.bind_next_tab = None;
             return Err(VmError {
                 message: "Maximum call depth exceeded (possible infinite recursion)".into(),
                 line: self.current_line,
@@ -15300,8 +15297,15 @@ impl Vm {
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
         self.gc_frames
             .push(crate::gc::GcFrame::new(&cvs, &tmps, has_this));
-        let r = self.execute_frame(op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin);
+        // The frame's symbol table, if it gets one.
+        let mut sym = None;
+        let r = self.execute_frame(
+            op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin, &mut sym,
+        );
         self.gc_frames.pop();
+        if let Some(fs) = sym.as_mut() {
+            self.symtab_release_local(&mut cvs, &op_array.cv_names, fs);
+        }
         // i_free_compiled_variables: locals still shared elsewhere become
         // possible cycle roots.
         crate::gc::release_frame(&cvs);
@@ -15316,6 +15320,11 @@ impl Vm {
                 }
             }
         }
+        // The CVs are released before the symbol table's other variables
+        // (zend_leave_helper).
+        drop(tmps);
+        drop(cvs);
+        drop(sym);
         r
     }
 
@@ -15328,10 +15337,11 @@ impl Vm {
         ip: usize,
         cvs: &mut Vec<Value>,
         tmps: &mut Vec<Value>,
+        sym: &mut Option<crate::symtab::FrameSymtab>,
     ) -> Result<usize, VmError> {
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
-        let r = self.execute_frame(op_array, cvs, tmps, Some(ip), false, &mut Vec::new());
+        let r = self.execute_frame(op_array, cvs, tmps, Some(ip), false, &mut Vec::new(), sym);
         self.is_global_scope = was_global;
         // A write to $GLOBALS[...] may have changed the symbol table's shape.
         if let Some(op) = op_array.ops.get(ip) {
@@ -15339,7 +15349,7 @@ impl Vm {
                 if let OperandType::Cv(i) = o {
                     if op_array.cv_names.get(*i as usize).map(|n| n.as_slice()) == Some(b"GLOBALS")
                     {
-                        self.globals_gen = self.globals_gen.wrapping_add(1);
+                        self.bump_globals_gen();
                     }
                 }
             }
@@ -15364,6 +15374,7 @@ impl Vm {
         // Running finally blocks: (exception handler depth at entry, the
         // exception that led into it).
         fin: &mut Vec<(usize, Option<Value>)>,
+        fsym: &mut Option<crate::symtab::FrameSymtab>,
     ) -> Result<Value, VmError> {
         let mut ip: usize = single_step.unwrap_or(0);
         let temp_count = op_array.temp_count as usize;
@@ -15422,15 +15433,22 @@ impl Vm {
                 *slot = Value::Array(self.globals.clone());
             }
         }
-        // Global-scope frames: every CV is bound to the symbol table entry
-        // of the same name (see symtab.rs).
-        let global_bound = self.is_global_scope;
-        let mut gbind = crate::symtab::GlobalBinding::new(if global_bound { cvs.len() } else { 0 });
+        // Bound frames (global scope, include / eval inside a function, and
+        // functions whose symbol table was built): every CV is bound to the
+        // symbol table entry of the same name (see symtab.rs).
         if single_step.is_some() {
-            // A suspended frame's variables are already set up.
-        } else if global_bound {
-            self.symtab_rebind_all(&mut cvs, &op_array.cv_names, &mut gbind);
-        } else {
+            // A suspended frame's variables are already set up; the
+            // generator executor may have replaced bound CV slots.
+            if let Some(fs) = fsym.as_mut() {
+                self.symtab_fix_all(&mut cvs, &op_array.cv_names, fs);
+            }
+        } else if let Some(tab) = self.bind_next_tab.take() {
+            *fsym = Some(self.symtab_attach(&mut cvs, &op_array.cv_names, tab));
+        } else if self.is_global_scope {
+            let tab = self.globals_tab();
+            *fsym = Some(self.symtab_attach(&mut cvs, &op_array.cv_names, tab));
+        }
+        if single_step.is_none() && !fsym.as_ref().is_some_and(|f| f.tab.global) {
             // Bind auto-global CVs ($_SERVER, $_GET, ...) to the shared global
             // slot so reads, writes and unset of elements act on the real global.
             for (i, cv_name) in op_array.cv_names.iter().enumerate() {
@@ -15443,6 +15461,12 @@ impl Vm {
             }
         }
         let mut prev_op: Option<usize> = None;
+        // The frame is bound to a symbol table (mirrors `fsym.is_some()`;
+        // set where an opcode builds the table).
+        let mut bound = fsym.is_some();
+        // Ops are tracked (`prev_op`) for the binding repairs and for writes
+        // to $GLOBALS[...].
+        let mut track = bound || globals_cv.is_some();
 
         if cv_frame {
             self.set_cv_frame_vars(cvs);
@@ -15474,6 +15498,9 @@ impl Vm {
         'exec: loop {
             if single_step.is_some() {
                 if stepped {
+                    if let Some(fs) = fsym.as_mut() {
+                        self.symtab_fix_all(&mut cvs, &op_array.cv_names, fs);
+                    }
                     return Ok(Value::Long(ip as i64));
                 }
                 stepped = true;
@@ -15521,48 +15548,44 @@ impl Vm {
                 return Ok(Value::Undef);
             }
 
-            if let Some(p) = prev_op {
-                // A write to $GLOBALS[...] may have changed the table's shape.
-                let pop = &op_array.ops[p];
-                if let Some(g) = globals_cv {
-                    let g = OperandType::Cv(g);
-                    if (pop.op1 == g || pop.op2 == g || pop.result == g)
-                        && !matches!(pop.opcode, OpCode::ArrayGet | OpCode::ArrayIsset)
-                    {
-                        self.globals_gen = self.globals_gen.wrapping_add(1);
-                    }
-                }
-            }
-            if global_bound {
+            if track {
                 if let Some(p) = prev_op {
+                    // A write to $GLOBALS[...] may have changed the table's shape.
                     let pop = &op_array.ops[p];
-                    for o in [&pop.op1, &pop.op2, &pop.result] {
-                        if let OperandType::Cv(i) = o {
-                            self.symtab_fix_cv(
-                                *i as usize,
-                                &mut cvs,
-                                &op_array.cv_names,
-                                &mut gbind,
-                            );
-                        }
-                    }
-                    if Self::op_writes_many_cvs(pop.opcode) {
-                        for i in 0..cvs.len() {
-                            self.symtab_fix_cv(i, &mut cvs, &op_array.cv_names, &mut gbind);
+                    if let Some(g) = globals_cv {
+                        let g = OperandType::Cv(g);
+                        if (pop.op1 == g || pop.op2 == g || pop.result == g)
+                            && !matches!(pop.opcode, OpCode::ArrayGet | OpCode::ArrayIsset)
+                        {
+                            self.bump_globals_gen();
                         }
                     }
                 }
-                if gbind.seen_gen != self.globals_gen {
-                    self.symtab_rebind_all(&mut cvs, &op_array.cv_names, &mut gbind);
+                if !bound {
+                } else if let Some(fs) = fsym.as_mut() {
+                    if let Some(p) = prev_op {
+                        let pop = &op_array.ops[p];
+                        for o in [&pop.op1, &pop.op2, &pop.result] {
+                            if let OperandType::Cv(i) = o {
+                                self.symtab_fix_cv(*i as usize, &mut cvs, &op_array.cv_names, fs);
+                            }
+                        }
+                        if Self::op_writes_many_cvs(pop.opcode) {
+                            for i in 0..cvs.len() {
+                                self.symtab_fix_cv(i, &mut cvs, &op_array.cv_names, fs);
+                            }
+                        }
+                    }
+                    if fs.bind.seen_gen != fs.tab.generation.get() {
+                        self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                    }
                 }
+                prev_op = Some(ip);
             }
 
             let op = &op_array.ops[ip];
             ip += 1;
             self.current_line = op.line;
-            if global_bound || globals_cv.is_some() {
-                prev_op = Some(ip - 1);
-            }
             // In-place modification of a CV holding a reference bound to typed
             // properties is verified after the op.
             let typed_ref_watch = if !typed_ref::any() {
@@ -15914,15 +15937,10 @@ impl Vm {
                     } else {
                         drop(val);
                     }
-                    if global_bound {
+                    if let Some(fs) = fsym.as_mut() {
                         // Publish the new variable before destructors can observe it.
                         if let OperandType::Cv(idx) = op.op1 {
-                            self.symtab_fix_cv(
-                                idx as usize,
-                                &mut cvs,
-                                &op_array.cv_names,
-                                &mut gbind,
-                            );
+                            self.symtab_fix_cv(idx as usize, &mut cvs, &op_array.cv_names, fs);
                         }
                     }
                     crate::gc::dtor_watch_end(old_watch);
@@ -15967,12 +15985,12 @@ impl Vm {
                                     .unwrap_or(Value::Null);
                                 tmps[r as usize] = v;
                             }
-                            if global_bound {
+                            if let Some(fs) = fsym.as_mut() {
                                 self.symtab_fix_cv(
                                     target_idx as usize,
                                     &mut cvs,
                                     &op_array.cv_names,
-                                    &mut gbind,
+                                    fs,
                                 );
                             }
                             let had_exc = self.current_exception.is_some();
@@ -16047,15 +16065,10 @@ impl Vm {
                             crate::gc::possible_root(&old);
                         }
                         drop(old);
-                        if global_bound {
-                            self.symtab_fix_cv(ti, &mut cvs, &op_array.cv_names, &mut gbind);
+                        if let Some(fs) = fsym.as_mut() {
+                            self.symtab_fix_cv(ti, &mut cvs, &op_array.cv_names, fs);
                             if let OperandType::Cv(vi) = op.op2 {
-                                self.symtab_fix_cv(
-                                    vi as usize,
-                                    &mut cvs,
-                                    &op_array.cv_names,
-                                    &mut gbind,
-                                );
+                                self.symtab_fix_cv(vi as usize, &mut cvs, &op_array.cv_names, fs);
                             }
                         }
                         if released {
@@ -28756,7 +28769,7 @@ impl Vm {
                     // At the end of the main script, force-close any suspended
                     // generators so their finally blocks run on script exit
                     // (matches PHP's "shutdown" semantics).
-                    if global_bound && self.call_depth == 1 {
+                    if fsym.as_ref().is_some_and(|f| f.tab.global) && self.call_depth == 1 {
                         // Close any generator CVs (top-level script ending). Any
                         // exception they produce is surfaced as a Fatal error below.
                         for cv in cvs.iter() {
@@ -29565,6 +29578,7 @@ impl Vm {
                         _ => Vec::new(),
                     };
                     let mut stack: Vec<usize> = Vec::new();
+                    let tab = fsym.as_ref().map(|f| f.tab.clone());
                     for (i, entry) in top.iter().enumerate() {
                         self.compact_var(
                             &mut result,
@@ -29572,6 +29586,7 @@ impl Vm {
                             (i + 1) as u32,
                             &cvs,
                             op_array,
+                            tab.as_ref(),
                             &mut stack,
                             op.line,
                         );
@@ -29608,16 +29623,6 @@ impl Vm {
                             self.error_handler_threw = true;
                         }
                     }
-                }
-                OpCode::GetDefinedVars => {
-                    let result = self.defined_vars(&cvs, op_array);
-                    self.write_operand(
-                        &op.result,
-                        Value::Array(Rc::new(RefCell::new(result))),
-                        &mut cvs,
-                        &mut tmps,
-                        &static_cv_keys,
-                    );
                 }
                 OpCode::CompactSet => {
                     // Like ArraySet but skip if the CV is Undef (emit warning)
@@ -32048,8 +32053,24 @@ impl Vm {
                 }
 
                 OpCode::BindGlobal => {
-                    let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    let name = name_val.to_php_string().as_bytes().to_vec();
+                    let name_val = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let Some(name) = self.varvar_name(&name_val) else {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        continue;
+                    };
                     // From a function, the symbol table entry becomes an
                     // IS_REFERENCE, which shutdown's first phase skips.
                     if !self.is_global_scope && !self.global_ref_names.contains(&name) {
@@ -32058,20 +32079,23 @@ impl Vm {
                     // ZEND_BIND_GLOBAL: the CV becomes a reference to the
                     // symbol table entry (created as NULL when missing).
                     // `global ${expr}` names the local variable at runtime.
-                    let target = match op.op1 {
-                        OperandType::Unused => op_array
-                            .cv_names
-                            .iter()
-                            .position(|n| *n == name)
-                            .map(|i| OperandType::Cv(i as u32)),
-                        o => Some(o),
-                    };
-                    if target.is_none() {
-                        let _ = self.global_cell(&name);
+                    if matches!(op.op1, OperandType::Unused) {
+                        // `global $$name`: the local variable of that name
+                        // (in the frame's symbol table) is bound.
+                        let cell = self.global_cell(&name);
+                        let fs = self.symtab_ensure(fsym, &mut cvs, op_array);
+                        bound = true;
+                        track = true;
+                        if !fs.tab.global {
+                            fs.tab.bind_ref(&name, cell);
+                            self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                        }
+                        continue;
                     }
+                    let target = Some(op.op1);
                     if let Some(OperandType::Cv(cv_idx)) = target {
-                        let same_cv =
-                            global_bound && op_array.cv_names.get(cv_idx as usize) == Some(&name);
+                        let same_cv = fsym.as_ref().is_some_and(|f| f.tab.global)
+                            && op_array.cv_names.get(cv_idx as usize) == Some(&name);
                         if !same_cv {
                             let cell = self.global_cell(&name);
                             if let Some(slot) = cvs.get_mut(cv_idx as usize) {
@@ -34368,20 +34392,18 @@ impl Vm {
                                             // Execute included file's op_array, sharing caller's scope
                                             let mut inc_cvs =
                                                 vec![Value::Undef; inc_op_array.cv_names.len()];
-                                            let mut inc_shared: Vec<usize> = Vec::new();
-
-                                            if self.is_global_scope {
-                                                // The included file's CVs are bound to the symbol table.
-                                                self.bind_next_frame = true;
-                                            } else {
-                                                // The included file runs in the caller's scope.
-                                                inc_shared = Self::share_scope_cvs(
-                                                    &mut cvs,
-                                                    &op_array.cv_names,
-                                                    &mut inc_cvs,
-                                                    &inc_op_array.cv_names,
-                                                );
-                                            }
+                                            // The included file runs in the caller's
+                                            // scope: its CVs are bound to the caller's
+                                            // symbol table.
+                                            self.share_scope(
+                                                fsym,
+                                                &mut cvs,
+                                                op_array,
+                                                &mut inc_cvs,
+                                                &inc_op_array.cv_names,
+                                            );
+                                            bound = true;
+                                            track = true;
 
                                             // The include/require frame of backtraces.
                                             let kind_name = match include_kind {
@@ -34434,7 +34456,6 @@ impl Vm {
 
                                             // Restore outer pending_classes
                                             self.pending_classes = saved_pending;
-                                            Self::unshare_scope_cvs(&mut cvs, &inc_shared);
 
                                             result
                                         }
@@ -34621,20 +34642,16 @@ impl Vm {
                                         // Eval shares the calling scope's variables
                                         let mut eval_cvs =
                                             vec![Value::Undef; eval_op_array.cv_names.len()];
-                                        let mut eval_shared: Vec<usize> = Vec::new();
-
-                                        if self.is_global_scope {
-                                            // eval'd code at global scope uses the symbol table.
-                                            self.bind_next_frame = true;
-                                        } else {
-                                            // eval'd code runs in the caller's scope.
-                                            eval_shared = Self::share_scope_cvs(
-                                                &mut cvs,
-                                                &op_array.cv_names,
-                                                &mut eval_cvs,
-                                                &eval_op_array.cv_names,
-                                            );
-                                        }
+                                        // eval'd code runs in the caller's scope.
+                                        self.share_scope(
+                                            fsym,
+                                            &mut cvs,
+                                            op_array,
+                                            &mut eval_cvs,
+                                            &eval_op_array.cv_names,
+                                        );
+                                        bound = true;
+                                        track = true;
 
                                         // Set current file to eval's filename for correct error messages
                                         let saved_file = self.current_file.clone();
@@ -34680,7 +34697,6 @@ impl Vm {
 
                                         // Restore outer pending_classes
                                         self.pending_classes = eval_saved_pending;
-                                        Self::unshare_scope_cvs(&mut cvs, &eval_shared);
 
                                         eval_result
                                     }
@@ -34856,6 +34872,10 @@ impl Vm {
                     let mut count = 0i64;
                     if err.is_none() {
                         if let Value::Array(arr) = &arr_val {
+                            // extract() writes the scope's symbol table.
+                            let tab = self.symtab_ensure(fsym, &mut cvs, op_array).tab.clone();
+                            bound = true;
+                            track = true;
                             let entries: Vec<(crate::array::ArrayKey, Value)> = arr
                                 .borrow()
                                 .iter()
@@ -34870,20 +34890,8 @@ impl Vm {
                                         (n.to_string().into_bytes(), true)
                                     }
                                 };
-                                let exists = |cvs: &[Value], vm: &Self, n: &[u8]| -> bool {
-                                    if n == b"this" {
-                                        return false;
-                                    }
-                                    match op_array.cv_names.iter().position(|c| c.as_slice() == n) {
-                                        Some(i) => match &cvs[i] {
-                                            Value::Undef => false,
-                                            Value::Reference(r) => {
-                                                !matches!(&*r.borrow(), Value::Undef)
-                                            }
-                                            _ => true,
-                                        },
-                                        None => vm.global_exists(n),
-                                    }
+                                let exists = |_: &[Value], _: &Self, n: &[u8]| -> bool {
+                                    n != b"this" && tab.exists(n)
                                 };
                                 // Determine the target variable name (None = skip).
                                 let target: Option<Vec<u8>> = match etype {
@@ -34926,8 +34934,23 @@ impl Vm {
                                         }
                                     }
                                     5 => {
-                                        if !numeric && exists(&cvs, self, &name) {
+                                        if numeric {
+                                            None
+                                        } else if exists(&cvs, self, &name) {
                                             Some(prefixed(&name))
+                                        } else if name != b"this"
+                                            && (matches!(
+                                                tab.arr.borrow().get(&crate::symtab::gkey(&name)),
+                                                Some(Value::Undef)
+                                            ) || op_array.cv_names.iter().any(|c| {
+                                                c.as_slice() == name.as_slice()
+                                                    && !crate::symtab::skip_name(c, tab.global)
+                                            }))
+                                        {
+                                            // An undefined compiled variable (an
+                                            // IS_INDIRECT UNDEF entry) is assigned
+                                            // under its own name.
+                                            Some(name.clone())
                                         } else {
                                             None
                                         }
@@ -34961,11 +34984,6 @@ impl Vm {
                                     err = Some((b"Error", "Cannot re-assign $this".into()));
                                     break;
                                 }
-                                // Value to bind
-                                let cv_idx = op_array
-                                    .cv_names
-                                    .iter()
-                                    .position(|c| c.as_slice() == target.as_slice());
                                 if refs {
                                     let r = match &entry {
                                         Value::Reference(r) => r.clone(),
@@ -34976,30 +34994,25 @@ impl Vm {
                                             r
                                         }
                                     };
-                                    // (A global-scope CV rebinds its symbol-table entry
-                                    // after the opcode, see symtab.rs.)
-                                    match cv_idx {
-                                        Some(i) => cvs[i] = Value::Reference(r.clone()),
-                                        None => self.global_bind_ref(&target, r.clone()),
-                                    }
+                                    tab.bind_ref(&target, r);
                                 } else {
                                     let mut v = entry.deref();
                                     if let Value::Array(a) = &v {
                                         let copy = a.borrow().clone();
                                         v = Value::Array(Rc::new(RefCell::new(copy)));
                                     }
-                                    match cv_idx {
-                                        Some(i) => {
-                                            if let Value::Reference(r) = &cvs[i] {
-                                                *r.borrow_mut() = v.clone();
-                                            } else {
-                                                cvs[i] = v.clone();
-                                            }
-                                        }
-                                        None => self.global_assign(&target, v.clone()),
+                                    // (ZEND_TRY_ASSIGN_COPY_EX in weak mode)
+                                    if let Err(msg) =
+                                        self.symtab_assign_checked(&tab, &target, v, false)
+                                    {
+                                        err = Some((b"TypeError", msg));
+                                        break;
                                     }
                                 }
                                 count += 1;
+                            }
+                            if let Some(fs) = fsym.as_mut() {
+                                self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
                             }
                         }
                     }
@@ -36046,16 +36059,15 @@ impl Vm {
                     };
                     // Directly replace the CV slot with Undef (breaks reference links)
                     if let OperandType::Cv(idx) = op.op1 {
-                        if global_bound {
-                            self.symtab_unbind_cv(
-                                idx as usize,
-                                &mut cvs,
-                                &op_array.cv_names,
-                                &mut gbind,
-                            );
-                        } else if let Some(name) = op_array.cv_names.get(idx as usize) {
-                            if is_auto_global_name(name) {
-                                self.global_unset(name);
+                        let global_frame = fsym.as_ref().is_some_and(|f| f.tab.global);
+                        if let Some(fs) = fsym.as_mut() {
+                            self.symtab_unbind_cv(idx as usize, &mut cvs, &op_array.cv_names, fs);
+                        }
+                        if !global_frame {
+                            if let Some(name) = op_array.cv_names.get(idx as usize) {
+                                if is_auto_global_name(name) {
+                                    self.global_unset(name);
+                                }
                             }
                         }
                         let sole_gen = match cvs.get(idx as usize) {
@@ -36948,6 +36960,7 @@ impl Vm {
                 }
 
                 OpCode::VarVarGet => {
+                    // FETCH_R / FETCH_IS (op2 = Const) of `$$name`.
                     let name_val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -36956,39 +36969,58 @@ impl Vm {
                         op_array,
                         op.line,
                     );
-                    let name = name_val.to_php_string();
-                    let name_bytes = name.as_bytes();
-                    let mut found = Value::Null;
-                    for (i, cv_name) in op_array.cv_names.iter().enumerate() {
-                        if cv_name == name_bytes {
-                            if let Some(val) = cvs.get(i) {
-                                found = val.deref();
+                    let Some(name) = self.varvar_name(&name_val) else {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        continue;
+                    };
+                    let quiet = matches!(op.op2, OperandType::Const(_));
+                    let found = match fsym.as_ref() {
+                        Some(fs) => fs.tab.lookup(&name),
+                        None => Self::varvar_cv_lookup(&cvs, &op_array.cv_names, &name),
+                    };
+                    let found = match found {
+                        Some(v) => v,
+                        None if name == b"this" => match Self::frame_this(&cvs, &op_array.cv_names)
+                        {
+                            Some(t) => t,
+                            None => {
+                                if !quiet {
+                                    self.emit_warning_at("Undefined variable $this", op.line);
+                                }
+                                Value::Null
                             }
-                            break;
+                        },
+                        None => {
+                            if !quiet {
+                                self.emit_warning_at(
+                                    &format!(
+                                        "Undefined variable ${}",
+                                        String::from_utf8_lossy(&name)
+                                    ),
+                                    op.line,
+                                );
+                            }
+                            Value::Null
                         }
-                    }
-                    let mut defined = false;
-                    for (i, cv_name) in op_array.cv_names.iter().enumerate() {
-                        if cv_name == name_bytes {
-                            defined =
-                                !matches!(cvs.get(i).map(|v| v.deref()), None | Some(Value::Undef));
-                            break;
-                        }
-                    }
-                    if matches!(found, Value::Null | Value::Undef) {
-                        if let Some(val) = self.global_lookup(name_bytes) {
-                            found = val;
-                            defined = true;
-                        }
-                    }
-                    if !defined && name_bytes != b"this" {
-                        let varname = String::from_utf8_lossy(name_bytes).to_string();
-                        self.emit_warning_at(&format!("Undefined variable ${}", varname), op.line);
-                    }
+                    };
                     self.write_operand(&op.result, found, &mut cvs, &mut tmps, &static_cv_keys);
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                 }
 
                 OpCode::VarVarSet => {
+                    // `$$name = value` (FETCH_W + ASSIGN).
                     let name_val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -36998,21 +37030,247 @@ impl Vm {
                         op.line,
                     );
                     let value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    let name = name_val.to_php_string();
-                    let name_bytes = name.as_bytes().to_vec();
-                    let mut wrote = false;
-                    for (i, cv_name) in op_array.cv_names.iter().enumerate() {
-                        if *cv_name == name_bytes {
-                            if let Some(slot) = cvs.get_mut(i) {
-                                *slot = value.clone();
-                                wrote = true;
+                    let Some(name) = self.varvar_name(&name_val) else {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        continue;
+                    };
+                    if name == b"this" {
+                        self.throw_error_at(b"Error", "Cannot re-assign $this", op.line);
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                    }
+                    let value = self.dup_array_value(value.deref());
+                    let tab = self.symtab_ensure(fsym, &mut cvs, op_array).tab.clone();
+                    bound = true;
+                    track = true;
+                    let r = self.symtab_assign_checked(&tab, &name, value, op_array.strict_types);
+                    if let Some(fs) = fsym.as_mut() {
+                        self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                    }
+                    if let Err(msg) = r {
+                        self.throw_error_at(b"TypeError", &msg, op.line);
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                    }
+                    release_point!('exec);
+                }
+
+                OpCode::VarVarFetch => {
+                    let name_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let Some(name) = self.varvar_name(&name_val) else {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        continue;
+                    };
+                    let mode = match op.op2 {
+                        OperandType::Const(i) => op_array
+                            .literals
+                            .get(i as usize)
+                            .map(|v| v.to_long())
+                            .unwrap_or(0),
+                        _ => 0,
+                    };
+                    if name == b"this" {
+                        let msg = if mode == 2 {
+                            "Cannot unset $this"
+                        } else {
+                            "Cannot re-assign $this"
+                        };
+                        self.throw_error_at(b"Error", msg, op.line);
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                    }
+                    let fs = self.symtab_ensure(fsym, &mut cvs, op_array);
+                    bound = true;
+                    track = true;
+                    let fetched = if mode == 2 && !fs.tab.exists(&name) {
+                        Value::Null
+                    } else {
+                        if mode == 1 && !fs.tab.exists(&name) {
+                            self.emit_warning_at(
+                                &format!("Undefined variable ${}", String::from_utf8_lossy(&name)),
+                                op.line,
+                            );
+                        }
+                        Value::Reference(fs.tab.cell(&name).0)
+                    };
+                    self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                    match op.result {
+                        OperandType::Cv(i) => {
+                            if let Some(slot) = cvs.get_mut(i as usize) {
+                                *slot = fetched;
                             }
-                            break;
+                        }
+                        OperandType::Tmp(t) => {
+                            if let Some(slot) = tmps.get_mut(t as usize) {
+                                *slot = fetched;
+                            }
+                        }
+                        _ => {}
+                    }
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
+                }
+
+                OpCode::VarVarUnset => {
+                    let name_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let Some(name) = self.varvar_name(&name_val) else {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        continue;
+                    };
+                    let defined = match fsym.as_ref() {
+                        Some(fs) => fs
+                            .tab
+                            .arr
+                            .borrow()
+                            .get(&crate::symtab::gkey(&name))
+                            .is_some(),
+                        None => Self::varvar_cv_lookup(&cvs, &op_array.cv_names, &name).is_some(),
+                    };
+                    if defined {
+                        let fs = self.symtab_ensure(fsym, &mut cvs, op_array);
+                        bound = true;
+                        track = true;
+                        fs.tab.unset(&name);
+                        self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                        release_point!('exec);
+                    }
+                }
+
+                OpCode::VarVarAssignRef => {
+                    let name_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let Some(name) = self.varvar_name(&name_val) else {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        continue;
+                    };
+                    if name == b"this" {
+                        self.throw_error_at(b"Error", "Cannot re-assign $this", op.line);
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                    }
+                    let cell = match op.op2 {
+                        OperandType::Cv(i) => match cvs.get_mut(i as usize) {
+                            Some(Value::Reference(r)) => {
+                                if matches!(*r.borrow(), Value::Undef) {
+                                    *r.borrow_mut() = Value::Null;
+                                }
+                                r.clone()
+                            }
+                            Some(slot) => {
+                                let v = std::mem::replace(slot, Value::Undef);
+                                let v = if matches!(v, Value::Undef) {
+                                    Value::Null
+                                } else {
+                                    v
+                                };
+                                let r = Rc::new(RefCell::new(v));
+                                *slot = Value::Reference(r.clone());
+                                r
+                            }
+                            None => Rc::new(RefCell::new(Value::Null)),
+                        },
+                        OperandType::Tmp(t) => match tmps.get(t as usize) {
+                            Some(Value::Reference(r)) => r.clone(),
+                            Some(v) => Rc::new(RefCell::new(match v {
+                                Value::Undef => Value::Null,
+                                v => v.clone(),
+                            })),
+                            None => Rc::new(RefCell::new(Value::Null)),
+                        },
+                        _ => {
+                            let v = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                            match v {
+                                Value::Reference(r) => r,
+                                v => Rc::new(RefCell::new(v)),
+                            }
+                        }
+                    };
+                    let result = cell.borrow().clone();
+                    let fs = self.symtab_ensure(fsym, &mut cvs, op_array);
+                    bound = true;
+                    track = true;
+                    fs.tab.bind_ref(&name, cell);
+                    self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                    if let OperandType::Tmp(r) = op.result {
+                        if let Some(slot) = tmps.get_mut(r as usize) {
+                            *slot = result;
                         }
                     }
-                    if !wrote {
-                        self.global_assign(&name_bytes, value);
-                    }
+                    release_point!('exec);
+                }
+
+                OpCode::GetDefinedVars => {
+                    let vars = self.defined_vars(fsym.as_ref(), &cvs, op_array);
+                    self.write_operand(&op.result, vars, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 OpCode::SaveReturn => {
@@ -49297,51 +49555,6 @@ impl Vm {
         self.read_operand(operand, cvs, tmps, literals)
     }
 
-    /// Read a CV value without dereferencing (keeps Reference wrapper)
-    /// include / eval inside a function: the code shares the caller's
-    /// variables. Every variable named in both is bound through one reference
-    /// cell; returns the caller slots that were wrapped for it.
-    fn share_scope_cvs(
-        caller: &mut [Value],
-        caller_names: &[Vec<u8>],
-        callee: &mut [Value],
-        callee_names: &[Vec<u8>],
-    ) -> Vec<usize> {
-        let mut shared = Vec::new();
-        for (ci, name) in callee_names.iter().enumerate() {
-            let Some(pi) = caller_names.iter().position(|n| n == name) else {
-                continue;
-            };
-            if name == b"this" || name == b"GLOBALS" {
-                callee[ci] = caller[pi].clone();
-                continue;
-            }
-            let cell = match &caller[pi] {
-                Value::Reference(r) => r.clone(),
-                other => {
-                    let r = Rc::new(RefCell::new(other.clone()));
-                    caller[pi] = Value::Reference(r.clone());
-                    shared.push(pi);
-                    r
-                }
-            };
-            callee[ci] = Value::Reference(cell);
-        }
-        shared
-    }
-
-    /// Undo share_scope_cvs for cells nothing else kept.
-    fn unshare_scope_cvs(caller: &mut [Value], shared: &[usize]) {
-        for &pi in shared {
-            if let Some(Value::Reference(r)) = caller.get(pi) {
-                if Rc::strong_count(r) == 1 {
-                    let v = r.borrow().clone();
-                    caller[pi] = v;
-                }
-            }
-        }
-    }
-
     /// Opcodes that may store into CV slots other than their operands.
     fn op_writes_many_cvs(opcode: OpCode) -> bool {
         matches!(opcode, OpCode::Extract | OpCode::VarVarSet)
@@ -49438,7 +49651,7 @@ impl Vm {
         }
     }
 
-    fn dup_array_value(&self, value: Value) -> Value {
+    pub(crate) fn dup_array_value(&self, value: Value) -> Value {
         match &value {
             Value::Array(arr) => {
                 // zend_array_dup(): references held only by the source

@@ -351,6 +351,15 @@ pub enum OpCode {
     VarVarGet,
     /// Dynamic variable write: op1 = name expr, op2 = value
     VarVarSet,
+    /// Dynamic variable fetch for writing (FETCH_W / FETCH_RW / FETCH_UNSET):
+    /// op1 = name expr, op2 = Const mode (0 = W, 1 = RW, 2 = UNSET),
+    /// result = CV or tmp receiving the variable's reference cell.
+    VarVarFetch,
+    /// unset($$name): op1 = name expr
+    VarVarUnset,
+    /// $$name = &source: op1 = name expr, op2 = source (CV, or tmp holding a
+    /// reference), result = value
+    VarVarAssignRef,
     /// Save return value for deferred return (finally blocks): op1 = value
     SaveReturn,
     /// Save jump target for deferred break/continue (finally blocks): op1 = JmpTarget

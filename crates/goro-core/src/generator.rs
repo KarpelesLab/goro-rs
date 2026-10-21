@@ -35,6 +35,8 @@ pub struct PhpGenerator {
     pub cvs: Vec<Value>,
     /// Temporary variables
     pub tmps: Vec<Value>,
+    /// The frame's symbol table, once dynamic variables needed one.
+    pub(crate) symtab: Option<crate::symtab::FrameSymtab>,
     /// Foreach iteration positions
     pub foreach_positions: HashMap<u32, usize>,
     /// Static variable keys
@@ -157,6 +159,7 @@ impl PhpGenerator {
             ip: 0,
             cvs,
             tmps: vec![Value::Undef; temp_count],
+            symtab: None,
             foreach_positions: HashMap::new(),
             static_cv_keys: HashMap::new(),
             global_cv_keys: HashMap::new(),
@@ -678,7 +681,13 @@ impl PhpGenerator {
             {
                 // Shared semantics: run the VM's implementation of the opcode
                 // on this frame's variables.
-                match vm.execute_single_op(&op_array, ip - 1, &mut self.cvs, &mut self.tmps) {
+                match vm.execute_single_op(
+                    &op_array,
+                    ip - 1,
+                    &mut self.cvs,
+                    &mut self.tmps,
+                    &mut self.symtab,
+                ) {
                     Ok(next) => ip = next,
                     Err(e) => {
                         if vm.exit_requested {
@@ -2926,7 +2935,13 @@ impl PhpGenerator {
 
                 // Every other opcode runs through the VM's implementation on
                 // this frame's variables.
-                _ => match vm.execute_single_op(&op_array, ip - 1, &mut self.cvs, &mut self.tmps) {
+                _ => match vm.execute_single_op(
+                    &op_array,
+                    ip - 1,
+                    &mut self.cvs,
+                    &mut self.tmps,
+                    &mut self.symtab,
+                ) {
                     Ok(next) => ip = next,
                     Err(e) => {
                         if vm.current_exception.is_some() {

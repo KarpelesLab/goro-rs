@@ -135,6 +135,11 @@ pub struct Compiler {
     /// already-computed operands while synthesized code is compiled (target
     /// keys evaluated before an assigned value).
     tmp_aliases: Vec<(Vec<u8>, OperandType)>,
+    /// Hidden `\0vvN` CVs holding the variables of dynamic variable writes
+    /// (`$$n[k] = v`, `$$n .= v`, ...) fetched by VarVarFetch; released at
+    /// the end of the statement.
+    dynvar_count: u32,
+    dynvar_pending: Vec<u32>,
     /// Stack of loop contexts for break/continue
     loop_stack: Vec<LoopContext>,
     /// Compiled class entries (stored in the compiler, passed to VM)
@@ -395,6 +400,8 @@ impl Compiler {
             memoized_exprs: HashMap::new(),
             memoize_root: 0,
             tmp_aliases: Vec::new(),
+            dynvar_count: 0,
+            dynvar_pending: Vec::new(),
             loop_stack: Vec::new(),
             compiled_classes: Vec::new(),
             current_class: None,
@@ -1236,6 +1243,22 @@ impl Compiler {
                         line,
                     });
                 }
+                // `sort($$n)`: the array-taking builtins get the variable
+                // fetched for writing, like a CV.
+                let rewritten;
+                let arg = if let ExprKind::DynamicVariable(inner) = &arg.value.kind {
+                    if i == 0 && Self::is_array_ref_builtin(func_name) {
+                        rewritten = Argument {
+                            value: self.dynvar_as_cv_expr(&arg.value, inner, 0)?,
+                            ..arg.clone()
+                        };
+                        &rewritten
+                    } else {
+                        arg
+                    }
+                } else {
+                    arg
+                };
                 // Check if this argument position is by-ref for known builtins
                 let mut is_byref = Self::is_builtin_byref_param(func_name, i);
                 // array_multisort() takes its arguments by "prefer-ref": variables
@@ -1350,6 +1373,7 @@ impl Compiler {
                     ExprKind::ArrayAccess { .. }
                         | ExprKind::StaticPropertyAccess { .. }
                         | ExprKind::DynamicStaticPropertyAccess { .. }
+                        | ExprKind::DynamicVariable(_)
                 ) || matches!(
                     &arg.value.kind,
                     ExprKind::PropertyAccess {
@@ -1439,6 +1463,20 @@ impl Compiler {
                             b"Cannot use temporary expression in write context",
                             line,
                         )?;
+                        let end = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_end, end);
+                        continue;
+                    }
+                    if let ExprKind::DynamicVariable(inner) = &arg.value.kind {
+                        // FETCH_FUNC_ARG of `$$n` for a by-reference parameter.
+                        let cv = self.compile_dynvar_fetch(inner, 0, line)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::SendRef,
+                            op1: cv,
+                            op2: OperandType::Const(pos_idx),
+                            result: OperandType::Unused,
+                            line,
+                        });
                         let end = self.op_array.current_offset();
                         self.op_array.patch_jump(jmp_end, end);
                         continue;
@@ -1572,6 +1610,8 @@ impl Compiler {
                         // f($obj->prop) with a by-ref builtin parameter: pass
                         // the property slot's reference
                         OperandType::Tmp(self.compile_property_ref(object, property, line)?)
+                    } else if let ExprKind::DynamicVariable(inner) = &arg.value.kind {
+                        self.compile_dynvar_fetch(inner, 0, line)?
                     } else {
                         self.compile_expr(&arg.value)?
                     }
@@ -1640,7 +1680,7 @@ impl Compiler {
     /// Used to determine if a by-ref argument should emit "Only variables should be passed by reference"
     fn is_writable_lvalue(expr: &Expr) -> bool {
         match &expr.kind {
-            ExprKind::Variable(_) => true,
+            ExprKind::Variable(_) | ExprKind::DynamicVariable(_) => true,
             ExprKind::PropertyAccess { nullsafe, .. } => !nullsafe,
             ExprKind::StaticPropertyAccess { .. } => true,
             ExprKind::ArrayAccess { .. } => true,
@@ -2251,7 +2291,21 @@ impl Compiler {
     }
 
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {
-        self.compile_stmt_inner(stmt)?;
+        let r = self.compile_stmt_inner(stmt);
+        if !self.dynvar_pending.is_empty() {
+            // The variables fetched for dynamic writes are not held past
+            // the statement.
+            for cv in std::mem::take(&mut self.dynvar_pending) {
+                self.op_array.emit(Op {
+                    opcode: OpCode::UnsetCv,
+                    op1: OperandType::Cv(cv),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line: stmt.span.line,
+                });
+            }
+        }
+        r?;
         // zend_compile_stmt(): a TICKS opcode after each ticked statement.
         let ticks = TICKS.with(|t| t.get());
         if ticks > 0
@@ -2273,6 +2327,212 @@ impl Compiler {
             });
         }
         Ok(())
+    }
+
+    /// The name of `${expr}` when it is a compile-time constant (zend_try_compile_cv):
+    /// the variable is then a CV like `$name`.
+    fn static_dynvar_name(inner: &Expr) -> Option<Vec<u8>> {
+        match &inner.kind {
+            ExprKind::String(s)
+                if !crate::vm::is_auto_global_name(s) && s.as_slice() != b"GLOBALS" =>
+            {
+                Some(s.clone())
+            }
+            _ => None,
+        }
+    }
+
+    /// FETCH_W / FETCH_RW / FETCH_UNSET (mode 0 / 1 / 2) of `$$inner` into a
+    /// hidden CV bound to the variable, which the write then targets.
+    fn compile_dynvar_fetch(
+        &mut self,
+        inner: &Expr,
+        mode: i64,
+        line: u32,
+    ) -> CompileResult<OperandType> {
+        if let Some(name) = Self::static_dynvar_name(inner) {
+            return Ok(OperandType::Cv(self.op_array.get_or_create_cv(&name)));
+        }
+        let name_op = self.compile_expr(inner)?;
+        let cv = self.dynvar_hidden_cv();
+        let mode_idx = self.op_array.add_literal(Value::Long(mode));
+        self.op_array.emit(Op {
+            opcode: OpCode::VarVarFetch,
+            op1: name_op,
+            op2: OperandType::Const(mode_idx),
+            result: OperandType::Cv(cv),
+            line,
+        });
+        Ok(OperandType::Cv(cv))
+    }
+
+    /// A fresh hidden CV for a dynamic variable fetch.
+    fn dynvar_hidden_cv(&mut self) -> u32 {
+        let mut name = b"\0vv".to_vec();
+        name.extend_from_slice(self.dynvar_count.to_string().as_bytes());
+        self.dynvar_count += 1;
+        let cv = self.op_array.get_or_create_cv(&name);
+        self.dynvar_pending.push(cv);
+        cv
+    }
+
+    /// `$$inner` as an expression naming the hidden CV it was fetched into
+    /// (mode as for compile_dynvar_fetch).
+    fn dynvar_as_cv_expr(&mut self, e: &Expr, inner: &Expr, mode: i64) -> CompileResult<Expr> {
+        let op = self.compile_dynvar_fetch(inner, mode, e.span.line)?;
+        let OperandType::Cv(cv) = op else {
+            unreachable!()
+        };
+        Ok(Expr {
+            kind: ExprKind::Variable(self.op_array.cv_names[cv as usize].clone()),
+            span: e.span,
+        })
+    }
+
+    #[inline(never)]
+    fn compile_assign_ref_dynvar_value(
+        &mut self,
+        expr: &Expr,
+        target: &Expr,
+        value: &Expr,
+    ) -> CompileResult<OperandType> {
+        // `... = &$$n`: FETCH_W of the variable, bound like a CV.
+        let ExprKind::DynamicVariable(inner) = &value.kind else {
+            unreachable!()
+        };
+        let v = self.dynvar_as_cv_expr(value, inner, 0)?;
+        let e = Expr {
+            kind: ExprKind::AssignRef {
+                target: Box::new(target.clone()),
+                value: Box::new(v),
+            },
+            span: expr.span,
+        };
+        self.compile_expr(&e)
+    }
+
+    #[inline(never)]
+    fn compile_assign_ref_dynvar_target(
+        &mut self,
+        expr: &Expr,
+        target: &Expr,
+        value: &Expr,
+    ) -> CompileResult<OperandType> {
+        // `$$n = &source`: the source's reference is taken through a
+        // hidden variable, then bound to the name.
+        let ExprKind::DynamicVariable(inner) = &target.kind else {
+            unreachable!()
+        };
+        let result_discarded = self.assign_result_discarded;
+        let name_op = self.compile_expr(inner)?;
+        let cv = self.dynvar_hidden_cv();
+        let e = Expr {
+            kind: ExprKind::AssignRef {
+                target: Box::new(Expr {
+                    kind: ExprKind::Variable(self.op_array.cv_names[cv as usize].clone()),
+                    span: target.span,
+                }),
+                value: Box::new(value.clone()),
+            },
+            span: expr.span,
+        };
+        self.compile_expr(&e)?;
+        let result = if result_discarded {
+            OperandType::Unused
+        } else {
+            OperandType::Tmp(self.op_array.alloc_temp())
+        };
+        self.op_array.emit(Op {
+            opcode: OpCode::VarVarAssignRef,
+            op1: name_op,
+            op2: OperandType::Cv(cv),
+            result,
+            line: expr.span.line,
+        });
+        Ok(if result_discarded {
+            OperandType::Cv(cv)
+        } else {
+            result
+        })
+    }
+
+    #[inline(never)]
+    fn compile_assign_dynvar(
+        &mut self,
+        expr: &Expr,
+        target: &Expr,
+        value: &Expr,
+    ) -> CompileResult<OperandType> {
+        // `$$n = v`: the name is evaluated before the value; the
+        // variable is fetched (FETCH_W) and assigned after it.
+        self.assign_result_discarded = false;
+        let ExprKind::DynamicVariable(inner) = &target.kind else {
+            unreachable!()
+        };
+        let name_op = self.compile_expr(inner)?;
+        let val = self.compile_expr(value)?;
+        self.op_array.emit(Op {
+            opcode: OpCode::VarVarSet,
+            op1: name_op,
+            op2: val,
+            result: OperandType::Unused,
+            line: expr.span.line,
+        });
+        Ok(val)
+    }
+
+    /// `$$n op= v`: the value is computed first, then the variable is
+    /// fetched (FETCH_RW) and assigned to.
+    #[inline(never)]
+    fn compile_compound_dynvar(
+        &mut self,
+        expr: &Expr,
+        op: BinaryOp,
+        target: &Expr,
+        value: &Expr,
+    ) -> CompileResult<OperandType> {
+        let ExprKind::DynamicVariable(inner) = &target.kind else {
+            unreachable!()
+        };
+        let saved = self.tmp_aliases.len();
+        let name = self.memoize_operand(inner)?;
+        let v = self.memoize_operand(value)?;
+        let t = self.dynvar_as_cv_expr(target, &name, 1)?;
+        let e = Expr {
+            kind: ExprKind::CompoundAssign {
+                op,
+                target: Box::new(t),
+                value: Box::new(v),
+            },
+            span: expr.span,
+        };
+        let r = self.compile_expr(&e);
+        self.tmp_aliases.truncate(saved);
+        r
+    }
+
+    /// `$$n++`: FETCH_RW of the variable, then the increment.
+    #[inline(never)]
+    fn compile_incdec_dynvar(
+        &mut self,
+        expr: &Expr,
+        op: UnaryOp,
+        operand: &Expr,
+        prefix: bool,
+    ) -> CompileResult<OperandType> {
+        let ExprKind::DynamicVariable(inner) = &operand.kind else {
+            unreachable!()
+        };
+        let t = self.dynvar_as_cv_expr(operand, inner, 1)?;
+        let e = Expr {
+            kind: ExprKind::UnaryOp {
+                op,
+                operand: Box::new(t),
+                prefix,
+            },
+            span: expr.span,
+        };
+        self.compile_expr(&e)
     }
 
     fn compile_stmt_inner(&mut self, stmt: &Statement) -> CompileResult<()> {
@@ -2918,6 +3178,17 @@ impl Compiler {
                                 op1: obj,
                                 op2: OperandType::Tmp(val_tmp),
                                 result: name,
+                                line: stmt.span.line,
+                            });
+                        }
+                        ExprKind::DynamicVariable(inner) => {
+                            // foreach (... as &$$n): bind the named variable.
+                            let name_op = self.compile_expr(inner)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::VarVarAssignRef,
+                                op1: name_op,
+                                op2: OperandType::Tmp(val_tmp),
+                                result: OperandType::Unused,
                                 line: stmt.span.line,
                             });
                         }
@@ -4245,6 +4516,25 @@ impl Compiler {
                                 opcode: OpCode::StaticPropUnset,
                                 op1: class_op,
                                 op2: name_op,
+                                result: OperandType::Unused,
+                                line: stmt.span.line,
+                            });
+                        }
+                        ExprKind::Variable(name) if name == b"this" => {
+                            return Err(CompileError {
+                                message: "Cannot unset $this".into(),
+                                line: stmt.span.line,
+                            });
+                        }
+                        ExprKind::DynamicVariable(inner)
+                            if Self::static_dynvar_name(inner).is_none() =>
+                        {
+                            // unset($$name): ZEND_UNSET_VAR
+                            let name_op = self.compile_expr(inner)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::VarVarUnset,
+                                op1: name_op,
+                                op2: OperandType::Unused,
                                 result: OperandType::Unused,
                                 line: stmt.span.line,
                             });
@@ -9907,7 +10197,20 @@ impl Compiler {
                 });
                 Ok(OperandType::Tmp(tmp))
             }
+            ExprKind::DynamicVariable(inner) => {
+                self.compile_dynvar_fetch(inner, Self::dynvar_mode(mode), object.span.line)
+            }
             _ => self.compile_expr(object),
+        }
+    }
+
+    /// The VarVarFetch mode of a write fetch.
+    fn dynvar_mode(mode: crate::fetch_w::DimFetch) -> i64 {
+        use crate::fetch_w::DimFetch;
+        match mode {
+            DimFetch::Rw => 1,
+            DimFetch::Unset => 2,
+            DimFetch::W | DimFetch::Obj => 0,
         }
     }
 
@@ -10095,6 +10398,12 @@ impl Compiler {
                     },
                 }
             }
+            // The variable named is fetched when written (the name, a plain
+            // variable, is read then).
+            ExprKind::DynamicVariable(inner) => Expr {
+                span: e.span,
+                kind: ExprKind::DynamicVariable(Box::new(self.memoize_operand(inner)?)),
+            },
             _ => self.memoize_operand(e)?,
         })
     }
@@ -10218,6 +10527,9 @@ impl Compiler {
                 line: array.span.line,
             });
             return Ok(OperandType::Tmp(tmp));
+        }
+        if let ExprKind::DynamicVariable(inner) = &array.kind {
+            return self.compile_dynvar_fetch(inner, Self::dynvar_mode(mode), array.span.line);
         }
         self.compile_expr(array)
     }
@@ -10437,6 +10749,9 @@ impl Compiler {
                 Ok(OperandType::Cv(cv))
             }
 
+            ExprKind::Assign { target, value } if matches!(&target.kind, ExprKind::DynamicVariable(i) if Self::static_dynvar_name(i).is_none()) => {
+                self.compile_assign_dynvar(expr, target, value)
+            }
             ExprKind::Assign { target, value } => {
                 let result_discarded = std::mem::take(&mut self.assign_result_discarded);
                 // Check for nullsafe in write context
@@ -10776,6 +11091,11 @@ impl Compiler {
                         message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(),
                         line: expr.span.line,
                     });
+                }
+                if matches!(&target.kind, ExprKind::DynamicVariable(i) if Self::static_dynvar_name(i).is_none())
+                    && *op != BinaryOp::Coalesce
+                {
+                    return self.compile_compound_dynvar(expr, *op, target, value);
                 }
                 if *op == BinaryOp::Coalesce {
                     return self.compile_assign_coalesce(expr, target, value);
@@ -11176,6 +11496,17 @@ impl Compiler {
                 operand,
                 prefix,
             } => {
+                if matches!(&operand.kind, ExprKind::DynamicVariable(i) if Self::static_dynvar_name(i).is_none())
+                    && matches!(
+                        op,
+                        UnaryOp::PostIncrement
+                            | UnaryOp::PostDecrement
+                            | UnaryOp::PreIncrement
+                            | UnaryOp::PreDecrement
+                    )
+                {
+                    return self.compile_incdec_dynvar(expr, *op, operand, *prefix);
+                }
                 // Unary plus just coerces to number - return the operand directly
                 if matches!(op, UnaryOp::Plus) {
                     let val = self.compile_expr(operand)?;
@@ -15322,6 +15653,14 @@ impl Compiler {
                     line: expr.span.line,
                 });
                 Ok(OperandType::Tmp(tmp))
+            }
+
+            ExprKind::AssignRef { target, value } if matches!(&value.kind, ExprKind::DynamicVariable(i) if Self::static_dynvar_name(i).is_none()) => {
+                self.compile_assign_ref_dynvar_value(expr, target, value)
+            }
+
+            ExprKind::AssignRef { target, value } if matches!(&target.kind, ExprKind::DynamicVariable(i) if Self::static_dynvar_name(i).is_none()) => {
+                self.compile_assign_ref_dynvar_target(expr, target, value)
             }
 
             ExprKind::AssignRef { target, value } => {

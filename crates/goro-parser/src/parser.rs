@@ -4669,6 +4669,22 @@ impl Parser {
                 self.advance();
                 let inner = self.parse_expression()?;
                 self.expect(&TokenKind::CloseBrace)?;
+                // `${'name'}` names a compiled variable, like `$name`
+                // (zend_try_compile_cv).
+                if let ExprKind::String(name) = &inner.kind {
+                    let valid = name
+                        .first()
+                        .is_some_and(|&c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80)
+                        && name
+                            .iter()
+                            .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80);
+                    if valid {
+                        return Ok(Expr {
+                            kind: ExprKind::Variable(name.clone()),
+                            span,
+                        });
+                    }
+                }
                 Ok(Expr {
                     kind: ExprKind::DynamicVariable(Box::new(inner)),
                     span,
