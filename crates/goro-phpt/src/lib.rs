@@ -418,10 +418,11 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     // Normalize \r\n to \n for comparison (PHP test files use \n line endings)
     let actual_normalized = actual.replace("\r\n", "\n");
 
+    // run-tests.php compares trim()med output (PHP's trim() character set).
     // Compare with expected output
     if let Some(expected) = test.expect_section() {
-        let expected_trimmed = expected.trim();
-        let actual_trimmed = actual_normalized.trim();
+        let expected_trimmed = php_trim(&expected);
+        let actual_trimmed = php_trim(&actual_normalized);
         // Replace %0 with actual null byte for comparison (PHPT files encode null as %0)
         let expected_with_nulls = expected_trimmed.replace("%0", "\0");
         if actual_trimmed == expected_with_nulls || actual_trimmed == expected_trimmed {
@@ -434,8 +435,8 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         }
     } else if let Some(pattern) = test.expectf_section() {
         // EXPECTF: convert printf-style patterns to regex
-        let pattern_trimmed = pattern.trim();
-        let actual_trimmed = actual_normalized.trim();
+        let pattern_trimmed = php_trim(&pattern);
+        let actual_trimmed = php_trim(&actual_normalized);
         if matches_expectf(pattern_trimmed, actual_trimmed) {
             TestResult::Pass
         } else {
@@ -459,8 +460,8 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         }
     } else if let Some(regex_pattern) = test.expect_regex_section() {
         // EXPECTREGEX: match output against regex pattern
-        let regex_trimmed = regex_pattern.trim();
-        let actual_trimmed = actual_normalized.trim();
+        let regex_trimmed = php_trim(&regex_pattern);
+        let actual_trimmed = php_trim(&actual_normalized);
         if matches_expect_regex(regex_trimmed, actual_trimmed) {
             TestResult::Pass
         } else {
