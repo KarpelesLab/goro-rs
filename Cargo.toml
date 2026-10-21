@@ -22,6 +22,7 @@ members = [
     "crates/goro-ext-xml",
     "crates/goro-ext-spl",
     "crates/goro-ext-reflection",
+    "crates/goro-pcre",
 ]
 resolver = "2"
 

@@ -1,0 +1,15 @@
+[package]
+name = "goro-pcre"
+version = "0.1.0"
+edition = "2024"
+description = "Pure-Rust port of the PCRE2 10.44 regex engine (8-bit, interpreter) for goro-rs"
+license = "BSD-3-Clause"
+
+[lints]
+workspace = true
+
+[features]
+# Debug tracing of the matcher (development only).
+trace = []
+
+[dependencies]
