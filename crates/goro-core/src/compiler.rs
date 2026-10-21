@@ -442,7 +442,7 @@ impl Compiler {
     /// Resolve a magic constant or known constant name in class constant context.
     fn resolve_class_const_magic(&self, name_lower: &[u8], class_name: &[u8], line: u32) -> Value {
         match name_lower {
-            b"__method__" | b"__function__" => {
+            b"__method__" | b"__function__" | b"__property__" => {
                 // In class constant context (not a method), __METHOD__ and __FUNCTION__ are ""
                 Value::String(PhpString::empty())
             }
@@ -8557,6 +8557,20 @@ impl Compiler {
                             };
                             Value::String(PhpString::from_string(dir.to_string()))
                         }
+                    }
+                    b"__property__" => {
+                        // Inside a property hook (op_array named `$prop::get` /
+                        // `$prop::set`) this is the property name, else "".
+                        let n = &self.op_array.name;
+                        let prop: &[u8] = if n.len() > 6
+                            && n[0] == b'$'
+                            && (n.ends_with(b"::get") || n.ends_with(b"::set"))
+                        {
+                            &n[1..n.len() - 5]
+                        } else {
+                            b""
+                        };
+                        Value::String(PhpString::from_vec(prop.to_vec()))
                     }
                     b"__function__" => {
                         // For closures, __FUNCTION__ is the canonical display name
