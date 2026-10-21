@@ -15853,10 +15853,18 @@ impl Vm {
                 break 'shutdown;
             }
             let shutdown_result = self.call_callback(&callback, &extra_args);
-            if shutdown_result.is_err() && self.exception_handler.is_some() && self.current_exception.is_some() {
-                let handler = self.exception_handler.take().unwrap();
-                let exc = self.current_exception.take().unwrap();
-                let _ = self.call_callback(&handler, &[exc]);
+            if self.current_exception.is_some() {
+                if self.exception_handler.is_some() {
+                    let handler = self.exception_handler.take().unwrap();
+                    let exc = self.current_exception.take().unwrap();
+                    let _ = self.call_callback(&handler, &[exc]);
+                } else {
+                    // Uncaught exception in a shutdown function: fatal error,
+                    // the remaining shutdown functions do not run.
+                    let e = shutdown_result.err().unwrap_or(VmError { message: "Uncaught exception".into(), line: self.current_line });
+                    self.report_uncaught(&e);
+                    break 'shutdown;
+                }
             }
         }
         }
@@ -23654,9 +23662,25 @@ impl Vm {
                                             for arg in arg_iter {
                                                 spl_args.push(arg.clone());
                                             }
+                                            let had_exc = self.current_exception.is_some();
                                             if let Some(result) = self.handle_spl_docall(&class_lower, &method_lower, &spl_args) {
                                                 self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                                                 handled = true;
+                                            }
+                                            // An exception thrown by an extension-provided method.
+                                            if handled && !had_exc && self.current_exception.is_some()
+                                                && self.native_class_handlers.contains_key(&class_lower)
+                                            {
+                                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    ip = *catch_target as usize;
+                                                    continue;
+                                                }
+                                                let msg = if let Some(Value::Object(o)) = &self.current_exception {
+                                                    let ob = o.borrow();
+                                                    format!("Uncaught {}: {}", crate::value::display_class_name(&ob.class_name), ob.get_property(b"message").to_php_string().to_string_lossy())
+                                                } else { "Uncaught exception".to_string() };
+                                                return Err(VmError { message: msg, line: op.line });
                                             }
                                         }
                                     }
