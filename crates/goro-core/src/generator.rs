@@ -111,6 +111,39 @@ pub struct PhpGenerator {
 }
 
 impl PhpGenerator {
+    /// zend_generator_get_current(): the value and key of the innermost
+    /// still-running generator `gen` delegates to with `yield from` (several
+    /// generators may delegate to the same one).
+    pub fn leaf_current(
+        generator: &std::rc::Rc<std::cell::RefCell<PhpGenerator>>,
+    ) -> (Value, Value) {
+        let mut cur = generator.clone();
+        for _ in 0..10_000 {
+            let next = match cur.try_borrow() {
+                Ok(b) => match &b.yield_from_source {
+                    Some(Value::Generator(inner))
+                        if matches!(
+                            inner.try_borrow().map(|ib| ib.state.clone()),
+                            Ok(GeneratorState::Suspended)
+                        ) =>
+                    {
+                        Some(inner.clone())
+                    }
+                    _ => None,
+                },
+                Err(_) => None,
+            };
+            match next {
+                Some(n) => cur = n,
+                None => break,
+            }
+        }
+        match cur.try_borrow() {
+            Ok(b) => (b.current_value.clone(), b.current_key.clone()),
+            Err(_) => (Value::Null, Value::Null),
+        }
+    }
+
     /// Create a new generator from a compiled op_array and initial CVs
     pub fn new(op_array: OpArray, cvs: Vec<Value>) -> Self {
         let temp_count = op_array.temp_count as usize;
@@ -822,15 +855,14 @@ impl PhpGenerator {
                                 }
                                 self.yield_from_observed = false;
                                 // Read inner state without holding borrow
-                                let (is_suspended, val, key, ret) = {
+                                let (is_suspended, ret) = {
                                     let inner = inner_gen.borrow();
                                     (
                                         inner.state == GeneratorState::Suspended,
-                                        inner.current_value.clone(),
-                                        inner.current_key.clone(),
                                         inner.return_value.clone(),
                                     )
                                 };
+                                let (val, key) = Self::leaf_current(inner_gen);
                                 if is_suspended {
                                     self.current_value = val;
                                     self.current_key = key;

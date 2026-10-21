@@ -14329,6 +14329,12 @@ impl Compiler {
             }
 
             ExprKind::YieldFrom(inner) => {
+                if self.op_array.returns_by_ref {
+                    return Err(CompileError {
+                        message: "Cannot use \"yield from\" inside a by-reference generator".into(),
+                        line: expr.span.line,
+                    });
+                }
                 let val = self.compile_expr(inner)?;
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {

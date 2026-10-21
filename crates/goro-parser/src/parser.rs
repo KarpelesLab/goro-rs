@@ -6193,6 +6193,9 @@ impl Parser {
                         | TokenKind::ShiftLeft
                         | TokenKind::ShiftRight
                         | TokenKind::NullCoalesce
+                        | TokenKind::And
+                        | TokenKind::Or
+                        | TokenKind::Xor
                 );
                 if bare {
                     Ok(Expr {
@@ -6200,11 +6203,12 @@ impl Parser {
                         kind: ExprKind::Yield(None, None),
                     })
                 } else {
-                    let first = self.parse_expression()?;
+                    // yield binds tighter than `and`/`xor`/`or`.
+                    let first = self.parse_assignment()?;
                     // Check for yield $key => $value
                     if matches!(self.peek(), TokenKind::DoubleArrow) {
                         self.advance(); // consume =>
-                        let value = self.parse_expression()?;
+                        let value = self.parse_assignment()?;
                         Ok(Expr {
                             span,
                             kind: ExprKind::Yield(Some(Box::new(value)), Some(Box::new(first))),
