@@ -4676,6 +4676,7 @@ impl Compiler {
                                     class.parent.as_deref(),
                                 )
                                 .or_else(|| self.type_redundancy_error(hint))
+                                .or_else(|| relative_type_in_intersection(hint, modifiers.is_trait))
                                 {
                                     return Err(CompileError {
                                         message: err,
@@ -6859,7 +6860,9 @@ impl Compiler {
                                         class.parent.as_deref(),
                                     )
                                     .or_else(|| self.type_redundancy_error(hint))
-                                    {
+                                    .or_else(|| {
+                                        relative_type_in_intersection(hint, modifiers.is_trait)
+                                    }) {
                                         return Err(CompileError {
                                             message: err,
                                             line: *method_line,
@@ -6885,7 +6888,9 @@ impl Compiler {
                                             class.parent.as_deref(),
                                         )
                                         .or_else(|| self.type_redundancy_error(hint))
-                                        {
+                                        .or_else(|| {
+                                            relative_type_in_intersection(hint, modifiers.is_trait)
+                                        }) {
                                             return Err(CompileError {
                                                 message: err,
                                                 line: *method_line,
@@ -6946,7 +6951,9 @@ impl Compiler {
                                         class.parent.as_deref(),
                                     )
                                     .or_else(|| self.type_redundancy_error(hint))
-                                    {
+                                    .or_else(|| {
+                                        relative_type_in_intersection(hint, modifiers.is_trait)
+                                    }) {
                                         return Err(CompileError {
                                             message: err,
                                             line: *method_line,
@@ -7046,7 +7053,9 @@ impl Compiler {
                                             class.parent.as_deref(),
                                         )
                                         .or_else(|| self.type_redundancy_error(hint))
-                                        {
+                                        .or_else(|| {
+                                            relative_type_in_intersection(hint, modifiers.is_trait)
+                                        }) {
                                             return Err(CompileError {
                                                 message: err,
                                                 line: *method_line,
@@ -17413,6 +17422,32 @@ fn validate_type_hint_full(
             // Intersection type validation is already handled in parser
             None
         }
+    }
+}
+
+/// zend_compile_typename: `self`/`parent` left unresolved at compile time
+/// (inside a trait) cannot be part of an intersection type.
+fn relative_type_in_intersection(hint: &TypeHint, in_trait: bool) -> Option<String> {
+    if !in_trait {
+        return None;
+    }
+    match hint {
+        TypeHint::Intersection(types) => types.iter().find_map(|t| match t {
+            TypeHint::Simple(n)
+                if n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent") =>
+            {
+                Some(format!(
+                    "Type {} cannot be part of an intersection type",
+                    String::from_utf8_lossy(n)
+                ))
+            }
+            _ => None,
+        }),
+        TypeHint::Union(types) => types
+            .iter()
+            .find_map(|t| relative_type_in_intersection(t, in_trait)),
+        TypeHint::Nullable(inner) => relative_type_in_intersection(inner, in_trait),
+        TypeHint::Simple(_) => None,
     }
 }
 
