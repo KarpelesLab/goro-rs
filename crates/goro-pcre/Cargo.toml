@@ -13,3 +13,4 @@ workspace = true
 trace = []
 
 [dependencies]
+memchr = "2"

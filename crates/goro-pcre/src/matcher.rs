@@ -3253,7 +3253,7 @@ impl Code {
         }
 
         let memchr = |s: &[u8], from: usize, to: usize, c: u8| -> Option<usize> {
-            s[from..to].iter().position(|&b| b == c).map(|p| p + from)
+            memchr::memchr(c, &s[from..to]).map(|p| p + from)
         };
 
         let mut rc: i32;
