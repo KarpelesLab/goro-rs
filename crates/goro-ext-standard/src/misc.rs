@@ -17266,6 +17266,12 @@ fn get_loaded_extensions_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmEr
 fn get_extension_funcs_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let name = String::from_utf8_lossy(name.as_bytes()).to_ascii_lowercase();
+    // "zend" names the Core module.
+    let name = if name == "zend" {
+        "core".to_string()
+    } else {
+        name
+    };
     let mut arr = PhpArray::new();
     for f in goro_core::stub_sigs::FUNCTIONS {
         if f.ext.eq_ignore_ascii_case(&name)
