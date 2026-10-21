@@ -17398,10 +17398,11 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    let cmp = a.compare(&b);
+                    // `a > b` is `b < a` (ZEND_IS_SMALLER with swapped operands).
+                    let cmp = b.compare(&a);
                     self.write_operand(
                         &op.result,
-                        if cmp != i64::MIN && cmp > 0 {
+                        if cmp != i64::MIN && cmp < 0 {
                             Value::True
                         } else {
                             Value::False
@@ -17490,10 +17491,11 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    let cmp = a.compare(&b);
+                    // `a > b` is `b < a` (ZEND_IS_SMALLER with swapped operands).
+                    let cmp = b.compare(&a);
                     self.write_operand(
                         &op.result,
-                        if cmp != i64::MIN && cmp >= 0 {
+                        if cmp != i64::MIN && cmp <= 0 {
                             Value::True
                         } else {
                             Value::False
@@ -23317,6 +23319,7 @@ impl Vm {
                             // Emit implicit float-to-int deprecation for non-strict mode
                             // BEFORE coercion truncates the value.
                             if !op_array.strict_types {
+                                let had_exc = self.current_exception.is_some();
                                 for (i, arg) in call.args.iter().enumerate() {
                                     if i >= user_fn.param_types.len() {
                                         break;
@@ -23337,6 +23340,21 @@ impl Vm {
                                             recv_line,
                                         );
                                     }
+                                }
+                                // An error handler that throws aborts the call.
+                                if !had_exc && self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        self.call_stack.pop(); // pop early-pushed frame
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: "Uncaught exception".into(),
+                                        line: op.line,
+                                    });
                                 }
                             }
                             let nan_args: Vec<usize> = if op_array.strict_types {
