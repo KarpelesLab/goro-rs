@@ -7611,12 +7611,15 @@ impl Compiler {
                     // e_strict is not folded at compile time - goes through runtime ConstLookup
                     // so the deprecation warning is emitted
                     b"e_deprecated" => Value::Long(8192),
-                    b"php_prefix_separator" | b"directory_separator" | b"path_separator" => {
+                    b"php_prefix_separator" | b"directory_separator" => {
                         Value::String(PhpString::from_bytes(if cfg!(windows) {
                             b"\\"
                         } else {
                             b"/"
                         }))
+                    }
+                    b"path_separator" => {
+                        Value::String(PhpString::from_bytes(if cfg!(windows) { b";" } else { b":" }))
                     }
                     b"str_pad_right" => Value::Long(1),
                     b"str_pad_left" => Value::Long(0),

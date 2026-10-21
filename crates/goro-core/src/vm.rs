@@ -2574,49 +2574,14 @@ impl Vm {
     }
 
     /// Check open_basedir restriction. Returns true if path is allowed, false if blocked.
+    /// (php_check_open_basedir: warns on failure.)
     pub fn check_open_basedir(&mut self, func_name: &str, path: &str) -> bool {
-        let basedir_val = self.constants.get(b"open_basedir".as_ref())
-            .cloned()
-            .unwrap_or(Value::String(crate::string::PhpString::from_bytes(b"")));
-        let basedir_str = basedir_val.to_php_string().to_string_lossy();
-        if basedir_str.is_empty() {
-            return true;
-        }
-        if path.contains("://") {
-            return true;
-        }
-        let abs_path = if std::path::Path::new(path).is_absolute() {
-            path.to_string()
-        } else {
-            std::env::current_dir()
-                .map(|d| d.join(path).to_string_lossy().to_string())
-                .unwrap_or_else(|_| path.to_string())
-        };
-        let canonical = std::fs::canonicalize(&abs_path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| abs_path.clone());
-        let separator = if cfg!(windows) { ';' } else { ':' };
-        for dir in basedir_str.split(separator) {
-            let dir = dir.trim();
-            if dir.is_empty() { continue; }
-            let dir_canonical = std::fs::canonicalize(dir)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| dir.to_string());
-            let check = if dir_canonical.ends_with('/') {
-                dir_canonical.clone()
-            } else {
-                format!("{}/", dir_canonical)
-            };
-            if canonical.starts_with(&check) || canonical == dir_canonical
-                || abs_path.starts_with(&check) || abs_path == dir_canonical {
-                return true;
-            }
-        }
-        self.emit_warning(&format!(
-            "{}(): open_basedir restriction in effect. File({}) is not within the allowed path(s): ({})",
-            func_name, path, basedir_str
-        ));
-        false
+        crate::basedir::check_open_basedir_ex(self, func_name, path, true)
+    }
+
+    /// Same as `check_open_basedir` but without a warning.
+    pub fn check_open_basedir_silent(&mut self, path: &str) -> bool {
+        crate::basedir::check_open_basedir_ex(self, "", path, false)
     }
 
     /// Emit deprecation for optional parameters before required parameters.

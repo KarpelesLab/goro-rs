@@ -1,3 +1,4 @@
+pub mod basedir_guard;
 pub mod filters;
 pub mod html;
 pub(crate) mod html_tables;
@@ -26,6 +27,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     ob::register(vm);
     html::register(vm);
     regex::register(vm);
+    basedir_guard::register(vm);
     register_builtin_param_names(vm);
 }
 

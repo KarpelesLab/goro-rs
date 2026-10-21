@@ -1,4 +1,5 @@
 pub mod array;
+pub mod basedir;
 pub mod compiler;
 pub mod fiber;
 pub mod function;
