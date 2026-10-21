@@ -1684,12 +1684,26 @@ fn m_replace_children(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn m_query_selector(vm: &mut Vm, _o: &Obj, a: &[Value]) -> R<Value> {
+fn m_query_selector(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 1)?;
-    let _sel = a.str(vm, 0, "selectors")?;
-    dom_err_msg(vm, SYNTAX_ERR, "CSS selectors are not supported");
-    Err(())
+    let sel = a.str(vm, 0, "selectors")?;
+    let n = this_node(vm, o)?;
+    let r = super::css::select(vm, n, &sel, true)?;
+    Ok(node_obj_opt(vm, r.first().copied()))
+}
+
+fn m_query_selector_all(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
+    let a = args(a);
+    a.count(vm, 1, 1)?;
+    let sel = a.str(vm, 0, "selectors")?;
+    let n = this_node(vm, o)?;
+    let r = super::css::select(vm, n, &sel, false)?;
+    let mut items = Vec::new();
+    for x in r {
+        items.push(node_obj(vm, x));
+    }
+    Ok(mlist_obj(vm, b"Dom\\NodeList", ListKind::Static(items)))
 }
 
 pub fn parent_methods() -> Vec<(&'static str, MethodFn)> {
@@ -1698,7 +1712,7 @@ pub fn parent_methods() -> Vec<(&'static str, MethodFn)> {
         ("prepend", m_prepend),
         ("replaceChildren", m_replace_children),
         ("querySelector", m_query_selector),
-        ("querySelectorAll", m_query_selector),
+        ("querySelectorAll", m_query_selector_all),
     ]
 }
 

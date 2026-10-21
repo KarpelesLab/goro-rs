@@ -13,6 +13,7 @@
 
 pub mod chardata;
 pub mod collections;
+pub mod css;
 pub mod document;
 pub mod element;
 pub mod html_serializer;

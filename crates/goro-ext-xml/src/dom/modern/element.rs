@@ -740,12 +740,21 @@ fn m_insert_adjacent_html(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     Ok(Value::Null)
 }
 
-fn m_closest(vm: &mut Vm, _o: &Obj, a: &[Value]) -> R<Value> {
+fn m_closest(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let a = args(a);
     a.count(vm, 1, 1)?;
-    let _sel = a.str(vm, 0, "selectors")?;
-    dom_err_msg(vm, SYNTAX_ERR, "CSS selectors are not supported");
-    Err(())
+    let sel = a.str(vm, 0, "selectors")?;
+    let n = this_node(vm, o)?;
+    let r = super::css::closest(vm, n, &sel)?;
+    Ok(node_obj_opt(vm, r))
+}
+
+fn m_matches(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
+    let a = args(a);
+    a.count(vm, 1, 1)?;
+    let sel = a.str(vm, 0, "selectors")?;
+    let n = this_node(vm, o)?;
+    Ok(bv(super::css::matches_node(vm, n, &sel)?))
 }
 
 /// dom_element_get_in_scope_namespace_info
@@ -923,7 +932,7 @@ pub fn element_methods() -> Vec<(&'static str, MethodFn)> {
         ),
         ("setIdAttributeNode", m_set_id_attribute_node),
         ("closest", m_closest),
-        ("matches", m_closest),
+        ("matches", m_matches),
         ("getInScopeNamespaces", m_get_in_scope_namespaces),
         ("getDescendantNamespaces", m_get_descendant_namespaces),
         ("rename", m_rename),
