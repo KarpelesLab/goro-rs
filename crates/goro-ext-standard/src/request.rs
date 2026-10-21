@@ -1254,6 +1254,7 @@ pub fn parse_str_into(vm: &mut Vm, data: &[u8], arr: &Rc<RefCell<PhpArray>>) {
 }
 
 pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
+    crate::info::set_web_sapi(req.cgi);
     // php_request_startup(): SAPI_PHP_VERSION_HEADER (the CLI SAPI has
     // no headers).
     if req.cgi && ini_bool(ini("expose_php"), true) {

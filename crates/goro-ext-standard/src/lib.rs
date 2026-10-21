@@ -11,6 +11,7 @@ pub mod highlight;
 pub mod html;
 pub(crate) mod html_tables;
 pub mod image;
+pub mod info;
 pub mod ini_parser;
 pub mod locale;
 pub mod math;

@@ -2042,7 +2042,84 @@ fn matches_expect_regex(pattern: &str, actual: &str) -> bool {
     true
 }
 
+/// run-tests.php's EXPECTF matching for a pattern with %r...%r sections:
+/// the whole pattern as one regex (`/^...$/s`), the %r parts verbatim.
+/// None when the regex cannot be built.
+fn matches_expectf_as_regex(pattern: &str, actual: &str) -> Option<bool> {
+    fn placeholder(c: u8) -> Option<&'static str> {
+        Some(match c {
+            b'e' => "/",
+            b's' => r"[^\r\n]+",
+            b'S' => r"[^\r\n]*",
+            b'a' => ".+?",
+            b'A' => ".*?",
+            b'w' => r"\s*",
+            b'i' => r"[+-]?\d+",
+            b'd' => r"\d+",
+            b'x' => "[0-9a-fA-F]+",
+            b'f' => r"[+-]?(?:\d+|\.\d)(?:\.\d+)?(?:[Ee][+-]?\d+)?",
+            b'c' => ".",
+            b'0' => r"\x00",
+            _ => return None,
+        })
+    }
+    let b = pattern.as_bytes();
+    let mut re = String::from("(?s-u)^");
+    let mut i = 0;
+    let mut in_re = false;
+    let mut seg = String::new();
+    while i < b.len() {
+        if b[i] == b'%' && i + 1 < b.len() {
+            if b[i + 1] == b'r' {
+                if in_re {
+                    re.push('(');
+                    re.push_str(&pcre_to_rust_regex(&seg));
+                    re.push(')');
+                    seg.clear();
+                }
+                in_re = !in_re;
+                i += 2;
+                continue;
+            }
+            if let Some(r) = placeholder(b[i + 1]) {
+                if in_re {
+                    seg.push_str(r);
+                } else {
+                    re.push_str(r);
+                }
+                i += 2;
+                continue;
+            }
+        }
+        let ch = pattern[i..].chars().next()?;
+        if in_re {
+            seg.push(ch);
+        } else {
+            for byte in ch.to_string().bytes() {
+                if byte.is_ascii() {
+                    re.push_str(&regex::escape(&(byte as char).to_string()));
+                } else {
+                    re.push_str(&format!("\\x{:02x}", byte));
+                }
+            }
+        }
+        i += ch.len_utf8();
+    }
+    if in_re {
+        return None;
+    }
+    re.push('$');
+    let r = regex::bytes::RegexBuilder::new(&re)
+        .size_limit(64 << 20)
+        .build()
+        .ok()?;
+    Some(r.is_match(actual.as_bytes()))
+}
+
 fn matches_expectf(pattern: &str, actual: &str) -> bool {
+    if pattern.contains("%r") && matches_expectf_as_regex(pattern, actual) == Some(true) {
+        return true;
+    }
     // Check if the pattern contains %a or %A which can match across lines
     // In that case we need whole-string matching, not line-by-line
     if pattern.contains("%a") || pattern.contains("%A") || pattern.contains("%w") {
