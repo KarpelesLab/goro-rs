@@ -12,6 +12,7 @@ pub mod request;
 pub mod serialize;
 pub mod strings;
 pub mod type_funcs;
+pub mod url_scanner;
 
 // Alias for code referencing `stream_filters` (the gitignore unfortunately
 // matches anything starting with "stream").
@@ -32,6 +33,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     regex::register(vm);
     request::register(vm);
     basedir_guard::register(vm);
+    url_scanner::register(vm);
     register_builtin_param_names(vm);
 }
 
