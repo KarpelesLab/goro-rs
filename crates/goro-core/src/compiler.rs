@@ -128,6 +128,10 @@ pub struct Compiler {
     memoized_exprs: HashMap<usize, OperandType>,
     /// The synthetic isset / assign node being compiled in memoize mode.
     memoize_root: usize,
+    /// Reserved variable names (not expressible in PHP source) standing for
+    /// already-computed operands while synthesized code is compiled (target
+    /// keys evaluated before an assigned value).
+    tmp_aliases: Vec<(Vec<u8>, OperandType)>,
     /// Stack of loop contexts for break/continue
     loop_stack: Vec<LoopContext>,
     /// Compiled class entries (stored in the compiler, passed to VM)
@@ -362,6 +366,7 @@ impl Compiler {
             memoize_mode: 0,
             memoized_exprs: HashMap::new(),
             memoize_root: 0,
+            tmp_aliases: Vec::new(),
             loop_stack: Vec::new(),
             compiled_classes: Vec::new(),
             current_class: None,
@@ -1433,15 +1438,52 @@ impl Compiler {
                     self.compile_expr(&arg.value)?
                 };
                 let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
+                // A non-variable passed where the callee (known at run time)
+                // may take a reference: SEND_VAR_NO_REF_EX for call results
+                // (notice), SEND_VAL_EX for other expressions (Error).
+                let checked = if is_byref {
+                    None
+                } else {
+                    match &arg.value.kind {
+                        ExprKind::FunctionCall { .. }
+                        | ExprKind::MethodCall { .. }
+                        | ExprKind::StaticMethodCall { .. }
+                        | ExprKind::DynamicStaticMethodCall { .. }
+                        | ExprKind::New { .. }
+                        | ExprKind::Include { .. } => Some(0),
+                        ExprKind::Variable(_)
+                        | ExprKind::DynamicVariable(_)
+                        | ExprKind::PropertyAccess { .. }
+                        | ExprKind::StaticPropertyAccess { .. }
+                        | ExprKind::DynamicStaticPropertyAccess { .. }
+                        | ExprKind::ArrayAccess { .. }
+                        | ExprKind::AssignRef { .. }
+                        | ExprKind::Spread(_) => None,
+                        // `[...] = $v` / `list(...) = $v` evaluates to $v.
+                        ExprKind::Assign { target, .. }
+                            if matches!(
+                                target.kind,
+                                ExprKind::Array(_) | ExprKind::FunctionCall { .. }
+                            ) =>
+                        {
+                            None
+                        }
+                        _ => Some(1),
+                    }
+                };
+                let checked_kind = checked
+                    .map(|kind| OperandType::Const(self.op_array.add_literal(Value::Long(kind))));
                 self.op_array.emit(Op {
                     opcode: if is_byref {
                         OpCode::SendRef
+                    } else if checked.is_some() {
+                        OpCode::SendValChecked
                     } else {
                         OpCode::SendVal
                     },
                     op1: val,
                     op2: OperandType::Const(pos_idx),
-                    result: OperandType::Unused,
+                    result: checked_kind.unwrap_or(OperandType::Unused),
                     line,
                 });
             }
@@ -2506,6 +2548,15 @@ impl Compiler {
                     });
                 }
                 if let Some(k) = key {
+                    let is_list = matches!(k.kind, ExprKind::Array(_))
+                        || matches!(&k.kind, ExprKind::FunctionCall { name, .. }
+                            if matches!(&name.kind, ExprKind::Identifier(n) if n.eq_ignore_ascii_case(b"list")));
+                    if is_list {
+                        return Err(CompileError {
+                            message: "Cannot use list as key element".into(),
+                            line: stmt.span.line,
+                        });
+                    }
                     if self.check_foreach_this_assign(k, stmt.span.line)? {
                         return Err(CompileError {
                             message: "Cannot re-assign $this".into(),
@@ -2574,6 +2625,14 @@ impl Compiler {
                     }
                     ctx.depth_nop = depth_nop;
                 }
+                // By-ref foreach into a plain variable: ForeachNextRef binds the
+                // variable to the element's reference itself.
+                let by_ref_cv = match &value.kind {
+                    ExprKind::Variable(name) if *by_ref => {
+                        Some(self.op_array.get_or_create_cv(name))
+                    }
+                    _ => None,
+                };
                 let jmp_done = if *by_ref {
                     // For by-ref foreach, ForeachNextRef stores reference directly in val_tmp
 
@@ -2581,7 +2640,10 @@ impl Compiler {
                         opcode: OpCode::ForeachNextRef,
                         op1: OperandType::Tmp(iter_tmp),
                         op2: OperandType::JmpTarget(0), // patched later
-                        result: OperandType::Tmp(val_tmp),
+                        result: match by_ref_cv {
+                            Some(cv) => OperandType::Cv(cv),
+                            None => OperandType::Tmp(val_tmp),
+                        },
                         line: stmt.span.line,
                     })
                 } else {
@@ -2596,16 +2658,49 @@ impl Compiler {
 
                 // Assign value to the value variable
                 if *by_ref {
-                    // For by-ref: directly replace CV slot with the reference (don't write through existing ref)
-                    if let ExprKind::Variable(name) = &value.kind {
-                        let cv = self.op_array.get_or_create_cv(name);
-                        self.op_array.emit(Op {
-                            opcode: OpCode::AssignRef,
-                            op1: OperandType::Cv(cv),
-                            op2: OperandType::Tmp(val_tmp),
-                            result: OperandType::Unused,
-                            line: stmt.span.line,
-                        });
+                    // Plain variables were bound by ForeachNextRef; other
+                    // targets are bound to the element's reference.
+                    match &value.kind {
+                        ExprKind::ArrayAccess { array, index } => {
+                            let arr = self.compile_dim_write_base(array)?;
+                            match index {
+                                Some(idx_expr) => {
+                                    let idx = self.compile_expr(idx_expr)?;
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::ArraySetRef,
+                                        op1: arr,
+                                        op2: OperandType::Tmp(val_tmp),
+                                        result: idx,
+                                        line: stmt.span.line,
+                                    });
+                                }
+                                None => {
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::ArrayAppendRef,
+                                        op1: arr,
+                                        op2: OperandType::Tmp(val_tmp),
+                                        result: OperandType::Unused,
+                                        line: stmt.span.line,
+                                    });
+                                }
+                            }
+                        }
+                        ExprKind::PropertyAccess {
+                            object,
+                            property,
+                            nullsafe: false,
+                        } => {
+                            let obj = self.compile_expr(object)?;
+                            let name = self.compile_property_name(property)?;
+                            self.op_array.emit(Op {
+                                opcode: OpCode::PropertySetRef,
+                                op1: obj,
+                                op2: OperandType::Tmp(val_tmp),
+                                result: name,
+                                line: stmt.span.line,
+                            });
+                        }
+                        _ => {}
                     }
                 } else if let ExprKind::Variable(name) = &value.kind {
                     let cv = self.op_array.get_or_create_cv(name);
@@ -2666,6 +2761,8 @@ impl Compiler {
                             result: OperandType::Unused,
                             line: stmt.span.line,
                         });
+                    } else {
+                        self.compile_assign_tmp_to_target(key_expr, key_tmp, stmt.span.line)?;
                     }
                 }
 
@@ -3771,28 +3868,10 @@ impl Compiler {
                                     line: stmt.span.line,
                                 });
                             }
-                            // A missing intermediate dimension is not an error
-                            // (FETCH_DIM_UNSET).
-                            let nested = matches!(array.kind, ExprKind::ArrayAccess { .. });
-                            if nested {
-                                self.op_array.emit(Op {
-                                    opcode: OpCode::ErrorSuppress,
-                                    op1: OperandType::Unused,
-                                    op2: OperandType::Unused,
-                                    result: OperandType::Unused,
-                                    line: stmt.span.line,
-                                });
-                            }
-                            let arr_operand = self.compile_expr(array)?;
-                            if nested {
-                                self.op_array.emit(Op {
-                                    opcode: OpCode::ErrorRestore,
-                                    op1: OperandType::Unused,
-                                    op2: OperandType::Unused,
-                                    result: OperandType::Unused,
-                                    line: stmt.span.line,
-                                });
-                            }
+                            let arr_operand = self.compile_dim_write_base_mode(
+                                array,
+                                crate::fetch_w::DimFetch::Unset,
+                            )?;
                             if let Some(idx_expr) = index {
                                 let idx_operand = self.compile_expr(idx_expr)?;
                                 self.op_array.emit(Op {
@@ -3808,7 +3887,10 @@ impl Compiler {
                             object, property, ..
                         } => {
                             // unset($obj->prop) - remove property
-                            let obj_operand = self.compile_expr(object)?;
+                            let obj_operand = self.compile_obj_write_base_mode(
+                                object,
+                                crate::fetch_w::DimFetch::Unset,
+                            )?;
                             let prop_operand = self.compile_property_name(property)?;
                             self.op_array.emit(Op {
                                 opcode: OpCode::PropertyUnset,
@@ -4534,6 +4616,7 @@ impl Compiler {
                             attributes,
                             doc_comment: prop_doc_comment,
                             set_hook_type,
+                            get_hook_by_ref,
                         } => {
                             // Enums cannot include properties
                             if modifiers.is_enum {
@@ -5647,6 +5730,7 @@ impl Compiler {
                                 hook_compiler.op_array.strict_types = self.op_array.strict_types;
                                 // The get hook's return type is the property type.
                                 hook_compiler.op_array.return_type = prop_type.clone();
+                                hook_compiler.op_array.returns_by_ref = *get_hook_by_ref;
                                 hook_compiler.op_array.is_generator =
                                     stmts_contain_yield(hook_body);
                                 hook_compiler.source_file = self.source_file.clone();
@@ -6578,6 +6662,8 @@ impl Compiler {
                                                     self.op_array.strict_types;
                                                 hook_compiler.op_array.return_type =
                                                     promoted_prop_type.clone();
+                                                hook_compiler.op_array.returns_by_ref =
+                                                    param.get_hook_by_ref;
                                                 hook_compiler.source_file =
                                                     self.source_file.clone();
                                                 hook_compiler.current_class =
@@ -9255,9 +9341,299 @@ impl Compiler {
         Ok(ref_tmp)
     }
 
+    /// Compile the object operand of a property write (`<obj>->p = v`,
+    /// `<obj>->p op= v`, ...): a property or element container is fetched for
+    /// writing (FETCH_OBJ_W / FETCH_DIM_W), so the write reaches it.
+    fn compile_obj_write_base(&mut self, object: &Expr) -> CompileResult<OperandType> {
+        self.compile_obj_write_base_mode(object, crate::fetch_w::DimFetch::W)
+    }
+
+    /// compile_obj_write_base() for a write context: W (assignments), Rw
+    /// (compound assignments / increments), Unset (unset()).
+    fn compile_obj_write_base_mode(
+        &mut self,
+        object: &Expr,
+        mode: crate::fetch_w::DimFetch,
+    ) -> CompileResult<OperandType> {
+        use crate::fetch_w::DimFetch;
+        match &object.kind {
+            ExprKind::PropertyAccess {
+                object: inner,
+                property,
+                nullsafe: false,
+            } => {
+                let obj = self.compile_obj_write_base_mode(inner, mode)?;
+                let name = self.compile_property_name(property)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: match mode {
+                        DimFetch::Unset => OpCode::PropertyGetWUnset,
+                        DimFetch::Rw => OpCode::PropertyGetWObjRW,
+                        _ => OpCode::PropertyGetWObj,
+                    },
+                    op1: obj,
+                    op2: name,
+                    result: OperandType::Tmp(tmp),
+                    line: object.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
+            }
+            // `$a[]->p = v`: the appended element is fetched for writing.
+            ExprKind::ArrayAccess { index: None, .. } => {
+                self.compile_dim_write_base_mode(object, DimFetch::W)
+            }
+            ExprKind::ArrayAccess {
+                array,
+                index: Some(index),
+            } => {
+                let container = self.compile_dim_write_base_mode(
+                    array,
+                    if mode == DimFetch::Unset {
+                        DimFetch::Unset
+                    } else {
+                        DimFetch::W
+                    },
+                )?;
+                let key = self.compile_expr(index)?;
+                let tmp = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: if mode == DimFetch::Unset {
+                        OpCode::ArrayGetWUnset
+                    } else {
+                        OpCode::ArrayGetWObj
+                    },
+                    op1: container,
+                    op2: key,
+                    result: OperandType::Tmp(tmp),
+                    line: object.span.line,
+                });
+                Ok(OperandType::Tmp(tmp))
+            }
+            _ => self.compile_expr(object),
+        }
+    }
+
+    /// `&$array[index]` (`index == None` is `&$array[]`): fetch the container
+    /// for writing and get (creating) the element's reference into a tmp.
+    fn compile_dim_ref(
+        &mut self,
+        array: &Expr,
+        index: Option<&Expr>,
+        line: u32,
+    ) -> CompileResult<u32> {
+        let arr = self.compile_dim_write_base(array)?;
+        let idx = match index {
+            Some(i) => self.compile_expr(i)?,
+            None => OperandType::Unused,
+        };
+        let t = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::ArrayGetRef,
+            op1: arr,
+            op2: idx,
+            result: OperandType::Tmp(t),
+            line,
+        });
+        Ok(t)
+    }
+
+    /// Compile `expr` for an isset/empty check (BP_VAR_IS): a property is
+    /// fetched with PropertyGetIs so __isset() gates __get().
+    fn compile_is_fetch(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        if let ExprKind::PropertyAccess {
+            object,
+            property,
+            nullsafe: false,
+        } = &expr.kind
+        {
+            let obj = self.compile_expr(object)?;
+            let name = self.compile_property_name(property)?;
+            let tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::PropertyGetIs,
+                op1: obj,
+                op2: name,
+                result: OperandType::Tmp(tmp),
+                line: expr.span.line,
+            });
+            return Ok(OperandType::Tmp(tmp));
+        }
+        self.compile_expr(expr)
+    }
+
+    /// `<target> = v` / `<target> op= v` whose target keys are computed
+    /// first (kept out of compile_expr to keep its stack frame small).
+    #[inline(never)]
+    fn compile_assign_memoized(
+        &mut self,
+        expr: &Expr,
+        target: &Expr,
+        value: &Expr,
+        op: Option<BinaryOp>,
+    ) -> CompileResult<OperandType> {
+        let saved = self.tmp_aliases.len();
+        let memo = Box::new(self.memoize_lvalue(target)?);
+        let value = Box::new(value.clone());
+        let kind = match op {
+            None => ExprKind::Assign {
+                target: memo,
+                value,
+            },
+            Some(op) => ExprKind::CompoundAssign {
+                op,
+                target: memo,
+                value,
+            },
+        };
+        let r = self.compile_expr(&Expr {
+            span: expr.span,
+            kind,
+        });
+        self.tmp_aliases.truncate(saved);
+        r
+    }
+
+    /// Whether an assignment target has keys / property names that must be
+    /// evaluated before the assigned value (anything but literals and plain
+    /// variables, which PHP reads when the target is fetched).
+    fn lvalue_needs_memo(e: &Expr) -> bool {
+        let simple = |k: &Expr| {
+            matches!(
+                k.kind,
+                ExprKind::Int(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::String(_)
+                    | ExprKind::True
+                    | ExprKind::False
+                    | ExprKind::Null
+                    | ExprKind::Variable(_)
+                    | ExprKind::Identifier(_)
+            )
+        };
+        match &e.kind {
+            ExprKind::ArrayAccess { array, index } => {
+                index.as_deref().map(|i| !simple(i)).unwrap_or(false)
+                    || Self::lvalue_needs_memo(array)
+            }
+            ExprKind::PropertyAccess {
+                object, property, ..
+            } => {
+                !simple(property)
+                    || matches!(
+                        object.kind,
+                        ExprKind::ArrayAccess { .. } | ExprKind::PropertyAccess { .. }
+                    ) && Self::lvalue_needs_memo(object)
+            }
+            _ => false,
+        }
+    }
+
+    /// Rewrite an lvalue so that its keys, dynamic property names and
+    /// non-variable bases are computed now (into aliased temporaries).
+    fn memoize_lvalue(&mut self, e: &Expr) -> CompileResult<Expr> {
+        Ok(match &e.kind {
+            ExprKind::Variable(_) | ExprKind::StaticPropertyAccess { .. } => e.clone(),
+            ExprKind::DynamicStaticPropertyAccess { class, property } => Expr {
+                span: e.span,
+                kind: ExprKind::DynamicStaticPropertyAccess {
+                    class: class.clone(),
+                    property: Box::new(self.memoize_operand(property)?),
+                },
+            },
+            ExprKind::ArrayAccess { array, index } => {
+                let array = self.memoize_lvalue(array)?;
+                let index = match index {
+                    Some(i) => Some(Box::new(self.memoize_operand(i)?)),
+                    None => None,
+                };
+                Expr {
+                    span: e.span,
+                    kind: ExprKind::ArrayAccess {
+                        array: Box::new(array),
+                        index,
+                    },
+                }
+            }
+            ExprKind::PropertyAccess {
+                object,
+                property,
+                nullsafe,
+            } => {
+                let object = self.memoize_lvalue(object)?;
+                let property = match &property.kind {
+                    ExprKind::Identifier(_) => (**property).clone(),
+                    _ => self.memoize_operand(property)?,
+                };
+                Expr {
+                    span: e.span,
+                    kind: ExprKind::PropertyAccess {
+                        object: Box::new(object),
+                        property: Box::new(property),
+                        nullsafe: *nullsafe,
+                    },
+                }
+            }
+            _ => self.memoize_operand(e)?,
+        })
+    }
+
+    /// Evaluate `e` once into a temporary and return a reserved variable
+    /// standing for it (literals and plain variables are kept as is).
+    fn memoize_operand(&mut self, e: &Expr) -> CompileResult<Expr> {
+        if matches!(
+            e.kind,
+            ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::String(_)
+                | ExprKind::True
+                | ExprKind::False
+                | ExprKind::Null
+                | ExprKind::Variable(_)
+                | ExprKind::Identifier(_)
+        ) {
+            return Ok(e.clone());
+        }
+        let v = self.compile_expr(e)?;
+        // A fresh temporary already holds the value; anything else (a
+        // variable written by the expression, ...) is copied now.
+        let held = match v {
+            OperandType::Tmp(_) | OperandType::Const(_) => v,
+            other => {
+                let t = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::Assign,
+                    op1: OperandType::Tmp(t),
+                    op2: other,
+                    result: OperandType::Unused,
+                    line: e.span.line,
+                });
+                OperandType::Tmp(t)
+            }
+        };
+        let mut name = b"\0memo".to_vec();
+        name.extend_from_slice(self.tmp_aliases.len().to_string().as_bytes());
+        self.tmp_aliases.push((name.clone(), held));
+        Ok(Expr {
+            span: e.span,
+            kind: ExprKind::Variable(name),
+        })
+    }
+
     /// Compile the container of a dimension write. A property container
     /// (`$obj->p[...] = v`) is fetched for writing (FETCH_OBJ_W semantics).
     fn compile_dim_write_base(&mut self, array: &Expr) -> CompileResult<OperandType> {
+        self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::W)
+    }
+
+    /// Compile the container of a dimension write fetched for `mode`
+    /// (FETCH_*_W for assignments, FETCH_*_RW for compound assignments and
+    /// increments, FETCH_*_UNSET for unset()).
+    fn compile_dim_write_base_mode(
+        &mut self,
+        array: &Expr,
+        mode: crate::fetch_w::DimFetch,
+    ) -> CompileResult<OperandType> {
+        use crate::fetch_w::DimFetch;
         if matches!(
             array.kind,
             ExprKind::StaticPropertyAccess { .. } | ExprKind::DynamicStaticPropertyAccess { .. }
@@ -9271,11 +9647,23 @@ impl Compiler {
             nullsafe: false,
         } = &array.kind
         {
-            let obj = self.compile_expr(object)?;
+            let obj = self.compile_obj_write_base_mode(
+                object,
+                if mode == DimFetch::Unset {
+                    DimFetch::Unset
+                } else {
+                    DimFetch::W
+                },
+            )?;
             let name = self.compile_property_name(property)?;
             let tmp = self.op_array.alloc_temp();
             self.op_array.emit(Op {
-                opcode: OpCode::PropertyGetW,
+                opcode: match mode {
+                    DimFetch::W => OpCode::PropertyGetW,
+                    DimFetch::Rw => OpCode::PropertyGetWRW,
+                    DimFetch::Unset => OpCode::PropertyGetWUnset,
+                    DimFetch::Obj => OpCode::PropertyGetWObj,
+                },
                 op1: obj,
                 op2: name,
                 result: OperandType::Tmp(tmp),
@@ -9289,14 +9677,19 @@ impl Compiler {
         } = &array.kind
         {
             // Nested dimension write: fetch the intermediate element for writing.
-            let container = self.compile_dim_write_base(inner)?;
+            let container = self.compile_dim_write_base_mode(inner, mode)?;
             let key = match index {
                 Some(idx) => self.compile_expr(idx)?,
                 None => OperandType::Unused,
             };
             let tmp = self.op_array.alloc_temp();
             self.op_array.emit(Op {
-                opcode: OpCode::ArrayGetW,
+                opcode: match mode {
+                    DimFetch::W => OpCode::ArrayGetW,
+                    DimFetch::Rw => OpCode::ArrayGetWRW,
+                    DimFetch::Unset => OpCode::ArrayGetWUnset,
+                    DimFetch::Obj => OpCode::ArrayGetWObj,
+                },
                 op1: container,
                 op2: key,
                 result: OperandType::Tmp(tmp),
@@ -9305,109 +9698,6 @@ impl Compiler {
             return Ok(OperandType::Tmp(tmp));
         }
         self.compile_expr(array)
-    }
-
-    /// Compile the object of a property write (`X->p = v`). A property
-    /// chain is fetched for writing (FETCH_OBJ_W); `[]` inside the chain is
-    /// a dimension write fetch.
-    fn compile_obj_write_base(&mut self, object: &Expr) -> CompileResult<OperandType> {
-        fn has_append(e: &Expr) -> bool {
-            match &e.kind {
-                ExprKind::ArrayAccess { index: None, .. } => true,
-                ExprKind::ArrayAccess { array, .. } => has_append(array),
-                ExprKind::PropertyAccess {
-                    object,
-                    nullsafe: false,
-                    ..
-                } => has_append(object),
-                _ => false,
-            }
-        }
-        match &object.kind {
-            ExprKind::PropertyAccess {
-                object: inner,
-                property,
-                nullsafe: false,
-            } => {
-                let base = self.compile_obj_write_base(inner)?;
-                let name = self.compile_property_name(property)?;
-                let tmp = self.op_array.alloc_temp();
-                self.op_array.emit(Op {
-                    opcode: OpCode::PropertyGetObjW,
-                    op1: base,
-                    op2: name,
-                    result: OperandType::Tmp(tmp),
-                    line: object.span.line,
-                });
-                Ok(OperandType::Tmp(tmp))
-            }
-            ExprKind::ArrayAccess { .. } if has_append(object) => {
-                self.compile_dim_write_base_obj(object)
-            }
-            ExprKind::ArrayAccess {
-                array: inner,
-                index: Some(idx),
-            } => {
-                let base = self.compile_obj_write_base(inner)?;
-                let key = self.compile_expr(idx)?;
-                let tmp = self.op_array.alloc_temp();
-                self.op_array.emit(Op {
-                    opcode: OpCode::ArrayGetObjW,
-                    op1: base,
-                    op2: key,
-                    result: OperandType::Tmp(tmp),
-                    line: object.span.line,
-                });
-                Ok(OperandType::Tmp(tmp))
-            }
-            _ => self.compile_expr(object),
-        }
-    }
-
-    /// Like compile_dim_write_base, for the `[]`-containing base of a
-    /// property write.
-    fn compile_dim_write_base_obj(&mut self, e: &Expr) -> CompileResult<OperandType> {
-        if let ExprKind::ArrayAccess {
-            array: inner,
-            index,
-        } = &e.kind
-        {
-            let container = match &inner.kind {
-                ExprKind::PropertyAccess {
-                    object,
-                    property,
-                    nullsafe: false,
-                } => {
-                    let obj = self.compile_obj_write_base(object)?;
-                    let name = self.compile_property_name(property)?;
-                    let tmp = self.op_array.alloc_temp();
-                    self.op_array.emit(Op {
-                        opcode: OpCode::PropertyGetW,
-                        op1: obj,
-                        op2: name,
-                        result: OperandType::Tmp(tmp),
-                        line: inner.span.line,
-                    });
-                    OperandType::Tmp(tmp)
-                }
-                ExprKind::ArrayAccess { .. } => self.compile_dim_write_base_obj(inner)?,
-                _ => self.compile_expr(inner)?,
-            };
-            let key = match index {
-                Some(idx) => self.compile_expr(idx)?,
-                None => OperandType::Unused,
-            };
-            let tmp = self.op_array.alloc_temp();
-            self.op_array.emit(Op {
-                opcode: OpCode::ArrayGetW,
-                op1: container,
-                op2: key,
-                result: OperandType::Tmp(tmp),
-                line: e.span.line,
-            });
-            return Ok(OperandType::Tmp(tmp));
-        }
-        self.compile_expr(e)
     }
 
     /// Emit `throw new \Error($msg)`.
@@ -9606,6 +9896,11 @@ impl Compiler {
             }
 
             ExprKind::Variable(name) => {
+                if !self.tmp_aliases.is_empty() {
+                    if let Some((_, op)) = self.tmp_aliases.iter().rev().find(|(n, _)| n == name) {
+                        return Ok(*op);
+                    }
+                }
                 let cv = self.op_array.get_or_create_cv(name);
                 if name == b"this" && !self.this_always_bound && !self.quiet_this {
                     // "Using $this when not in object context" unless bound.
@@ -9670,6 +9965,11 @@ impl Compiler {
                             line: expr.span.line,
                         });
                     }
+                }
+                // Computed keys / names of the target are evaluated before the
+                // assigned value (the target's fetches are delayed past it).
+                if Self::lvalue_needs_memo(target) {
+                    return self.compile_assign_memoized(expr, target, value, None);
                 }
                 // Destructuring with by-reference elements: [&$a, $b] = $src
                 if let ExprKind::Array(elems) = &target.kind {
@@ -9913,6 +10213,11 @@ impl Compiler {
                 if *op == BinaryOp::Coalesce {
                     return self.compile_assign_coalesce(expr, target, value);
                 }
+                // Computed keys / names of the target are evaluated before
+                // the operand (ASSIGN_DIM_OP / ASSIGN_OBJ_OP).
+                if Self::lvalue_needs_memo(target) {
+                    return self.compile_assign_memoized(expr, target, value, Some(*op));
+                }
                 let val = self.compile_expr(value)?;
                 match &target.kind {
                     ExprKind::Variable(name) => {
@@ -9951,22 +10256,15 @@ impl Compiler {
                         // Read current: tmp = $arr[$key]
                         // Compute: tmp2 = tmp op $val
                         // Write back: $arr[$key] = tmp2
-                        let arr = self.compile_expr(array)?;
+                        let arr =
+                            self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::Rw)?;
                         let idx = if let Some(idx_expr) = index {
                             self.compile_expr(idx_expr)?
                         } else {
-                            // $arr[] op= val: append with compound op
-                            // For a new element, starting value is null/empty
-                            // So $arr[] .= "test" => $arr[] = "" . "test" = "test"
-                            // Just compile as a simple array append
-                            self.op_array.emit(Op {
-                                opcode: OpCode::ArrayAppend,
-                                op1: arr,
-                                op2: val,
-                                result: OperandType::Unused,
-                                line: expr.span.line,
-                            });
-                            return Ok(val);
+                            // $arr[] op= val: the new element starts as null
+                            // (offsetGet(null) on ArrayAccess objects), then
+                            // `null op val` is appended.
+                            OperandType::Unused
                         };
 
                         let read_tmp = self.op_array.alloc_temp();
@@ -10002,20 +10300,31 @@ impl Compiler {
                             line: expr.span.line,
                         });
 
-                        self.op_array.emit(Op {
-                            opcode: OpCode::ArraySet,
-                            op1: arr,
-                            op2: OperandType::Tmp(result_tmp),
-                            result: idx,
-                            line: expr.span.line,
-                        });
+                        if matches!(idx, OperandType::Unused) {
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayAppend,
+                                op1: arr,
+                                op2: OperandType::Tmp(result_tmp),
+                                result: OperandType::Unused,
+                                line: expr.span.line,
+                            });
+                        } else {
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArraySet,
+                                op1: arr,
+                                op2: OperandType::Tmp(result_tmp),
+                                result: idx,
+                                line: expr.span.line,
+                            });
+                        }
                         Ok(OperandType::Tmp(result_tmp))
                     }
                     ExprKind::PropertyAccess {
                         object, property, ..
                     } => {
                         // $obj->prop op= $val
-                        let obj = self.compile_expr(object)?;
+                        let obj =
+                            self.compile_obj_write_base_mode(object, crate::fetch_w::DimFetch::Rw)?;
                         // Dynamic names ($obj->$name op= $val) are evaluated once.
                         let name_operand = match &property.kind {
                             ExprKind::Identifier(name) => {
@@ -10354,7 +10663,8 @@ impl Compiler {
                     // Without explicit read-modify-write the inc would land on a
                     // throwaway temp and the array element would never change.
                     if let ExprKind::ArrayAccess { array, index } = &operand.kind {
-                        let arr_op = self.compile_expr(array)?;
+                        let arr_op =
+                            self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::Rw)?;
                         let idx_op = if let Some(idx_expr) = index {
                             self.compile_expr(idx_expr)?
                         } else {
@@ -10368,7 +10678,7 @@ impl Compiler {
                         // Fetch current value
                         let old_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::ArrayGetRW,
+                            opcode: OpCode::ArrayGetIncDec,
                             op1: arr_op,
                             op2: idx_op,
                             result: OperandType::Tmp(old_tmp),
@@ -10389,7 +10699,7 @@ impl Compiler {
                         });
                         // Write the new value (now in old_tmp) back to $arr[$key]
                         self.op_array.emit(Op {
-                            opcode: OpCode::ArraySet,
+                            opcode: OpCode::ArraySetIncDec,
                             op1: arr_op,
                             op2: OperandType::Tmp(old_tmp),
                             result: idx_op,
@@ -10408,7 +10718,8 @@ impl Compiler {
                         object, property, ..
                     } = &operand.kind
                     {
-                        let obj_op = self.compile_expr(object)?;
+                        let obj_op =
+                            self.compile_obj_write_base_mode(object, crate::fetch_w::DimFetch::Rw)?;
                         // Property name: a literal identifier, or an expression
                         // evaluated once ($obj->$name++, $obj->{'a'}++).
                         let name_op = match &property.kind {
@@ -12481,7 +12792,7 @@ impl Compiler {
                         jmp_to_true.push(j as usize);
                         OperandType::Tmp(t)
                     } else {
-                        self.compile_expr(base_expr)?
+                        self.compile_is_fetch(base_expr)?
                     };
                     let base_op = self.snapshot_cv(base_op, expr.span.line);
                     let result_tmp = self.op_array.alloc_temp();
@@ -14403,23 +14714,8 @@ impl Compiler {
                         },
                     ) => {
                         // $var = &$arr[key] — get/create reference in array, assign to variable
-                        let src_arr = self.compile_expr(value_arr)?;
-                        let ref_tmp = self.op_array.alloc_temp();
-                        if let Some(src_idx_expr) = value_idx {
-                            let src_idx = self.compile_expr(src_idx_expr)?;
-                            self.op_array.emit(Op {
-                                opcode: OpCode::ArrayGetRef,
-                                op1: src_arr,
-                                op2: src_idx,
-                                result: OperandType::Tmp(ref_tmp),
-                                line: expr.span.line,
-                            });
-                        } else {
-                            return Err(CompileError {
-                                message: "Cannot use [] for reading".into(),
-                                line: expr.span.line,
-                            });
-                        }
+                        let ref_tmp =
+                            self.compile_dim_ref(value_arr, value_idx.as_deref(), expr.span.line)?;
                         let target_cv = self.op_array.get_or_create_cv(target_name);
                         // Bind the CV to the reference (rebinding, not writing
                         // through a reference the CV may already hold)
@@ -14467,7 +14763,7 @@ impl Compiler {
                         // $arr[k] = &$obj->prop
                         let ref_tmp =
                             self.compile_property_ref(object, property, expr.span.line)?;
-                        let arr = self.compile_expr(array)?;
+                        let arr = self.compile_dim_write_base(array)?;
                         let idx = self.compile_expr(index)?;
                         self.op_array.emit(Op {
                             opcode: OpCode::ArraySetRef,
@@ -14505,20 +14801,12 @@ impl Compiler {
                             }
                             ExprKind::ArrayAccess {
                                 array: value_arr,
-                                index: Some(value_idx),
-                            } => {
-                                let src_arr = self.compile_expr(value_arr)?;
-                                let src_idx = self.compile_expr(value_idx)?;
-                                let ref_tmp = self.op_array.alloc_temp();
-                                self.op_array.emit(Op {
-                                    opcode: OpCode::ArrayGetRef,
-                                    op1: src_arr,
-                                    op2: src_idx,
-                                    result: OperandType::Tmp(ref_tmp),
-                                    line: expr.span.line,
-                                });
-                                OperandType::Tmp(ref_tmp)
-                            }
+                                index: value_idx,
+                            } => OperandType::Tmp(self.compile_dim_ref(
+                                value_arr,
+                                value_idx.as_deref(),
+                                expr.span.line,
+                            )?),
                             ExprKind::PropertyAccess {
                                 object: vo,
                                 property: vp,
@@ -14636,7 +14924,7 @@ impl Compiler {
                     }
                     (ExprKind::ArrayAccess { array, index }, ExprKind::Variable(value_name)) => {
                         // $arr[key] = &$var — store reference into array element
-                        let arr = self.compile_expr(array)?;
+                        let arr = self.compile_dim_write_base(array)?;
                         let value_cv = self.op_array.get_or_create_cv(value_name);
                         if let Some(idx_expr) = index {
                             let idx = self.compile_expr(idx_expr)?;
@@ -14681,24 +14969,9 @@ impl Compiler {
                         },
                     ) => {
                         // $arr1[k1] = &$arr2[k2] — get/create reference in source, store in target
-                        let src_arr = self.compile_expr(value_arr)?;
-                        let ref_tmp = self.op_array.alloc_temp();
-                        if let Some(src_idx_expr) = value_idx {
-                            let src_idx = self.compile_expr(src_idx_expr)?;
-                            self.op_array.emit(Op {
-                                opcode: OpCode::ArrayGetRef,
-                                op1: src_arr,
-                                op2: src_idx,
-                                result: OperandType::Tmp(ref_tmp),
-                                line: expr.span.line,
-                            });
-                        } else {
-                            return Err(CompileError {
-                                message: "Cannot use [] for reading".into(),
-                                line: expr.span.line,
-                            });
-                        }
-                        let dst_arr = self.compile_expr(target_arr)?;
+                        let ref_tmp =
+                            self.compile_dim_ref(value_arr, value_idx.as_deref(), expr.span.line)?;
+                        let dst_arr = self.compile_dim_write_base(target_arr)?;
                         if let Some(dst_idx_expr) = target_idx {
                             let dst_idx = self.compile_expr(dst_idx_expr)?;
                             self.op_array.emit(Op {
@@ -14725,7 +14998,7 @@ impl Compiler {
                     }
                     (ExprKind::ArrayAccess { array, index }, _) => {
                         // $arr[key] = &<expr> — evaluate expr and store reference
-                        let arr = self.compile_expr(array)?;
+                        let arr = self.compile_dim_write_base(array)?;
                         let val = self.compile_expr(value)?;
                         self.emit_assign_ref_call_notice(value, expr.span.line);
                         if let Some(idx_expr) = index {

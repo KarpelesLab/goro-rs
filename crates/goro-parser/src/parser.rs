@@ -46,6 +46,8 @@ pub struct Parser {
     pending_extra_properties: Vec<ClassMember>,
     /// Explicit parameter type of the last parsed `set(Type $v)` hook.
     last_set_hook_type: Option<TypeHint>,
+    /// Whether the get hook parsed by the last parse_property_hooks() was `&get`.
+    last_get_hook_by_ref: bool,
     /// A doc-comment captured at the start of an assignment statement that
     /// should be applied to a closure/arrow function on the right-hand side.
     /// Set in parse_statement() when we see `/** doc */ $x = function/fn/static
@@ -184,6 +186,7 @@ impl Parser {
             source: Vec::new(),
             pending_extra_properties: Vec::new(),
             last_set_hook_type: None,
+            last_get_hook_by_ref: false,
             pending_closure_doc: None,
             class_name_stack: Vec::new(),
             is_interface_stack: Vec::new(),
@@ -1800,6 +1803,7 @@ impl Parser {
                 set_hook_abstract: param_set_hook_abstract,
                 doc_comment: param_doc_comment,
                 set_hook_type: self.last_set_hook_type.take(),
+                get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
             });
 
             if !self.eat(&TokenKind::Comma) {
@@ -2815,6 +2819,7 @@ impl Parser {
                                 attributes: member_attributes.clone(),
                                 doc_comment: extra_doc,
                                 set_hook_type: None,
+                                get_hook_by_ref: false,
                             });
                         } else {
                             break;
@@ -2893,6 +2898,7 @@ impl Parser {
                     attributes: member_attributes.clone(),
                     doc_comment: member_doc_comment,
                     set_hook_type: self.last_set_hook_type.take(),
+                    get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
                 })
             }
             _ => {
@@ -2959,6 +2965,7 @@ impl Parser {
                                 attributes: member_attributes.clone(),
                                 doc_comment: extra_doc,
                                 set_hook_type: None,
+                                get_hook_by_ref: false,
                             });
                         } else {
                             break;
@@ -3037,6 +3044,7 @@ impl Parser {
                     attributes: member_attributes,
                     doc_comment: member_doc_comment,
                     set_hook_type: self.last_set_hook_type.take(),
+                    get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
                 })
             }
         }
@@ -3062,6 +3070,7 @@ impl Parser {
         let mut get_hook_final = false;
         let mut set_hook_final = false;
         let mut get_hook_abstract = false;
+        self.last_get_hook_by_ref = false;
         let mut set_hook_abstract = false;
 
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
@@ -3119,7 +3128,11 @@ impl Parser {
                 });
             }
             let _ = hook_is_private;
-            let _ = hook_is_by_ref;
+            if hook_is_by_ref
+                && matches!(self.peek(), TokenKind::Identifier(n) if n.eq_ignore_ascii_case(b"get"))
+            {
+                self.last_get_hook_by_ref = true;
+            }
             // Look for "get" or "set" identifier
             let hook_name = match self.peek().clone() {
                 TokenKind::Identifier(name) => name,

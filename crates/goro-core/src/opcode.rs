@@ -401,6 +401,44 @@ pub enum OpCode {
     /// the result tmp: snapshots an operand that a magic method could change
     /// between two uses (`$o->$name ?? x` calls __isset then __get).
     QmAssign,
+    /// Like ArrayGetW for the containers of a compound assignment /
+    /// increment (`$a[k][j] op= v`, FETCH_DIM_RW): undefined variables and
+    /// keys are warned about before being created.
+    ArrayGetWRW,
+    /// Like ArrayGetW for the containers of `unset($a[k][j])`
+    /// (FETCH_DIM_UNSET): nothing is created; a missing element yields null.
+    ArrayGetWUnset,
+    /// SendVal of a non-variable argument (op1, position op2) whose callee
+    /// may take it by reference: result = Const(0) for a call result
+    /// (SEND_VAR_NO_REF_EX: "Only variables should be passed by reference"
+    /// notice), Const(1) for another expression (SEND_VAL_EX: Error).
+    SendValChecked,
+    /// Read side of `$a[k]++` (FETCH_DIM_RW for an increment): like
+    /// ArrayGetRW, but on ArrayAccess objects the by-value offsetGet() result
+    /// is reported as an indirect modification.
+    ArrayGetIncDec,
+    /// Write-back of `$a[k]++`: like ArraySet, but a no-op on objects.
+    ArraySetIncDec,
+    /// FETCH_DIM_W for the container of an object write (`$a[k]->p = v`):
+    /// a missing element is created as null (no array vivification).
+    ArrayGetWObj,
+    /// FETCH_OBJ_W for the container of an object write (`$o->a->b = v`):
+    /// a missing property is created as null; non-objects throw "Attempt
+    /// to modify property".
+    PropertyGetWObj,
+    /// FETCH_OBJ_RW for the container of a compound object write
+    /// (`$o->a->b op= v`): like PropertyGetWObj, but an undefined property
+    /// warns and an uninitialized typed one throws.
+    PropertyGetWObjRW,
+    /// PropertyGet for empty() / isset() (FETCH_OBJ_IS): an overloaded
+    /// property is checked with __isset() before __get() is called.
+    PropertyGetIs,
+    /// Like PropertyGetW for the container of a compound assignment
+    /// (`$o->p[k] op= v`, FETCH_OBJ_RW): an undefined property is warned about.
+    PropertyGetWRW,
+    /// Like PropertyGetW for `unset($o->p[k])` (FETCH_OBJ_UNSET): a missing
+    /// property is created as null instead of an array.
+    PropertyGetWUnset,
 }
 
 /// A compiled function / script

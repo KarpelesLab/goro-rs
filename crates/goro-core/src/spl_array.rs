@@ -335,6 +335,59 @@ impl Vm {
         }
     }
 
+    /// spl_array_read_dimension() in a write context (BP_VAR_W / RW / UNSET,
+    /// `mode` b'w' / b'r' / b'u'): the element a nested write goes into,
+    /// vivified to an array (W/RW) and separated so writes reach the storage.
+    /// `None` stands for &EG(uninitialized_zval).
+    pub(crate) fn ao_fetch_dim_w(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        offset: Option<&Value>,
+        mode: u8,
+    ) -> Option<Value> {
+        let offset = offset?;
+        if mode != b'u' && !self.ao_sort_check(obj) {
+            return Some(Value::Null);
+        }
+        let k = match self.ao_hash_key(obj, offset) {
+            Ok(k) => k,
+            Err(t) => {
+                self.ao_illegal_offset(obj, &t, if mode == b'u' { b'u' } else { b'w' });
+                return if mode == b'u' {
+                    None
+                } else {
+                    Some(Value::Null)
+                };
+            }
+        };
+        let t = self.ao_table(obj);
+        let cur = match self.table_get(&t, &k) {
+            None | Some(Value::Undef) => {
+                if mode == b'u' {
+                    return None;
+                }
+                if mode == b'r' {
+                    self.ao_undefined_key(&k);
+                }
+                Value::Null
+            }
+            Some(v) => v.deref(),
+        };
+        match cur {
+            Value::Null if mode != b'u' => {
+                let arr = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                self.table_set(&t, k, arr.clone());
+                Some(arr)
+            }
+            Value::Array(rc) if Rc::strong_count(&rc) > 2 => {
+                let sep = Value::Array(Rc::new(RefCell::new(rc.borrow().clone())));
+                self.table_set(&t, k, sep.clone());
+                Some(sep)
+            }
+            other => Some(other),
+        }
+    }
+
     pub(crate) fn ao_offset_set(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value, v: Value) {
         if !self.ao_sort_check(obj) {
             return;

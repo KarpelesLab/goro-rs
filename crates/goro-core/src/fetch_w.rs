@@ -1,0 +1,801 @@
+//! Dimension fetches in a write context (php-src zend_fetch_dimension_address
+//! for BP_VAR_W / BP_VAR_RW / BP_VAR_UNSET), used for the containers of a
+//! nested write such as `$a[k][j] = v`, `$a[k][j] .= v` or `unset($a[k][j])`.
+//!
+//! The fetched element is returned as a value the next opcode writes into: an
+//! array `Rc` that is the element's own storage (vivified and separated), an
+//! object, or a plain value (scalars are rejected by the consumer).
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use crate::array::PhpArray;
+use crate::value::Value;
+use crate::vm::Vm;
+
+/// Which write context a dimension container is fetched for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DimFetch {
+    /// FETCH_DIM_W: missing elements are created silently.
+    W,
+    /// FETCH_DIM_RW: missing variables / keys are warned about, then created.
+    Rw,
+    /// FETCH_DIM_UNSET: nothing is created.
+    Unset,
+    /// FETCH_DIM_W for the container of an object write (`$a[k]->p = v`):
+    /// a missing element is created as null, not vivified to an array.
+    Obj,
+}
+
+impl Vm {
+    /// Fetch `slot[key]` (`key == None` is `slot[]`) for a nested write.
+    /// `slot` is the container: a CV slot (possibly holding a reference) or a
+    /// tmp holding an earlier fetch. `undef_cv` names the CV for the
+    /// "Undefined variable" warning. Returns `None` when an exception is
+    /// pending.
+    pub(crate) fn fetch_dim_for_write(
+        &mut self,
+        slot: &mut Value,
+        key: Option<Value>,
+        mode: DimFetch,
+        undef_cv: Option<&[u8]>,
+        line: u32,
+    ) -> Option<Value> {
+        let cell = match slot {
+            Value::Reference(r) => Some(r.clone()),
+            _ => None,
+        };
+        let cur = match &cell {
+            Some(r) => r.borrow().clone(),
+            None => std::mem::replace(slot, Value::Undef),
+        };
+        let restore = |slot: &mut Value, v: Value| {
+            if cell.is_none() {
+                *slot = v;
+            }
+        };
+        match cur {
+            Value::Array(rc) => {
+                restore(slot, Value::Array(rc.clone()));
+                self.fetch_dim_from_array(&rc, key, mode, line)
+            }
+            Value::Undef | Value::Null | Value::False => {
+                if mode != DimFetch::W && matches!(cur, Value::Undef) && cell.is_none() {
+                    if let Some(name) = undef_cv {
+                        self.emit_warning_at(
+                            &format!("Undefined variable ${}", String::from_utf8_lossy(name)),
+                            line,
+                        );
+                    }
+                }
+                if matches!(cur, Value::False) {
+                    self.emit_deprecated_at(
+                        "Automatic conversion of false to array is deprecated",
+                        line,
+                    );
+                }
+                if mode == DimFetch::Unset {
+                    restore(slot, cur);
+                    return Some(Value::Null);
+                }
+                let rc = Rc::new(RefCell::new(PhpArray::new()));
+                match &cell {
+                    Some(r) => *r.borrow_mut() = Value::Array(rc.clone()),
+                    None => *slot = Value::Array(rc.clone()),
+                }
+                self.fetch_dim_from_array(&rc, key, mode, line)
+            }
+            Value::Object(_) => {
+                let obj = cur.clone();
+                restore(slot, cur);
+                self.fetch_dim_from_object(&obj, key, mode, line)
+            }
+            Value::String(s) => {
+                restore(slot, Value::String(s));
+                match key {
+                    None => self.throw_error_msg(b"Error", "[] operator not supported for strings"),
+                    Some(k) => {
+                        if self.check_string_offset_w(&k, mode, line) {
+                            self.throw_error_msg(b"Error", "Cannot use string offset as an array");
+                        }
+                    }
+                }
+                None
+            }
+            other => {
+                restore(slot, other);
+                if mode == DimFetch::Unset {
+                    self.throw_error_msg(b"Error", "Cannot unset offset in a non-array variable");
+                } else {
+                    self.throw_error_msg(b"Error", "Cannot use a scalar value as an array");
+                }
+                None
+            }
+        }
+    }
+
+    /// Whether read_dimension() of `obj` hands out the element itself in a
+    /// write context (ArrayObject storage, WeakMap values), so writes through
+    /// it are not "indirect modifications".
+    pub(crate) fn dim_fetch_native_ref(&self, obj: &Rc<RefCell<crate::object::PhpObject>>) -> bool {
+        let cl: Vec<u8> = obj
+            .borrow()
+            .class_name
+            .iter()
+            .map(|b| b.to_ascii_lowercase())
+            .collect();
+        if cl == b"weakmap" {
+            return true;
+        }
+        self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"])
+            .is_some()
+            && !self.ao_user_has(obj, b"offsetget")
+    }
+
+    /// zend_std_read_property() in a write context (FETCH_OBJ_W/RW/UNSET)
+    /// for a `__get()` result: a by-value non-object result is a copy the
+    /// write cannot reach.
+    pub(crate) fn magic_get_w_result(
+        &mut self,
+        result: Value,
+        class_name: &[u8],
+        prop: &[u8],
+        line: u32,
+    ) -> Value {
+        if self.last_call_by_ref {
+            return result.deref();
+        }
+        match result.deref() {
+            Value::Object(o) => Value::Object(o),
+            other => {
+                self.emit_notice_at(
+                    &format!(
+                        "Indirect modification of overloaded property {}::${} has no effect",
+                        crate::value::display_class_name(class_name),
+                        String::from_utf8_lossy(prop)
+                    ),
+                    line,
+                );
+                match other {
+                    Value::Array(rc) => {
+                        let copy = rc.borrow().clone();
+                        Value::Array(Rc::new(RefCell::new(copy)))
+                    }
+                    v => v,
+                }
+            }
+        }
+    }
+
+    /// A get hook result fetched for writing: a by-value non-object result
+    /// throws "Indirect modification of C::$p is not allowed". Returns false
+    /// when it threw.
+    pub(crate) fn hook_get_w_check(&mut self, val: &Value, class_name: &[u8], prop: &[u8]) -> bool {
+        if self.last_call_by_ref || matches!(val.deref(), Value::Object(_)) {
+            return true;
+        }
+        let msg = format!(
+            "Indirect modification of {}::${} is not allowed",
+            crate::value::display_class_name(class_name),
+            String::from_utf8_lossy(prop)
+        );
+        self.throw_error_msg(b"Error", &msg);
+        false
+    }
+
+    /// The property's hooks `(has_get, has_set)` when accessed from outside
+    /// its own hooks; `None` for a plain property or from inside a hook.
+    pub(crate) fn prop_hooks_outside(
+        &self,
+        class_lower: &[u8],
+        prop: &[u8],
+    ) -> Option<(bool, bool)> {
+        let (g, st) = self
+            .classes
+            .get(class_lower)
+            .and_then(|c| c.properties.iter().find(|p| p.name == prop && !p.is_static))
+            .map(|p| (p.has_get_hook, p.has_set_hook))?;
+        if !g && !st {
+            return None;
+        }
+        let mut base = class_lower.to_vec();
+        base.extend_from_slice(b"::");
+        base.extend_from_slice(prop);
+        if self
+            .property_hook_stack
+            .iter()
+            .any(|k| k.starts_with(&base))
+        {
+            return None;
+        }
+        Some((g, st))
+    }
+
+    /// Run the get hook of `prop` (outside of it) and return its result.
+    pub(crate) fn call_prop_get_hook(
+        &mut self,
+        obj_val: &Value,
+        class_lower: &[u8],
+        prop: &[u8],
+    ) -> Value {
+        let mut key = class_lower.to_vec();
+        key.extend_from_slice(b"::");
+        key.extend_from_slice(prop);
+        key.extend_from_slice(b"::get");
+        let mut m = b"__property_get_".to_vec();
+        m.extend_from_slice(prop);
+        self.last_call_by_ref = false;
+        self.property_hook_stack.push(key);
+        let r = self.call_object_method(obj_val, &m, &[]);
+        self.property_hook_stack.pop();
+        r.unwrap_or(Value::Null)
+    }
+
+    /// zend_cannot_pass_by_reference() message for argument `arg_index`
+    /// (0-based) of the pending call.
+    pub(crate) fn cannot_pass_by_ref_msg(&self, arg_index: usize) -> String {
+        let (fname, pname, num) = self
+            .pending_calls
+            .last()
+            .and_then(|call| {
+                let lower: Vec<u8> = call.name.as_bytes().to_ascii_lowercase();
+                self.user_functions.get(&lower).map(|f| {
+                    // Methods carry $this as their first argument.
+                    let is_method = f.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                        && matches!(call.args.first(), Some(Value::Object(_)));
+                    let disp = if call.name.as_bytes().windows(2).any(|w| w == b"::")
+                        || f.name.is_empty()
+                    {
+                        call.name.to_string_lossy().to_string()
+                    } else {
+                        String::from_utf8_lossy(f.effective_name()).to_string()
+                    };
+                    let num = if is_method { arg_index } else { arg_index + 1 };
+                    (disp, f.cv_names.get(arg_index).cloned(), num)
+                })
+            })
+            .unwrap_or_default();
+        match pname {
+            Some(p) => format!(
+                "{}(): Argument #{} (${}) could not be passed by reference",
+                fname,
+                num,
+                String::from_utf8_lossy(&p)
+            ),
+            None => format!(
+                "{}(): Argument #{} could not be passed by reference",
+                fname, num
+            ),
+        }
+    }
+
+    /// FETCH_OBJ_IS on an overloaded property: true when the class has an
+    /// (unguarded) __isset() that reports the property as not set, so the
+    /// fetch yields null without calling __get().
+    pub(crate) fn magic_isset_denies(
+        &mut self,
+        obj_val: &Value,
+        class_lower: &[u8],
+        prop: &crate::string::PhpString,
+    ) -> bool {
+        let Value::Object(o) = obj_val else {
+            return false;
+        };
+        let has_isset = self
+            .classes
+            .get(class_lower)
+            .map(|c| c.get_method(b"__isset").is_some())
+            .unwrap_or(false);
+        if !has_isset {
+            return false;
+        }
+        let key = (o.borrow().object_id, prop.as_bytes().to_vec(), 1u8);
+        if self.magic_prop_guards.contains(&key) {
+            return false;
+        }
+        self.magic_prop_guards.insert(key.clone());
+        let r = self.call_object_method(obj_val, b"__isset", &[Value::String(prop.clone())]);
+        self.magic_prop_guards.remove(&key);
+        !r.map(|v| v.is_truthy()).unwrap_or(false)
+    }
+
+    /// The Error a dimension write on `container` throws, for containers
+    /// other than arrays and null-ish values (`append`: `$c[] = v`).
+    pub(crate) fn dim_write_container_error(
+        &self,
+        container: &Value,
+        append: bool,
+    ) -> Option<String> {
+        match container {
+            Value::True | Value::Long(_) | Value::Double(_) | Value::Resource(_) => {
+                Some("Cannot use a scalar value as an array".to_string())
+            }
+            Value::String(_) if append => Some("[] operator not supported for strings".to_string()),
+            Value::Object(o) => {
+                let cl: Vec<u8> = o.borrow().class_name.to_ascii_lowercase();
+                let array_access = cl == b"weakmap"
+                    || self
+                        .classes
+                        .get(&cl)
+                        .map(|c| c.get_method(b"offsetset").is_some())
+                        .unwrap_or(false)
+                    || self.class_implements_interface(&cl, b"arrayaccess")
+                    || self
+                        .spl_find_base(
+                            &cl,
+                            &[
+                                b"arrayobject",
+                                b"arrayiterator",
+                                b"splfixedarray",
+                                b"splobjectstorage",
+                                b"multipleiterator",
+                                b"simplexmlelement",
+                                b"spldoublylinkedlist",
+                            ],
+                        )
+                        .is_some()
+                    || self.native_class_handlers.contains_key(&cl)
+                    || Self::spl_iter_class(&cl)
+                    || crate::vm::get_builtin_parent(&cl).is_some();
+                if array_access {
+                    None
+                } else {
+                    Some(format!(
+                        "Cannot use object of type {} as array",
+                        crate::value::display_class_name(&o.borrow().class_name)
+                    ))
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// zend_asymmetric_visibility_property_modification_error(): the
+    /// message when the current scope may not write a `set_vis` property.
+    pub(crate) fn asym_set_denied(
+        &self,
+        set_vis: Option<crate::object::Visibility>,
+        is_readonly: bool,
+        declaring_class: &[u8],
+        class_name: &[u8],
+        prop: &[u8],
+        operation: &str,
+    ) -> Option<String> {
+        let sv = set_vis?;
+        if sv == crate::object::Visibility::Public {
+            return None;
+        }
+        let prop_str = String::from_utf8_lossy(prop).to_string();
+        let caller_scope = self.current_class_scope();
+        self.check_visibility(
+            sv,
+            declaring_class,
+            class_name,
+            &prop_str,
+            true,
+            caller_scope.as_deref(),
+        )?;
+        let vis_str = match (sv, is_readonly) {
+            (crate::object::Visibility::Private, _) => "private(set)",
+            (_, true) => "protected(set) readonly",
+            _ => "protected(set)",
+        };
+        let decl_lower = declaring_class.to_ascii_lowercase();
+        let class_display = self
+            .classes
+            .get(&decl_lower)
+            .map(|c| crate::value::display_class_name(&c.name))
+            .unwrap_or_else(|| crate::value::display_class_name(declaring_class));
+        let scope_str = match caller_scope.as_deref() {
+            Some(cs) => format!(
+                "scope {}",
+                self.classes
+                    .get(&cs.to_ascii_lowercase())
+                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                    .unwrap_or_else(|| String::from_utf8_lossy(cs).to_string())
+            ),
+            None => "global scope".to_string(),
+        };
+        Some(format!(
+            "Cannot {} {} property {}::${} from {}",
+            operation, vis_str, class_display, prop_str, scope_str
+        ))
+    }
+
+    /// `$obj[k] = &$v` / `$obj[] = &$v` on an object (ZEND_ASSIGN_REF on a
+    /// FETCH_DIM_W result): offsetGet() is called for the write fetch; unless
+    /// it returned a reference there is no slot to bind and an Error is
+    /// thrown. Returns false when an exception is pending.
+    pub(crate) fn assign_ref_to_object_dim(
+        &mut self,
+        obj: &Value,
+        key: Option<Value>,
+        line: u32,
+    ) -> bool {
+        self.last_call_by_ref = false;
+        let r = self.fetch_dim_from_object(obj, key, DimFetch::W, line);
+        if r.is_none() || self.current_exception.is_some() {
+            return false;
+        }
+        if !self.last_call_by_ref {
+            self.throw_error_msg(
+                b"Error",
+                "Cannot assign by reference to an array dimension of an object",
+            );
+            return false;
+        }
+        true
+    }
+
+    fn throw_error_msg(&mut self, class: &[u8], msg: &str) {
+        let line = self.current_line;
+        let exc = self.create_exception(class, msg, line);
+        self.current_exception = Some(exc);
+    }
+
+    /// zend_check_string_offset(): false when it threw.
+    pub(crate) fn check_string_offset_w(&mut self, key: &Value, mode: DimFetch, line: u32) -> bool {
+        match key.deref() {
+            Value::Long(_) => true,
+            Value::String(s) => {
+                let (numeric, trailing) = Vm::is_numeric_string_with_trailing(s.as_bytes());
+                if numeric
+                    && s.as_bytes()
+                        .iter()
+                        .all(|b| !matches!(b, b'.' | b'e' | b'E'))
+                {
+                    if trailing && mode != DimFetch::Unset {
+                        self.emit_warning_at(
+                            &format!("Illegal string offset \"{}\"", s.to_string_lossy()),
+                            line,
+                        );
+                    }
+                    true
+                } else {
+                    self.illegal_string_offset(&Value::String(s), mode);
+                    false
+                }
+            }
+            Value::Double(_) | Value::Null | Value::Undef | Value::False | Value::True => {
+                self.emit_warning_at("String offset cast occurred", line);
+                true
+            }
+            other => {
+                self.illegal_string_offset(&other, mode);
+                false
+            }
+        }
+    }
+
+    fn illegal_string_offset(&mut self, key: &Value, mode: DimFetch) {
+        if mode == DimFetch::Unset {
+            self.throw_error_msg(b"Error", "Cannot unset string offsets");
+        } else {
+            let t = Self::offset_type_name(key);
+            self.throw_error_msg(
+                b"TypeError",
+                &format!("Cannot access offset of type {} on string", t),
+            );
+        }
+    }
+
+    fn offset_type_name(key: &Value) -> String {
+        match key {
+            Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name),
+            Value::Array(_) => "array".to_string(),
+            Value::String(_) => "string".to_string(),
+            Value::Resource(_) => "resource".to_string(),
+            Value::Double(_) => "float".to_string(),
+            Value::Long(_) => "int".to_string(),
+            Value::True | Value::False => "bool".to_string(),
+            _ => "null".to_string(),
+        }
+    }
+
+    /// zend_fetch_dimension_address_inner() + vivification for W/RW/UNSET.
+    fn fetch_dim_from_array(
+        &mut self,
+        arr: &Rc<RefCell<PhpArray>>,
+        key: Option<Value>,
+        mode: DimFetch,
+        line: u32,
+    ) -> Option<Value> {
+        let Some(key_val) = key else {
+            let rc = Rc::new(RefCell::new(PhpArray::new()));
+            if let Err(msg) = arr.borrow_mut().try_push(Value::Array(rc.clone())) {
+                self.throw_error_msg(b"Error", msg);
+                return None;
+            }
+            return Some(Value::Array(rc));
+        };
+        let key_inner = key_val.deref();
+        if matches!(key_inner, Value::Array(_) | Value::Object(_)) {
+            let t = Self::offset_type_name(&key_inner);
+            let msg = if mode == DimFetch::Unset {
+                format!("Cannot unset offset of type {} on array", t)
+            } else {
+                format!("Cannot access offset of type {} on array", t)
+            };
+            self.throw_error_msg(b"TypeError", &msg);
+            return None;
+        }
+        let k = self.value_to_array_key_checked(&key_inner, line);
+        let existing = arr.borrow().get(&k).cloned();
+        let vivify = |arr: &Rc<RefCell<PhpArray>>, k| {
+            let rc = Rc::new(RefCell::new(PhpArray::new()));
+            arr.borrow_mut().set(k, Value::Array(rc.clone()));
+            Value::Array(rc)
+        };
+        if mode == DimFetch::Obj {
+            return Some(match existing {
+                None | Some(Value::Undef) => {
+                    arr.borrow_mut().set(k, Value::Null);
+                    Value::Null
+                }
+                Some(v) => v.deref(),
+            });
+        }
+        match existing {
+            None | Some(Value::Undef) => {
+                if mode == DimFetch::Unset {
+                    return Some(Value::Null);
+                }
+                if mode == DimFetch::Rw {
+                    self.emit_undefined_key_warning(&k, line);
+                }
+                Some(vivify(arr, k))
+            }
+            Some(Value::Null) => {
+                if mode == DimFetch::Unset {
+                    return Some(Value::Null);
+                }
+                Some(vivify(arr, k))
+            }
+            Some(Value::False) if mode != DimFetch::Unset => {
+                self.emit_deprecated_at(
+                    "Automatic conversion of false to array is deprecated",
+                    line,
+                );
+                Some(vivify(arr, k))
+            }
+            Some(Value::Reference(r)) => {
+                let inner = r.borrow().clone();
+                match inner {
+                    Value::Null | Value::Undef => {
+                        if mode == DimFetch::Unset {
+                            return Some(Value::Null);
+                        }
+                        let rc = Rc::new(RefCell::new(PhpArray::new()));
+                        *r.borrow_mut() = Value::Array(rc.clone());
+                        Some(Value::Array(rc))
+                    }
+                    Value::False if mode != DimFetch::Unset => {
+                        self.emit_deprecated_at(
+                            "Automatic conversion of false to array is deprecated",
+                            line,
+                        );
+                        let rc = Rc::new(RefCell::new(PhpArray::new()));
+                        *r.borrow_mut() = Value::Array(rc.clone());
+                        Some(Value::Array(rc))
+                    }
+                    Value::Array(rc) => {
+                        // The reference holds one count, `inner` the other.
+                        // (unset() leaves a referenced array in place: a builtin may
+                        // be working on it through the reference.)
+                        if Rc::strong_count(&rc) > 2 && mode != DimFetch::Unset {
+                            let sep = Rc::new(RefCell::new(rc.borrow().clone()));
+                            *r.borrow_mut() = Value::Array(sep.clone());
+                            Some(Value::Array(sep))
+                        } else {
+                            Some(Value::Array(rc))
+                        }
+                    }
+                    other => Some(other),
+                }
+            }
+            Some(Value::Array(rc)) => {
+                // Copy-on-write: separate an element array shared elsewhere
+                // (the container holds one count, `existing` the other).
+                if Rc::strong_count(&rc) > 2 {
+                    let sep = Rc::new(RefCell::new(rc.borrow().clone()));
+                    arr.borrow_mut().set(k, Value::Array(sep.clone()));
+                    Some(Value::Array(sep))
+                } else {
+                    Some(Value::Array(rc))
+                }
+            }
+            Some(other) => Some(other),
+        }
+    }
+
+    /// zend_weakmap_read_dimension() for W/RW/UNSET: the stored value itself.
+    fn weakmap_fetch_dim_w(
+        &mut self,
+        obj: &Rc<RefCell<crate::object::PhpObject>>,
+        key: Option<Value>,
+        mode: DimFetch,
+    ) -> Option<Value> {
+        let Some(key) = key else {
+            self.throw_error_msg(b"Error", "Cannot append to WeakMap");
+            return None;
+        };
+        let Value::Object(key_obj) = key.deref() else {
+            self.throw_error_msg(b"TypeError", "WeakMap key must be an object");
+            return None;
+        };
+        let wm_id = obj.borrow().object_id;
+        let key_id = key_obj.borrow().object_id;
+        let entry = self.weak_map_entries.get_mut(&wm_id).and_then(|entries| {
+            entries
+                .iter_mut()
+                .find(|(oid, weak, _)| *oid == key_id && weak.upgrade().is_some())
+        });
+        let Some((_, _, v)) = entry else {
+            let msg = format!(
+                "Object {}#{} not contained in WeakMap",
+                crate::value::display_class_name(&key_obj.borrow().class_name),
+                key_id
+            );
+            self.throw_error_msg(b"Error", &msg);
+            return None;
+        };
+        let target: &mut Value = v;
+        let fetched = match &*target {
+            Value::Reference(r) => r.borrow().clone(),
+            other => other.clone(),
+        };
+        let store = |target: &mut Value, nv: Value| match target {
+            Value::Reference(r) => *r.borrow_mut() = nv,
+            t => *t = nv,
+        };
+        match fetched {
+            Value::Null if mode != DimFetch::Unset => {
+                let arr = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                store(target, arr.clone());
+                Some(arr)
+            }
+            Value::Array(rc) if Rc::strong_count(&rc) > 2 => {
+                let sep = Value::Array(Rc::new(RefCell::new(rc.borrow().clone())));
+                store(target, sep.clone());
+                Some(sep)
+            }
+            other => Some(other),
+        }
+    }
+
+    fn emit_undefined_key_warning(&mut self, k: &crate::array::ArrayKey, line: u32) {
+        let msg = match k {
+            crate::array::ArrayKey::Int(i) => format!("Undefined array key {}", i),
+            crate::array::ArrayKey::String(s) => {
+                format!("Undefined array key \"{}\"", s.to_string_lossy())
+            }
+        };
+        self.emit_warning_at(&msg, line);
+    }
+
+    /// read_dimension() of an object in a write context, then the
+    /// "Indirect modification" check of zend_fetch_dimension_address().
+    pub(crate) fn fetch_dim_from_object(
+        &mut self,
+        obj_val: &Value,
+        key: Option<Value>,
+        mode: DimFetch,
+        line: u32,
+    ) -> Option<Value> {
+        let Value::Object(obj) = obj_val else {
+            return Some(Value::Null);
+        };
+        let (class_name, class_lower) = {
+            let ob = obj.borrow();
+            let cl: Vec<u8> = ob
+                .class_name
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            (ob.class_name.clone(), cl)
+        };
+        let indirect_notice = |vm: &mut Vm| {
+            let disp = crate::value::display_class_name(&class_name);
+            vm.emit_notice_at(
+                &format!(
+                    "Indirect modification of overloaded element of {} has no effect",
+                    disp
+                ),
+                line,
+            );
+        };
+        let is_ao = self
+            .spl_find_base(&class_lower, &[b"arrayobject", b"arrayiterator"])
+            .is_some();
+        if is_ao && !self.ao_user_has(obj, b"offsetget") {
+            let m = match mode {
+                DimFetch::W | DimFetch::Obj => b'w',
+                DimFetch::Rw => b'r',
+                DimFetch::Unset => b'u',
+            };
+            let r = self.ao_fetch_dim_w(obj, key.as_ref(), m);
+            if self.current_exception.is_some() {
+                return None;
+            }
+            return match r {
+                Some(v) => Some(v),
+                None => {
+                    indirect_notice(self);
+                    Some(Value::Null)
+                }
+            };
+        }
+        if class_lower == b"weakmap" {
+            return self.weakmap_fetch_dim_w(obj, key, mode);
+        }
+        let key_arg = key.map(|k| k.deref()).unwrap_or(Value::Null);
+        self.last_call_by_ref = false;
+        let args = [obj_val.clone(), key_arg.clone()];
+        // A by-reference offsetGet() hands out the element's reference, which
+        // the write goes through.
+        let by_ref = self
+            .classes
+            .get(&class_lower)
+            .and_then(|c| c.get_method(b"offsetget"))
+            .map(|m| m.op_array.returns_by_ref)
+            .unwrap_or(false);
+        let result = match self.handle_spl_docall(&class_lower, b"offsetget", &args) {
+            Some(v) => Some(v),
+            None => {
+                if by_ref {
+                    self.keep_ref_depth = Some(self.call_depth + 1);
+                }
+                let r = self.call_object_method(obj_val, b"offsetGet", &[key_arg]);
+                self.keep_ref_depth = None;
+                r
+            }
+        };
+        if let Some(Value::Reference(r)) = &result {
+            self.last_call_by_ref = true;
+            let cur = r.borrow().clone();
+            return Some(match cur {
+                Value::Null | Value::Undef if matches!(mode, DimFetch::W | DimFetch::Rw) => {
+                    let a = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                    *r.borrow_mut() = a.clone();
+                    a
+                }
+                // The reference holds one count, `cur` the other.
+                Value::Array(a) if Rc::strong_count(&a) > 2 => {
+                    let sep = Value::Array(Rc::new(RefCell::new(a.borrow().clone())));
+                    *r.borrow_mut() = sep.clone();
+                    sep
+                }
+                other => other,
+            });
+        }
+        if self.current_exception.is_some() {
+            return None;
+        }
+        let Some(result) = result else {
+            let disp = crate::value::display_class_name(&class_name);
+            self.throw_error_msg(
+                b"Error",
+                &format!("Cannot use object of type {} as array", disp),
+            );
+            return None;
+        };
+        if self.last_call_by_ref {
+            self.last_call_by_ref = false;
+            return Some(result.deref());
+        }
+        let result = result.deref();
+        match result {
+            Value::Object(_) => Some(result),
+            Value::Array(rc) => {
+                indirect_notice(self);
+                // The write lands on a copy (offsetGet returned by value).
+                let copy = rc.borrow().clone();
+                Some(Value::Array(Rc::new(RefCell::new(copy))))
+            }
+            other => {
+                indirect_notice(self);
+                Some(other)
+            }
+        }
+    }
+}

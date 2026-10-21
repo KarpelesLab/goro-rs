@@ -443,7 +443,7 @@ pub struct Vm {
     /// User-defined functions (compiled op arrays)
     pub user_functions: HashMap<Vec<u8>, OpArray>,
     /// Stack of pending function calls (supports nested calls)
-    pending_calls: Vec<PendingCall>,
+    pub(crate) pending_calls: Vec<PendingCall>,
     /// Static variable storage (keyed by "funcname::varname")
     static_vars: HashMap<Vec<u8>, Value>,
     /// The global symbol table (also the value of `$GLOBALS`, see symtab.rs)
@@ -507,7 +507,7 @@ pub struct Vm {
     /// keyed by the reference cell's address.
     pub(crate) typed_refs: static_props::TypedRefs,
     /// Current call depth (to prevent stack overflow from infinite recursion)
-    call_depth: u32,
+    pub(crate) call_depth: u32,
     /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
     pub call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
     /// Stack of saved error_reporting levels (for @ operator)
@@ -546,7 +546,11 @@ pub struct Vm {
     /// Whether the most recently completed user function call was declared
     /// to return by reference (for "Only variables should be assigned by
     /// reference" notices on `$x = &f()`).
-    last_call_by_ref: bool,
+    pub(crate) last_call_by_ref: bool,
+    /// Set by ArrayGetIncDec on an ArrayAccess object whose offsetGet()
+    /// returned by value: the matching ArraySetIncDec must not call
+    /// offsetSet() (the increment only affected a temporary).
+    incdec_skip_set: bool,
     /// Current executing line number (updated during execution for warning/error reporting)
     pub current_line: u32,
     /// Cached enum case singleton objects: key = "classname_lower::CaseName"
@@ -807,6 +811,7 @@ impl Vm {
             current_file: "Unknown.php".to_string(),
             last_return_line: 0,
             last_call_by_ref: false,
+            incdec_skip_set: false,
             current_line: 0,
             enum_case_cache: HashMap::new(),
             fiber_suspended: false,
@@ -2213,7 +2218,7 @@ impl Vm {
     /// Find the PropertyDef for a given property name in a class (by lowercase class name).
     /// Walks up the parent chain to find the property definition.
     /// Returns (visibility, declaring_class, is_readonly, property_type, set_visibility).
-    fn find_property_def(
+    pub(crate) fn find_property_def(
         &self,
         class_name_lower: &[u8],
         prop_name: &[u8],
@@ -2365,7 +2370,11 @@ impl Vm {
     ///
     /// Allowed when scope is the object's class itself, an ancestor, or a
     /// descendant — i.e. they share a class hierarchy.
-    fn scope_can_see_protected(&self, scope_lower: &[u8], obj_class_lower: &[u8]) -> bool {
+    pub(crate) fn scope_can_see_protected(
+        &self,
+        scope_lower: &[u8],
+        obj_class_lower: &[u8],
+    ) -> bool {
         if scope_lower == obj_class_lower {
             return true;
         }
@@ -14798,8 +14807,21 @@ impl Vm {
         // loops over Traversables (zend_iterator_init allocates one), keyed
         // by iterator tmp; released with the loop.
         let mut foreach_iter_handles: HashMap<u32, Value> = HashMap::new();
-        // Snapshot of array keys at foreach init (for stable iteration)
-        let mut foreach_keys: HashMap<u32, Vec<ArrayKey>> = HashMap::new();
+        // By-value foreach over an array iterates the array as it was when the
+        // loop started (PHP iterates a copy): a shallow snapshot of its entries.
+        let mut foreach_snap: HashMap<u32, Vec<(ArrayKey, Value)>> = HashMap::new();
+        // Key of the element the foreach is currently on (ForeachKey, and the
+        // by-ref iterator's position tracking).
+        let mut foreach_cur_key: HashMap<u32, ArrayKey> = HashMap::new();
+        // By-ref foreach: the reference of the current element (the iterator
+        // follows it when elements before it are removed or inserted).
+        let mut foreach_cur_ref: HashMap<u32, std::rc::Weak<RefCell<Value>>> = HashMap::new();
+        // foreach over a plain object: the object, and the storage name of the
+        // current property slot.
+        // (The iterator tmp holds the object itself, so it is released with it.)
+        let mut foreach_obj: HashMap<u32, std::rc::Weak<RefCell<crate::object::PhpObject>>> =
+            HashMap::new();
+        let mut foreach_obj_cur: HashMap<u32, Vec<u8>> = HashMap::new();
         // Generator key storage for foreach (saved before advancing to next yield)
         let mut foreach_gen_keys: HashMap<u32, Value> = HashMap::new();
         // WeakMap iteration: maps iterator index to key objects
@@ -15033,6 +15055,15 @@ impl Vm {
                 OpCode::FreeTmps => {
                     if let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) {
                         let mut freed = false;
+                        // Iteration copies of foreach loops abandoned by an exception.
+                        if !foreach_snap.is_empty() {
+                            let before = foreach_snap.len();
+                            foreach_snap.retain(|k, _| !(a..b).contains(k));
+                            freed |= foreach_snap.len() != before;
+                        }
+                        if !foreach_obj.is_empty() {
+                            foreach_obj.retain(|k, _| !(a..b).contains(k));
+                        }
                         let end = (b as usize).min(tmps.len());
                         for slot in tmps[(a as usize).min(end)..end].iter_mut() {
                             match slot {
@@ -18710,7 +18741,7 @@ impl Vm {
                         named_args: Vec::new(),
                     });
                 }
-                OpCode::SendVal => {
+                OpCode::SendVal | OpCode::SendValChecked => {
                     // Check if the callee function expects this parameter by-ref
                     let arg_index = self.pending_calls.last().map(|c| c.args.len()).unwrap_or(0);
                     let callee_expects_ref = self
@@ -18734,6 +18765,37 @@ impl Vm {
                             .map(|call| self.spl_deferred_arg_by_ref(call, arg_index))
                             .unwrap_or(false);
 
+                    if callee_expects_ref && matches!(op.opcode, OpCode::SendValChecked) {
+                        let is_call_result = matches!(
+                            self.read_operand(&op.result, &cvs, &tmps, &op_array.literals),
+                            Value::Long(0)
+                        );
+                        let returned_ref = self.last_call_by_ref
+                            || matches!(&op.op1, OperandType::Tmp(t) if matches!(tmps.get(*t as usize), Some(Value::Reference(_))));
+                        if is_call_result {
+                            if !returned_ref {
+                                self.emit_notice_at(
+                                    "Only variables should be passed by reference",
+                                    op.line,
+                                );
+                            }
+                        } else {
+                            let msg = self.cannot_pass_by_ref_msg(arg_index);
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     if callee_expects_ref {
                         // Pass by reference: create a shared reference between caller CV and callee CV
                         if let OperandType::Cv(idx) = &op.op1 {
@@ -27771,6 +27833,20 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                    } else if let Some(msg) = self.dim_write_container_error(&arr_val, true) {
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[] = $val -> offsetSet(null, $val)
                         let class_lower: Vec<u8> = obj
@@ -27847,8 +27923,16 @@ impl Vm {
                         }
                     }
                 }
-                OpCode::ArraySet => {
+                OpCode::ArraySet | OpCode::ArraySetIncDec => {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // The write-back of `$obj[k]++`: FETCH_DIM_RW never calls
+                    // offsetSet().
+                    if matches!(op.opcode, OpCode::ArraySetIncDec)
+                        && matches!(arr_val.deref(), Value::Object(_))
+                        && std::mem::take(&mut self.incdec_skip_set)
+                    {
+                        continue;
+                    }
                     let key_val = self.read_operand_warn(
                         &op.result,
                         &cvs,
@@ -28023,6 +28107,23 @@ impl Vm {
                                 }
                             }
                         }
+                    } else if let Some(msg) = matches!(arr_val, Value::Object(_))
+                        .then(|| self.dim_write_container_error(&arr_val, false))
+                        .flatten()
+                    {
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
                     } else if let Value::Object(obj) = &arr_val {
                         // ArrayAccess: $obj[$key] = $val -> offsetSet($key, $val)
                         let class_lower: Vec<u8> = obj
@@ -28389,8 +28490,11 @@ impl Vm {
                     self.exit_requested = true;
                     return Ok(Value::Null);
                 }
-                OpCode::ArrayGet | OpCode::ArrayGetRW | OpCode::ArrayGetObjW => {
-                    let is_rw = matches!(op.opcode, OpCode::ArrayGetRW);
+                OpCode::ArrayGet
+                | OpCode::ArrayGetRW
+                | OpCode::ArrayGetObjW
+                | OpCode::ArrayGetIncDec => {
+                    let is_rw = matches!(op.opcode, OpCode::ArrayGetRW | OpCode::ArrayGetIncDec);
                     let obj_w = matches!(op.opcode, OpCode::ArrayGetObjW);
                     let mut arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // If the source is an uninitialized superglobal CV, fall back to the global.
@@ -28415,6 +28519,11 @@ impl Vm {
                                 }
                             }
                         }
+                    }
+                    // Reading a dimension of an undefined variable warns
+                    // (ZVAL_UNDEFINED_OP1 in FETCH_DIM_R/RW).
+                    if matches!(arr_val, Value::Undef | Value::Null) {
+                        self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     }
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     if let Value::Object(obj) = &arr_val.deref() {
@@ -28495,6 +28604,58 @@ impl Vm {
                                 });
                             }
                         }
+                        // `$a[] op= v` reads the (new) element as null; on
+                        // objects it is offsetGet(null).
+                        let append = matches!(op.op2, OperandType::Unused);
+                        let str_err = match &arr_val {
+                            Value::String(_) if append => {
+                                Some("[] operator not supported for strings")
+                            }
+                            Value::String(_) => {
+                                if self.check_string_offset_w(
+                                    &key_val,
+                                    crate::fetch_w::DimFetch::Rw,
+                                    op.line,
+                                ) {
+                                    Some(if matches!(op.opcode, OpCode::ArrayGetIncDec) {
+                                        "Cannot increment/decrement string offsets"
+                                    } else {
+                                        "Cannot use assign-op operators with string offsets"
+                                    })
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        };
+                        if str_err.is_some() || self.current_exception.is_some() {
+                            if let Some(msg) = str_err {
+                                let exc = self.create_exception(b"Error", msg, op.line);
+                                self.current_exception = Some(exc);
+                            }
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", str_err.unwrap_or("")),
+                                line: op.line,
+                            });
+                        }
+                        if append && matches!(arr_val, Value::Array(_) | Value::Null | Value::Undef)
+                        {
+                            self.write_operand(
+                                &op.result,
+                                Value::Null,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                            continue;
+                        }
                     }
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
@@ -28515,18 +28676,17 @@ impl Vm {
                                 }
                             }
                             None => {
-                                // Emit "Undefined array key" warning — but not
-                                // for FETCH_DIM_RW: the write side will create
-                                // the missing entry, so a warning would be a
-                                // spurious "undefined" diagnostic for what is
-                                // really a brand-new initializer.
-                                if !is_rw && Rc::ptr_eq(arr, &self.globals) {
+                                // Emit "Undefined array key" warning (FETCH_DIM_RW
+                                // warns too: zend_undefined_offset_write()).
+                                if Rc::ptr_eq(arr, &self.globals) {
                                     // $GLOBALS['x'] is a FETCH of the global variable.
-                                    self.emit_warning_at(
-                                        &format!("Undefined global variable ${}", key),
-                                        op.line,
-                                    );
-                                } else if !is_rw {
+                                    if !is_rw {
+                                        self.emit_warning_at(
+                                            &format!("Undefined global variable ${}", key),
+                                            op.line,
+                                        );
+                                    }
+                                } else {
                                     match &key {
                                         crate::array::ArrayKey::Int(i) => {
                                             self.emit_warning_at(
@@ -28755,6 +28915,7 @@ impl Vm {
                             }
                         }
                         let args = vec![arr_val.clone(), key_val.clone()];
+                        self.last_call_by_ref = false;
                         let offsetget_result = self
                             .handle_spl_docall(&class_lower, b"offsetget", &args)
                             .unwrap_or_else(|| {
@@ -28766,6 +28927,24 @@ impl Vm {
                                 )
                                 .unwrap_or(Value::Null)
                             });
+                        // `$obj[k]++` (FETCH_DIM_RW): the increment lands on
+                        // offsetGet()'s by-value result.
+                        let by_value_incdec = matches!(op.opcode, OpCode::ArrayGetIncDec)
+                            && !self.last_call_by_ref
+                            && !self.dim_fetch_native_ref(obj);
+                        self.incdec_skip_set = by_value_incdec;
+                        if by_value_incdec
+                            && self.current_exception.is_none()
+                            && !matches!(offsetget_result, Value::Object(_))
+                        {
+                            self.emit_notice_at(
+                                &format!(
+                                    "Indirect modification of overloaded element of {} has no effect",
+                                    class_name_orig
+                                ),
+                                op.line,
+                            );
+                        }
                         if let Some(exc_val) = self.current_exception.take() {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                 exception_handlers.last()
@@ -28801,7 +28980,7 @@ impl Vm {
                             Value::Null | Value::Undef => "null",
                             _ => "",
                         };
-                        if !type_name.is_empty() && type_name != "null" {
+                        if !type_name.is_empty() {
                             self.emit_warning_at(
                                 &format!("Trying to access array offset on {}", type_name),
                                 op.line,
@@ -28997,6 +29176,13 @@ impl Vm {
                 }
 
                 OpCode::ForeachInit => {
+                    // SplFixedArray is iterated over its live storage.
+                    let mut live_iteration = false;
+                    if !foreach_obj.is_empty() {
+                        if let OperandType::Tmp(t) = op.result {
+                            foreach_obj.remove(&t);
+                        }
+                    }
                     let arr_val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -29181,6 +29367,7 @@ impl Vm {
                             let is_fixed = self
                                 .spl_find_base(&class_lower, &[b"splfixedarray"])
                                 .is_some();
+                            live_iteration = is_fixed;
                             let obj_borrow = obj.borrow();
                             let spl_arr = obj_borrow.get_property(b"__spl_array");
                             let arr_val = if let Value::Array(a) = spl_arr {
@@ -29344,111 +29531,42 @@ impl Vm {
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
-                            let obj_borrow = target.borrow();
-                            let mut arr = PhpArray::new();
-                            for (name, value) in &obj_borrow.properties {
-                                // Skip internal bookkeeping properties and
-                                // uninitialized/typed-undef slots.
-                                if name.starts_with(b"__spl_")
-                                    || name.starts_with(b"__reflection_")
-                                    || name.starts_with(b"__enum_")
-                                    || name.starts_with(b"__ctor_")
-                                    || name.starts_with(b"__clone_")
-                                    || name.starts_with(b"__destructed")
-                                    || name.starts_with(b"__fiber_")
-                                    || name.starts_with(b"__timestamp")
-                                    || name.starts_with(b"__lazy_")
-                                    || name.starts_with(b"__uri_")
-                                    || name.starts_with(b"__weak_ref_id")
-                                    || name.starts_with(b"__sxml_")
-                                    || name.starts_with(b"__hash_")
-                                    || name.starts_with(b"__hmac_")
-                                    || name.starts_with(b"__pkey_id")
-                                    || name.starts_with(b"__cert_id")
-                                    || name.starts_with(b"__csr_id")
-                                {
-                                    continue;
+                            // Plain objects are iterated over their live property
+                            // table (hooked properties: a snapshot through the hooks).
+                            let hooked = self.class_has_hooked_props(&obj_class_lower);
+                            if !hooked {
+                                if let OperandType::Tmp(t) = op.result {
+                                    foreach_obj.insert(t, Rc::downgrade(&target));
+                                    foreach_obj_cur.remove(&t);
                                 }
-                                if matches!(value, Value::Undef) {
-                                    continue;
-                                }
-                                // Demangle private/protected storage keys of the
-                                // form \0Class\0name. Private slots are only
-                                // visible from their declaring class's scope;
-                                // other classes' private slots are skipped.
-                                let display_name: Vec<u8> = if name.first() == Some(&0) {
-                                    if let Some(sep) = name[1..].iter().position(|&b| b == 0) {
-                                        let decl = &name[1..1 + sep];
-                                        let bare = &name[1 + sep + 1..];
-                                        if decl == b"*" {
-                                            // protected: visible only from a
-                                            // class scope related to the
-                                            // declaring class hierarchy.
-                                            let s = match &scope_lower {
-                                                Some(s) => s,
-                                                None => continue,
-                                            };
-                                            if !self.scope_can_see_protected(s, &obj_class_lower) {
-                                                continue;
-                                            }
-                                            bare.to_vec()
-                                        } else {
-                                            let decl_lower: Vec<u8> = decl
-                                                .iter()
-                                                .map(|b| b.to_ascii_lowercase())
-                                                .collect();
-                                            if scope_lower.as_deref() != Some(decl_lower.as_slice())
-                                            {
-                                                continue;
-                                            }
-                                            bare.to_vec()
-                                        }
-                                    } else {
-                                        name.clone()
-                                    }
-                                } else {
-                                    // Bare-named property. Look up its prop_def
-                                    // in the class hierarchy and apply visibility.
-                                    // Dynamic properties (no prop_def) are public.
-                                    if let Some(prop_def) =
-                                        self.find_instance_prop_def(&obj_class_lower, name)
-                                    {
-                                        match prop_def.0 {
-                                            crate::object::Visibility::Public => {}
-                                            crate::object::Visibility::Protected => {
-                                                let s = match &scope_lower {
-                                                    Some(s) => s,
-                                                    None => continue,
-                                                };
-                                                if !self
-                                                    .scope_can_see_protected(s, &obj_class_lower)
-                                                {
-                                                    continue;
-                                                }
-                                            }
-                                            crate::object::Visibility::Private => {
-                                                let decl_lower: Vec<u8> = prop_def
-                                                    .1
-                                                    .iter()
-                                                    .map(|b| b.to_ascii_lowercase())
-                                                    .collect();
-                                                if scope_lower.as_deref()
-                                                    != Some(decl_lower.as_slice())
-                                                {
-                                                    continue;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    name.clone()
-                                };
-                                arr.set(
-                                    ArrayKey::String(PhpString::from_vec(display_name)),
-                                    value.clone(),
-                                );
+                                live_iteration = true;
                             }
-                            drop(obj_borrow);
-                            if self.class_has_hooked_props(&obj_class_lower) {
+                            let mut arr = PhpArray::new();
+                            if !hooked {
+                                arr.push(Value::Object(target.clone()));
+                            }
+                            if hooked {
+                                let props: Vec<(Vec<u8>, Value)> =
+                                    target.borrow().properties.clone();
+                                for (name, value) in &props {
+                                    if crate::foreach_obj::is_internal_slot(name)
+                                        || matches!(value, Value::Undef)
+                                    {
+                                        continue;
+                                    }
+                                    if let Some(key) = self.foreach_prop_key(
+                                        &obj_class_lower,
+                                        scope_lower.as_deref(),
+                                        name,
+                                    ) {
+                                        arr.set(
+                                            ArrayKey::String(PhpString::from_vec(key)),
+                                            value.clone(),
+                                        );
+                                    }
+                                }
+                            }
+                            if hooked {
                                 match self.hooked_object_iteration_array(&target, &arr) {
                                     Ok(a) => arr = a,
                                     Err(e) => {
@@ -29516,15 +29634,30 @@ impl Vm {
                         _ => 0,
                     };
                     foreach_positions.insert(iter_idx, 0usize);
-                    // Snapshot array keys for stable iteration
+                    if !foreach_cur_key.is_empty() {
+                        foreach_cur_key.remove(&iter_idx);
+                    }
+                    // Snapshot the entries: later changes to the array do not
+                    // affect a by-value iteration.
                     let stored = match &op.result {
                         OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned(),
                         OperandType::Cv(idx) => cvs.get(*idx as usize).cloned(),
                         _ => None,
                     };
-                    if let Some(Value::Array(arr)) = stored {
-                        let keys: Vec<ArrayKey> = arr.borrow().keys().cloned().collect();
-                        foreach_keys.insert(iter_idx, keys);
+                    // A temporary array nobody else holds (the source operand,
+                    // the iterator and `stored`) cannot change: iterate it live.
+                    let unshared = matches!(op.op1, OperandType::Tmp(_) | OperandType::Const(_))
+                        && matches!(&stored, Some(Value::Array(a)) if Rc::strong_count(a) <= 3);
+                    if let Some(Value::Array(arr)) = stored.filter(|_| !live_iteration && !unshared)
+                    {
+                        // The buffer of an earlier run of this loop is reused.
+                        let ab = arr.borrow();
+                        let snap = foreach_snap.entry(iter_idx).or_default();
+                        snap.clear();
+                        snap.reserve(ab.len());
+                        snap.extend(ab.iter().map(|(k, v)| (k.clone(), v.clone())));
+                    } else if !foreach_snap.is_empty() {
+                        foreach_snap.remove(&iter_idx);
                     }
                 }
 
@@ -29784,52 +29917,88 @@ impl Vm {
                             foreach_positions.insert(iter_idx, pos + 1);
                         }
                     } else if let Value::Array(arr) = &arr_val {
-                        // Use snapshotted keys for stable iteration
-                        let keys = foreach_keys.get(&iter_idx);
-                        let done = if let Some(keys) = keys {
-                            // Find next valid key
-                            let arr_borrow = arr.borrow();
-                            let mut found = false;
-                            let mut next_pos = pos;
-                            while next_pos < keys.len() {
-                                if let Some(value) = arr_borrow.get(&keys[next_pos]) {
+                        let obj_iter = if foreach_obj.is_empty() {
+                            None
+                        } else {
+                            foreach_obj.get(&iter_idx).cloned()
+                        };
+                        let done = if let Some(weak) = obj_iter {
+                            let cur = foreach_obj_cur.get(&iter_idx).cloned();
+                            let step = match weak.upgrade() {
+                                Some(obj) => {
+                                    self.foreach_obj_step(&obj, pos, cur.as_deref(), false)
+                                }
+                                None => Ok(None),
+                            };
+                            match step {
+                                Ok(Some(step)) => {
+                                    foreach_cur_key.insert(
+                                        iter_idx,
+                                        ArrayKey::String(PhpString::from_vec(step.key)),
+                                    );
+                                    foreach_obj_cur.insert(iter_idx, step.name);
                                     self.write_operand(
                                         &op.result,
-                                        value.deref(), // by-value foreach never binds the element reference
+                                        step.value,
                                         &mut cvs,
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    foreach_positions.insert(iter_idx, next_pos + 1);
-                                    found = true;
-                                    break;
+                                    foreach_positions.insert(iter_idx, step.next_pos);
+                                    false
                                 }
-                                next_pos += 1;
+                                _ => {
+                                    foreach_obj.remove(&iter_idx);
+                                    foreach_obj_cur.remove(&iter_idx);
+                                    true
+                                }
                             }
-                            !found
+                        } else if let Some(snap) = foreach_snap.get(&iter_idx) {
+                            match snap.get(pos) {
+                                Some((_, v)) => {
+                                    // by-value foreach never binds the element reference
+                                    let value = v.deref();
+                                    self.write_operand(
+                                        &op.result,
+                                        value,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    foreach_positions.insert(iter_idx, pos + 1);
+                                    false
+                                }
+                                None => true,
+                            }
                         } else {
-                            // Fallback: direct position-based iteration
-                            let arr_borrow = arr.borrow();
-                            let entries: Vec<_> = arr_borrow.iter().collect();
-                            if pos >= entries.len() {
-                                true
-                            } else {
-                                let (_, value) = entries[pos];
-                                self.write_operand(
-                                    &op.result,
-                                    value.deref(),
-                                    &mut cvs,
-                                    &mut tmps,
-                                    &static_cv_keys,
-                                );
-                                foreach_positions.insert(iter_idx, pos + 1);
-                                false
+                            // Live position-based iteration (SplFixedArray storage,
+                            // unshared temporaries); ForeachKey reads the key back.
+                            let entry = arr.borrow().entry_at(pos).map(|(_, v)| v.deref());
+                            match entry {
+                                None => true,
+                                Some(value) => {
+                                    self.write_operand(
+                                        &op.result,
+                                        value,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    foreach_positions.insert(iter_idx, pos + 1);
+                                    false
+                                }
                             }
                         };
                         if done {
                             // Release iterator state to allow weakly-held keys to be freed.
                             weakmap_iter_keys.remove(&iter_idx);
-                            foreach_keys.remove(&iter_idx);
+                            // Keep the snapshot buffer (emptied) for the next run.
+                            if let Some(snap) = foreach_snap.get_mut(&iter_idx) {
+                                snap.clear();
+                            }
+                            if !foreach_cur_key.is_empty() {
+                                foreach_cur_key.remove(&iter_idx);
+                            }
                             foreach_positions.remove(&iter_idx);
                             if let OperandType::Tmp(t) = op.op1 {
                                 if let Some(slot) = tmps.get_mut(t as usize) {
@@ -29843,7 +30012,10 @@ impl Vm {
                     } else {
                         // Not an array or generator - jump to end
                         weakmap_iter_keys.remove(&iter_idx);
-                        foreach_keys.remove(&iter_idx);
+                        foreach_snap.remove(&iter_idx);
+                        if !foreach_cur_key.is_empty() {
+                            foreach_cur_key.remove(&iter_idx);
+                        }
                         foreach_positions.remove(&iter_idx);
                         if let OperandType::Tmp(t) = op.op1 {
                             if let Some(slot) = tmps.get_mut(t as usize) {
@@ -29889,6 +30061,32 @@ impl Vm {
                             let k = self
                                 .spl_call_method(&arr_val, b"key", &[])
                                 .unwrap_or(Value::Long(0));
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                let msg = match &self.current_exception {
+                                    Some(Value::Object(o)) => {
+                                        let ob = o.borrow();
+                                        format!(
+                                            "Uncaught {}: {}",
+                                            crate::value::display_class_name(&ob.class_name),
+                                            ob.get_property(b"message")
+                                                .to_php_string()
+                                                .to_string_lossy()
+                                        )
+                                    }
+                                    _ => "Uncaught exception".to_string(),
+                                };
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
+                            }
                             foreach_gen_keys.insert(iter_idx, k.clone());
                             k
                         };
@@ -29910,14 +30108,25 @@ impl Vm {
                             } else {
                                 Value::Null
                             }
-                        } else if let Some(keys) = foreach_keys.get(&iter_idx) {
-                            if actual_pos < keys.len() {
-                                match &keys[actual_pos] {
-                                    ArrayKey::Int(n) => Value::Long(*n),
-                                    ArrayKey::String(s) => Value::String(s.clone()),
-                                }
-                            } else {
-                                Value::Null
+                        } else if let Some(k) = foreach_snap
+                            .get(&iter_idx)
+                            .and_then(|snap| snap.get(actual_pos))
+                            .map(|(k, _)| k)
+                            .or_else(|| foreach_cur_key.get(&iter_idx))
+                        {
+                            match k {
+                                ArrayKey::Int(n) => Value::Long(*n),
+                                ArrayKey::String(s) => Value::String(s.clone()),
+                            }
+                        } else if let Some(k) = match &arr_val {
+                            Value::Array(a) => {
+                                a.borrow().entry_at(actual_pos).map(|(k, _)| k.clone())
+                            }
+                            _ => None,
+                        } {
+                            match k {
+                                ArrayKey::Int(n) => Value::Long(n),
+                                ArrayKey::String(s) => Value::String(s),
                             }
                         } else {
                             Value::Long(actual_pos as i64)
@@ -29933,6 +30142,9 @@ impl Vm {
                 }
 
                 OpCode::ForeachInitRef => {
+                    if let OperandType::Tmp(t) = op.result {
+                        foreach_obj.remove(&t);
+                    }
                     let mut arr_val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -30211,40 +30423,14 @@ impl Vm {
                                         weakmap_iter_keys.insert(iter_idx, key_objs);
                                         Rc::new(RefCell::new(arr))
                                     } else {
+                                        // Plain objects: the live property table is
+                                        // walked by ForeachNextRef.
                                         let target = self.proxy_redirect(obj);
-                                        // For objects, convert to array of references to properties
-                                        let obj_borrow = target.borrow();
-                                        let mut arr = PhpArray::new();
-                                        for (name, value) in &obj_borrow.properties {
-                                            if name.starts_with(b"__spl_")
-                                                || name.starts_with(b"__reflection_")
-                                                || name.starts_with(b"__enum_")
-                                                || name.starts_with(b"__ctor_")
-                                                || name.starts_with(b"__clone_")
-                                                || name.starts_with(b"__destructed")
-                                                || name.starts_with(b"__fiber_")
-                                                || name.starts_with(b"__timestamp")
-                                                || name.starts_with(b"__lazy_")
-                                                || name.starts_with(b"__uri_")
-                                                || name.starts_with(b"__weak_ref_id")
-                                                || name.starts_with(b"__sxml_")
-                                                || name.starts_with(b"__hash_")
-                                                || name.starts_with(b"__hmac_")
-                                                || name.starts_with(b"__pkey_id")
-                                                || name.starts_with(b"__cert_id")
-                                                || name.starts_with(b"__csr_id")
-                                            {
-                                                continue;
-                                            }
-                                            if matches!(value, Value::Undef) {
-                                                continue;
-                                            }
-                                            arr.set(
-                                                ArrayKey::String(PhpString::from_vec(name.clone())),
-                                                value.clone(),
-                                            );
-                                        }
-                                        Rc::new(RefCell::new(arr))
+                                        foreach_obj.insert(iter_idx, Rc::downgrade(&target));
+                                        foreach_obj_cur.remove(&iter_idx);
+                                        let mut holder = PhpArray::new();
+                                        holder.push(Value::Object(target));
+                                        Rc::new(RefCell::new(holder))
                                     }
                                 }
                                 _ => {
@@ -30274,7 +30460,11 @@ impl Vm {
                         _ => {}
                     }
 
-                    foreach_ref_arrays.insert(iter_idx, arr_rc.clone());
+                    if foreach_obj.contains_key(&iter_idx) {
+                        foreach_ref_arrays.remove(&iter_idx);
+                    } else {
+                        foreach_ref_arrays.insert(iter_idx, arr_rc.clone());
+                    }
 
                     // Store as Value::Array for the iteration state
                     self.write_operand(
@@ -30286,9 +30476,8 @@ impl Vm {
                     );
 
                     foreach_positions.insert(iter_idx, 0usize);
-                    // Snapshot keys for stable iteration
-                    let keys: Vec<ArrayKey> = arr_rc.borrow().keys().cloned().collect();
-                    foreach_keys.insert(iter_idx, keys);
+                    foreach_cur_key.remove(&iter_idx);
+                    foreach_cur_ref.remove(&iter_idx);
                 }
 
                 OpCode::ForeachNextRef => {
@@ -30313,6 +30502,21 @@ impl Vm {
                             }
                             continue;
                         }
+                        // A by-ref loop variable is (re)bound to the yielded reference.
+                        let bind = |val: Value, cvs: &mut Vec<Value>| -> Option<Value> {
+                            if let OperandType::Cv(ci) = op.result {
+                                let r = match val {
+                                    Value::Reference(_) => val,
+                                    other => Value::Reference(Rc::new(RefCell::new(other))),
+                                };
+                                if let Some(slot) = cvs.get_mut(ci as usize) {
+                                    *slot = r;
+                                }
+                                None
+                            } else {
+                                Some(val)
+                            }
+                        };
                         // On first call (pos==0), the generator was already primed by ForeachInitRef
                         if pos == 0 {
                             let val = gen_borrow.current_value.clone();
@@ -30325,13 +30529,17 @@ impl Vm {
                                 (Some(r), OperandType::Tmp(i)) => {
                                     tmps[*i as usize] = Value::Reference(r)
                                 }
-                                _ => self.write_operand(
-                                    &op.result,
-                                    val,
-                                    &mut cvs,
-                                    &mut tmps,
-                                    &static_cv_keys,
-                                ),
+                                _ => {
+                                    if let Some(val) = bind(val, &mut cvs) {
+                                        self.write_operand(
+                                            &op.result,
+                                            val,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                    }
+                                }
                             }
                             foreach_positions.insert(iter_idx, pos + 1);
                         } else {
@@ -30350,13 +30558,17 @@ impl Vm {
                                         (Some(r), OperandType::Tmp(i)) => {
                                             tmps[*i as usize] = Value::Reference(r)
                                         }
-                                        _ => self.write_operand(
-                                            &op.result,
-                                            val,
-                                            &mut cvs,
-                                            &mut tmps,
-                                            &static_cv_keys,
-                                        ),
+                                        _ => {
+                                            if let Some(val) = bind(val, &mut cvs) {
+                                                self.write_operand(
+                                                    &op.result,
+                                                    val,
+                                                    &mut cvs,
+                                                    &mut tmps,
+                                                    &static_cv_keys,
+                                                );
+                                            }
+                                        }
                                     }
                                     foreach_positions.insert(iter_idx, pos + 1);
                                 }
@@ -30373,61 +30585,163 @@ impl Vm {
 
                     let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
 
-                    // Re-snapshot keys each iteration for by-ref (elements may be added)
-                    if let Some(arr_rc) = foreach_ref_arrays.get(&iter_idx) {
-                        let keys: Vec<ArrayKey> = arr_rc.borrow().keys().cloned().collect();
-                        foreach_keys.insert(iter_idx, keys);
-                    }
-
-                    let done = if let Some(keys) = foreach_keys.get(&iter_idx) {
-                        if let Some(arr_rc) = foreach_ref_arrays.get(&iter_idx).cloned() {
-                            // Find next valid key
-                            let mut found = false;
-                            let mut next_pos = pos;
-                            while next_pos < keys.len() {
-                                let key = &keys[next_pos];
-                                let has_key = arr_rc.borrow().get(key).is_some();
-                                if has_key {
-                                    // Get or create a reference to this element
-                                    let ref_val = {
-                                        let mut arr_borrow = arr_rc.borrow_mut();
-                                        let current = arr_borrow.get(key).unwrap().clone();
-                                        let reference = match current {
-                                            Value::Reference(r) => r,
-                                            other => {
-                                                let r = Rc::new(RefCell::new(other));
-                                                arr_borrow
-                                                    .set(key.clone(), Value::Reference(r.clone()));
-                                                r
-                                            }
-                                        };
-                                        Value::Reference(reference)
-                                    };
-
-                                    // Rebind the loop variable to the element's
-                                    // reference (don't write through the previous one).
-                                    if let OperandType::Cv(ci) = op.result {
-                                        if let Some(slot) = cvs.get_mut(ci as usize) {
-                                            *slot = ref_val.clone();
-                                        }
-                                    } else {
-                                        self.write_operand(
-                                            &op.result,
-                                            ref_val,
-                                            &mut cvs,
-                                            &mut tmps,
-                                            &static_cv_keys,
-                                        );
+                    // By-ref foreach walks the live array (appended elements are
+                    // seen). The position follows the current element (by its
+                    // reference, which survives renumbering): when elements before
+                    // it were removed or inserted it is found again; when it was
+                    // itself removed, the element that took its place comes next.
+                    if let Some(weak) = foreach_obj.get(&iter_idx).cloned() {
+                        let cur = foreach_obj_cur.get(&iter_idx).cloned();
+                        let obj = weak.upgrade();
+                        let step = match &obj {
+                            Some(obj) => self.foreach_obj_step(obj, pos, cur.as_deref(), true),
+                            None => Ok(None),
+                        };
+                        match step {
+                            Ok(Some(step)) => {
+                                foreach_cur_key.insert(
+                                    iter_idx,
+                                    ArrayKey::String(PhpString::from_vec(step.key)),
+                                );
+                                let prev_name = foreach_obj_cur.insert(iter_idx, step.name);
+                                let prev = match &step.value {
+                                    Value::Reference(r) => {
+                                        foreach_cur_ref.insert(iter_idx, Rc::downgrade(r))
                                     }
-                                    foreach_positions.insert(iter_idx, next_pos + 1);
-                                    found = true;
-                                    break;
+                                    _ => None,
+                                };
+                                if let OperandType::Cv(ci) = op.result {
+                                    if let Some(slot) = cvs.get_mut(ci as usize) {
+                                        *slot = step.value;
+                                    }
+                                } else {
+                                    self.write_operand(
+                                        &op.result,
+                                        step.value,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
                                 }
-                                next_pos += 1;
+                                foreach_positions.insert(iter_idx, step.next_pos);
+                                // The previous slot's reference is held by the object
+                                // alone now: a plain value again.
+                                if let (Some(prev), Some(prev_name), Some(obj)) =
+                                    (prev.and_then(|w| w.upgrade()), prev_name, obj.as_ref())
+                                {
+                                    if Rc::strong_count(&prev) == 2 {
+                                        let mut ob = obj.borrow_mut();
+                                        if let Some(slot) =
+                                            ob.properties.iter_mut().find(|(n, _)| *n == prev_name)
+                                        {
+                                            if matches!(&slot.1, Value::Reference(r) if Rc::ptr_eq(r, &prev))
+                                            {
+                                                slot.1 = prev.borrow().clone();
+                                            }
+                                        }
+                                    }
+                                }
                             }
-                            !found
-                        } else {
-                            true
+                            Ok(None) => {
+                                foreach_obj.remove(&iter_idx);
+                                foreach_obj_cur.remove(&iter_idx);
+                                if let OperandType::JmpTarget(target) = op.op2 {
+                                    ip = target as usize;
+                                }
+                            }
+                            Err(msg) => {
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        continue;
+                    }
+                    let done = if let Some(arr_rc) = foreach_ref_arrays.get(&iter_idx).cloned() {
+                        let next_pos = {
+                            let ab = arr_rc.borrow();
+                            let is_cur = |v: Option<(&ArrayKey, &Value)>,
+                                          cur: &std::rc::Weak<RefCell<Value>>| {
+                                matches!(v, Some((_, Value::Reference(r))) if std::ptr::eq(Rc::as_ptr(r), cur.as_ptr()))
+                            };
+                            match foreach_cur_ref.get(&iter_idx) {
+                                Some(cur) if pos > 0 => {
+                                    if is_cur(ab.entry_at(pos - 1), cur) {
+                                        pos
+                                    } else {
+                                        (0..ab.len())
+                                            .find(|&i| is_cur(ab.entry_at(i), cur))
+                                            .map(|i| i + 1)
+                                            .unwrap_or(pos - 1)
+                                    }
+                                }
+                                _ => pos,
+                            }
+                        };
+                        let ref_val = {
+                            let mut ab = arr_rc.borrow_mut();
+                            let key = ab.entry_at(next_pos).map(|(k, _)| k.clone());
+                            match (key, ab.value_at_mut(next_pos)) {
+                                (Some(key), Some(slot)) => {
+                                    let r = match slot {
+                                        Value::Reference(r) => r.clone(),
+                                        other => {
+                                            let r = Rc::new(RefCell::new(std::mem::take(other)));
+                                            *other = Value::Reference(r.clone());
+                                            r
+                                        }
+                                    };
+                                    let prev = foreach_cur_ref.insert(iter_idx, Rc::downgrade(&r));
+                                    Some((key, Value::Reference(r), prev))
+                                }
+                                _ => None,
+                            }
+                        };
+                        match ref_val {
+                            Some((key, ref_val, prev)) => {
+                                foreach_cur_key.insert(iter_idx, key);
+                                // Rebind the loop variable to the element's
+                                // reference (don't write through the previous one).
+                                if let OperandType::Cv(ci) = op.result {
+                                    if let Some(slot) = cvs.get_mut(ci as usize) {
+                                        *slot = ref_val.clone();
+                                    }
+                                } else {
+                                    self.write_operand(
+                                        &op.result,
+                                        ref_val,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                }
+                                foreach_positions.insert(iter_idx, next_pos + 1);
+                                // The previous element's reference is now held by the
+                                // array alone (refcount 1): it is a plain value again.
+                                if let Some(prev) = prev.and_then(|w| w.upgrade()) {
+                                    if Rc::strong_count(&prev) == 2 && next_pos > 0 {
+                                        let mut ab = arr_rc.borrow_mut();
+                                        if let Some(slot) = ab.value_at_mut(next_pos - 1) {
+                                            if matches!(slot, Value::Reference(r) if Rc::ptr_eq(r, &prev))
+                                            {
+                                                *slot = prev.borrow().clone();
+                                            }
+                                        }
+                                    }
+                                }
+                                false
+                            }
+                            None => true,
                         }
                     } else {
                         true
@@ -34331,26 +34645,78 @@ impl Vm {
                         OperandType::Tmp(idx) => tmps.get(*idx as usize).cloned(),
                         _ => None,
                     };
-                    // unset($ref[$k]) on a reference to an object acts on the object.
                     let arr_val = match arr_val {
-                        Some(Value::Reference(r)) if matches!(&*r.borrow(), Value::Object(_)) => {
-                            Some(r.borrow().clone())
-                        }
-                        v => v,
+                        Some(Value::Reference(r)) => Some(r.borrow().clone()),
+                        other => other,
                     };
+                    // UNSET_DIM on a non-array, non-object container.
+                    let unset_err: Option<(&[u8], String)> = match &arr_val {
+                        Some(Value::Array(_)) => match key_val.deref() {
+                            Value::Array(_) => Some((
+                                b"TypeError",
+                                "Cannot unset offset of type array on array".to_string(),
+                            )),
+                            Value::Object(o) => Some((
+                                b"TypeError",
+                                format!(
+                                    "Cannot unset offset of type {} on array",
+                                    crate::value::display_class_name(&o.borrow().class_name)
+                                ),
+                            )),
+                            _ => None,
+                        },
+                        Some(Value::Undef) | None => {
+                            if let OperandType::Cv(ci) = op.op1 {
+                                if let Some(n) = op_array.cv_names.get(ci as usize) {
+                                    self.emit_warning_at(
+                                        &format!(
+                                            "Undefined variable ${}",
+                                            String::from_utf8_lossy(n)
+                                        ),
+                                        op.line,
+                                    );
+                                }
+                            }
+                            None
+                        }
+                        Some(Value::String(_)) => {
+                            Some((b"Error", "Cannot unset string offsets".to_string()))
+                        }
+                        Some(Value::False) => {
+                            self.emit_deprecated_at(
+                                "Automatic conversion of false to array is deprecated",
+                                op.line,
+                            );
+                            None
+                        }
+                        Some(
+                            Value::True | Value::Long(_) | Value::Double(_) | Value::Resource(_),
+                        ) => Some((
+                            b"Error",
+                            "Cannot unset offset in a non-array variable".to_string(),
+                        )),
+                        _ => None,
+                    };
+                    if let Some((cls, msg)) = unset_err {
+                        let exc = self.create_exception(cls, &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught {}: {}", String::from_utf8_lossy(cls), msg),
+                            line: op.line,
+                        });
+                    }
                     if let Some(Value::Array(arr)) = arr_val {
                         let key = Self::value_to_array_key(key_val.clone());
                         let w = arr.borrow().get(&key).and_then(crate::gc::dtor_watch);
                         arr.borrow_mut().remove(&key);
                         crate::gc::dtor_watch_end(w);
-                    } else if let Some(Value::Reference(r)) = arr_val {
-                        let inner = r.borrow().clone();
-                        if let Value::Array(arr) = inner {
-                            let key = Self::value_to_array_key(key_val.clone());
-                            let w = arr.borrow().get(&key).and_then(crate::gc::dtor_watch);
-                            arr.borrow_mut().remove(&key);
-                            crate::gc::dtor_watch_end(w);
-                        }
                     } else if let Some(Value::Object(obj)) = arr_val.as_ref().map(|v| v.deref()).filter(|v| matches!(v, Value::Object(o) if native_handlers(o).and_then(|h| h.unset_dimension).is_some())) {
                         let f = native_handlers(&obj).and_then(|h| h.unset_dimension).unwrap();
                         f(self, &obj, &key_val.deref());
@@ -35295,9 +35661,40 @@ impl Vm {
                 OpCode::ArrayAppendRef => {
                     // Append to array keeping Reference wrapper (for closure by-ref capture)
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let raw_val = Self::read_operand_raw(&cvs, &op.op2);
-                    if let Value::Array(arr) = arr_val {
+                    let raw_val = match &op.op2 {
+                        OperandType::Tmp(t) => {
+                            tmps.get(*t as usize).cloned().unwrap_or(Value::Null)
+                        }
+                        other => Self::read_operand_raw(&cvs, other),
+                    };
+                    if let Value::Object(_) = &arr_val {
+                        if !self.assign_ref_to_object_dim(&arr_val, None, op.line) {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: "Uncaught Error: Cannot assign by reference to an array dimension of an object".into(),
+                                line: op.line,
+                            });
+                        }
+                    } else if let Value::Array(arr) = arr_val {
                         arr.borrow_mut().push(raw_val);
+                    } else if matches!(arr_val, Value::Null | Value::Undef) {
+                        // `$undef[] = &$x`: the write vivifies an array.
+                        if let OperandType::Cv(ci) = op.op1 {
+                            let mut na = PhpArray::new();
+                            na.push(raw_val);
+                            let nv = Value::Array(Rc::new(RefCell::new(na)));
+                            match cvs.get_mut(ci as usize) {
+                                Some(Value::Reference(r)) => *r.borrow_mut() = nv,
+                                Some(slot) => *slot = nv,
+                                None => {}
+                            }
+                        }
                     }
                 }
 
@@ -35333,7 +35730,21 @@ impl Vm {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
 
-                    if let Value::Array(arr) = &arr_val {
+                    if let Value::Object(_) = &arr_val {
+                        if !self.assign_ref_to_object_dim(&arr_val, Some(key_val), op.line) {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: "Uncaught Error: Cannot assign by reference to an array dimension of an object".into(),
+                                line: op.line,
+                            });
+                        }
+                    } else if let Value::Array(arr) = &arr_val {
                         let key = Self::value_to_array_key(key_val);
                         let old = arr.borrow().get(&key).cloned();
                         arr.borrow_mut().set(key, ref_val);
@@ -35575,7 +35986,16 @@ impl Vm {
                     }
                 }
 
-                OpCode::ArrayGetW => {
+                OpCode::ArrayGetW
+                | OpCode::ArrayGetWRW
+                | OpCode::ArrayGetWUnset
+                | OpCode::ArrayGetWObj => {
+                    let mode = match op.opcode {
+                        OpCode::ArrayGetW => crate::fetch_w::DimFetch::W,
+                        OpCode::ArrayGetWRW => crate::fetch_w::DimFetch::Rw,
+                        OpCode::ArrayGetWObj => crate::fetch_w::DimFetch::Obj,
+                        _ => crate::fetch_w::DimFetch::Unset,
+                    };
                     if let Value::Object(obj) = &self
                         .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                         .deref()
@@ -35608,176 +36028,95 @@ impl Vm {
                             }
                         }
                     }
-                    // Resolve the container array, vivifying a null/undef CV.
-                    let container: Option<Rc<RefCell<PhpArray>>> = match &op.op1 {
-                        OperandType::Cv(ci) => {
-                            let i = *ci as usize;
-                            let cur = cvs.get(i).map(|v| v.deref()).unwrap_or(Value::Undef);
-                            match cur {
-                                Value::Array(rc) => Some(rc),
-                                Value::Null | Value::Undef => {
-                                    let rc = Rc::new(RefCell::new(PhpArray::new()));
-                                    match cvs.get_mut(i) {
-                                        Some(Value::Reference(r)) => {
-                                            *r.borrow_mut() = Value::Array(rc.clone());
-                                        }
-                                        Some(slot) => {
-                                            *slot = Value::Array(rc.clone());
-                                        }
-                                        None => {}
-                                    }
-                                    Some(rc)
-                                }
-                                _ => None,
-                            }
-                        }
-                        other => match self
-                            .read_operand(other, &cvs, &tmps, &op_array.literals)
-                            .deref()
-                        {
-                            Value::Array(rc) => Some(rc),
-                            _ => None,
-                        },
-                    };
-                    let result = if let Some(arr) = container {
-                        if matches!(op.op2, OperandType::Unused) {
-                            let rc = Rc::new(RefCell::new(PhpArray::new()));
-                            arr.borrow_mut().push(Value::Array(rc.clone()));
-                            Value::Array(rc)
-                        } else {
-                            let key_val = self.read_operand_warn(
-                                &op.op2,
-                                &cvs,
-                                &tmps,
-                                &op_array.literals,
-                                op_array,
-                                op.line,
-                            );
-                            let key = self.value_to_array_key_checked(&key_val, op.line);
-                            let existing = arr.borrow().get(&key).cloned();
-                            match existing {
-                                None | Some(Value::Null) | Some(Value::Undef) => {
-                                    let rc = Rc::new(RefCell::new(PhpArray::new()));
-                                    arr.borrow_mut().set(key, Value::Array(rc.clone()));
-                                    Value::Array(rc)
-                                }
-                                Some(Value::Reference(r)) => {
-                                    let inner = r.borrow().clone();
-                                    match inner {
-                                        Value::Null | Value::Undef => {
-                                            let rc = Rc::new(RefCell::new(PhpArray::new()));
-                                            *r.borrow_mut() = Value::Array(rc.clone());
-                                            Value::Array(rc)
-                                        }
-                                        Value::Array(rc) => {
-                                            if Rc::strong_count(&rc) > 2 {
-                                                let sep =
-                                                    Rc::new(RefCell::new(rc.borrow().clone()));
-                                                *r.borrow_mut() = Value::Array(sep.clone());
-                                                Value::Array(sep)
-                                            } else {
-                                                Value::Array(rc)
-                                            }
-                                        }
-                                        other => other,
-                                    }
-                                }
-                                Some(Value::Array(rc)) => {
-                                    // Copy-on-write: separate an element array shared elsewhere.
-                                    if Rc::strong_count(&rc) > 2 {
-                                        let sep = Rc::new(RefCell::new(rc.borrow().clone()));
-                                        arr.borrow_mut().set(key, Value::Array(sep.clone()));
-                                        Value::Array(sep)
-                                    } else {
-                                        Value::Array(rc)
-                                    }
-                                }
-                                Some(Value::False) => {
-                                    self.emit_deprecated_at(
-                                        "Automatic conversion of false to array is deprecated",
-                                        op.line,
-                                    );
-                                    let rc = Rc::new(RefCell::new(PhpArray::new()));
-                                    arr.borrow_mut().set(key, Value::Array(rc.clone()));
-                                    Value::Array(rc)
-                                }
-                                Some(other) => other,
-                            }
-                        }
+                    let key = if matches!(op.op2, OperandType::Unused) {
+                        None
                     } else {
-                        // Non-array container (string, object, scalar): fall back to a read.
-                        let c = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                        if matches!(op.op2, OperandType::Unused) {
-                            Value::Null
-                        } else {
-                            let key_val =
-                                self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                            match c.deref() {
-                                Value::Object(o) => {
-                                    // `$obj[k][...] = v`: write through the reference a
-                                    // by-ref offsetGet returns.
-                                    let class_lower = o.borrow().class_name.to_ascii_lowercase();
-                                    let by_ref = self
-                                        .classes
-                                        .get(&class_lower)
-                                        .and_then(|c| c.get_method(b"offsetget"))
-                                        .map(|m| m.op_array.returns_by_ref)
-                                        .unwrap_or(false);
-                                    if by_ref {
-                                        self.keep_ref_depth = Some(self.call_depth + 1);
-                                    }
-                                    let v = self
-                                        .call_object_method(&c.deref(), b"offsetGet", &[key_val])
-                                        .unwrap_or(Value::Null);
-                                    self.keep_ref_depth = None;
-                                    match v {
-                                        Value::Reference(r) => {
-                                            let cur = r.borrow().clone();
-                                            match cur {
-                                                Value::Null | Value::Undef => {
-                                                    let a = Value::Array(Rc::new(RefCell::new(
-                                                        PhpArray::new(),
-                                                    )));
-                                                    *r.borrow_mut() = a.clone();
-                                                    a
-                                                }
-                                                Value::Array(a) if Rc::strong_count(&a) > 2 => {
-                                                    let sep = Value::Array(Rc::new(RefCell::new(
-                                                        a.borrow().clone(),
-                                                    )));
-                                                    *r.borrow_mut() = sep.clone();
-                                                    sep
-                                                }
-                                                other => other,
-                                            }
-                                        }
-                                        other => {
-                                            if !matches!(other, Value::Object(_))
-                                                && self
-                                                    .classes
-                                                    .get(&class_lower)
-                                                    .and_then(|c| c.get_method(b"offsetget"))
-                                                    .is_some()
-                                            {
-                                                let cd = crate::value::display_class_name(
-                                                    &o.borrow().class_name,
-                                                );
-                                                self.emit_notice_at(&format!("Indirect modification of overloaded element of {} has no effect", cd), op.line);
-                                            }
-                                            other
-                                        }
-                                    }
-                                }
-                                _ => Value::Null,
-                            }
-                        }
+                        Some(self.read_operand_warn(
+                            &op.op2,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        ))
                     };
+                    // Drop a stale holder of the previous fetch (loops) so the
+                    // copy-on-write checks don't see a phantom share.
                     if let OperandType::Tmp(t) = op.result {
-                        if let Some(slot) = tmps.get_mut(t as usize) {
-                            *slot = Value::Undef;
+                        if op.op1 != op.result {
+                            if let Some(slot) = tmps.get_mut(t as usize) {
+                                *slot = Value::Undef;
+                            }
                         }
                     }
-                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    let fetched = match op.op1 {
+                        OperandType::Cv(ci) => {
+                            let i = ci as usize;
+                            let name = op_array.cv_names.get(i).map(|n| n.as_slice());
+                            let mut slot =
+                                cvs.get_mut(i).map(std::mem::take).unwrap_or(Value::Undef);
+                            let r = self.fetch_dim_for_write(&mut slot, key, mode, name, op.line);
+                            if let Some(s) = cvs.get_mut(i) {
+                                *s = slot;
+                            }
+                            r
+                        }
+                        OperandType::Tmp(ti) => {
+                            let i = ti as usize;
+                            let mut slot =
+                                tmps.get_mut(i).map(std::mem::take).unwrap_or(Value::Undef);
+                            let r = self.fetch_dim_for_write(&mut slot, key, mode, None, op.line);
+                            if let Some(s) = tmps.get_mut(i) {
+                                *s = slot;
+                            }
+                            r
+                        }
+                        other => {
+                            let mut v = self.read_operand(&other, &cvs, &tmps, &op_array.literals);
+                            self.fetch_dim_for_write(&mut v, key, mode, None, op.line)
+                        }
+                    };
+                    match fetched {
+                        Some(v) => {
+                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        None => {
+                            if self.current_exception.is_none() {
+                                self.write_operand(
+                                    &op.result,
+                                    Value::Null,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                            } else {
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                    exception_handlers.last()
+                                {
+                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                let msg = match &self.current_exception {
+                                    Some(Value::Object(o)) => {
+                                        let ob = o.borrow();
+                                        format!(
+                                            "Uncaught {}: {}",
+                                            String::from_utf8_lossy(&ob.class_name),
+                                            ob.get_property(b"message")
+                                                .to_php_string()
+                                                .to_string_lossy()
+                                        )
+                                    }
+                                    _ => "Uncaught exception".to_string(),
+                                };
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
+                            }
+                        }
+                    }
                 }
 
                 OpCode::JmpIfArgByRef => {
@@ -35873,48 +36212,26 @@ impl Vm {
                                     crate::value::display_class_name(&declaring_class)
                                 });
                             let prop_str = prop_name.to_string_lossy();
-                            if let Some(sv) = set_vis {
-                                if sv != Visibility::Public {
-                                    let caller_scope = self.current_class_scope();
-                                    if self
-                                        .check_visibility(
-                                            sv,
-                                            &declaring_class,
-                                            &class_name_orig,
-                                            &prop_str,
-                                            true,
-                                            caller_scope.as_deref(),
-                                        )
-                                        .is_some()
-                                    {
-                                        let vis_str = if sv == Visibility::Private {
-                                            "private(set)"
-                                        } else {
-                                            "protected(set)"
-                                        };
-                                        let scope_str = match caller_scope.as_deref() {
-                                            Some(cs) => {
-                                                format!("scope {}", String::from_utf8_lossy(cs))
-                                            }
-                                            None => "global scope".to_string(),
-                                        };
-                                        deny = Some(format!(
-                                            "Cannot modify {} property {}::${} from {}",
-                                            vis_str, class_display, prop_str, scope_str
-                                        ));
-                                    }
-                                }
-                            }
-                            if deny.is_none()
-                                && is_readonly
-                                && obj.borrow().has_property(prop_name.as_bytes())
-                            {
+                            deny = self.asym_set_denied(
+                                set_vis,
+                                is_readonly,
+                                &declaring_class,
+                                &class_name_orig,
+                                prop_name.as_bytes(),
+                                "indirectly modify",
+                            );
+                            if deny.is_none() && is_readonly {
                                 deny = Some(format!(
-                                    "Cannot modify readonly property {}::${}",
+                                    "Cannot indirectly modify readonly property {}::${}",
                                     class_display, prop_str
                                 ));
                             }
                         }
+                        let hooks = if deny.is_none() {
+                            self.prop_hooks_outside(&class_lower, prop_name.as_bytes())
+                        } else {
+                            None
+                        };
                         let get_method = self
                             .classes
                             .get(&class_lower)
@@ -35922,13 +36239,39 @@ impl Vm {
                             .map(|m| m.op_array.returns_by_ref);
                         let oid = obj.borrow().object_id;
                         let guard_key = (oid, prop_name.as_bytes().to_vec(), 0u8);
-                        let overloaded = (inaccessible.is_some() || !obj.borrow().has_property(prop_name.as_bytes()))
+                        let overloaded = hooks.is_none()
+                            && (inaccessible.is_some() || !obj.borrow().has_property(prop_name.as_bytes()))
                             && get_method.is_some()
                             && !self.magic_prop_guards.contains(&guard_key)
                             // Not every __get dispatch path records its guard:
                             // inside a magic method an inaccessible property errors.
                             && !(inaccessible.is_some() && self.magic_depth > 0);
-                        if overloaded && deny.is_none() {
+                        if let Some((has_get_hook, _)) = hooks {
+                            // A hooked property only hands out objects (or the
+                            // result of a by-reference get hook).
+                            let (v, by_ref) = if has_get_hook {
+                                let v = self.call_prop_get_hook(
+                                    &obj_val,
+                                    &class_lower,
+                                    prop_name.as_bytes(),
+                                );
+                                (v, self.last_call_by_ref)
+                            } else {
+                                (obj.borrow().get_property(prop_name.as_bytes()), false)
+                            };
+                            if self.current_exception.is_some() {
+                                Value::Null
+                            } else if by_ref || matches!(v.deref(), Value::Object(_)) {
+                                v.deref()
+                            } else {
+                                ref_error = Some(format!(
+                                    "Indirect modification of {}::${} is not allowed",
+                                    crate::value::display_class_name(&class_name_orig),
+                                    prop_name.to_string_lossy()
+                                ));
+                                Value::Null
+                            }
+                        } else if overloaded && deny.is_none() {
                             // Overloaded property: fetched through __get, by
                             // reference when __get returns by reference.
                             if get_method == Some(true) {
@@ -36036,6 +36379,110 @@ impl Vm {
                         }
                         other => self.read_operand(other, &cvs, &tmps, &op_array.literals),
                     };
+                    // Hooked or __get-overloaded properties have no slot to bind
+                    // (zend_assign_to_property_reference).
+                    if let Value::Object(obj) = &obj_val {
+                        let (class_lower, class_name, oid) = {
+                            let ob = obj.borrow();
+                            (
+                                ob.class_name
+                                    .iter()
+                                    .map(|b| b.to_ascii_lowercase())
+                                    .collect::<Vec<u8>>(),
+                                ob.class_name.clone(),
+                                ob.object_id,
+                            )
+                        };
+                        let pn = prop_name.as_bytes();
+                        // Readonly / asymmetric-visibility properties cannot be
+                        // bound by reference.
+                        if let Some((_v, decl, is_ro, _t, sv)) =
+                            self.find_property_def(&class_lower, pn)
+                        {
+                            let msg = self
+                                .asym_set_denied(
+                                    sv,
+                                    is_ro,
+                                    &decl,
+                                    &class_name,
+                                    pn,
+                                    "indirectly modify",
+                                )
+                                .or_else(|| {
+                                    is_ro.then(|| {
+                                        let decl_lower = decl.to_ascii_lowercase();
+                                        format!(
+                                            "Cannot indirectly modify readonly property {}::${}",
+                                            self.classes
+                                                .get(&decl_lower)
+                                                .map(|c| crate::value::display_class_name(&c.name))
+                                                .unwrap_or_else(|| {
+                                                    crate::value::display_class_name(&decl)
+                                                }),
+                                            prop_name.to_string_lossy()
+                                        )
+                                    })
+                                });
+                            if let Some(msg) = msg {
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        let hooked = self.prop_hooks_outside(&class_lower, pn).is_some();
+                        let overloaded = !hooked
+                            && !obj.borrow().has_property(pn)
+                            && self
+                                .classes
+                                .get(&class_lower)
+                                .map(|c| c.get_method(b"__get").is_some())
+                                .unwrap_or(false)
+                            && !self.magic_prop_guards.contains(&(oid, pn.to_vec(), 0u8));
+                        if overloaded {
+                            self.last_call_by_ref = false;
+                            let v = self
+                                .call_object_method(
+                                    &obj_val,
+                                    b"__get",
+                                    &[Value::String(prop_name.clone())],
+                                )
+                                .unwrap_or(Value::Null);
+                            if self.current_exception.is_none() {
+                                self.magic_get_w_result(v, &class_name, pn, op.line);
+                            }
+                        }
+                        if hooked || overloaded {
+                            if self.current_exception.is_none() {
+                                let exc = self.create_exception(
+                                    b"Error",
+                                    "Cannot assign by reference to overloaded object",
+                                    op.line,
+                                );
+                                self.current_exception = Some(exc);
+                            }
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: "Uncaught Error: Cannot assign by reference to overloaded object".into(),
+                                line: op.line,
+                            });
+                        }
+                    }
                     if let Value::Object(obj) = &obj_val {
                         match value {
                             Value::Reference(r) => {
@@ -36246,6 +36693,29 @@ impl Vm {
                         }
                     }
                     let key_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // An undefined variable used as the key warns (ZVAL_UNDEFINED_OP2),
+                    // even inside isset()/empty()/?? (compiled under suppression).
+                    if matches!(key_val, Value::Null | Value::Undef)
+                        && !matches!(arr_val, Value::Null | Value::Undef)
+                    {
+                        let saved_er = self.error_reporting;
+                        if saved_er == 0 {
+                            if let Some(outer) = self.error_reporting_stack.last() {
+                                self.error_reporting = *outer;
+                            }
+                        }
+                        self.check_undefined_cv(&op.op2, &cvs, op_array, op.line);
+                        self.error_reporting = saved_er;
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                        }
+                    }
                     if let Value::Object(obj) = &arr_val.deref() {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.has_dimension) {
                             if let Some(b) = f(self, obj, &key_val.deref(), 0) {
@@ -36420,11 +36890,52 @@ impl Vm {
                                     self.call_object_method(&arr_val, b"offsetexists", &[key_val])
                                         .unwrap_or(Value::False)
                                 });
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                let msg = match &self.current_exception {
+                                    Some(Value::Object(o)) => {
+                                        let ob = o.borrow();
+                                        format!(
+                                            "Uncaught {}: {}",
+                                            crate::value::display_class_name(&ob.class_name),
+                                            ob.get_property(b"message")
+                                                .to_php_string()
+                                                .to_string_lossy()
+                                        )
+                                    }
+                                    _ => "Uncaught exception".to_string(),
+                                };
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
+                            }
                             if exists_result.is_truthy() {
                                 Value::True
                             } else {
                                 Value::False
                             }
+                        } else if let Some(msg) = self.dim_write_container_error(&arr_val, false) {
+                            // isset() on an object that is not ArrayAccess throws.
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
                         } else {
                             Value::False
                         }
@@ -42282,8 +42793,24 @@ impl Vm {
                 OpCode::PropertyGet
                 | OpCode::PropertyGetRW
                 | OpCode::PropertyGetW
-                | OpCode::PropertyGetObjW => {
-                    if !matches!(op.opcode, OpCode::PropertyGetW) {
+                | OpCode::PropertyGetObjW
+                | OpCode::PropertyGetWRW
+                | OpCode::PropertyGetWUnset
+                | OpCode::PropertyGetWObj
+                | OpCode::PropertyGetWObjRW
+                | OpCode::PropertyGetIs => {
+                    // FETCH_OBJ_IS (empty(), isset() containers): __isset() is
+                    // consulted before __get().
+                    let is_fetch_is = matches!(op.opcode, OpCode::PropertyGetIs);
+                    let is_w_fetch = matches!(
+                        op.opcode,
+                        OpCode::PropertyGetW
+                            | OpCode::PropertyGetWRW
+                            | OpCode::PropertyGetWUnset
+                            | OpCode::PropertyGetWObj
+                            | OpCode::PropertyGetWObjRW
+                    );
+                    if !is_w_fetch {
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     } else if let OperandType::Tmp(t) = op.result {
                         // Drop a stale holder of the previous fetch (loops) so the
@@ -42908,6 +43435,26 @@ impl Vm {
                             self.property_hook_stack.pop();
                             match hook_result {
                                 Ok(val) => {
+                                    if is_w_fetch
+                                        && !self.hook_get_w_check(
+                                            &val,
+                                            &class_name_orig,
+                                            prop_name_bytes,
+                                        )
+                                    {
+                                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                            exception_handlers.last().copied()
+                                        {
+                                            pending_calls_catch_depth = Some(eh_pc_depth);
+                                            exception_handlers.pop();
+                                            ip = catch_target as usize;
+                                            continue;
+                                        }
+                                        return Err(VmError {
+                                            message: "Uncaught Error: Indirect modification".into(),
+                                            line: op.line,
+                                        });
+                                    }
                                     self.write_operand(
                                         &op.result,
                                         val.deref(),
@@ -42994,6 +43541,21 @@ impl Vm {
                             // Don't recursively dispatch __get when access is denied from inside
                             // __get itself (PHP raises the Error directly).
                             if has_get && self.magic_depth == 0 {
+                                if is_fetch_is
+                                    && self.magic_isset_denies(&obj_val, &class_lower, &prop_name)
+                                {
+                                    if let Some((rid, pname)) = &propagate_get_guard_to_real {
+                                        self.magic_prop_guards.remove(&(*rid, pname.clone(), 0u8));
+                                    }
+                                    self.write_operand(
+                                        &op.result,
+                                        Value::Null,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    continue;
+                                }
                                 self.magic_depth += 1;
                                 let magic_method_def = self
                                     .classes
@@ -43033,6 +43595,16 @@ impl Vm {
                                 let result = self
                                     .execute_op_array(&method, fn_cvs)
                                     .unwrap_or(Value::Null);
+                                let result = if is_w_fetch && self.current_exception.is_none() {
+                                    self.magic_get_w_result(
+                                        result,
+                                        &class_name_orig,
+                                        prop_name.as_bytes(),
+                                        op.line,
+                                    )
+                                } else {
+                                    result
+                                };
                                 self.call_stack.pop();
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
@@ -43134,18 +43706,88 @@ impl Vm {
                                 }
                             }
                             // Write fetch for a dimension write: vivify / separate / readonly.
-                            if matches!(op.opcode, OpCode::PropertyGetW) && !hidden_private_prop {
+                            if is_w_fetch && !hidden_private_prop {
                                 let exists = obj.borrow().has_property(&storage_key);
                                 let has_get = self
                                     .classes
                                     .get(&class_lower)
                                     .map(|c| c.methods.contains_key(&b"__get".to_vec()))
                                     .unwrap_or(false);
+                                // UNSET fetches and containers of object writes create
+                                // a missing property as null (no array vivification).
+                                let unset_fetch = matches!(
+                                    op.opcode,
+                                    OpCode::PropertyGetWUnset
+                                        | OpCode::PropertyGetWObj
+                                        | OpCode::PropertyGetWObjRW
+                                );
+                                let rw_fetch = matches!(
+                                    op.opcode,
+                                    OpCode::PropertyGetWRW | OpCode::PropertyGetWObjRW
+                                );
+                                if rw_fetch && !exists && !has_get {
+                                    let class_display =
+                                        crate::value::display_class_name(&class_name_orig);
+                                    self.emit_warning_at(
+                                        &format!(
+                                            "Undefined property: {}::${}",
+                                            class_display,
+                                            prop_name.to_string_lossy()
+                                        ),
+                                        op.line,
+                                    );
+                                }
                                 let def =
                                     self.find_property_def(&class_lower, prop_name.as_bytes());
                                 let mut w_error: Option<String> = None;
-                                if let Some((_v, declaring_class, is_readonly, ref pt, _sv)) = def {
-                                    if is_readonly && exists && !matches!(prop, Value::Undef) {
+                                // A hooked property (outside its hooks) only hands out
+                                // objects for writing.
+                                let hooked = !in_hook
+                                    && self
+                                        .classes
+                                        .get(&class_lower)
+                                        .and_then(|c| {
+                                            c.properties
+                                                .iter()
+                                                .find(|p| p.name == prop_name.as_bytes())
+                                        })
+                                        .map(|p| p.has_set_hook || p.has_get_hook)
+                                        .unwrap_or(false);
+                                if hooked && !matches!(prop, Value::Object(_)) {
+                                    w_error = Some(format!(
+                                        "Indirect modification of {}::${} is not allowed",
+                                        crate::value::display_class_name(&class_name_orig),
+                                        prop_name.to_string_lossy()
+                                    ));
+                                } else if let Some((_v, declaring_class, is_readonly, ref pt, sv)) =
+                                    def
+                                {
+                                    // RW of an uninitialized property: the "must not
+                                    // be accessed before initialization" error wins.
+                                    let undef_skip = matches!(prop, Value::Undef)
+                                        && (rw_fetch
+                                            || matches!(op.opcode, OpCode::PropertyGetWUnset));
+                                    let asym = if matches!(prop, Value::Object(_)) || undef_skip {
+                                        None
+                                    } else {
+                                        self.asym_set_denied(
+                                            sv,
+                                            is_readonly,
+                                            &declaring_class,
+                                            &class_name_orig,
+                                            prop_name.as_bytes(),
+                                            "indirectly modify",
+                                        )
+                                    };
+                                    // zend_std_read_property(W/RW/UNSET) on a readonly
+                                    // property: only objects (as copies) can be fetched;
+                                    // unset() of an uninitialized one is a no-op.
+                                    if asym.is_some() {
+                                        w_error = asym;
+                                    } else if is_readonly
+                                        && !matches!(prop, Value::Object(_))
+                                        && !undef_skip
+                                    {
                                         let declaring_lower: Vec<u8> = declaring_class
                                             .iter()
                                             .map(|b| b.to_ascii_lowercase())
@@ -43158,12 +43800,13 @@ impl Vm {
                                                 crate::value::display_class_name(&declaring_class)
                                             });
                                         w_error = Some(format!(
-                                            "Cannot modify readonly property {}::${}",
+                                            "Cannot indirectly modify readonly property {}::${}",
                                             class_display,
                                             prop_name.to_string_lossy()
                                         ));
                                     } else if matches!(prop, Value::Null | Value::Undef)
                                         && (exists || !has_get)
+                                        && !unset_fetch
                                         && pt.as_ref().map(param_type_accepts_array).unwrap_or(true)
                                     {
                                         let arr =
@@ -43204,7 +43847,11 @@ impl Vm {
                                             self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, prop_name.to_string_lossy()));
                                         }
                                     }
-                                    let arr = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                                    let arr = if unset_fetch {
+                                        Value::Null
+                                    } else {
+                                        Value::Array(Rc::new(RefCell::new(PhpArray::new())))
+                                    };
                                     obj.borrow_mut()
                                         .set_property(storage_key.clone(), arr.clone());
                                     prop = arr;
@@ -43238,7 +43885,9 @@ impl Vm {
                             }
                             // Check for typed property accessed before initialization
                             // Skip this check when error reporting is suppressed (empty(), @)
+                            // (FETCH_OBJ_UNSET hands out the uninitialized slot.)
                             if matches!(prop, Value::Undef)
+                                && !matches!(op.opcode, OpCode::PropertyGetWUnset)
                                 && !hidden_private_prop
                                 && obj.borrow().has_property(&storage_key)
                                 && self.error_reporting != 0
@@ -43251,6 +43900,29 @@ impl Vm {
                                         .map(|c| c.methods.contains_key(&b"__get".to_vec()))
                                         .unwrap_or(false);
                                 if has_get {
+                                    if is_fetch_is
+                                        && self.magic_isset_denies(
+                                            &obj_val,
+                                            &class_lower,
+                                            &prop_name,
+                                        )
+                                    {
+                                        if let Some((rid, pname)) = &propagate_get_guard_to_real {
+                                            self.magic_prop_guards.remove(&(
+                                                *rid,
+                                                pname.clone(),
+                                                0u8,
+                                            ));
+                                        }
+                                        self.write_operand(
+                                            &op.result,
+                                            Value::Null,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        continue;
+                                    }
                                     self.magic_depth += 1;
                                     let magic_method_def = self
                                         .classes
@@ -43272,6 +43944,14 @@ impl Vm {
                                     let mut result = self
                                         .execute_op_array(&method, fn_cvs)
                                         .unwrap_or(Value::Null);
+                                    if is_w_fetch && self.current_exception.is_none() {
+                                        result = self.magic_get_w_result(
+                                            result,
+                                            &class_name_orig,
+                                            prop_name.as_bytes(),
+                                            op.line,
+                                        );
+                                    }
                                     self.called_class_stack.pop();
                                     self.class_scope_stack.pop();
                                     self.magic_depth -= 1;
@@ -43360,6 +44040,29 @@ impl Vm {
                                     (get_obj_id, prop_name.as_bytes().to_vec(), 0u8);
                                 let get_already = self.magic_prop_guards.contains(&get_guard_key);
                                 if has_get && !get_already {
+                                    if is_fetch_is
+                                        && self.magic_isset_denies(
+                                            &obj_val,
+                                            &class_lower,
+                                            &prop_name,
+                                        )
+                                    {
+                                        if let Some((rid, pname)) = &propagate_get_guard_to_real {
+                                            self.magic_prop_guards.remove(&(
+                                                *rid,
+                                                pname.clone(),
+                                                0u8,
+                                            ));
+                                        }
+                                        self.write_operand(
+                                            &op.result,
+                                            Value::Null,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        continue;
+                                    }
                                     self.magic_depth += 1;
                                     let magic_method_def = self
                                         .classes
@@ -43394,6 +44097,16 @@ impl Vm {
                                     let result = self
                                         .execute_op_array(&method, fn_cvs)
                                         .unwrap_or(Value::Null);
+                                    let result = if is_w_fetch && self.current_exception.is_none() {
+                                        self.magic_get_w_result(
+                                            result,
+                                            &class_name_orig,
+                                            prop_name.as_bytes(),
+                                            op.line,
+                                        )
+                                    } else {
+                                        result
+                                    };
                                     self.call_stack.pop();
                                     self.called_class_stack.pop();
                                     self.class_scope_stack.pop();
@@ -43510,6 +44223,28 @@ impl Vm {
                                 prop
                             }
                         }
+                    } else if matches!(op.opcode, OpCode::PropertyGetWUnset) {
+                        // FETCH_OBJ_UNSET on a non-object: nothing to unset.
+                        Value::Null
+                    } else if is_w_fetch {
+                        // FETCH_OBJ_W/RW on a non-object.
+                        let type_name = Self::value_type_name(&obj_val);
+                        let msg = format!(
+                            "Attempt to modify property \"{}\" on {}",
+                            prop_name.to_string_lossy(),
+                            type_name
+                        );
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
                     } else {
                         // Accessing property on non-object
                         match &obj_val {

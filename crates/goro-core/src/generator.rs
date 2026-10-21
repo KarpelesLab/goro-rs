@@ -177,6 +177,7 @@ impl PhpGenerator {
                 | OpCode::InitDynamicStaticCall
                 | OpCode::InitMethodCall
                 | OpCode::SendVal
+                | OpCode::SendValChecked
                 | OpCode::SendValRaw
                 | OpCode::SendNamedVal
                 | OpCode::SendUnpack
@@ -1586,7 +1587,7 @@ impl PhpGenerator {
                     func_name.extend_from_slice(method_name.as_bytes());
                     vm.generator_init_fcall(Value::String(PhpString::from_vec(func_name)));
                 }
-                OpCode::SendVal => {
+                OpCode::SendVal | OpCode::SendValChecked => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     vm.generator_send_val(val);
                 }
@@ -1857,7 +1858,15 @@ impl PhpGenerator {
                                     None => Rc::new(RefCell::new(Value::Null)),
                                 }
                             };
-                            self.write_operand(&op.result, Value::Reference(r));
+                            // A plain loop variable is rebound to the reference.
+                            match op.result {
+                                OperandType::Cv(ci) => {
+                                    if let Some(slot) = self.cvs.get_mut(ci as usize) {
+                                        *slot = Value::Reference(r);
+                                    }
+                                }
+                                _ => self.write_operand(&op.result, Value::Reference(r)),
+                            }
                             self.foreach_positions.insert(iter_idx, pos + 1);
                         }
                     } else {

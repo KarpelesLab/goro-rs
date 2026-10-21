@@ -5024,7 +5024,7 @@ fn current(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(arr
             .iter()
             .nth(pos)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.deref())
             .unwrap_or(Value::False))
     } else {
         Ok(Value::False)
@@ -5039,7 +5039,7 @@ fn next_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(arr
             .iter()
             .nth(pos)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.deref())
             .unwrap_or(Value::False))
     } else {
         Ok(Value::False)
@@ -5061,7 +5061,7 @@ fn prev_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(arr
                 .iter()
                 .nth(pos)
-                .map(|(_, v)| v.clone())
+                .map(|(_, v)| v.deref())
                 .unwrap_or(Value::False))
         }
     } else {
@@ -5076,7 +5076,7 @@ fn reset_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(arr
             .iter()
             .next()
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.deref())
             .unwrap_or(Value::False))
     } else {
         Ok(Value::False)
@@ -5091,7 +5091,7 @@ fn end_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(arr
             .iter()
             .last()
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.deref())
             .unwrap_or(Value::False))
     } else {
         Ok(Value::False)

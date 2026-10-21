@@ -365,6 +365,8 @@ pub struct Param {
     pub set_hook_abstract: bool,
     pub doc_comment: Option<Vec<u8>>,
     pub set_hook_type: Option<TypeHint>,
+    /// `&get { ... }`: the get hook returns by reference.
+    pub get_hook_by_ref: bool,
 }
 #[derive(Debug, Clone)]
 pub enum TypeHint {
@@ -432,6 +434,8 @@ pub enum ClassMember {
         attributes: Vec<Attribute>,
         doc_comment: Option<Vec<u8>>,
         set_hook_type: Option<TypeHint>,
+        /// `&get { ... }`: the get hook returns by reference.
+        get_hook_by_ref: bool,
     },
     Method {
         name: Vec<u8>,

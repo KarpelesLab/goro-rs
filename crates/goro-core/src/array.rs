@@ -544,6 +544,21 @@ impl PhpArray {
     pub fn contains_key(&self, key: &ArrayKey) -> bool {
         self.find(key).is_some()
     }
+
+    /// The entry at insertion-order position `pos`.
+    pub fn entry_at(&self, pos: usize) -> Option<(&ArrayKey, &Value)> {
+        self.entries.get(pos).map(|(k, v)| (k, v))
+    }
+
+    /// Mutable value of the entry at insertion-order position `pos`.
+    pub fn value_at_mut(&mut self, pos: usize) -> Option<&mut Value> {
+        self.entries.get_mut(pos).map(|(_, v)| v)
+    }
+
+    /// Insertion-order position of `key`.
+    pub fn position_of(&self, key: &ArrayKey) -> Option<usize> {
+        self.find(key)
+    }
 }
 
 impl Default for PhpArray {
