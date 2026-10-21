@@ -4,6 +4,7 @@
 mod var;
 mod files;
 mod rewrite;
+mod upload;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -3392,4 +3393,5 @@ pub fn register(vm: &mut Vm) {
     register_classes(vm);
     vm.startup_hooks.push(startup);
     vm.request_startup_hooks.push(request_startup);
+    vm.rfc1867_callback = Some(upload::callback);
 }
