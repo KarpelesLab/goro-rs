@@ -1464,7 +1464,10 @@ impl<'a> Parser<'a> {
             if is_readonly || matches!(default, Value::Undef) {
                 obj.set_property(name, Value::Undef);
             } else {
-                let resolved = vm.resolve_deferred_value(&default);
+                let resolved = match vm.resolve_deferred_value(&default) {
+                    Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
+                    v => v,
+                };
                 obj.set_property(name, resolved);
             }
         }

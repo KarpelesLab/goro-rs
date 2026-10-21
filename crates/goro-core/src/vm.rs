@@ -27753,6 +27753,8 @@ impl Vm {
                                     }
                                 } else {
                                     match value {
+                                        // Arrays are values: the clone gets its own copy.
+                                        Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
                                         // A reference held only by this object is
                                         // separated on clone (PHP semantics).
                                         Value::Reference(r) if Rc::strong_count(r) == 1 => r.borrow().clone(),
