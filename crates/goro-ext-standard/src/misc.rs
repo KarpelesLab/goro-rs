@@ -2781,7 +2781,7 @@ pub(crate) fn callable_error(vm: &Vm, cb: &Value) -> Option<String> {
         let mlower = method.to_ascii_lowercase();
         match class.get_method(&mlower) {
             Some(m) => {
-                let scope = vm.current_class_scope();
+                let scope = vm.current_class_scope().map(|c| c.to_ascii_lowercase());
                 let ok = match m.visibility {
                     goro_core::object::Visibility::Public => true,
                     goro_core::object::Visibility::Private => scope.as_deref() == Some(m.declaring_class.as_slice()),
@@ -4901,93 +4901,132 @@ fn extract_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // function_exists('extract') and call_user_func('extract', ...) don't fail.
     Ok(Value::Long(0))
 }
-fn array_column(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let input = match args.first() {
-        Some(Value::Array(a)) => a.borrow(),
-        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    };
-    let column_key = args.get(1).unwrap_or(&Value::Null);
-    let index_key = args.get(2);
-
-    let mut result = PhpArray::new();
-
-    for (_, row) in input.iter() {
-        let row_ref = match row {
-            Value::Array(a) => a.clone(),
-            Value::Object(o) => {
-                // Convert object properties to array-like access
-                let obj = o.borrow();
-                let mut arr = PhpArray::new();
-                for (k, v) in obj.properties.iter() {
-                    // Try to parse numeric property names as integers
-                    let key_str = String::from_utf8_lossy(k);
-                    if let Ok(n) = key_str.parse::<i64>() {
-                        if n.to_string() == key_str.as_ref() {
-                            arr.set(goro_core::array::ArrayKey::Int(n), v.clone());
-                            continue;
-                        }
-                    }
-                    let key = goro_core::array::ArrayKey::String(PhpString::from_vec(k.clone()));
-                    arr.set(key, v.clone());
-                }
-                Rc::new(RefCell::new(arr))
+/// array_column_fetch_prop()
+fn array_column_fetch(vm: &mut Vm, data: &Value, name: &Value) -> Option<Value> {
+    match data {
+        Value::Object(o) => {
+            let pname: Vec<u8> = name.to_php_string().as_bytes().to_vec();
+            let class_lower = o.borrow().class_name.to_ascii_lowercase();
+            let scope = vm.current_class_scope().map(|c| c.to_ascii_lowercase());
+            let (accessible, declared) = match vm.get_class_def(&class_lower)
+                .and_then(|c| c.properties.iter().find(|p| p.name == pname && !p.is_static).map(|p| (p.visibility, p.declaring_class.clone())))
+            {
+                Some((vis, decl)) => (match vis {
+                    goro_core::object::Visibility::Public => true,
+                    goro_core::object::Visibility::Private => scope.as_deref() == Some(decl.as_slice()),
+                    goro_core::object::Visibility::Protected => scope.as_ref().map(|sc| {
+                        sc.as_slice() == decl.as_slice() || vm.class_extends(sc, &decl) || vm.class_extends(&decl, sc)
+                    }).unwrap_or(false),
+                }, true),
+                None => (true, false),
+            };
+            let present = {
+                let ob = o.borrow();
+                ob.has_property(&pname) && !matches!(ob.get_property(&pname), Value::Undef)
+            };
+            if accessible && present {
+                return Some(o.borrow().get_property(&pname).deref());
             }
-            _ => continue,
-        };
-        let row_arr = row_ref.borrow();
-
-        // Get the value to store
-        let value = if matches!(column_key, Value::Null) {
-            // null column_key means return the whole row
-            row.clone()
-        } else {
-            let col_key = value_to_array_key(column_key);
-            match row_arr.get(&col_key) {
-                Some(v) => v.clone(),
-                None => continue,
+            let _ = declared;
+            let has_isset = vm.get_class_def(&class_lower).map(|c| c.get_method(b"__isset").is_some()).unwrap_or(false);
+            if !has_isset {
+                return None;
             }
-        };
-
-        // Determine the key
-        if let Some(idx_key_val) = index_key {
-            if matches!(idx_key_val, Value::Null) {
-                result.push(value);
+            let pv = Value::String(PhpString::from_vec(pname.clone()));
+            let isset = vm.call_object_method(data, b"__isset", &[pv.clone()]).unwrap_or(Value::False);
+            if !isset.is_truthy() {
+                return None;
+            }
+            let has_get = vm.get_class_def(&class_lower).map(|c| c.get_method(b"__get").is_some()).unwrap_or(false);
+            if has_get {
+                vm.call_object_method(data, b"__get", &[pv]).map(|v| v.deref())
+            } else if present {
+                Some(o.borrow().get_property(&pname).deref())
             } else {
-                let idx_k = value_to_array_key(idx_key_val);
-                if let Some(idx_val) = row_arr.get(&idx_k) {
-                    let key = match &idx_val {
-                        Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
-                        Value::String(s) => {
-                            // Coerce numeric string keys to integers
-                            let s_str = s.to_string_lossy();
-                            if let Ok(n) = s_str.parse::<i64>() {
-                                if n.to_string() == s_str {
-                                    goro_core::array::ArrayKey::Int(n)
-                                } else {
-                                    goro_core::array::ArrayKey::String(s.clone())
-                                }
-                            } else {
-                                goro_core::array::ArrayKey::String(s.clone())
-                            }
-                        }
-                        Value::True => goro_core::array::ArrayKey::Int(1),
-                        Value::False | Value::Null => goro_core::array::ArrayKey::Int(0),
-                        Value::Double(f) => goro_core::array::ArrayKey::Int(*f as i64),
-                        _ => goro_core::array::ArrayKey::String(idx_val.to_php_string()),
-                    };
-                    result.set(key, value);
-                } else {
-                    result.push(value);
-                }
+                None
             }
-        } else {
-            result.push(value);
         }
+        Value::Array(a) => {
+            let key = match name {
+                Value::Long(n) => ArrayKey::Int(*n),
+                other => value_to_array_key(other),
+            };
+            a.borrow().get(&key).map(|v| v.deref())
+        }
+        _ => None,
     }
-
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
+fn array_column(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null).deref();
+    require_array_arg(vm, &first, "array_column", "array", 1)?;
+    let input: Vec<Value> = match &first {
+        Value::Array(a) => a.borrow().values().cloned().collect(),
+        _ => return Ok(Value::Null),
+    };
+    // Z_PARAM_STR_OR_LONG_OR_NULL
+    let mut key_param = |vm: &mut Vm, idx: usize, pname: &str| -> Result<Option<Value>, VmError> {
+        let v = match args.get(idx) { Some(v) => v.deref(), None => return Ok(None) };
+        match &v {
+            Value::Null | Value::Undef => Ok(None),
+            Value::Long(_) | Value::String(_) => Ok(Some(v.clone())),
+            Value::Double(f) if !vm.caller_strict_types => {
+                if f.is_finite() && f.fract() != 0.0 {
+                    vm.emit_deprecated(&format!("Implicit conversion from float {} to int loses precision", goro_core::value::format_php_float(*f)));
+                }
+                Ok(Some(Value::Long(*f as i64)))
+            }
+            Value::True | Value::False if !vm.caller_strict_types => Ok(Some(Value::Long(matches!(v, Value::True) as i64))),
+            Value::Object(o) if !vm.caller_strict_types && vm.get_class_def(&o.borrow().class_name.to_ascii_lowercase()).map(|c| c.get_method(b"__tostring").is_some()).unwrap_or(false) => {
+                Ok(Some(Value::String(vm.value_to_string(&v))))
+            }
+            _ => {
+                let tn = match &v { Value::True => "true".to_string(), Value::False => "false".to_string(), _ => Vm::value_type_name(&v).to_string() };
+                let msg = format!("array_column(): Argument #{} (${}) must be of type string|int|null, {} given", idx + 1, pname, tn);
+                let exc = vm.throw_type_error(msg.clone());
+                vm.current_exception = Some(exc);
+                Err(VmError { message: msg, line: vm.current_line })
+            }
+        }
+    };
+    let column = key_param(vm, 1, "column_key")?;
+    let index = key_param(vm, 2, "index_key")?;
+    let mut result = PhpArray::new();
+    for row in input {
+        let data = row.deref();
+        let colval = match &column {
+            None => data.clone(),
+            Some(c) => match array_column_fetch(vm, &data, c) {
+                Some(v) => v,
+                None => continue,
+            },
+        };
+        match &index {
+            None => result.push(colval),
+            Some(ik) => match array_column_fetch(vm, &data, ik) {
+                Some(kv) => {
+                    // array_set_zval_key()
+                    let line = vm.current_line;
+                    match &kv {
+                        Value::Array(_) | Value::Object(_) => {
+                            let tn = if let Value::Object(o) = &kv { goro_core::value::display_class_name(&o.borrow().class_name) } else { "array".to_string() };
+                            let msg = format!("Cannot access offset of type {} on array", tn);
+                            let exc = vm.throw_type_error(msg.clone());
+                            vm.current_exception = Some(exc);
+                            return Err(VmError { message: msg, line });
+                        }
+                        _ => {
+                            let key = vm.value_to_array_key_checked(&kv, line);
+                            result.set(key, colval);
+                        }
+                    }
+                }
+                None => result.push(colval),
+            },
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
 fn value_to_array_key(val: &Value) -> goro_core::array::ArrayKey {
     match val {
         Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
