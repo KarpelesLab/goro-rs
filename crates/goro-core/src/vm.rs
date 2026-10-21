@@ -13351,7 +13351,8 @@ impl Vm {
                 if let Some(op_array) = found_op {
                     let name = op_array.name.clone();
                     self.register_user_function(&name, op_array);
-                    return Value::String(PhpString::from_vec(closure_name.to_vec()));
+                    let inner = Value::String(PhpString::from_vec(closure_name.to_vec()));
+                    return self.make_closure_object(inner);
                 }
             }
             if s_bytes.starts_with(b"__deferred_global_const__::") {
@@ -18977,7 +18978,28 @@ impl Vm {
                     } else if func_name_lower == b"closure::fromcallable" {
                         // Closure::fromCallable($callable) - convert callable to a Closure
                         let callable = call.args.first().cloned().unwrap_or(Value::Null);
-                        let result = self.callable_to_closure(callable, op.line);
+                        let scope = self.class_scope_stack.last().cloned();
+                        let this =
+                            if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                                cvs.first()
+                                    .map(|v| v.deref())
+                                    .filter(|v| matches!(v, Value::Object(_)))
+                            } else {
+                                None
+                            };
+                        let result = match self.closure_from_callable(&callable, scope, this) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                if self.current_exception.is_none() {
+                                    let exc = self.throw_type_error(format!(
+                                        "Failed to create closure from callable: {}",
+                                        e
+                                    ));
+                                    self.current_exception = Some(exc);
+                                }
+                                Value::Null
+                            }
+                        };
                         if self.current_exception.is_some() {
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
@@ -29934,8 +29956,8 @@ impl Vm {
                                             &op_array.name.clone(),
                                             op_array,
                                         );
-                                        let closure_val = Value::String(PhpString::from_vec(
-                                            closure_name.to_vec(),
+                                        let closure_val = self.make_closure_object(Value::String(
+                                            PhpString::from_vec(closure_name.to_vec()),
                                         ));
                                         self.write_operand(
                                             &op.result,
@@ -38632,10 +38654,10 @@ impl Vm {
                                         if let Some(op_array) = closure_op {
                                             let name_copy = op_array.name.clone();
                                             self.register_user_function(&name_copy, op_array);
-                                            class.constants.insert(
-                                                const_name,
-                                                Value::String(PhpString::from_vec(closure_name)),
-                                            );
+                                            let c = self.make_closure_object(Value::String(
+                                                PhpString::from_vec(closure_name),
+                                            ));
+                                            class.constants.insert(const_name, c);
                                         }
                                     }
                                 }
@@ -38722,8 +38744,8 @@ impl Vm {
                                     if let Some(op_array) = closure_op {
                                         let name = op_array.name.clone();
                                         self.register_user_function(&name, op_array);
-                                        prop.default = Value::String(PhpString::from_vec(
-                                            closure_name.to_vec(),
+                                        prop.default = self.make_closure_object(Value::String(
+                                            PhpString::from_vec(closure_name.to_vec()),
                                         ));
                                     }
                                 }
@@ -38749,10 +38771,10 @@ impl Vm {
                                         if let Some(op_array) = closure_op {
                                             let name = op_array.name.clone();
                                             self.register_user_function(&name, op_array);
-                                            class.static_properties.insert(
-                                                prop_name,
-                                                Value::String(PhpString::from_vec(closure_name)),
-                                            );
+                                            let c = self.make_closure_object(Value::String(
+                                                PhpString::from_vec(closure_name),
+                                            ));
+                                            class.static_properties.insert(prop_name, c);
                                         }
                                     }
                                 }

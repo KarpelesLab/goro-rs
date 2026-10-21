@@ -21,7 +21,7 @@ use crate::vm::Vm;
 
 /// Whether `name` is an internal closure function name.
 pub fn is_closure_fn_name(name: &[u8]) -> bool {
-    name.starts_with(b"__closure_")
+    (name.starts_with(b"__closure_") && !name.starts_with(b"__closure_fcc_"))
         || name.starts_with(b"__arrow_")
         || name.starts_with(b"__bound_closure_")
 }
@@ -826,6 +826,358 @@ impl Vm {
                     String::from_utf8_lossy(m)
                 ),
             )),
+        }
+    }
+}
+
+impl Vm {
+    /// A closure forwarding to `__call`/`__callStatic` for `method`
+    /// (the closure PHP builds over a call trampoline).
+    fn magic_call_closure(
+        &mut self,
+        class_canon: &[u8],
+        method: &[u8],
+        obj: Option<Value>,
+    ) -> Value {
+        use crate::opcode::Op;
+        let mut target = class_canon.to_vec();
+        target.extend_from_slice(b"::");
+        target.extend_from_slice(method);
+        // One trampoline per (target, instance/static): equal closures compare equal.
+        let name = format!(
+            "__closure_fcc_tramp_{}_{}",
+            if obj.is_some() { "i" } else { "s" },
+            String::from_utf8_lossy(&lower(&target))
+        )
+        .into_bytes();
+        let mut op = OpArray::new();
+        op.name = name.clone();
+        op.fcc_target_name = Some(target.clone());
+        op.scope_class = Some(lower(class_canon));
+        let has_obj = obj.is_some();
+        if has_obj {
+            op.get_or_create_cv(b"__fcc_captured");
+        }
+        let args_cv = op.get_or_create_cv(b"args");
+        op.param_count = 1;
+        op.required_param_count = 0;
+        op.variadic_param = Some(args_cv);
+        let zero = op.add_literal(Value::Long(0));
+        if has_obj {
+            let m = op.add_literal(str_val(method));
+            op.emit(Op {
+                opcode: OpCode::InitMethodCall,
+                op1: OperandType::Cv(0),
+                op2: OperandType::Const(m),
+                result: OperandType::Unused,
+                line: 0,
+            });
+        } else {
+            let t = op.add_literal(str_val(&target));
+            op.emit(Op {
+                opcode: OpCode::InitFCall,
+                op1: OperandType::Const(t),
+                op2: OperandType::Const(zero),
+                result: OperandType::Unused,
+                line: 0,
+            });
+        }
+        op.emit(Op {
+            opcode: OpCode::SendUnpack,
+            op1: OperandType::Cv(args_cv),
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line: 0,
+        });
+        let tmp = op.alloc_temp();
+        op.emit(Op {
+            opcode: OpCode::DoFCall,
+            op1: OperandType::Unused,
+            op2: OperandType::Unused,
+            result: OperandType::Tmp(tmp),
+            line: 0,
+        });
+        op.emit(Op {
+            opcode: OpCode::Return,
+            op1: OperandType::Tmp(tmp),
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line: 0,
+        });
+        self.user_functions.insert(name.clone(), op);
+        let inner = match obj {
+            Some(o) => {
+                let mut arr = PhpArray::new();
+                arr.push(str_val(&name));
+                arr.push(o);
+                Value::Array(Rc::new(RefCell::new(arr)))
+            }
+            None => str_val(&name),
+        };
+        self.make_closure_object(inner)
+    }
+
+    /// Resolve `self`/`parent`/`static` in a callable class name relative to
+    /// `scope` (lowercase), emitting the PHP 8.2 deprecation.
+    fn callable_class_relative(
+        &mut self,
+        cls: &[u8],
+        scope: Option<&[u8]>,
+    ) -> Result<Vec<u8>, String> {
+        let l = lower(cls);
+        let kw: &str = match l.as_slice() {
+            b"self" => "self",
+            b"parent" => "parent",
+            b"static" => "static",
+            _ => return Ok(cls.strip_prefix(b"\\").unwrap_or(cls).to_vec()),
+        };
+        let line = self.current_line;
+        self.emit_deprecated_at(
+            &format!("Use of \"{}\" in callables is deprecated", kw),
+            line,
+        );
+        let scope = match scope {
+            Some(s) => s.to_vec(),
+            None => {
+                return Err(format!(
+                    "cannot access \"{}\" when no class scope is active",
+                    kw
+                ));
+            }
+        };
+        match kw {
+            "self" => Ok(scope),
+            "parent" => match self.classes.get(&scope).and_then(|c| c.parent.clone()) {
+                Some(p) => Ok(p),
+                None => Err(
+                    "cannot access \"parent\" when current class scope has no parent".to_string(),
+                ),
+            },
+            _ => Ok(self.called_class_stack.last().cloned().unwrap_or(scope)),
+        }
+    }
+
+    /// Closure::fromCallable() (zend_create_closure_from_callable): resolve
+    /// the callable from `scope` (lowercase class of the caller, with its
+    /// `$this`), returning the closure or the zend_is_callable error text.
+    pub fn closure_from_callable(
+        &mut self,
+        callable: &Value,
+        scope: Option<Vec<u8>>,
+        this: Option<Value>,
+    ) -> Result<Value, String> {
+        let callable = callable.deref();
+        if callable.is_closure_obj() {
+            return Ok(callable);
+        }
+        match &callable {
+            Value::String(s) => {
+                let b = s.as_bytes().to_vec();
+                if let Some(p) = b.windows(2).position(|w| w == b"::") {
+                    let cls = self.callable_class_relative(&b[..p], scope.as_deref())?;
+                    return self.from_callable_method(&cls, &b[p + 2..], None, this, scope);
+                }
+                let name = b.strip_prefix(b"\\").unwrap_or(&b).to_vec();
+                let l = lower(&name);
+                if let Some(op) = self.user_functions.get(&l) {
+                    if !crate::closure::is_closure_fn_name(&op.name) {
+                        let canon = op.name.clone();
+                        return Ok(self.make_closure_object(str_val(&canon)));
+                    }
+                }
+                if self.functions.contains_key(&l) {
+                    return Ok(self.make_closure_object(str_val(&l)));
+                }
+                Err(format!(
+                    "function \"{}\" not found or invalid function name",
+                    String::from_utf8_lossy(&b)
+                ))
+            }
+            Value::Array(arr) => {
+                let (len, t, m) = {
+                    let a = arr.borrow();
+                    (
+                        a.len(),
+                        a.get_int(0).map(|v| v.deref()),
+                        a.get_int(1).map(|v| v.deref()),
+                    )
+                };
+                if len != 2 {
+                    return Err("array callback must have exactly two members".to_string());
+                }
+                let m = match m {
+                    Some(Value::String(m)) => m.as_bytes().to_vec(),
+                    _ => return Err("second array member is not a valid method".to_string()),
+                };
+                match t {
+                    Some(c) if c.is_closure_obj() && m.eq_ignore_ascii_case(b"__invoke") => Ok(c),
+                    Some(Value::Object(o)) => {
+                        let ocls = o.borrow().class_name.clone();
+                        let (cls, meth) = match m.windows(2).position(|w| w == b"::") {
+                            Some(p) => (
+                                self.callable_class_relative(
+                                    &m[..p],
+                                    scope.as_deref().or(Some(&lower(&ocls))),
+                                )?,
+                                m[p + 2..].to_vec(),
+                            ),
+                            None => (ocls, m.clone()),
+                        };
+                        self.from_callable_method(&cls, &meth, Some(Value::Object(o)), None, scope)
+                    }
+                    Some(Value::String(c)) => {
+                        let cls = self.callable_class_relative(c.as_bytes(), scope.as_deref())?;
+                        self.from_callable_method(&cls, &m, None, this, scope)
+                    }
+                    _ => Err("first array member is not a valid class name or object".to_string()),
+                }
+            }
+            Value::Object(o) => {
+                let cn = o.borrow().class_name.clone();
+                let has_invoke = self
+                    .classes
+                    .get(&lower(&cn))
+                    .map(|c| c.get_method(b"__invoke").is_some())
+                    .unwrap_or(false);
+                if has_invoke {
+                    self.from_callable_method(&cn, b"__invoke", Some(callable.clone()), None, scope)
+                } else {
+                    Err("no array or string given".to_string())
+                }
+            }
+            _ => Err("no array or string given".to_string()),
+        }
+    }
+
+    fn from_callable_method(
+        &mut self,
+        cls: &[u8],
+        m: &[u8],
+        obj: Option<Value>,
+        this: Option<Value>,
+        scope: Option<Vec<u8>>,
+    ) -> Result<Value, String> {
+        let cl = lower(cls);
+        if !self.classes.contains_key(&cl) {
+            self.try_autoload_class(cls);
+        }
+        let ce = match self.classes.get(&cl) {
+            Some(c) => c,
+            None => {
+                if self.is_known_builtin_class(&cl) {
+                    // Builtin class methods: keep the [obj|class, method] callable.
+                    let mut arr = PhpArray::new();
+                    arr.push(obj.unwrap_or_else(|| str_val(cls)));
+                    arr.push(str_val(m));
+                    return Ok(self.make_closure_object(Value::Array(Rc::new(RefCell::new(arr)))));
+                }
+                return Err(format!(
+                    "class \"{}\" not found",
+                    String::from_utf8_lossy(cls)
+                ));
+            }
+        };
+        let canon = ce.name.clone();
+        let ml = lower(m);
+        let method = ce.methods.get(&ml).map(|md| {
+            (
+                md.is_static,
+                md.is_abstract,
+                md.visibility,
+                md.declaring_class.clone(),
+                md.name.clone(),
+                md.op_array.clone(),
+                md.attributes.clone(),
+            )
+        });
+        let has_call = ce.get_method(b"__call").is_some();
+        let has_call_static = ce.get_method(b"__callstatic").is_some();
+        // A compatible caller $this is used for non-static methods named statically.
+        let compat_this = this.filter(|t| match t {
+            Value::Object(o) => {
+                let ocl = lower(&o.borrow().class_name);
+                ocl == cl || self.class_extends(&ocl, &cl)
+            }
+            _ => false,
+        });
+        let obj = obj.or(compat_this.clone());
+        match method {
+            Some((is_static, is_abstract, vis, decl, mname, op, attrs)) => {
+                if let Some(msg) = self.check_visibility(
+                    vis,
+                    &decl,
+                    &canon,
+                    &String::from_utf8_lossy(&mname),
+                    false,
+                    scope.as_deref(),
+                ) {
+                    if obj.is_some() && has_call {
+                        return Ok(self.magic_call_closure(&canon, m, obj));
+                    }
+                    if obj.is_none() && has_call_static {
+                        return Ok(self.magic_call_closure(&canon, m, None));
+                    }
+                    // "Call to private method A::m() from scope B" -> "cannot access private method A::m()"
+                    let vis_s = match vis {
+                        crate::object::Visibility::Private => "private",
+                        crate::object::Visibility::Protected => "protected",
+                        crate::object::Visibility::Public => "public",
+                    };
+                    let _ = msg;
+                    return Err(format!(
+                        "cannot access {} method {}::{}()",
+                        vis_s,
+                        String::from_utf8_lossy(&canon),
+                        String::from_utf8_lossy(&mname)
+                    ));
+                }
+                if is_abstract {
+                    return Err(format!(
+                        "cannot call abstract method {}::{}()",
+                        String::from_utf8_lossy(&canon),
+                        String::from_utf8_lossy(&mname)
+                    ));
+                }
+                let mut n = canon.clone();
+                n.extend_from_slice(b"::");
+                n.extend_from_slice(&mname);
+                if is_static {
+                    return Ok(self.make_closure_object(str_val(&n)));
+                }
+                let o = match obj {
+                    Some(o) => o,
+                    None => {
+                        return Err(format!(
+                            "non-static method {}::{}() cannot be called statically",
+                            String::from_utf8_lossy(&canon),
+                            String::from_utf8_lossy(&mname)
+                        ));
+                    }
+                };
+                let key = lower(&n);
+                let mut op = op;
+                if op.attributes.is_empty() && !attrs.is_empty() {
+                    op.attributes = attrs;
+                }
+                self.user_functions.insert(key, op);
+                let mut arr = PhpArray::new();
+                arr.push(str_val(&n));
+                arr.push(o);
+                Ok(self.make_closure_object(Value::Array(Rc::new(RefCell::new(arr)))))
+            }
+            None => {
+                if obj.is_some() && has_call {
+                    return Ok(self.magic_call_closure(&canon, m, obj));
+                }
+                if has_call_static {
+                    return Ok(self.magic_call_closure(&canon, m, None));
+                }
+                Err(format!(
+                    "class {} does not have a method \"{}\"",
+                    String::from_utf8_lossy(&canon),
+                    String::from_utf8_lossy(m)
+                ))
+            }
         }
     }
 }
