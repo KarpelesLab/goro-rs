@@ -22,6 +22,9 @@ pub struct PhptTest {
     pub sections: HashMap<String, String>,
     /// Byte-exact (line endings preserved) copies of the request sections.
     pub raw_sections: HashMap<String, String>,
+    /// The file was not valid UTF-8 and was decoded as Latin-1 (one char per
+    /// byte); `bytes()` maps section text back to the original bytes.
+    pub latin1: bool,
 }
 
 impl PhptTest {
@@ -80,7 +83,7 @@ impl PhptTest {
                 raw_sections.insert(sec.to_string(), r);
             }
         }
-        Some(PhptTest { name, sections, raw_sections })
+        Some(PhptTest { name, sections, raw_sections, latin1: false })
     }
 
     /// Extract a section byte-exactly (keeping `\r\n` line endings).
@@ -148,6 +151,28 @@ impl PhptTest {
             }
         }
         out
+    }
+
+    /// Parse raw file bytes; non-UTF-8 files are decoded as Latin-1.
+    pub fn parse_bytes(content: &[u8]) -> Option<Self> {
+        match std::str::from_utf8(content) {
+            Ok(s) => Self::parse(s),
+            Err(_) => {
+                let s: String = content.iter().map(|&b| b as char).collect();
+                let mut t = Self::parse(&s)?;
+                t.latin1 = true;
+                Some(t)
+            }
+        }
+    }
+
+    /// Bytes of a section's text (undoing the Latin-1 decoding if needed).
+    pub fn bytes(&self, s: &str) -> Vec<u8> {
+        if self.latin1 {
+            s.chars().map(|c| c as u32 as u8).collect()
+        } else {
+            s.as_bytes().to_vec()
+        }
     }
 
     pub fn file_section(&self) -> Option<&str> {
@@ -319,7 +344,8 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
     let timeout_secs: u64 = if source.contains("php_cli_server_start") { 30 } else { 5 };
     let req = build_request(test, test_dir, filename);
     PHPT_REQUEST.with(|r| *r.borrow_mut() = Some(req));
-    let output = execute_php_with_timeout_and_filename(source.as_bytes(), timeout_secs, test_dir, &ini_settings, filename);
+    let source_bytes = test.bytes(source);
+    let output = execute_php_with_timeout_and_filename(&source_bytes, timeout_secs, test_dir, &ini_settings, filename);
     PHPT_REQUEST.with(|r| *r.borrow_mut() = None);
     let output = match output {
         Ok(output) => output,
@@ -357,7 +383,11 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
         }
     }
 
-    let actual = String::from_utf8_lossy(&output).to_string();
+    let actual = if test.latin1 {
+        output.iter().map(|&b| b as char).collect::<String>()
+    } else {
+        String::from_utf8_lossy(&output).to_string()
+    };
     // Normalize \r\n to \n for comparison (PHP test files use \n line endings)
     let actual_normalized = actual.replace("\r\n", "\n");
 
@@ -1771,8 +1801,8 @@ pub fn run_test_dir(dir: &Path) -> (usize, usize, usize, usize) {
     }
 
     for path in &files {
-        if let Ok(content) = std::fs::read_to_string(path) {
-            if let Some(test) = PhptTest::parse(&content) {
+        if let Ok(content) = std::fs::read(path) {
+            if let Some(test) = PhptTest::parse_bytes(&content) {
                 let test_dir = path.parent();
                 // Wrap in catch_unwind to prevent stack overflows from killing the runner
                 let test_name = test.name.clone();
@@ -1983,7 +2013,7 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
             started = true;
             request.push_str(line);
         }
-        request.into_bytes()
+        test.bytes(&request)
     };
     if not_empty("POST_RAW") {
         body = raw_request("POST_RAW", &mut content_type);
@@ -1994,7 +2024,7 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         content_length = body.len().to_string();
         method = "PUT".into();
     } else if not_empty("POST") {
-        body = php_trim(raw("POST").unwrap_or("")).as_bytes().to_vec();
+        body = test.bytes(php_trim(raw("POST").unwrap_or("")));
         method = "POST".into();
         content_type = "application/x-www-form-urlencoded".into();
         content_length = body.len().to_string();
@@ -2010,8 +2040,8 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
     info.script_filename = filename.as_bytes().to_vec();
     if is_cgi {
         info.request_method = Some(method.into_bytes());
-        info.query_string = query.into_bytes();
-        info.cookie_data = cookie.map(|c| c.into_bytes());
+        info.query_string = test.bytes(&query);
+        info.cookie_data = cookie.map(|c| test.bytes(&c));
         info.content_type = if content_type.is_empty() { None } else { Some(content_type.into_bytes()) };
         info.content_length = content_length.parse().unwrap_or(0);
         info.body = body;
@@ -2036,6 +2066,6 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         full.push((k.clone().into_bytes(), v.clone().into_bytes()));
     }
     info.env = full;
-    let stdin = test.sections.get("STDIN").map(|s| s.clone().into_bytes());
+    let stdin = test.sections.get("STDIN").map(|s| test.bytes(s));
     PhptRequest { info, env, stdin }
 }
