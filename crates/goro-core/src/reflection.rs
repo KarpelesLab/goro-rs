@@ -4786,7 +4786,7 @@ fn format_reflection_default(v: &Value) -> String {
     }
 }
 
-fn extract_param_default(op_array: &crate::opcode::OpArray, cv_idx: u32) -> Option<Value> {
+pub(crate) fn extract_param_default(op_array: &crate::opcode::OpArray, cv_idx: u32) -> Option<Value> {
     use crate::opcode::{OpCode, OperandType};
     // Scan only the first portion of the function (the default-value prelude
     // sits before any real body opcode that reads/writes other CVs in non-
@@ -4812,7 +4812,7 @@ fn extract_param_default(op_array: &crate::opcode::OpArray, cv_idx: u32) -> Opti
 /// Returns Some("global:<NAME>") for a global constant default
 /// (emitted by ConstLookup), Some("class:<Class>::<CONST>") for a class
 /// constant default (StaticPropGet with class+name), or None.
-fn extract_param_default_constant(
+pub(crate) fn extract_param_default_constant(
     op_array: &crate::opcode::OpArray,
     cv_idx: u32,
 ) -> Option<String> {

@@ -4834,7 +4834,32 @@ impl Vm {
 
                 // Check if has default value (optional)
                 if i as u32 >= op.required_param_count && op.variadic_param != Some(cv_idx as u32) {
-                    part.push_str(" = null");
+                    // zend_get_function_declaration's rendering of the default
+                    let shown = if let Some(v) = crate::reflection::extract_param_default(op, cv_idx as u32) {
+                        match v {
+                            Value::Null | Value::Undef => "null".to_string(),
+                            Value::True => "true".to_string(),
+                            Value::False => "false".to_string(),
+                            Value::Long(n) => n.to_string(),
+                            Value::Double(f) => crate::value::format_php_float(f),
+                            Value::String(st) => {
+                                let b = st.as_bytes();
+                                if b.len() > 10 {
+                                    format!("'{}...'", String::from_utf8_lossy(&b[..10]))
+                                } else {
+                                    format!("'{}'", String::from_utf8_lossy(b))
+                                }
+                            }
+                            Value::Array(a) => if a.borrow().len() == 0 { "[]".to_string() } else { "[...]".to_string() },
+                            _ => "null".to_string(),
+                        }
+                    } else if let Some(c) = crate::reflection::extract_param_default_constant(op, cv_idx as u32) {
+                        c.strip_prefix("global:").or_else(|| c.strip_prefix("class:")).unwrap_or(&c).to_string()
+                    } else {
+                        "null".to_string()
+                    };
+                    part.push_str(" = ");
+                    part.push_str(&shown);
                 }
 
                 parts.push(part);
