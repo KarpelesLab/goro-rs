@@ -30264,7 +30264,18 @@ impl Vm {
                                         // Check compatibility for all method overrides except:
                                         // - non-abstract constructors (PHP only checks abstract __construct signatures)
                                         // - private parent methods (not inherited for override checking)
-                                        let should_check = (mn_lower != b"__construct" || method.is_abstract)
+                                        // Constructors are checked only against an abstract or
+                                        // interface-declared prototype.
+                                        let ctor_proto = if mn_lower == b"__construct" && !method.is_abstract {
+                                            self.ctor_prototype(&parent_lower)
+                                        } else {
+                                            None
+                                        };
+                                        let (check_against_name, check_against) = match &ctor_proto {
+                                            Some((n, m)) => (n.clone(), m.clone()),
+                                            None => (parent.name.clone(), method.clone()),
+                                        };
+                                        let should_check = (mn_lower != b"__construct" || method.is_abstract || ctor_proto.is_some())
                                             && method.visibility != Visibility::Private;
                                         // A concrete constructor still has a prototype when it
                                         // implements an interface (or abstract) constructor;
@@ -30296,7 +30307,7 @@ impl Vm {
                                             // Check method signature compatibility
                                             if let Some((err_msg, unresolved)) = self.variance_check_method(
                                                 &class, child_method,
-                                                &parent.name, method,
+                                                &check_against_name, &check_against,
                                             ) {
                                                 if unresolved && is_early_attempt {
                                                     variance::defer(&class.name);
@@ -30764,6 +30775,9 @@ impl Vm {
                                 }
                             }
                         }
+                        // Signature checks against interface methods run after trait
+                        // binding (PHP binds traits before implementing interfaces).
+                        let mut deferred_iface_checks: Vec<(Vec<u8>, crate::object::MethodDef)> = Vec::new();
                         // Resolve interfaces: copy interface methods into the class
                         let iface_names = class.interfaces.clone();
                         for iface_name in &iface_names {
@@ -30813,30 +30827,10 @@ impl Vm {
                                     }
                                 }
                                 for (method_name, method) in &iface.methods {
-                                    if let Some(existing_method) = class.methods.get(method_name) {
-                                        // Check method signature compatibility when a class/interface
-                                        // redeclares a method that an interface defines
-                                        let _mn_lower: Vec<u8> = method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        // Interface methods (constructors included) are prototypes.
-                                        {
-                                            if let Some((err_msg, unresolved)) = self.variance_check_method(
-                                                &class, existing_method,
-                                                &iface.name, method,
-                                            ) {
-                                                if unresolved && is_early_attempt {
-                                                    variance::defer(&class.name);
-                                                    continue 'exec;
-                                                }
-                                                let l = if existing_method.op_array.decl_line > 0 { existing_method.op_array.decl_line } else { op.line };
-                                                return Err(VmError {
-                                                    message: err_msg,
-                                                    line: l,
-                                                });
-                                            }
-                                        }
-                                    } else {
+                                    if class.methods.get(method_name).is_none() {
                                         class.methods.insert(method_name.clone(), method.clone());
                                     }
+                                    deferred_iface_checks.push((iface.name.clone(), method.clone()));
                                 }
                                 // Inherit interface constants
                                 for (const_name, const_val) in &iface.constants {
@@ -31661,6 +31655,35 @@ impl Vm {
                                         }
                                     }
                                 }
+                            }
+                        }
+
+                        // Check class methods (own, inherited or from traits) against the
+                        // interface methods they implement.
+                        for (iface_name_c, iface_method) in &deferred_iface_checks {
+                            let mn_lower: Vec<u8> = iface_method.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let existing = match class.methods.get(&mn_lower) {
+                                Some(m) => m.clone(),
+                                None => continue,
+                            };
+                            // Still the interface's own (abstract) declaration: nothing to check.
+                            if existing.is_abstract && existing.declaring_class == iface_method.declaring_class
+                                && existing.op_array.decl_line == iface_method.op_array.decl_line {
+                                continue;
+                            }
+                            if let Some((err_msg, unresolved)) = self.variance_check_method(
+                                &class, &existing,
+                                iface_name_c, iface_method,
+                            ) {
+                                if unresolved && is_early_attempt {
+                                    variance::defer(&class.name);
+                                    continue 'exec;
+                                }
+                                let l = if existing.op_array.decl_line > 0 { existing.op_array.decl_line } else { op.line };
+                                return Err(VmError {
+                                    message: err_msg,
+                                    line: l,
+                                });
                             }
                         }
 

@@ -283,6 +283,15 @@ impl<'a> Ctx<'a> {
             return true;
         }
         if a.builtin {
+            // Builtins missing from the VM's hierarchy tables.
+            let extra: &[&[u8]] = match al.as_slice() {
+                b"generator" => &[b"iterator", b"traversable"],
+                b"datetime" | b"datetimeimmutable" => &[b"datetimeinterface"],
+                _ => &[],
+            };
+            if extra.iter().any(|e| *e == bl.as_slice()) {
+                return true;
+            }
             return super::is_builtin_subclass(&al, &bl)
                 || self.vm.builtin_implements_interface(&al, &bl)
                 || self.vm.builtin_interface_extends(&al, &bl);
@@ -1160,5 +1169,57 @@ impl Vm {
             _ => return true,
         };
         tv.mask & bit != 0
+    }
+}
+
+impl Vm {
+    /// Prototype of the constructor of class `class_lower` (zend_function.prototype):
+    /// an abstract constructor or one declared by an implemented interface.
+    /// Constructors are only signature-checked against such a prototype.
+    pub(crate) fn ctor_prototype(&self, class_lower: &[u8]) -> Option<(Vec<u8>, MethodDef)> {
+        self.ctor_prototype_depth(class_lower, 0)
+    }
+
+    fn iface_ctor(&self, iface_lower: &[u8], depth: u32) -> Option<(Vec<u8>, MethodDef)> {
+        if depth > 32 {
+            return None;
+        }
+        let ic = self.classes.get(iface_lower)?;
+        if let Some(m) = ic.methods.get(b"__construct".as_slice()) {
+            let decl = self.classes.get(&m.declaring_class).map(|c| c.name.clone()).unwrap_or_else(|| ic.name.clone());
+            return Some((decl, m.clone()));
+        }
+        let mut parents: Vec<Vec<u8>> = ic.interfaces.clone();
+        if let Some(p) = &ic.parent {
+            parents.insert(0, p.clone());
+        }
+        for p in parents {
+            if let Some(r) = self.iface_ctor(&lower(&p), depth + 1) {
+                return Some(r);
+            }
+        }
+        None
+    }
+
+    fn ctor_prototype_depth(&self, class_lower: &[u8], depth: u32) -> Option<(Vec<u8>, MethodDef)> {
+        if depth > 32 {
+            return None;
+        }
+        let c = self.classes.get(class_lower)?;
+        let m = c.methods.get(b"__construct".as_slice())?;
+        let decl_lower = if m.declaring_class.is_empty() { class_lower.to_vec() } else { lower(&m.declaring_class) };
+        let d = self.classes.get(&decl_lower).unwrap_or(c);
+        if m.is_abstract {
+            return Some((d.name.clone(), m.clone()));
+        }
+        for i in &d.interfaces {
+            if let Some(r) = self.iface_ctor(&lower(i), 0) {
+                return Some(r);
+            }
+        }
+        if let Some(p) = &d.parent {
+            return self.ctor_prototype_depth(&lower(p), depth + 1);
+        }
+        None
     }
 }
