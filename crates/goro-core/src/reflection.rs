@@ -2370,6 +2370,10 @@ pub fn reflection_class_method(
                         if idx > 0 && prop.visibility == Visibility::Private {
                             continue;
                         }
+                        // Uninitialized typed properties have no default.
+                        if matches!(prop.default, Value::Undef) {
+                            continue;
+                        }
                         let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
                         if result.get(&key).is_none() {
                             result.set(key, prop.default.clone());
