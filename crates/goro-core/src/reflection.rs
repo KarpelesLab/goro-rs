@@ -6061,49 +6061,89 @@ pub fn reflection_parameter_method(
                 "Method ReflectionParameter::getClass() is deprecated since 8.0, use ReflectionParameter::getType() instead",
                 vm.current_line,
             );
+            // Only a single class-name type (optionally nullable) qualifies.
             let class_name_opt = resolved_op_array.as_ref()
-                .and_then(|op| {
-                    if type_idx < op.param_types.len() {
-                        op.param_types[type_idx].as_ref().map(|pti| pti.param_type.clone())
-                    } else { None }
-                })
-                .and_then(|pt| {
-                    fn unwrap_simple(pt: &crate::opcode::ParamType) -> Option<Vec<u8>> {
+                .and_then(|op| op.param_types.get(type_idx).cloned().flatten())
+                .and_then(|pti| {
+                    fn single_name(pt: &crate::opcode::ParamType) -> Option<Vec<u8>> {
                         match pt {
                             crate::opcode::ParamType::Simple(n) => Some(n.clone()),
-                            crate::opcode::ParamType::Nullable(inner) => unwrap_simple(inner.as_ref()),
+                            crate::opcode::ParamType::Nullable(inner) => single_name(inner),
+                            crate::opcode::ParamType::Union(items) => {
+                                let non_null: Vec<&crate::opcode::ParamType> = items.iter()
+                                    .filter(|t| !matches!(t, crate::opcode::ParamType::Simple(n) if n.eq_ignore_ascii_case(b"null")))
+                                    .collect();
+                                if non_null.len() == 1 && non_null.len() + 1 == items.len() { single_name(non_null[0]) } else { None }
+                            }
                             _ => None,
                         }
                     }
-                    unwrap_simple(&pt)
+                    single_name(&pti.param_type)
                 });
-            if let Some(name) = class_name_opt {
-                let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let is_scalar = matches!(lower.as_slice(),
-                    b"int" | b"integer" | b"long" | b"float" | b"double" | b"real" |
-                    b"string" | b"bool" | b"boolean" | b"array" | b"object" | b"void" |
-                    b"null" | b"mixed" | b"iterable" | b"callable" | b"false" | b"true" |
-                    b"never"
-                );
-                if is_scalar {
-                    return Some(Value::Null);
-                }
-                // Resolve self/parent/static against the parameter's declaring class
-                let ob = obj.borrow();
-                let decl_class_bytes = ob.get_property(b"__reflection_param_class").to_php_string();
-                drop(ob);
-                let decl_lower: Vec<u8> = decl_class_bytes.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
-                let resolved_lower: Vec<u8> = match lower.as_slice() {
-                    b"self" | b"static" => decl_lower.clone(),
-                    b"parent" => rcls(vm, &decl_lower).and_then(|c| c.parent.as_ref().map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())).unwrap_or_default(),
-                    _ => lower,
-                };
-                if vm.classes.contains_key(&resolved_lower) {
-                    let name_str = String::from_utf8_lossy(&rcls(vm, &resolved_lower).map(|c| c.name.clone()).unwrap_or_else(|| resolved_lower.clone())).to_string();
-                    return Some(create_reflection_class(vm, &name_str));
-                }
+            let name = match class_name_opt {
+                Some(n) => n,
+                None => return Some(Value::Null),
+            };
+            let lower = name.to_ascii_lowercase();
+            let is_builtin_type = matches!(lower.as_slice(),
+                b"int" | b"float" | b"string" | b"bool" | b"array" | b"object" | b"void" |
+                b"null" | b"mixed" | b"iterable" | b"callable" | b"false" | b"true" | b"never" | b"static"
+            );
+            if is_builtin_type {
+                return Some(Value::Null);
             }
-            Some(Value::Null)
+            // The function's scope: a method's class or a closure's scope.
+            let scope: Option<Vec<u8>> = {
+                let pc = obj.borrow().get_property(b"__reflection_param_class").to_php_string();
+                if !pc.as_bytes().is_empty() {
+                    Some(pc.as_bytes().to_ascii_lowercase())
+                } else {
+                    resolved_op_array.as_ref().and_then(|op| op.scope_class.clone())
+                }
+            };
+            let target: Vec<u8> = match lower.as_slice() {
+                b"self" => match scope {
+                    Some(s) => s,
+                    None => {
+                        let exc = vm.create_exception(b"ReflectionException", "Parameter uses \"self\" as type but function is not a class member", vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                },
+                b"parent" => {
+                    let s = match scope {
+                        Some(s) => s,
+                        None => {
+                            let exc = vm.create_exception(b"ReflectionException", "Parameter uses \"parent\" as type but function is not a class member", vm.current_line);
+                            vm.current_exception = Some(exc);
+                            return Some(Value::Null);
+                        }
+                    };
+                    match rcls(vm, &s).and_then(|c| c.parent.clone()) {
+                        Some(p) => p.to_ascii_lowercase(),
+                        None => {
+                            let exc = vm.create_exception(b"ReflectionException", "Parameter uses \"parent\" as type although class does not have a parent", vm.current_line);
+                            vm.current_exception = Some(exc);
+                            return Some(Value::Null);
+                        }
+                    }
+                }
+                _ => {
+                    if rcls(vm, &lower).is_none() {
+                        vm.try_autoload_class(&name);
+                    }
+                    if rcls(vm, &lower).is_none() {
+                        let msg = format!("Class \"{}\" does not exist", String::from_utf8_lossy(&name));
+                        let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                    lower
+                }
+            };
+            let name_str = rcls(vm, &target).map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or_else(|| String::from_utf8_lossy(&target).to_string());
+            Some(create_reflection_class(vm, &name_str))
         }
         b"isarray" => {
             // Deprecated since 8.0, returns true if param type is array.
