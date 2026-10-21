@@ -23436,7 +23436,25 @@ impl Vm {
                                 raw_display.clone()
                             }
                         } else if !user_fn.display_name.is_empty() {
-                            String::from_utf8_lossy(&user_fn.display_name).to_string()
+                            let name = String::from_utf8_lossy(&user_fn.display_name).to_string();
+                            // A closure's frame is qualified by its scope
+                            // (Class::{closure:...}, or Class->... with $this).
+                            match user_fn.scope_class.as_ref().filter(|_| {
+                                crate::closure::is_closure_fn_name(&user_fn.name)
+                                    && name.starts_with("{closure")
+                            }) {
+                                Some(scope) => {
+                                    let class_display = self
+                                        .classes
+                                        .get(scope)
+                                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                        .unwrap_or_else(|| {
+                                            String::from_utf8_lossy(scope).to_string()
+                                        });
+                                    format!("{}::{}", class_display, name)
+                                }
+                                None => name,
+                            }
                         } else if (raw_display.starts_with("__closure_")
                             || raw_display.starts_with("__arrow_"))
                             && !raw_display.starts_with("__closure_fcc_")
@@ -23702,6 +23720,14 @@ impl Vm {
                                 call.args.push(Value::Array(Rc::new(RefCell::new(
                                     crate::array::PhpArray::new(),
                                 ))));
+                            }
+                            // The frame pushed above shows ($name, $arguments).
+                            if let Some(top) = self.call_stack.last_mut() {
+                                let skip = usize::from(matches!(
+                                    call.args.first(),
+                                    Some(Value::Object(_))
+                                ));
+                                top.3 = call.args.iter().skip(skip).cloned().collect();
                             }
                         }
 
@@ -27545,12 +27571,53 @@ impl Vm {
                                                         RefCell::new(args_arr),
                                                     ));
                                                 }
+                                                // The magic method runs as a frame of its own.
+                                                let frame_name = format!(
+                                                    "{}::__call",
+                                                    self.classes
+                                                        .get(&declaring_class)
+                                                        .map(|c| String::from_utf8_lossy(&c.name)
+                                                            .to_string())
+                                                        .unwrap_or_else(|| {
+                                                            String::from_utf8_lossy(class_part)
+                                                                .to_string()
+                                                        })
+                                                );
+                                                let frame_args: Vec<Value> = fn_cvs
+                                                    .get(1..3)
+                                                    .map(|a| a.to_vec())
+                                                    .unwrap_or_default();
+                                                self.call_stack.push((
+                                                    frame_name,
+                                                    self.current_file.clone(),
+                                                    op.line,
+                                                    frame_args,
+                                                    true,
+                                                ));
                                                 self.called_class_stack.push(class_part.to_vec());
                                                 self.class_scope_stack.push(declaring_class);
                                                 let result =
-                                                    self.execute_op_array(&call_op, fn_cvs)?;
+                                                    self.execute_op_array(&call_op, fn_cvs);
                                                 self.called_class_stack.pop();
                                                 self.class_scope_stack.pop();
+                                                self.call_stack.pop();
+                                                let result = match result {
+                                                    Ok(v) => v,
+                                                    Err(e) => {
+                                                        if self.current_exception.is_some() {
+                                                            if let Some((ct, ft, _, _, saved_pc)) =
+                                                                exception_handlers.pop()
+                                                            {
+                                                                pending_calls_catch_depth =
+                                                                    Some(saved_pc);
+                                                                ip = if ct > 0 { ct } else { ft }
+                                                                    as usize;
+                                                                continue;
+                                                            }
+                                                        }
+                                                        return Err(e);
+                                                    }
+                                                };
                                                 self.write_operand(
                                                     &op.result,
                                                     result,
@@ -27640,12 +27707,53 @@ impl Vm {
                                                         RefCell::new(args_arr),
                                                     ));
                                                 }
+                                                // The magic method runs as a frame of its own.
+                                                let frame_name = format!(
+                                                    "{}::__callStatic",
+                                                    self.classes
+                                                        .get(&declaring_class)
+                                                        .map(|c| String::from_utf8_lossy(&c.name)
+                                                            .to_string())
+                                                        .unwrap_or_else(|| {
+                                                            String::from_utf8_lossy(class_part)
+                                                                .to_string()
+                                                        })
+                                                );
+                                                let frame_args: Vec<Value> = fn_cvs
+                                                    .get(0..2)
+                                                    .map(|a| a.to_vec())
+                                                    .unwrap_or_default();
+                                                self.call_stack.push((
+                                                    frame_name,
+                                                    self.current_file.clone(),
+                                                    op.line,
+                                                    frame_args,
+                                                    false,
+                                                ));
                                                 self.called_class_stack.push(class_part.to_vec());
                                                 self.class_scope_stack.push(declaring_class);
                                                 let result =
-                                                    self.execute_op_array(&call_static_op, fn_cvs)?;
+                                                    self.execute_op_array(&call_static_op, fn_cvs);
                                                 self.called_class_stack.pop();
                                                 self.class_scope_stack.pop();
+                                                self.call_stack.pop();
+                                                let result = match result {
+                                                    Ok(v) => v,
+                                                    Err(e) => {
+                                                        if self.current_exception.is_some() {
+                                                            if let Some((ct, ft, _, _, saved_pc)) =
+                                                                exception_handlers.pop()
+                                                            {
+                                                                pending_calls_catch_depth =
+                                                                    Some(saved_pc);
+                                                                ip = if ct > 0 { ct } else { ft }
+                                                                    as usize;
+                                                                continue;
+                                                            }
+                                                        }
+                                                        return Err(e);
+                                                    }
+                                                };
                                                 self.write_operand(
                                                     &op.result,
                                                     result,
@@ -35021,7 +35129,36 @@ impl Vm {
                                                 Value::True,
                                             );
                                         }
+                                        // __clone() runs as a frame of its own.
+                                        let clone_frame = {
+                                            let cl = match &new_obj_val {
+                                                Value::Object(o) => {
+                                                    o.borrow().class_name.to_ascii_lowercase()
+                                                }
+                                                _ => Vec::new(),
+                                            };
+                                            let decl = self
+                                                .classes
+                                                .get(&cl)
+                                                .and_then(|c| c.get_method(b"__clone"))
+                                                .map(|m| m.declaring_class.clone())
+                                                .unwrap_or(cl);
+                                            let name = self
+                                                .classes
+                                                .get(&decl)
+                                                .map(|c| c.name.clone())
+                                                .unwrap_or(decl);
+                                            format!("{}::__clone", String::from_utf8_lossy(&name))
+                                        };
+                                        self.call_stack.push((
+                                            clone_frame,
+                                            self.current_file.clone(),
+                                            op.line,
+                                            Vec::new(),
+                                            true,
+                                        ));
                                         self.call_object_method(&new_obj_val, b"__clone", &[]);
+                                        self.call_stack.pop();
                                         if let Value::Object(ref rc) = new_obj_val {
                                             let mut ob = rc.borrow_mut();
                                             ob.remove_property(b"__clone_window");
@@ -48368,7 +48505,34 @@ impl Vm {
                 // Push class scope so `parent::`/`self::` resolves inside __toString.
                 self.class_scope_stack.push(class_lower.clone());
                 self.called_class_stack.push(class_lower.clone());
+                // __toString() runs as a frame of its own.
+                let frame = {
+                    let decl = self
+                        .classes
+                        .get(&class_lower)
+                        .and_then(|c| c.get_method(b"__tostring"))
+                        .map(|m| (m.declaring_class.clone(), m.name.clone()))
+                        .unwrap_or_else(|| (class_lower.clone(), b"__toString".to_vec()));
+                    let cname = self
+                        .classes
+                        .get(&decl.0)
+                        .map(|c| c.name.clone())
+                        .unwrap_or(decl.0);
+                    format!(
+                        "{}::{}",
+                        String::from_utf8_lossy(&cname),
+                        String::from_utf8_lossy(&decl.1)
+                    )
+                };
+                self.call_stack.push((
+                    frame,
+                    self.current_file.clone(),
+                    self.current_line,
+                    Vec::new(),
+                    true,
+                ));
                 let result = self.execute_op_array(&method, method_cvs);
+                self.call_stack.pop();
                 self.class_scope_stack.pop();
                 self.called_class_stack.pop();
                 // If __toString threw, propagate the exception (already set in current_exception)
