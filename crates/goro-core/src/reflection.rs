@@ -3255,19 +3255,24 @@ pub fn reflection_class_docall(
                 };
                 let prop_name = PhpString::from_string(prop_name_s);
                 let default = args.get(2);
-                // First check if the property is declared as a static prop
-                // on this class (or an ancestor).
+                // zend_std_get_static_property() from the class's scope.
                 let declared_static = rcls(vm, &class_lower)
                     .map(|ce| ce.properties.iter().any(|p| p.is_static && p.name == prop_name.as_bytes()))
                     .unwrap_or(false);
-                if let Some(ce) = rcls(vm, &class_lower) {
-                    if let Some(val) = ce.static_properties.get(prop_name.as_bytes()) {
-                        return Some(val.clone());
+                if declared_static {
+                    let val = find_static_property_value(vm, &class_lower, prop_name.as_bytes());
+                    match val {
+                        Some(v) if !matches!(v, Value::Undef) => return Some(v.deref()),
+                        _ => {}
                     }
-                    if declared_static {
-                        // Property exists but has no value: return Null.
-                        return Some(Value::Null);
+                    if let Some(d) = default {
+                        return Some(d.clone());
                     }
+                    let cname = rcls(vm, &class_lower).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| target.clone());
+                    let err_msg = format!("Typed property {}::${} must not be accessed before initialization", cname, prop_name.to_string_lossy());
+                    let exc = vm.create_exception(b"Error", &err_msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return Some(Value::Null);
                 }
                 // Property doesn't exist on the class. PHP: if a default
                 // was provided, return it; otherwise throw.
@@ -5394,7 +5399,15 @@ pub fn reflection_property_docall(
                     // parent chain to find the storage slot.
                     let val = find_static_property_value(vm, &class_lower, prop_name.as_bytes())
                         .unwrap_or(Value::Null);
-                    Some(val)
+                    if matches!(val, Value::Undef) {
+                        let decl = find_static_property_owner(vm, &class_lower, prop_name.as_bytes()).unwrap_or_else(|| class_lower.clone());
+                        let cname = rcls(vm, &decl).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| class_name.clone());
+                        let err_msg = format!("Typed static property {}::${} must not be accessed before initialization", cname, prop_name);
+                        let exc = vm.create_exception(b"Error", &err_msg, vm.current_line);
+                        vm.current_exception = Some(exc);
+                        return Some(Value::Null);
+                    }
+                    Some(val.deref())
                 } else if let Some(target) = args.get(1) {
                     if let Value::Object(_) = target {
                         // zend_read_property_ex() in the declaring class's scope.
@@ -5435,6 +5448,23 @@ pub fn reflection_property_docall(
                     // Store on the declaring class, not the reflected one.
                     let declaring = find_static_property_owner(vm, &class_lower, prop_name.as_bytes())
                         .unwrap_or_else(|| class_lower.clone());
+                    // Typed static properties: weak-mode coercion, else TypeError.
+                    let mut value = value;
+                    if let Some(pt) = rprop(vm, &class_lower, prop_name.as_bytes()).and_then(|p| p.property_type.clone()) {
+                        let mut coerced = value.clone();
+                        Vm::coerce_value_to_type(&mut coerced, &pt, false);
+                        if !vm.value_matches_type(&coerced, &pt) {
+                            let cname = rcls(vm, &declaring).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| class_name.clone());
+                            let msg = format!(
+                                "Cannot assign {} to property {}::${} of type {}",
+                                Vm::value_type_name(&value), cname, prop_name, zend_type_string(&pt)
+                            );
+                            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+                            vm.current_exception = Some(exc);
+                            return Some(Value::Null);
+                        }
+                        value = coerced;
+                    }
                     if let Some(ce) = vm.classes.get_mut(declaring.as_slice()) {
                         ce.static_properties.insert(prop_name.as_bytes().to_vec(), value);
                     }
