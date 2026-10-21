@@ -36,6 +36,7 @@ pub struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a [u8]) -> Self {
+        let _ = crate::take_lexer_error();
         Self {
             source,
             pos: 0,
@@ -333,41 +334,62 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 _ => {
-                    // Check for traditional octal: 0NNN (digits 0-7 only)
-                    // Also handle 0_NNN (with numeric separator)
+                    // Traditional octal: an integer literal with a leading 0
+                    // (LNUM in zend_language_scanner.l). Digits 8/9 make it an
+                    // "Invalid numeric literal"; overflow yields a float.
                     let after_zero = self.peek_at(1);
-                    let is_traditional_octal = after_zero.is_some_and(|c| (b'0'..=b'7').contains(&c))
-                        || (after_zero == Some(b'_') && self.peek_at(2).is_some_and(|c| (b'0'..=b'7').contains(&c)));
-                    if is_traditional_octal {
-                        // Could be octal - scan digits
+                    let starts_digits = after_zero.is_some_and(|c| c.is_ascii_digit())
+                        || (after_zero == Some(b'_') && self.peek_at(2).is_some_and(|c| c.is_ascii_digit()));
+                    if starts_digits {
                         let oct_start = self.pos;
                         self.advance(); // skip leading 0
-                        let mut is_octal = true;
                         while let Some(ch) = self.peek() {
-                            if (b'0'..=b'7').contains(&ch) || ch == b'_' {
+                            if ch.is_ascii_digit() || (ch == b'_' && self.peek_at(1).is_some_and(|c| c.is_ascii_digit())) {
                                 self.advance();
-                            } else if ch.is_ascii_digit() {
-                                // 08, 09 etc. - not valid octal, treat as decimal
-                                is_octal = false;
-                                break;
                             } else {
                                 break;
                             }
                         }
-                        if is_octal && self.pos > oct_start + 1 {
-                            // Check it's not followed by decimal point or 'e'
-                            if !matches!(self.peek(), Some(b'.') | Some(b'e') | Some(b'E')) {
-                                let s: String = self.source[oct_start..self.pos]
-                                    .iter()
-                                    .filter(|b| **b != b'_')
-                                    .map(|&b| b as char)
-                                    .collect();
-                                return TokenKind::LongNumber(
-                                    i64::from_str_radix(&s[1..], 8).unwrap_or(0),
-                                );
+                        let is_float_lit = match self.peek() {
+                            Some(b'e') | Some(b'E') => true,
+                            Some(b'.') => {
+                                let next = self.peek_at(1);
+                                !(next.is_some_and(|c| (c.is_ascii_alphabetic() || c == b'_' || c >= 0x80) && c != b'e' && c != b'E')
+                                    || next == Some(b'.'))
                             }
+                            _ => false,
+                        };
+                        if !is_float_lit {
+                            let digits: Vec<u8> = self.source[oct_start + 1..self.pos]
+                                .iter()
+                                .copied()
+                                .filter(|b| *b != b'_')
+                                .collect();
+                            if digits.iter().any(|d| *d == b'8' || *d == b'9') {
+                                crate::push_lexer_error("Invalid numeric literal".to_string(), self.line);
+                                return TokenKind::LongNumber(0);
+                            }
+                            let mut v: i64 = 0;
+                            let mut overflow = false;
+                            for d in &digits {
+                                match v.checked_mul(8).and_then(|x| x.checked_add((*d - b'0') as i64)) {
+                                    Some(n) => v = n,
+                                    None => {
+                                        overflow = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !overflow {
+                                return TokenKind::LongNumber(v);
+                            }
+                            let mut f = 0.0f64;
+                            for d in &digits {
+                                f = f * 8.0 + (*d - b'0') as f64;
+                            }
+                            return TokenKind::DoubleNumber(f);
                         }
-                        // Reset and fall through to decimal parsing
+                        // A float literal like 08.5 / 012e3: parse as decimal.
                         self.pos = oct_start;
                     }
                 }
@@ -485,47 +507,27 @@ impl<'a> Lexer<'a> {
                         Some(b'$') => result.push(b'$'),
                         Some(b'"') => result.push(b'"'),
                         Some(b'u') if self.peek() == Some(b'{') => {
-                            // \u{HEX} — Unicode codepoint encoded as UTF-8.
-                            // On a malformed escape we restore the pre-`{` position so
-                            // the literal `\u` is followed by the unchanged `{...}` text.
-                            let saved_pos = self.pos;
+                            // \u{HEX} - Unicode codepoint encoded as UTF-8.
                             self.advance(); // consume '{'
                             let mut hex_str = String::new();
                             let mut bad = false;
-                            while let Some(ch) = self.peek() {
-                                if ch == b'}' { break; }
-                                if !ch.is_ascii_hexdigit() {
-                                    bad = true;
-                                    break;
-                                }
-                                hex_str.push(ch as char);
-                                self.advance();
-                            }
-                            let ok = !bad && !hex_str.is_empty() && self.peek() == Some(b'}');
-                            if ok {
-                                self.advance(); // consume '}'
-                                if let Ok(cp) = u32::from_str_radix(&hex_str, 16) {
-                                    if let Some(c) = char::from_u32(cp) {
-                                        let mut buf = [0u8; 4];
-                                        let s = c.encode_utf8(&mut buf);
-                                        result.extend_from_slice(s.as_bytes());
-                                    } else if (0xD800..=0xDFFF).contains(&cp) {
-                                        // PHP encodes surrogate codepoints as 3-byte sequences
-                                        result.extend_from_slice(&[(0xE0 | (cp >> 12)) as u8, (0x80 | ((cp >> 6) & 0x3F)) as u8, (0x80 | (cp & 0x3F)) as u8]);
-                                    } else {
-                                        result.push(b'\\');
-                                        result.push(b'u');
-                                        result.push(b'{');
-                                        result.extend_from_slice(hex_str.as_bytes());
-                                        result.push(b'}');
+                            loop {
+                                match self.peek() {
+                                    Some(b'}') => break,
+                                    Some(ch) if ch.is_ascii_hexdigit() => {
+                                        hex_str.push(ch as char);
+                                        self.advance();
+                                    }
+                                    _ => {
+                                        bad = true;
+                                        break;
                                     }
                                 }
-                            } else {
-                                // Restore position so the unchanged `{...` text follows the literal `\u`.
-                                self.pos = saved_pos;
-                                result.push(b'\\');
-                                result.push(b'u');
                             }
+                            if !bad {
+                                self.advance(); // consume '}'
+                            }
+                            encode_unicode_escape(&hex_str, bad, self.line, &mut result);
                         }
                         Some(x_ch @ (b'x' | b'X')) => {
                             let mut hex = Vec::new();
@@ -1047,7 +1049,8 @@ impl<'a> Lexer<'a> {
                 );
             }
 
-            if self.starts_with(b"<?php")
+            if self.source.len() >= self.pos + 5
+                && self.source[self.pos..self.pos + 5].eq_ignore_ascii_case(b"<?php")
                 && self
                     .peek_at(5)
                     .is_none_or(|c| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r')
@@ -1096,7 +1099,35 @@ impl<'a> Lexer<'a> {
                 );
             }
 
+            if self.starts_with(b"<?") && crate::short_open_tag() {
+                if self.pos > start {
+                    return Token::new(
+                        TokenKind::InlineHtml(self.source[start..self.pos].to_vec()),
+                        Span::new(start as u32, self.pos as u32, start_line),
+                    );
+                }
+                let tag_start = self.pos;
+                self.pos += 2;
+                self.push_mode(LexerMode::Scripting);
+                return Token::new(
+                    TokenKind::OpenTag,
+                    Span::new(tag_start as u32, self.pos as u32, start_line),
+                );
+            }
+
             self.advance();
+        }
+    }
+
+    /// Skip a leading `#!` line (the CLI does this for the primary script).
+    pub fn skip_shebang(&mut self) {
+        if self.pos == 0 && self.source.starts_with(b"#!") {
+            while let Some(c) = self.peek() {
+                self.advance();
+                if c == b'\n' {
+                    break;
+                }
+            }
         }
     }
 
@@ -1570,6 +1601,10 @@ impl<'a> Lexer<'a> {
 
             _ => {
                 // Unknown character - skip it and produce an identifier
+                if ch < 0x20 || ch == 0x7F {
+                    // T_BAD_CHARACTER
+                    crate::push_lexer_error(format!("syntax error, unexpected character 0x{:02X}", ch), self.line);
+                }
                 self.advance();
                 TokenKind::Identifier(vec![ch])
             }
@@ -1753,27 +1788,11 @@ impl<'a> Lexer<'a> {
                                 hex_str.push(content[j] as char);
                                 j += 1;
                             }
-                            let ok = !bad && !hex_str.is_empty() && j < len && content[j] == b'}';
-                            if ok {
-                                if let Ok(cp) = u32::from_str_radix(&hex_str, 16) {
-                                    if let Some(c) = char::from_u32(cp) {
-                                        let mut buf = [0u8; 4];
-                                        let s = c.encode_utf8(&mut buf);
-                                        result.extend_from_slice(s.as_bytes());
-                                        i = j + 1;
-                                        continue;
-                                    } else if (0xD800..=0xDFFF).contains(&cp) {
-                                        // PHP encodes surrogate codepoints as 3-byte sequences
-                                        result.extend_from_slice(&[(0xE0 | (cp >> 12)) as u8, (0x80 | ((cp >> 6) & 0x3F)) as u8, (0x80 | (cp & 0x3F)) as u8]);
-                                        i = j + 1;
-                                        continue;
-                                    }
-                                }
+                            if j >= len {
+                                bad = true;
                             }
-                            // Malformed — emit literal \u, leave the rest in place
-                            result.push(b'\\');
-                            result.push(b'u');
-                            i += 1;
+                            encode_unicode_escape(&hex_str, bad, self.line, &mut result);
+                            i = if bad { j } else { j + 1 };
                         }
                         b'x' | b'X' => {
                             let x_ch = content[i];
@@ -2233,5 +2252,37 @@ mod tests {
         assert_eq!(tokens[1].kind, TokenKind::LongNumber(255));
         assert_eq!(tokens[3].kind, TokenKind::LongNumber(10));
         assert_eq!(tokens[5].kind, TokenKind::LongNumber(63));
+    }
+}
+
+/// Encode a `\u{...}` escape like zend_language_scanner.l: invalid or empty
+/// sequences and codepoints above U+10FFFF are compile errors; surrogate
+/// halves are encoded as plain 3-byte sequences.
+fn encode_unicode_escape(hex: &str, bad: bool, line: u32, out: &mut Vec<u8>) {
+    if bad || hex.is_empty() {
+        crate::push_lexer_error("Invalid UTF-8 codepoint escape sequence".to_string(), line);
+        return;
+    }
+    let cp = match u64::from_str_radix(hex, 16) {
+        Ok(v) if v <= 0x10FFFF => v as u32,
+        _ => {
+            crate::push_lexer_error("Invalid UTF-8 codepoint escape sequence: Codepoint too large".to_string(), line);
+            return;
+        }
+    };
+    if cp < 0x80 {
+        out.push(cp as u8);
+    } else if cp < 0x800 {
+        out.push(0xC0 | (cp >> 6) as u8);
+        out.push(0x80 | (cp & 0x3F) as u8);
+    } else if cp < 0x10000 {
+        out.push(0xE0 | (cp >> 12) as u8);
+        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
+        out.push(0x80 | (cp & 0x3F) as u8);
+    } else {
+        out.push(0xF0 | (cp >> 18) as u8);
+        out.push(0x80 | ((cp >> 12) & 0x3F) as u8);
+        out.push(0x80 | ((cp >> 6) & 0x3F) as u8);
+        out.push(0x80 | (cp & 0x3F) as u8);
     }
 }

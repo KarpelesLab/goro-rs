@@ -170,6 +170,7 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
 
     // Lex
     let mut lexer = Lexer::new(source);
+    lexer.skip_shebang();
     let tokens = lexer.tokenize();
 
     // Parse

@@ -26433,7 +26433,7 @@ impl Vm {
                             }
                             Err(e) => {
                                 // PHP 7+: parse errors in eval throw ParseError exception
-                                let msg = if e.message.contains("unexpected") || e.message.contains("syntax error") {
+                                let msg = if e.message.contains("unexpected") || e.message.contains("syntax error") || e.message.starts_with("Invalid ") {
                                     e.message.clone()
                                 } else {
                                     format!("syntax error in eval()'d code on line {}", e.span.line)
@@ -26452,7 +26452,7 @@ impl Vm {
                                     continue;
                                 }
                                 // No exception handler - output as parse error
-                                let err_msg = if e.message.contains("unexpected") || e.message.contains("syntax error") {
+                                let err_msg = if e.message.contains("unexpected") || e.message.contains("syntax error") || e.message.starts_with("Invalid ") {
                                     e.message.clone()
                                 } else {
                                     format!("syntax error")

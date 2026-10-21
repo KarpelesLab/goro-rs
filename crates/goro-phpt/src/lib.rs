@@ -1059,7 +1059,12 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     }
 
     // Lex
+    let short_tags = ini_settings.iter().rev().find(|(k, _)| k == "short_open_tag")
+        .map(|(_, v)| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "on" | "true" | "yes"))
+        .unwrap_or(false);
+    goro_parser::set_short_open_tag(short_tags);
     let mut lexer = Lexer::new(source);
+    lexer.skip_shebang();
     let tokens = lexer.tokenize();
 
     // Drain any deprecations recorded by the lexer (e.g. `${var}` syntax).
@@ -1137,6 +1142,8 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                 )
             } else if err_msg.starts_with("syntax error")
                 || err_msg.starts_with("The (real) cast")
+                || err_msg.starts_with("Invalid UTF-8 codepoint")
+                || err_msg.starts_with("Invalid numeric literal")
             {
                 format!(
                     "\nParse error: {} in {} on line {}\n",

@@ -16,6 +16,40 @@ thread_local! {
     static LEXER_DEPRECATIONS: RefCell<Vec<(String, u32)>> = const { RefCell::new(Vec::new()) };
 }
 
+thread_local! {
+    /// First compile error detected by the lexer (e.g. an invalid `\u{}`
+    /// escape). Reported by the parser as a parse error.
+    static LEXER_ERROR: RefCell<Option<(String, u32)>> = const { RefCell::new(None) };
+}
+
+/// Record a lexer-level compile error (only the first one is kept).
+pub fn push_lexer_error(msg: String, line: u32) {
+    LEXER_ERROR.with(|e| {
+        let mut e = e.borrow_mut();
+        if e.is_none() {
+            *e = Some((msg, line));
+        }
+    });
+}
+
+/// Take the pending lexer error, if any.
+pub fn take_lexer_error() -> Option<(String, u32)> {
+    LEXER_ERROR.with(|e| e.borrow_mut().take())
+}
+
+thread_local! {
+    static SHORT_OPEN_TAG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Configure the `short_open_tag` INI setting for subsequent lexer runs.
+pub fn set_short_open_tag(on: bool) {
+    SHORT_OPEN_TAG.with(|c| c.set(on));
+}
+
+pub fn short_open_tag() -> bool {
+    SHORT_OPEN_TAG.with(|c| c.get())
+}
+
 /// Record a deprecation diagnostic discovered by the lexer/parser.
 pub fn push_lexer_deprecated(msg: String, line: u32) {
     LEXER_DEPRECATIONS.with(|d| d.borrow_mut().push((msg, line)));

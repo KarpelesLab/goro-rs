@@ -204,6 +204,11 @@ impl Parser {
 
     /// Parse a complete PHP program
     pub fn parse(&mut self) -> ParseResult<Program> {
+        if let Some((message, line)) = crate::take_lexer_error() {
+            let mut span = self.tokens.first().map(|t| t.span).unwrap_or(crate::token::Span { start: 0, end: 0, line });
+            span.line = line;
+            return Err(ParseError { message, span });
+        }
         let mut statements = Vec::new();
         while !self.is_at_end() {
             let stmt = self.parse_statement()?;
@@ -258,7 +263,21 @@ impl Parser {
                         kind: StmtKind::Echo(vec![expr]),
                         span,
                     })
-                } else if matches!(self.peek(), TokenKind::Eof) {
+                } else if matches!(
+                    self.peek(),
+                    TokenKind::Eof
+                        | TokenKind::CloseBrace
+                        | TokenKind::Else
+                        | TokenKind::ElseIf
+                        | TokenKind::EndIf
+                        | TokenKind::EndWhile
+                        | TokenKind::EndFor
+                        | TokenKind::EndForeach
+                        | TokenKind::EndSwitch
+                        | TokenKind::EndDeclare
+                        | TokenKind::Case
+                        | TokenKind::Default
+                ) {
                     // <?php with no body / at end of file: emit a no-op so the
                     // overall parse succeeds (matches PHP, which accepts a file
                     // containing nothing but the opening tag).
