@@ -417,7 +417,7 @@ pub(crate) fn resolve_class_constant(vm: &mut Vm, class_lower: &[u8], name: &[u8
         Ok(p) => p,
         Err(_) => return Some(vm.resolve_deferred_value(&raw)),
     };
-    let mut compiler = crate::compiler::Compiler::new();
+    let compiler = crate::compiler::Compiler::new();
     let op_array = match compiler.compile(&program) {
         Ok((op, _, _)) => op,
         Err(_) => return Some(vm.resolve_deferred_value(&raw)),
@@ -431,10 +431,7 @@ pub(crate) fn resolve_class_constant(vm: &mut Vm, class_lower: &[u8], name: &[u8
     if vm.current_exception.is_some() {
         return None;
     }
-    match r {
-        Ok(v) => Some(v),
-        Err(_) => None,
-    }
+    r.ok()
 }
 
 
@@ -604,7 +601,7 @@ pub(crate) fn run_snippet_in_scope(vm: &mut Vm, src: &str, vars: &[(&str, Value)
     let tokens = lexer.tokenize();
     let mut parser = goro_parser::Parser::new(tokens);
     let program = parser.parse().ok()?;
-    let mut compiler = crate::compiler::Compiler::new();
+    let compiler = crate::compiler::Compiler::new();
     let (mut op_array, _, _) = compiler.compile(&program).ok()?;
     // Errors raised by the snippet are reported at the caller's line.
     let line = vm.current_line;
@@ -3642,7 +3639,7 @@ pub fn reflection_method_method(
             Some(if method_lower.as_bytes() == b"__destruct" { Value::True } else { Value::False })
         }
         b"getmodifiers" => {
-            let mods = rmethod(vm, &class_lower, method_lower.as_bytes()).map(|m| reflection_method_modifiers(m))
+            let mods = rmethod(vm, &class_lower, method_lower.as_bytes()).map(reflection_method_modifiers)
                 .unwrap_or(1); // default public
             Some(Value::Long(mods))
         }
@@ -4494,7 +4491,7 @@ fn eval_internal_default(vm: &mut Vm, def: &str) -> Option<Value> {
     let tokens = lexer.tokenize();
     let mut parser = goro_parser::Parser::new(tokens);
     let program = parser.parse().ok()?;
-    let mut compiler = crate::compiler::Compiler::new();
+    let compiler = crate::compiler::Compiler::new();
     let (op_array, _classes, _warnings) = compiler.compile(&program).ok()?;
     let cvs = vec![Value::Undef; op_array.cv_names.len()];
     vm.execute_op_array_pub(&op_array, cvs).ok()
@@ -5321,7 +5318,7 @@ pub fn reflection_property_method(
         }
         b"getmodifiers" => {
             let mods = rcls(vm, &class_lower)
-                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(|p| reflection_property_modifiers(p)))
+                .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()).map(reflection_property_modifiers))
                 .unwrap_or(1);
             Some(Value::Long(mods))
         }
@@ -8761,7 +8758,7 @@ pub fn create_reflection_attributes(
 
 thread_local! {
     /// Argument op arrays of ReflectionAttribute objects, evaluated lazily.
-    static ATTR_ARG_OPS: RefCell<Vec<OpArray>> = RefCell::new(Vec::new());
+    static ATTR_ARG_OPS: RefCell<Vec<OpArray>> = const { RefCell::new(Vec::new()) };
 }
 
 /// The (lazily evaluated) arguments array of a ReflectionAttribute.
@@ -9973,7 +9970,7 @@ fn zend_zval_type_name(v: &Value) -> &'static str {
 
 thread_local! {
     /// Constant values pre-evaluated (with a mutable VM) for `class_string`.
-    static RESOLVED_CONSTS: RefCell<Option<Vec<(Vec<u8>, Value)>>> = RefCell::new(None);
+    static RESOLVED_CONSTS: RefCell<Option<Vec<(Vec<u8>, Value)>>> = const { RefCell::new(None) };
 }
 
 /// Port of `_class_string()`.
