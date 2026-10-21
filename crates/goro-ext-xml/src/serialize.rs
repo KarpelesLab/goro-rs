@@ -488,7 +488,8 @@ pub fn doc_to_bytes(
     encode_output(&ctx.out, enc.as_deref())
 }
 
-/// Serialize a node (xmlNodeDumpOutput with doc encoding).
+/// Serialize a node (xmlNodeDumpOutput into an unencoded buffer: the
+/// output stays UTF-8 and non-ASCII characters are written raw).
 pub fn node_to_bytes(
     t: &Tree,
     node: NodeId,
@@ -496,10 +497,11 @@ pub fn node_to_bytes(
     format: bool,
     no_empty: bool,
 ) -> Vec<u8> {
-    let mut ctx = SaveCtx::new(encoding, format);
+    let enc = encoding.unwrap_or("UTF-8");
+    let mut ctx = SaveCtx::new(Some(enc), format);
     ctx.no_empty = no_empty;
     dump_node(t, &mut ctx, node);
-    encode_output(&ctx.out, encoding)
+    ctx.out.into_bytes()
 }
 
 pub fn encode_output(s: &str, enc: Option<&str>) -> Vec<u8> {

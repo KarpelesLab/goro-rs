@@ -1,3 +1,5 @@
+pub mod c14n;
+pub mod dom;
 pub mod io;
 pub mod libxml;
 pub mod parser;
@@ -6,13 +8,36 @@ pub mod serialize;
 pub mod simplexml;
 pub mod tree;
 pub mod uri;
+pub mod valid;
+pub mod xinclude;
 pub mod xpath;
 
 /// The XML node behind a DOM object (for simplexml_import_dom).
 pub fn dom_node_of(
-    _o: &std::rc::Rc<std::cell::RefCell<goro_core::object::PhpObject>>,
+    o: &std::rc::Rc<std::cell::RefCell<goro_core::object::PhpObject>>,
 ) -> Option<tree::NodeId> {
-    None
+    dom::node_of(o)
+}
+
+/// HTML parsing entry point (DOMDocument::loadHTML).
+pub fn html_parse(_data: &[u8], _url: Option<&str>, _options: i64) -> sax2::ParseOutcome {
+    let doc = tree::with(|t| t.new_html_doc());
+    sax2::ParseOutcome {
+        doc: Some(doc),
+        well_formed: true,
+        ns_well_formed: true,
+        errors: Vec::new(),
+    }
+}
+
+/// HTML serialization of a node (DOMDocument::saveHTML($node)).
+pub fn html_node_bytes(t: &tree::Tree, n: tree::NodeId, format: bool) -> Vec<u8> {
+    serialize::node_to_bytes(t, n, None, format, false)
+}
+
+/// HTML serialization of a document (DOMDocument::saveHTML()).
+pub fn html_doc_bytes(t: &tree::Tree, d: tree::NodeId, format: bool) -> Vec<u8> {
+    serialize::doc_to_bytes(t, d, None, format, true, false)
 }
 
 use goro_core::array::{ArrayKey, PhpArray};
@@ -876,6 +901,7 @@ pub fn register(vm: &mut Vm) {
 
     libxml::register(vm);
     simplexml::register(vm);
+    dom::register(vm);
 
     // Register XMLParser as a final, opaque, non-serializable class.
     let mut xmlparser_ce = goro_core::object::ClassEntry::new(b"XMLParser".to_vec());
