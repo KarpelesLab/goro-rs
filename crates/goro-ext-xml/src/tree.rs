@@ -939,12 +939,9 @@ impl Tree {
 
     /// Find attribute by qualified name (prefix:local) as written.
     pub fn has_qname_prop(&self, node: NodeId, qname: &str) -> Option<NodeId> {
-        for a in self.attrs_of(node) {
-            if self.qname(a) == qname {
-                return Some(a);
-            }
-        }
-        None
+        self.attrs_of(node)
+            .into_iter()
+            .find(|&a| self.qname(a) == qname)
     }
 
     /// xmlGetNoNsProp
@@ -1599,7 +1596,7 @@ impl Tree {
                 NType::Element => {
                     let name = self.qname(c);
                     let name = if n.ns.is_some() && self.ns_prefix(n.ns).is_none() {
-                        format!("*")
+                        "*".to_string()
                     } else {
                         name
                     };

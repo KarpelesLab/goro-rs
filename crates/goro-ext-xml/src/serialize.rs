@@ -29,7 +29,7 @@ impl SaveCtx {
     }
 
     fn write_indent(&mut self) {
-        let level = self.level.min(60).max(0);
+        let level = self.level.clamp(0, 60);
         for _ in 0..level {
             let i = self.indent.clone();
             self.out.push_str(&i);

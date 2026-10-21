@@ -461,13 +461,8 @@ pub fn string_get_node_list(t: &mut Tree, doc: Option<NodeId>, parent: NodeId, v
             let mut charval: u32 = 0;
             if cur != q {
                 buf.extend_from_slice(&b[q..cur]);
-                q = cur;
             }
-            if cur + 2 < len + 0
-                && cur + 2 <= len - 1 + 1
-                && b.get(cur + 1) == Some(&b'#')
-                && b.get(cur + 2) == Some(&b'x')
-            {
+            if cur + 2 < len && b.get(cur + 1) == Some(&b'#') && b.get(cur + 2) == Some(&b'x') {
                 cur += 3;
                 let mut tmp = 0u8;
                 while cur < len {
@@ -1713,14 +1708,11 @@ fn prop_is_empty(s: &Sxe) -> bool {
                 }
                 skip = true;
             }
-            if !skip {
-                if nd.t == NType::Element && !match_ns(t, n, nsp.as_deref(), isp) {
-                    skip = true;
-                } else if nd.name.is_empty() {
-                    skip = true;
-                } else {
-                    return false;
-                }
+            if !skip
+                && !((nd.t == NType::Element && !match_ns(t, n, nsp.as_deref(), isp))
+                    || nd.name.is_empty())
+            {
+                return false;
             }
             let next = nd.next;
             cur = if use_iter {
@@ -2062,22 +2054,12 @@ fn resolve_class_arg(vm: &mut Vm, fname: &str, argn: usize, v: Option<&Value>) -
             };
             let lower = name.to_ascii_lowercase();
             if !is_sxe_class(vm, &lower) && lower != b"simplexmlelement" {
-                let exists = vm.classes.contains_key(&lower) || lower == b"simplexmliterator";
-                let msg = if exists {
-                    format!(
-                        "{}(): Argument #{} ($class_name) must be a class name derived from SimpleXMLElement, {} given",
-                        fname,
-                        argn,
-                        String::from_utf8_lossy(&name)
-                    )
-                } else {
-                    format!(
-                        "{}(): Argument #{} ($class_name) must be a class name derived from SimpleXMLElement, {} given",
-                        fname,
-                        argn,
-                        String::from_utf8_lossy(&name)
-                    )
-                };
+                let msg = format!(
+                    "{}(): Argument #{} ($class_name) must be a class name derived from SimpleXMLElement, {} given",
+                    fname,
+                    argn,
+                    String::from_utf8_lossy(&name)
+                );
                 if lower != b"simplexmliterator" {
                     throw_error(vm, b"TypeError", &msg);
                     return None;
@@ -2662,8 +2644,8 @@ fn call_method(
                     .parent
                     .map(|p| t.nodes[p].t == NType::Document)
                     .unwrap_or(false);
-                if is_root && doc.is_some() {
-                    serialize::doc_to_bytes(t, doc.unwrap(), enc.as_deref(), false, false, false)
+                if let (true, Some(d)) = (is_root, doc) {
+                    serialize::doc_to_bytes(t, d, enc.as_deref(), false, false, false)
                 } else {
                     serialize::node_to_bytes(
                         t,

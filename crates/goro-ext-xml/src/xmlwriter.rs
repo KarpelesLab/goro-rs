@@ -45,6 +45,7 @@ thread_local! {
     static WRITERS: RefCell<HashMap<usize, Slot>> = RefCell::new(HashMap::new());
     static NEXT_SEQ: Cell<u64> = const { Cell::new(1) };
     /// Writers of freed objects whose output needs the VM to be flushed.
+    #[allow(clippy::vec_box)]
     static DEFERRED: RefCell<Vec<Box<PhpWriter>>> = const { RefCell::new(Vec::new()) };
 }
 

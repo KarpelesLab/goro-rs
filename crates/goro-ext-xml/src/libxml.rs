@@ -75,7 +75,7 @@ pub fn user_entity_load(
         Value::Resource(_) => {
             let data = vm
                 .functions
-                .get(&b"stream_get_contents".to_vec())
+                .get(&b"stream_get_contents"[..])
                 .copied()
                 .and_then(|f| f(vm, std::slice::from_ref(&rv)).ok());
             if let Some(Value::String(d)) = data {
@@ -334,8 +334,8 @@ fn libxml_disable_entity_loader(vm: &mut Vm, _args: &[Value]) -> Result<Value, V
 fn libxml_set_external_entity_loader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let v = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
     if !matches!(v, Value::Null | Value::Undef) {
-        let ok = match vm.functions.get(&b"is_callable".to_vec()).copied() {
-            Some(f) => matches!(f(vm, &[v.clone()]), Ok(Value::True)),
+        let ok = match vm.functions.get(&b"is_callable"[..]).copied() {
+            Some(f) => matches!(f(vm, std::slice::from_ref(&v)), Ok(Value::True)),
             None => true,
         };
         if !ok {

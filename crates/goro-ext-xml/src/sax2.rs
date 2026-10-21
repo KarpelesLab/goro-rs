@@ -615,10 +615,9 @@ impl Sink for TreeBuilder {
         let validate = self.validate && !html;
         let v = &mut self.validator;
         let el = tree::with(|t| {
-            let name = if prefix.is_some() && uri.is_none() {
-                format!("{}:{}", prefix.unwrap(), localname)
-            } else {
-                localname.to_string()
+            let name = match (prefix, uri) {
+                (Some(p), None) => format!("{}:{}", p, localname),
+                _ => localname.to_string(),
             };
             let el = t.new_element(doc, &name);
             t.nodes[el].line = line;
@@ -646,12 +645,12 @@ impl Sink for TreeBuilder {
                     t.link_child_raw(pn, el);
                 }
             }
-            if uri.is_some() && t.nodes[el].ns.is_none() {
+            if let (Some(u), None) = (uri, t.nodes[el].ns) {
                 let ns = t.search_ns(el, prefix);
                 match ns {
                     Some(ns) => t.nodes[el].ns = Some(ns),
                     None => {
-                        let ns = t.new_ns_raw(uri.unwrap(), prefix, Some(el));
+                        let ns = t.new_ns_raw(u, prefix, Some(el));
                         t.nodes[el].ns_def.push(ns);
                         t.nodes[el].ns = Some(ns);
                         warn_undef = Some(prefix.unwrap_or("").to_string());

@@ -1332,9 +1332,9 @@ pub fn context_window(input: &Input) -> String {
     let mut out = String::from_utf8_lossy(content).into_owned();
     out.push('\n');
     let mut marker: Vec<u8> = content.to_vec();
-    for i in 0..col {
-        if marker[i] != b'\t' {
-            marker[i] = b' ';
+    for m in marker.iter_mut().take(col) {
+        if *m != b'\t' {
+            *m = b' ';
         }
     }
     marker.truncate(col);
@@ -3879,7 +3879,7 @@ impl<'a, S: Sink> Parser<'a, S> {
         if val >= 0x110000 {
             self.fatal_msg(
                 XML_ERR_INVALID_CHAR,
-                format!("xmlParseCharRef: character reference out of bounds\n"),
+                "xmlParseCharRef: character reference out of bounds\n".to_string(),
             );
             return 0;
         } else if !is_char(val) {
@@ -3940,12 +3940,12 @@ impl<'a, S: Sink> Parser<'a, S> {
         while i < b.len() && !self.stopped() {
             let c = b[i];
             if c != b'&' {
-                if pent.is_some() && c == b'<' {
+                if let (Some(pe), b'<') = (pent.as_ref(), c) {
                     self.fatal_msg(
                         XML_ERR_LT_IN_ATTRIBUTE,
                         format!(
                             "'<' in entity '{}' is not allowed in attributes values\n",
-                            pent.unwrap()
+                            pe
                         ),
                     );
                     break;
@@ -5185,39 +5185,6 @@ fn is_test_char_data(c: u8) -> bool {
     c == 0x09 || ((0x20..0x80).contains(&c) && c != b'&' && c != b'<' && c != b']')
 }
 
-fn dummy_state() -> ParserState {
-    ParserState {
-        inputs: Vec::new(),
-        options: 0,
-        well_formed: true,
-        ns_well_formed: true,
-        valid: true,
-        disable_sax: 0,
-        errors: Vec::new(),
-        nb_errors: 0,
-        nb_warnings: 0,
-        replace_entities: false,
-        keep_blanks: true,
-        recovery: false,
-        in_subset: 0,
-        standalone: -1,
-        version: None,
-        encoding: None,
-        input_encoding: None,
-        has_external_subset: false,
-        has_perefs: false,
-        html: false,
-        stop: false,
-        quiet: false,
-        ids: HashMap::new(),
-        err_no: 0,
-        last_err_level: 0,
-        sax1: false,
-        sax_get_entity: false,
-        directory: None,
-    }
-}
-
 /// Normalize a non-CDATA attribute value: collapse runs of spaces and strip
 /// leading/trailing spaces.
 pub fn normalize_attr_value(s: &str) -> String {
@@ -6021,8 +5988,6 @@ fn percent_decode_str(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Load an external resource through the installed hook (or the default
-/// loader).
 thread_local! {
     /// The parser context of the load in progress (libxml2's
     /// ctxt->directory, intSubName, extSubURI, extSubSystem), for loaders
@@ -6033,6 +5998,8 @@ thread_local! {
 /// Error code a loader returns when it already reported the failure.
 pub const EXT_LOAD_REPORTED: i32 = -1;
 
+/// Load an external resource through the installed hook (or the default
+/// loader).
 pub fn load_external(public: Option<&str>, system: &str, url: &str) -> ExtLoadResult {
     let hook = EXT_LOADER.with(|c| c.borrow_mut().take());
     match hook {

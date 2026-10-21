@@ -373,12 +373,12 @@ fn node_dump(t: &Tree, ctx: &mut DumpCtx, root: NodeId) {
                     }
                     descend = true;
                 }
-                if !descend
-                    && format
-                    && n.next.is_some()
-                    && info.map(|i| !i.isinline).unwrap_or(false)
-                {
-                    let nx = n.next.unwrap();
+                if let (false, true, Some(nx), true) = (
+                    descend,
+                    format,
+                    n.next,
+                    info.map(|i| !i.isinline).unwrap_or(false),
+                ) {
                     if !is_text_like(t, nx) && parent_allows_newline(t, parent) {
                         ctx.out.push('\n');
                     }

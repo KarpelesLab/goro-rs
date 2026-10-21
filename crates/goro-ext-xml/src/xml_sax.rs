@@ -229,8 +229,9 @@ impl CompatSink {
         self.ctx.as_ref().map(|(s, _)| s.clone())
     }
 
-    fn vm(&self) -> &mut Vm {
-        unsafe { &mut *self.ctx.as_ref().unwrap().1 }
+    /// The VM running the parse (set for the duration of xml_parse()).
+    fn vm_ptr(&self) -> *mut Vm {
+        self.ctx.as_ref().unwrap().1
     }
 
     fn sep(&self, st: &XmlState) -> Vec<u8> {
@@ -265,7 +266,8 @@ impl CompatSink {
         if self.failed.is_some() {
             return None;
         }
-        let vm = self.vm();
+        // SAFETY: the pointer is the VM that called xml_parse() and outlives it
+        let vm = unsafe { &mut *self.vm_ptr() };
         let callable = match h {
             Handler::Callable(c) => c.clone(),
             Handler::Method { obj, name } => {
@@ -402,7 +404,7 @@ impl CompatSink {
                 lt[lvl - 1] = Some(tag_name.clone());
             }
             b.lastwasopen = true;
-            if attr_arr.len() > 0 {
+            if !attr_arr.is_empty() {
                 tag.set(
                     skey("attributes"),
                     Value::Array(Rc::new(RefCell::new(attr_arr))),
@@ -459,7 +461,7 @@ impl CompatSink {
             b.lastwasopen = false;
         }
         let lvl = b.level;
-        if lvl >= 1 && lvl <= XML_MAXLEVEL {
+        if (1..=XML_MAXLEVEL).contains(&lvl) {
             if let Some(lt) = b.ltags.as_mut() {
                 lt[(lvl - 1) as usize] = None;
             }
@@ -561,7 +563,9 @@ impl CompatSink {
             .state()
             .map(|s| s.borrow().cur_fn)
             .unwrap_or("xml_parse");
-        self.vm().emit_warning(&format!(
+        // SAFETY: as in call_handler
+        let vm = unsafe { &mut *self.vm_ptr() };
+        vm.emit_warning(&format!(
             "{}(): Maximum depth exceeded - Results truncated",
             f
         ));

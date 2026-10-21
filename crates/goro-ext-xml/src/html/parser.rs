@@ -2013,7 +2013,7 @@ impl<'a> HtmlParser<'a> {
             self.depth -= 1;
             return false;
         }
-        if !self.names.iter().any(|n| *n == name) {
+        if !self.names.contains(&name) {
             self.perr(
                 XML_ERR_TAG_NAME_MISMATCH,
                 "Unexpected end tag : %s\n",

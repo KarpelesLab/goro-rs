@@ -19,7 +19,7 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() + 0 && i + 2 <= b.len() - 1 {
+        if b[i] == b'%' && i + 2 < b.len() {
             if let Ok(v) =
                 u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16)
             {
@@ -73,7 +73,7 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
     let path = strip_file_scheme(filename);
     if path.contains("://") || path.starts_with("php://") || path.starts_with("data:") {
         // go through file_get_contents (stream wrappers)
-        let f = vm.functions.get(&b"file_get_contents".to_vec()).copied()?;
+        let f = vm.functions.get(&b"file_get_contents"[..]).copied()?;
         let silenced = vm.error_reporting;
         vm.error_reporting = 0;
         let mut fargs = vec![Value::String(PhpString::from_string(filename.to_string()))];
@@ -89,10 +89,7 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
         };
     }
     let full = resolve_path(vm, &path);
-    match std::fs::read(&full) {
-        Ok(d) => Some(d),
-        Err(_) => None,
-    }
+    std::fs::read(&full).ok()
 }
 
 fn resolve_path(_vm: &Vm, path: &str) -> std::path::PathBuf {
@@ -118,7 +115,7 @@ pub fn write_resource(vm: &mut Vm, filename: &str, data: &[u8]) -> bool {
     }
     let path = strip_file_scheme(filename);
     if path.contains("://") {
-        let f = match vm.functions.get(&b"file_put_contents".to_vec()).copied() {
+        let f = match vm.functions.get(&b"file_put_contents"[..]).copied() {
             Some(f) => f,
             None => return false,
         };

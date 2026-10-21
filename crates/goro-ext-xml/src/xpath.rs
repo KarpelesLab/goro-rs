@@ -125,19 +125,18 @@ fn lex(s: &str) -> Result<Vec<Tok>, XErr> {
     let mut toks: Vec<Tok> = Vec::new();
     let n = chars.len();
     let prev_allows_operator = |toks: &Vec<Tok>| -> bool {
-        match toks.last() {
-            None => false,
-            Some(Tok::At)
-            | Some(Tok::ColonColon)
-            | Some(Tok::LParen)
-            | Some(Tok::LBracket)
-            | Some(Tok::Comma)
-            | Some(Tok::Op(_))
-            | Some(Tok::Slash)
-            | Some(Tok::SlashSlash)
-            | Some(Tok::Pipe) => false,
-            _ => true,
-        }
+        !matches!(
+            toks.last(),
+            None | Some(Tok::At)
+                | Some(Tok::ColonColon)
+                | Some(Tok::LParen)
+                | Some(Tok::LBracket)
+                | Some(Tok::Comma)
+                | Some(Tok::Op(_))
+                | Some(Tok::Slash)
+                | Some(Tok::SlashSlash)
+                | Some(Tok::Pipe)
+        )
     };
     while i < n {
         let c = chars[i];
@@ -989,13 +988,7 @@ fn eval_expr(e: &Expr, f: &Focus, ctx: &mut Ctx) -> Result<XValue, XErr> {
                         while let Some(p) = t.nodes[cur].parent {
                             cur = p;
                         }
-                        if t.nodes[cur].t == NType::NamespaceDecl
-                            || t.nodes[cur].t == NType::Attribute
-                        {
-                            cur
-                        } else {
-                            cur
-                        }
+                        cur
                     });
                     vec![root]
                 }
@@ -1797,7 +1790,7 @@ fn call_function(
                 to_str(&eval_expr(&args[0], f, ctx)?)
             };
             Ok(XValue::Str(
-                s.split(|c| c == ' ' || c == '\t' || c == '\n' || c == '\r')
+                s.split([' ', '\t', '\n', '\r'])
                     .filter(|x| !x.is_empty())
                     .collect::<Vec<_>>()
                     .join(" "),
@@ -1918,7 +1911,7 @@ fn round_half(x: f64) -> f64 {
     if x.is_nan() || x.is_infinite() {
         return x;
     }
-    if x < 0.0 && x >= -0.5 {
+    if (-0.5..0.0).contains(&x) {
         return -0.0;
     }
     (x + 0.5).floor()
