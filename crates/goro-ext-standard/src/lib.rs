@@ -13,6 +13,7 @@ pub mod serialize;
 pub mod strings;
 pub mod type_funcs;
 pub mod url_scanner;
+pub mod zsort;
 
 // Alias for code referencing `stream_filters` (the gitignore unfortunately
 // matches anything starting with "stream").

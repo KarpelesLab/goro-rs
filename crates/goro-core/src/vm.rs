@@ -4478,6 +4478,79 @@ impl Vm {
             }
         }
 
+        // Number of leading CVs that are not user-visible parameters ($this and
+        // closure use-vars); only count $this when it was actually supplied.
+        let this_cv = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") { 1usize } else { 0 };
+        let hidden_cvs = (op_array.param_count as usize).saturating_sub(op_array.param_attributes.len());
+        let lead = if this_cv == 1 && !matches!(call.args.first(), Some(Value::Object(_))) {
+            hidden_cvs.saturating_sub(1)
+        } else {
+            hidden_cvs
+        };
+        let cv_shift = hidden_cvs - lead; // 1 when $this is expected but absent from args
+        // By-value parameters receive the dereferenced value; by-reference
+        // parameters given a plain value warn (PHP's zend_call_function behaviour).
+        {
+            let variadic_start = op_array.variadic_param.map(|v| v as usize).unwrap_or(usize::MAX);
+            for i in lead..call.args.len() {
+                let cv_idx = i + cv_shift;
+                if cv_idx >= op_array.by_ref_params.len() || cv_idx >= variadic_start {
+                    break;
+                }
+                let by_ref = op_array.by_ref_params[cv_idx];
+                if !by_ref {
+                    if let Value::Reference(r) = &call.args[i] {
+                        let inner = r.borrow().clone();
+                        call.args[i] = inner;
+                    }
+                } else if !matches!(call.args[i], Value::Reference(_)) {
+                    let mut fname = String::from_utf8_lossy(op_array.effective_name()).to_string();
+                    if op_array.display_name.is_empty() && !fname.contains("::") {
+                        if let Some(sc) = &op_array.scope_class {
+                            let cname = self.classes.get(&sc.to_ascii_lowercase())
+                                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
+                            fname = format!("{}::{}", cname, fname);
+                        }
+                    }
+                    let pname = op_array.cv_names.get(cv_idx).map(|n| String::from_utf8_lossy(n).to_string()).unwrap_or_default();
+                    let msg = format!("{}(): Argument #{} (${}) must be passed by reference, value given",
+                        fname, cv_idx + 1 - hidden_cvs, pname);
+                    let line = self.current_line;
+                    self.emit_warning_at(&msg, line);
+                }
+            }
+        }
+
+        // Too few arguments for an internally invoked callback (PHP throws
+        // ArgumentCountError without the "passed in ... on line" part).
+        {
+            let provided = call.args.len().saturating_sub(lead) as u32;
+            let required = op_array.required_param_count;
+            let lname = op_array.name.to_ascii_lowercase();
+            let is_special = lname.ends_with(b"__call") || lname.ends_with(b"__callstatic")
+                || lname.ends_with(b"__construct");
+            if !is_special && provided < required {
+                let mut fname = String::from_utf8_lossy(op_array.effective_name()).to_string();
+                if op_array.display_name.is_empty() && !fname.contains("::") {
+                    if let Some(sc) = &op_array.scope_class {
+                        let cname = self.classes.get(&sc.to_ascii_lowercase())
+                            .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                            .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
+                        fname = format!("{}::{}", cname, fname);
+                    }
+                }
+                let total = op_array.param_count.saturating_sub(implicit_args as u32);
+                let qualifier = if op_array.variadic_param.is_some() || total > required { "at least" } else { "exactly" };
+                let err_msg = format!("Too few arguments to function {}(), {} passed and {} {} expected",
+                    fname, provided, qualifier, required);
+                let line = self.current_line;
+                let exc_val = self.create_exception(b"ArgumentCountError", &err_msg, line);
+                self.current_exception = Some(exc_val);
+                return Err(VmError { message: format!("Uncaught ArgumentCountError: {}", err_msg), line });
+            }
+        }
+
         // Set up CVs
         let mut func_cvs = vec![Value::Undef; op_array.cv_names.len()];
         if let Some(variadic_idx) = op_array.variadic_param {
@@ -16968,9 +17041,15 @@ impl Vm {
                                 || func_name_lower.ends_with(b"::__callstatic")
                                 || func_name_lower.ends_with(b"::__construct");
                             if !is_special && provided < required {
-                                let display_name = call.name.to_string_lossy();
+                                let display_name = if !user_fn.display_name.is_empty() {
+                                    String::from_utf8_lossy(&user_fn.display_name).into_owned()
+                                } else {
+                                    call.name.to_string_lossy()
+                                };
                                 // Extract just the function name for display
-                                let fn_display = if let Some(pos) = display_name.rfind("::") {
+                                let fn_display = if display_name.starts_with("{closure") {
+                                    &display_name
+                                } else if let Some(pos) = display_name.rfind("::") {
                                     &display_name[pos + 2..]
                                 } else {
                                     &display_name

@@ -2629,7 +2629,7 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let provided = (1 + captured_args.len()) as u32;
             let required = user_fn.required_param_count;
             if provided < required {
-                let display_name = String::from_utf8_lossy(&func_name).into_owned();
+                let display_name = String::from_utf8_lossy(user_fn.effective_name()).into_owned();
                 let total_params = user_fn.param_count;
                 let has_optional = total_params > required;
                 let qualifier = if has_optional { "at least" } else { "exactly" };
@@ -2715,7 +2715,7 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
                     let required = user_fn.required_param_count;
                     if n_args < required {
-                        let display_name = String::from_utf8_lossy(&func_name).into_owned();
+                        let display_name = String::from_utf8_lossy(user_fn.effective_name()).into_owned();
                         let total_params = user_fn.param_count;
                         let has_optional = total_params > required;
                         let qualifier = if has_optional { "at least" } else { "exactly" };
@@ -3561,105 +3561,178 @@ fn php_key_sort_cmp_flags(a: &ArrayKey, b: &ArrayKey, flags: i64) -> std::cmp::O
     }
 }
 
-fn sort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// String conversion used by the sort comparators (zval_get_tmp_string):
+/// arrays warn, objects use __toString.
+fn sort_cmp_string(vm: &mut Vm, v: &Value) -> Vec<u8> {
+    let v = v.deref();
+    match &v {
+        Value::Array(_) => {
+            vm.emit_warning("Array to string conversion");
+            b"Array".to_vec()
+        }
+        Value::Object(_) => vm.value_to_string(&v).as_bytes().to_vec(),
+        _ => v.to_php_string().as_bytes().to_vec(),
+    }
+}
+
+/// zval_get_double() as used by numeric_compare_function.
+fn sort_cmp_double(vm: &mut Vm, v: &Value) -> f64 {
+    let v = v.deref();
+    match &v {
+        Value::Object(o) => {
+            let cn = goro_core::value::display_class_name(&o.borrow().class_name);
+            vm.emit_warning(&format!("Object of class {} could not be converted to float", cn));
+            1.0
+        }
+        Value::Array(a) => if a.borrow().len() > 0 { 1.0 } else { 0.0 },
+        _ => v.to_double(),
+    }
+}
+
+fn three_way<T: PartialOrd>(a: T, b: T) -> i32 {
+    if a < b { -1 } else if a > b { 1 } else { 0 }
+}
+
+fn bytes_cmp(a: &[u8], b: &[u8]) -> i32 {
+    match a.cmp(b) { std::cmp::Ordering::Less => -1, std::cmp::Ordering::Greater => 1, _ => 0 }
+}
+
+/// zend_compare() including operator-overloading objects (GMP).
+fn sort_regular_cmp(vm: &mut Vm, a: &Value, b: &Value) -> i64 {
+    let a = a.deref();
+    let b = b.deref();
+    if let (Some(cmp_fn), Some(is_type)) = (vm.object_compare, vm.object_is_operator_type) {
+        if is_type(&a) || is_type(&b) {
+            if let Some(ord) = cmp_fn(&a, &b) {
+                return match ord { std::cmp::Ordering::Less => -1, std::cmp::Ordering::Equal => 0, std::cmp::Ordering::Greater => 1 };
+            }
+        }
+    }
+    a.compare(&b)
+}
+
+/// php_get_data_compare_func(): unstable value comparison for the given flags.
+fn php_data_cmp(vm: &mut Vm, a: &Value, b: &Value, flags: i64) -> i32 {
+    let base_flag = flags & !SORT_FLAG_CASE;
+    let ci = (flags & SORT_FLAG_CASE) != 0;
+    match base_flag {
+        SORT_NUMERIC => {
+            let x = sort_cmp_double(vm, a);
+            let y = sort_cmp_double(vm, b);
+            three_way(x, y)
+        }
+        SORT_STRING | SORT_LOCALE_STRING => {
+            let x = sort_cmp_string(vm, a);
+            let y = sort_cmp_string(vm, b);
+            if ci && base_flag == SORT_STRING {
+                let lx: Vec<u8> = x.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let ly: Vec<u8> = y.iter().map(|c| c.to_ascii_lowercase()).collect();
+                bytes_cmp(&lx, &ly)
+            } else {
+                bytes_cmp(&x, &y)
+            }
+        }
+        SORT_NATURAL => {
+            let x = sort_cmp_string(vm, a);
+            let y = sort_cmp_string(vm, b);
+            crate::zsort::strnatcmp_ex(&x, &y, ci)
+        }
+        _ => {
+            let r = sort_regular_cmp(vm, a, b);
+            if r < 0 { -1 } else if r > 0 { 1 } else { 0 }
+        }
+    }
+}
+
+fn key_to_bytes(k: &ArrayKey) -> Vec<u8> {
+    match k { ArrayKey::Int(n) => n.to_string().into_bytes(), ArrayKey::String(s) => s.as_bytes().to_vec() }
+}
+
+fn key_to_value(k: &ArrayKey) -> Value {
+    match k { ArrayKey::Int(n) => Value::Long(*n), ArrayKey::String(s) => Value::String(s.clone()) }
+}
+
+/// php_get_key_compare_func(): unstable key comparison for the given flags.
+fn php_key_cmp(vm: &mut Vm, a: &ArrayKey, b: &ArrayKey, flags: i64) -> i32 {
+    let base_flag = flags & !SORT_FLAG_CASE;
+    let ci = (flags & SORT_FLAG_CASE) != 0;
+    match base_flag {
+        SORT_NUMERIC => {
+            if let (ArrayKey::Int(x), ArrayKey::Int(y)) = (a, b) {
+                return if x > y { 1 } else { -1 };
+            }
+            let d = |k: &ArrayKey| match k {
+                ArrayKey::Int(n) => *n as f64,
+                ArrayKey::String(s) => goro_core::value::parse_leading_numeric_string(s.as_bytes()).map(|(v, _)| v).unwrap_or(0.0),
+            };
+            three_way(d(a), d(b))
+        }
+        SORT_STRING | SORT_LOCALE_STRING => {
+            let x = key_to_bytes(a);
+            let y = key_to_bytes(b);
+            if ci && base_flag == SORT_STRING {
+                let lx: Vec<u8> = x.iter().map(|c| c.to_ascii_lowercase()).collect();
+                let ly: Vec<u8> = y.iter().map(|c| c.to_ascii_lowercase()).collect();
+                bytes_cmp(&lx, &ly)
+            } else {
+                bytes_cmp(&x, &y)
+            }
+        }
+        SORT_NATURAL => crate::zsort::strnatcmp_ex(&key_to_bytes(a), &key_to_bytes(b), ci),
+        _ => {
+            if let (ArrayKey::Int(x), ArrayKey::Int(y)) = (a, b) {
+                return if x > y { 1 } else { -1 };
+            }
+            let r = sort_regular_cmp(vm, &key_to_value(a), &key_to_value(b));
+            if r < 0 { -1 } else if r > 0 { 1 } else { 0 }
+        }
+    }
+}
+
+/// Shared driver for sort/rsort/asort/arsort/ksort/krsort.
+fn php_builtin_sort(vm: &mut Vm, args: &[Value], fname: &str, by_key: bool, reverse: bool, renumber: bool) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
-    require_array_arg(vm, first, "sort", "array", 1)?;
+    require_array_arg(vm, first, fname, "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        let mut arr = arr.borrow_mut();
-        let mut entries: Vec<Value> = arr.values().cloned().collect();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            entries.sort_by(|a, b| php_sort_cmp_flags(a, b, flags));
-        }));
-        let mut new_arr = PhpArray::new();
-        for val in entries {
-            new_arr.push(val);
+        let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        if entries.len() <= 1 && !(renumber && !entries.is_empty()) {
+            return Ok(Value::True);
         }
-        *arr = new_arr;
+        let sorted = crate::zsort::zend_sort_stable(entries, |x, y| {
+            let r = if by_key {
+                php_key_cmp(vm, &x.0, &y.0, flags)
+            } else {
+                php_data_cmp(vm, &x.1, &y.1, flags)
+            };
+            if reverse { -r } else { r }
+        });
+        let mut new_arr = PhpArray::new();
+        for (k, v) in sorted {
+            if renumber { new_arr.push(v); } else { new_arr.set(k, v); }
+        }
+        *arr.borrow_mut() = new_arr;
     }
     Ok(Value::True)
+}
+
+fn sort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_builtin_sort(vm, args, "sort", false, false, true)
 }
 fn rsort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let first = args.first().unwrap_or(&Value::Null);
-    require_array_arg(vm, first, "rsort", "array", 1)?;
-    if let Some(Value::Array(arr)) = args.first() {
-        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        let mut arr = arr.borrow_mut();
-        let mut entries: Vec<Value> = arr.values().cloned().collect();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            entries.sort_by(|a, b| php_sort_cmp_flags(b, a, flags));
-        }));
-        let mut new_arr = PhpArray::new();
-        for val in entries {
-            new_arr.push(val);
-        }
-        *arr = new_arr;
-    }
-    Ok(Value::True)
+    php_builtin_sort(vm, args, "rsort", false, true, true)
 }
 fn asort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let first = args.first().unwrap_or(&Value::Null);
-    require_array_arg(vm, first, "asort", "array", 1)?;
-    if let Some(Value::Array(arr)) = args.first() {
-        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        let mut arr = arr.borrow_mut();
-        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            entries.sort_by(|a, b| php_sort_cmp_flags(&a.1, &b.1, flags));
-        }));
-        *arr = goro_core::array::PhpArray::new();
-        for (k, v) in entries {
-            arr.set(k, v);
-        }
-    }
-    Ok(Value::True)
+    php_builtin_sort(vm, args, "asort", false, false, false)
 }
 fn arsort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let first = args.first().unwrap_or(&Value::Null);
-    require_array_arg(vm, first, "arsort", "array", 1)?;
-    if let Some(Value::Array(arr)) = args.first() {
-        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        let mut arr = arr.borrow_mut();
-        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            entries.sort_by(|a, b| php_sort_cmp_flags(&b.1, &a.1, flags));
-        }));
-        *arr = goro_core::array::PhpArray::new();
-        for (k, v) in entries {
-            arr.set(k, v);
-        }
-    }
-    Ok(Value::True)
+    php_builtin_sort(vm, args, "arsort", false, true, false)
 }
 fn ksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let first = args.first().unwrap_or(&Value::Null);
-    require_array_arg(vm, first, "ksort", "array", 1)?;
-    if let Some(Value::Array(arr)) = args.first() {
-        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        let mut arr = arr.borrow_mut();
-        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        entries.sort_by(|a, b| php_key_sort_cmp_flags(&a.0, &b.0, flags));
-        *arr = goro_core::array::PhpArray::new();
-        for (k, v) in entries {
-            arr.set(k, v);
-        }
-    }
-    Ok(Value::True)
+    php_builtin_sort(vm, args, "ksort", true, false, false)
 }
 fn krsort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let first = args.first().unwrap_or(&Value::Null);
-    require_array_arg(vm, first, "krsort", "array", 1)?;
-    if let Some(Value::Array(arr)) = args.first() {
-        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        let mut arr = arr.borrow_mut();
-        let mut entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        entries.sort_by(|a, b| php_key_sort_cmp_flags(&b.0, &a.0, flags));
-        *arr = goro_core::array::PhpArray::new();
-        for (k, v) in entries {
-            arr.set(k, v);
-        }
-    }
-    Ok(Value::True)
+    php_builtin_sort(vm, args, "krsort", true, true, false)
 }
 fn shuffle_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
@@ -10981,73 +11054,79 @@ fn cmp_callback_result(
     }
 }
 
-fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
-        let callback = callback.clone();
-        let mut entries: Vec<Value> = arr.borrow().values().cloned().collect();
-
-        let mut warned = false;
-        stable_sort_by(&mut entries, |a, b| {
-            let result = vm.call_callback(&callback, &[a.clone(), b.clone()]).unwrap_or(Value::Long(0));
-            cmp_callback_result(vm, result, "usort", &mut warned)
-        });
-
-        let mut new_arr = PhpArray::new();
-        for val in entries {
-            new_arr.push(val);
+/// php_array_user_compare_unstable(): call the user comparator, handling the
+/// bool-return deprecation (with swapped retry for false) like PHP.
+fn user_sort_compare(vm: &mut Vm, cb: &Value, a: Value, b: Value, fname: &str, warned: &mut bool) -> i32 {
+    if vm.current_exception.is_some() {
+        return 0;
+    }
+    let result = match call_user_func(vm, &[cb.clone(), a.clone(), b.clone()]) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    if matches!(result, Value::True | Value::False) {
+        if !*warned {
+            *warned = true;
+            vm.emit_deprecated(&format!(
+                "{}(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero",
+                fname
+            ));
         }
-        arr.borrow_mut().clone_from(&new_arr);
+        if matches!(result, Value::False) {
+            if vm.current_exception.is_some() {
+                return 0;
+            }
+            let r2 = match call_user_func(vm, &[cb.clone(), b, a]) {
+                Ok(v) => v,
+                Err(_) => return 0,
+            };
+            let n = r2.to_long();
+            return if n > 0 { -1 } else if n < 0 { 1 } else { 0 };
+        }
+    }
+    let n = result.to_long();
+    if n > 0 { 1 } else if n < 0 { -1 } else { 0 }
+}
+
+fn php_user_sort(vm: &mut Vm, args: &[Value], fname: &str, by_key: bool, renumber: bool) -> Result<Value, VmError> {
+    let first = args.first().unwrap_or(&Value::Null);
+    require_array_arg(vm, first, fname, "array", 1)?;
+    if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
+        let cb = callback.clone();
+        let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        if entries.is_empty() {
+            return Ok(Value::True);
+        }
+        let mut warned = false;
+        let sorted = if entries.len() > 1 {
+            crate::zsort::zend_sort_stable(entries, |x, y| {
+                if by_key {
+                    user_sort_compare(vm, &cb, key_to_value(&x.0), key_to_value(&y.0), fname, &mut warned)
+                } else {
+                    user_sort_compare(vm, &cb, x.1.clone(), y.1.clone(), fname, &mut warned)
+                }
+            })
+        } else {
+            entries
+        };
+        let mut new_arr = PhpArray::new();
+        for (k, v) in sorted {
+            if renumber { new_arr.push(v); } else { new_arr.set(k, v); }
+        }
+        *arr.borrow_mut() = new_arr;
     }
     Ok(Value::True)
+}
+
+fn usort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_user_sort(vm, args, "usort", false, true)
 }
 
 fn uasort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
-        let mut entries: Vec<(ArrayKey, Value)> =
-            arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
-        let cb = callback.clone();
-        let mut warned = false;
-        stable_sort_by(&mut entries, |a, b| {
-            let result = call_user_func(vm, &[cb.clone(), a.1.clone(), b.1.clone()]).unwrap_or(Value::Long(0));
-            cmp_callback_result(vm, result, "uasort", &mut warned)
-        });
-
-        let mut new_arr = PhpArray::new();
-        for (key, val) in entries {
-            new_arr.set(key, val);
-        }
-        *arr.borrow_mut() = new_arr;
-    }
-    Ok(Value::True)
+    php_user_sort(vm, args, "uasort", false, false)
 }
 fn uksort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
-        let mut entries: Vec<(ArrayKey, Value)> =
-            arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-
-        let cb = callback.clone();
-        let mut warned = false;
-        stable_sort_by(&mut entries, |a, b| {
-            let key_a = match &a.0 {
-                ArrayKey::Int(n) => Value::Long(*n),
-                ArrayKey::String(s) => Value::String(s.clone()),
-            };
-            let key_b = match &b.0 {
-                ArrayKey::Int(n) => Value::Long(*n),
-                ArrayKey::String(s) => Value::String(s.clone()),
-            };
-            let result = call_user_func(vm, &[cb.clone(), key_a, key_b]).unwrap_or(Value::Long(0));
-            cmp_callback_result(vm, result, "uksort", &mut warned)
-        });
-
-        let mut new_arr = PhpArray::new();
-        for (key, val) in entries {
-            new_arr.set(key, val);
-        }
-        *arr.borrow_mut() = new_arr;
-    }
-    Ok(Value::True)
+    php_user_sort(vm, args, "uksort", true, false)
 }
 
 fn array_reduce_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
