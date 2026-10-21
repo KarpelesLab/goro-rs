@@ -6112,6 +6112,9 @@ impl Vm {
         scope_provided: bool,
     ) -> Value {
         let inner = closure_val.unwrap_closure();
+        if let Some(r) = self.bind_fake_closure(&inner, &new_this, &scope, scope_provided) {
+            return r;
+        }
         let r = self.bind_closure_raw(&inner, new_this, scope, scope_provided);
         self.make_closure_object(r)
     }
@@ -6171,11 +6174,45 @@ impl Vm {
             }
         }
 
-        // Check if trying to bind an instance to a static closure
+        // Requested scope (zend_closure_bind): "static" keeps the current one.
+        let requested_scope: Option<Vec<u8>> = if scope_provided {
+            match &scope {
+                Value::Null => None,
+                Value::Object(obj) => Some(obj.borrow().class_name.to_ascii_lowercase()),
+                Value::String(s) if s.as_bytes().eq_ignore_ascii_case(b"static") => {
+                    original_op.scope_class.clone()
+                }
+                Value::String(s) => {
+                    let name = s
+                        .as_bytes()
+                        .strip_prefix(b"\\")
+                        .unwrap_or(s.as_bytes())
+                        .to_vec();
+                    let l = name.to_ascii_lowercase();
+                    if !self.classes.contains_key(&l) && !self.is_known_builtin_class(&l) {
+                        self.try_autoload_class(&name);
+                    }
+                    if !self.classes.contains_key(&l) && !self.is_known_builtin_class(&l) {
+                        self.emit_warning(&format!(
+                            "Class \"{}\" not found",
+                            String::from_utf8_lossy(&name)
+                        ));
+                        return Value::Null;
+                    }
+                    Some(l)
+                }
+                _ => original_op.scope_class.clone(),
+            }
+        } else {
+            original_op.scope_class.clone()
+        };
+
+        // zend_valid_closure_binding
         if !matches!(new_this, Value::Null) && original_op.is_static_closure {
             self.emit_warning(
                 "Cannot bind an instance to a static closure, this will be an error in PHP 9",
             );
+            return Value::Null;
         }
 
         // Find $this CV position in the original closure
@@ -6199,38 +6236,23 @@ impl Vm {
             }
         }
 
-        // Determine the new scope class
-        let new_scope: Option<Vec<u8>> = if scope_provided {
-            match &scope {
-                Value::Null => None,
-                Value::String(s) => {
-                    let bytes = s.as_bytes();
-                    if bytes.eq_ignore_ascii_case(b"static") {
-                        original_op.scope_class.clone()
-                    } else {
-                        Some(bytes.to_ascii_lowercase())
-                    }
-                }
-                Value::Object(obj) => {
-                    let obj_borrow = obj.borrow();
-                    Some(obj_borrow.class_name.to_ascii_lowercase())
-                }
-                _ => original_op.scope_class.clone(),
+        if let Some(sc) = &requested_scope {
+            if Some(sc) != original_op.scope_class.as_ref()
+                && !self.classes.contains_key(sc)
+                && sc.as_slice() != b"closure"
+            {
+                let canon = self.builtin_canonical_name(sc);
+                self.emit_warning(&format!("Cannot bind closure to scope of internal class {}, this will be an error in PHP 9", canon));
+                return Value::Null;
             }
-        } else {
-            if !matches!(new_this, Value::Null) {
-                if let Some(scope) = &original_op.scope_class {
-                    Some(scope.clone())
-                } else if let Value::Object(obj) = &new_this {
-                    let obj_borrow = obj.borrow();
-                    Some(obj_borrow.class_name.to_ascii_lowercase())
-                } else {
-                    None
-                }
+        }
+        // Binding an object without a scope uses the dummy Closure scope.
+        let new_scope: Option<Vec<u8>> =
+            if requested_scope.is_none() && !matches!(new_this, Value::Null) {
+                Some(b"closure".to_vec())
             } else {
-                original_op.scope_class.clone()
-            }
-        };
+                requested_scope
+            };
 
         // Create a new bound closure name
         let bound_id = self.next_bound_closure_id;
@@ -30766,6 +30788,48 @@ impl Vm {
                         }
                     }
 
+                    // Inaccessible (private/protected) static properties are not set.
+                    if found_val.is_some() {
+                        let mut walker = Some(class_lower.clone());
+                        let mut def: Option<(Visibility, Vec<u8>)> = None;
+                        while let Some(cl) = walker {
+                            match self.classes.get(&cl) {
+                                Some(c) => {
+                                    if let Some(p) = c
+                                        .properties
+                                        .iter()
+                                        .find(|p| p.is_static && p.name == prop_name.as_bytes())
+                                    {
+                                        def = Some((p.visibility, p.declaring_class.clone()));
+                                        break;
+                                    }
+                                    walker = c.parent.as_ref().map(|p| {
+                                        p.iter().map(|b| b.to_ascii_lowercase()).collect()
+                                    });
+                                }
+                                None => break,
+                            }
+                        }
+                        if let Some((vis, decl)) = def {
+                            let scope = op_array
+                                .scope_class
+                                .clone()
+                                .or_else(|| self.class_scope_stack.last().cloned());
+                            if self
+                                .check_visibility(
+                                    vis,
+                                    &decl,
+                                    &resolved_class,
+                                    &prop_name.to_string_lossy(),
+                                    true,
+                                    scope.as_deref(),
+                                )
+                                .is_some()
+                            {
+                                found_val = None;
+                            }
+                        }
+                    }
                     let result = match found_val {
                         Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
                         _ => Value::False,

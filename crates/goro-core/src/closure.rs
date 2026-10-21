@@ -1181,3 +1181,141 @@ impl Vm {
         }
     }
 }
+
+impl Vm {
+    /// Closure::bind()/bindTo() on a closure created from a callable
+    /// (function or method): validates like zend_valid_closure_binding and
+    /// returns the rebound closure (or NULL). None for user closures.
+    pub fn bind_fake_closure(
+        &mut self,
+        inner: &Value,
+        new_this: &Value,
+        scope: &Value,
+        scope_provided: bool,
+    ) -> Option<Value> {
+        let (name, caps) = closure_parts(inner);
+        if is_closure_fn_name(&name) || name.starts_with(b"__closure_fcc_") {
+            return None;
+        }
+        let lname = lower(&name);
+        // Function scope / static-ness of the target.
+        let (func_scope, is_static, mname): (Option<Vec<u8>>, bool, Vec<u8>) =
+            match lname.windows(2).position(|w| w == b"::") {
+                Some(p) => {
+                    let cl = lname[..p].to_vec();
+                    let md = self
+                        .classes
+                        .get(&cl)
+                        .and_then(|c| c.methods.get(&lname[p + 2..]));
+                    match md {
+                        Some(md) => (
+                            Some(md.declaring_class.to_ascii_lowercase()),
+                            md.is_static,
+                            md.name.clone(),
+                        ),
+                        None => (Some(cl), caps.is_empty(), name[p + 2..].to_vec()),
+                    }
+                }
+                None => (None, false, name.clone()),
+            };
+        let has_this = matches!(new_this, Value::Object(_));
+        let requested: Option<Vec<u8>> = if scope_provided {
+            match scope {
+                Value::Null => None,
+                Value::Object(o) => Some(lower(&o.borrow().class_name)),
+                Value::String(s) if s.as_bytes().eq_ignore_ascii_case(b"static") => {
+                    func_scope.clone()
+                }
+                Value::String(s) => {
+                    let n = s
+                        .as_bytes()
+                        .strip_prefix(b"\\")
+                        .unwrap_or(s.as_bytes())
+                        .to_vec();
+                    let l = lower(&n);
+                    if !self.classes.contains_key(&l) && !self.is_known_builtin_class(&l) {
+                        self.try_autoload_class(&n);
+                    }
+                    if !self.classes.contains_key(&l) && !self.is_known_builtin_class(&l) {
+                        self.emit_warning(&format!(
+                            "Class \"{}\" not found",
+                            String::from_utf8_lossy(&n)
+                        ));
+                        return Some(Value::Null);
+                    }
+                    Some(l)
+                }
+                _ => func_scope.clone(),
+            }
+        } else {
+            func_scope.clone()
+        };
+        let scope_display = |vm: &Vm, l: &[u8]| -> String {
+            vm.classes
+                .get(l)
+                .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                .unwrap_or_else(|| vm.builtin_canonical_name(l))
+        };
+        if has_this {
+            if is_static {
+                self.emit_warning(
+                    "Cannot bind an instance to a static closure, this will be an error in PHP 9",
+                );
+                return Some(Value::Null);
+            }
+            if let Some(fs) = &func_scope {
+                let ocl = match new_this {
+                    Value::Object(o) => lower(&o.borrow().class_name),
+                    _ => Vec::new(),
+                };
+                if ocl != *fs && !self.class_extends(&ocl, fs) {
+                    let oname = match new_this {
+                        Value::Object(o) => {
+                            crate::value::display_class_name(&o.borrow().class_name)
+                        }
+                        _ => String::new(),
+                    };
+                    let msg = format!(
+                        "Cannot bind method {}::{}() to object of class {}, this will be an error in PHP 9",
+                        scope_display(self, fs),
+                        String::from_utf8_lossy(&mname),
+                        oname
+                    );
+                    self.emit_warning(&msg);
+                    return Some(Value::Null);
+                }
+            }
+        } else if func_scope.is_some() && !is_static {
+            self.emit_warning("Cannot unbind $this of method, this will be an error in PHP 9");
+            return Some(Value::Null);
+        }
+        if let Some(sc) = &requested {
+            if Some(sc) != func_scope.as_ref() && !self.classes.contains_key(sc) {
+                let msg = format!(
+                    "Cannot bind closure to scope of internal class {}, this will be an error in PHP 9",
+                    scope_display(self, sc)
+                );
+                self.emit_warning(&msg);
+                return Some(Value::Null);
+            }
+        }
+        if requested != func_scope {
+            if func_scope.is_none() {
+                self.emit_warning("Cannot rebind scope of closure created from function, this will be an error in PHP 9");
+            } else {
+                self.emit_warning("Cannot rebind scope of closure created from method, this will be an error in PHP 9");
+            }
+            return Some(Value::Null);
+        }
+        let new_inner = match new_this {
+            Value::Object(_) if func_scope.is_some() => {
+                let mut arr = PhpArray::new();
+                arr.push(str_val(&name));
+                arr.push(new_this.clone());
+                Value::Array(Rc::new(RefCell::new(arr)))
+            }
+            _ => str_val(&name),
+        };
+        Some(self.make_closure_object(new_inner))
+    }
+}
