@@ -3399,7 +3399,11 @@ impl Parser {
         let try_body = self.parse_block()?;
 
         let mut catches = Vec::new();
-        while self.eat(&TokenKind::Catch) {
+        loop {
+            let catch_line = self.span().line;
+            if !self.eat(&TokenKind::Catch) {
+                break;
+            }
             self.expect(&TokenKind::OpenParen)?;
 
             let mut types = Vec::new();
@@ -3452,6 +3456,7 @@ impl Parser {
                 types,
                 variable,
                 body,
+                line: catch_line,
             });
         }
 

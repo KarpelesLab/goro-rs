@@ -3770,7 +3770,7 @@ impl Compiler {
                         {
                             return Err(CompileError {
                                 message: "Bad class name in the catch statement".into(),
-                                line: stmt.span.line,
+                                line: catch.line,
                             });
                         }
                     }
@@ -3801,14 +3801,14 @@ impl Compiler {
                                 op1: OperandType::Tmp(exc_tmp),
                                 op2: OperandType::Const(type_idx),
                                 result: OperandType::Tmp(check_tmp),
-                                line: stmt.span.line,
+                                line: catch.line,
                             });
                             let match_jmp = self.op_array.emit(Op {
                                 opcode: OpCode::JmpNz,
                                 op1: OperandType::Tmp(check_tmp),
                                 op2: OperandType::JmpTarget(0),
                                 result: OperandType::Unused,
-                                line: stmt.span.line,
+                                line: catch.line,
                             });
                             match_jumps.push(match_jmp);
                         }
@@ -3819,7 +3819,7 @@ impl Compiler {
                             op1: OperandType::JmpTarget(0),
                             op2: OperandType::Unused,
                             result: OperandType::Unused,
-                            line: stmt.span.line,
+                            line: catch.line,
                         });
                         next_catch_jumps.push(skip_jmp);
 
@@ -3835,7 +3835,7 @@ impl Compiler {
                         if var_name == b"this" {
                             return Err(CompileError {
                                 message: "Cannot re-assign $this".into(),
-                                line: stmt.span.line,
+                                line: catch.line,
                             });
                         }
                         let cv = self.op_array.get_or_create_cv(var_name);
@@ -3844,7 +3844,7 @@ impl Compiler {
                             op1: OperandType::Cv(cv),
                             op2: OperandType::Tmp(exc_tmp),
                             result: OperandType::Unused,
-                            line: stmt.span.line,
+                            line: catch.line,
                         });
                     } else {
                         // `catch (E)` without a variable releases the exception.
@@ -3853,7 +3853,7 @@ impl Compiler {
                             op1: OperandType::Tmp(exc_tmp),
                             op2: OperandType::Tmp(exc_tmp + 1),
                             result: OperandType::Unused,
-                            line: stmt.span.line,
+                            line: catch.line,
                         });
                     }
 

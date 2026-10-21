@@ -392,6 +392,8 @@ pub struct CatchClause {
     pub types: Vec<Vec<Vec<u8>>>,
     pub variable: Option<Vec<u8>>,
     pub body: Vec<Statement>,
+    /// Line of the `catch` keyword (the ZEND_CATCH opline).
+    pub line: u32,
 }
 #[derive(Debug, Clone)]
 pub struct ClosureUse {
