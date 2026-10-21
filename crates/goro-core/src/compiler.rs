@@ -854,6 +854,24 @@ impl Compiler {
                     });
                     let ref_start = self.op_array.current_offset();
                     self.op_array.patch_jump(jmp_ref, ref_start);
+                    let mut base = &arg.value;
+                    while let ExprKind::ArrayAccess { array, .. } = &base.kind {
+                        base = array;
+                    }
+                    let temp_base = !matches!(
+                        base.kind,
+                        ExprKind::Variable(_)
+                            | ExprKind::DynamicVariable(_)
+                            | ExprKind::PropertyAccess { .. }
+                            | ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicStaticPropertyAccess { .. }
+                    );
+                    if temp_base {
+                        self.compile_throw_error(b"Cannot use temporary expression in write context", line)?;
+                        let end = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_end, end);
+                        continue;
+                    }
                     let ref_tmp = match &arg.value.kind {
                         ExprKind::ArrayAccess { array, index: Some(idx_expr) } => {
                             let arr_op = self.compile_dim_write_base(array)?;
@@ -4096,6 +4114,7 @@ impl Compiler {
                             doc_comment: method_doc_comment,
                             returns_by_ref: method_returns_by_ref,
                         } => {
+                            check_duplicate_params(params, *method_line)?;
                             // Check: a method cannot be both abstract and final
                             if *is_abstract && *method_is_final {
                                 return Err(CompileError {
@@ -6270,6 +6289,27 @@ impl Compiler {
         self.compile_expr(array)
     }
 
+    /// Emit `throw new \Error($msg)`.
+    fn compile_throw_error(&mut self, msg: &[u8], line: u32) -> CompileResult<()> {
+        let span = goro_parser::token::Span::new(0, 0, line);
+        let e = Expr {
+            span,
+            kind: ExprKind::ThrowExpr(Box::new(Expr {
+                span,
+                kind: ExprKind::New {
+                    class: Box::new(Expr { span, kind: ExprKind::Identifier(b"\\Error".to_vec()) }),
+                    args: vec![Argument {
+                        name: None,
+                        value: Expr { span, kind: ExprKind::String(msg.to_vec()) },
+                        unpack: false,
+                    }],
+                },
+            })),
+        };
+        self.compile_expr(&e)?;
+        Ok(())
+    }
+
     fn compile_static_class_operand(&mut self, class: &Expr) -> CompileResult<OperandType> {
         match &class.kind {
             ExprKind::Identifier(name) => {
@@ -6291,7 +6331,12 @@ impl Compiler {
                 }
                 Ok(OperandType::Const(idx))
             }
-            _ => self.compile_expr(class),
+            _ => {
+                if is_illegal_class_literal(class) {
+                    return Err(CompileError { message: "Illegal class name".into(), line: class.span.line });
+                }
+                self.compile_expr(class)
+            }
         }
     }
 
@@ -9073,6 +9118,7 @@ impl Compiler {
                 returns_by_ref: closure_returns_by_ref,
                 ..
             } => {
+                check_duplicate_params(params, expr.span.line)?;
                 // Compile closure body as a child function
                 let closure_id = self.op_array.child_functions.len();
                 let global_id = next_closure_id();
@@ -9336,6 +9382,7 @@ impl Compiler {
             }
 
             ExprKind::ArrowFunction { params, body, attributes, end_line: arrow_end_line, doc_comment: arrow_doc_comment, return_type: arrow_return_type, returns_by_ref: arrow_returns_by_ref, .. } => {
+                check_duplicate_params(params, expr.span.line)?;
                 // Arrow function: fn($x) => $x * 2
                 // Arrow functions implicitly capture outer variables by value
 
@@ -9643,6 +9690,9 @@ impl Compiler {
                         self.resolve_class_name(name)
                     }
                     _ => {
+                        if is_illegal_class_literal(class) {
+                            return Err(CompileError { message: "Illegal class name".into(), line: class.span.line });
+                        }
                         // $expr::class - emit GetClassName opcode
                         if constant == b"class" {
                             let obj_operand = self.compile_expr(class)?;
@@ -9955,6 +10005,9 @@ impl Compiler {
                 method,
                 args,
             } => {
+                if matches!(method.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::True | ExprKind::False | ExprKind::Null) {
+                    return Err(CompileError { message: "Method name must be a string".into(), line: expr.span.line });
+                }
                 // Dynamic static method call: Foo::$method()
                 let class_operand = match &class.kind {
                     ExprKind::Identifier(name) => {
@@ -9996,6 +10049,9 @@ impl Compiler {
             }
 
             ExprKind::StaticPropertyAccess { class, property } => {
+                if is_illegal_class_literal(class) {
+                    return Err(CompileError { message: "Illegal class name".into(), line: class.span.line });
+                }
                 // Check if the class expression is in a nullsafe chain
                 let chain_nullsafe = expr_is_in_nullsafe_chain(class);
                 let (class_operand, prop_str) = match &class.kind {
@@ -10214,6 +10270,9 @@ impl Compiler {
             } => {
                 // Check if this is in a nullsafe chain (e.g., $obj?->foo()->bar()
                 // where ->bar() should also short-circuit)
+                if matches!(method.kind, ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::True | ExprKind::False | ExprKind::Null) {
+                    return Err(CompileError { message: "Method name must be a string".into(), line: expr.span.line });
+                }
                 let effective_nullsafe = *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
                 let obj = self.compile_expr(object)?;
                 let tmp = self.op_array.alloc_temp();
@@ -12773,4 +12832,29 @@ fn args_to_source_string(args: &[Argument]) -> String {
             .unwrap_or_default();
         format!("{}{}{}", name_prefix, prefix, expr_to_source_string(&arg.value))
     }).collect::<Vec<_>>().join(", ")
+}
+
+/// "Redefinition of parameter $x" for duplicate parameter names.
+fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
+    let mut seen = std::collections::HashSet::new();
+    for p in params {
+        if !seen.insert(p.name.as_slice()) {
+            return Err(CompileError {
+                message: format!("Redefinition of parameter ${}", String::from_utf8_lossy(&p.name)),
+                line,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// A constant non-string class expression such as `(0)::X` (PHP: "Illegal class name").
+fn is_illegal_class_literal(e: &Expr) -> bool {
+    match &e.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::True | ExprKind::False | ExprKind::Null => true,
+        ExprKind::UnaryOp { op: UnaryOp::Negate | UnaryOp::Plus, operand, .. } => {
+            matches!(operand.kind, ExprKind::Int(_) | ExprKind::Float(_))
+        }
+        _ => false,
+    }
 }
