@@ -77,6 +77,8 @@ pub(crate) struct UserStream {
     pub orig_path: String,
     pub in_free: bool,
     pub closed: bool,
+    /// The wrapper was registered with STREAM_IS_URL.
+    pub is_url: bool,
 }
 
 type Us = Rc<RefCell<UserStream>>;
@@ -1613,7 +1615,7 @@ pub(crate) fn shutdown_streams(vm: &mut Vm) {
 // Wrapper ops (user_stream_wops)
 // ---------------------------------------------------------------------------
 
-fn alloc_stream(obj: Value, class_name: Vec<u8>, mode: &str, path: &[u8], is_dir: bool) -> (i64, Us) {
+fn alloc_stream(obj: Value, class_name: Vec<u8>, mode: &str, path: &[u8], is_dir: bool, is_url: bool) -> (i64, Us) {
     let placeholder = std::fs::File::open("/dev/null").or_else(|_| tempfile::tempfile());
     let file = match placeholder {
         Ok(f) => f,
@@ -1644,6 +1646,7 @@ fn alloc_stream(obj: Value, class_name: Vec<u8>, mode: &str, path: &[u8], is_dir
         orig_path: lossy(path),
         in_free: false,
         closed: false,
+        is_url,
     }));
     USER_STREAMS.with(|m| {
         m.borrow_mut().insert(fid, us.clone());
@@ -1700,7 +1703,7 @@ fn wrapper_open(
                         Value::Object(o) => o.borrow().class_name.clone(),
                         _ => Vec::new(),
                     };
-                    let (fid, us) = alloc_stream(obj, class_name, mode, path, false);
+                    let (fid, us) = alloc_stream(obj, class_name, mode, path, false, uw.is_url);
                     let op = match opened.borrow().deref() {
                         Value::String(s) => Some(s.as_bytes().to_vec()),
                         _ => None,
@@ -1746,7 +1749,7 @@ fn wrapper_opendir(vm: &mut Vm, uw: &UserWrapperRef, path: &[u8], options: i64, 
                         Value::Object(o) => o.borrow().class_name.clone(),
                         _ => Vec::new(),
                     };
-                    Ok(Some(alloc_stream(obj, class_name, "r", path, true)))
+                    Ok(Some(alloc_stream(obj, class_name, "r", path, true, uw.is_url)))
                 } else {
                     log_error(vm, options, format!("\"{}::dir_opendir\" call failed", cname));
                     Ok(None)
@@ -2591,6 +2594,126 @@ fn h_stream_select(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError
     Ok(Some(if n < 0 { Value::False } else { Value::Long(pfds.iter().filter(|p| p.revents != 0).count() as i64) }))
 }
 
+fn h_fgetcsv(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
+    let (fid, us) = match us_arg(args, 0) {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    let maxlen = match int_arg(args, 1) {
+        None | Some(0) => None,
+        Some(n) if n < 0 => {
+            return Err(throw(vm, b"ValueError", "fgetcsv(): Argument #2 ($length) must be between 0 and 2147483647"))
+        }
+        Some(n) => Some(n as usize + 1),
+    };
+    let enclosure = arg_str(args, 3).unwrap_or_else(|| b"\"".to_vec());
+    let mut line = match stream_get_line(vm, fid, &us, maxlen)? {
+        Some(l) => l,
+        None => return Ok(Some(Value::False)),
+    };
+    // php_fgetcsv() keeps reading lines while inside an enclosure.
+    if let Some(&q) = enclosure.first() {
+        while line.iter().filter(|&&c| c == q).count() % 2 == 1 {
+            match stream_get_line(vm, fid, &us, maxlen)? {
+                Some(more) => line.extend_from_slice(&more),
+                None => break,
+            }
+        }
+    }
+    while line.last() == Some(&b'\n') || line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    if line.is_empty() {
+        // A blank line yields array(null).
+        let mut a = new_arr();
+        a.push(Value::Null);
+        return Ok(Some(arr_val(a)));
+    }
+    let mut a = vec![s(&line)];
+    a.extend(args.iter().skip(2).cloned());
+    Ok(Some(call_orig(vm, "str_getcsv", &a)?))
+}
+
+/// Run an original builtin that formats into a stream against a
+/// php://memory stream and return what it wrote.
+fn format_via_memory(vm: &mut Vm, name: &'static str, rest: &[Value]) -> Result<Option<Vec<u8>>, VmError> {
+    let mem = match fid_of(&call_orig(vm, "fopen", &[s(b"php://memory"), s(b"w+")])?) {
+        Some(f) => f,
+        None => return Ok(None),
+    };
+    let mut a = vec![Value::Resource(mem)];
+    a.extend_from_slice(rest);
+    let r = call_orig(vm, name, &a);
+    call_orig(vm, "rewind", &[Value::Resource(mem)])?;
+    let out = call_orig(vm, "stream_get_contents", &[Value::Resource(mem)])?;
+    call_orig(vm, "fclose", &[Value::Resource(mem)])?;
+    match r? {
+        Value::False => Ok(None),
+        _ => Ok(Some(out.to_php_string().as_bytes().to_vec())),
+    }
+}
+
+fn h_fputcsv(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
+    let (fid, us) = match us_arg(args, 0) {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    let line = match format_via_memory(vm, "fputcsv", &args[1..])? {
+        Some(l) => l,
+        None => return Ok(Some(Value::False)),
+    };
+    let r = stream_write(vm, fid, &us, &line)?;
+    Ok(Some(if r < 0 { Value::False } else { Value::Long(r) }))
+}
+
+fn h_fscanf(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
+    let (fid, us) = match us_arg(args, 0) {
+        Some(x) => x,
+        None => return Ok(None),
+    };
+    let line = match stream_get_line(vm, fid, &us, None)? {
+        Some(l) => l,
+        None => return Ok(Some(Value::False)),
+    };
+    let mut a = vec![s(&line)];
+    a.extend(args.iter().skip(1).cloned());
+    Ok(Some(call_orig(vm, "sscanf", &a)?))
+}
+
+fn h_stream_is_local(_vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
+    let v = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    let is_url = match &v {
+        Value::Resource(fid) => match get_us(*fid) {
+            Some(us) => us.borrow().is_url,
+            None => return Ok(None),
+        },
+        Value::String(sv) => {
+            let p = sv.as_bytes();
+            match scheme_len(p).and_then(|n| user_wrapper(&p[..n].to_ascii_lowercase())) {
+                Some(u) => u.is_url,
+                None => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(b(!is_url)))
+}
+
+fn h_stream_resolve_include_path(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
+    let p = match arg_str(args, 0) {
+        Some(p) => p,
+        None => return Ok(None),
+    };
+    if USER_WRAPPERS.with(|w| w.borrow().is_empty()) {
+        return Ok(None);
+    }
+    match resolve_path_user(vm, &p) {
+        Some(Ok(r)) => Ok(Some(s(&r))),
+        Some(Err(e)) => Err(e),
+        None => Ok(None),
+    }
+}
+
 // --- path functions ---------------------------------------------------------
 
 /// Locate the wrapper for a path argument of a filesystem function:
@@ -2680,7 +2803,9 @@ fn h_file_get_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
     };
     let use_path = args.get(1).map(|v| v.deref().is_truthy()).unwrap_or(false);
     let p = use_path_resolve(vm, p, use_path)?;
-    if !needs_locate(&p) {
+    let filter_inner = p.starts_with(b"php://filter/")
+        && p.windows(9).position(|w| w == b"resource=").map(|i| needs_locate(&p[i + 9..])).unwrap_or(false);
+    if !needs_locate(&p) && !filter_inner {
         return Ok(None);
     }
     let offset = int_arg(args, 3).unwrap_or(0);
@@ -2693,14 +2818,32 @@ fn h_file_get_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
     };
     let ctx = context_from_arg(vm, args.get(2), false)?;
     let options = if use_path { USE_PATH } else { 0 } | REPORT_ERRORS;
-    let (fid, us) = match open_located(vm, &p, "rb", options, ctx)? {
-        Opened::Stream(fid, us) => (fid, us),
-        Opened::Failed => return Ok(Some(Value::False)),
-        Opened::Builtin(np) => {
-            if np == p {
-                return Ok(None);
+    let (fid, us) = if filter_inner {
+        // php://filter over a user stream: the filter wrapper opens the
+        // inner resource and stacks the filters on it.
+        let ctx_val = ctx.map(Value::Resource).unwrap_or(Value::Null);
+        let r = call_orig(vm, "fopen", &[s(&p), s(b"rb"), Value::False, ctx_val])?;
+        match fid_of(&r).and_then(|f| get_us(f).map(|u| (f, u))) {
+            Some(x) => x,
+            None => {
+                if let Some(f) = fid_of(&r) {
+                    let c = call_orig(vm, "stream_get_contents", &[Value::Resource(f)])?;
+                    call_orig(vm, "fclose", &[Value::Resource(f)])?;
+                    return Ok(Some(c));
+                }
+                return Ok(Some(Value::False));
             }
-            return Ok(Some(call_orig(vm, "file_get_contents", &with_path(args, 0, np))?));
+        }
+    } else {
+        match open_located(vm, &p, "rb", options, ctx)? {
+            Opened::Stream(fid, us) => (fid, us),
+            Opened::Failed => return Ok(Some(Value::False)),
+            Opened::Builtin(np) => {
+                if np == p {
+                    return Ok(None);
+                }
+                return Ok(Some(call_orig(vm, "file_get_contents", &with_path(args, 0, np))?));
+            }
         }
     };
     if offset != 0 && stream_seek(vm, fid, &us, offset, if offset > 0 { SEEK_SET } else { SEEK_END })? < 0 {
@@ -3814,6 +3957,11 @@ intercepts! {
     w_fprintf => ("fprintf", h_fprintf),
     w_vfprintf => ("vfprintf", h_vfprintf),
     w_stream_select => ("stream_select", h_stream_select),
+    w_fgetcsv => ("fgetcsv", h_fgetcsv),
+    w_fputcsv => ("fputcsv", h_fputcsv),
+    w_fscanf => ("fscanf", h_fscanf),
+    w_stream_is_local => ("stream_is_local", h_stream_is_local),
+    w_stream_resolve_include_path => ("stream_resolve_include_path", h_stream_resolve_include_path),
     w_fopen => ("fopen", h_fopen),
     w_file_get_contents => ("file_get_contents", h_file_get_contents),
     w_file_put_contents => ("file_put_contents", h_file_put_contents),
