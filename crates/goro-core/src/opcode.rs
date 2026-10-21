@@ -356,7 +356,12 @@ pub enum OpCode {
     /// Save jump target for deferred break/continue (finally blocks): op1 = JmpTarget
     SaveJump,
     /// Check and execute deferred return or jump after finally block
+    /// (ZEND_FAST_RET): op1 = finally start, op2 = the finally's slot tmp
     ReturnDeferred,
+    /// Start of a finally block: moves what led here (the pending exception,
+    /// deferred return value or jump) into the slot tmp op1 (the fast_call
+    /// variable of ZEND_FAST_CALL / ZEND_HANDLE_EXCEPTION).
+    FinallyEnter,
     /// Save and suppress error reporting (for @ operator)
     ErrorSuppress,
     /// Restore error reporting (for @ operator)

@@ -3080,12 +3080,18 @@ impl Compiler {
                 if let Some(&finally_target) =
                     self.finally_targets.last().filter(|_| leaves_try_finally)
                 {
+                    // Number of finally blocks the jump runs through.
+                    let fin_levels = self.op_array.add_literal(Value::Long(
+                        (self.finally_targets.len()
+                            - self.loop_stack[target_index].try_finally_depth)
+                            as i64,
+                    ));
                     if finally_target > 0 {
                         // Inside try-with-finally: save jump target and jump to finally
                         let save_jmp = self.op_array.emit(Op {
                             opcode: OpCode::SaveJump,
                             op1: OperandType::JmpTarget(0), // patched to break target later
-                            op2: OperandType::Unused,
+                            op2: OperandType::Const(fin_levels),
                             result: OperandType::Unused,
                             line: stmt.span.line,
                         });
@@ -3102,7 +3108,7 @@ impl Compiler {
                         let save_jmp = self.op_array.emit(Op {
                             opcode: OpCode::SaveJump,
                             op1: OperandType::JmpTarget(0), // patched to break target later
-                            op2: OperandType::Unused,
+                            op2: OperandType::Const(fin_levels),
                             result: OperandType::Unused,
                             line: stmt.span.line,
                         });
@@ -3201,12 +3207,18 @@ impl Compiler {
                 if let Some(&finally_target) =
                     self.finally_targets.last().filter(|_| leaves_try_finally)
                 {
+                    // Number of finally blocks the jump runs through.
+                    let fin_levels = self.op_array.add_literal(Value::Long(
+                        (self.finally_targets.len()
+                            - self.loop_stack[target_index].try_finally_depth)
+                            as i64,
+                    ));
                     if finally_target > 0 {
                         // Inside try-with-finally: save jump target and jump to finally
                         let save_jmp = self.op_array.emit(Op {
                             opcode: OpCode::SaveJump,
                             op1: OperandType::JmpTarget(0), // patched to continue target later
-                            op2: OperandType::Unused,
+                            op2: OperandType::Const(fin_levels),
                             result: OperandType::Unused,
                             line: stmt.span.line,
                         });
@@ -3223,7 +3235,7 @@ impl Compiler {
                         let save_jmp = self.op_array.emit(Op {
                             opcode: OpCode::SaveJump,
                             op1: OperandType::JmpTarget(0), // patched to continue target later
-                            op2: OperandType::Unused,
+                            op2: OperandType::Const(fin_levels),
                             result: OperandType::Unused,
                             line: stmt.span.line,
                         });
@@ -4098,6 +4110,12 @@ impl Compiler {
                     });
                 }
 
+                // The finally block's slot: what is pending while it runs.
+                let finally_slot = if finally_body.is_some() {
+                    Some(self.op_array.alloc_temp())
+                } else {
+                    None
+                };
                 // Emit TryBegin with jump target for catch handler
                 let try_begin = self.op_array.emit(Op {
                     opcode: OpCode::TryBegin,
@@ -4330,6 +4348,14 @@ impl Compiler {
                 // Compile finally block
                 let finally_or_end = if let Some(finally_stmts) = finally_body {
                     let finally_start = self.op_array.current_offset();
+                    let slot = OperandType::Tmp(finally_slot.unwrap_or(0));
+                    self.op_array.emit(Op {
+                        opcode: OpCode::FinallyEnter,
+                        op1: slot,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
 
                     // Patch the finally target placeholder for return deferral
                     if let Some(target) = self.finally_targets.last_mut() {
@@ -4373,7 +4399,7 @@ impl Compiler {
                     self.op_array.emit(Op {
                         opcode: OpCode::ReturnDeferred,
                         op1: OperandType::JmpTarget(finally_start),
-                        op2: OperandType::Unused,
+                        op2: slot,
                         result: OperandType::Unused,
                         line: stmt.span.line,
                     });

@@ -172,6 +172,7 @@ impl PhpGenerator {
                 | OpCode::SaveReturn
                 | OpCode::SaveJump
                 | OpCode::ReturnDeferred
+                | OpCode::FinallyEnter
                 | OpCode::ForeachInit
                 | OpCode::ForeachNext
                 | OpCode::ForeachKey
@@ -2018,6 +2019,10 @@ impl PhpGenerator {
                 OpCode::TryEnd => {
                     self.exception_handlers.pop();
                 }
+
+                // Generators keep the pending exception/return in the
+                // executor state while a finally block runs.
+                OpCode::FinallyEnter => {}
 
                 OpCode::CatchException => {
                     // Graceful-exit unwinding (fiber destruction) skips catch clauses.

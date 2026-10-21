@@ -526,6 +526,8 @@ pub struct Vm {
     pending_return: Option<Value>,
     /// Pending jump target (for deferred break/continue in finally blocks)
     pending_finally_jump: Option<u32>,
+    /// How many finally blocks the pending jump still runs through.
+    pending_finally_levels: u32,
     /// User error handler callback (from set_error_handler)
     pub error_handler: Option<Value>,
     /// EG(user_error_handler_error_reporting): the `$error_levels` mask of
@@ -833,6 +835,7 @@ impl Vm {
             error_reporting_stack: Vec::new(),
             pending_return: None,
             pending_finally_jump: None,
+            pending_finally_levels: 1,
             error_handler: None,
             error_handler_mask: crate::errdisplay::E_ALL,
             error_handler_stack: Vec::new(),
@@ -15220,12 +15223,24 @@ impl Vm {
     ) -> Result<Value, VmError> {
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
+        let mut fin = Vec::new();
         self.gc_frames.push(crate::gc::GcFrame::new(&cvs, &tmps));
-        let r = self.execute_frame(op_array, &mut cvs, &mut tmps, None, cv_frame);
+        let r = self.execute_frame(op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin);
         self.gc_frames.pop();
         // i_free_compiled_variables: locals still shared elsewhere become
         // possible cycle roots.
         crate::gc::release_frame(&cvs);
+        // An exception leaving the frame escapes every finally block still
+        // running: each one's pending exception becomes its previous.
+        if r.is_err() {
+            if let Some(cur) = self.current_exception.clone() {
+                for (_, pending) in fin.into_iter().rev() {
+                    if let Some(prev) = pending {
+                        Self::exception_set_previous(&cur, prev);
+                    }
+                }
+            }
+        }
         r
     }
 
@@ -15241,7 +15256,7 @@ impl Vm {
     ) -> Result<usize, VmError> {
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
-        let r = self.execute_frame(op_array, cvs, tmps, Some(ip), false);
+        let r = self.execute_frame(op_array, cvs, tmps, Some(ip), false, &mut Vec::new());
         self.is_global_scope = was_global;
         // A write to $GLOBALS[...] may have changed the symbol table's shape.
         if let Some(op) = op_array.ops.get(ip) {
@@ -15271,6 +15286,9 @@ impl Vm {
         tmps: &mut Vec<Value>,
         single_step: Option<usize>,
         cv_frame: bool,
+        // Running finally blocks: (exception handler depth at entry, the
+        // exception that led into it).
+        fin: &mut Vec<(usize, Option<Value>)>,
     ) -> Result<Value, VmError> {
         let mut ip: usize = single_step.unwrap_or(0);
         let temp_count = op_array.temp_count as usize;
@@ -32053,10 +32071,47 @@ impl Vm {
                     exception_handlers.pop();
                 }
 
+                OpCode::FinallyEnter => {
+                    // Reaching the finally through a handler that the dispatch
+                    // site left on the stack.
+                    if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1 || h.1 as usize == ip - 1)
+                    {
+                        exception_handlers.pop();
+                    }
+                    let depth = exception_handlers.len();
+                    Self::finally_escape(fin, depth, &self.current_exception);
+                    let mut pending_exc = None;
+                    let slot = if let Some(exc) = self.current_exception.take() {
+                        pending_exc = Some(exc.clone());
+                        Self::finally_slot(1, exc)
+                    } else if let Some(v) = self.pending_return.take() {
+                        Self::finally_slot(2, v)
+                    } else if let Some(t) = self.pending_finally_jump.take() {
+                        let levels = std::mem::replace(&mut self.pending_finally_levels, 1);
+                        Self::finally_slot(3, Value::Long(t as i64 | ((levels as i64) << 32)))
+                    } else {
+                        Value::Null
+                    };
+                    fin.push((depth, pending_exc));
+                    if let OperandType::Tmp(t) = op.op1 {
+                        if let Some(s) = tmps.get_mut(t as usize) {
+                            *s = slot;
+                        }
+                    }
+                }
+
                 OpCode::CatchException => {
                     if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1) {
                         exception_handlers.pop();
                     }
+                    // The catch of a try with a finally starts with the finally
+                    // guard's TryBegin, already pushed above the caught level.
+                    let guarded = ip >= 2
+                        && matches!(op_array.ops.get(ip - 2), Some(g) if g.opcode == OpCode::TryBegin && g.op1 == g.op2);
+                    let caught_at = exception_handlers
+                        .len()
+                        .saturating_sub(usize::from(guarded));
+                    Self::finally_escape(fin, caught_at, &self.current_exception);
                     // Restore pending_calls depth saved when we jumped to this catch block
                     if let Some(depth) = pending_calls_catch_depth.take() {
                         self.pending_calls.truncate(depth);
@@ -36490,6 +36545,11 @@ impl Vm {
                         &mut exception_handlers,
                         op_array.ops.get(ip),
                     );
+                    // A return out of a running finally block discards what it
+                    // had pending (ZEND_DISCARD_EXCEPTION).
+                    while fin.last().is_some_and(|f| f.0 > exception_handlers.len()) {
+                        fin.pop();
+                    }
                 }
 
                 OpCode::SaveJump => {
@@ -36497,10 +36557,19 @@ impl Vm {
                     if let OperandType::JmpTarget(target) = op.op1 {
                         self.pending_finally_jump = Some(target);
                     }
+                    self.pending_finally_levels = match op.op2 {
+                        OperandType::Const(_) => self
+                            .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                            .to_long() as u32,
+                        _ => 1,
+                    };
                     Self::pop_handlers_for_finally_jump(
                         &mut exception_handlers,
                         op_array.ops.get(ip),
                     );
+                    while fin.last().is_some_and(|f| f.0 > exception_handlers.len()) {
+                        fin.pop();
+                    }
                     // A break/continue inside try-with-finally discards any pending exception
                     self.current_exception = None;
                 }
@@ -36512,11 +36581,32 @@ impl Vm {
                     } else {
                         0
                     };
-                    // An exception raised after the deferred return/jump was saved
-                    // (i.e. thrown inside a finally block) discards it.
-                    if self.current_exception.is_some() {
-                        self.pending_return = None;
-                        self.pending_finally_jump = None;
+                    // ZEND_FAST_RET: resume what led into the finally block.
+                    if let OperandType::Tmp(t) = op.op2 {
+                        fin.pop();
+                        let slot = tmps
+                            .get_mut(t as usize)
+                            .map(|s| std::mem::replace(s, Value::Undef))
+                            .unwrap_or(Value::Undef);
+                        if let Value::Array(a) = slot {
+                            let (kind, payload) = {
+                                let a = a.borrow();
+                                (
+                                    a.get_int(0).map(|v| v.to_long()).unwrap_or(0),
+                                    a.get_int(1).cloned().unwrap_or(Value::Null),
+                                )
+                            };
+                            match kind {
+                                1 => self.current_exception = Some(payload),
+                                2 => self.pending_return = Some(payload),
+                                3 => {
+                                    let v = payload.to_long();
+                                    self.pending_finally_jump = Some(v as u32);
+                                    self.pending_finally_levels = (v >> 32) as u32;
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                     // If there's a pending return, chain through outer finally blocks if any
                     if let Some(val) = self.pending_return.take() {
@@ -36563,6 +36653,39 @@ impl Vm {
                     }
                     // If there's a pending jump (deferred break/continue), execute it now
                     if let Some(target) = self.pending_finally_jump.take() {
+                        let levels = std::mem::replace(&mut self.pending_finally_levels, 1);
+                        if levels > 1 {
+                            // The jump also leaves enclosing try/finally blocks:
+                            // run the next one first (like a deferred return).
+                            if this_finally_start > 0
+                                && exception_handlers.iter().any(|h| h.1 == this_finally_start)
+                            {
+                                while let Some(&(_, finally_target, _, _, _)) =
+                                    exception_handlers.last()
+                                {
+                                    exception_handlers.pop();
+                                    if finally_target == this_finally_start {
+                                        break;
+                                    }
+                                }
+                            }
+                            let mut outer_finally = None;
+                            while let Some(&(_, finally_target, _, _, _)) =
+                                exception_handlers.last()
+                            {
+                                exception_handlers.pop();
+                                if finally_target > 0 {
+                                    outer_finally = Some(finally_target);
+                                    break;
+                                }
+                            }
+                            if let Some(finally_ip) = outer_finally {
+                                self.pending_finally_jump = Some(target);
+                                self.pending_finally_levels = levels - 1;
+                                ip = finally_ip as usize;
+                                continue;
+                            }
+                        }
                         ip = target as usize;
                         continue;
                     }
@@ -47153,116 +47276,9 @@ impl Vm {
                                         severity
                                     })
                                 }
-                                b"__tostring" => {
-                                    let class_display =
-                                        crate::value::display_class_name(&obj_borrow.class_name);
-                                    let message = obj_borrow
-                                        .get_property(b"message")
-                                        .to_php_string()
-                                        .to_string_lossy();
-                                    let file = obj_borrow
-                                        .get_property(b"file")
-                                        .to_php_string()
-                                        .to_string_lossy();
-                                    let line = obj_borrow.get_property(b"line").to_long();
-                                    let file_str = if file.is_empty() {
-                                        self.current_file.clone()
-                                    } else {
-                                        file
-                                    };
-                                    // Build trace string from stored trace
-                                    let trace = obj_borrow.get_property(b"trace");
-                                    let trace_str = if let Value::Array(arr) = &trace {
-                                        let arr = arr.borrow();
-                                        let mut lines = Vec::new();
-                                        let mut idx = 0;
-                                        for (_key, frame_val) in arr.iter() {
-                                            if let Value::Array(frame) = frame_val {
-                                                let frame = frame.borrow();
-                                                let ff = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"file"),
-                                                    ))
-                                                    .map(|v| v.to_php_string().to_string_lossy())
-                                                    .unwrap_or_default();
-                                                let fl = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"line"),
-                                                    ))
-                                                    .map(|v| v.to_long())
-                                                    .unwrap_or(0);
-                                                let func = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"function"),
-                                                    ))
-                                                    .map(|v| v.to_php_string().to_string_lossy())
-                                                    .unwrap_or_default();
-                                                let cls = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"class"),
-                                                    ))
-                                                    .map(|v| v.to_php_string().to_string_lossy())
-                                                    .unwrap_or_default();
-                                                let typ = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"type"),
-                                                    ))
-                                                    .map(|v| v.to_php_string().to_string_lossy())
-                                                    .unwrap_or_default();
-                                                // Format args
-                                                let args_str = if let Some(args_val) =
-                                                    frame.get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"args"),
-                                                    )) {
-                                                    if let Value::Array(args_arr) = args_val {
-                                                        let args_arr = args_arr.borrow();
-                                                        let formatted: Vec<String> = args_arr
-                                                            .iter()
-                                                            .map(|(_k, v)| {
-                                                                Self::format_trace_arg(v)
-                                                            })
-                                                            .collect();
-                                                        formatted.join(", ")
-                                                    } else {
-                                                        String::new()
-                                                    }
-                                                } else {
-                                                    String::new()
-                                                };
-                                                let loc = if ff.is_empty() {
-                                                    "[internal function]".to_string()
-                                                } else {
-                                                    format!("{}({})", ff, fl)
-                                                };
-                                                lines.push(format!(
-                                                    "#{} {}: {}{}{}({})",
-                                                    idx, loc, cls, typ, func, args_str
-                                                ));
-                                            }
-                                            idx += 1;
-                                        }
-                                        lines.push(format!("#{} {{main}}", idx));
-                                        lines.join("\n")
-                                    } else {
-                                        "#0 {main}".to_string()
-                                    };
-                                    let result = if message.is_empty() {
-                                        format!(
-                                            "{} in {}:{}\nStack trace:\n{}",
-                                            class_display, file_str, line, trace_str
-                                        )
-                                    } else {
-                                        let conn = Self::exception_location_connector(&message);
-                                        format!(
-                                            "{}: {}{}{}:{}\nStack trace:\n{}",
-                                            class_display, message, conn, file_str, line, trace_str
-                                        )
-                                    };
-                                    let prev = obj_borrow.get_property(b"previous");
-                                    drop(obj_borrow);
-                                    let result = self.with_previous_exceptions(&prev, result);
-                                    Some(Value::String(PhpString::from_string(result)))
-                                }
+                                b"__tostring" => Some(Value::String(PhpString::from_string(
+                                    self.throwable_chain_string(obj),
+                                ))),
                                 _ => None,
                             }
                         } else if !has_user_method {
@@ -48290,16 +48306,6 @@ impl Vm {
     }
 
     /// Convert a value to string, calling __toString for objects if available
-    /// Throwable::__toString(): the previous exceptions come first, each
-    /// followed by "Next" and the one it is the previous of.
-    fn with_previous_exceptions(&mut self, prev: &Value, this: String) -> String {
-        if !matches!(prev, Value::Object(_)) {
-            return this;
-        }
-        let p = self.value_to_string(prev).to_string_lossy();
-        format!("{}\n\nNext {}", p, this)
-    }
-
     pub fn value_to_string(&mut self, val: &Value) -> PhpString {
         // Unwrap References to handle their inner Value
         if let Value::Reference(r) = val {
@@ -48402,108 +48408,12 @@ impl Vm {
                 || self.class_extends(&class_lower, b"exception")
                 || self.class_extends(&class_lower, b"error");
             if is_throwable {
-                let obj_borrow = obj.borrow();
-                let class_display = crate::value::display_class_name(&obj_borrow.class_name);
-                let message = obj_borrow
-                    .get_property(b"message")
-                    .to_php_string()
-                    .to_string_lossy();
-                let file = obj_borrow
-                    .get_property(b"file")
-                    .to_php_string()
-                    .to_string_lossy();
-                let line = obj_borrow.get_property(b"line").to_long();
-                let file_str = if file.is_empty() {
-                    self.current_file.clone()
-                } else {
-                    file
-                };
-                // Build trace string from stored trace data
-                let trace = obj_borrow.get_property(b"trace");
-                let trace_str = if let Value::Array(arr) = &trace {
-                    let arr = arr.borrow();
-                    let mut trace_lines = Vec::new();
-                    let mut tidx = 0;
-                    for (_key, frame_val) in arr.iter() {
-                        if let Value::Array(frame) = frame_val {
-                            let frame = frame.borrow();
-                            let ff = frame
-                                .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                                    b"file",
-                                )))
-                                .map(|v| v.to_php_string().to_string_lossy())
-                                .unwrap_or_default();
-                            let fl = frame
-                                .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                                    b"line",
-                                )))
-                                .map(|v| v.to_long())
-                                .unwrap_or(0);
-                            let func = frame
-                                .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                                    b"function",
-                                )))
-                                .map(|v| v.to_php_string().to_string_lossy())
-                                .unwrap_or_default();
-                            let cls = frame
-                                .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                                    b"class",
-                                )))
-                                .map(|v| v.to_php_string().to_string_lossy())
-                                .unwrap_or_default();
-                            let typ = frame
-                                .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                                    b"type",
-                                )))
-                                .map(|v| v.to_php_string().to_string_lossy())
-                                .unwrap_or_default();
-                            let args_str = if let Some(args_val) = frame.get(
-                                &crate::array::ArrayKey::String(PhpString::from_bytes(b"args")),
-                            ) {
-                                if let Value::Array(args_arr) = args_val {
-                                    let args_arr = args_arr.borrow();
-                                    let formatted: Vec<String> = args_arr
-                                        .iter()
-                                        .map(|(_k, v)| Self::format_trace_arg(v))
-                                        .collect();
-                                    formatted.join(", ")
-                                } else {
-                                    String::new()
-                                }
-                            } else {
-                                String::new()
-                            };
-                            let loc = if ff.is_empty() {
-                                "[internal function]".to_string()
-                            } else {
-                                format!("{}({})", ff, fl)
-                            };
-                            trace_lines.push(format!(
-                                "#{} {}: {}{}{}({})",
-                                tidx, loc, cls, typ, func, args_str
-                            ));
-                        }
-                        tidx += 1;
-                    }
-                    trace_lines.push(format!("#{} {{main}}", tidx));
-                    trace_lines.join("\n")
-                } else {
-                    "#0 {main}".to_string()
-                };
-                let result = if message.is_empty() {
-                    format!(
-                        "{} in {}:{}\nStack trace:\n{}",
-                        class_display, file_str, line, trace_str
-                    )
-                } else {
-                    let conn = Self::exception_location_connector(&message);
-                    format!(
-                        "{}: {}{}{}:{}\nStack trace:\n{}",
-                        class_display, message, conn, file_str, line, trace_str
-                    )
-                };
-                let prev = obj.borrow().get_property(b"previous");
-                let result = self.with_previous_exceptions(&prev, result);
+                let result = self.throwable_chain_string(obj);
+                // Exception::__toString() keeps the result in $string.
+                obj.borrow_mut().set_property(
+                    b"string".to_vec(),
+                    Value::String(PhpString::from_string(result.clone())),
+                );
                 return PhpString::from_string(result);
             }
             // Built-in SPL __toString (SplFileInfo family, CachingIterator)
@@ -48586,6 +48496,135 @@ impl Vm {
     }
 
     /// Convert a value to string, but throw an Error for objects without __toString
+    /// One exception's part of Exception::__toString().
+    fn throwable_single_string(&self, obj: &Rc<RefCell<PhpObject>>) -> String {
+        let obj_borrow = obj.borrow();
+        let class_display = crate::value::display_class_name(&obj_borrow.class_name);
+        let message = obj_borrow
+            .get_property(b"message")
+            .to_php_string()
+            .to_string_lossy();
+        let file = obj_borrow
+            .get_property(b"file")
+            .to_php_string()
+            .to_string_lossy();
+        let line = obj_borrow.get_property(b"line").to_long();
+        let file_str = if file.is_empty() {
+            self.current_file.clone()
+        } else {
+            file
+        };
+        // Build trace string from stored trace data
+        let trace = obj_borrow.get_property(b"trace");
+        let trace_str = if let Value::Array(arr) = &trace {
+            let arr = arr.borrow();
+            let mut trace_lines = Vec::new();
+            let mut tidx = 0;
+            for (_key, frame_val) in arr.iter() {
+                if let Value::Array(frame) = frame_val {
+                    let frame = frame.borrow();
+                    let ff = frame
+                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
+                            b"file",
+                        )))
+                        .map(|v| v.to_php_string().to_string_lossy())
+                        .unwrap_or_default();
+                    let fl = frame
+                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
+                            b"line",
+                        )))
+                        .map(|v| v.to_long())
+                        .unwrap_or(0);
+                    let func = frame
+                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
+                            b"function",
+                        )))
+                        .map(|v| v.to_php_string().to_string_lossy())
+                        .unwrap_or_default();
+                    let cls = frame
+                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
+                            b"class",
+                        )))
+                        .map(|v| v.to_php_string().to_string_lossy())
+                        .unwrap_or_default();
+                    let typ = frame
+                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
+                            b"type",
+                        )))
+                        .map(|v| v.to_php_string().to_string_lossy())
+                        .unwrap_or_default();
+                    let args_str = if let Some(args_val) = frame.get(
+                        &crate::array::ArrayKey::String(PhpString::from_bytes(b"args")),
+                    ) {
+                        if let Value::Array(args_arr) = args_val {
+                            let args_arr = args_arr.borrow();
+                            let formatted: Vec<String> = args_arr
+                                .iter()
+                                .map(|(_k, v)| Self::format_trace_arg(v))
+                                .collect();
+                            formatted.join(", ")
+                        } else {
+                            String::new()
+                        }
+                    } else {
+                        String::new()
+                    };
+                    let loc = if ff.is_empty() {
+                        "[internal function]".to_string()
+                    } else {
+                        format!("{}({})", ff, fl)
+                    };
+                    trace_lines.push(format!(
+                        "#{} {}: {}{}{}({})",
+                        tidx, loc, cls, typ, func, args_str
+                    ));
+                }
+                tidx += 1;
+            }
+            trace_lines.push(format!("#{} {{main}}", tidx));
+            trace_lines.join("\n")
+        } else {
+            "#0 {main}".to_string()
+        };
+        if message.is_empty() {
+            format!(
+                "{} in {}:{}\nStack trace:\n{}",
+                class_display, file_str, line, trace_str
+            )
+        } else {
+            let conn = Self::exception_location_connector(&message);
+            format!(
+                "{}: {}{}{}:{}\nStack trace:\n{}",
+                class_display, message, conn, file_str, line, trace_str
+            )
+        }
+    }
+
+    /// Exception::__toString(): the previous chain from the innermost one,
+    /// each followed by "Next" and the exception it led to.
+    pub fn throwable_chain_string(&self, obj: &Rc<RefCell<PhpObject>>) -> String {
+        let mut out = String::new();
+        let mut cur = Some(obj.clone());
+        let mut guard = 0;
+        while let Some(o) = cur {
+            let part = self.throwable_single_string(&o);
+            out = if out.is_empty() {
+                part
+            } else {
+                format!("{}\n\nNext {}", part, out)
+            };
+            cur = match o.borrow().get_property(b"previous") {
+                Value::Object(p) => Some(p),
+                _ => None,
+            };
+            guard += 1;
+            if guard > 10_000 {
+                break;
+            }
+        }
+        out
+    }
+
     pub fn value_to_string_checked(&mut self, val: &Value) -> Result<PhpString, VmError> {
         if matches!(val, Value::Double(d) if d.is_nan()) {
             let l = self.current_line;
@@ -50484,7 +50523,8 @@ impl Vm {
     }
 
     /// zend_exception_set_previous(): append `prev` at the end of `exc`'s
-    /// previous-chain (graceful-exit objects are never chained).
+    /// previous-chain, unless an exception of that chain already is an
+    /// ancestor of `prev` (no cycles); graceful-exit objects are never chained.
     pub fn exception_set_previous(exc: &Value, prev: Value) {
         if Self::is_graceful_exit(&prev) {
             return;
@@ -50495,25 +50535,62 @@ impl Vm {
         if Rc::ptr_eq(head, prev_rc) {
             return;
         }
-        let mut cur = head.clone();
-        let mut guard = 0;
-        loop {
-            let next = cur.borrow().get_property(b"previous");
-            match next {
-                Value::Object(n) => {
+        let previous_of = |o: &Rc<RefCell<PhpObject>>| match o.borrow().get_property(b"previous") {
+            Value::Object(n) => Some(n),
+            _ => None,
+        };
+        let mut ex = head.clone();
+        for _ in 0..100_000 {
+            // Is `ex` an ancestor of `prev`?
+            let mut anc = previous_of(prev_rc);
+            let mut guard = 0;
+            while let Some(a) = anc {
+                if Rc::ptr_eq(&a, &ex) {
+                    return;
+                }
+                anc = previous_of(&a);
+                guard += 1;
+                if guard > 100_000 {
+                    return;
+                }
+            }
+            match previous_of(&ex) {
+                None => {
+                    ex.borrow_mut().set_property(b"previous".to_vec(), prev);
+                    return;
+                }
+                Some(n) => {
                     if Rc::ptr_eq(&n, prev_rc) {
                         return;
                     }
-                    cur = n;
+                    ex = n;
                 }
-                _ => break,
-            }
-            guard += 1;
-            if guard > 10000 {
-                return;
             }
         }
-        cur.borrow_mut().set_property(b"previous".to_vec(), prev);
+    }
+
+    /// The value kept in a finally block's slot: `[kind, payload]` with
+    /// kind 1 = exception, 2 = deferred return value, 3 = deferred jump.
+    fn finally_slot(kind: i64, payload: Value) -> Value {
+        let mut a = PhpArray::new();
+        a.push(Value::Long(kind));
+        a.push(payload);
+        Value::Array(Rc::new(RefCell::new(a)))
+    }
+
+    /// An exception dispatched to the handler at index `depth` leaves the
+    /// finally blocks entered above it; their pending exceptions become its
+    /// previous ones (zend_dispatch_try_catch_finally_helper).
+    fn finally_escape(
+        fin: &mut Vec<(usize, Option<Value>)>,
+        depth: usize,
+        current: &Option<Value>,
+    ) {
+        while fin.last().is_some_and(|f| f.0 > depth) {
+            if let (Some((_, Some(prev))), Some(cur)) = (fin.pop(), current.as_ref()) {
+                Self::exception_set_previous(cur, prev);
+            }
+        }
     }
 
     /// zend_fiber_object_destroy(): a suspended fiber that is being destroyed is
