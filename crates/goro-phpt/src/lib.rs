@@ -1860,8 +1860,8 @@ fn matches_expect_regex(pattern: &str, actual: &str) -> bool {
 fn matches_expectf(pattern: &str, actual: &str) -> bool {
     // Check if the pattern contains %a or %A which can match across lines
     // In that case we need whole-string matching, not line-by-line
-    if pattern.contains("%a") || pattern.contains("%A") {
-        // Whole-string matching (supports cross-line %a/%A)
+    if pattern.contains("%a") || pattern.contains("%A") || pattern.contains("%w") {
+        // Whole-string matching (supports cross-line %a/%A/%w)
         return match_expectf_at(pattern.as_bytes(), 0, actual.as_bytes(), 0);
     }
 
@@ -1996,9 +1996,19 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                 }
                 b'w' => {
                     pi += 2;
-                    while ai < ab.len() && (ab[ai] == b' ' || ab[ai] == b'\t') {
+                    // %w: run-tests.php's `\s*` (newlines included), with backtracking
+                    let start = ai;
+                    while ai < ab.len()
+                        && matches!(ab[ai], b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c)
+                    {
                         ai += 1;
                     }
+                    for try_ai in (start..=ai).rev() {
+                        if match_expectf_at(pb, pi, ab, try_ai) {
+                            return true;
+                        }
+                    }
+                    return false;
                 }
                 b'c' => {
                     pi += 2;
