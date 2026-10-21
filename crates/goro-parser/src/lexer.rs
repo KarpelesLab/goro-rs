@@ -2317,6 +2317,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)] // 3.14 is test input, not PI
     fn test_variables_and_assignment() {
         let src = b"<?php $x = 10; $y = 3.14;";
         let mut lexer = Lexer::new(src);

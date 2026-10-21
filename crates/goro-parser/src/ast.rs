@@ -6,6 +6,7 @@ pub struct Program { pub statements: Vec<Statement> }
 #[derive(Debug, Clone)]
 pub struct Statement { pub kind: StmtKind, pub span: Span }
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)] // AST node; boxing variants would churn every consumer
 pub enum StmtKind {
     InlineHtml(Vec<u8>), Expression(Expr), Echo(Vec<Expr>), Return(Option<Expr>),
     If { condition: Expr, body: Vec<Statement>, elseif_clauses: Vec<(Expr, Vec<Statement>)>, else_body: Option<Vec<Statement>> },

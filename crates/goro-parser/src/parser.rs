@@ -164,11 +164,6 @@ impl Parser {
         self.token_doc_comments.get(self.pos).and_then(|d| d.as_ref())
     }
 
-    /// Take and clear the doc comment at a specific position (if any).
-    fn take_doc_comment_at(&mut self, pos: usize) -> Option<Vec<u8>> {
-        self.token_doc_comments.get_mut(pos).and_then(|d| d.take())
-    }
-
     /// Attach a doc comment to a freshly-parsed Statement that represents a
     /// function/class/etc. declaration. Other statement kinds keep no doc
     /// comment.
@@ -968,17 +963,6 @@ impl Parser {
                         TokenKind::Variable(_) => {
                             // Look ahead for Assign followed by Function/Fn/Static(Function|Fn)
                             let p = self.pos + 1;
-                            // Allow array-/object-access between var and =
-                            while p < self.tokens.len() {
-                                match self.tokens.get(p).map(|t| &t.kind) {
-                                    Some(TokenKind::OpenBracket) => {
-                                        // Skip a bracketed expression — too complex to
-                                        // walk by hand; bail out unless it's empty
-                                        break;
-                                    }
-                                    _ => break,
-                                }
-                            }
                             let after = self.tokens.get(p).map(|t| &t.kind);
                             let then = self.tokens.get(p + 1).map(|t| &t.kind);
                             let then2 = self.tokens.get(p + 2).map(|t| &t.kind);
@@ -1723,17 +1707,12 @@ impl Parser {
         if self.eat(&TokenKind::Backslash) {
             // Fully qualified name - prefix with \ to mark as absolute
             let mut name = vec![b'\\'];
-            loop {
-                match self.peek().clone() {
-                    TokenKind::Identifier(part) => {
-                        self.advance();
-                        if name.len() > 1 {
-                            name.push(b'\\');
-                        }
-                        name.extend_from_slice(&part);
-                    }
-                    _ => break,
+            while let TokenKind::Identifier(part) = self.peek().clone() {
+                self.advance();
+                if name.len() > 1 {
+                    name.push(b'\\');
                 }
+                name.extend_from_slice(&part);
                 if !self.eat(&TokenKind::Backslash) {
                     break;
                 }
@@ -2313,7 +2292,7 @@ impl Parser {
                     None
                 };
 
-                let mut method_end_line: u32 = method_line;
+                let method_end_line: u32;
                 let body = if is_abstract {
                     if matches!(self.peek(), TokenKind::Semicolon) {
                         method_end_line = self.span().line;
@@ -5204,17 +5183,12 @@ impl Parser {
                         // Prefix with \ to mark as fully qualified
                         self.advance();
                         let mut full_name = vec![b'\\'];
-                        loop {
-                            match self.peek().clone() {
-                                TokenKind::Identifier(part) => {
-                                    self.advance();
-                                    if full_name.len() > 1 {
-                                        full_name.push(b'\\');
-                                    }
-                                    full_name.extend_from_slice(&part);
-                                }
-                                _ => break,
+                        while let TokenKind::Identifier(part) = self.peek().clone() {
+                            self.advance();
+                            if full_name.len() > 1 {
+                                full_name.push(b'\\');
                             }
+                            full_name.extend_from_slice(&part);
                             if !self.eat(&TokenKind::Backslash) {
                                 break;
                             }

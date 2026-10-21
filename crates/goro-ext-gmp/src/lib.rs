@@ -474,6 +474,7 @@ fn value_type_display_for_gmp(val: &Value) -> String {
 ///   * a leading `+` sign (GMP itself rejects "+123")
 ///   * empty strings or strings with no digits at all
 ///   * strings whose digits don't fit the inferred base (e.g. "09" with base 0)
+///
 /// `base == 0` enables prefix auto-detection (PHP/GMP default).
 fn parse_bigint_str_strict(s: &str, base: u32) -> Result<BigInt, String> {
     // Strip leading whitespace.
@@ -2244,7 +2245,7 @@ fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Guard against malicious/huge word_size that would overflow when padding.
     // PHP's gmp_export rejects this with a ValueError.
-    if word_size_usize > 0 && word_size_usize > 1_000_000_000 {
+    if word_size_usize > 1_000_000_000 {
         let msg = "gmp_export(): Argument #2 ($word_size) is too large for argument #1 ($num)".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
