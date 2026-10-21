@@ -533,9 +533,11 @@ impl Vm {
                 b"splpriorityqueue", b"splminheap", b"splmaxheap", b"splheap",
                 b"directoryiterator", b"splfileobject", b"splfileinfo", b"splfixedarray",
                 b"spldoublylinkedlist", b"splobjectstorage", b"multipleiterator",
+                b"arrayobject", b"arrayiterator",
             ],
         )?;
         match base {
+            b"arrayobject" | b"arrayiterator" => Some(self.ao_debug_info(obj)),
             b"splobjectstorage" | b"multipleiterator" => Some(self.sos_debug_info(obj)),
             b"spldoublylinkedlist" => Some(self.dll_debug_info(obj)),
             b"splfixedarray" => Some(self.fa_debug_info(obj, true)),

@@ -206,7 +206,7 @@ impl Vm {
         }
     }
 
-    fn obj_instanceof(&self, v: &Value, iface_lower: &[u8]) -> bool {
+    pub fn obj_instanceof(&self, v: &Value, iface_lower: &[u8]) -> bool {
         match v {
             Value::Object(o) => {
                 // Same walk as the `instanceof` operator.
@@ -245,6 +245,37 @@ impl Vm {
             Value::Generator(_) => matches!(iface_lower, b"traversable" | b"iterator" | b"generator"),
             _ => false,
         }
+    }
+
+    /// Resolve IteratorAggregate::getIterator() chains (zend_user_it /
+    /// ce->get_iterator) to the object or generator actually iterated.
+    /// Throws LogicException like spl_get_iterator_from_aggregate when the
+    /// result is not Traversable.
+    pub fn spl_resolve_traversable(&mut self, v: &Value) -> Value {
+        let mut cur = v.clone();
+        for _ in 0..32 {
+            if !matches!(cur, Value::Object(_)) {
+                return cur;
+            }
+            if self.obj_instanceof(&cur, b"iterator") || !self.obj_instanceof(&cur, b"iteratoraggregate") {
+                return cur;
+            }
+            let cls = match &cur {
+                Value::Object(o) => crate::value::display_class_name(&o.borrow().class_name).to_string(),
+                _ => String::new(),
+            };
+            let r = self.call_object_method(&cur, b"getIterator", &[]).unwrap_or(Value::Null);
+            if self.exc() {
+                return Value::Null;
+            }
+            if !self.obj_instanceof(&r, b"traversable") {
+                let msg = format!("{}::getIterator() must return an object that implements Traversable", cls);
+                self.spl_throw(b"Exception", &msg);
+                return Value::Null;
+            }
+            cur = r;
+        }
+        cur
     }
 
     /// zval_get_string() with the array warning.

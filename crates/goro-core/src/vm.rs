@@ -1819,7 +1819,7 @@ impl Vm {
     ///
     /// Returns `None` for dynamic properties or anything not declared as a
     /// non-static property on the class hierarchy.
-    fn find_instance_prop_def(
+    pub(crate) fn find_instance_prop_def(
         &self,
         class_name_lower: &[u8],
         prop_name: &[u8],
@@ -4589,6 +4589,13 @@ impl Vm {
     /// - For an initialized lazy proxy, redirects to the real backing object.
     /// - Applies PHP-style name mangling for private/protected props.
     pub fn object_to_array(&self, obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpArray>> {
+        // ArrayObject/ArrayIterator: get_properties_for(ARRAY_CAST)
+        {
+            let cl: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"]).is_some() {
+                return Rc::new(RefCell::new(self.ao_properties_for_cast(obj)));
+            }
+        }
         // Proxy: if initialized, use the real backing object's props.
         let target = self.proxy_redirect(obj);
         let ob = target.borrow();
@@ -6214,81 +6221,8 @@ impl Vm {
             b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
                 crate::uri::uri_dispatch_noarg(class_lower, method_lower, obj)
             }
-            b"arrayobject" | b"arrayiterator" => {
-                self.spl_array_method(method_lower, obj)
-            }
-            b"recursivearrayiterator" => {
-                // hasChildren/getChildren are specific to RecursiveArrayIterator
-                match method_lower {
-                    b"haschildren" => {
-                        let ob = obj.borrow();
-                        let arr = ob.get_property(b"__spl_array");
-                        let pos = ob.get_property(b"__spl_pos");
-                        let flags = if let Value::Long(f) = ob.get_property(b"__spl_flags") { f } else { 0 };
-                        let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
-                        match arr {
-                            Value::Array(a) => {
-                                let a = a.borrow();
-                                let current = a.values().nth(pos_val);
-                                let r = match current {
-                                    Some(Value::Array(_)) => Value::True,
-                                    // CHILD_ARRAYS_ONLY (4): only arrays count as children
-                                    Some(Value::Object(_)) if (flags & 4) == 0 => Value::True,
-                                    _ => Value::False,
-                                };
-                                Some(r)
-                            }
-                            _ => Some(Value::False),
-                        }
-                    }
-                    b"getchildren" => {
-                        // Return a new RecursiveArrayIterator wrapping the current value
-                        let ob = obj.borrow();
-                        let arr = ob.get_property(b"__spl_array");
-                        let pos = ob.get_property(b"__spl_pos");
-                        let flags = ob.get_property(b"__spl_flags");
-                        let class_name = ob.class_name.clone();
-                        let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
-                        drop(ob);
-                        let inner_val = if let Value::Array(a) = arr {
-                            let a = a.borrow();
-                            a.values().nth(pos_val).cloned().unwrap_or(Value::Null)
-                        } else {
-                            Value::Null
-                        };
-                        let obj_id = self.next_object_id;
-                        self.next_object_id += 1;
-                        let mut child_obj = PhpObject::new(class_name, obj_id);
-                        let inner_arr = match &inner_val {
-                            Value::Array(a) => Value::Array(a.clone()),
-                            Value::Object(_) => {
-                                // For objects, build an array from visible properties
-                                let mut arr = PhpArray::new();
-                                if let Value::Object(o) = &inner_val {
-                                    for (name, v) in self.visible_properties(o) {
-                                        // Try parsing as int key first
-                                        if let Ok(s) = std::str::from_utf8(&name) {
-                                            if let Ok(n) = s.parse::<i64>() {
-                                                arr.set(ArrayKey::Int(n), v);
-                                                continue;
-                                            }
-                                        }
-                                        arr.set(ArrayKey::String(PhpString::from_vec(name)), v);
-                                    }
-                                }
-                                Value::Array(Rc::new(RefCell::new(arr)))
-                            }
-                            _ => Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
-                        };
-                        child_obj.set_property(b"__spl_array".to_vec(), inner_arr);
-                        child_obj.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                        if !matches!(flags, Value::Null | Value::Undef) {
-                            child_obj.set_property(b"__spl_flags".to_vec(), flags);
-                        }
-                        Some(Value::Object(Rc::new(RefCell::new(child_obj))))
-                    }
-                    _ => self.spl_array_method(method_lower, obj),
-                }
+            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
+                self.spl_array_call(class_lower, method_lower, obj, None)
             }
             b"splfixedarray" => {
                 self.spl_fixed_call(method_lower, obj, None)
@@ -6954,219 +6888,6 @@ impl Vm {
             })
             .map(|(n, v)| (n.clone(), v.clone()))
             .collect()
-    }
-
-    fn spl_array_method(
-        &mut self,
-        method: &[u8],
-        obj: &Rc<RefCell<PhpObject>>,
-    ) -> Option<Value> {
-        let storage_prop = b"__spl_array";
-        match method {
-            b"offsetget" => {
-                // Retrieved from pending call args later
-                None
-            }
-            b"offsetset" => None,
-            b"offsetexists" => None,
-            b"offsetunset" => None,
-            b"count" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                match arr {
-                    Value::Array(a) => Some(Value::Long(a.borrow().len() as i64)),
-                    Value::Object(inner) => {
-                        let n = self.count_visible_properties(&inner);
-                        Some(Value::Long(n))
-                    }
-                    _ => Some(Value::Long(0)),
-                }
-            }
-            b"getarraycopy" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                if let Value::Array(a) = arr {
-                    Some(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))))
-                } else {
-                    Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-                }
-            }
-            b"append" => None,
-            b"getflags" => {
-                let ob = obj.borrow();
-                let flags = ob.get_property(b"__spl_flags");
-                if matches!(flags, Value::Null) {
-                    Some(Value::Long(0))
-                } else {
-                    Some(flags)
-                }
-            }
-            b"setflags" => None,
-            b"getiteratorclass" => {
-                let ob = obj.borrow();
-                let ic = ob.get_property(b"__spl_iterator_class");
-                if matches!(ic, Value::Null) {
-                    Some(Value::String(PhpString::from_bytes(b"ArrayIterator")))
-                } else {
-                    Some(ic)
-                }
-            }
-            b"getiterator" => {
-                // Create an iterator of the configured class (default: ArrayIterator).
-                let ob = obj.borrow();
-                let spl_arr = ob.get_property(b"__spl_array");
-                let iter_class_val = ob.get_property(b"__spl_iterator_class");
-                let flags = ob.get_property(b"__spl_flags");
-                drop(ob);
-                let iter_class_bytes: Vec<u8> = match iter_class_val {
-                    Value::String(s) if !s.as_bytes().is_empty() => s.as_bytes().to_vec(),
-                    _ => b"ArrayIterator".to_vec(),
-                };
-                let obj_id = self.next_object_id;
-                self.next_object_id += 1;
-                let mut iter_obj = PhpObject::new(iter_class_bytes.clone(), obj_id);
-                iter_obj.set_property(b"__spl_array".to_vec(), spl_arr);
-                if !matches!(flags, Value::Null | Value::Undef) {
-                    iter_obj.set_property(b"__spl_flags".to_vec(), flags);
-                }
-                let iter_val = Value::Object(Rc::new(RefCell::new(iter_obj)));
-                // If the iterator class has a user-defined __construct, invoke it
-                // so custom subclasses (e.g. MyIterator extends ArrayIterator) run
-                // their initialization logic.
-                let iter_lower: Vec<u8> = iter_class_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if let Some(cd) = self.classes.get(&iter_lower) {
-                    if cd.methods.contains_key(&b"__construct".to_vec()) {
-                        self.call_object_method(&iter_val, b"__construct", &[]);
-                    }
-                }
-                Some(iter_val)
-            }
-            b"setiteratorclass" => None,
-            b"ksort" => None,     // handled in handle_spl_docall
-            b"asort" => None,
-            b"natsort" => None,
-            b"natcasesort" => None,
-            b"uasort" => None,
-            b"uksort" => None,
-            // Iterator methods for ArrayIterator
-            b"rewind" => {
-                let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                Some(Value::Null)
-            }
-            b"valid" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                let pos = ob.get_property(b"__spl_pos");
-                let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
-                match arr {
-                    Value::Array(a) => Some(if pos_val < a.borrow().len() { Value::True } else { Value::False }),
-                    Value::Object(inner) => {
-                        drop(ob);
-                        let n = self.count_visible_properties(&inner) as usize;
-                        Some(if pos_val < n { Value::True } else { Value::False })
-                    }
-                    _ => Some(Value::False),
-                }
-            }
-            b"current" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                let pos = ob.get_property(b"__spl_pos");
-                let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
-                match arr {
-                    Value::Array(a) => {
-                        let a = a.borrow();
-                        Some(a.values().nth(pos_val).cloned().unwrap_or(Value::Null))
-                    }
-                    Value::Object(inner) => {
-                        drop(ob);
-                        let visible = self.visible_properties(&inner);
-                        Some(visible.get(pos_val).map(|(_, v)| v.clone()).unwrap_or(Value::Null))
-                    }
-                    _ => Some(Value::Null),
-                }
-            }
-            b"key" => {
-                let ob = obj.borrow();
-                let arr = ob.get_property(storage_prop);
-                let pos = ob.get_property(b"__spl_pos");
-                let pos_val = if let Value::Long(p) = pos { p as usize } else { 0 };
-                match arr {
-                    Value::Array(a) => {
-                        let a = a.borrow();
-                        if let Some(key) = a.keys().nth(pos_val) {
-                            match key {
-                                ArrayKey::Int(n) => Some(Value::Long(*n)),
-                                ArrayKey::String(s) => Some(Value::String(s.clone())),
-                            }
-                        } else {
-                            Some(Value::Null)
-                        }
-                    }
-                    Value::Object(inner) => {
-                        drop(ob);
-                        let visible = self.visible_properties(&inner);
-                        Some(visible.get(pos_val)
-                            .map(|(n, _)| Value::String(PhpString::from_bytes(n)))
-                            .unwrap_or(Value::Null))
-                    }
-                    _ => Some(Value::Null),
-                }
-            }
-            b"next" => {
-                let mut ob = obj.borrow_mut();
-                let pos = ob.get_property(b"__spl_pos");
-                let pos_val = if let Value::Long(p) = pos { p } else { 0 };
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos_val + 1));
-                Some(Value::Null)
-            }
-            b"seek" => None,     // handled in handle_spl_docall
-            b"serialize" => {
-                // Serialize storage/flags to a PHP-serialize string. Unused for the
-                // empty-string roundtrip test; return empty serialize payload.
-                Some(Value::String(PhpString::from_bytes(b"x:i:0;a:0:{};m:a:0:{}")))
-            }
-            b"unserialize" => {
-                // ArrayObject::unserialize($data). Minimal implementation: accept
-                // an empty or invalid string without raising so round-trips with
-                // empty state succeed. Full serialize() parsing isn't required by
-                // current PHPT coverage.
-                Some(Value::Null)
-            }
-            b"__serialize" => {
-                // ArrayObject::__serialize(): [flags, storage, members, iteratorClass]
-                // where iteratorClass is NULL for the default ArrayIterator.
-                let ob = obj.borrow();
-                let flags = ob.get_property(b"__spl_flags");
-                let storage = ob.get_property(b"__spl_array");
-                let iter_class = ob.get_property(b"__spl_iterator_class");
-                let iter_class = match iter_class {
-                    Value::String(ref s) if !s.as_bytes().eq_ignore_ascii_case(b"ArrayIterator") => iter_class.clone(),
-                    _ => Value::Null,
-                };
-                let mut props = PhpArray::new();
-                for (name, val) in ob.properties.iter() {
-                    if name.starts_with(b"__spl_") || name.starts_with(b"__reflection_")
-                        || name.starts_with(b"__ctor_") || name.starts_with(b"__destructed")
-                        || name.starts_with(b"__clone_") {
-                        continue;
-                    }
-                    if matches!(val, Value::Undef) {
-                        continue;
-                    }
-                    props.set(Self::value_to_array_key(Value::String(PhpString::from_vec(name.clone()))), val.clone());
-                }
-                drop(ob);
-                let mut arr = PhpArray::new();
-                arr.push(if matches!(flags, Value::Null | Value::Undef) { Value::Long(0) } else { flags });
-                arr.push(storage);
-                arr.push(Value::Array(Rc::new(RefCell::new(props))));
-                arr.push(iter_class);
-                Some(Value::Array(Rc::new(RefCell::new(arr))))
-            }
-            _ => None,
-        }
     }
 
     fn spl_outer_resolve_inner(&mut self, obj: &Rc<RefCell<PhpObject>>) -> Value {
@@ -8580,14 +8301,9 @@ impl Vm {
         match class {
             b"phptoken" => matches!(method, b"is"),
             b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => crate::uri::uri_is_args_method(method),
-            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => matches!(
-                method,
-                b"offsetget" | b"offsetset" | b"offsetexists" | b"offsetunset"
-                    | b"append" | b"exchangearray" | b"setflags"
-                    | b"ksort" | b"asort" | b"natsort" | b"natcasesort"
-                    | b"uasort" | b"uksort" | b"setiteratorclass"
-                    | b"seek" | b"__unserialize" | b"unserialize"
-            ),
+            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
+                crate::spl_stubs::spl_stub_method(class, method).is_some() && method != b"__construct"
+            }
             b"spldoublylinkedlist" | b"splstack" | b"splqueue" => matches!(
                 method,
                 b"push" | b"pop" | b"shift" | b"unshift" | b"enqueue" | b"dequeue"
@@ -8746,767 +8462,7 @@ impl Vm {
                     crate::uri::uri_dispatch_with_args(class, method, args, &mut self.next_object_id)
                 }
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
-                    // ArrayObject methods that delegate to internal PHP functions
-                    // are blocked when the corresponding function is in
-                    // disable_functions. Emits "Cannot call method X when
-                    // function X is disabled".
-                    let delegates_to_fn: Option<&'static [u8]> = match method {
-                        b"ksort" => Some(b"ksort"),
-                        b"asort" => Some(b"asort"),
-                        b"natsort" => Some(b"natsort"),
-                        b"natcasesort" => Some(b"natcasesort"),
-                        b"uasort" => Some(b"uasort"),
-                        b"uksort" => Some(b"uksort"),
-                        _ => None,
-                    };
-                    if let Some(fn_name) = delegates_to_fn {
-                        if self.disabled_functions.contains(fn_name) {
-                            let fn_str = std::str::from_utf8(fn_name).unwrap_or("?");
-                            let msg = format!(
-                                "Cannot call method {} when function {} is disabled",
-                                fn_str, fn_str
-                            );
-                            let exc = self.create_exception(b"Error", &msg, 0);
-                            self.current_exception = Some(exc);
-                            return Some(Value::Null);
-                        }
-                    }
-                    match method {
-                        b"offsetget" => {
-                            let key = args.get(1)?;
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            match arr {
-                                Value::Array(a) => {
-                                    let k = Self::value_to_array_key(key.clone());
-                                    let got = a.borrow().get(&k).cloned();
-                                    if got.is_none() {
-                                        drop(ob);
-                                        let key_display = match &k {
-                                            ArrayKey::Int(n) => n.to_string(),
-                                            ArrayKey::String(s) => format!("\"{}\"", s.to_string_lossy()),
-                                        };
-                                        self.emit_warning_at(
-                                            &format!("Undefined array key {}", key_display),
-                                            self.current_line,
-                                        );
-                                        return Some(Value::Null);
-                                    }
-                                    Some(got.unwrap())
-                                }
-                                Value::Object(inner) => {
-                                    // Object-backed storage: if the wrapped object is
-                                    // itself an ArrayObject/ArrayIterator, forward to
-                                    // its offsetGet semantics (recursing into its inner
-                                    // storage). Otherwise read it as a named property.
-                                    let inner_class: Vec<u8> = inner.borrow().class_name
-                                        .iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    if matches!(inner_class.as_slice(),
-                                        b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator")
-                                    {
-                                        let inner_val = Value::Object(inner.clone());
-                                        drop(ob);
-                                        return self.handle_spl_docall(&inner_class, b"offsetget", &[inner_val, key.clone()]);
-                                    }
-                                    let kstr = key.to_php_string();
-                                    let inner_b = inner.borrow();
-                                    let v = inner_b.get_property(kstr.as_bytes());
-                                    Some(match v { Value::Undef => Value::Null, other => other })
-                                }
-                                _ => Some(Value::Null),
-                            }
-                        }
-                        b"offsetset" => {
-                            let key = args.get(1).cloned().unwrap_or(Value::Null);
-                            let val = args.get(2).cloned().unwrap_or(Value::Null);
-                            let mut ob = obj.borrow_mut();
-                            let arr = ob.get_property(b"__spl_array");
-                            match arr {
-                                Value::Array(a) => {
-                                    if matches!(key, Value::Null) {
-                                        a.borrow_mut().push(val);
-                                    } else {
-                                        let k = Self::value_to_array_key(key);
-                                        a.borrow_mut().set(k, val);
-                                    }
-                                }
-                                Value::Object(inner) => {
-                                    // Object-backed storage: write named property.
-                                    if !matches!(key, Value::Null) {
-                                        let kstr = key.to_php_string();
-                                        inner.borrow_mut().set_property(kstr.as_bytes().to_vec(), val);
-                                    }
-                                }
-                                _ => {}
-                            }
-                            Some(Value::Null)
-                        }
-                        b"offsetexists" => {
-                            let key = args.get(1)?;
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            match arr {
-                                Value::Array(a) => {
-                                    let k = Self::value_to_array_key(key.clone());
-                                    Some(if a.borrow().get(&k).is_some() { Value::True } else { Value::False })
-                                }
-                                Value::Object(inner) => {
-                                    let kstr = key.to_php_string();
-                                    let exists = !matches!(inner.borrow().get_property(kstr.as_bytes()), Value::Undef);
-                                    Some(if exists { Value::True } else { Value::False })
-                                }
-                                _ => Some(Value::False),
-                            }
-                        }
-                        b"offsetunset" => {
-                            let key = args.get(1)?;
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            match arr {
-                                Value::Array(a) => {
-                                    let k = Self::value_to_array_key(key.clone());
-                                    a.borrow_mut().remove(&k);
-                                }
-                                Value::Object(inner) => {
-                                    let kstr = key.to_php_string();
-                                    inner.borrow_mut().remove_property(kstr.as_bytes());
-                                }
-                                _ => {}
-                            }
-                            Some(Value::Null)
-                        }
-                        b"append" => {
-                            let val = args.get(1).cloned().unwrap_or(Value::Null);
-                            let mut ob = obj.borrow_mut();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                a.borrow_mut().push(val);
-                            }
-                            Some(Value::Null)
-                        }
-                        b"exchangearray" => {
-                            // Validate argument count: exchangeArray() expects exactly 1 argument
-                            let extra = args.len().saturating_sub(1);
-                            if extra == 0 {
-                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                let msg = format!(
-                                    "{}::exchangeArray() expects exactly 1 argument, 0 given",
-                                    class_display
-                                );
-                                let exc = self.create_exception(b"ArgumentCountError", &msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            // Validate argument type: must be array or object (including null as error).
-                            let raw = args.get(1).cloned().unwrap_or(Value::Null);
-                            match &raw {
-                                Value::Array(_) | Value::Object(_) => {}
-                                other => {
-                                    let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                    let type_str = match other {
-                                        Value::Null => "null",
-                                        Value::True | Value::False => "bool",
-                                        Value::Long(_) => "int",
-                                        Value::Double(_) => "float",
-                                        Value::String(_) => "string",
-                                        _ => "mixed",
-                                    };
-                                    let msg = format!(
-                                        "{}::exchangeArray(): Argument #1 ($array) must be of type array, {} given",
-                                        class_display, type_str
-                                    );
-                                    let exc = self.create_exception(b"TypeError", &msg, 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                            }
-                            let is_object_input = matches!(&raw, Value::Object(_));
-                            if is_object_input {
-                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                self.emit_deprecated_at(
-                                    &format!(
-                                        "{}::exchangeArray(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
-                                        class_display, class_display
-                                    ),
-                                    self.current_line,
-                                );
-                                // Reject objects with overloaded get_properties
-                                // handlers (internal classes that don't expose their
-                                // state as plain properties). PHP throws
-                                // InvalidArgumentException in this case.
-                                if let Value::Object(inner) = &raw {
-                                    let inner_class_lower: Vec<u8> = inner.borrow().class_name
-                                        .iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    let is_overloaded = matches!(inner_class_lower.as_slice(),
-                                        b"splfixedarray"
-                                        | b"dateinterval"
-                                        | b"datetime" | b"datetimeimmutable"
-                                        | b"datetimezone" | b"dateperiod"
-                                        | b"splobjectstorage"
-                                    );
-                                    if is_overloaded {
-                                        let inner_class_display = crate::value::display_class_name(&inner.borrow().class_name);
-                                        let msg = format!(
-                                            "Overloaded object of type {} is not compatible with ArrayObject",
-                                            inner_class_display
-                                        );
-                                        let exc = self.create_exception(b"InvalidArgumentException", &msg, 0);
-                                        self.current_exception = Some(exc);
-                                        return Some(Value::Null);
-                                    }
-                                }
-                            }
-                            // Deep-copy array arguments (value semantics); keep objects
-                            // live (references) like construction does.
-                            let new_arr = match &raw {
-                                Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
-                                _ => raw,
-                            };
-                            let mut ob = obj.borrow_mut();
-                            let old = ob.get_property(b"__spl_array");
-                            // Return the previous storage as an array snapshot so the
-                            // caller sees a detached array (matches PHP's zend_hash_copy
-                            // into a fresh HashTable for the return value).
-                            let old_ret = match &old {
-                                Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
-                                Value::Object(o) => {
-                                    let ob_ref = o.borrow();
-                                    let mut arr = PhpArray::new();
-                                    for (name, value) in &ob_ref.properties {
-                                        if name.starts_with(b"\0") || name.starts_with(b"__") {
-                                            continue;
-                                        }
-                                        arr.set(ArrayKey::String(PhpString::from_bytes(name)), value.clone());
-                                    }
-                                    Value::Array(Rc::new(RefCell::new(arr)))
-                                }
-                                Value::Null | Value::Undef => Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
-                                other => other.clone(),
-                            };
-                            ob.set_property(b"__spl_array".to_vec(), new_arr);
-                            Some(old_ret)
-                        }
-                        b"setflags" => {
-                            let flags = args.get(1).cloned().unwrap_or(Value::Long(0));
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_flags".to_vec(), flags);
-                            Some(Value::Null)
-                        }
-                        b"setiteratorclass" => {
-                            let class_name = args.get(1).cloned().unwrap_or(Value::String(PhpString::from_bytes(b"ArrayIterator")));
-                            // Validate: the given name must be a class derived from ArrayIterator.
-                            let class_str = class_name.to_php_string();
-                            let class_lower: Vec<u8> = class_str.as_bytes()
-                                .iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let is_valid = class_lower == b"arrayiterator"
-                                || class_lower == b"recursivearrayiterator"
-                                || self.class_extends(&class_lower, b"arrayiterator");
-                            if !is_valid {
-                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                let msg = format!(
-                                    "{}::setIteratorClass(): Argument #1 ($iteratorClass) must be a class name derived from ArrayIterator, {} given",
-                                    class_display,
-                                    String::from_utf8_lossy(class_str.as_bytes())
-                                );
-                                let exc = self.create_exception(b"TypeError", &msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_iterator_class".to_vec(), class_name);
-                            Some(Value::Null)
-                        }
-                        b"__unserialize" => {
-                            // PHP ArrayObject::__unserialize() accepts two
-                            // forms.
-                            //
-                            // (a) New PHP 8.5 named-key form, written by
-                            //     __serialize(): ['flags' => int, 'storage'
-                            //     => array|object, 'iteratorClass' => string,
-                            //     'properties' => array]
-                            //
-                            // (b) Legacy positional form preserved for
-                            //     compatibility with hand-crafted serialize
-                            //     payloads: [0 => int flags, 1 =>
-                            //     array|object storage, 2 => array
-                            //     properties, optional 3 => string
-                            //     iteratorClass].
-                            //
-                            // Form (b) is validated strictly: bad types throw
-                            // 'Incomplete or ill-typed serialization data',
-                            // and a non-array/object storage throws 'Passed
-                            // variable is not an array or object'. Form (a)
-                            // is accepted with best-effort restoration.
-                            let data = args.get(1).cloned().unwrap_or(Value::Null);
-                            let class_canonical = self.builtin_canonical_name(class);
-                            if let Value::Array(a) = &data {
-                                let a_borrow = a.borrow();
-                                let flags_key = ArrayKey::String(PhpString::from_bytes(b"flags"));
-                                let storage_key = ArrayKey::String(PhpString::from_bytes(b"storage"));
-                                let iter_key = ArrayKey::String(PhpString::from_bytes(b"iteratorClass"));
-                                let props_key = ArrayKey::String(PhpString::from_bytes(b"properties"));
-                                // Detect named-key form.
-                                let is_named = a_borrow.get(&flags_key).is_some()
-                                    || a_borrow.get(&storage_key).is_some()
-                                    || a_borrow.get(&iter_key).is_some()
-                                    || a_borrow.get(&props_key).is_some();
-                                if is_named {
-                                    let mut ob = obj.borrow_mut();
-                                    if let Some(v) = a_borrow.get(&flags_key) {
-                                        ob.set_property(b"__spl_flags".to_vec(), v.clone());
-                                    }
-                                    if let Some(v) = a_borrow.get(&storage_key) {
-                                        ob.set_property(b"__spl_array".to_vec(), v.clone());
-                                    }
-                                    if let Some(v) = a_borrow.get(&iter_key) {
-                                        ob.set_property(b"__spl_iterator_class".to_vec(), v.clone());
-                                    }
-                                    if let Some(Value::Array(p)) = a_borrow.get(&props_key) {
-                                        let p = p.borrow();
-                                        for (k, v) in p.iter() {
-                                            if let ArrayKey::String(s) = k {
-                                                ob.set_property(s.as_bytes().to_vec(), v.clone());
-                                            }
-                                        }
-                                    }
-                                    return Some(Value::Null);
-                                }
-                                // Positional form: must have at least 3
-                                // elements (flags, storage, properties) and
-                                // an optional 4th (iteratorClass).
-                                let len = a_borrow.len();
-                                if len < 3 {
-                                    drop(a_borrow);
-                                    let exc = self.create_exception(
-                                        b"UnexpectedValueException",
-                                        "Incomplete or ill-typed serialization data",
-                                        self.current_line,
-                                    );
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                                // i:0 must be a long (PHP rejects bool/string/etc.)
-                                let flags_v = a_borrow.get(&ArrayKey::Int(0)).cloned();
-                                if !matches!(flags_v, Some(Value::Long(_))) {
-                                    drop(a_borrow);
-                                    let exc = self.create_exception(
-                                        b"UnexpectedValueException",
-                                        "Incomplete or ill-typed serialization data",
-                                        self.current_line,
-                                    );
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                                let storage_v = a_borrow.get(&ArrayKey::Int(1)).cloned();
-                                let storage_is_ok = matches!(storage_v,
-                                    Some(Value::Array(_)) | Some(Value::Object(_)));
-                                let props_v = a_borrow.get(&ArrayKey::Int(2)).cloned();
-                                let props_is_ok = matches!(props_v, Some(Value::Array(_)));
-                                // Order of checks (mirroring PHP): if i:3 is
-                                // present, its type (string) is validated
-                                // BEFORE storage shape. If properties is bad
-                                // ("ill-typed") that wins over storage too.
-                                let iter_class_v = a_borrow.get(&ArrayKey::Int(3)).cloned();
-                                let iter_class_is_ok = match &iter_class_v {
-                                    None => true,
-                                    Some(Value::String(_)) | Some(Value::Null) => true,
-                                    _ => false,
-                                };
-                                if !iter_class_is_ok {
-                                    drop(a_borrow);
-                                    let exc = self.create_exception(
-                                        b"UnexpectedValueException",
-                                        "Incomplete or ill-typed serialization data",
-                                        self.current_line,
-                                    );
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                                if !props_is_ok {
-                                    drop(a_borrow);
-                                    let exc = self.create_exception(
-                                        b"UnexpectedValueException",
-                                        "Incomplete or ill-typed serialization data",
-                                        self.current_line,
-                                    );
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                                if !storage_is_ok {
-                                    drop(a_borrow);
-                                    let exc = self.create_exception(
-                                        b"UnexpectedValueException",
-                                        "Passed variable is not an array or object",
-                                        self.current_line,
-                                    );
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                                // Optional iteratorClass at i:3 must reference
-                                // an existing class that implements Iterator.
-                                if let Some(ic) = iter_class_v.as_ref().filter(|v| !matches!(v, Value::Null)) {
-                                    let icn = ic.to_php_string();
-                                    let icn_bytes = icn.as_bytes();
-                                    let icn_lower: Vec<u8> = icn_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    let exists = self.classes.contains_key(&icn_lower)
-                                        || self.is_known_builtin_class(&icn_lower);
-                                    if !exists {
-                                        drop(a_borrow);
-                                        let msg = format!(
-                                            "Cannot deserialize {} with iterator class '{}'; no such class exists",
-                                            class_canonical, String::from_utf8_lossy(icn_bytes)
-                                        );
-                                        let exc = self.create_exception(
-                                            b"InvalidArgumentException",
-                                            &msg,
-                                            self.current_line,
-                                        );
-                                        self.current_exception = Some(exc);
-                                        return Some(Value::Null);
-                                    }
-                                    let implements_iter = icn_lower == b"arrayiterator"
-                                        || icn_lower == b"recursivearrayiterator"
-                                        || self.class_extends(&icn_lower, b"arrayiterator")
-                                        || self.class_implements_interface(&icn_lower, b"iterator")
-                                        || self.builtin_implements_interface(&icn_lower, b"iterator");
-                                    if !implements_iter {
-                                        drop(a_borrow);
-                                        let msg = format!(
-                                            "Cannot deserialize {} with iterator class '{}'; this class does not implement the Iterator interface",
-                                            class_canonical, String::from_utf8_lossy(icn_bytes)
-                                        );
-                                        let exc = self.create_exception(
-                                            b"InvalidArgumentException",
-                                            &msg,
-                                            self.current_line,
-                                        );
-                                        self.current_exception = Some(exc);
-                                        return Some(Value::Null);
-                                    }
-                                }
-                                // Apply state.
-                                let mut ob = obj.borrow_mut();
-                                if let Some(v) = flags_v { ob.set_property(b"__spl_flags".to_vec(), v); }
-                                if let Some(v) = storage_v { ob.set_property(b"__spl_array".to_vec(), v); }
-                                if let Some(Value::Array(p)) = props_v {
-                                    for (k, v) in p.borrow().iter() {
-                                        if let ArrayKey::String(s) = k {
-                                            // Members use mangled names (\0*\0prop, \0Class\0prop).
-                                            let b = s.as_bytes();
-                                            let name = if b.first() == Some(&0) {
-                                                match b[1..].iter().position(|&c| c == 0) {
-                                                    Some(sep) => &b[sep + 2..],
-                                                    None => b,
-                                                }
-                                            } else {
-                                                b
-                                            };
-                                            ob.set_property(name.to_vec(), v.clone());
-                                        }
-                                    }
-                                }
-                                if let Some(v) = iter_class_v {
-                                    ob.set_property(b"__spl_iterator_class".to_vec(), v);
-                                }
-                            }
-                            Some(Value::Null)
-                        }
-                        b"unserialize" => {
-                            // ArrayObject::unserialize(string $data): deserialize and
-                            // load state. Minimal implementation: an empty or invalid
-                            // serialize payload is a no-op so code that round-trips an
-                            // empty state still works.
-                            Some(Value::Null)
-                        }
-                        b"serialize" => {
-                            // ArrayObject::serialize(): return empty serialize payload
-                            Some(Value::String(PhpString::from_bytes(b"")))
-                        }
-                        b"ksort" => {
-                            // Validate $flags parameter type
-                            if let Some(flags_val) = args.get(1) {
-                                if matches!(flags_val, Value::String(_)) {
-                                    let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                    let msg = format!("{}::ksort(): Argument #1 ($flags) must be of type int, string given", class_display);
-                                    let exc = self.create_exception(b"TypeError", &msg, 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                            }
-                            let _sort_flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            match arr {
-                                Value::Array(a) => {
-                                    let mut entries: Vec<_> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    entries.sort_by(|(a_key, _), (b_key, _)| {
-                                        match (a_key, b_key) {
-                                            (ArrayKey::Int(a), ArrayKey::Int(b)) => a.cmp(b),
-                                            (ArrayKey::String(a), ArrayKey::String(b)) => a.as_bytes().cmp(b.as_bytes()),
-                                            (ArrayKey::Int(_), ArrayKey::String(_)) => std::cmp::Ordering::Less,
-                                            (ArrayKey::String(_), ArrayKey::Int(_)) => std::cmp::Ordering::Greater,
-                                        }
-                                    });
-                                    let mut new_arr = PhpArray::new();
-                                    for (k, v) in entries {
-                                        new_arr.set(k, v);
-                                    }
-                                    *a.borrow_mut() = new_arr;
-                                }
-                                Value::Object(inner) => {
-                                    // Sort by the mangled form of the key, matching PHP's
-                                    // ksort behaviour when an ArrayObject wraps an object.
-                                    // Private   -> "\0Class\0name"
-                                    // Protected -> "\0*\0name"
-                                    // Public    -> "name"
-                                    let class_name = inner.borrow().class_name.clone();
-                                    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    let vis_map: std::collections::HashMap<Vec<u8>, Visibility> = self
-                                        .classes
-                                        .get(&class_lower)
-                                        .map(|c| c.properties.iter()
-                                            .filter(|p| !p.is_static)
-                                            .map(|p| (p.name.clone(), p.visibility))
-                                            .collect())
-                                        .unwrap_or_default();
-                                    let mangle = |name: &[u8]| -> Vec<u8> {
-                                        // Already-mangled names start with NUL.
-                                        if name.first() == Some(&0) {
-                                            return name.to_vec();
-                                        }
-                                        match vis_map.get(name).copied() {
-                                            Some(Visibility::Private) => {
-                                                let mut r = vec![0u8];
-                                                r.extend_from_slice(&class_name);
-                                                r.push(0u8);
-                                                r.extend_from_slice(name);
-                                                r
-                                            }
-                                            Some(Visibility::Protected) => {
-                                                let mut r = vec![0u8, b'*', 0u8];
-                                                r.extend_from_slice(name);
-                                                r
-                                            }
-                                            _ => name.to_vec(),
-                                        }
-                                    };
-                                    let mut props = inner.borrow().properties.clone();
-                                    props.sort_by(|(a_name, _), (b_name, _)| {
-                                        mangle(a_name).cmp(&mangle(b_name))
-                                    });
-                                    inner.borrow_mut().properties = props;
-                                }
-                                _ => {}
-                            }
-                            Some(Value::True)
-                        }
-                        b"asort" => {
-                            // Validate $flags parameter type
-                            if let Some(flags_val) = args.get(1) {
-                                if matches!(flags_val, Value::String(_)) {
-                                    let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                    let msg = format!("{}::asort(): Argument #1 ($flags) must be of type int, string given", class_display);
-                                    let exc = self.create_exception(b"TypeError", &msg, 0);
-                                    self.current_exception = Some(exc);
-                                    return Some(Value::Null);
-                                }
-                            }
-                            let _sort_flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            match arr {
-                                Value::Array(a) => {
-                                    let mut entries: Vec<_> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                    entries.sort_by(|(_, a_val), (_, b_val)| {
-                                        Self::php_compare_values(a_val, b_val)
-                                    });
-                                    let mut new_arr = PhpArray::new();
-                                    for (k, v) in entries {
-                                        new_arr.set(k, v);
-                                    }
-                                    *a.borrow_mut() = new_arr;
-                                }
-                                Value::Object(inner) => {
-                                    let mut props = inner.borrow().properties.clone();
-                                    props.sort_by(|(_, a_val), (_, b_val)| {
-                                        Self::php_compare_values(a_val, b_val)
-                                    });
-                                    inner.borrow_mut().properties = props;
-                                }
-                                _ => {}
-                            }
-                            Some(Value::True)
-                        }
-                        b"natsort" => {
-                            // Validate argument count: natsort() takes 0 arguments
-                            let extra_args = args.len().saturating_sub(1); // exclude $this
-                            if extra_args > 0 {
-                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                let msg = format!("{}::natsort() expects exactly 0 arguments, {} given", class_display, extra_args);
-                                let exc = self.create_exception(b"ArgumentCountError", &msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let mut entries: Vec<_> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                entries.sort_by(|(_, a_val), (_, b_val)| {
-                                    let a_str = a_val.to_php_string().to_string_lossy();
-                                    let b_str = b_val.to_php_string().to_string_lossy();
-                                    Self::strnatcmp(&a_str, &b_str, false)
-                                });
-                                let mut new_arr = PhpArray::new();
-                                for (k, v) in entries {
-                                    new_arr.set(k, v);
-                                }
-                                *a.borrow_mut() = new_arr;
-                            }
-                            Some(Value::True)
-                        }
-                        b"natcasesort" => {
-                            // Validate argument count: natcasesort() takes 0 arguments
-                            let extra_args = args.len().saturating_sub(1);
-                            if extra_args > 0 {
-                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                let msg = format!("{}::natcasesort() expects exactly 0 arguments, {} given", class_display, extra_args);
-                                let exc = self.create_exception(b"ArgumentCountError", &msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let mut entries: Vec<_> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                entries.sort_by(|(_, a_val), (_, b_val)| {
-                                    let a_str = a_val.to_php_string().to_string_lossy();
-                                    let b_str = b_val.to_php_string().to_string_lossy();
-                                    Self::strnatcmp(&a_str, &b_str, true)
-                                });
-                                let mut new_arr = PhpArray::new();
-                                for (k, v) in entries {
-                                    new_arr.set(k, v);
-                                }
-                                *a.borrow_mut() = new_arr;
-                            }
-                            Some(Value::True)
-                        }
-                        b"uasort" => {
-                            // Validate: uasort() expects exactly 1 argument
-                            let extra_args = args.len().saturating_sub(1);
-                            if extra_args != 1 {
-                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                let msg = format!("{}::uasort() expects exactly 1 argument, {} given", class_display, extra_args);
-                                let exc = self.create_exception(b"ArgumentCountError", &msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            // User comparison sort by value - need to call callback
-                            let callback = args.get(1).cloned().unwrap_or(Value::Null);
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let mut entries: Vec<_> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                drop(ob);
-                                // Pre-compute comparison using insertion sort to avoid borrow issues
-                                let len = entries.len();
-                                for i in 1..len {
-                                    let mut j = i;
-                                    while j > 0 {
-                                        let cmp_result = self.spl_call_compare_callback(&callback, &entries[j-1].1, &entries[j].1);
-                                        if cmp_result > 0 {
-                                            entries.swap(j-1, j);
-                                            j -= 1;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                }
-                                let arr_ref = obj.borrow().get_property(b"__spl_array");
-                                if let Value::Array(a) = arr_ref {
-                                    let mut new_arr = PhpArray::new();
-                                    for (k, v) in entries {
-                                        new_arr.set(k, v);
-                                    }
-                                    *a.borrow_mut() = new_arr;
-                                }
-                            }
-                            Some(Value::True)
-                        }
-                        b"uksort" => {
-                            // Validate: uksort() expects exactly 1 argument
-                            let extra_args = args.len().saturating_sub(1);
-                            if extra_args != 1 {
-                                let class_display = crate::value::display_class_name(&obj.borrow().class_name);
-                                let msg = format!("{}::uksort() expects exactly 1 argument, {} given", class_display, extra_args);
-                                let exc = self.create_exception(b"ArgumentCountError", &msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let callback = args.get(1).cloned().unwrap_or(Value::Null);
-                            let ob = obj.borrow();
-                            let arr = ob.get_property(b"__spl_array");
-                            if let Value::Array(a) = arr {
-                                let mut entries: Vec<_> = a.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                drop(ob);
-                                let len = entries.len();
-                                for i in 1..len {
-                                    let mut j = i;
-                                    while j > 0 {
-                                        let a_val = match &entries[j-1].0 {
-                                            ArrayKey::Int(n) => Value::Long(*n),
-                                            ArrayKey::String(s) => Value::String(s.clone()),
-                                        };
-                                        let b_val = match &entries[j].0 {
-                                            ArrayKey::Int(n) => Value::Long(*n),
-                                            ArrayKey::String(s) => Value::String(s.clone()),
-                                        };
-                                        let cmp_result = self.spl_call_compare_callback(&callback, &a_val, &b_val);
-                                        if cmp_result > 0 {
-                                            entries.swap(j-1, j);
-                                            j -= 1;
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                }
-                                let arr_ref = obj.borrow().get_property(b"__spl_array");
-                                if let Value::Array(a) = arr_ref {
-                                    let mut new_arr = PhpArray::new();
-                                    for (k, v) in entries {
-                                        new_arr.set(k, v);
-                                    }
-                                    *a.borrow_mut() = new_arr;
-                                }
-                            }
-                            Some(Value::True)
-                        }
-                        b"seek" => {
-                            let pos = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-                            // Validate against the size of the storage.
-                            let size = {
-                                let ob = obj.borrow();
-                                let arr = ob.get_property(b"__spl_array");
-                                if let Value::Array(a) = arr {
-                                    a.borrow().len() as i64
-                                } else if let Value::Object(inner) = arr {
-                                    inner.borrow().properties.len() as i64
-                                } else {
-                                    0
-                                }
-                            };
-                            if pos < 0 || pos >= size {
-                                let msg = format!("Seek position {} is out of range", pos);
-                                let exc = self.create_exception(b"OutOfBoundsException", &msg, 0);
-                                self.current_exception = Some(exc);
-                                return Some(Value::Null);
-                            }
-                            let mut ob = obj.borrow_mut();
-                            ob.set_property(b"__spl_pos".to_vec(), Value::Long(pos));
-                            Some(Value::Null)
-                        }
-                        _ => None,
-                    }
+                    self.spl_array_call(class, method, obj, Some(&args[1..]))
                 }
                 b"spldoublylinkedlist" | b"splstack" | b"splqueue" => {
                     self.spl_dll_call(method, obj, Some(&args[1..]))
@@ -22196,6 +21152,7 @@ impl Vm {
                             );
                         } else if has_spl_array && !self.class_implements_interface(&class_lower, b"iterator")
                             && !(self.spl_find_base(&class_lower, &[b"splfixedarray"]).is_some() && self.fa_user_get_iterator(obj))
+                            && self.spl_find_base(&class_lower, &[b"arrayobject", b"arrayiterator"]).is_none()
                         {
                             // SPL class with internal array - iterate the array directly
                             // (SplFixedArray iterates its live storage).
@@ -25232,6 +24189,13 @@ impl Vm {
                     }
                     let cloned = match &val {
                         Value::Object(obj) => {
+                            // ArrayObject clones its table; ArrayIterator clones share
+                            // the original (USE_OTHER).
+                            let ao_clone: Option<(Value, i64)> = {
+                                let cl: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"])
+                                    .map(|b| self.ao_clone_storage(obj, b == b"arrayobject"))
+                            };
                             let obj_borrow = obj.borrow();
                             // Check if this is an uncloneable object
                             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -25250,7 +24214,8 @@ impl Vm {
                                     | b"reflectionconstant" | b"reflectiongenerator"
                                     | b"reflectionfiber" | b"reflectionreference"
                             );
-                            if reflection_uncloneable || class_lower == b"generator" || class_lower == b"closure" || class_lower == b"xmlparser" || class_lower == b"fiber" || obj_borrow.has_property(b"__enum_case") {
+                            let spl_uncloneable = self.spl_find_base(&class_lower, &[b"splfileobject"]).is_some();
+                            if reflection_uncloneable || spl_uncloneable || class_lower == b"generator" || class_lower == b"closure" || class_lower == b"xmlparser" || class_lower == b"fiber" || obj_borrow.has_property(b"__enum_case") {
                                 let class_name = crate::value::display_class_name(&obj_borrow.class_name);
                                 drop(obj_borrow);
                                 let msg = format!("Trying to clone an uncloneable object of class {}", class_name);
@@ -25276,9 +24241,8 @@ impl Vm {
                             // snapshot a wrapped object into a fresh array in
                             // both cases because the wrapped object lifecycle is
                             // separate.
-                            let is_array_object_like = matches!(class_lower.as_slice(),
-                                b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator");
-                            let deep_clone_storage = class_lower.as_slice() == b"arrayobject";
+                            let is_array_object_like = false;
+                            let deep_clone_storage = false;
                             // Copy all properties, deep-cloning arrays for SPL classes
                             // and deep-cloning __lazy_real for lazy proxies.
                             for (name, value) in &obj_borrow.properties {
@@ -25372,6 +24336,10 @@ impl Vm {
                                     }
                                 };
                                 new_obj.set_property(name.clone(), cloned_value);
+                            }
+                            if let Some((st, fl)) = ao_clone {
+                                new_obj.set_property(b"__spl_array".to_vec(), st);
+                                new_obj.set_property(b"__spl_flags".to_vec(), Value::Long(fl));
                             }
                             // For WeakMap, copy the live entries from the source.
                             let original_oid = obj_borrow.object_id;
@@ -31106,23 +30074,28 @@ impl Vm {
                         // ArrayObject/ArrayIterator ARRAY_AS_PROPS: route $obj->foo to $obj['foo']
                         // when the ARRAY_AS_PROPS flag (bit 2) is set, unless the property is
                         // a real declared one (in which case STD_PROP_LIST controls what wins).
-                        let aa_prop_result = if matches!(
-                            class_lower.as_slice(),
-                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-                        ) && !prop_name.as_bytes().starts_with(b"__spl_")
+                        let aa_prop_result = if !prop_name.as_bytes().starts_with(b"__spl_")
+                            && self.spl_find_base(&class_lower, &[b"arrayobject", b"arrayiterator"]).is_some()
                         {
-                            let ob = obj.borrow();
-                            let flags = ob.get_property(b"__spl_flags").to_long();
-                            let has_prop = ob.has_property(prop_name.as_bytes());
-                            let arr = ob.get_property(b"__spl_array");
-                            drop(ob);
-                            if flags & 2 != 0 && !has_prop {
-                                if let Value::Array(a) = arr {
-                                    let key = crate::array::ArrayKey::String(PhpString::from_bytes(prop_name.as_bytes()));
-                                    Some(a.borrow().get(&key).cloned().unwrap_or(Value::Null))
+                            let flags = crate::spl_array::ao_flags(obj);
+                            let has_prop = obj.borrow().has_property(prop_name.as_bytes());
+                            if flags & crate::spl_array::ARRAY_AS_PROPS != 0 && !has_prop {
+                                let user_get = self.classes.get(&class_lower).map(|c| c.get_method(b"offsetget").is_some()).unwrap_or(false);
+                                let key = Value::String(prop_name.clone());
+                                let v = if user_get {
+                                    self.call_object_method(&obj_val, b"offsetGet", &[key]).unwrap_or(Value::Null)
                                 } else {
-                                    None
+                                    self.ao_offset_get(obj, &key)
+                                };
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: "Uncaught exception".to_string(), line: op.line });
                                 }
+                                Some(v)
                             } else {
                                 None
                             }
@@ -31806,31 +30779,35 @@ impl Vm {
                             .collect();
 
                         // ArrayObject/ArrayIterator ARRAY_AS_PROPS: route $obj->foo = $v to the array.
-                        if matches!(
-                            class_lower.as_slice(),
-                            b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-                        ) && !prop_name.as_bytes().starts_with(b"__spl_")
+                        if !prop_name.as_bytes().starts_with(b"__spl_")
+                            && self.spl_find_base(&class_lower, &[b"arrayobject", b"arrayiterator"]).is_some()
                         {
-                            let ob = obj.borrow();
-                            let flags = ob.get_property(b"__spl_flags").to_long();
-                            let has_prop = ob.has_property(prop_name.as_bytes());
-                            let arr = ob.get_property(b"__spl_array");
-                            drop(ob);
-                            if flags & 2 != 0 && !has_prop {
-                                if let Value::Array(a) = arr {
-                                    let key = crate::array::ArrayKey::String(
-                                        PhpString::from_bytes(prop_name.as_bytes()),
-                                    );
-                                    a.borrow_mut().set(key, value.clone());
-                                    self.write_operand(
-                                        &op.op2,
-                                        value,
-                                        &mut cvs,
-                                        &mut tmps,
-                                        &static_cv_keys,
-                                    );
-                                    continue;
+                            let flags = crate::spl_array::ao_flags(obj);
+                            let has_prop = obj.borrow().has_property(prop_name.as_bytes());
+                            if flags & crate::spl_array::ARRAY_AS_PROPS != 0 && !has_prop {
+                                let user_set = self.classes.get(&class_lower).map(|c| c.get_method(b"offsetset").is_some()).unwrap_or(false);
+                                let key = Value::String(prop_name.clone());
+                                if user_set {
+                                    self.call_object_method(&obj_val, b"offsetSet", &[key, value.clone()]);
+                                } else {
+                                    self.ao_offset_set(obj, &key, value.clone());
                                 }
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: "Uncaught exception".to_string(), line: op.line });
+                                }
+                                self.write_operand(
+                                    &op.op2,
+                                    value,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                continue;
                             }
                         }
 

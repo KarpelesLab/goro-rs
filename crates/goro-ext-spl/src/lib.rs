@@ -50,6 +50,10 @@ pub fn register(vm: &mut Vm) {
         b"splfileinfo".to_vec(),
         goro_core::spl_file::spl_file_info_construct_native,
     );
+    for cls in [&b"arrayobject"[..], b"arrayiterator", b"recursivearrayiterator"] {
+        vm.object_construct_handlers
+            .insert(cls.to_vec(), goro_core::spl_array::spl_array_construct_native);
+    }
     vm.object_construct_handlers.insert(
         b"multipleiterator".to_vec(),
         goro_core::spl_storage::spl_multiple_construct_native,
@@ -236,31 +240,19 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
         }
         Some(val @ Value::Object(obj)) => {
             // IteratorAggregate: dispatch to getIterator()'s return value.
-            let cls_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            let mut is_aggregate = false;
-            let mut cur = cls_lower.clone();
-            for _ in 0..32 {
-                if let Some(c) = vm.classes.get(&cur) {
-                    if c.interfaces.iter().any(|n| n.eq_ignore_ascii_case(b"IteratorAggregate")) {
-                        is_aggregate = true;
-                        break;
-                    }
-                    if c.interfaces.iter().any(|n| n.eq_ignore_ascii_case(b"Iterator")) {
-                        break;
-                    }
-                    if let Some(p) = &c.parent {
-                        cur = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    } else { break; }
-                } else { break; }
-            }
+            let mut is_aggregate = !vm.obj_instanceof(val, b"iterator") && vm.obj_instanceof(val, b"iteratoraggregate");
             // Extension-provided aggregates (e.g. DatePeriod)
             if !is_aggregate {
+                let cls_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                 if let Some((native, _)) = vm.find_native_class_handler(&cls_lower) {
                     is_aggregate = vm.builtin_implements_interface(&native, b"iteratoraggregate");
                 }
             }
             if is_aggregate {
-                let iter_val = vm.call_object_method(val, b"getIterator", &[]).unwrap_or(Value::Null);
+                let iter_val = vm.spl_resolve_traversable(val);
+                if vm.current_exception.is_some() {
+                    return Ok(Value::Null);
+                }
                 return iterator_to_array_impl(vm, &[iter_val, if use_keys { Value::True } else { Value::False }]);
             }
             let mut result = PhpArray::new();
@@ -404,7 +396,17 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::Null);
         }
     }
-    match args.first() {
+    let resolved = match args.first() {
+        Some(v @ Value::Object(_)) => {
+            let r = vm.spl_resolve_traversable(v);
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
+            }
+            Some(r)
+        }
+        other => other.cloned(),
+    };
+    match resolved.as_ref() {
         Some(Value::Array(arr)) => Ok(Value::Long(arr.borrow().len() as i64)),
         Some(val @ Value::Object(_)) => {
             let mut count: i64 = 0;
