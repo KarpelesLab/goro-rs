@@ -482,6 +482,28 @@ impl Vm {
         self.typed_ref_verify_sources(&srcs, value, strict)
     }
 
+    /// zend_verify_ref_array_assignable: may the null held by the typed
+    /// reference in `slot` (a CV) be auto-initialized to an array?
+    pub(crate) fn typed_ref_auto_init_check(&self, slot: Option<&Value>) -> Result<(), String> {
+        let Some(Value::Reference(r)) = slot else {
+            return Ok(());
+        };
+        if !any() {
+            return Ok(());
+        }
+        for s in sources(r) {
+            if !super::param_type_accepts_array(&s.ty) {
+                return Err(format!(
+                    "Cannot auto-initialize an array inside a reference held by property {}::${} of type {}",
+                    s.class,
+                    s.prop,
+                    self.param_type_name(&s.ty)
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn typed_ref_conflict(&self, a: &RefSource, b: &RefSource, v: &Value) -> String {
         format!(
             "Cannot assign {} to reference held by property {}::${} of type {} and property {}::${} of type {}, as this would result in an inconsistent type conversion",

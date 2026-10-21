@@ -28148,6 +28148,23 @@ impl Vm {
                             });
                         }
                     } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
+                        if let OperandType::Cv(ci) = op.op1 {
+                            if let Err(msg) = self.typed_ref_auto_init_check(cvs.get(ci as usize)) {
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught TypeError: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         // Auto-initialize null/undef/false to array and append
                         if matches!(&arr_val, Value::False) {
                             self.emit_deprecated_at(
@@ -28330,6 +28347,23 @@ impl Vm {
                             release_point!('exec);
                         }
                     } else if matches!(&arr_val, Value::Null | Value::Undef | Value::False) {
+                        if let OperandType::Cv(ci) = op.op1 {
+                            if let Err(msg) = self.typed_ref_auto_init_check(cvs.get(ci as usize)) {
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught TypeError: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         // Auto-initialize null/undef/false to array
                         if matches!(&arr_val, Value::False) {
                             self.emit_deprecated_at(
@@ -44090,6 +44124,7 @@ impl Vm {
                                 let def =
                                     self.find_property_def(&class_lower, prop_name.as_bytes());
                                 let mut w_error: Option<String> = None;
+                                let mut w_type_error: Option<String> = None;
                                 // A hooked property (outside its hooks) only hands out
                                 // objects for writing.
                                 let hooked = !in_hook
@@ -44164,6 +44199,30 @@ impl Vm {
                                         obj.borrow_mut()
                                             .set_property(storage_key.clone(), arr.clone());
                                         prop = arr;
+                                    } else if matches!(prop, Value::Null | Value::Undef)
+                                        && (exists || !has_get)
+                                        && !unset_fetch
+                                    {
+                                        if let Some(t) = pt {
+                                            // zend_throw_auto_init_in_prop_error
+                                            let declaring_lower =
+                                                declaring_class.to_ascii_lowercase();
+                                            let class_display = self
+                                                .classes
+                                                .get(&declaring_lower)
+                                                .map(|c| crate::value::display_class_name(&c.name))
+                                                .unwrap_or_else(|| {
+                                                    crate::value::display_class_name(
+                                                        &declaring_class,
+                                                    )
+                                                });
+                                            w_type_error = Some(format!(
+                                                "Cannot auto-initialize an array inside property {}::${} of type {}",
+                                                class_display,
+                                                prop_name.to_string_lossy(),
+                                                self.param_type_name(t)
+                                            ));
+                                        }
                                     }
                                 } else if matches!(prop, Value::Null | Value::Undef)
                                     && (exists || !has_get)
@@ -44205,6 +44264,21 @@ impl Vm {
                                     obj.borrow_mut()
                                         .set_property(storage_key.clone(), arr.clone());
                                     prop = arr;
+                                }
+                                if let Some(msg) = w_type_error {
+                                    let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: format!("Uncaught TypeError: {}", msg),
+                                        line: op.line,
+                                    });
                                 }
                                 if let Some(msg) = w_error {
                                     let exc = self.create_exception(b"Error", &msg, op.line);
