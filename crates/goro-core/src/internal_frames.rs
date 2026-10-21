@@ -219,6 +219,21 @@ impl Vm {
             }
         }
         let Some((info, flags)) = self.zpp_info(lname) else {
+            // zend_call_function() -> the function's own zpp: the arity
+            // check holds for every internal function, even those whose
+            // types the generic layer doesn't check yet.
+            if let Some(msg) = crate::arginfo::lookup(lname).and_then(|i| i.arity_error(args.len()))
+            {
+                let line = self.current_line;
+                self.push_builtin_frame(lname, args, at);
+                let exc = self.create_exception(b"ArgumentCountError", &msg, line);
+                self.pop_builtin_frame();
+                self.current_exception = Some(exc);
+                return Err(crate::vm::VmError {
+                    message: self.uncaught_exception_message(),
+                    line,
+                });
+            }
             self.push_builtin_frame(lname, args, at);
             let r = f(self, args);
             self.pop_builtin_frame();
