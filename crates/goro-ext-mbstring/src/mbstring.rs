@@ -31,6 +31,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_encoding_aliases", mb_encoding_aliases);
     vm.register_function(b"mb_check_encoding", mb_check_encoding);
     vm.register_function(b"mb_get_info", mb_get_info);
+    vm.register_function(b"mb_output_handler", mb_output_handler);
     crate::strfuncs::register(vm);
     crate::mime::register(vm);
     crate::entities::register(vm);
@@ -933,4 +934,51 @@ fn mb_get_info(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Ok(Value::False)
         }
     }
+}
+
+/* ===== mb_output_handler ===== */
+
+const PHP_OUTPUT_HANDLER_START: i64 = 0x01;
+const PHP_OUTPUT_HANDLER_FINAL: i64 = 0x08;
+
+fn mb_output_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let f = "mb_output_handler";
+    let s = str_arg(vm, f, args, 0, "string")?;
+    let status = long_arg(vm, f, args, 1, "status")?;
+    state::sync(vm);
+    let enc = state::with(|st| st.current_http_output_encoding);
+    if enc.no == EncNo::Pass {
+        return Ok(pstring(s));
+    }
+    if status & PHP_OUTPUT_HANDLER_START != 0 {
+        // The CLI never sends headers, so the default content type applies
+        // and output conversion is enabled.
+        state::with(|st| st.outconv_enabled = true);
+    }
+    if !state::with(|st| st.outconv_enabled) {
+        return Ok(pstring(s));
+    }
+    let last_feed = status & PHP_OUTPUT_HANDLER_FINAL != 0;
+    let (repl, mode) = state::illegal_settings();
+    let internal = state::current_internal_encoding();
+    let mut buf = mbfl::ConvBuf::new(s.len(), repl, mode);
+    let mut wchars = Vec::with_capacity(s.len());
+    if let (Some(tw), Some(fw)) = (internal.to_wchar, enc.from_wchar) {
+        let mut st = state::with(|st| st.outconv_state);
+        tw(&s, &mut wchars, &mut st);
+        state::with(|x| x.outconv_state = st);
+        if !s.is_empty() {
+            fw(&wchars, &mut buf, last_feed);
+        }
+    } else {
+        return Ok(pstring(s));
+    }
+    state::add_illegal_chars(buf.errors);
+    if last_feed {
+        state::with(|st| {
+            st.outconv_enabled = false;
+            st.outconv_state = 0;
+        });
+    }
+    Ok(pstring(buf.out))
 }

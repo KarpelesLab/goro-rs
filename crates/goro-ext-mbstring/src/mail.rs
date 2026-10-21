@@ -41,7 +41,7 @@ fn parse_mail_headers(s: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let mut token_pos = 0usize;
     let mut fld_name: Option<Vec<u8>> = None;
     let mut fld_val: Option<Vec<u8>>;
-    let mut update = |out: &mut Vec<(Vec<u8>, Vec<u8>)>, name: Vec<u8>, val: Vec<u8>| {
+    let update = |out: &mut Vec<(Vec<u8>, Vec<u8>)>, name: Vec<u8>, val: Vec<u8>| {
         let name = name.to_ascii_lowercase();
         match out.iter_mut().find(|(n, _)| *n == name) {
             Some(e) => e.1 = val,

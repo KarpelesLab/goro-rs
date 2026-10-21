@@ -213,7 +213,6 @@ enum Ctype {
     Gc(&'static [usize]), // Unicode general categories (prop indices)
     Range(u32, u32), // script ranges etc.
     Ranges(&'static [(u32, u32)]),
-    Newline,
 }
 
 fn is_space_code(c: u32) -> bool {
@@ -315,7 +314,6 @@ fn ctype_match(ct: Ctype, c: u32, enc: RegEnc) -> bool {
         Ctype::Gc(props) => uni_is(c, props),
         Ctype::Range(lo, hi) => c >= lo && c <= hi,
         Ctype::Ranges(rs) => rs.iter().any(|&(lo, hi)| c >= lo && c <= hi),
-        Ctype::Newline => c == 0x0A,
     }
 }
 
@@ -802,7 +800,7 @@ impl<'a> Parser<'a> {
                     possessive = true;
                 }
             }
-            atom = Node::Repeat { node: Box::new(atom), min, max, greedy, possessive };
+            atom = reduce_nested_quantifier(Node::Repeat { node: Box::new(atom), min, max, greedy, possessive });
         }
     }
 
@@ -1517,6 +1515,34 @@ impl<'a> Parser<'a> {
 
 const PLAIN_FLAG: usize = 1 << 40;
 
+/// `(?:x+)+` => `x+`, `(?:x*)+` => `x*`, ... (greedy, non-capturing only)
+fn reduce_nested_quantifier(n: Node) -> Node {
+    if let Node::Repeat { node, min, max, greedy: true, possessive: false } = &n {
+        let inner = match &**node {
+            Node::Group(b, 0) => &**b,
+            other => other,
+        };
+        if let Node::Repeat { node: inode, min: imin, max: imax, greedy: true, possessive: false } = inner {
+            let outer = (*min, *max);
+            let inn = (*imin, *imax);
+            let star = (0u32, None);
+            let plus = (1u32, None);
+            let opt = (0u32, Some(1u32));
+            let result = if outer == plus && inn == plus {
+                Some(plus)
+            } else if (outer == star || outer == plus || outer == opt) && (inn == star || inn == plus || inn == opt) && !(outer == opt && inn == opt) {
+                Some(star)
+            } else {
+                None
+            };
+            if let Some((mn, mx)) = result {
+                return Node::Repeat { node: inode.clone(), min: mn, max: mx, greedy: true, possessive: false };
+            }
+        }
+    }
+    n
+}
+
 /// Fixed length (in characters) of a node, if it has one
 fn char_length(n: &Node) -> Option<usize> {
     match n {
@@ -1581,6 +1607,11 @@ enum Inst {
     AnyNl,
     Class(usize, bool),
     Split(usize, usize),
+    /// OP_PUSH_OR_JUMP_EXACT1: if the current char is c, push b and go to a;
+    /// otherwise jump to b
+    SplitExact(usize, usize, u32),
+    /// OP_PUSH_IF_PEEK_NEXT: go to a, pushing b only if the current char is c
+    SplitPeek(usize, usize, u32),
     Jmp(usize),
     Save(usize),
     Assert(Anchor),
@@ -1613,6 +1644,8 @@ struct Compiler {
     classes: Vec<CharClass>,
     nloops: usize,
     enc: RegEnc,
+    /// Head exact char of the node following the one being compiled
+    next_exact: Option<u32>,
 }
 
 impl Compiler {
@@ -1641,9 +1674,24 @@ impl Compiler {
                 self.emit(Inst::Class(idx, *ci));
             }
             Node::Seq(v) => {
-                for x in v {
+                for (i, x) in v.iter().enumerate() {
+                    let next = v.get(i + 1);
+                    if let (Some(nx), Node::Repeat { node, min, max: None, greedy: true, possessive: false }) = (next, x) {
+                        // automatic possessivation a*b ==> (?>a*)b
+                        if *min <= 1 && is_strict_real_node(node) {
+                            if let (Some(a), Some(b)) = (head_literal(node, false), head_literal(nx, false)) {
+                                if is_exclusive(&a, &b, self.enc) {
+                                    self.next_exact = next_head_exact(nx);
+                                    self.compile(&Node::Atomic(Box::new(x.clone())));
+                                    continue;
+                                }
+                            }
+                        }
+                    }
+                    self.next_exact = next.and_then(next_head_exact);
                     self.compile(x);
                 }
+                self.next_exact = None;
             }
             Node::Alt(v) => {
                 let mut jumps = Vec::new();
@@ -1678,12 +1726,14 @@ impl Compiler {
                     self.compile(&Node::Atomic(Box::new(inner)));
                     return;
                 }
+                let next_exact = self.next_exact.take();
                 for _ in 0..*min {
                     self.compile(node);
                 }
                 match max {
                     None => {
                         let can_empty = nullable(node);
+                        let head = if *greedy && !can_empty { head_literal(node, true).and_then(|h| h.exact_char()) } else { None };
                         let l = self.emit(Inst::Split(0, 0));
                         let reg = if can_empty {
                             let r = self.nloops;
@@ -1697,7 +1747,15 @@ impl Compiler {
                         let check = reg.map(|r| self.emit(Inst::LoopCheck(r, 0)));
                         self.emit(Inst::Jmp(l));
                         let exit = self.prog.len();
-                        self.prog[l] = if *greedy { Inst::Split(l + 1, exit) } else { Inst::Split(exit, l + 1) };
+                        self.prog[l] = if *greedy {
+                            match (head, next_exact) {
+                                (Some(c), _) => Inst::SplitExact(l + 1, exit, c),
+                                (None, Some(c)) => Inst::SplitPeek(l + 1, exit, c),
+                                _ => Inst::Split(l + 1, exit),
+                            }
+                        } else {
+                            Inst::Split(exit, l + 1)
+                        };
                         if let (Some(ci), Some(r)) = (check, reg) {
                             self.prog[ci] = Inst::LoopCheck(r, exit);
                         }
@@ -1768,6 +1826,66 @@ impl Compiler {
                 self.emit(Inst::Keep);
             }
         }
+    }
+}
+
+/// Head literal of a node (C: get_tree_head_literal)
+enum HeadLit<'a> {
+    Char(u32, bool),
+    Class(&'a CharClass, bool),
+}
+
+impl<'a> HeadLit<'a> {
+    fn exact_char(&self) -> Option<u32> {
+        match self {
+            HeadLit::Char(c, false) => Some(*c),
+            _ => None,
+        }
+    }
+}
+
+fn head_literal(n: &Node, exact: bool) -> Option<HeadLit<'_>> {
+    match n {
+        Node::Char(c, ci) => {
+            if exact && *ci {
+                None
+            } else {
+                Some(HeadLit::Char(*c, *ci))
+            }
+        }
+        Node::Class(cc, ci) => {
+            if exact {
+                None
+            } else {
+                Some(HeadLit::Class(cc, *ci))
+            }
+        }
+        Node::Seq(v) => v.first().and_then(|x| head_literal(x, exact)),
+        Node::Group(b, _) | Node::Atomic(b) => head_literal(b, exact),
+        Node::Repeat { node, min, .. } if *min > 0 => head_literal(node, exact),
+        Node::Look { node, ahead: true, negate: false } => head_literal(node, exact),
+        _ => None,
+    }
+}
+
+/// The first byte-level exact char of a following node (tune_next):
+/// Oniguruma compares the first byte, so only ASCII chars qualify here.
+fn next_head_exact(n: &Node) -> Option<u32> {
+    match head_literal(n, true) {
+        Some(HeadLit::Char(c, false)) if c != 0 && c < 0x80 => Some(c),
+        _ => None,
+    }
+}
+
+fn is_strict_real_node(n: &Node) -> bool {
+    matches!(n, Node::Char(..) | Node::Class(..))
+}
+
+fn is_exclusive(a: &HeadLit, b: &HeadLit, enc: RegEnc) -> bool {
+    match (a, b) {
+        (HeadLit::Char(x, false), HeadLit::Char(y, false)) => x != y,
+        (HeadLit::Class(cc, false), HeadLit::Char(y, false)) | (HeadLit::Char(y, false), HeadLit::Class(cc, false)) => !cc.matches(*y, false, enc),
+        _ => false,
     }
 }
 
@@ -1910,7 +2028,7 @@ pub fn compile(pattern: &[u8], options: u32, enc: RegEnc, syntax: Syntax) -> Res
     }
     let ast = resolve(ast, &|raw| mapping[raw], &names, has_names).map_err(|e| e.0)?;
     let anchored_start = starts_with_begin_buf(&ast);
-    let mut c = Compiler { prog: Vec::new(), classes: Vec::new(), nloops: 0, enc };
+    let mut c = Compiler { prog: Vec::new(), classes: Vec::new(), nloops: 0, enc, next_exact: None };
     c.compile(&ast);
     c.emit(Inst::Match);
     Ok(Regex {
@@ -2078,6 +2196,28 @@ impl<'a> Exec<'a> {
                     ip = *a;
                     true
                 }
+                Inst::SplitExact(a, b, c) => {
+                    if pos < codes.len() && codes[pos] == *c {
+                        stack.push(Frame::Alt(*b, pos));
+                        if self.limits.stack_limit > 0 && stack.len() + 1 > self.limits.stack_limit {
+                            return Err(MatchError::StackLimit);
+                        }
+                        ip = *a;
+                    } else {
+                        ip = *b;
+                    }
+                    true
+                }
+                Inst::SplitPeek(a, b, c) => {
+                    if pos < codes.len() && codes[pos] == *c {
+                        stack.push(Frame::Alt(*b, pos));
+                        if self.limits.stack_limit > 0 && stack.len() + 1 > self.limits.stack_limit {
+                            return Err(MatchError::StackLimit);
+                        }
+                    }
+                    ip = *a;
+                    true
+                }
                 Inst::Jmp(t) => {
                     ip = *t;
                     true
@@ -2200,7 +2340,15 @@ impl<'a> Exec<'a> {
                 // Backtrack
                 loop {
                     match stack.pop() {
-                        None => return Ok(None),
+                        None => {
+                            if depth == 0 {
+                                self.retries += 1;
+                                if self.limits.retry_limit > 0 && self.retries > self.limits.retry_limit {
+                                    return Err(MatchError::RetryLimit);
+                                }
+                            }
+                            return Ok(None);
+                        }
                         Some(Frame::Alt(i, p)) => {
                             self.retries += 1;
                             if self.limits.retry_limit > 0 && self.retries > self.limits.retry_limit {

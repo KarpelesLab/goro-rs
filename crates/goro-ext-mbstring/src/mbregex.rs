@@ -136,7 +136,13 @@ fn regex_encoding() -> (RegEnc, usize, Option<&'static Encoding>) {
 }
 
 fn limits(vm: &Vm) -> Limits {
-    let get = |k: &[u8], d: i64| -> i64 { vm.constants.get(k).map(|v| v.to_long()).unwrap_or(d) };
+    let get = |k: &[u8], d: i64| -> i64 {
+        match vm.constants.get(k) {
+            Some(Value::String(s)) if s.is_empty() => d,
+            Some(v) => v.to_long(),
+            None => d,
+        }
+    };
     let stack = get(b"mbstring.regex_stack_limit", 100000);
     let retry = get(b"mbstring.regex_retry_limit", 1000000);
     Limits {
@@ -390,7 +396,7 @@ fn substitute(out: &mut Vec<u8>, subject: &[u8], replace: &[u8], re: &Regex, reg
             out.extend_from_slice(&replace[sp..p]);
             continue;
         }
-        let mut no: i64;
+        let no: i64;
         match replace[p] {
             b'0' => {
                 no = 0;
@@ -445,8 +451,7 @@ fn substitute(out: &mut Vec<u8>, subject: &[u8], replace: &[u8], re: &Regex, reg
                     if name_end - name == 1 {
                         no = (replace[name] - b'0') as i64;
                     } else if replace[name] == b'0' {
-                        no = -1;
-                        // "01" is not valid: falls through with no unset -> treated as invalid
+                        // "01" is not a valid number: keep the escape sequence
                         out.extend_from_slice(&replace[sp..p]);
                         continue;
                     } else {
