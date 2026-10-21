@@ -7893,9 +7893,17 @@ impl Compiler {
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => self.resolve_class_name(name),
                     _ => {
-                        let _ = self.compile_expr(class)?;
-                        let idx = self.op_array.add_literal(Value::False);
-                        return Ok(OperandType::Const(idx));
+                        // Dynamic class: `$x instanceof $y` (string or object)
+                        let class_op = self.compile_expr(class)?;
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::TypeCheck,
+                            op1: obj,
+                            op2: class_op,
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        return Ok(OperandType::Tmp(tmp));
                     }
                 };
                 let name_idx = self

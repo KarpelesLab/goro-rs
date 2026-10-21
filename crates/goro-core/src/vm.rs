@@ -25118,11 +25118,18 @@ impl Vm {
                 OpCode::TypeCheck => {
                     // instanceof check: op1 = value, op2 = class name
                     let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let class_name = self
-                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
-                    let class_lower: Vec<u8> = class_name
-                        .as_bytes()
+                    let class_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals).deref();
+                    let class_name = match &class_val {
+                        Value::Object(o) => PhpString::from_vec(o.borrow().class_name.clone()),
+                        other => other.to_php_string(),
+                    };
+                    let class_bytes = class_name.as_bytes();
+                    let class_bytes = if !matches!(op.op2, OperandType::Const(_)) {
+                        class_bytes.strip_prefix(b"\\").unwrap_or(class_bytes)
+                    } else {
+                        class_bytes
+                    };
+                    let class_lower: Vec<u8> = class_bytes
                         .iter()
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
@@ -29553,18 +29560,18 @@ impl Vm {
                                 // Check for duplicate interface implementation (interface extends)
                                 if class.is_interface {
                                     // Check if parent interfaces already include this one
+                                    // zend_do_implement_interfaces: only an interface listed twice
+                                    // (possibly through an alias) is an error; interfaces reached
+                                    // through other listed interfaces are merged silently.
+                                    let iface_identity = iface.name.to_ascii_lowercase();
                                     let already_inherited = class.interfaces.iter()
-                                        .filter(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>() != iface_lower)
-                                        .any(|other_iface| {
-                                            let other_lower: Vec<u8> = other_iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                            if let Some(other) = self.classes.get(&other_lower) {
-                                                other.interfaces.iter().any(|inherited| {
-                                                    inherited.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<_>>() == iface_lower
-                                                })
-                                            } else {
-                                                false
-                                            }
-                                        });
+                                        .filter(|other_iface| {
+                                            let other_lower = other_iface.to_ascii_lowercase();
+                                            self.classes.get(&other_lower)
+                                                .map(|o| o.name.to_ascii_lowercase() == iface_identity)
+                                                .unwrap_or(other_lower == iface_lower)
+                                        })
+                                        .count() > 1;
                                     if already_inherited {
                                         let iface_display = String::from_utf8_lossy(iface_name).to_string();
                                         let class_display = String::from_utf8_lossy(&class.name).to_string();
