@@ -1646,10 +1646,95 @@ fn format_exception_trace_with_limit(trace_val: &goro_core::value::Value, fallba
     fallback_trace.to_string()
 }
 
+/// Translate PCRE-isms run-tests relies on into Rust regex syntax: a `{`
+/// that does not start a `{n}`/`{n,}`/`{n,m}` quantifier is literal, and
+/// `\0` means NUL.
+fn pcre_to_rust_regex(p: &str) -> String {
+    let b = p.as_bytes();
+    let mut out = String::with_capacity(p.len() + 8);
+    let mut i = 0;
+    let mut in_class = false;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\\' && i + 1 < b.len() {
+            if b[i + 1] == b'0' && !(i + 2 < b.len() && b[i + 2].is_ascii_digit()) {
+                out.push_str("\\x00");
+                i += 2;
+                continue;
+            }
+            let ch = p[i + 1..].chars().next().unwrap();
+            out.push('\\');
+            out.push(ch);
+            i += 1 + ch.len_utf8();
+            continue;
+        }
+        if in_class {
+            if c == b']' {
+                in_class = false;
+            }
+            let ch = p[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        if c == b'[' {
+            in_class = true;
+            out.push('[');
+            i += 1;
+            if i < b.len() && b[i] == b'^' {
+                out.push('^');
+                i += 1;
+            }
+            if i < b.len() && b[i] == b']' {
+                out.push_str("\\]");
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'{' {
+            let mut j = i + 1;
+            let mut digits = 0;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+                digits += 1;
+            }
+            if digits > 0 && j < b.len() && b[j] == b',' {
+                j += 1;
+                while j < b.len() && b[j].is_ascii_digit() {
+                    j += 1;
+                }
+            }
+            if digits > 0 && j < b.len() && b[j] == b'}' && !out.is_empty() {
+                out.push_str(&p[i..=j]);
+                i = j + 1;
+            } else {
+                out.push_str("\\{");
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'}' {
+            out.push_str("\\}");
+            i += 1;
+            continue;
+        }
+        let ch = p[i..].chars().next().unwrap();
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 fn matches_expect_regex(pattern: &str, actual: &str) -> bool {
     // EXPECTREGEX uses raw regex patterns. Each line of the pattern is a regex for
     // matching the corresponding line of output.
-    // First try matching the entire output as one regex
+    // First try matching the entire output as one regex (run-tests uses /s).
+    let full_pattern = format!("(?s)^(?:{})$", pcre_to_rust_regex(pattern));
+    if let Ok(re) = regex::Regex::new(&full_pattern) {
+        if re.is_match(actual) {
+            return true;
+        }
+    }
     let full_pattern = format!("^(?:{})$", pattern);
     if let Ok(re) = regex::Regex::new(&full_pattern) {
         if re.is_match(actual) {
