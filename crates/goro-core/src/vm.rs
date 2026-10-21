@@ -4519,7 +4519,12 @@ impl Vm {
         }
         let this_val = Value::Object(obj.clone());
         let exc_before = self.current_exception.is_some();
+        // The initializer appears in backtraces as called from the code that
+        // triggered initialization.
+        let init_name = self.callable_display_name(&initializer);
+        self.call_stack.push((init_name, self.current_file.clone(), self.current_line, vec![this_val.clone()], false));
         let result = self.call_closure_value(&initializer, vec![this_val.clone()]);
+        self.call_stack.pop();
         let threw = !exc_before && self.current_exception.is_some();
         self.lazy_init_in_progress.remove(&object_id);
         if state_bytes == b"ghost" {
@@ -33426,33 +33431,10 @@ impl Vm {
         }
     }
 
-    /// Execute Fiber::start(...$args) - begin executing the fiber callback
-    /// on a fresh corosensei stack. Subsequent `Fiber::suspend()` calls
-    /// from any depth resume cleanly.
-    fn fiber_start(
-        &mut self,
-        obj_rc: Rc<RefCell<PhpObject>>,
-        args: &[Value],
-        line: u32,
-    ) -> Result<Value, VmError> {
-        let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
-        if state != FiberState::Created as i64 {
-            let msg = "Cannot start a fiber that has already been started";
-            let exc = self.create_exception(b"FiberError", msg, line);
-            self.current_exception = Some(exc);
-            return Err(VmError {
-                message: format!("Uncaught FiberError: {}", msg),
-                line,
-            });
-        }
-
-        let callback = obj_rc.borrow().get_property(b"__fiber_callback");
-        let args_owned: Vec<Value> = args.to_vec();
-
-        // Compute the display name for the fiber's callback so it can
-        // appear properly in stack traces (`{closure:file:line}` for
-        // closures, the function name otherwise).
-        let display_name: String = match &callback {
+    /// Name of a callable as shown in stack traces (`{closure:file:line}`
+    /// for closures, the function name or `Class::method` otherwise).
+    pub fn callable_display_name(&self, callback: &Value) -> String {
+        match callback {
             Value::String(s) => {
                 let name_bytes = s.as_bytes();
                 let lower: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -33499,7 +33481,36 @@ impl Vm {
                 format!("{}::__invoke", cls)
             }
             _ => "fiber-callback".to_string(),
-        };
+        }
+    }
+
+    /// Execute Fiber::start(...$args) - begin executing the fiber callback
+    /// on a fresh corosensei stack. Subsequent `Fiber::suspend()` calls
+    /// from any depth resume cleanly.
+    fn fiber_start(
+        &mut self,
+        obj_rc: Rc<RefCell<PhpObject>>,
+        args: &[Value],
+        line: u32,
+    ) -> Result<Value, VmError> {
+        let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
+        if state != FiberState::Created as i64 {
+            let msg = "Cannot start a fiber that has already been started";
+            let exc = self.create_exception(b"FiberError", msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught FiberError: {}", msg),
+                line,
+            });
+        }
+
+        let callback = obj_rc.borrow().get_property(b"__fiber_callback");
+        let args_owned: Vec<Value> = args.to_vec();
+
+        // Compute the display name for the fiber's callback so it can
+        // appear properly in stack traces (`{closure:file:line}` for
+        // closures, the function name otherwise).
+        let display_name: String = self.callable_display_name(&callback);
         // Keep a copy to push onto the outer call_stack each time the
         // fiber runs (the body closure consumes the original).
         let display_name_for_stack = display_name.clone();
