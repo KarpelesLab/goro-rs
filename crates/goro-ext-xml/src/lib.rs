@@ -23,6 +23,7 @@ pub fn dom_node_of(
 use goro_core::vm::Vm;
 
 mod xml_sax;
+mod xmlreader;
 mod xmlwriter;
 
 // ── Public registration ─────────────────────────────────────────────────────
@@ -35,4 +36,5 @@ pub fn register(vm: &mut Vm) {
     libxml::register(vm);
     simplexml::register(vm);
     dom::register(vm);
+    xmlreader::register(vm);
 }
