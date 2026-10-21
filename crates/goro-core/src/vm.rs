@@ -652,6 +652,9 @@ pub struct Vm {
     pub include_resolve_hook: Option<fn(&mut Vm, &str) -> Option<Result<String, VmError>>>,
     /// Run at request shutdown after destructors (resource list destruction).
     pub resource_shutdown_hooks: Vec<fn(&mut Vm)>,
+    /// Extension shutdown handlers, run after the shutdown destructors (where
+    /// PHP frees the remaining objects, e.g. XMLWriter flushing its output).
+    pub shutdown_hooks: Vec<fn(&mut Vm)>,
     /// Whether the current caller has strict_types=1 (set before calling builtins)
     pub caller_strict_types: bool,
     pub stored_attr_op_arrays: Vec<OpArray>,
@@ -1650,6 +1653,7 @@ impl Vm {
             include_stream_hook: None,
             include_resolve_hook: None,
             resource_shutdown_hooks: Vec::new(),
+            shutdown_hooks: Vec::new(),
             caller_strict_types: false,
             stored_attr_op_arrays: Vec::new(),
             weak_refs: HashMap::new(),
@@ -14076,6 +14080,9 @@ impl Vm {
                 message: "Uncaught exception".into(),
                 line,
             });
+        }
+        for hook in self.shutdown_hooks.clone() {
+            hook(self);
         }
     }
 

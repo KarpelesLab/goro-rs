@@ -24,6 +24,8 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
+mod xmlwriter;
+
 // ── Thread-local parser storage ─────────────────────────────────────────────
 
 thread_local! {
@@ -766,6 +768,7 @@ fn dispatch_callback(
 
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"xml");
+    xmlwriter::register(vm);
     // Functions
     vm.register_function(b"xml_parser_create", xml_parser_create);
     vm.register_function(b"xml_parser_create_ns", xml_parser_create_ns);
