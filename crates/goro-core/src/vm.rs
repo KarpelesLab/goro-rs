@@ -11409,8 +11409,20 @@ impl Vm {
     /// uncaught fatal error has been emitted so that destructor output (e.g. `echo`
     /// inside `__destruct`) appears AFTER the "Fatal error: ..." message, matching PHP.
     pub fn run_shutdown_destructors(&mut self) {
-        let destructibles = std::mem::take(&mut self.destructible_objects);
-        for obj_val in destructibles.iter().rev() {
+        // Pop one object at a time (rather than taking the whole list) so that
+        // objects released while a destructor / fiber unwind runs are still
+        // seen by run_pending_destructors().
+        while let Some(obj_val) = self.destructible_objects.pop() {
+            let obj_val = &obj_val;
+            if self.current_exception.is_some() {
+                // An exception escaped a shutdown destructor: it is fatal
+                // (zend_exception_error), and remaining objects are marked
+                // destructed without running their destructors.
+                let line = self.current_line;
+                self.report_uncaught(&VmError { message: "Uncaught exception".into(), line });
+                self.destructible_objects.clear();
+                break;
+            }
             if let Value::Object(obj_rc) = obj_val {
                 if matches!(obj_rc.borrow().get_property(b"__ctor_pending"), Value::True) {
                     continue;
@@ -11473,6 +11485,10 @@ impl Vm {
                     self.called_class_stack.pop();
                 }
             }
+        }
+        if self.current_exception.is_some() {
+            let line = self.current_line;
+            self.report_uncaught(&VmError { message: "Uncaught exception".into(), line });
         }
     }
 
