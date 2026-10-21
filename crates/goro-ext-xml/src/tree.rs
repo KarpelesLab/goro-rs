@@ -184,6 +184,8 @@ pub struct Tree {
     pub nss: Vec<Ns>,
     /// predefined entity declarations (lazily created)
     pub predef: Vec<(String, NodeId)>,
+    /// Slots given back with `release`, reused by `alloc`.
+    pub free_slots: Vec<NodeId>,
 }
 
 thread_local! {
@@ -216,8 +218,20 @@ impl Tree {
     // Allocation
 
     pub fn alloc(&mut self, n: Node) -> NodeId {
+        if let Some(id) = self.free_slots.pop() {
+            self.nodes[id] = n;
+            return id;
+        }
         self.nodes.push(n);
         self.nodes.len() - 1
+    }
+
+    /// Give back the slot of an unlinked node that nothing (no PHP object,
+    /// no other node) refers to any more, e.g. the nodes an XMLReader is
+    /// done with. Its id may be reused by a later allocation.
+    pub fn release(&mut self, id: NodeId) {
+        self.nodes[id] = Node::new(NType::Text, "");
+        self.free_slots.push(id);
     }
 
     pub fn n(&self, id: NodeId) -> &Node {

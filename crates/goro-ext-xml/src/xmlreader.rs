@@ -548,7 +548,16 @@ impl Core {
             }
         }
         self.state = oldstate;
-        if self.mode == Mode::Eof && self.state != St::Done {
+        // Discard the consumed input when needed and possible
+        if self.mode == Mode::Interactive {
+            if !matches!(self.src, Source::Memory)
+                && self.cur >= 4096
+                && self.buf.len() - self.cur <= CHUNK_SIZE
+            {
+                self.buf.drain(..self.cur);
+                self.cur = 0;
+            }
+        } else if self.mode == Mode::Eof && self.state != St::Done {
             let end = self.buf.len();
             let val = self.parse(self.cur, end, true);
             self.cur = end;
@@ -579,16 +588,15 @@ impl Core {
                 return;
             }
             t.unlink(n);
-            // Nothing refers to the released subtree any more: drop its
-            // strings (arena slots are never reused).
+            // Nothing refers to the released subtree any more: give its
+            // slots back (xmlTextReaderFreeNode).
             let mut stack = vec![n];
             while let Some(x) = stack.pop() {
                 let ty = t.nodes[x].t;
-                if matches!(ty, NType::Dtd | NType::EntityDecl) {
+                if matches!(ty, NType::Dtd | NType::EntityDecl | NType::Entity) {
                     continue;
                 }
                 empty.empty.remove(&x);
-                t.nodes[x].content = String::new();
                 if ty != NType::EntityRef {
                     let mut c = t.nodes[x].children;
                     let mut p = t.nodes[x].properties;
@@ -601,6 +609,18 @@ impl Core {
                         p = t.nodes[y].next;
                     }
                 }
+                if ty == NType::Attribute && t.nodes[x].atype == 2 {
+                    // the value text is still there (children go after)
+                    let key = t.node_get_content(x);
+                    if let Some(d) = t.nodes[x].doc {
+                        if let Some(di) = t.doc_info_mut(d) {
+                            if di.ids.get(&key) == Some(&x) {
+                                di.ids.remove(&key);
+                            }
+                        }
+                    }
+                }
+                t.release(x);
             }
         });
     }
@@ -1163,6 +1183,8 @@ impl Core {
     }
 
     fn get_attribute_no(&self, no: i64) -> Option<String> {
+        // C int argument; negative indexes behave like 0
+        let no = (no as i32).max(0) as i64;
         if self.curnode != Cur::None {
             return None;
         }
@@ -1239,6 +1261,7 @@ impl Core {
     }
 
     fn move_to_attribute_no(&mut self, no: i64) -> i32 {
+        let no = (no as i32).max(0) as i64;
         let n = match self.node {
             Some(n) => n,
             None => return -1,
@@ -1622,6 +1645,10 @@ fn is_blank_node(t: &Tree, n: NodeId) -> bool {
 
 /// xmlNodeGetSpacePreserve: 1 preserve, 0 default, -1 unspecified
 fn space_preserve(t: &Tree, n: NodeId) -> i32 {
+    // only defined from an element (the reader passes the text node itself)
+    if t.nodes[n].t != NType::Element {
+        return -1;
+    }
     let mut cur = Some(n);
     while let Some(c) = cur {
         if t.nodes[c].t == NType::Element {
