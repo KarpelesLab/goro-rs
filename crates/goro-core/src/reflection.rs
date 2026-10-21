@@ -2187,8 +2187,14 @@ pub fn reflection_class_docall(
                     None => return Some(Value::Null),
                 };
                 let const_name = PhpString::from_string(const_name_s);
-                let val = reflection_class_get_constant(vm, &class_lower, const_name.as_bytes());
-                if let Some(v) = val {
+                let val = if reflection_class_has_constant(vm, &class_lower, const_name.as_bytes()) {
+                    resolve_class_constant(vm, &class_lower, const_name.as_bytes())
+                } else {
+                    None
+                };
+                if vm.current_exception.is_some() {
+                    Some(Value::Null)
+                } else if let Some(v) = val {
                     Some(v)
                 } else {
                     // Emit deprecated warning
@@ -2221,6 +2227,17 @@ pub fn reflection_class_docall(
                             }
                         }
                         result.set(ArrayKey::String(PhpString::from_vec(name.clone())), val.clone());
+                    }
+                }
+                // Evaluate pending constant expressions / enum cases.
+                let keys: Vec<Vec<u8>> = result.iter().filter(|(_, v)| is_deferred_const_value(v)).map(|(k, _)| match k {
+                    ArrayKey::String(s) => s.as_bytes().to_vec(),
+                    ArrayKey::Int(n) => n.to_string().into_bytes(),
+                }).collect();
+                for k in keys {
+                    match resolve_class_constant(vm, &class_lower, &k) {
+                        Some(v) => result.set(ArrayKey::String(PhpString::from_vec(k)), v),
+                        None => return Some(Value::Null),
                     }
                 }
                 // Also check parent constants (no filter applied to inherited
@@ -7045,7 +7062,22 @@ pub fn reflection_class_constant_method(
 
     match method {
         b"getname" => Some(ob.get_property(b"name")),
-        b"getvalue" => Some(ob.get_property(b"__reflection_value")),
+        b"getvalue" => {
+            // Evaluate (and cache) the constant like a Class::NAME fetch.
+            let cached = ob.get_property(b"__reflection_value");
+            drop(ob);
+            let decl = meta.as_ref().map(|m| m.declaring_class.clone()).unwrap_or_else(|| class_lower.clone());
+            if !is_deferred_const_value(&cached) {
+                return Some(cached);
+            }
+            match resolve_class_constant(vm, &decl, const_name.as_bytes()) {
+                Some(v) => {
+                    obj.borrow_mut().set_property(b"__reflection_value".to_vec(), v.clone());
+                    Some(v)
+                }
+                None => Some(Value::Null),
+            }
+        }
         b"getdeclaringclass" => {
             let declaring = meta.as_ref()
                 .map(|m| {
@@ -7139,25 +7171,20 @@ pub fn reflection_class_constant_method(
         }
         b"__tostring" => {
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
-            let val = ob.get_property(b"__reflection_value");
+            let cached = ob.get_property(b"__reflection_value");
             drop(ob);
-            let vis_str = match visibility {
-                Visibility::Public => "public",
-                Visibility::Protected => "protected",
-                Visibility::Private => "private",
+            let _ = (visibility, is_final);
+            // zend_update_class_constant() first; errors abort the cast.
+            let val = if is_deferred_const_value(&cached) {
+                let decl = meta.as_ref().map(|m| m.declaring_class.clone()).unwrap_or_else(|| class_lower.clone());
+                match resolve_class_constant(vm, &decl, name.as_bytes()) {
+                    Some(v) => v,
+                    None => return Some(Value::Null),
+                }
+            } else {
+                cached
             };
-            let final_str = if is_final { "final " } else { "" };
-            let type_str = reflection_const_type_name(meta.as_ref().and_then(|m| m.declared_type.as_ref()), &val)
-                .map(|n| format!("{} ", n))
-                .unwrap_or_default();
-            let val_str = reflection_const_value_repr(&val);
-            let mut s = String::new();
-            if let Some(doc) = meta.as_ref().and_then(|m| m.doc_comment.clone()) {
-                s.push_str(&doc);
-                s.push('\n');
-            }
-            s.push_str(&format!("Constant [ {}{} {}{} ] {{ {} }}\n", final_str, vis_str, type_str, name, val_str));
-            Some(Value::String(PhpString::from_string(s)))
+            Some(Value::String(PhpString::from_string(class_const_string(name.as_bytes(), &val, meta.as_ref(), ""))))
         }
         _ => None,
     }
