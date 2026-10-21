@@ -367,6 +367,11 @@ final class StreamBucket {
     vm.register_function(b"is_subclass_of", is_subclass_of_fn);
     vm.register_function(b"get_parent_class", get_parent_class_fn);
     vm.register_function(b"get_called_class", get_called_class_fn);
+    vm.register_function_with_params(
+        b"clone",
+        goro_core::clone::clone_fn,
+        &[b"object", b"withProperties"],
+    );
     vm.register_function(b"get_defined_vars", get_defined_vars_fn);
     vm.register_function(b"get_defined_functions", get_defined_functions_fn);
     vm.register_function(b"get_defined_constants", get_defined_constants_fn);

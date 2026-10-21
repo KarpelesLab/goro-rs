@@ -3,6 +3,7 @@ pub mod array;
 pub mod basedir;
 pub mod callable;
 pub mod class_table;
+pub mod clone;
 pub mod closure;
 pub mod compiler;
 pub mod crypto;

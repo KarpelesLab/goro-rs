@@ -233,10 +233,6 @@ pub enum ExprKind {
     Yield(Option<Box<Expr>>, Option<Box<Expr>>),
     YieldFrom(Box<Expr>),
     Clone(Box<Expr>),
-    CloneWith {
-        object: Box<Expr>,
-        with_args: Vec<(Vec<u8>, Expr)>,
-    },
     Spread(Box<Expr>),
     Pipe {
         value: Box<Expr>,

@@ -4649,69 +4649,100 @@ impl Parser {
             }
             TokenKind::Clone => {
                 self.advance();
-                // PHP 8.5: clone($expr, [...]) function call syntax.
-                // The disambiguation rule (per PHP grammar `clone_argument_list`):
-                //   - `clone(expr)` (single bare expr) -> SAME AS `clone expr`
-                //     (so the trailing `)` is just a parenthesized operand; if
-                //     followed by `->` / `[` etc., the chain continues on the
-                //     parenthesized expression which clone wraps).
-                //   - `clone(expr,)` (trailing comma) -> function-call form.
-                //   - `clone(expr, args...)` -> clone-with-args form.
-                //   - `clone(...)` -> first-class callable.
-                // For the single-bare-expr case we let parse_unary handle the
-                // entire `(expr)...postfix...` so chained operations bind
-                // tighter than clone (matching PHP precedence).
+                // PHP 8.5 `clone` (zend_language_parser.y): `T_CLONE expr` and
+                // `T_CLONE clone_argument_list` both compile to a call of the
+                // `\clone()` function. `clone(expr)` with a single bare
+                // expression is the language construct on a parenthesized
+                // operand (so postfix operations continue on it); an argument
+                // list needs `()`, `(...)`, a named / unpacked first argument
+                // or a `,` after the first expression.
+                let clone_name = |span| Expr {
+                    span,
+                    kind: ExprKind::Identifier(b"\\clone".to_vec()),
+                };
                 if matches!(self.peek(), TokenKind::OpenParen) {
-                    // Look ahead to detect clone-with-args / FCC / trailing comma forms.
                     let saved_pos = self.pos;
                     self.advance(); // consume '('
-                    // Detect `clone(...)` FCC form
-                    if matches!(self.peek(), TokenKind::Ellipsis)
-                        && matches!(self.peek_at(1), TokenKind::CloseParen)
-                    {
-                        self.advance();
+                    let call_form = match self.peek() {
+                        TokenKind::CloseParen | TokenKind::Ellipsis => true,
+                        TokenKind::Variable(_) => false,
+                        _ => matches!(self.peek_at(1), TokenKind::Colon),
+                    };
+                    let args = if call_form {
+                        Some(self.parse_arguments()?)
+                    } else {
+                        let first = self.parse_expression()?;
+                        if self.eat(&TokenKind::Comma) {
+                            let mut args = vec![Argument {
+                                name: None,
+                                value: first,
+                                unpack: false,
+                            }];
+                            args.extend(self.parse_arguments()?);
+                            Some(args)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(mut args) = args {
+                        let is_fcc = self.first_class_callable_flag;
+                        let end_span = self.span();
                         self.expect(&TokenKind::CloseParen)?;
-                        // For now treat clone(...) FCC same as clone($x) wrapper:
-                        // since `clone` is a language construct, FCC form is rare;
-                        // fall through and produce a Clone of a placeholder.
-                        // (This path is uncommon in tests we target.)
-                        return Ok(Expr {
-                            span,
-                            kind: ExprKind::Clone(Box::new(Expr {
-                                span,
-                                kind: ExprKind::Variable(b"clone".to_vec()),
-                            })),
-                        });
-                    }
-                    // Try to parse first expr; if followed by ',' -> function-call form.
-                    let first = self.parse_expression()?;
-                    if self.eat(&TokenKind::Comma) {
-                        if matches!(self.peek(), TokenKind::CloseParen) {
-                            // Trailing comma: clone($expr,) -- function form
-                            self.expect(&TokenKind::CloseParen)?;
+                        let full = span.merge(end_span);
+                        if is_fcc {
                             return Ok(Expr {
-                                span: span.merge(first.span),
-                                kind: ExprKind::Clone(Box::new(first)),
+                                span: full,
+                                kind: ExprKind::FirstClassCallable(CallableTarget::Function(
+                                    Box::new(clone_name(span)),
+                                )),
                             });
                         }
-                        let with_expr = self.parse_expression()?;
-                        let _ = self.eat(&TokenKind::Comma);
-                        self.expect(&TokenKind::CloseParen)?;
+                        // `clone($x,)`: the construct (ZEND_CLONE).
+                        if args.len() == 1 && args[0].name.is_none() && !args[0].unpack {
+                            let a = args.pop().unwrap();
+                            return Ok(Expr {
+                                span: full,
+                                kind: ExprKind::Clone(Box::new(a.value)),
+                            });
+                        }
                         return Ok(Expr {
-                            span,
-                            kind: ExprKind::CloneWith {
-                                object: Box::new(first),
-                                with_args: vec![(vec![], with_expr)],
+                            span: full,
+                            kind: ExprKind::FunctionCall {
+                                name: Box::new(clone_name(span)),
+                                args,
                             },
                         });
                     }
-                    // No comma: this is a single parenthesized expr operand;
-                    // rewind to before the '(' and let parse_unary handle the
-                    // full postfix chain.
+                    // A single parenthesized operand: rewind before the '('
+                    // and let parse_unary handle the full postfix chain.
                     self.pos = saved_pos;
                 }
-                // Default: clone <postfix-unary-expression>
-                let operand = self.parse_unary()?;
+                let start = self.pos;
+                let mut operand = self.parse_unary()?;
+                // `clone $a = expr` is `clone ($a = expr)` (the grammar shifts
+                // the assignment onto the variable).
+                if Self::is_lvalue(&operand)
+                    && matches!(
+                        self.peek(),
+                        TokenKind::Assign
+                            | TokenKind::PlusAssign
+                            | TokenKind::MinusAssign
+                            | TokenKind::StarAssign
+                            | TokenKind::SlashAssign
+                            | TokenKind::PercentAssign
+                            | TokenKind::PowAssign
+                            | TokenKind::DotAssign
+                            | TokenKind::AmpersandAssign
+                            | TokenKind::PipeAssign
+                            | TokenKind::CaretAssign
+                            | TokenKind::ShiftLeftAssign
+                            | TokenKind::ShiftRightAssign
+                            | TokenKind::NullCoalesceAssign
+                    )
+                {
+                    self.pos = start;
+                    operand = self.parse_assignment()?;
+                }
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::Clone(Box::new(operand)),
