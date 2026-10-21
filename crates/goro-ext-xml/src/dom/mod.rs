@@ -1,6 +1,10 @@
 //! ext/dom (legacy DOM classes), ported from php-src/ext/dom on top of the
 //! tree in `tree.rs`.
 
+// Methods return R<T> = Result<T, ()>: the error itself is the pending PHP
+// exception (vm.current_exception) or an already emitted warning.
+#![allow(clippy::result_unit_err)]
+
 pub mod chardata;
 pub mod document;
 pub mod element;
@@ -474,10 +478,11 @@ pub fn base_of_class(vm: &Vm, class_name: &[u8]) -> Option<Base> {
         if let Some(b) = base_from_lower(&cur) {
             return Some(b);
         }
-        match vm.classes.get(&cur).and_then(|c| c.parent.clone()) {
-            Some(p) => cur = p.to_ascii_lowercase(),
-            None => return None,
-        }
+        cur = vm
+            .classes
+            .get(&cur)
+            .and_then(|c| c.parent.clone())?
+            .to_ascii_lowercase();
     }
     None
 }
@@ -999,6 +1004,9 @@ impl<'a> Args<'a> {
     pub fn len(&self) -> usize {
         self.a.len()
     }
+    pub fn is_empty(&self) -> bool {
+        self.a.is_empty()
+    }
 }
 
 /// DOM_GET_OBJ: the node behind an object, or "Couldn't fetch".
@@ -1173,15 +1181,14 @@ fn find_prop(vm: &Vm, o: &Obj, name: &[u8]) -> Option<(Base, Prop)> {
 
 /// The node for a property read; DOM_PROP_NODE throws "Invalid State Error".
 fn prop_target(vm: &mut Vm, o: &Obj) -> R<NodeId> {
-    match data_of(o) {
-        Some(d) => match &*d.kind.borrow() {
+    if let Some(d) = data_of(o) {
+        match &*d.kind.borrow() {
             Kind::Node(n) => return Ok(*n),
             Kind::List(_) | Kind::Map(_) | Kind::XPath(_) | Kind::Iter(_) | Kind::Modern(_) => {
                 return Ok(usize::MAX);
             }
             _ => {}
-        },
-        None => {}
+        }
     }
     // DOMXPath property readers check their own state
     if matches!(base_of(vm, o), Some(Base::XPath) | Some(Base::MXPath)) {
@@ -1896,7 +1903,7 @@ pub fn register(vm: &mut Vm) {
     // InternalIterator is shared with ext/date (DatePeriod)
     if let Some(prev) = vm
         .native_class_handlers
-        .get(&b"internaliterator".to_vec())
+        .get(&b"internaliterator"[..])
         .copied()
     {
         DATE_ITER_HANDLER.with(|c| c.set(Some(prev)));

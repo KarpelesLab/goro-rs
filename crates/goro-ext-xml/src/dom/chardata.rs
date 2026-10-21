@@ -260,11 +260,11 @@ fn r_dt_name(_vm: &mut Vm, _o: &Obj, n: NodeId) -> R<Value> {
     Ok(tree::with(|t| s(&t.nodes[n].name)))
 }
 
-fn r_dt_entities(vm: &mut Vm, o: &Obj, n: NodeId) -> R<Value> {
+fn r_dt_entities(vm: &mut Vm, o: &Obj, _n: NodeId) -> R<Value> {
     Ok(map_obj(vm, MapKind::Entities(o.clone())))
 }
 
-fn r_dt_notations(vm: &mut Vm, o: &Obj, n: NodeId) -> R<Value> {
+fn r_dt_notations(vm: &mut Vm, o: &Obj, _n: NodeId) -> R<Value> {
     Ok(map_obj(vm, MapKind::Notations(o.clone())))
 }
 

@@ -71,7 +71,7 @@ pub fn next_in_tree(t: &Tree, node: NodeId, base: NodeId) -> Option<NodeId> {
     }
 }
 
-/// xmlSetNs + reconciliation helpers
+// xmlSetNs + reconciliation helpers
 
 /// xmlNewReconciledNs
 fn new_reconciled_ns(t: &mut Tree, tree_root: NodeId, ns: NsId) -> Option<NsId> {
@@ -104,7 +104,7 @@ pub fn reconciliate_ns(t: &mut Tree, root: NodeId) {
         return;
     }
     let mut cache: Vec<(NsId, NsId)> = Vec::new();
-    let mut fix = |t: &mut Tree, n: NodeId, cache: &mut Vec<(NsId, NsId)>| {
+    let fix = |t: &mut Tree, n: NodeId, cache: &mut Vec<(NsId, NsId)>| {
         if let Some(ns) = t.nodes[n].ns {
             if let Some((_, newns)) = cache.iter().find(|(o, _)| *o == ns) {
                 t.nodes[n].ns = Some(*newns);
@@ -131,11 +131,8 @@ pub fn reconciliate_ns(t: &mut Tree, root: NodeId) {
         } else if n != root {
             let mut cur = n;
             node = None;
-            loop {
-                match t.nodes[cur].parent {
-                    Some(p) => cur = p,
-                    None => break,
-                }
+            while let Some(p) = t.nodes[cur].parent {
+                cur = p;
                 if cur == root {
                     break;
                 }
@@ -465,7 +462,7 @@ fn r_parent_element(vm: &mut Vm, _o: &Obj, n: NodeId) -> R<Value> {
     Ok(node_obj_opt(vm, p))
 }
 
-fn r_child_nodes(vm: &mut Vm, o: &Obj, n: NodeId) -> R<Value> {
+fn r_child_nodes(vm: &mut Vm, o: &Obj, _n: NodeId) -> R<Value> {
     Ok(list_obj(vm, ListKind::Children(o.clone())))
 }
 

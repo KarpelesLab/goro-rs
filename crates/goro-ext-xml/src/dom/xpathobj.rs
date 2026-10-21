@@ -369,8 +369,8 @@ fn m_evaluate(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 }
 
 fn is_callable(vm: &mut Vm, v: &Value) -> bool {
-    match vm.functions.get(&b"is_callable".to_vec()).copied() {
-        Some(f) => matches!(f(vm, &[v.clone()]), Ok(Value::True)),
+    match vm.functions.get(&b"is_callable"[..]).copied() {
+        Some(f) => matches!(f(vm, std::slice::from_ref(v)), Ok(Value::True)),
         None => true,
     }
 }
