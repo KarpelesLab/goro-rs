@@ -998,7 +998,7 @@ fn func_num_args(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::Long(args.len() as i64))
     } else {
         // PHP 8.4: calling from global scope throws Error
-        let msg = "func_num_args() cannot be called from the global scope";
+        let msg = "func_num_args() must be called from a function context";
         let exc = vm.create_exception(b"Error", msg, vm.current_line);
         vm.current_exception = Some(exc);
         Err(VmError { message: msg.to_string(), line: vm.current_line })

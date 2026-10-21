@@ -35,6 +35,39 @@ pub fn register(vm: &mut Vm) {
     }
 }
 
+/// php_request_startup(): start the `output_handler` INI handler, or a
+/// default buffer when `output_buffering` is enabled.
+pub fn request_startup(vm: &mut Vm) {
+    let ini = |vm: &Vm, k: &[u8]| vm.constants.get(k).map(|v| v.to_php_string().to_string_lossy());
+    let handler = ini(vm, b"output_handler").unwrap_or_default();
+    if !handler.is_empty() {
+        let cb = Value::String(PhpString::from_string(handler.clone()));
+        let h = match ob_callable_name(vm, &cb) {
+            Ok(name) => Some(Vm::ob_make_handler(name, ObKind::User(cb), 0, OBH_STDFLAGS)),
+            Err(e) => {
+                vm.write_output(format!("\nWarning: (null)(): {} in Unknown on line 0\n", e).as_bytes());
+                None
+            }
+        };
+        vm.ob_handler_start(h);
+        return;
+    }
+    let ob = ini(vm, b"output_buffering").unwrap_or_default();
+    let l = ob.trim().to_ascii_lowercase();
+    let size: i64 = match l.as_str() {
+        "on" | "yes" | "true" => 1,
+        _ => {
+            let (v, _) = goro_core::ini_quantity::parse_quantity(l.as_bytes(), true);
+            v as i64
+        }
+    };
+    if size > 0 {
+        let chunk = if size > 1 { size as usize } else { 0 };
+        let h = Vm::ob_make_handler(b"default output handler".to_vec(), ObKind::Default, chunk, OBH_STDFLAGS);
+        vm.ob_handler_start(Some(h));
+    }
+}
+
 fn s(b: &[u8]) -> ArrayKey {
     ArrayKey::String(PhpString::from_bytes(b))
 }

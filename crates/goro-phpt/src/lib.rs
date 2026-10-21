@@ -1357,6 +1357,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     for class in compiled_classes {
         vm.register_class(class);
     }
+    goro_ext_standard::ob::request_startup(&mut vm);
 
     // Request startup: superglobals, $argv/$argc, php://input (main FILE only).
     if let Some(req) = PHPT_REQUEST.with(|r| r.borrow_mut().take()) {

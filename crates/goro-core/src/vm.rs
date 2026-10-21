@@ -36494,74 +36494,42 @@ fn php_increment(val: &Value) -> Value {
             if bytes.is_empty() {
                 return Value::String(PhpString::from_bytes(b"1"));
             }
-            // Check if ALL characters are alphanumeric - PHP only does
-            // alphabetic increment on purely alphanumeric strings
-            let all_alnum = bytes.iter().all(|b| b.is_ascii_alphanumeric());
-            if !all_alnum {
-                // Contains non-alphanumeric characters: perform increment on
-                // rightmost alphanumeric characters (PHP 8.3+ emits deprecation but still increments)
-                let has_alnum = bytes.iter().any(|b| b.is_ascii_alphanumeric());
-                if !has_alnum {
-                    return val.clone();
-                }
-                let mut result: Vec<u8> = bytes.to_vec();
-                let mut carry = true;
-                for i in (0..result.len()).rev() {
-                    if !carry {
+            // increment_string(): walk back from the last character while the
+            // carry propagates through [a-zA-Z0-9]; any other character stops it.
+            let mut result: Vec<u8> = bytes.to_vec();
+            let mut carry = false;
+            let mut last = 0u8; // 1 = lower, 2 = upper, 3 = numeric
+            let mut pos = result.len();
+            while pos > 0 {
+                pos -= 1;
+                let ch = result[pos];
+                match ch {
+                    b'a'..=b'z' => {
+                        if ch == b'z' { result[pos] = b'a'; carry = true; } else { result[pos] += 1; carry = false; }
+                        last = 1;
+                    }
+                    b'A'..=b'Z' => {
+                        if ch == b'Z' { result[pos] = b'A'; carry = true; } else { result[pos] += 1; carry = false; }
+                        last = 2;
+                    }
+                    b'0'..=b'9' => {
+                        if ch == b'9' { result[pos] = b'0'; carry = true; } else { result[pos] += 1; carry = false; }
+                        last = 3;
+                    }
+                    _ => {
+                        carry = false;
                         break;
                     }
-                    if !result[i].is_ascii_alphanumeric() {
-                        continue;
-                    }
-                    carry = false;
-                    match result[i] {
-                        b'z' => { result[i] = b'a'; carry = true; }
-                        b'Z' => { result[i] = b'A'; carry = true; }
-                        b'9' => { result[i] = b'0'; carry = true; }
-                        _ => { result[i] += 1; }
-                    }
                 }
-                return Value::String(PhpString::from_vec(result));
-            }
-            // Alphabetic increment: "a" -> "b", "z" -> "aa", "Az" -> "Ba"
-            let mut result: Vec<u8> = bytes.to_vec();
-            let mut carry = true;
-            for i in (0..result.len()).rev() {
                 if !carry {
                     break;
                 }
-                // Skip non-alphanumeric characters
-                if !result[i].is_ascii_alphanumeric() {
-                    continue;
-                }
-                carry = false;
-                match result[i] {
-                    b'z' => {
-                        result[i] = b'a';
-                        carry = true;
-                    }
-                    b'Z' => {
-                        result[i] = b'A';
-                        carry = true;
-                    }
-                    b'9' => {
-                        result[i] = b'0';
-                        carry = true;
-                    }
-                    b'a'..=b'y' | b'A'..=b'Y' | b'0'..=b'8' => {
-                        result[i] += 1;
-                    }
-                    _ => {
-                        result[i] += 1;
-                    }
-                }
             }
             if carry {
-                // Need to prepend: "z" -> "aa", "Z" -> "AA", "9" -> "10"
-                let prefix = match result[0] {
-                    b'a'..=b'z' => b'a',
-                    b'A'..=b'Z' => b'A',
-                    _ => b'1',
+                let prefix = match last {
+                    3 => b'1',
+                    2 => b'A',
+                    _ => b'a',
                 };
                 result.insert(0, prefix);
             }
