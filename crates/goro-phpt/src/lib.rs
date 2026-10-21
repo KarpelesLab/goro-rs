@@ -782,6 +782,13 @@ fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
                     || (value.starts_with('\'') && value.ends_with('\''))
                 {
                     value = value[1..value.len() - 1].to_string();
+                } else {
+                    // Unquoted INI boolean literals (zend_ini_scanner BOOL_TRUE/FALSE, NULL_NULL).
+                    match value.to_ascii_lowercase().as_str() {
+                        "true" | "on" | "yes" => value = "1".to_string(),
+                        "false" | "off" | "no" | "none" | "null" => value = String::new(),
+                        _ => {}
+                    }
                 }
                 settings.push((key, value));
             }

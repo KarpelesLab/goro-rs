@@ -3975,7 +3975,8 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Err(throw_type_error_msg(vm, "ini_set(): Argument #2 ($value) must be of type string|int|float|bool|null".to_string()));
     }
     let key = name.as_bytes().to_vec();
-    let old = vm.constants.get(&key).cloned();
+    // ini_set() returns the old value as a string.
+    let old = vm.constants.get(&key).map(|v| Value::String(v.to_php_string()));
     // Extension-registered INI validators (e.g. date.timezone)
     if let Some(validate) = vm.ini_validators.get(&key).copied() {
         let new_bytes = value.to_php_string().as_bytes().to_vec();

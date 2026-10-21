@@ -14131,7 +14131,7 @@ fn param_type_accepts_array(pt: &ParamType) -> bool {
 pub(crate) fn is_auto_global_name(name: &[u8]) -> bool {
     matches!(
         name,
-        b"_SERVER" | b"_GET" | b"_POST" | b"_COOKIE" | b"_FILES" | b"_REQUEST" | b"_ENV"
+        b"_SERVER" | b"_GET" | b"_POST" | b"_COOKIE" | b"_FILES" | b"_REQUEST" | b"_ENV" | b"_SESSION"
     )
 }
 
