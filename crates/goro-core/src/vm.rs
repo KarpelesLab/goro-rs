@@ -228,6 +228,12 @@ impl Vm {
         name: &[u8],
         kind: u8,
     ) -> bool {
+        if kind == 0
+            && matches!(name, b"name" | b"class")
+            && !crate::reflection::reflection_prop_write_allowed(self, obj, name)
+        {
+            return false;
+        }
         if self.native_class_handlers.is_empty() {
             return true;
         }
@@ -635,6 +641,9 @@ pub struct Vm {
     pub ini_originals: HashMap<Vec<u8>, Option<Value>>,
     /// Autoload callback functions (spl_autoload_register)
     pub autoload_functions: Vec<Value>,
+    /// `$this` of the generator frame whose DoFCall is being dispatched
+    /// (for `parent::m()` / `self::m()` calls made from a generator).
+    pub(crate) gen_call_this: Option<Value>,
     /// Shutdown functions registered via register_shutdown_function
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
     /// Object operator overloading handler (e.g., GMP)
@@ -890,6 +899,7 @@ impl Vm {
             included_files_list: Vec::new(),
             ini_originals: HashMap::new(),
             autoload_functions: Vec::new(),
+            gen_call_this: None,
             shutdown_functions: Vec::new(),
             constants: {
                 let mut c = crate::fxhash::FxHashMap::default();
@@ -19112,6 +19122,32 @@ impl Vm {
                             let cls = &name.as_bytes()[..pos];
                             let cls_lower: Vec<u8> =
                                 cls.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            // `A::m()`: the class is fetched (and autoloaded)
+                            // before the arguments are evaluated
+                            // (ZEND_INIT_STATIC_METHOD_CALL).
+                            if matches!(op.op1, OperandType::Const(_))
+                                && !matches!(cls_lower.as_slice(), b"self" | b"parent" | b"static")
+                                && !self.classes.contains_key(&cls_lower)
+                                && !self.class_aliases.contains_key(&cls_lower)
+                                && !self.autoload_functions.is_empty()
+                            {
+                                self.try_autoload_class(cls);
+                                if self.current_exception.is_some()
+                                    && !self.classes.contains_key(&cls_lower)
+                                {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                        exception_handlers.last()
+                                    {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: "Uncaught exception".into(),
+                                        line: op.line,
+                                    });
+                                }
+                            }
                             if self
                                 .classes
                                 .get(&cls_lower)
@@ -19131,9 +19167,24 @@ impl Vm {
                         if from_closure {
                             self.closure_pending_calls.push(self.pending_calls.len());
                         }
+                        // `A::m()` / `parent::m()` naming a non-static user
+                        // method, from a compatible $this: the call gets
+                        // $this up front (ZEND_INIT_STATIC_METHOD_CALL), so a
+                        // first argument that is an object is not mistaken
+                        // for it.
+                        let mut init_args = Vec::new();
+                        if matches!(op.op1, OperandType::Const(_))
+                            && op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                        {
+                            if let Some(this @ Value::Object(_)) = cvs.first().map(|v| v.deref()) {
+                                if let Some(t) = self.static_syntax_this(name.as_bytes(), &this) {
+                                    init_args.push(t);
+                                }
+                            }
+                        }
                         self.pending_calls.push(PendingCall {
                             name,
-                            args: Vec::new(),
+                            args: init_args,
                             named_args: Vec::new(),
                         });
                     }
@@ -37299,7 +37350,34 @@ impl Vm {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
 
-                    if matches!(op.op2, OperandType::Unused) {
+                    if matches!(op.op2, OperandType::Unused) && matches!(arr_val, Value::Object(_))
+                    {
+                        // `&$obj[]`: read_dimension() without an offset.
+                        let v = self.fetch_dim_from_object(
+                            &arr_val,
+                            None,
+                            crate::fetch_w::DimFetch::W,
+                            op.line,
+                        );
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                continue;
+                            }
+                            return Err(VmError {
+                                message: "Uncaught exception".into(),
+                                line: op.line,
+                            });
+                        }
+                        let v = match v.unwrap_or(Value::Null) {
+                            Value::Reference(r) => Value::Reference(r),
+                            other => Value::Reference(Rc::new(RefCell::new(other))),
+                        };
+                        self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if matches!(op.op2, OperandType::Unused) {
                         // $a[] in reference context: append a fresh NULL slot.
                         let r = Rc::new(RefCell::new(Value::Null));
                         match &arr_val {
@@ -49337,11 +49415,123 @@ impl Vm {
         r
     }
 
+    /// `static::m` / `self::m` / `parent::m` call names resolved against the
+    /// running class scope (as the DoFCall opcode does), or None.
+    fn resolve_relative_call_name(&self, name: &[u8]) -> Option<Vec<u8>> {
+        let lower = name.to_ascii_lowercase();
+        let (cls, rest): (Vec<u8>, &[u8]) = if lower.starts_with(b"static::") {
+            (self.called_class_stack.last()?.clone(), &name[6..])
+        } else if lower.starts_with(b"self::") {
+            let scope = self
+                .class_scope_stack
+                .last()
+                .or(self.called_class_stack.last())?;
+            let n = self
+                .classes
+                .get(&scope.to_ascii_lowercase())
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| scope.clone());
+            (n, &name[4..])
+        } else if lower.starts_with(b"parent::") {
+            let scope = self
+                .class_scope_stack
+                .last()
+                .or(self.called_class_stack.last())?;
+            let p = self
+                .classes
+                .get(&scope.to_ascii_lowercase())
+                .and_then(|c| c.parent.clone())?;
+            let n = self
+                .classes
+                .get(&p.to_ascii_lowercase())
+                .map(|c| c.name.clone())
+                .unwrap_or(p);
+            (n, &name[6..])
+        } else {
+            return None;
+        };
+        let mut out = cls;
+        out.extend_from_slice(rest);
+        Some(out)
+    }
+
+    /// For a static-syntax call `name` ("A::m", "parent::m", ...) made with
+    /// `$this` in scope: `$this` when it names a non-static userland method
+    /// whose declaring class `$this` is an instance of (the call then runs
+    /// on it), else None.
+    fn static_syntax_this(&self, name: &[u8], this: &Value) -> Option<Value> {
+        let resolved = self
+            .resolve_relative_call_name(name)
+            .unwrap_or_else(|| name.to_vec())
+            .to_ascii_lowercase();
+        let sep = resolved.windows(2).position(|w| w == b"::")?;
+        let (cls, m) = (&resolved[..sep], &resolved[sep + 2..]);
+        let md = self.classes.get(cls)?.get_method(m)?;
+        if md.is_static
+            || md.op_array.internal_sig.is_some()
+            || md.op_array.cv_names.first().map(|n| n.as_slice()) != Some(b"this")
+        {
+            return None;
+        }
+        let Value::Object(o) = this else {
+            return None;
+        };
+        let oc = o.borrow().class_name.to_ascii_lowercase();
+        let decl = md.declaring_class.to_ascii_lowercase();
+        let ok = oc == decl
+            || self.class_extends(&oc, &decl)
+            || self.classes.get(&decl).map(|c| c.is_trait).unwrap_or(false);
+        ok.then(|| this.clone())
+    }
+
     fn generator_do_fcall_inner(&mut self, line: u32, strict: bool) -> Result<Value, VmError> {
         let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
             message: "no pending function call".into(),
             line,
         })?;
+        if let Some(n) = self.resolve_relative_call_name(call.name.as_bytes()) {
+            call.name = PhpString::from_vec(n);
+            // A non-static method called through parent::/self::/static::
+            // runs on the generator's $this.
+            if let Some(this) = self.gen_call_this.take() {
+                let nb = call.name.as_bytes().to_ascii_lowercase();
+                if let Some(sep) = nb.windows(2).position(|w| w == b"::") {
+                    let (cls, m) = (nb[..sep].to_vec(), nb[sep + 2..].to_vec());
+                    let user = self
+                        .classes
+                        .get(&cls)
+                        .and_then(|c| c.get_method(&m))
+                        .map(|md| (md.is_static, md.op_array.internal_sig.is_some()));
+                    match user {
+                        Some((false, false)) => call.args.insert(0, this),
+                        Some((_, false)) => {}
+                        _ => {
+                            // A built-in (SPL) parent method.
+                            let mut spl_args = vec![this.clone()];
+                            spl_args.extend(call.args.iter().cloned());
+                            let r = match self.handle_spl_docall(&cls, &m, &spl_args) {
+                                Some(v) => Some(v),
+                                None if call.args.is_empty() => match &this {
+                                    Value::Object(o) => self.dispatch_spl_method(&cls, &m, o),
+                                    _ => None,
+                                },
+                                None => None,
+                            };
+                            if let Some(v) = r {
+                                if self.current_exception.is_some() {
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line,
+                                    });
+                                }
+                                return Ok(v);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.gen_call_this = None;
 
         let func_name_lower: Vec<u8> = call
             .name

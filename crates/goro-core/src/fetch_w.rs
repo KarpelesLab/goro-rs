@@ -896,6 +896,16 @@ impl Vm {
         if class_lower == b"weakmap" {
             return self.weakmap_fetch_dim_w(obj, key, mode);
         }
+        // spl_fixedarray_object_read_dimension() without an offset.
+        if key.is_none()
+            && self
+                .spl_find_base(&class_lower, &[b"splfixedarray"])
+                .is_some()
+            && !self.ao_user_has(obj, b"offsetget")
+        {
+            self.spl_throw(b"Error", "[] operator not supported for SplFixedArray");
+            return None;
+        }
         let key_arg = key.map(|k| k.deref()).unwrap_or(Value::Null);
         self.last_call_by_ref = false;
         let args = [obj_val.clone(), key_arg.clone()];

@@ -1655,6 +1655,15 @@ impl PhpGenerator {
                     vm.generator_send_named_val(name, val);
                 }
                 OpCode::DoFCall => {
+                    vm.gen_call_this =
+                        if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                            match self.read_operand(&OperandType::Cv(0), &op_array.literals) {
+                                v @ Value::Object(_) => Some(v),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
                     match vm.generator_do_fcall(op.line, op_array.strict_types) {
                         Ok(result) => {
                             self.write_operand(&op.result, result);

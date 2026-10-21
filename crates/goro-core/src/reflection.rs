@@ -9871,6 +9871,54 @@ pub fn reflection_attribute_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -
 
 /// Handle static method calls on Reflection classes
 /// Wrapper that includes the original (case-preserved) method name for error messages.
+/// _reflection_write_property(): the declared `$name` / `$class` properties
+/// of reflection objects are read-only. False (with a ReflectionException
+/// pending) when the write must not happen.
+pub(crate) fn reflection_prop_write_allowed(
+    vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    name: &[u8],
+) -> bool {
+    let (cl, display) = {
+        let ob = obj.borrow();
+        (ob.class_name.to_ascii_lowercase(), ob.class_name.clone())
+    };
+    let is = |vm: &Vm, base: &[u8]| cl == base || vm.class_extends(&cl, base);
+    let declared = match name {
+        b"name" => [
+            &b"reflectionfunctionabstract"[..],
+            b"reflectionclass",
+            b"reflectionproperty",
+            b"reflectionclassconstant",
+            b"reflectionparameter",
+            b"reflectionextension",
+            b"reflectionzendextension",
+            b"reflectionconstant",
+        ]
+        .iter()
+        .any(|b| is(vm, b)),
+        b"class" => [
+            &b"reflectionmethod"[..],
+            b"reflectionproperty",
+            b"reflectionclassconstant",
+        ]
+        .iter()
+        .any(|b| is(vm, b)),
+        _ => false,
+    };
+    if !declared {
+        return true;
+    }
+    let msg = format!(
+        "Cannot set read-only property {}::${}",
+        crate::value::display_class_name(&display),
+        String::from_utf8_lossy(name)
+    );
+    let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    false
+}
+
 pub fn reflection_static_call_named(
     vm: &mut Vm,
     class_lower: &str,
@@ -9879,6 +9927,38 @@ pub fn reflection_static_call_named(
     args: &[Value],
     line: u32,
 ) -> Option<Value> {
+    // A static method inherited by a userland subclass of a Reflection
+    // class (MyReflectionMethod::createFromMethodName()): run the internal
+    // one; a `static` return becomes an instance of the called class.
+    if let Some(user) = rcls(vm, class_lower.as_bytes()).filter(|c| {
+        !is_internal_class(vm, class_lower.as_bytes())
+            && c.get_method(method_lower.as_bytes()).is_none()
+    }) {
+        let called = user.name.clone();
+        let mut base = user.parent.clone().map(|p| p.to_ascii_lowercase());
+        for _ in 0..64 {
+            let Some(b) = base.clone() else { break };
+            if is_internal_class(vm, &b) {
+                break;
+            }
+            base = rcls(vm, &b)
+                .and_then(|c| c.parent.clone())
+                .map(|p| p.to_ascii_lowercase());
+        }
+        let base = base?;
+        let base_s = String::from_utf8_lossy(&base).to_string();
+        if !base_s.starts_with("reflection") {
+            return None;
+        }
+        let r =
+            reflection_static_call_named(vm, &base_s, method_lower, method_original, args, line);
+        if method_lower == "createfrommethodname" {
+            if let Some(Value::Object(o)) = &r {
+                o.borrow_mut().class_name = called;
+            }
+        }
+        return r;
+    }
     // Forbid calling non-static instance methods statically. We list common
     // ReflectionClass/Method/Property/etc instance methods that have no
     // legitimate static dispatch.
