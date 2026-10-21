@@ -25868,7 +25868,7 @@ impl Vm {
                                     String::from_utf8_lossy(&func_op_array.name).to_string()
                                 };
                                 return Err(VmError {
-                                    message: format!("Attribute \"ReturnTypeWillChange\" cannot target function (is targeting function {})", func_display),
+                                    message: { let _ = func_display; "Attribute \"ReturnTypeWillChange\" cannot target function (allowed targets: method)".to_string() },
                                     line: op.line,
                                 });
                             }

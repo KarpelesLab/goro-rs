@@ -576,6 +576,13 @@ impl Compiler {
                 target
             ));
         }
+        // "ReturnTypeWillChange" is only allowed on methods.
+        if bare.eq_ignore_ascii_case(b"ReturnTypeWillChange") && !target.is_empty() && target != "method" {
+            return Some(format!(
+                "Attribute \"ReturnTypeWillChange\" cannot target {} (allowed targets: method)",
+                target
+            ));
+        }
         // Note: We intentionally skip Override and Deprecated here, because:
         //   - Override target validation is part of runtime inheritance
         //     checks (we already pass those tests today).
