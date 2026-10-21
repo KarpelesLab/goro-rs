@@ -3553,7 +3553,7 @@ pub fn reflection_method_method(
                 (b"getextensionname", Some(e)) => Value::String(PhpString::from_string(e.to_string())),
                 (b"getextensionname", None) => Value::False,
                 (_, Some(e)) => {
-                    let obj_id = vm.next_object_id();
+                    let obj_id = vm.alloc_object_id();
                     let mut ext_obj = PhpObject::new(b"ReflectionExtension".to_vec(), obj_id);
                     ext_obj.set_property(b"name".to_vec(), Value::String(PhpString::from_string(e.to_string())));
                     Value::Object(Rc::new(RefCell::new(ext_obj)))
@@ -4425,7 +4425,7 @@ fn reflection_reference_from_array_element(vm: &mut Vm, args: &[Value], line: u3
         return Value::Null;
     }
     let id = Rc::as_ptr(&rc) as usize as u64;
-    let obj_id = vm.next_object_id();
+    let obj_id = vm.alloc_object_id();
     let mut obj = PhpObject::new(b"ReflectionReference".to_vec(), obj_id);
     obj.set_property(b"__reflection_ref_id".to_vec(), Value::Long(id as i64));
     Value::Object(Rc::new(RefCell::new(obj)))
@@ -6520,6 +6520,46 @@ pub fn reflection_constant_docall(
 
 /// ReflectionGenerator method dispatch (no args). The `__reflection_target`
 /// property holds the underlying Generator value.
+
+/// Line a suspended generator is executing (its current opline).
+fn generator_exec_line(gb: &crate::generator::PhpGenerator) -> u32 {
+    use crate::opcode::OpCode;
+    if gb.state == crate::generator::GeneratorState::Created {
+        return gb.op_array.decl_line;
+    }
+    let ops = &gb.op_array.ops;
+    if gb.yield_from_source.is_some() {
+        if let Some(op) = ops.get(gb.ip) {
+            if op.opcode == OpCode::YieldFrom {
+                return op.line;
+            }
+        }
+    }
+    if gb.ip > 0 {
+        if let Some(op) = ops.get(gb.ip - 1) {
+            return op.line;
+        }
+    }
+    ops.get(gb.ip).map(|o| o.line).unwrap_or(gb.op_array.decl_line)
+}
+
+/// The chain of generators from `g` down to the innermost one it is
+/// delegating to via `yield from`.
+fn generator_chain(g: &Rc<RefCell<crate::generator::PhpGenerator>>) -> Vec<Rc<RefCell<crate::generator::PhpGenerator>>> {
+    let mut chain = vec![g.clone()];
+    for _ in 0..1024 {
+        let next = match &chain.last().unwrap().borrow().yield_from_source {
+            Some(Value::Generator(inner)) => Some(inner.clone()),
+            _ => None,
+        };
+        match next {
+            Some(n) if !chain.iter().any(|c| Rc::ptr_eq(c, &n)) => chain.push(n),
+            _ => break,
+        }
+    }
+    chain
+}
+
 pub fn reflection_generator_method(
     vm: &mut Vm,
     method: &[u8],
@@ -6558,15 +6598,7 @@ pub fn reflection_generator_method(
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
-                // For a generator not yet started, return the function's
-                // declaration line. Once running, use the line of the op at
-                // the current ip.
-                if gb.state == crate::generator::GeneratorState::Created {
-                    return Some(Value::Long(gb.op_array.decl_line as i64));
-                }
-                let line = gb.op_array.ops.get(gb.ip).map(|op| op.line as i64).unwrap_or(0);
-                if line > 0 { return Some(Value::Long(line)); }
-                return Some(Value::Long(gb.op_array.decl_line as i64));
+                return Some(Value::Long(generator_exec_line(&gb) as i64));
             }
             Some(Value::Long(vm.current_line as i64))
         }
@@ -6579,7 +6611,16 @@ pub fn reflection_generator_method(
             if let Value::Generator(g) = &target {
                 let gb = g.borrow();
                 let fn_name = String::from_utf8_lossy(&gb.op_array.name).to_string();
+                // Methods yield a ReflectionMethod.
+                let method_of = if gb.op_array.display_name.is_empty() { gb.op_array.scope_class.clone() } else { None };
                 drop(gb);
+                if let Some(cls) = method_of {
+                    let mname = fn_name.rsplit("::").next().unwrap_or(&fn_name).to_string();
+                    if rmethod(vm, &cls, mname.as_bytes()).is_some() {
+                        let cname = rcls(vm, &cls).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&cls).to_string());
+                        return Some(create_reflection_method(vm, &cname, &mname));
+                    }
+                }
                 let obj_id = vm.alloc_object_id();
                 let mut rf_obj = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
                 let display = if fn_name.is_empty() { "{closure}".to_string() } else { fn_name.clone() };
@@ -6601,8 +6642,11 @@ pub fn reflection_generator_method(
             Some(Value::Null)
         }
         b"getexecutinggenerator" => {
-            let ob = obj.borrow();
-            Some(ob.get_property(b"__reflection_target"))
+            // zend_generator_get_current(): the innermost delegated generator.
+            match get_gen(obj) {
+                Some(g) => Some(Value::Generator(generator_chain(&g).pop().unwrap())),
+                None => Some(obj.borrow().get_property(b"__reflection_target")),
+            }
         }
         b"gettrace" => {
             // A closed generator cannot produce a trace.
@@ -6614,8 +6658,64 @@ pub fn reflection_generator_method(
                     return Some(Value::Null);
                 }
             }
-            // Empty trace - generators don't track call frames here.
-            Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+            // Frames from the innermost delegated generator out to this one;
+            // each frame's file/line is its caller's current position.
+            let g = match get_gen(obj) {
+                Some(g) => g,
+                None => return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+            };
+            let chain = generator_chain(&g);
+            let mut frames: Vec<(String, String, u32, Vec<Value>, bool)> = Vec::new();
+            let mut objects: Vec<Option<Value>> = Vec::new();
+            for (i, genr) in chain.iter().enumerate() {
+                let gb = genr.borrow();
+                let mut fname = String::from_utf8_lossy(gb.op_array.effective_name()).to_string();
+                let is_method = gb.op_array.scope_class.is_some() && !fname.starts_with("{closure");
+                if is_method && !fname.contains("::") {
+                    let cls = gb.called_class.clone().or_else(|| gb.op_array.scope_class.clone()).unwrap_or_default();
+                    let cname = rcls(vm, &cls).map(|c| String::from_utf8_lossy(&c.name).to_string()).unwrap_or_else(|| String::from_utf8_lossy(&cls).to_string());
+                    fname = format!("{}::{}", cname, fname);
+                }
+                let has_this = matches!(gb.cvs.first(), Some(Value::Object(_))) && gb.op_array.cv_names.first().map(|n| n.as_slice() == b"this").unwrap_or(false);
+                let (file, line) = if i == 0 {
+                    (String::new(), 0)
+                } else {
+                    let caller = chain[i - 1].borrow();
+                    (String::from_utf8_lossy(&caller.op_array.filename).to_string(), generator_exec_line(&caller))
+                };
+                let mut fargs = gb.args.clone();
+                if has_this {
+                    if let (Some(Value::Object(a)), Some(Value::Object(t))) = (fargs.first(), gb.cvs.first()) {
+                        if Rc::ptr_eq(a, t) {
+                            fargs.remove(0);
+                        }
+                    }
+                }
+                objects.push(if has_this { gb.cvs.first().cloned() } else { None });
+                frames.push((fname, file, line, fargs, has_this));
+            }
+            // build_exception_trace() walks the stack top-down.
+            let saved = std::mem::replace(&mut vm.call_stack, frames);
+            let trace = vm.build_exception_trace();
+            vm.call_stack = saved;
+            // DEBUG_BACKTRACE_PROVIDE_OBJECT: add "object" after "class".
+            objects.reverse();
+            if let Value::Array(t) = &trace {
+                let frames_v: Vec<(ArrayKey, Value)> = t.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                for (i, (k, fv)) in frames_v.into_iter().enumerate() {
+                    if let (Some(Some(o)), Value::Array(fa)) = (objects.get(i), &fv) {
+                        let mut nf = PhpArray::new();
+                        for (fk, v) in fa.borrow().iter() {
+                            nf.set(fk.clone(), v.clone());
+                            if matches!(fk, ArrayKey::String(s) if s.as_bytes() == b"class") {
+                                nf.set(ArrayKey::String(PhpString::from_bytes(b"object")), o.clone());
+                            }
+                        }
+                        t.borrow_mut().set(k, Value::Array(Rc::new(RefCell::new(nf))));
+                    }
+                }
+            }
+            Some(trace)
         }
         b"isclosed" => {
             if let Some(g) = get_gen(obj) {
