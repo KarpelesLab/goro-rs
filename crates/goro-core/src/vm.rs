@@ -24001,38 +24001,53 @@ impl Vm {
                                 }
                             }
                         }
-                        Err(_) => {
+                        Err(io_err) => {
                             let kind_name = match include_kind {
                                 1 => "include_once",
                                 2 => "require",
                                 3 => "require_once",
                                 _ => "include",
                             };
-                            let inc_path = &abs_path;
+                            // Diagnostics name the path as written in the script.
+                            let inc_path = &path_str;
+                            let reason = {
+                                let s = io_err.to_string();
+                                match s.find(" (os error") {
+                                    Some(i) => s[..i].to_string(),
+                                    None => s,
+                                }
+                            };
                             let warning_msg = format!(
-                                "{}({}): Failed to open stream: No such file or directory",
-                                kind_name, inc_path
+                                "{}({}): Failed to open stream: {}",
+                                kind_name, inc_path, reason
                             );
                             self.emit_warning_at(&warning_msg, op.line);
+                            let include_path = self
+                                .constants
+                                .get(b"include_path".as_slice())
+                                .map(|v| v.to_php_string().to_string_lossy())
+                                .unwrap_or_else(|| ".".to_string());
                             if is_require {
-                                // require/require_once: fatal error
+                                // ZMSG_FAILED_REQUIRE_FOPEN: zend_throw_error()
                                 let msg = format!(
-                                    "{}(): Failed opening required '{}' (include_path='')",
-                                    kind_name, inc_path
+                                    "Failed opening required '{}' (include_path='{}')",
+                                    inc_path, include_path
                                 );
-                                let fatal = format!(
-                                    "\nFatal error: {} in {} on line {}\n",
-                                    msg, self.current_file, op.line
-                                );
-                                self.write_output(fatal.as_bytes());
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                self.current_file = old_file;
+                                if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() { pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
                                 return Err(VmError {
-                                    message: msg,
+                                    message: format!("Uncaught Error: {}", msg),
                                     line: op.line,
                                 });
                             } else {
                                 let warning_msg2 = format!(
-                                    "{}(): Failed opening '{}' for inclusion (include_path='')",
-                                    kind_name, inc_path
+                                    "{}(): Failed opening '{}' for inclusion (include_path='{}')",
+                                    kind_name, inc_path, include_path
                                 );
                                 self.emit_warning_at(&warning_msg2, op.line);
                                 Value::False
