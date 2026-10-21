@@ -117,7 +117,7 @@ impl Vm {
         let inner = closure.closure_inner()?;
         let (name, _) = closure_parts(&inner);
         let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-        self.user_functions.get(&lower)
+        self.user_functions.get(&lower).map(|o| &**o)
     }
 
     /// Canonical "Class::method" / "function" display for a fake closure target.
@@ -318,7 +318,7 @@ impl Vm {
             let target_op: Option<OpArray> = self
                 .user_functions
                 .get(&tl)
-                .cloned()
+                .map(|o| (**o).clone())
                 .or_else(|| self.closure_method_op(&tl));
             if let Some(top) = &target_op {
                 let statics = self.closure_static_vars(top);
@@ -517,7 +517,9 @@ impl Vm {
     fn closure_method_op(&self, lower: &[u8]) -> Option<OpArray> {
         let p = lower.windows(2).position(|w| w == b"::")?;
         let ce = self.classes.get(&lower[..p])?;
-        ce.methods.get(&lower[p + 2..]).map(|m| m.op_array.clone())
+        ce.methods
+            .get(&lower[p + 2..])
+            .map(|m| (*m.op_array).clone())
     }
 }
 
@@ -919,7 +921,7 @@ impl Vm {
                         self.user_functions.entry(lower(&n)).or_insert_with(|| {
                             let mut op = op;
                             if op.attributes.is_empty() && !attrs.is_empty() {
-                                op.attributes = attrs;
+                                std::rc::Rc::make_mut(&mut op).attributes = attrs;
                             }
                             op
                         });
@@ -1027,7 +1029,7 @@ impl Vm {
             result: OperandType::Unused,
             line: 0,
         });
-        self.user_functions.insert(name.clone(), op);
+        self.user_functions.insert(name.clone(), Rc::new(op));
         let inner = match obj {
             Some(o) => {
                 let mut arr = PhpArray::new();
@@ -1292,7 +1294,7 @@ impl Vm {
                 let key = lower(&n);
                 let mut op = op;
                 if op.attributes.is_empty() && !attrs.is_empty() {
-                    op.attributes = attrs;
+                    std::rc::Rc::make_mut(&mut op).attributes = attrs;
                 }
                 self.user_functions.insert(key, op);
                 let mut arr = PhpArray::new();
@@ -1556,11 +1558,11 @@ impl Vm {
         }
         let nl = lower(&new_name);
         if !self.user_functions.contains_key(&nl) {
-            let mut nop = op.clone();
+            let mut nop = (**op).clone();
             nop.name = new_name.clone();
             nop.scope_class = frame_scope.cloned();
             nop.closure_called_class = called;
-            self.user_functions.entry(nl).or_insert(nop);
+            self.user_functions.entry(nl).or_insert(Rc::new(nop));
         }
         if caps.is_empty() {
             return str_val(&new_name);
@@ -1621,7 +1623,7 @@ impl Vm {
         }
         let l = lower(&name);
         let op = match self.user_functions.get(&l) {
-            Some(op) if op_has_statics(op) => op.clone(),
+            Some(op) if op_has_statics(op) => (**op).clone(),
             _ => return inner,
         };
         let id = CLOSURE_STATICS_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1671,7 +1673,7 @@ impl Vm {
                 self.set_static_var(nk, v);
             }
         }
-        self.user_functions.insert(lower(&new_name), nop);
+        self.user_functions.insert(lower(&new_name), Rc::new(nop));
         if caps.is_empty() {
             return str_val(&new_name);
         }

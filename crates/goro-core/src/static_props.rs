@@ -1158,7 +1158,8 @@ impl Vm {
             };
             // __toString() implicitly returns string.
             if key.as_slice() == b"__tostring" && child.op_array.return_type.is_none() {
-                child.op_array.return_type = Some(ParamType::Simple(b"string".to_vec()));
+                std::rc::Rc::make_mut(&mut child.op_array).return_type =
+                    Some(ParamType::Simple(b"string".to_vec()));
             }
             if pm.visibility == Visibility::Private {
                 continue;
@@ -1228,7 +1229,7 @@ impl Vm {
             if tentative && pm.op_array.return_type.is_some() {
                 // The tentative return type only warns: check the rest first.
                 let mut relaxed = pm.clone();
-                relaxed.op_array.return_type = None;
+                std::rc::Rc::make_mut(&mut relaxed.op_array).return_type = None;
                 if let Some((msg, unresolved)) =
                     self.variance_check_method(class, &child, &parent.name, &relaxed)
                 {

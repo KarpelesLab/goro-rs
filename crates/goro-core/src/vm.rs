@@ -1,4 +1,3 @@
-use indexmap::IndexMap;
 use std::cell::Cell;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -241,7 +240,7 @@ impl Vm {
     }
 }
 /// Type alias for the class map (used by external crates)
-pub type ClassMap = IndexMap<Vec<u8>, ClassEntry>;
+pub type ClassMap = crate::fxhash::FxIndexMap<Vec<u8>, ClassEntry>;
 
 /// VM runtime error
 #[derive(Debug, Clone)]
@@ -448,11 +447,11 @@ pub struct Vm {
     /// access (zend_wrong_string_offset() names "an object" then).
     pub(crate) str_wb_obj_ctx: bool,
     /// Registered built-in functions
-    pub functions: HashMap<Vec<u8>, BuiltinFn>,
+    pub functions: crate::fxhash::FxHashMap<Vec<u8>, BuiltinFn>,
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
     pub builtin_param_names: HashMap<Vec<u8>, Vec<Vec<u8>>>,
     /// User-defined functions (compiled op arrays)
-    pub user_functions: HashMap<Vec<u8>, OpArray>,
+    pub user_functions: crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>,
     /// Stack of pending function calls (supports nested calls)
     pub(crate) pending_calls: Vec<PendingCall>,
     /// Static variable storage (keyed by "funcname::varname")
@@ -460,7 +459,7 @@ pub struct Vm {
     /// The global symbol table (also the value of `$GLOBALS`, see symtab.rs)
     pub(crate) globals: Rc<RefCell<PhpArray>>,
     /// Class table (preserves insertion order)
-    pub classes: IndexMap<Vec<u8>, ClassEntry>,
+    pub classes: ClassMap,
     /// Next object ID
     next_object_id: u64,
     /// Recycled object IDs (freed when object's Rc drops to 1)
@@ -473,7 +472,7 @@ pub struct Vm {
     /// Whether we're executing the top-level script (vs a function)
     pub(crate) is_global_scope: bool,
     /// User-defined constants (from define())
-    pub constants: HashMap<Vec<u8>, Value>,
+    pub constants: crate::fxhash::FxHashMap<Vec<u8>, Value>,
     /// Attributes attached to user-defined constants
     pub constant_attributes: HashMap<Vec<u8>, Vec<crate::object::RuntimeAttribute>>,
     /// Keys currently being evaluated for #[\Deprecated] — used to break
@@ -803,14 +802,14 @@ impl Vm {
             str_offset_wb: None,
             str_wb_pending: None,
             str_wb_obj_ctx: false,
-            functions: HashMap::new(),
+            functions: Default::default(),
             builtin_param_names: HashMap::new(),
-            user_functions: HashMap::new(),
+            user_functions: Default::default(),
             pending_calls: Vec::new(),
             static_vars: HashMap::new(),
             globals: Rc::new(RefCell::new(PhpArray::new())),
             object_store_no_reuse: false,
-            classes: IndexMap::new(),
+            classes: Default::default(),
             next_object_id: 1,
             free_object_ids: Vec::new(),
             lazy_init_in_progress: std::collections::HashSet::new(),
@@ -880,7 +879,7 @@ impl Vm {
             autoload_functions: Vec::new(),
             shutdown_functions: Vec::new(),
             constants: {
-                let mut c = HashMap::new();
+                let mut c = crate::fxhash::FxHashMap::default();
                 // Default ini values
                 c.insert(
                     b"arg_separator.output".to_vec(),
@@ -4134,7 +4133,7 @@ impl Vm {
                     .eq_ignore_ascii_case(b"SensitiveParameter")
             })
         };
-        let any = self.user_functions.values().any(is_s)
+        let any = self.user_functions.values().any(|o| is_s(o))
             || self
                 .classes
                 .values()
@@ -5797,7 +5796,7 @@ impl Vm {
                 .map(|m| {
                     let mut op = m.op_array.clone();
                     if op.attributes.is_empty() && !m.attributes.is_empty() {
-                        op.attributes = m.attributes.clone();
+                        std::rc::Rc::make_mut(&mut op).attributes = m.attributes.clone();
                     }
                     (
                         op,
@@ -6655,7 +6654,7 @@ impl Vm {
     /// Register a user-defined function
     pub fn register_user_function(&mut self, name: &[u8], op_array: OpArray) {
         self.user_functions
-            .insert(name.to_ascii_lowercase(), op_array);
+            .insert(name.to_ascii_lowercase(), Rc::new(op_array));
     }
 
     /// Set up `$closure->method(...)` on a Closure object: pushes the pending
@@ -6762,7 +6761,8 @@ impl Vm {
                                 if op_array.attributes.is_empty()
                                     && !method_def.attributes.is_empty()
                                 {
-                                    op_array.attributes = method_def.attributes.clone();
+                                    std::rc::Rc::make_mut(&mut op_array).attributes =
+                                        method_def.attributes.clone();
                                 }
                                 self.user_functions.insert(func_lower, op_array);
                                 Value::String(PhpString::from_vec(func_name))
@@ -6836,7 +6836,8 @@ impl Vm {
                                     if op_array.attributes.is_empty()
                                         && !method_def.attributes.is_empty()
                                     {
-                                        op_array.attributes = method_def.attributes.clone();
+                                        std::rc::Rc::make_mut(&mut op_array).attributes =
+                                            method_def.attributes.clone();
                                     }
                                     self.user_functions.insert(func_lower.clone(), op_array);
                                 }
@@ -6884,7 +6885,8 @@ impl Vm {
                                     if op_array.attributes.is_empty()
                                         && !method_def.attributes.is_empty()
                                     {
-                                        op_array.attributes = method_def.attributes.clone();
+                                        std::rc::Rc::make_mut(&mut op_array).attributes =
+                                            method_def.attributes.clone();
                                     }
                                     self.user_functions.insert(func_lower.clone(), op_array);
                                 }
@@ -6930,7 +6932,8 @@ impl Vm {
                         if let Some(method_def) = class_def.get_method(b"__invoke") {
                             let mut op_array = method_def.op_array.clone();
                             if op_array.attributes.is_empty() && !method_def.attributes.is_empty() {
-                                op_array.attributes = method_def.attributes.clone();
+                                std::rc::Rc::make_mut(&mut op_array).attributes =
+                                    method_def.attributes.clone();
                             }
                             self.user_functions.insert(func_lower.clone(), op_array);
                         }
@@ -7124,7 +7127,7 @@ impl Vm {
         let new_closure_name = format!("__bound_closure_{}", bound_id).into_bytes();
 
         // Clone and modify the OpArray
-        let mut new_op = original_op.clone();
+        let mut new_op = (*original_op).clone();
         new_op.name = new_closure_name.clone();
         new_op.scope_class = new_scope;
 
@@ -14004,7 +14007,8 @@ impl Vm {
                     }
                     // If this is a generator function, create a Generator object instead of executing
                     if method_op.is_generator {
-                        let mut generator = crate::generator::PhpGenerator::new(method_op, fn_cvs);
+                        let mut generator =
+                            crate::generator::PhpGenerator::new((*method_op).clone(), fn_cvs);
                         // Capture class context for get_class() / get_called_class() inside generator
                         generator.called_class = Some(class_lower.clone());
                         generator.class_scope = Some(method.declaring_class.clone());
@@ -15003,7 +15007,7 @@ impl Vm {
                 .map(|m| {
                     let mut op = m.op_array.clone();
                     if op.attributes.is_empty() && !m.attributes.is_empty() {
-                        op.attributes = m.attributes.clone();
+                        std::rc::Rc::make_mut(&mut op).attributes = m.attributes.clone();
                     }
                     (op, m.declaring_class.to_ascii_lowercase())
                 });
@@ -19156,7 +19160,8 @@ impl Vm {
                                     if op_array.attributes.is_empty()
                                         && !method.attributes.is_empty()
                                     {
-                                        op_array.attributes = method.attributes.clone();
+                                        std::rc::Rc::make_mut(&mut op_array).attributes =
+                                            method.attributes.clone();
                                     }
                                     self.user_functions
                                         .insert(func_name.to_ascii_lowercase(), op_array);
@@ -24025,7 +24030,7 @@ impl Vm {
 
                             // Create a generator instead of executing
                             let mut generator =
-                                crate::generator::PhpGenerator::new(user_fn.clone(), func_cvs);
+                                crate::generator::PhpGenerator::new((*user_fn).clone(), func_cvs);
                             // Store the args for func_get_args() support
                             generator.args =
                                 call.args[crate::internal_frames::implicit_args(&user_fn)
@@ -27505,7 +27510,8 @@ impl Vm {
                                                 if op.attributes.is_empty()
                                                     && !m.attributes.is_empty()
                                                 {
-                                                    op.attributes = m.attributes.clone();
+                                                    std::rc::Rc::make_mut(&mut op).attributes =
+                                                        m.attributes.clone();
                                                 }
                                                 (op, m.declaring_class.clone())
                                             })
@@ -27517,7 +27523,8 @@ impl Vm {
                                                     if op.attributes.is_empty()
                                                         && !m.attributes.is_empty()
                                                     {
-                                                        op.attributes = m.attributes.clone();
+                                                        std::rc::Rc::make_mut(&mut op).attributes =
+                                                            m.attributes.clone();
                                                     }
                                                     (op, m.declaring_class.clone())
                                                 })
@@ -27530,7 +27537,8 @@ impl Vm {
                                                 if op.attributes.is_empty()
                                                     && !m.attributes.is_empty()
                                                 {
-                                                    op.attributes = m.attributes.clone();
+                                                    std::rc::Rc::make_mut(&mut op).attributes =
+                                                        m.attributes.clone();
                                                 }
                                                 (op, m.declaring_class.clone())
                                             })
@@ -40986,7 +40994,8 @@ impl Vm {
                                     m.op_array.literals.get(lit_idx as usize)
                                 {
                                     if s.as_bytes() == trait_name_original {
-                                        m.op_array.literals[lit_idx as usize] =
+                                        std::rc::Rc::make_mut(&mut m.op_array).literals
+                                            [lit_idx as usize] =
                                             Value::String(PhpString::from_vec(class_name.to_vec()));
                                     } else if s.as_bytes().len() > trait_name_original.len() + 2
                                         && s.as_bytes()[..trait_name_original.len()]
@@ -41000,7 +41009,8 @@ impl Vm {
                                         nv.extend_from_slice(
                                             &s.as_bytes()[trait_name_original.len()..],
                                         );
-                                        m.op_array.literals[lit_idx as usize] =
+                                        std::rc::Rc::make_mut(&mut m.op_array).literals
+                                            [lit_idx as usize] =
                                             Value::String(PhpString::from_vec(nv));
                                     }
                                 }
@@ -41180,7 +41190,8 @@ impl Vm {
                                         }
                                         // Trait methods should have scope of the using class
                                         m.declaring_class = class_name_lower.clone();
-                                        m.op_array.scope_class = Some(class_name_lower.clone());
+                                        std::rc::Rc::make_mut(&mut m.op_array).scope_class =
+                                            Some(class_name_lower.clone());
                                         // Patch __CLASS__ references in literals (only marked ones)
                                         let trait_name_original = trait_def.name.clone();
                                         patch_class_literals(
@@ -41657,7 +41668,8 @@ impl Vm {
                                     }
                                     let mut m = method.clone();
                                     m.declaring_class = class_name_lower.clone();
-                                    m.op_array.scope_class = Some(class_name_lower.clone());
+                                    std::rc::Rc::make_mut(&mut m.op_array).scope_class =
+                                        Some(class_name_lower.clone());
                                     class.methods.insert(method_name.clone(), m);
                                 }
                             }
@@ -41727,7 +41739,8 @@ impl Vm {
                                 }
                                 if let Some(mut m) = source_method {
                                     m.declaring_class = class_name_lower.clone();
-                                    m.op_array.scope_class = Some(class_name_lower.clone());
+                                    std::rc::Rc::make_mut(&mut m.op_array).scope_class =
+                                        Some(class_name_lower.clone());
                                     // Patch __CLASS__ in the aliased method
                                     for tn in &trait_names {
                                         let tn_lower: Vec<u8> =
@@ -42174,7 +42187,8 @@ impl Vm {
                             if method_op_array.attributes.is_empty()
                                 && !method.attributes.is_empty()
                             {
-                                method_op_array.attributes = method.attributes.clone();
+                                std::rc::Rc::make_mut(&mut method_op_array).attributes =
+                                    method.attributes.clone();
                             }
                             self.user_functions
                                 .insert(func_name.to_ascii_lowercase(), method_op_array);
@@ -44698,7 +44712,7 @@ impl Vm {
                             // A get hook containing `yield` returns a Generator.
                             if method.is_generator {
                                 let mut generator =
-                                    crate::generator::PhpGenerator::new(method.clone(), fn_cvs);
+                                    crate::generator::PhpGenerator::new((*method).clone(), fn_cvs);
                                 generator.called_class = Some(class_lower.clone());
                                 generator.class_scope = Some(hook_declaring.clone());
                                 // The body runs as this property's hook (backing-store access).
@@ -47686,7 +47700,8 @@ impl Vm {
                                     if method_op_array.attributes.is_empty()
                                         && !method.attributes.is_empty()
                                     {
-                                        method_op_array.attributes = method.attributes.clone();
+                                        std::rc::Rc::make_mut(&mut method_op_array).attributes =
+                                            method.attributes.clone();
                                     }
                                     self.user_functions
                                         .insert(func_name.to_ascii_lowercase(), method_op_array);
@@ -47712,7 +47727,8 @@ impl Vm {
                                     if method_op_array.attributes.is_empty()
                                         && !call_method.attributes.is_empty()
                                     {
-                                        method_op_array.attributes = call_method.attributes.clone();
+                                        std::rc::Rc::make_mut(&mut method_op_array).attributes =
+                                            call_method.attributes.clone();
                                     }
                                     self.user_functions
                                         .insert(func_name.to_ascii_lowercase(), method_op_array);
@@ -47762,7 +47778,8 @@ impl Vm {
                                 if method_op_array.attributes.is_empty()
                                     && !call_method.attributes.is_empty()
                                 {
-                                    method_op_array.attributes = call_method.attributes.clone();
+                                    std::rc::Rc::make_mut(&mut method_op_array).attributes =
+                                        call_method.attributes.clone();
                                 }
                                 self.user_functions
                                     .insert(func_name.to_ascii_lowercase(), method_op_array);
@@ -49534,7 +49551,8 @@ impl Vm {
                     }
                 }
                 let skip = crate::internal_frames::implicit_args(&user_fn).min(call.args.len());
-                let mut generator = crate::generator::PhpGenerator::new(user_fn, func_cvs);
+                let mut generator =
+                    crate::generator::PhpGenerator::new((*user_fn).clone(), func_cvs);
                 generator.args = call.args[skip..].to_vec();
                 generator.call_file = self.current_file.clone();
                 generator.call_line = line;

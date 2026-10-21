@@ -10,6 +10,7 @@ pub mod fetch_w;
 pub mod fiber;
 pub mod foreach_obj;
 pub mod function;
+pub mod fxhash;
 pub mod gc;
 pub mod generator;
 pub mod include_path;

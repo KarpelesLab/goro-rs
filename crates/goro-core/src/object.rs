@@ -119,7 +119,7 @@ pub struct PropertyDef {
 #[derive(Debug, Clone)]
 pub struct MethodDef {
     pub name: Vec<u8>,
-    pub op_array: OpArray,
+    pub op_array: std::rc::Rc<OpArray>,
     pub param_count: usize,
     pub is_static: bool,
     pub is_abstract: bool,

@@ -6018,7 +6018,7 @@ impl Compiler {
                                     lower_hook_name,
                                     MethodDef {
                                         name: hook_method_name.into_bytes(),
-                                        op_array: hook_compiler.op_array,
+                                        op_array: std::rc::Rc::new(hook_compiler.op_array),
                                         param_count: 0,
                                         is_static: false,
                                         is_abstract: *get_hook_abstract,
@@ -6106,7 +6106,7 @@ impl Compiler {
                                     lower_hook_name,
                                     MethodDef {
                                         name: hook_method_name.into_bytes(),
-                                        op_array: hook_compiler.op_array,
+                                        op_array: std::rc::Rc::new(hook_compiler.op_array),
                                         param_count: 1, // $value
                                         is_static: false,
                                         is_abstract: *set_hook_abstract,
@@ -6945,7 +6945,9 @@ impl Compiler {
                                                     lower_hook_name,
                                                     MethodDef {
                                                         name: hook_method_name.into_bytes(),
-                                                        op_array: hook_compiler.op_array,
+                                                        op_array: std::rc::Rc::new(
+                                                            hook_compiler.op_array,
+                                                        ),
                                                         param_count: 0,
                                                         is_static: false,
                                                         is_abstract: false,
@@ -7024,7 +7026,9 @@ impl Compiler {
                                                     lower_hook_name,
                                                     MethodDef {
                                                         name: hook_method_name.into_bytes(),
-                                                        op_array: hook_compiler.op_array,
+                                                        op_array: std::rc::Rc::new(
+                                                            hook_compiler.op_array,
+                                                        ),
                                                         param_count: 1,
                                                         is_static: false,
                                                         is_abstract: false,
@@ -7503,7 +7507,7 @@ impl Compiler {
                                     lower_name,
                                     MethodDef {
                                         name: method_name.clone(),
-                                        op_array: concrete_op_array,
+                                        op_array: std::rc::Rc::new(concrete_op_array),
                                         param_count,
                                         is_static: *is_static,
                                         is_abstract: *is_abstract,
@@ -7685,7 +7689,7 @@ impl Compiler {
                                     lower_name,
                                     MethodDef {
                                         name: method_name.clone(),
-                                        op_array: abstract_op_array,
+                                        op_array: std::rc::Rc::new(abstract_op_array),
                                         param_count,
                                         is_static: *is_static,
                                         is_abstract: true,

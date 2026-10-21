@@ -532,7 +532,7 @@ fn enum_builtin_method(
     let m: &'static crate::object::MethodDef = Box::leak(Box::new(crate::object::MethodDef {
         name: sig.name.as_bytes().to_vec(),
         param_count: sig.args.len(),
-        op_array: oa,
+        op_array: std::rc::Rc::new(oa),
         is_static: true,
         is_abstract: false,
         is_final: false,
@@ -5673,7 +5673,8 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                             .map(|m| {
                                 let mut op = m.op_array.clone();
                                 if op.attributes.is_empty() && !m.attributes.is_empty() {
-                                    op.attributes = m.attributes.clone();
+                                    std::rc::Rc::make_mut(&mut op).attributes =
+                                        m.attributes.clone();
                                 }
                                 op
                             });
@@ -7822,7 +7823,7 @@ fn reflection_parameter_op_array(
             .collect();
         if let Some(ce) = rcls(vm, &class_lower) {
             if let Some(m) = ce.methods.get(&method_lower) {
-                return Some(m.op_array.clone());
+                return Some((*m.op_array).clone());
             }
         }
     }

@@ -1892,7 +1892,7 @@ fn call_scoped_method_callable(
     let method = class.get_method(&method_lower[pos + 2..])?;
     let mut op = method.op_array.clone();
     if op.attributes.is_empty() && !method.attributes.is_empty() {
-        op.attributes = method.attributes.clone();
+        std::rc::Rc::make_mut(&mut op).attributes = method.attributes.clone();
     }
     let this = if method.is_static { None } else { this };
     let declaring = method.declaring_class.clone();
@@ -1968,7 +1968,8 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                         let mut op = method.op_array.clone();
                                         if op.attributes.is_empty() && !method.attributes.is_empty()
                                         {
-                                            op.attributes = method.attributes.clone();
+                                            std::rc::Rc::make_mut(&mut op).attributes =
+                                                method.attributes.clone();
                                         }
                                         let display_fallback = format!(
                                             "{}::{}",
@@ -2072,7 +2073,8 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                 if accessible {
                                     let mut op = method.op_array.clone();
                                     if op.attributes.is_empty() && !method.attributes.is_empty() {
-                                        op.attributes = method.attributes.clone();
+                                        std::rc::Rc::make_mut(&mut op).attributes =
+                                            method.attributes.clone();
                                     }
                                     let display_fallback = format!(
                                         "{}::{}",
@@ -2192,7 +2194,8 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                             if accessible {
                                 let mut op = method.op_array.clone();
                                 if op.attributes.is_empty() && !method.attributes.is_empty() {
-                                    op.attributes = method.attributes.clone();
+                                    std::rc::Rc::make_mut(&mut op).attributes =
+                                        method.attributes.clone();
                                 }
                                 let display_fallback = format!(
                                     "{}::{}",
@@ -2278,7 +2281,7 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
             if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
                 let mut op = method.op_array.clone();
                 if op.attributes.is_empty() && !method.attributes.is_empty() {
-                    op.attributes = method.attributes.clone();
+                    std::rc::Rc::make_mut(&mut op).attributes = method.attributes.clone();
                 }
                 let display_fallback =
                     format!("{}::__invoke", String::from_utf8_lossy(&class.name));
@@ -2379,7 +2382,7 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                     if let Some(method) = class.methods.get(method_lower) {
                         let mut op = method.op_array.clone();
                         if op.attributes.is_empty() && !method.attributes.is_empty() {
-                            op.attributes = method.attributes.clone();
+                            std::rc::Rc::make_mut(&mut op).attributes = method.attributes.clone();
                         }
                         let display_fallback = format!(
                             "{}::{}",

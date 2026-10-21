@@ -459,7 +459,7 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
             MethodDef {
                 name: m.name.as_bytes().to_vec(),
                 param_count: m.args.len(),
-                op_array: oa,
+                op_array: std::rc::Rc::new(oa),
                 is_static: m.is_static(),
                 is_abstract,
                 is_final: m.flags & F_FINAL != 0,
