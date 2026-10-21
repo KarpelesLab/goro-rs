@@ -2361,74 +2361,53 @@ fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn quoted_printable_encode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = s.as_bytes();
-    let mut result = Vec::new();
-    let mut line_len: usize = 0;
-
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-
-        // Handle CRLF and LF line breaks - output as-is and reset line counter
-        if b == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-            // Trim trailing whitespace before line break
-            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
-                let ws = result.pop().unwrap();
-                // Need to encode the trailing whitespace
-                let encoded = format!("={:02X}", ws);
-                result.extend_from_slice(encoded.as_bytes());
-            }
-            result.push(b'\r');
-            result.push(b'\n');
-            line_len = 0;
-            i += 2;
-            continue;
-        }
-        if b == b'\n' {
-            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
-                let ws = result.pop().unwrap();
-                let encoded = format!("={:02X}", ws);
-                result.extend_from_slice(encoded.as_bytes());
-            }
-            result.push(b'\n');
-            line_len = 0;
-            i += 1;
-            continue;
-        }
-
-        // Determine the encoded form of this byte
-        let is_printable = ((33..=126).contains(&b) && b != b'=') || b == b'\t' || b == b' ';
-        let char_len = if is_printable { 1 } else { 3 };
-
-        // Check if we need a soft line break (max line length is 76 chars)
-        // We need room for the char plus potentially "=\r\n" soft break (3 chars)
-        if line_len + char_len > 75 {
-            result.extend_from_slice(b"=\r\n");
-            line_len = 0;
-        }
-
-        if is_printable {
-            result.push(b);
-            line_len += 1;
-        } else {
-            result.push(b'=');
-            result.extend_from_slice(format!("{:02X}", b).as_bytes());
-            line_len += 3;
-        }
-
+/// php_quot_print_encode() (ext/standard/quot_print.c)
+pub(crate) fn php_quot_print_encode(src: &[u8]) -> Vec<u8> {
+    const MAXL: u64 = 75;
+    let hex = b"0123456789ABCDEF";
+    let at = |i: usize| -> u8 { src.get(i).copied().unwrap_or(0) };
+    let mut d: Vec<u8> = Vec::with_capacity(src.len() * 3);
+    let mut lp: u64 = 0;
+    let mut i = 0usize;
+    let mut length = src.len();
+    while length > 0 {
+        length -= 1;
+        let c = src[i];
         i += 1;
+        if c == b'\r' && at(i) == b'\n' && length > 0 {
+            d.push(b'\r');
+            d.push(src[i]);
+            i += 1;
+            length -= 1;
+            lp = 0;
+        } else if c < 0x20 || c == 0x7f || c & 0x80 != 0 || c == b'=' || (c == b' ' && at(i) == b'\r') {
+            lp += 3;
+            if (lp > MAXL && c <= 0x7f)
+                || (c > 0x7f && c <= 0xdf && lp + 3 > MAXL)
+                || (c > 0xdf && c <= 0xef && lp + 6 > MAXL)
+                || (c > 0xef && c <= 0xf4 && lp + 9 > MAXL)
+            {
+                d.extend_from_slice(b"=\r\n");
+                lp = 3;
+            }
+            d.push(b'=');
+            d.push(hex[(c >> 4) as usize]);
+            d.push(hex[(c & 0xf) as usize]);
+        } else {
+            lp += 1;
+            if lp > MAXL {
+                d.extend_from_slice(b"=\r\n");
+                lp = 1;
+            }
+            d.push(c);
+        }
     }
+    d
+}
 
-    // Trim trailing whitespace at end of message
-    while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
-        let ws = result.pop().unwrap();
-        let encoded = format!("={:02X}", ws);
-        result.extend_from_slice(encoded.as_bytes());
-    }
-
-    Ok(Value::String(PhpString::from_vec(result)))
+fn quoted_printable_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = zpp_str(vm, args, 0, "quoted_printable_encode", "string")?;
+    Ok(Value::String(PhpString::from_vec(php_quot_print_encode(s.as_bytes()))))
 }
 
 fn quoted_printable_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -6061,89 +6040,9 @@ fn convert_uudecode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     convert_uudecode(vm, args)
 }
 
-fn quoted_printable_encode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = s.as_bytes();
-    let mut result = Vec::new();
-    let mut line_len: usize = 0;
-
-    let mut i = 0;
-    while i < bytes.len() {
-        let b = bytes[i];
-
-        // Handle CRLF line breaks - output as-is and reset line counter
-        if b == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-            // Encode trailing whitespace before hard line break
-            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
-                let ws = result.pop().unwrap();
-                result.push(b'=');
-                result.push(b"0123456789ABCDEF"[(ws >> 4) as usize]);
-                result.push(b"0123456789ABCDEF"[(ws & 0x0f) as usize]);
-            }
-            result.push(b'\r');
-            result.push(b'\n');
-            line_len = 0;
-            i += 2;
-            continue;
-        }
-        if b == b'\n' {
-            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
-                let ws = result.pop().unwrap();
-                result.push(b'=');
-                result.push(b"0123456789ABCDEF"[(ws >> 4) as usize]);
-                result.push(b"0123456789ABCDEF"[(ws & 0x0f) as usize]);
-            }
-            result.push(b'\r');
-            result.push(b'\n');
-            line_len = 0;
-            i += 1;
-            continue;
-        }
-        if b == b'\r' {
-            while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
-                let ws = result.pop().unwrap();
-                result.push(b'=');
-                result.push(b"0123456789ABCDEF"[(ws >> 4) as usize]);
-                result.push(b"0123456789ABCDEF"[(ws & 0x0f) as usize]);
-            }
-            result.push(b'\r');
-            result.push(b'\n');
-            line_len = 0;
-            i += 1;
-            continue;
-        }
-
-        let is_printable = b == b'\t' || (b >= 32 && b <= 126 && b != b'=');
-        let char_len: usize = if is_printable { 1 } else { 3 };
-
-        // Check if we need a soft line break
-        if line_len + char_len > 75 {
-            result.extend_from_slice(b"=\r\n");
-            line_len = 0;
-        }
-
-        if is_printable {
-            result.push(b);
-            line_len += 1;
-        } else {
-            result.push(b'=');
-            result.push(b"0123456789ABCDEF"[(b >> 4) as usize]);
-            result.push(b"0123456789ABCDEF"[(b & 0x0f) as usize]);
-            line_len += 3;
-        }
-
-        i += 1;
-    }
-
-    // Encode trailing whitespace at end of string
-    while result.last() == Some(&b' ') || result.last() == Some(&b'\t') {
-        let ws = result.pop().unwrap();
-        result.push(b'=');
-        result.push(b"0123456789ABCDEF"[(ws >> 4) as usize]);
-        result.push(b"0123456789ABCDEF"[(ws & 0x0f) as usize]);
-    }
-
-    Ok(Value::String(PhpString::from_vec(result)))
+fn quoted_printable_encode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let s = zpp_str(vm, args, 0, "quoted_printable_encode", "string")?;
+    Ok(Value::String(PhpString::from_vec(php_quot_print_encode(s.as_bytes()))))
 }
 
 fn quoted_printable_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
