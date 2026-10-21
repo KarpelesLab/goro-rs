@@ -448,9 +448,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"parse_str", parse_str_fn);
     vm.register_function(b"escapeshellarg", escapeshellarg_fn);
     vm.register_function(b"escapeshellcmd", escapeshellcmd_fn);
-    vm.register_function(b"htmlspecialchars", htmlspecialchars);
-    vm.register_function(b"htmlentities", htmlentities);
-    vm.register_function(b"htmlspecialchars_decode", htmlspecialchars_decode);
+    // htmlspecialchars/htmlentities/htmlspecialchars_decode/html_entity_decode/
+    // get_html_translation_table are registered by the html module.
     vm.register_function(b"fprintf", fprintf_fn);
     vm.register_function(b"vfprintf", vfprintf_fn);
     vm.register_function(b"sscanf", sscanf_fn);
@@ -5106,121 +5105,8 @@ fn rawurldecode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-/// PHP's html.c determine_charset accepts these encoding names (case-insensitive).
-fn is_supported_html_charset(name: &str) -> bool {
-    const SUPPORTED: &[&str] = &[
-        "ISO-8859-1", "ISO8859-1", "ISO-8859-15", "ISO8859-15",
-        "utf-8", "UTF-8",
-        "cp1252", "Windows-1252", "1252",
-        "BIG5", "950",
-        "GB2312", "936",
-        "BIG5-HKSCS",
-        "Shift_JIS", "SJIS", "932", "SJIS-win", "CP932",
-        "EUCJP", "EUC-JP", "eucJP-win",
-        "KOI8-R", "koi8-ru", "koi8r",
-        "cp1251", "Windows-1251", "win-1251",
-        "iso8859-5", "iso-8859-5",
-        "cp866", "866", "ibm866",
-        "MacRoman",
-        "", // empty falls back to default
-    ];
-    SUPPORTED.iter().any(|c| c.eq_ignore_ascii_case(name))
-}
-
-fn htmlspecialchars(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(11); // ENT_QUOTES | ENT_SUBSTITUTE (default)
-    // 3rd arg is charset hint - validate it like PHP does
-    if let Some(charset_val) = args.get(2) {
-        match charset_val {
-            Value::Null => {} // default UTF-8, no warning
-            _ => {
-                let charset = charset_val.to_php_string();
-                let cs_str = charset.to_string_lossy();
-                if !cs_str.is_empty() && !is_supported_html_charset(&cs_str) {
-                    vm.emit_warning(
-                        &format!("htmlspecialchars(): Charset \"{}\" is not supported, assuming UTF-8", cs_str),
-                    );
-                }
-            }
-        }
-    }
-    let double_encode = match args.get(3) {
-        Some(Value::Null) | None => true,
-        Some(v) => v.is_truthy(),
-    };
-    let ent_compat = flags & 2 != 0;  // ENT_COMPAT
-    let ent_quotes = flags & 3 == 3;  // ENT_QUOTES (both single and double)
-    let bytes = s.as_bytes();
-    let mut result = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'&' => {
-                if !double_encode {
-                    // Check if this is already an entity
-                    let remaining = &bytes[i..];
-                    let is_entity = remaining.starts_with(b"&amp;")
-                        || remaining.starts_with(b"&lt;")
-                        || remaining.starts_with(b"&gt;")
-                        || remaining.starts_with(b"&quot;")
-                        || remaining.starts_with(b"&#039;")
-                        || remaining.starts_with(b"&apos;")
-                        || (remaining.len() > 2 && remaining[1] == b'#' && {
-                            // Numeric entity: &#digits; or &#xhex;
-                            if let Some(end) = remaining.iter().position(|&b| b == b';') {
-                                end > 2
-                            } else { false }
-                        })
-                        || {
-                            // Named entity: &name;
-                            if let Some(end) = remaining.iter().position(|&b| b == b';') {
-                                end > 1 && remaining[1..end].iter().all(|&b| b.is_ascii_alphanumeric())
-                            } else { false }
-                        };
-                    if is_entity {
-                        result.push(b'&');
-                    } else {
-                        result.extend_from_slice(b"&amp;");
-                    }
-                } else {
-                    result.extend_from_slice(b"&amp;");
-                }
-            }
-            b'"' if ent_compat || ent_quotes => result.extend_from_slice(b"&quot;"),
-            b'\'' if ent_quotes => result.extend_from_slice(b"&#039;"),
-            b'<' => result.extend_from_slice(b"&lt;"),
-            b'>' => result.extend_from_slice(b"&gt;"),
-            _ => result.push(bytes[i]),
-        }
-        i += 1;
-    }
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-fn htmlentities(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    htmlspecialchars(_vm, args)
-}
-fn html_entity_decode(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::empty()))
-}
-fn htmlspecialchars_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(3); // ENT_QUOTES | ENT_SUBSTITUTE
-    let input = s.to_string_lossy();
-    let mut result = input
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">");
-    if flags & 2 != 0 {
-        // ENT_COMPAT - decode double quotes
-        result = result.replace("&quot;", "\"");
-    }
-    if flags & 4 != 0 || flags & 3 == 3 {
-        // ENT_QUOTES - decode single quotes
-        result = result.replace("&#039;", "'").replace("&apos;", "'");
-    }
-    Ok(Value::String(PhpString::from_string(result)))
-}
+// htmlspecialchars/htmlentities/html_entity_decode/htmlspecialchars_decode
+// moved to the html module.
 
 // Note: the active str_word_count implementation is `str_word_count_fn` in
 // strings.rs (it overrides this one at registration time, since both register
