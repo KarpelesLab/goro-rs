@@ -10859,6 +10859,11 @@ fn call_registered(
 }
 
 pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // php_error_docref() names the active function (file_get_contents(),
+    // highlight_file(), ...) when fopen's implementation is reached from it.
+    let fopen_caller = vm
+        .current_builtin_name()
+        .unwrap_or_else(|| "fopen".to_string());
     // Binary-safe copy of the name (data: payloads, php://filter targets).
     let raw_name: Vec<u8> = args
         .first()
@@ -10889,7 +10894,10 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // PHP fopen rejects null bytes embedded in the path.
     if filename.contains('\0') {
-        vm.emit_warning("fopen(): Argument #1 ($filename) must not contain any null bytes");
+        vm.emit_warning(&format!(
+            "{}(): Argument #1 ($filename) must not contain any null bytes",
+            fopen_caller
+        ));
         return Ok(Value::False);
     }
 
@@ -10908,12 +10916,12 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         if !host.is_empty() && host != "localhost" {
             vm.emit_warning(&format!(
-                "fopen(): Remote host file access not supported, file://{}",
-                rest
+                "{}(): Remote host file access not supported, file://{}",
+                fopen_caller, rest
             ));
             vm.emit_warning(&format!(
-                "fopen({}): Failed to open stream: no suitable wrapper could be found",
-                filename
+                "{}({}): Failed to open stream: no suitable wrapper could be found",
+                fopen_caller, filename
             ));
             return Ok(Value::False);
         }
@@ -10968,8 +10976,8 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let mut buf = Vec::new();
                         if dec.read_to_end(&mut buf).is_err() {
                             vm.emit_warning(&format!(
-                                "fopen({}): Failed to open stream: operation failed",
-                                filename
+                                "{}({}): Failed to open stream: operation failed",
+                                fopen_caller, filename
                             ));
                             return Ok(Value::False);
                         }
@@ -11001,8 +11009,8 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 Err(_) => {
                     vm.emit_warning(&format!(
-                        "fopen({}): Failed to open stream: No such file or directory",
-                        filename
+                        "{}({}): Failed to open stream: No such file or directory",
+                        fopen_caller, filename
                     ));
                     return Ok(Value::False);
                 }
@@ -11174,10 +11182,10 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // php://fd/<n> -- duplicate the file descriptor <n>.
         // php://fd is invalid (must include a number).
         if lower == "fd" {
-            vm.emit_warning("fopen(): Invalid php:// URL specified");
+            vm.emit_warning(&format!("{}(): Invalid php:// URL specified", fopen_caller));
             vm.emit_warning(&format!(
-                "fopen({}): Failed to open stream: operation failed",
-                filename
+                "{}({}): Failed to open stream: operation failed",
+                fopen_caller, filename
             ));
             return Ok(Value::False);
         }
@@ -11185,7 +11193,8 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Reject if trailing slash present or empty
             if fd_tail.is_empty() || fd_tail.contains('/') {
                 vm.emit_warning(&format!(
-                    "fopen({}): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd>",
+                    "{}({}): Failed to open stream: php://fd/ stream must be specified in the form php://fd/<orig fd>",
+                    fopen_caller,
                     filename
                 ));
                 return Ok(Value::False);
@@ -11211,8 +11220,9 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         let err = std::io::Error::last_os_error();
                         let errno = err.raw_os_error().unwrap_or(0);
                         vm.emit_warning(&format!(
-                            "fopen({}): Failed to open stream: Error duping file descriptor {}; possibly it doesn't exist: [{}]: {}",
-                            filename, n, errno, err
+                            "{}({}): Failed to open stream: Error duping file descriptor {}; possibly it doesn't exist: [{}]: {}",
+                            fopen_caller,
+                            filename, n, errno, strip_os_error(&err.to_string())
                         ));
                         return Ok(Value::False);
                     }
@@ -11232,7 +11242,8 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 _ => {
                     vm.emit_warning(&format!(
-                        "fopen({}): Failed to open stream: The file descriptors must be non-negative numbers smaller than {}",
+                        "{}({}): Failed to open stream: The file descriptors must be non-negative numbers smaller than {}",
+                        fopen_caller,
                         filename, max_fd
                     ));
                     return Ok(Value::False);
@@ -11258,8 +11269,8 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     if !valid_mode {
         vm.emit_warning(&format!(
-            "fopen({}): Failed to open stream: `{}' is not a valid mode for fopen",
-            filename, mode
+            "{}({}): Failed to open stream: `{}' is not a valid mode for fopen",
+            fopen_caller, filename, mode
         ));
         return Ok(Value::False);
     }
@@ -11375,8 +11386,8 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
             vm.emit_warning(&format!(
-                "fopen({}): Failed to open stream: {}",
-                filename, msg
+                "{}({}): Failed to open stream: {}",
+                fopen_caller, filename, msg
             ));
             Ok(Value::False)
         }
@@ -12545,7 +12556,7 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
-fn scandir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let dir = args.first().unwrap_or(&Value::Null).to_php_string();
     let dir_str = dir.to_string_lossy();
     let sort_order = args.get(1).map(|v| v.to_long()).unwrap_or(0); // 0 = ascending, 1 = descending
@@ -12565,9 +12576,23 @@ fn scandir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             for name in names {
                 arr.push(Value::String(PhpString::from_string(name)));
             }
+            // php_stream_scandir() opened a directory stream.
+            goro_core::value::alloc_resource_id();
             Ok(Value::Array(Rc::new(RefCell::new(arr))))
         }
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!(
+                "scandir({}): Failed to open directory: {}",
+                dir_str, msg
+            ));
+            vm.emit_warning(&format!(
+                "scandir(): (errno {}): {}",
+                e.raw_os_error().unwrap_or(0),
+                msg
+            ));
+            Ok(Value::False)
+        }
     }
 }
 // Thread-local storage for HTTP response headers and status code. The CLI
@@ -14125,14 +14150,15 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Err(e) => {
                 vm.emit_warning(&format!(
                     "opendir({}): Failed to open directory: {}",
-                    path_str, e
+                    path_str,
+                    strip_os_error(&e.to_string())
                 ));
                 Ok(Value::False)
             }
         }
     } else {
         let err_msg = match std::fs::metadata(dir_path) {
-            Err(e) => format!("{}", e),
+            Err(e) => strip_os_error(&e.to_string()),
             Ok(_) => "Not a directory".to_string(),
         };
         vm.emit_warning(&format!(
