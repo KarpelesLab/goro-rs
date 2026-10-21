@@ -34628,6 +34628,22 @@ impl Vm {
                                         eval_result
                                     }
                                     Err(e) => {
+                                        // Errors php-src throws as CompileError are catchable.
+                                        if is_compile_error_exception(&e.message) {
+                                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                                exception_handlers.last().copied()
+                                            {
+                                                let exc = self.create_exception(
+                                                    b"CompileError",
+                                                    &e.message,
+                                                    e.line,
+                                                );
+                                                self.current_exception = Some(exc);
+                                                pending_calls_catch_depth = Some(eh_pc_depth);
+                                                ip = catch_target as usize;
+                                                continue;
+                                            }
+                                        }
                                         // Compile error in eval - determine error type
                                         // Semantic errors like "Cannot use [] for reading" are Fatal errors
                                         // Syntax errors are Parse errors
@@ -34667,14 +34683,20 @@ impl Vm {
                             }
                             Err(e) => {
                                 // PHP 7+: parse errors in eval throw ParseError exception
-                                let msg = if is_php_parse_message(&e.message) {
+                                let compile_exc = is_compile_error_exception(&e.message);
+                                let msg = if compile_exc || is_php_parse_message(&e.message) {
                                     e.message.clone()
                                 } else {
                                     format!("syntax error in eval()'d code on line {}", e.span.line)
                                 };
                                 let eval_file =
                                     format!("{}({}) : eval()'d code", self.current_file, op.line);
-                                let exc = self.create_exception(b"ParseError", &msg, e.span.line);
+                                let exc_class: &[u8] = if compile_exc {
+                                    b"CompileError"
+                                } else {
+                                    b"ParseError"
+                                };
+                                let exc = self.create_exception(exc_class, &msg, e.span.line);
                                 // Set file and line on the exception
                                 if let Value::Object(ref obj) = exc {
                                     let mut ob = obj.borrow_mut();
@@ -34696,14 +34718,22 @@ impl Vm {
                                     continue;
                                 }
                                 // No exception handler - output as parse error
-                                let err_msg = if is_php_parse_message(&e.message) {
+                                let err_msg = if compile_exc || is_php_parse_message(&e.message) {
                                     e.message.clone()
                                 } else {
                                     "syntax error".to_string()
                                 };
                                 let msg = format!(
-                                    "\nParse error: {} in {}({}) : eval()'d code on line {}\n",
-                                    err_msg, self.current_file, op.line, e.span.line
+                                    "\n{}: {} in {}({}) : eval()'d code on line {}\n",
+                                    if compile_exc {
+                                        "Fatal error"
+                                    } else {
+                                        "Parse error"
+                                    },
+                                    err_msg,
+                                    self.current_file,
+                                    op.line,
+                                    e.span.line
                                 );
                                 self.write_output(msg.as_bytes());
                                 Value::False
@@ -51956,6 +51986,16 @@ fn check_inc_dec_type(val: &Value, is_increment: bool) -> Option<String> {
         }
         _ => None,
     }
+}
+
+/// Compile errors php-src raises as a (catchable) CompileError exception
+/// rather than a fatal error (zend_add_member_modifier & co.).
+fn is_compile_error_exception(msg: &str) -> bool {
+    (msg.starts_with("Multiple ") && msg.ends_with(" modifiers are not allowed"))
+        || (msg.starts_with("Cannot use the ")
+            && (msg.contains(" modifier on a") || msg.contains(" modifier on an")))
+        || msg == "__HALT_COMPILER() can only be used from the outermost scope"
+        || msg == "Encoding must be a literal"
 }
 
 /// Whether a parser message is one php-src's scanner/parser produces (others

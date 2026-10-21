@@ -56,6 +56,8 @@ pub struct Parser {
     class_name_stack: Vec<Vec<u8>>,
     /// Stack of "is this class actually an interface?" for nested class parsing.
     is_interface_stack: Vec<bool>,
+    /// Nesting of statements being parsed (1 = top level).
+    stmt_nesting: u32,
 }
 
 const MAX_PARSE_DEPTH: u32 = 512;
@@ -190,6 +192,7 @@ impl Parser {
             pending_closure_doc: None,
             class_name_stack: Vec::new(),
             is_interface_stack: Vec::new(),
+            stmt_nesting: 0,
         }
     }
 
@@ -400,6 +403,21 @@ impl Parser {
         None
     }
 
+    /// case_separator: ':' | ';' (the latter deprecated in PHP 8.5).
+    fn expect_case_separator(&mut self) -> ParseResult<()> {
+        if matches!(self.peek(), TokenKind::Semicolon) {
+            let line = self.span().line;
+            self.advance();
+            crate::push_lexer_deprecated(
+                "Case statements followed by a semicolon (;) are deprecated, use a colon (:) instead"
+                    .to_string(),
+                line,
+            );
+            return Ok(());
+        }
+        self.expect(&TokenKind::Colon).map(|_| ())
+    }
+
     /// Parse a complete PHP program
     pub fn parse(&mut self) -> ParseResult<Program> {
         let nesting = self.first_nesting_error();
@@ -410,14 +428,6 @@ impl Parser {
             (Err(e), Some((idx, message, line))) if idx <= self.pos => {
                 let mut span = e.span;
                 span.line = line;
-                Err(ParseError { message, span })
-            }
-            (Ok(_), Some((idx, message, line))) => {
-                let span = crate::token::Span {
-                    start: self.tokens.get(idx).map(|t| t.span.start).unwrap_or(0),
-                    end: self.tokens.get(idx).map(|t| t.span.end).unwrap_or(0),
-                    line,
-                };
                 Err(ParseError { message, span })
             }
             (r, _) => r,
@@ -538,7 +548,23 @@ impl Parser {
         Ok(attrs)
     }
     fn parse_statement(&mut self) -> ParseResult<Statement> {
+        self.stmt_nesting += 1;
+        let r = self.parse_statement_inner();
+        self.stmt_nesting -= 1;
+        r
+    }
+
+    fn parse_statement_inner(&mut self) -> ParseResult<Statement> {
         let span = self.span();
+        if self.stmt_nesting > 1
+            && matches!(self.peek(), TokenKind::Identifier(n) if n.eq_ignore_ascii_case(b"__halt_compiler"))
+            && matches!(self.peek_at(1), TokenKind::OpenParen)
+        {
+            return Err(ParseError {
+                message: "__HALT_COMPILER() can only be used from the outermost scope".into(),
+                span,
+            });
+        }
         match self.peek().clone() {
             TokenKind::InlineHtml(html) => {
                 self.advance();
@@ -1634,10 +1660,10 @@ impl Parser {
         {
             let value = if self.eat(&TokenKind::Case) {
                 let v = self.parse_expression()?;
-                self.expect(&TokenKind::Colon)?;
+                self.expect_case_separator()?;
                 Some(v)
             } else if self.eat(&TokenKind::Default) {
-                self.expect(&TokenKind::Colon)?;
+                self.expect_case_separator()?;
                 None
             } else {
                 return Err(ParseError {

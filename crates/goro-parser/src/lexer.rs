@@ -32,6 +32,9 @@ pub struct Lexer<'a> {
     preserve_trivia: bool,
     /// Accumulated trivia tokens (only used when preserve_trivia is true).
     trivia_buffer: Vec<Token>,
+    /// Closing delimiter of the interpolated string being scanned (`"`, or
+    /// `` ` `` for a shell-exec string).
+    dq_term: u8,
 }
 
 impl<'a> Lexer<'a> {
@@ -46,6 +49,7 @@ impl<'a> Lexer<'a> {
             pending: Vec::new(),
             preserve_trivia: false,
             trivia_buffer: Vec::new(),
+            dq_term: b'"',
         }
     }
 
@@ -528,13 +532,18 @@ impl<'a> Lexer<'a> {
         let mut result = Vec::new();
         loop {
             match self.peek() {
-                Some(b'"') => {
+                Some(c) if c == self.dq_term => {
                     self.advance();
                     break;
                 }
                 Some(b'\\') => {
                     self.advance();
                     match self.advance() {
+                        Some(b'`') if self.dq_term == b'`' => result.push(b'`'),
+                        Some(b'"') if self.dq_term == b'`' => {
+                            result.push(b'\\');
+                            result.push(b'"');
+                        }
                         Some(b'n') => result.push(b'\n'),
                         Some(b'r') => result.push(b'\r'),
                         Some(b't') => result.push(b'\t'),
@@ -668,6 +677,18 @@ impl<'a> Lexer<'a> {
                         match self.peek() {
                             Some(b'0'..=b'9') => {
                                 let num_kind = self.scan_number();
+                                self.pending.push(Token::new(
+                                    num_kind,
+                                    Span::new(self.pos as u32, self.pos as u32, self.line),
+                                ));
+                            }
+                            // "$a[-3]": a negative integer offset (T_NUM_STRING)
+                            Some(b'-') if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) => {
+                                self.advance(); // consume -
+                                let num_kind = match self.scan_number() {
+                                    TokenKind::LongNumber(n) => TokenKind::LongNumber(-n),
+                                    other => other,
+                                };
                                 self.pending.push(Token::new(
                                     num_kind,
                                     Span::new(self.pos as u32, self.pos as u32, self.line),
@@ -1094,6 +1115,25 @@ impl<'a> Lexer<'a> {
             b'"' => {
                 self.advance();
                 self.scan_double_quoted_string()
+            }
+
+            // `cmd` is shell_exec("cmd") (deprecated in PHP 8.5).
+            b'`' if !self.preserve_trivia => {
+                self.advance();
+                crate::push_lexer_deprecated(
+                    "The backtick (`) operator is deprecated, use shell_exec() instead".to_string(),
+                    start_line,
+                );
+                self.dq_term = b'`';
+                let first = self.scan_double_quoted_string();
+                self.dq_term = b'"';
+                let rest = std::mem::take(&mut self.pending);
+                let span = Span::new(self.pos as u32, self.pos as u32, start_line);
+                self.pending.push(Token::new(TokenKind::OpenParen, span));
+                self.pending.push(Token::new(first, span));
+                self.pending.extend(rest);
+                self.pending.push(Token::new(TokenKind::CloseParen, span));
+                TokenKind::Identifier(b"shell_exec".to_vec())
             }
 
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | 0x80..=0xFF => {
@@ -1862,7 +1902,14 @@ impl<'a> Lexer<'a> {
                         // Scan index: could be number, variable, or bare identifier
                         if i < len {
                             match content[i] {
-                                b'0'..=b'9' => {
+                                b'0'..=b'9' | b'-'
+                                    if content[i] != b'-'
+                                        || (i + 1 < len && content[i + 1].is_ascii_digit()) =>
+                                {
+                                    let neg = content[i] == b'-';
+                                    if neg {
+                                        i += 1;
+                                    }
                                     let num_start = i;
                                     while i < len && content[i].is_ascii_digit() {
                                         i += 1;
@@ -1870,6 +1917,7 @@ impl<'a> Lexer<'a> {
                                     let s: String =
                                         content[num_start..i].iter().map(|&b| b as char).collect();
                                     let n = s.parse::<i64>().unwrap_or(0);
+                                    let n = if neg { -n } else { n };
                                     self.pending.push(Token::new(
                                         TokenKind::LongNumber(n),
                                         Span::new(self.pos as u32, self.pos as u32, self.line),

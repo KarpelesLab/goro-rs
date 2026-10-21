@@ -1418,7 +1418,7 @@ fn execute_php_inner_impl(
     let tokens = lexer.tokenize();
 
     // Drain any deprecations recorded by the lexer (e.g. `${var}` syntax).
-    let lexer_deprecations = goro_parser::take_lexer_deprecations();
+    let mut lexer_deprecations = goro_parser::take_lexer_deprecations();
     let lexer_warnings = goro_parser::take_lexer_warnings();
 
     // Parse
@@ -1501,6 +1501,8 @@ fn execute_php_inner_impl(
                 || err_msg.starts_with("Invalid body indentation level")
                 || err_msg.starts_with("Invalid indentation - tabs and spaces")
                 || err_msg.starts_with("Unterminated comment")
+                || err_msg.starts_with("Unclosed '")
+                || err_msg.starts_with("Unmatched '")
             {
                 format!(
                     "\nParse error: {} in {} on line {}\n",
@@ -1515,6 +1517,9 @@ fn execute_php_inner_impl(
             return Ok(msg.into_bytes());
         }
     };
+    // ...and those of the parser, in source order.
+    lexer_deprecations.extend(goro_parser::take_lexer_deprecations());
+    lexer_deprecations.sort_by_key(|(_, line)| *line);
 
     // Compile
     let mut compiler = Compiler::new();

@@ -236,7 +236,9 @@ fn run_code(source: &[u8], filename: &str, initial_error_reporting: i64) {
     };
 
     // Drain any deprecations recorded by the lexer (e.g. `${var}` syntax).
-    let lexer_deprecations = goro_parser::take_lexer_deprecations();
+    let mut lexer_deprecations = goro_parser::take_lexer_deprecations();
+    // Lexer and parser diagnostics, in source order.
+    lexer_deprecations.sort_by_key(|(_, line)| *line);
 
     // Compile
     let mut compiler = Compiler::new();
