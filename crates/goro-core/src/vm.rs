@@ -15166,7 +15166,14 @@ impl Vm {
     /// Execute an op_array (main entry point)
     pub fn execute(&mut self, op_array: &OpArray) -> Result<Value, VmError> {
         self.is_global_scope = true;
-        let cvs = vec![Value::Undef; op_array.cv_names.len()];
+        let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
+        // The main script's CVs are the global symbol table: pick up variables
+        // registered at request startup (e.g. $argv / $argc).
+        for (i, name) in op_array.cv_names.iter().enumerate() {
+            if let Some(v) = self.globals.get(name) {
+                cvs[i] = v.clone();
+            }
+        }
         let result = self.execute_op_array(op_array, cvs);
 
         // The Return path in global scope force-closes outstanding generator CVs

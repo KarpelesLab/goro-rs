@@ -7,6 +7,7 @@ pub mod misc;
 pub mod ob;
 pub mod output;
 pub mod regex;
+pub mod request;
 pub mod strings;
 pub mod type_funcs;
 
@@ -27,6 +28,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     ob::register(vm);
     html::register(vm);
     regex::register(vm);
+    request::register(vm);
     basedir_guard::register(vm);
     register_builtin_param_names(vm);
 }

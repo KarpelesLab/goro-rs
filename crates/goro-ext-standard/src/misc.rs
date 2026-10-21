@@ -10191,7 +10191,13 @@ fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         if let Some(sp) = special {
             match tempfile::tempfile() {
-                Ok(f) => {
+                Ok(mut f) => {
+                    if lower == "input" {
+                        use std::io::{Seek, SeekFrom, Write};
+                        let body = get_request_body();
+                        let _ = f.write_all(&body);
+                        let _ = f.seek(SeekFrom::Start(0));
+                    }
                     let fid = alloc_file_handle_special_uri(f, &mode, sp, &filename);
                     goro_core::value::register_resource(fid, b"stream");
                     return Ok(Value::Resource(fid));

@@ -27,4 +27,5 @@ goro-ext-mbstring = { path = "../goro-ext-mbstring" }
 goro-ext-spl = { path = "../goro-ext-spl" }
 goro-ext-reflection = { path = "../goro-ext-reflection" }
 libc = "0.2"
+tempfile = "3"
 regex = "1"

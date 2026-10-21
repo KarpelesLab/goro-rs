@@ -20,6 +20,8 @@ const VALID_SECTIONS: &[&str] = &[
 pub struct PhptTest {
     pub name: String,
     pub sections: HashMap<String, String>,
+    /// Byte-exact (line endings preserved) copies of the request sections.
+    pub raw_sections: HashMap<String, String>,
 }
 
 impl PhptTest {
@@ -72,7 +74,37 @@ impl PhptTest {
 
         let name = sections.get("TEST")?.clone();
 
-        Some(PhptTest { name, sections })
+        let mut raw_sections = HashMap::new();
+        for sec in ["POST", "POST_RAW", "PUT", "GET", "COOKIE", "ARGS", "ENV", "STDIN"] {
+            if let Some(r) = Self::raw_section(content, sec) {
+                raw_sections.insert(sec.to_string(), r);
+            }
+        }
+        Some(PhptTest { name, sections, raw_sections })
+    }
+
+    /// Extract a section byte-exactly (keeping `\r\n` line endings).
+    fn raw_section(content: &str, want: &str) -> Option<String> {
+        let mut out: Option<String> = None;
+        let mut inside = false;
+        for line in content.split_inclusive('\n') {
+            let bare = line.trim_end_matches(['\n', '\r']);
+            if bare.len() > 4 && bare.starts_with("--") && bare.ends_with("--")
+                && VALID_SECTIONS.contains(&&bare[2..bare.len() - 2])
+            {
+                inside = &bare[2..bare.len() - 2] == want;
+                if inside {
+                    out = Some(String::new());
+                }
+                continue;
+            }
+            if inside {
+                if let Some(o) = out.as_mut() {
+                    o.push_str(line);
+                }
+            }
+        }
+        out
     }
 
     /// Extract the FILE (or FILEEOF) section exactly as run-tests.php does.
@@ -285,7 +317,11 @@ pub fn run_test_with_dir_and_filename(test: &PhptTest, test_dir: Option<&Path>, 
 
     // Execute the source with a timeout (longer for tests that spawn a server).
     let timeout_secs: u64 = if source.contains("php_cli_server_start") { 30 } else { 5 };
-    let output = match execute_php_with_timeout_and_filename(source.as_bytes(), timeout_secs, test_dir, &ini_settings, filename) {
+    let req = build_request(test, test_dir, filename);
+    PHPT_REQUEST.with(|r| *r.borrow_mut() = Some(req));
+    let output = execute_php_with_timeout_and_filename(source.as_bytes(), timeout_secs, test_dir, &ini_settings, filename);
+    PHPT_REQUEST.with(|r| *r.borrow_mut() = None);
+    let output = match output {
         Ok(output) => output,
         Err(e) => {
             // Run CLEAN section even on error so leftover files don't cascade.
@@ -1017,6 +1053,8 @@ fn execute_php_inner(source: &[u8], ini_settings: &[(String, String)], filename:
     };
 
     let result = execute_php_inner_impl(source, ini_settings, filename);
+    // destroy_uploaded_files_hash: remove upload temp files left in place
+    goro_ext_standard::request::shutdown();
 
     // Clean up the temporary file
     if file_written {
@@ -1269,6 +1307,26 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     }
     for class in compiled_classes {
         vm.register_class(class);
+    }
+
+    // Request startup: superglobals, $argv/$argc, php://input (main FILE only).
+    if let Some(req) = PHPT_REQUEST.with(|r| r.borrow_mut().take()) {
+        for (k, v) in &req.env {
+            unsafe { std::env::set_var(k, v); }
+        }
+        if let Some(stdin) = &req.stdin {
+            if let Ok(mut f) = tempfile::tempfile() {
+                use std::io::{Seek, SeekFrom, Write};
+                let _ = f.write_all(stdin);
+                let _ = f.seek(SeekFrom::Start(0));
+                use std::os::unix::io::AsRawFd;
+                unsafe { libc::dup2(f.as_raw_fd(), 0); }
+            }
+        }
+        let ini_lookup = |k: &str| -> Option<String> {
+            ini_settings.iter().rev().find(|(a, _)| a == k).map(|(_, v)| v.clone())
+        };
+        goro_ext_standard::request::startup(&mut vm, &req.info, &ini_lookup);
     }
 
     // Provide a minimal $_SERVER superglobal ONLY when the test depends on
@@ -1793,4 +1851,191 @@ fn parse_memory_limit_value(val: &goro_core::value::Value) -> i64 {
         (s, 1i64)
     };
     num_str.parse::<i64>().unwrap_or(128 * 1024 * 1024) * multiplier
+}
+
+/// Request environment for the main FILE run (CGI emulation / CLI argv),
+/// built from the test sections like run-tests.php does.
+#[derive(Default, Clone)]
+struct PhptRequest {
+    info: goro_ext_standard::request::RequestInfo,
+    /// Environment variables to export in the child before running.
+    env: Vec<(String, String)>,
+    stdin: Option<Vec<u8>>,
+}
+
+thread_local! {
+    static PHPT_REQUEST: std::cell::RefCell<Option<PhptRequest>> = const { std::cell::RefCell::new(None) };
+}
+
+/// PHP's trim() character set.
+fn php_trim(s: &str) -> &str {
+    s.trim_matches(|c| c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\0' || c == '\x0b')
+}
+
+/// Minimal POSIX-shell word splitting (quotes and backslashes) for --ARGS--.
+fn shell_split(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut have = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => {
+                have = true;
+                for d in chars.by_ref() {
+                    if d == '\'' {
+                        break;
+                    }
+                    cur.push(d);
+                }
+            }
+            '"' => {
+                have = true;
+                while let Some(d) = chars.next() {
+                    if d == '"' {
+                        break;
+                    }
+                    if d == '\\' {
+                        if let Some(&n) = chars.peek() {
+                            if matches!(n, '"' | '\\' | '$' | '`') {
+                                cur.push(n);
+                                chars.next();
+                                continue;
+                            }
+                        }
+                    }
+                    cur.push(d);
+                }
+            }
+            '\\' => {
+                have = true;
+                if let Some(n) = chars.next() {
+                    if n != '\n' {
+                        cur.push(n);
+                    }
+                }
+            }
+            c if c.is_whitespace() => {
+                if have {
+                    out.push(std::mem::take(&mut cur));
+                    have = false;
+                }
+            }
+            c => {
+                have = true;
+                cur.push(c);
+            }
+        }
+    }
+    if have {
+        out.push(cur);
+    }
+    out
+}
+
+fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> PhptRequest {
+    let raw = |k: &str| test.raw_sections.get(k).map(|s| s.as_str());
+    let not_empty = |k: &str| raw(k).is_some_and(|s| !php_trim(s).is_empty());
+    let is_cgi = test.sections.contains_key("CGI")
+        || ["GET", "POST", "POST_RAW", "PUT", "COOKIE"].iter().any(|k| not_empty(k))
+        || test.sections.get("EXPECTHEADERS").is_some_and(|s| !php_trim(s).is_empty());
+    let mut env: Vec<(String, String)> = Vec::new();
+    let mut set = |env: &mut Vec<(String, String)>, k: &str, v: String| {
+        env.retain(|(a, _)| a != k);
+        env.push((k.to_string(), v));
+    };
+    set(&mut env, "REDIRECT_STATUS", "1".into());
+    let query = raw("GET").map(|s| php_trim(s).to_string()).unwrap_or_default();
+    set(&mut env, "QUERY_STRING", query.clone());
+    set(&mut env, "PATH_TRANSLATED", filename.to_string());
+    set(&mut env, "SCRIPT_FILENAME", filename.to_string());
+    let cookie = raw("COOKIE").map(|s| php_trim(s).to_string());
+    set(&mut env, "HTTP_COOKIE", cookie.clone().unwrap_or_default());
+    set(&mut env, "TZ", String::new());
+    if let Some(e) = raw("ENV") {
+        let dir = test_dir.map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+        let e = e.replace("{PWD}", &dir);
+        for line in e.split('\n') {
+            let line = php_trim(line);
+            if let Some((k, v)) = line.split_once('=') {
+                if !k.is_empty() {
+                    set(&mut env, k, v.to_string());
+                }
+            }
+        }
+    }
+    let mut method = String::new();
+    let mut content_type = String::new();
+    let mut body: Vec<u8> = Vec::new();
+    let mut content_length = String::new();
+    let raw_request = |sec: &str, ct: &mut String| -> Vec<u8> {
+        let post = php_trim(raw(sec).unwrap_or(""));
+        let mut request = String::new();
+        let mut started = false;
+        for line in post.split('\n') {
+            if ct.is_empty() && line.len() >= 13 && line[..13].eq_ignore_ascii_case("Content-Type:") {
+                *ct = line[13..].replace('\r', "").trim().to_string();
+                continue;
+            }
+            if started {
+                request.push('\n');
+            }
+            started = true;
+            request.push_str(line);
+        }
+        request.into_bytes()
+    };
+    if not_empty("POST_RAW") {
+        body = raw_request("POST_RAW", &mut content_type);
+        content_length = body.len().to_string();
+        method = "POST".into();
+    } else if not_empty("PUT") {
+        body = raw_request("PUT", &mut content_type);
+        content_length = body.len().to_string();
+        method = "PUT".into();
+    } else if not_empty("POST") {
+        body = php_trim(raw("POST").unwrap_or("")).as_bytes().to_vec();
+        method = "POST".into();
+        content_type = "application/x-www-form-urlencoded".into();
+        content_length = body.len().to_string();
+    } else {
+        method = "GET".into();
+    }
+    set(&mut env, "REQUEST_METHOD", method.clone());
+    set(&mut env, "CONTENT_TYPE", content_type.clone());
+    set(&mut env, "CONTENT_LENGTH", content_length.clone());
+
+    let mut info = goro_ext_standard::request::RequestInfo::default();
+    info.cgi = is_cgi;
+    info.script_filename = filename.as_bytes().to_vec();
+    if is_cgi {
+        info.request_method = Some(method.into_bytes());
+        info.query_string = query.into_bytes();
+        info.cookie_data = cookie.map(|c| c.into_bytes());
+        info.content_type = if content_type.is_empty() { None } else { Some(content_type.into_bytes()) };
+        info.content_length = content_length.parse().unwrap_or(0);
+        info.body = body;
+    } else {
+        info.argv.push(filename.as_bytes().to_vec());
+        if let Some(a) = test.sections.get("ARGS") {
+            for w in shell_split(a) {
+                info.argv.push(w.into_bytes());
+            }
+        }
+    }
+    // Full environment as seen by the child: inherited vars + overrides.
+    let mut full: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+    for (k, v) in std::env::vars_os() {
+        let k = k.to_string_lossy().as_bytes().to_vec();
+        if env.iter().any(|(a, _)| a.as_bytes() == k.as_slice()) {
+            continue;
+        }
+        full.push((k, v.to_string_lossy().as_bytes().to_vec()));
+    }
+    for (k, v) in &env {
+        full.push((k.clone().into_bytes(), v.clone().into_bytes()));
+    }
+    info.env = full;
+    let stdin = test.sections.get("STDIN").map(|s| s.clone().into_bytes());
+    PhptRequest { info, env, stdin }
 }
