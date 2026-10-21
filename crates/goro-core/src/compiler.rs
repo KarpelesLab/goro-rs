@@ -96,6 +96,10 @@ struct LoopContext {
     /// Temporaries live during the loop (foreach iterator/value), released
     /// when `return` / `break N` / `continue N` leaves it (FE_FREE).
     free_tmps: Vec<u32>,
+    /// Nop at the loop entry, turned into SaveHandlerDepth (into the tmp)
+    /// once a jump out of the loop frees its temporaries.
+    depth_nop: Option<u32>,
+    depth_tmp: Option<u32>,
 }
 
 /// Compiles an AST into bytecode
@@ -1861,27 +1865,57 @@ impl Compiler {
         // after its finally block ran (php-src emits their FE_FREE after
         // the FAST_CALL), so a finally that throws keeps them running.
         let depth = self.finally_targets.len();
-        let tmps: Vec<u32> = self
-            .loop_stack
-            .iter()
-            .skip(from)
+        let levels: Vec<usize> = (from..self.loop_stack.len())
             .rev()
-            .take_while(|c| c.try_finally_depth >= depth)
-            .flat_map(|c| c.free_tmps.iter().copied())
-            .filter(|t| !matches!(keep, OperandType::Tmp(k) if k == *t))
+            .take_while(|&i| self.loop_stack[i].try_finally_depth >= depth)
+            .filter(|&i| !self.loop_stack[i].free_tmps.is_empty())
             .collect();
-        if tmps.is_empty() {
+        if levels.is_empty() {
             return;
         }
         let undef_const = self.op_array.add_literal(Value::Undef);
-        for t in tmps {
-            self.op_array.emit(Op {
-                opcode: OpCode::Assign,
-                op1: OperandType::Tmp(t),
-                op2: OperandType::Const(undef_const),
-                result: OperandType::Unused,
-                line,
-            });
+        for i in levels {
+            // ZEND_FREE_ON_RETURN: an exception thrown by the release is
+            // logically thrown at the end of the loop, so try blocks inside
+            // the loop don't catch it (the handler stack is cut back to its
+            // depth at the loop entry).
+            let depth_op = match (self.loop_stack[i].depth_tmp, self.loop_stack[i].depth_nop) {
+                (Some(t), _) => OperandType::Tmp(t),
+                (None, Some(nop)) => {
+                    let t = self.op_array.alloc_temp();
+                    let op = &mut self.op_array.ops[nop as usize];
+                    op.opcode = OpCode::SaveHandlerDepth;
+                    op.result = OperandType::Tmp(t);
+                    self.loop_stack[i].depth_tmp = Some(t);
+                    OperandType::Tmp(t)
+                }
+                (None, None) => OperandType::Unused,
+            };
+            let tmps: Vec<u32> = self.loop_stack[i]
+                .free_tmps
+                .iter()
+                .copied()
+                .filter(|t| !matches!(keep, OperandType::Tmp(k) if k == *t))
+                .collect();
+            for t in tmps {
+                if matches!(depth_op, OperandType::Unused) {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(t),
+                        op2: OperandType::Const(undef_const),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                } else {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::FreeLoopVar,
+                        op1: OperandType::Tmp(t),
+                        op2: depth_op,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                }
+            }
         }
     }
 
@@ -2185,6 +2219,8 @@ impl Compiler {
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
                     free_tmps: Vec::new(),
+                    depth_nop: None,
+                    depth_tmp: None,
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -2235,6 +2271,8 @@ impl Compiler {
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
                     free_tmps: Vec::new(),
+                    depth_nop: None,
+                    depth_tmp: None,
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -2281,6 +2319,8 @@ impl Compiler {
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
                     free_tmps: Vec::new(),
+                    depth_nop: None,
+                    depth_tmp: None,
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -2392,6 +2432,17 @@ impl Compiler {
                     line: stmt.span.line,
                 });
 
+                let depth_nop = if self.op_array.is_generator {
+                    None
+                } else {
+                    Some(self.op_array.emit(Op {
+                        opcode: OpCode::Nop,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    }))
+                };
                 self.loop_stack.push(LoopContext {
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
@@ -2400,6 +2451,8 @@ impl Compiler {
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
                     free_tmps: Vec::new(),
+                    depth_nop: None,
+                    depth_tmp: None,
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -2411,6 +2464,7 @@ impl Compiler {
                     if let OperandType::Tmp(arr_tmp) = arr {
                         ctx.free_tmps.push(arr_tmp);
                     }
+                    ctx.depth_nop = depth_nop;
                 }
                 let jmp_done = if *by_ref {
                     // For by-ref foreach, ForeachNextRef stores reference directly in val_tmp
@@ -2580,6 +2634,8 @@ impl Compiler {
                     finally_depth: self.finally_path.len(),
                     try_finally_depth: self.finally_targets.len(),
                     free_tmps: Vec::new(),
+                    depth_nop: None,
+                    depth_tmp: None,
                 });
 
                 // Switch compilation strategy:

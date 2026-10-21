@@ -302,6 +302,13 @@ pub enum OpCode {
     ArrayIsset,
     /// Make a CV into a reference (wrap in Rc<RefCell>): op1 = CV to make ref
     MakeRef,
+    /// Record the exception-handler stack depth at a loop entry: result = tmp.
+    SaveHandlerDepth,
+    /// Release a loop temporary when return/break leaves the loop
+    /// (FE_FREE with ZEND_FREE_ON_RETURN): op1 = tmp, op2 = tmp holding the
+    /// loop's SaveHandlerDepth. An exception thrown by a destructor run here
+    /// is dispatched from the loop's level.
+    FreeLoopVar,
     /// Write-fetch of a CV passed to a builtin's `array &$array` parameter
     /// (goro passes those by shared handle): an undefined CV becomes null
     /// silently, as ZEND_SEND_REF would. op1 = CV.

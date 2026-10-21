@@ -14937,6 +14937,55 @@ impl Vm {
                     self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
+                OpCode::SaveHandlerDepth => {
+                    if let OperandType::Tmp(t) = op.result {
+                        if let Some(slot) = tmps.get_mut(t as usize) {
+                            *slot = Value::Long(exception_handlers.len() as i64);
+                        }
+                    }
+                }
+                OpCode::FreeLoopVar => {
+                    if let OperandType::Tmp(t) = op.op1 {
+                        let depth = match op.op2 {
+                            OperandType::Tmp(d) => match tmps.get(d as usize) {
+                                Some(Value::Long(n)) => *n as usize,
+                                _ => usize::MAX,
+                            },
+                            _ => usize::MAX,
+                        };
+                        if let Some(slot) = tmps.get_mut(t as usize) {
+                            if matches!(slot, Value::Object(_)) {
+                                crate::gc::possible_root(slot);
+                            }
+                            *slot = Value::Undef;
+                        }
+                        foreach_iter_handles.remove(&t);
+                        if self.has_release_work() {
+                            let had_exc = self.current_exception.is_some();
+                            self.run_pending_destructors();
+                            if !had_exc && self.current_exception.is_some() {
+                                // Thrown "at the end of the loop": try blocks
+                                // opened inside it are not active there.
+                                exception_handlers.truncate(depth);
+                                if let Some((catch, finally, _, _, eh_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(eh_pc);
+                                    if catch > 0 {
+                                        ip = catch as usize;
+                                    } else if finally > 0 {
+                                        ip = finally as usize;
+                                    }
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception from destructor".into(),
+                                    line: self.current_line,
+                                });
+                            }
+                        }
+                    }
+                }
                 OpCode::FreeTmps => {
                     if let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) {
                         let mut freed = false;
