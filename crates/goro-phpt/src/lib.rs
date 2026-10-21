@@ -1389,8 +1389,8 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                                 ));
                             } else {
                                 fatal.push_str(&format!(
-                                    "\nFatal error: Uncaught {}: {} in {}:{}\nStack trace:\n{}",
-                                    class, msg_str, file_str, line_num, trace_str
+                                    "\nFatal error: Uncaught {}: {}{}{}:{}\nStack trace:\n{}",
+                                    class, msg_str, goro_core::vm::Vm::exception_location_connector(msg_str), file_str, line_num, trace_str
                                 ));
                             }
                         } else {
@@ -1401,8 +1401,8 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
                                 ));
                             } else {
                                 fatal.push_str(&format!(
-                                    "\n\nNext {}: {} in {}:{}\nStack trace:\n{}",
-                                    class, msg_str, file_str, line_num, trace_str
+                                    "\n\nNext {}: {}{}{}:{}\nStack trace:\n{}",
+                                    class, msg_str, goro_core::vm::Vm::exception_location_connector(msg_str), file_str, line_num, trace_str
                                 ));
                             }
                         }
