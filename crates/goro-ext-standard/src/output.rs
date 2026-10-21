@@ -476,7 +476,7 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
 
             // ReflectionAttribute: only show "name" property in var_dump
             if class_lower == b"reflectionattribute" {
-                let name_val = obj_borrow.get_property(b"__attr_name");
+                let name_val = obj_borrow.get_property(b"name");
                 let class_name_owned = class_name.to_string();
                 drop(obj_borrow);
                 vm.write_output(

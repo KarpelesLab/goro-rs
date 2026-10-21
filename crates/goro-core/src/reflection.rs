@@ -8486,10 +8486,11 @@ pub fn create_reflection_attributes(
         }
         let obj_id = vm.alloc_object_id();
         let mut obj = PhpObject::new(b"ReflectionAttribute".to_vec(), obj_id);
-        obj.set_property(b"__attr_name".to_vec(), Value::String(PhpString::from_vec(attr.name.clone())));
+        obj.set_property(b"name".to_vec(), Value::String(PhpString::from_vec(attr.name.clone())));
+        obj.set_property(b"__reflection_attr_name".to_vec(), Value::String(PhpString::from_vec(attr.name.clone())));
         // Store the op_array for lazy argument evaluation
-        obj.set_property(b"__attr_args_evaluated".to_vec(), Value::False);
-        obj.set_property(b"__attr_target".to_vec(), Value::Long(target));
+        obj.set_property(b"__reflection_attr_args_evaluated".to_vec(), Value::False);
+        obj.set_property(b"__reflection_attr_target".to_vec(), Value::Long(target));
         // Store args_op_array reference as a serialized form
         // We'll evaluate it lazily when getArguments() is called
         // For now, eagerly evaluate it
@@ -8501,7 +8502,7 @@ pub fn create_reflection_attributes(
             r.push(attr.args_op_array.clone());
             r.len() - 1
         });
-        obj.set_property(b"__attr_args_op".to_vec(), Value::Long(idx as i64));
+        obj.set_property(b"__reflection_attr_args_op".to_vec(), Value::Long(idx as i64));
         let mut reprs = PhpArray::new();
         for r in &attr.args_op_array.param_default_repr {
             reprs.push(match r {
@@ -8509,10 +8510,10 @@ pub fn create_reflection_attributes(
                 None => Value::Null,
             });
         }
-        obj.set_property(b"__attr_reprs".to_vec(), Value::Array(Rc::new(RefCell::new(reprs))));
+        obj.set_property(b"__reflection_attr_reprs".to_vec(), Value::Array(Rc::new(RefCell::new(reprs))));
         // Check if the attribute is repeated (count how many times this name appears)
         let repeat_count = attrs.iter().filter(|a| a.name.eq_ignore_ascii_case(&attr.name)).count();
-        obj.set_property(b"__attr_repeated".to_vec(), if repeat_count > 1 { Value::True } else { Value::False });
+        obj.set_property(b"__reflection_attr_repeated".to_vec(), if repeat_count > 1 { Value::True } else { Value::False });
         result.push(Value::Object(Rc::new(RefCell::new(obj))));
     }
     Value::Array(Rc::new(RefCell::new(result)))
@@ -8527,10 +8528,8 @@ thread_local! {
 /// The (lazily evaluated) arguments array of a ReflectionAttribute.
 /// None if evaluating them threw.
 fn attr_args_value(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) -> Option<Value> {
-    if matches!(obj.borrow().get_property(b"__attr_args_evaluated"), Value::True) {
-        return Some(obj.borrow().get_property(b"__attr_args"));
-    }
-    let idx = obj.borrow().get_property(b"__attr_args_op").to_long() as usize;
+    // Evaluated on every call: `new` in arguments yields fresh objects.
+    let idx = obj.borrow().get_property(b"__reflection_attr_args_op").to_long() as usize;
     let op = ATTR_ARG_OPS.with(|r| r.borrow().get(idx).cloned())?;
     let pushed_scope = if let Some(ref scope) = op.scope_class {
         vm.push_class_scope(scope.clone());
@@ -8549,8 +8548,8 @@ fn attr_args_value(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) -> Option<Value> {
     }
     let v = r.unwrap_or_else(|_| Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
     let mut ob = obj.borrow_mut();
-    ob.set_property(b"__attr_args".to_vec(), v.clone());
-    ob.set_property(b"__attr_args_evaluated".to_vec(), Value::True);
+    ob.set_property(b"__reflection_attr_args".to_vec(), v.clone());
+    ob.set_property(b"__reflection_attr_args_evaluated".to_vec(), Value::True);
     Some(v)
 }
 
@@ -8573,7 +8572,7 @@ pub fn reflection_attribute_method(
             Some(Value::Null)
         }
         b"getname" => {
-            let name = ob.get_property(b"__attr_name");
+            let name = ob.get_property(b"__reflection_attr_name");
             Some(name)
         }
         b"getarguments" => {
@@ -8596,15 +8595,15 @@ pub fn reflection_attribute_method(
             }
         }
         b"gettarget" => {
-            let target = ob.get_property(b"__attr_target");
+            let target = ob.get_property(b"__reflection_attr_target");
             Some(target)
         }
         b"isrepeated" => {
-            let repeated = ob.get_property(b"__attr_repeated");
+            let repeated = ob.get_property(b"__reflection_attr_repeated");
             Some(repeated)
         }
         b"newinstance" => {
-            let attr_name = ob.get_property(b"__attr_name").to_php_string().to_string_lossy();
+            let attr_name = ob.get_property(b"__reflection_attr_name").to_php_string().to_string_lossy();
             drop(ob);
             let args = match attr_args_value(vm, obj) {
                 Some(a) => a,
@@ -8703,7 +8702,7 @@ pub fn reflection_attribute_method(
             // `__attr_target` as the active target bit (e.g. TARGET_CLASS=1).
             let active_target = {
                 let ob2 = obj.borrow();
-                ob2.get_property(b"__attr_target").to_long()
+                ob2.get_property(b"__reflection_attr_target").to_long()
             };
             let target_mask = attr_flags & 127;
             if active_target != 0 && (target_mask & active_target) == 0 {
@@ -8737,7 +8736,7 @@ pub fn reflection_attribute_method(
             // as IS_REPEATABLE, throw an error.
             let is_repeated = {
                 let ob2 = obj.borrow();
-                matches!(ob2.get_property(b"__attr_repeated"), Value::True)
+                matches!(ob2.get_property(b"__reflection_attr_repeated"), Value::True)
             };
             if is_repeated && (attr_flags & 128) == 0 {
                 let err_msg = format!("Attribute \"{}\" must not be repeated", attr_name);
@@ -8863,8 +8862,8 @@ pub fn reflection_attribute_method(
             Some(instance)
         }
         b"__tostring" => {
-            let name = ob.get_property(b"__attr_name").to_php_string().to_string_lossy();
-            let reprs: Vec<Value> = match ob.get_property(b"__attr_reprs") {
+            let name = ob.get_property(b"__reflection_attr_name").to_php_string().to_string_lossy();
+            let reprs: Vec<Value> = match ob.get_property(b"__reflection_attr_reprs") {
                 Value::Array(a) => a.borrow().values().cloned().collect(),
                 _ => Vec::new(),
             };
