@@ -4254,7 +4254,10 @@ impl Parser {
                                 },
                             };
                         }
-                        TokenKind::Class => {
+                        // `X::class` (but `X::class()` is a method named "class")
+                        TokenKind::Class
+                            if !matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::OpenParen)) =>
+                        {
                             self.advance();
                             expr = Expr {
                                 span: expr.span.merge(member_span),
@@ -4397,6 +4400,22 @@ impl Parser {
                             let inner = self.parse_expression()?;
                             let end_span = self.span();
                             self.expect(&TokenKind::CloseBrace)?;
+                            if matches!(self.peek(), TokenKind::OpenParen) {
+                                // Foo::{'method'}(...) is a static call with a dynamic name
+                                self.advance();
+                                let args = self.parse_arguments()?;
+                                let end_span = self.span();
+                                self.expect(&TokenKind::CloseParen)?;
+                                expr = Expr {
+                                    span: expr.span.merge(end_span),
+                                    kind: ExprKind::DynamicStaticMethodCall {
+                                        class: Box::new(expr),
+                                        method: Box::new(inner),
+                                        args,
+                                    },
+                                };
+                                continue;
+                            }
                             expr = Expr {
                                 span: expr.span.merge(end_span),
                                 kind: ExprKind::DynamicClassConstAccess {

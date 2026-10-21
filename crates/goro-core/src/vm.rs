@@ -18001,6 +18001,23 @@ impl Vm {
                         }
                         _ => class_val.to_php_string().as_bytes().to_vec(),
                     };
+                    if matches!(class_val, Value::String(_)) {
+                        let cl: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        let cl = cl.strip_prefix(b"\\").map(|s| s.to_vec()).unwrap_or(cl);
+                        if !matches!(cl.as_slice(), b"self" | b"parent" | b"static") && !self.classes.contains_key(&cl) {
+                            self.try_autoload_class(&class_name);
+                            if !self.classes.contains_key(&cl) && !self.is_known_builtin_class(&cl) && !self.class_aliases.contains_key(&cl) {
+                                let err_msg = format!("Class \"{}\" not found", String::from_utf8_lossy(class_name.strip_prefix(b"\\").unwrap_or(&class_name)));
+                                let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                    ip = *catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
+                            }
+                        }
+                    }
                     if !matches!(method_val, Value::String(_)) {
                         let err_msg = "Method name must be a string";
                         let exc = self.create_exception(b"Error", err_msg, op.line);

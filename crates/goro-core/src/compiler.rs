@@ -648,6 +648,17 @@ impl Compiler {
         if name.starts_with(b"\\") {
             return name[1..].to_vec();
         }
+        // Namespace-relative name: namespace\Foo -> <current ns>\Foo
+        if name.len() > 10 && name[..10].eq_ignore_ascii_case(b"namespace\\") {
+            let rest = &name[10..];
+            if self.current_namespace.is_empty() {
+                return rest.to_vec();
+            }
+            let mut r = self.current_namespace.clone();
+            r.push(b'\\');
+            r.extend_from_slice(rest);
+            return r;
+        }
 
         if let Some(pos) = name.iter().position(|&b| b == b'\\') {
             // Qualified name (contains backslash but doesn't start with one)
