@@ -2820,12 +2820,24 @@ impl Vm {
                 if let Some(class) = self.classes.get(&class_lower).cloned() {
                     if let Some(method) = class.methods.get(b"__invoke".as_slice()) {
                         let op = method.op_array.clone();
-                        return self.execute_fn_with_named_args(
+                        // __invoke runs in its declaring class's scope.
+                        let scope = if method.declaring_class.is_empty() {
+                            class_lower.clone()
+                        } else {
+                            method.declaring_class.to_ascii_lowercase()
+                        };
+                        self.class_scope_stack.push(scope);
+                        self.called_class_stack
+                            .push(obj.borrow().class_name.clone());
+                        let r = self.execute_fn_with_named_args(
                             &op,
                             args.to_vec(),
                             vec![],
                             Some(Value::Object(obj.clone())),
                         );
+                        self.called_class_stack.pop();
+                        self.class_scope_stack.pop();
+                        return r;
                     }
                 }
                 Ok(Value::Null)

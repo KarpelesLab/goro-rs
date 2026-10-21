@@ -1932,12 +1932,23 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                     format!("{}::__invoke", String::from_utf8_lossy(&class.name));
                 let line = vm.current_line;
                 vm.check_user_function_deprecation(&op, &display_fallback, line);
-                return vm.execute_fn_with_named_args(
+                // __invoke runs in its declaring class's scope.
+                let scope = if method.declaring_class.is_empty() {
+                    class.name.clone()
+                } else {
+                    method.declaring_class.clone()
+                };
+                vm.called_class_stack.push(obj.borrow().class_name.clone());
+                vm.push_class_scope(scope);
+                let r = vm.execute_fn_with_named_args(
                     &op,
                     call_args,
                     named_args,
                     Some(Value::Object(obj.clone())),
                 );
+                vm.pop_class_scope();
+                vm.called_class_stack.pop();
+                return r;
             }
         }
         return Ok(Value::Null);
