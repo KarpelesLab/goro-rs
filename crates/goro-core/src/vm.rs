@@ -14280,11 +14280,10 @@ impl Vm {
         // Create the enum case object
         let obj_id = self.alloc_object_id();
         let mut obj = PhpObject::new(class.name.clone(), obj_id);
-        // Set the name property
-        obj.set_property(
-            b"name".to_vec(),
-            Value::String(PhpString::from_vec(case_name.to_vec())),
-        );
+        // Set the name property (the case name: an interned string)
+        let case_name_str = PhpString::from_vec(case_name.to_vec());
+        case_name_str.mark_interned();
+        obj.set_property(b"name".to_vec(), Value::String(case_name_str));
         // Set the value property for backed enums
         if let Some(ref bt) = class.enum_backing_type {
             obj.set_property(b"value".to_vec(), backing_value);

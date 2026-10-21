@@ -12104,6 +12104,7 @@ impl Compiler {
                     line: expr.span.line,
                 });
                 let elems_tmp_start = self.op_array.temp_count;
+                let lits_start = self.op_array.literals.len();
 
                 for elem in elements {
                     if elem.key.is_none()
@@ -12247,6 +12248,16 @@ impl Compiler {
                             result: OperandType::Unused,
                             line: expr.span.line,
                         });
+                    }
+                }
+                // A compile-time constant array (zend_try_ct_eval_array) keeps
+                // the strings of the AST, which are not interned (one-byte
+                // and empty strings aside); only literal operands are.
+                if Self::eval_const_expr(expr).is_some() {
+                    for lit in &self.op_array.literals[lits_start..] {
+                        if let Value::String(s) = lit {
+                            s.unmark_interned();
+                        }
                     }
                 }
                 // The element temporaries were copied into the array: release

@@ -598,6 +598,10 @@ impl OpArray {
 
     /// Add a literal value to the constant pool, returning its index
     pub fn add_literal(&mut self, value: Value) -> u32 {
+        // Compiled string literals are interned strings.
+        if let Value::String(s) = &value {
+            s.mark_interned();
+        }
         let idx = self.literals.len() as u32;
         self.literals.push(value);
         idx

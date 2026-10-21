@@ -251,6 +251,25 @@ impl PhpArray {
         Self::index_insert_slot(&mut self.index, h, pos);
     }
 
+    /// Whether PHP would hold this array as a packed array (HT_IS_PACKED),
+    /// as far as can be told from its contents: integer keys in ascending
+    /// order (holes allowed) that fit the packed table PHP would have
+    /// allocated for that many elements. Only reported by debug_zval_dump().
+    pub fn looks_packed(&self) -> bool {
+        if self.packed {
+            return true;
+        }
+        let mut prev = -1i64;
+        for (k, _) in &self.entries {
+            match k {
+                ArrayKey::Int(n) if *n > prev => prev = *n,
+                _ => return false,
+            }
+        }
+        let table = self.entries.len().next_power_of_two().max(8) as i64;
+        prev < table
+    }
+
     fn recompute_packed(&mut self) {
         self.packed = self
             .entries

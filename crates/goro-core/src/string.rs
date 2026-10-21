@@ -18,6 +18,10 @@ struct PhpStringInner {
     hash: std::cell::Cell<Option<u64>>,
     /// IS_STR_VALID_UTF8: set once the string is known to be valid UTF-8.
     valid_utf8: std::cell::Cell<bool>,
+    /// An interned string (IS_STR_INTERNED, not refcounted in PHP): a
+    /// compiled literal or a ZSTR_CHAR() one-byte string. Only reported by
+    /// debug_zval_dump().
+    interned: std::cell::Cell<bool>,
     tracked_bytes: usize,
 }
 
@@ -36,6 +40,7 @@ impl PhpString {
                 data: Vec::new(),
                 hash: std::cell::Cell::new(None),
                 valid_utf8: std::cell::Cell::new(false),
+                interned: std::cell::Cell::new(false),
                 tracked_bytes: 0, // empty strings don't track
             }),
         }
@@ -51,6 +56,7 @@ impl PhpString {
                 data: data.to_vec(),
                 hash: std::cell::Cell::new(None),
                 valid_utf8: std::cell::Cell::new(false),
+                interned: std::cell::Cell::new(false),
                 tracked_bytes: bytes,
             }),
         }
@@ -64,6 +70,7 @@ impl PhpString {
                 data: data.to_vec(),
                 hash: std::cell::Cell::new(None),
                 valid_utf8: std::cell::Cell::new(false),
+                interned: std::cell::Cell::new(false),
                 tracked_bytes: 0,
             }),
         }
@@ -75,9 +82,41 @@ impl PhpString {
     pub fn one_char(c: u8) -> Self {
         thread_local! {
             static ONE_CHAR: Vec<PhpString> =
-                (0..=255u8).map(|c| PhpString::from_bytes_untracked(&[c])).collect();
+                (0..=255u8)
+                    .map(|c| {
+                        let s = PhpString::from_bytes_untracked(&[c]);
+                        s.mark_interned();
+                        s
+                    })
+                    .collect();
         }
         ONE_CHAR.with(|t| t[c as usize].clone())
+    }
+
+    /// Mark the string interned (see `is_interned`).
+    pub fn mark_interned(&self) {
+        self.inner.interned.set(true);
+    }
+
+    /// Clear the interned mark: the string is refcounted after all (e.g.
+    /// the elements of a compile-time constant array; one-byte strings stay
+    /// interned).
+    pub fn unmark_interned(&self) {
+        if self.inner.data.len() > 1 {
+            self.inner.interned.set(false);
+        }
+    }
+
+    /// ZSTR_IS_INTERNED(): a compiled literal, a one-byte string or the
+    /// empty string.
+    pub fn is_interned(&self) -> bool {
+        self.inner.interned.get() || self.inner.data.is_empty()
+    }
+
+    /// The number of holders of this string (an approximation of its PHP
+    /// refcount, for debug_zval_dump()).
+    pub fn refcount(&self) -> usize {
+        Rc::strong_count(&self.inner)
     }
 
     pub fn from_vec(data: Vec<u8>) -> Self {
@@ -90,6 +129,7 @@ impl PhpString {
                 data,
                 hash: std::cell::Cell::new(None),
                 valid_utf8: std::cell::Cell::new(false),
+                interned: std::cell::Cell::new(false),
                 tracked_bytes: bytes,
             }),
         }

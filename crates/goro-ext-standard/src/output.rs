@@ -40,8 +40,194 @@ fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Null)
 }
 
-#[allow(clippy::if_same_then_else)] // branches mirror php-src
+thread_local! {
+    /// Set while debug_zval_dump() runs: var_dump()'s output with the
+    /// refcount / interned / packed annotations of php_debug_zval_dump().
+    static ZVAL_DUMP: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Holders the dumper itself added to the value being dumped: the
+    /// copies it makes of an object's properties or a reference's value
+    /// before descending into them.
+    static ZVAL_BIAS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// debug_zval_dump(). goro does not keep PHP refcounts: the counts shown
+/// are the number of holders of the shared string / array / object /
+/// reference cell (the variable and the argument for a dumped variable,
+/// like PHP), which can differ from PHP's where goro holds extra copies
+/// (values copied while an object's properties are dumped, temporaries).
+/// "interned" marks compiled literals, one-byte and empty strings, and the
+/// empty array; "packed" is decided from the array's keys.
+pub(crate) fn debug_zval_dump(vm: &mut Vm, args: &[Value]) {
+    let prev = ZVAL_DUMP.with(|z| z.replace(true));
+    let mut seen = HashSet::new();
+    for arg in args {
+        var_dump_value(vm, arg, 0, &mut seen);
+    }
+    ZVAL_DUMP.with(|z| z.set(prev));
+}
+
 fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
+    if !ZVAL_DUMP.with(|z| z.get()) {
+        return var_dump_value_inner(vm, val, indent, seen);
+    }
+    let bias = ZVAL_BIAS.with(|b| b.replace(0));
+    zval_dump_value(vm, val, indent, seen, bias);
+    ZVAL_BIAS.with(|b| b.set(bias));
+}
+
+/// Dump `val` (whose refcount is `bias` too high) the way
+/// php_debug_zval_dump() does.
+fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>, bias: usize) {
+    let prefix = " ".repeat(indent);
+    match val {
+        Value::String(s) if !goro_core::closure::is_closure_fn_name(s.as_bytes()) => {
+            vm.write_output(format!("{}string({}) \"", prefix, s.len()).as_bytes());
+            vm.write_output(s.as_bytes());
+            if s.is_interned() {
+                vm.write_output(b"\" interned\n");
+            } else {
+                let rc = s.refcount().saturating_sub(bias);
+                vm.write_output(format!("\" refcount({})\n", rc).as_bytes());
+            }
+        }
+        Value::Resource(id) => {
+            let t = if goro_core::value::is_open_resource(*id) {
+                goro_core::value::resource_type_of(*id)
+                    .map(|v| String::from_utf8_lossy(&v).to_string())
+                    .unwrap_or_else(|| "Unknown".to_string())
+            } else {
+                "Unknown".to_string()
+            };
+            // Resources are plain handles in goro: the variable and the
+            // argument, as for a dumped variable.
+            vm.write_output(
+                format!("{}resource({}) of type ({}) refcount(2)\n", prefix, id, t).as_bytes(),
+            );
+        }
+        Value::Reference(r) => {
+            // A variable of the global scope is a cell shared by the
+            // symbol table entry, the main script's CV slot and that
+            // frame's binding record; in PHP only the table entry holds it
+            // (the CV is an IS_INDIRECT slot).
+            let mut rc = Rc::strong_count(r).saturating_sub(bias);
+            let in_symtab = vm
+                .globals_array()
+                .borrow()
+                .iter()
+                .any(|(_, v)| matches!(v, Value::Reference(c) if Rc::ptr_eq(c, r)));
+            if in_symtab {
+                rc = rc.saturating_sub(2).max(1);
+            }
+            vm.write_output(format!("{}reference refcount({}) {{\n", prefix, rc).as_bytes());
+            let inner = r.borrow().clone();
+            ZVAL_BIAS.with(|b| b.set(1));
+            var_dump_value(vm, &inner, indent + 2, seen);
+            ZVAL_BIAS.with(|b| b.set(0));
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
+        }
+        Value::Array(arr) => {
+            let akey = (Rc::as_ptr(arr) as usize as u64) | (1u64 << 63);
+            if !seen.insert(akey) {
+                vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
+                return;
+            }
+            let rc = Rc::strong_count(arr).saturating_sub(bias);
+            let a = arr.borrow();
+            if a.is_empty() {
+                vm.write_output(format!("{}array(0) interned {{\n", prefix).as_bytes());
+            } else {
+                let packed = if a.looks_packed() { "packed " } else { "" };
+                vm.write_output(
+                    format!(
+                        "{}array({}) {}refcount({}){{\n",
+                        prefix,
+                        a.len(),
+                        packed,
+                        rc
+                    )
+                    .as_bytes(),
+                );
+            }
+            for (key, value) in a.iter() {
+                match key {
+                    goro_core::array::ArrayKey::Int(n) => {
+                        vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes());
+                    }
+                    goro_core::array::ArrayKey::String(k) => {
+                        vm.write_output(
+                            &[prefix.as_bytes(), b"  [\"", k.as_bytes(), b"\"]=>\n"].concat(),
+                        );
+                    }
+                }
+                var_dump_value(vm, value, indent + 2, seen);
+            }
+            drop(a);
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
+            seen.remove(&akey);
+        }
+        Value::Object(obj) if obj.borrow().has_property(b"__enum_case") => {
+            // php_debug_zval_dump() has no enum case: an object with its
+            // name (and value) properties.
+            let rc = Rc::strong_count(obj).saturating_sub(bias);
+            let (class_name, oid, props) = {
+                let b = obj.borrow();
+                let mut props = vec![(b"name".as_slice(), b.get_property(b"name"))];
+                if b.has_property(b"value") {
+                    props.push((b"value".as_slice(), b.get_property(b"value")));
+                }
+                (
+                    goro_core::value::display_class_name(&b.class_name).to_string(),
+                    b.object_id,
+                    props,
+                )
+            };
+            vm.write_output(
+                format!(
+                    "{}object({})#{} ({}) refcount({}){{\n",
+                    prefix,
+                    class_name,
+                    oid,
+                    props.len(),
+                    rc
+                )
+                .as_bytes(),
+            );
+            for (name, value) in &props {
+                vm.write_output(&[prefix.as_bytes(), b"  [\"", name, b"\"]=>\n"].concat());
+                ZVAL_BIAS.with(|b| b.set(1));
+                var_dump_value(vm, value, indent + 2, seen);
+                ZVAL_BIAS.with(|b| b.set(0));
+            }
+            vm.write_output(format!("{}}}\n", prefix).as_bytes());
+        }
+        Value::Object(obj) => {
+            // var_dump()'s object dump, with the refcount added to its
+            // header line ("object(C)#N (M) {").
+            let rc = Rc::strong_count(obj).saturating_sub(bias);
+            let start = vm.active_output_buffer().len();
+            ZVAL_BIAS.with(|b| b.set(1));
+            var_dump_value_inner(vm, val, indent, seen);
+            ZVAL_BIAS.with(|b| b.set(0));
+            let buf = vm.active_output_buffer();
+            if start <= buf.len() {
+                let line_end = buf[start..]
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map(|p| start + p);
+                if let Some(end) = line_end {
+                    if buf[start..end].ends_with(b" {") {
+                        let suffix = format!(" refcount({}){{", rc);
+                        buf.splice(end - 2..end, suffix.into_bytes());
+                    }
+                }
+            }
+        }
+        _ => var_dump_value_inner(vm, val, indent, seen),
+    }
+}
+
+#[allow(clippy::if_same_then_else)] // branches mirror php-src
+fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
     if indent > 8000 {
         return;
     }
@@ -995,6 +1181,9 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                         return;
                     }
                     vm.write_output(format!("{}  [\"instance\"]=>\n", prefix).as_bytes());
+                    // The instance is shown from a temporary table (which
+                    // holds it in PHP too): no dumper copy to discount.
+                    ZVAL_BIAS.with(|b| b.set(0));
                     var_dump_value(vm, &Value::Object(real), indent + 2, seen);
                     vm.write_output(format!("{}}}\n", prefix).as_bytes());
                     seen.remove(&oid);
