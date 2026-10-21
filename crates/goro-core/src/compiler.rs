@@ -6153,6 +6153,44 @@ impl Compiler {
         });
     }
 
+    /// `$x = &f()`: PHP raises "Only variables should be assigned by
+    /// reference" when the callee does not return by reference.
+    fn emit_assign_ref_call_notice(&mut self, value: &Expr, line: u32) {
+        if !matches!(
+            value.kind,
+            ExprKind::FunctionCall { .. } | ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. }
+        ) {
+            return;
+        }
+        let msg_idx = self.op_array.add_literal(Value::String(PhpString::from_bytes(
+            b"Only variables should be assigned by reference",
+        )));
+        let cond_idx = self.op_array.add_literal(Value::Long(1));
+        self.op_array.emit(Op {
+            opcode: OpCode::EmitNotice,
+            op1: OperandType::Const(msg_idx),
+            op2: OperandType::Const(cond_idx),
+            result: OperandType::Unused,
+            line,
+        });
+    }
+
+    /// Emit PropertyGetRef for `$obj->prop` in a reference context and return
+    /// the tmp holding the Reference.
+    fn compile_property_ref(&mut self, object: &Expr, property: &Expr, line: u32) -> CompileResult<u32> {
+        let obj = self.compile_expr(object)?;
+        let name = self.compile_property_name(property)?;
+        let ref_tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::PropertyGetRef,
+            op1: obj,
+            op2: name,
+            result: OperandType::Tmp(ref_tmp),
+            line,
+        });
+        Ok(ref_tmp)
+    }
+
     fn compile_static_class_operand(&mut self, class: &Expr) -> CompileResult<OperandType> {
         match &class.kind {
             ExprKind::Identifier(name) => {
@@ -10270,9 +10308,84 @@ impl Compiler {
                         });
                         Ok(OperandType::Cv(target_cv))
                     }
+                    (ExprKind::Variable(target_name), ExprKind::PropertyAccess { object, property, nullsafe: false }) => {
+                        // $var = &$obj->prop — bind the variable to the property slot
+                        let ref_tmp = self.compile_property_ref(object, property, expr.span.line)?;
+                        let target_cv = self.op_array.get_or_create_cv(target_name);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Cv(target_cv),
+                            op2: OperandType::Tmp(ref_tmp),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        Ok(OperandType::Cv(target_cv))
+                    }
+                    (ExprKind::ArrayAccess { array, index: Some(index) }, ExprKind::PropertyAccess { object, property, nullsafe: false }) => {
+                        // $arr[k] = &$obj->prop
+                        let ref_tmp = self.compile_property_ref(object, property, expr.span.line)?;
+                        let arr = self.compile_expr(array)?;
+                        let idx = self.compile_expr(index)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArraySetRef,
+                            op1: arr.clone(),
+                            op2: OperandType::Tmp(ref_tmp),
+                            result: idx,
+                            line: expr.span.line,
+                        });
+                        Ok(arr)
+                    }
+                    (ExprKind::PropertyAccess { object, property, nullsafe: false }, _) => {
+                        // $obj->prop = &<expr>
+                        let value_op = match &value.kind {
+                            ExprKind::Variable(value_name) => {
+                                let value_cv = self.op_array.get_or_create_cv(value_name);
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::MakeRef,
+                                    op1: OperandType::Cv(value_cv),
+                                    op2: OperandType::Unused,
+                                    result: OperandType::Unused,
+                                    line: expr.span.line,
+                                });
+                                OperandType::Cv(value_cv)
+                            }
+                            ExprKind::ArrayAccess { array: value_arr, index: Some(value_idx) } => {
+                                let src_arr = self.compile_expr(value_arr)?;
+                                let src_idx = self.compile_expr(value_idx)?;
+                                let ref_tmp = self.op_array.alloc_temp();
+                                self.op_array.emit(Op {
+                                    opcode: OpCode::ArrayGetRef,
+                                    op1: src_arr,
+                                    op2: src_idx,
+                                    result: OperandType::Tmp(ref_tmp),
+                                    line: expr.span.line,
+                                });
+                                OperandType::Tmp(ref_tmp)
+                            }
+                            ExprKind::PropertyAccess { object: vo, property: vp, nullsafe: false } => {
+                                OperandType::Tmp(self.compile_property_ref(vo, vp, expr.span.line)?)
+                            }
+                            _ => {
+                                let v = self.compile_expr(value)?;
+                                self.emit_assign_ref_call_notice(value, expr.span.line);
+                                v
+                            }
+                        };
+                        let obj = self.compile_expr(object)?;
+                        let name = self.compile_property_name(property)?;
+                        self.op_array.emit(Op {
+                            opcode: OpCode::PropertySetRef,
+                            op1: obj,
+                            op2: value_op.clone(),
+                            result: name,
+                            line: expr.span.line,
+                        });
+                        Ok(value_op)
+                    }
                     (ExprKind::Variable(target_name), _) => {
                         // $target = &<expr> — evaluate expr, assign to target, then make both reference
                         let val = self.compile_expr(value)?;
+                        self.emit_assign_ref_call_notice(value, expr.span.line);
                         let target_cv = self.op_array.get_or_create_cv(target_name);
                         self.op_array.emit(Op {
                             opcode: OpCode::Assign,
@@ -10360,6 +10473,7 @@ impl Compiler {
                         // $arr[key] = &<expr> — evaluate expr and store reference
                         let arr = self.compile_expr(array)?;
                         let val = self.compile_expr(value)?;
+                        self.emit_assign_ref_call_notice(value, expr.span.line);
                         if let Some(idx_expr) = index {
                             let idx = self.compile_expr(idx_expr)?;
                             self.op_array.emit(Op {

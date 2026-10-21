@@ -403,6 +403,10 @@ pub struct Vm {
     pub current_file: String,
     /// Line number of the last return statement (for return type error messages)
     last_return_line: u32,
+    /// Whether the most recently completed user function call was declared
+    /// to return by reference (for "Only variables should be assigned by
+    /// reference" notices on `$x = &f()`).
+    last_call_by_ref: bool,
     /// Current executing line number (updated during execution for warning/error reporting)
     pub current_line: u32,
     /// Cached enum case singleton objects: key = "classname_lower::CaseName"
@@ -568,6 +572,7 @@ impl Vm {
             pending_named_args: Vec::new(),
             current_file: "Unknown.php".to_string(),
             last_return_line: 0,
+            last_call_by_ref: false,
             current_line: 0,
             enum_case_cache: HashMap::new(),
             fiber_suspended: false,
@@ -15733,6 +15738,7 @@ impl Vm {
         }
         let result = self.execute_op_array_inner(op_array, cvs);
         self.call_depth -= 1;
+        self.last_call_by_ref = op_array.returns_by_ref;
         self.run_pending_destructors();
 
         // Check return type if declared
@@ -18520,6 +18526,7 @@ impl Vm {
                     }
                 }
                 OpCode::DoFCall => {
+                    self.last_call_by_ref = false;
                     let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
                         message: "no pending function call".into(),
                         line: op.line,
@@ -27575,7 +27582,12 @@ impl Vm {
                                         value.clone()
                                     }
                                 } else {
-                                    value.clone()
+                                    match value {
+                                        // A reference held only by this object is
+                                        // separated on clone (PHP semantics).
+                                        Value::Reference(r) if Rc::strong_count(r) == 1 => r.borrow().clone(),
+                                        _ => value.clone(),
+                                    }
                                 };
                                 new_obj.set_property(name.clone(), cloned_value);
                             }
@@ -28721,9 +28733,15 @@ impl Vm {
                 }
 
                 OpCode::EmitNotice => {
-                    let msg_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let msg = msg_val.to_php_string().to_string_lossy();
-                    self.emit_notice_at(&msg, op.line);
+                    // op2 = Const(1): only when the preceding call did not
+                    // return by reference.
+                    let conditional = matches!(op.op2, OperandType::Const(_))
+                        && matches!(self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals), Value::Long(1));
+                    if !(conditional && self.last_call_by_ref) {
+                        let msg_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                        let msg = msg_val.to_php_string().to_string_lossy();
+                        self.emit_notice_at(&msg, op.line);
+                    }
                 }
 
                 OpCode::ArrayGetRef => {
@@ -28782,6 +28800,115 @@ impl Vm {
                         self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
                         self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                    }
+                }
+
+                OpCode::PropertyGetRef => {
+                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let prop_name = self
+                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let mut ref_error: Option<String> = None;
+                    let result = if let Value::Object(obj) = &obj_val {
+                        let class_name_orig = obj.borrow().class_name.clone();
+                        let class_lower: Vec<u8> = class_name_orig.iter().map(|b| b.to_ascii_lowercase()).collect();
+                        // Asymmetric visibility / readonly: a reference would allow
+                        // modification. Objects yield a copy, other values error.
+                        let mut deny: Option<String> = None;
+                        if let Some((_vis, declaring_class, is_readonly, _pt, set_vis)) =
+                            self.find_property_def(&class_lower, prop_name.as_bytes())
+                        {
+                            let declaring_lower: Vec<u8> = declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let class_display = self.classes.get(&declaring_lower)
+                                .map(|c| crate::value::display_class_name(&c.name))
+                                .unwrap_or_else(|| crate::value::display_class_name(&declaring_class));
+                            let prop_str = prop_name.to_string_lossy();
+                            if let Some(sv) = set_vis {
+                                if sv != Visibility::Public {
+                                    let caller_scope = self.current_class_scope();
+                                    if self.check_visibility(sv, &declaring_class, &class_name_orig, &prop_str, true, caller_scope.as_deref()).is_some() {
+                                        let vis_str = if sv == Visibility::Private { "private(set)" } else { "protected(set)" };
+                                        let scope_str = match caller_scope.as_deref() {
+                                            Some(cs) => format!("scope {}", String::from_utf8_lossy(cs)),
+                                            None => "global scope".to_string(),
+                                        };
+                                        deny = Some(format!("Cannot modify {} property {}::${} from {}", vis_str, class_display, prop_str, scope_str));
+                                    }
+                                }
+                            }
+                            if deny.is_none() && is_readonly && obj.borrow().has_property(prop_name.as_bytes()) {
+                                deny = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_str));
+                            }
+                        }
+                        if let Some(msg) = deny {
+                            let cur = obj.borrow().get_property(prop_name.as_bytes());
+                            if matches!(cur, Value::Object(_)) {
+                                cur
+                            } else {
+                                ref_error = Some(msg);
+                                Value::Null
+                            }
+                        } else {
+                            let r = obj.borrow_mut().get_property_ref(prop_name.as_bytes());
+                            Value::Reference(r)
+                        }
+                    } else {
+                        Value::Null
+                    };
+                    if let Some(msg) = ref_error {
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                    }
+                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                }
+
+                OpCode::PropertySetRef => {
+                    let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let prop_name = self
+                        .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
+                        .to_php_string();
+                    let value = match &op.op2 {
+                        OperandType::Cv(i) => cvs.get(*i as usize).cloned().unwrap_or(Value::Null),
+                        OperandType::Tmp(i) => tmps.get(*i as usize).cloned().unwrap_or(Value::Null),
+                        other => self.read_operand(other, &cvs, &tmps, &op_array.literals),
+                    };
+                    if let Value::Object(obj) = &obj_val {
+                        match value {
+                            Value::Reference(r) => {
+                                obj.borrow_mut().set_property_ref(prop_name.as_bytes().to_vec(), r);
+                            }
+                            other => {
+                                // Non-referenceable value (e.g. by-value call result):
+                                // plain assignment, any existing reference is broken.
+                                let other = if matches!(other, Value::Undef) { Value::Null } else { other };
+                                let mut ob = obj.borrow_mut();
+                                if let Some(slot) = ob.properties.iter_mut().find(|(k, _)| k.as_slice() == prop_name.as_bytes()) {
+                                    slot.1 = other;
+                                } else {
+                                    ob.properties.push((prop_name.as_bytes().to_vec(), other));
+                                }
+                            }
+                        }
+                    } else {
+                        let type_name = Self::value_type_name(&obj_val);
+                        let msg = format!(
+                            "Attempt to modify property \"{}\" on {}",
+                            prop_name.to_string_lossy(), type_name
+                        );
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
                     }
                 }
 
@@ -32732,7 +32859,7 @@ impl Vm {
                             None
                         };
                         if let Some(v) = aa_prop_result {
-                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.write_operand(&op.result, v.deref(), &mut cvs, &mut tmps, &static_cv_keys);
                             continue;
                         }
 
@@ -32800,7 +32927,7 @@ impl Vm {
                             self.property_hook_stack.pop();
                             match hook_result {
                                 Ok(val) => {
-                                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                                    self.write_operand(&op.result, val.deref(), &mut cvs, &mut tmps, &static_cv_keys);
                                     continue;
                                 }
                                 Err(e) => {
@@ -33170,7 +33297,7 @@ impl Vm {
                     if let Some((rid, pname)) = propagate_get_guard_to_real {
                         self.magic_prop_guards.remove(&(rid, pname, 0u8));
                     }
-                    self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
+                    self.write_operand(&op.result, result.deref(), &mut cvs, &mut tmps, &static_cv_keys);
                 }
 
                 OpCode::PropertySet => {

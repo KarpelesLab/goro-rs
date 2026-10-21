@@ -326,6 +326,12 @@ pub enum OpCode {
     CompactSet,
     /// exit/die: op1 = value. If int, set exit code; if string, echo the string.
     ExitOp,
+    /// Get (creating) a reference to an object property: op1 = object,
+    /// op2 = property name, result = tmp holding the Reference
+    PropertyGetRef,
+    /// Bind an object property to a reference: op1 = object, op2 = value
+    /// (CV made a reference, or a tmp Reference), result = property name
+    PropertySetRef,
 }
 
 /// A compiled function / script

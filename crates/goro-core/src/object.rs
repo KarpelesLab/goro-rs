@@ -245,19 +245,55 @@ impl PhpObject {
         self.properties
             .iter()
             .find(|(k, _)| k == name)
-            .map(|(_, v)| v.clone())
+            .map(|(_, v)| v.deref())
             .unwrap_or(Value::Null)
     }
 
     pub fn set_property(&mut self, name: Vec<u8>, value: Value) {
-        // Update existing or append new
+        // Update existing or append new. A slot holding a PHP reference is
+        // written through (the reference set stays intact).
         for (k, v) in &mut self.properties {
             if *k == name {
-                *v = value;
+                match v {
+                    Value::Reference(r) if !matches!(value, Value::Reference(_)) => {
+                        *r.borrow_mut() = value;
+                    }
+                    _ => *v = value,
+                }
                 return;
             }
         }
         self.properties.push((name, value));
+    }
+
+    /// Bind a property slot to an existing reference (`$obj->p = &$x`).
+    pub fn set_property_ref(&mut self, name: Vec<u8>, r: std::rc::Rc<std::cell::RefCell<Value>>) {
+        for (k, v) in &mut self.properties {
+            if *k == name {
+                *v = Value::Reference(r);
+                return;
+            }
+        }
+        self.properties.push((name, Value::Reference(r)));
+    }
+
+    /// Get (creating if needed) a reference to a property slot (`$x = &$obj->p`).
+    pub fn get_property_ref(&mut self, name: &[u8]) -> std::rc::Rc<std::cell::RefCell<Value>> {
+        for (k, v) in &mut self.properties {
+            if k.as_slice() == name {
+                if let Value::Reference(r) = v {
+                    return r.clone();
+                }
+                let cur = std::mem::replace(v, Value::Null);
+                let cur = if matches!(cur, Value::Undef) { Value::Null } else { cur };
+                let r = std::rc::Rc::new(std::cell::RefCell::new(cur));
+                *v = Value::Reference(r.clone());
+                return r;
+            }
+        }
+        let r = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+        self.properties.push((name.to_vec(), Value::Reference(r.clone())));
+        r
     }
 
     pub fn has_property(&self, name: &[u8]) -> bool {
