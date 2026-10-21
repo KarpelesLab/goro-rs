@@ -363,6 +363,19 @@ impl Vm {
     /// once the CV vector is in place, and the caller pops the entry when the
     /// function ends.
     #[inline]
+    /// The top `call_stack` frame is the user-code call of `op_array` (not
+    /// the frame of a builtin that invoked it).
+    pub(crate) fn top_frame_is_call_of(&self, op_array: &crate::opcode::OpArray) -> bool {
+        let Some(depth) = self.call_stack.len().checked_sub(1) else {
+            return false;
+        };
+        frame_is_for(&self.call_stack[depth].0, op_array)
+            && !self
+                .builtin_frames
+                .iter()
+                .any(|b| b.materialized && b.depth == depth)
+    }
+
     pub(crate) fn register_cv_frame(&mut self, op_array: &crate::opcode::OpArray) -> bool {
         if op_array.param_count == 0 {
             return false;
