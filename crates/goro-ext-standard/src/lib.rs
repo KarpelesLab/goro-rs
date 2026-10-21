@@ -1,6 +1,7 @@
 pub mod basedir_guard;
 pub mod crypt;
 mod crypt_blowfish_tables;
+pub mod csv;
 pub mod filters;
 pub mod highlight;
 pub mod html;
@@ -13,6 +14,7 @@ pub mod ob;
 pub mod output;
 pub mod regex;
 pub mod request;
+pub mod scanf;
 pub mod serialize;
 pub mod strings;
 pub mod type_funcs;
@@ -36,6 +38,8 @@ pub fn register_standard_functions(vm: &mut Vm) {
     math::register(vm);
     misc::register(vm);
     highlight::register(vm);
+    scanf::register(vm);
+    csv::register(vm);
     ob::register(vm);
     arrdiff::register(vm);
     html::register(vm);

@@ -376,15 +376,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"chown", chown_fn);
     vm.register_function(b"chgrp", chgrp_fn);
     vm.register_function(b"clearstatcache", clearstatcache_fn);
-    vm.register_function_with_params(b"fputcsv", fputcsv_fn, &[b"stream", b"fields", b"separator", b"enclosure", b"escape", b"eol"]);
-    vm.register_function_with_params(b"fgetcsv", fgetcsv_fn, &[b"stream", b"length", b"separator", b"enclosure", b"escape"]);
     vm.register_function(b"fpassthru", fpassthru_fn);
     vm.register_function(b"fgetc", fgetc_fn);
     vm.register_function(b"flock", flock_fn);
     vm.register_function(b"fstat", fstat_fn);
     vm.register_function(b"stream_get_contents", stream_get_contents_fn);
     vm.register_function(b"fputs", fwrite_fn); // fputs is an alias for fwrite
-    vm.register_function(b"fscanf", fscanf_fn);
     vm.register_function(b"linkinfo", linkinfo_fn);
     vm.register_function(b"parse_ini_file", parse_ini_file_fn);
     vm.register_function(b"header", header_fn);
@@ -462,7 +459,6 @@ pub fn register(vm: &mut Vm) {
     // get_html_translation_table are registered by the html module.
     vm.register_function(b"fprintf", fprintf_fn);
     vm.register_function(b"vfprintf", vfprintf_fn);
-    vm.register_function(b"sscanf", sscanf_fn);
     // File stubs (return false/null for now)
     vm.register_function(b"file_exists", file_exists_fn);
     vm.register_function(b"is_file", is_file_fn);
@@ -483,7 +479,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"is_numeric", is_numeric_fn);
     vm.register_function(b"clearstatcache", clearstatcache_fn);
     vm.register_function(b"array_walk_recursive", array_walk_recursive_fn);
-    vm.register_function_with_params(b"fgetcsv", fgetcsv_fn, &[b"stream", b"length", b"separator", b"enclosure", b"escape"]);
     vm.register_function(b"fileperms", fileperms_fn);
     vm.register_function(b"filetype", filetype_fn);
     vm.register_function(b"opendir", opendir_fn);
@@ -5884,641 +5879,6 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(len as i64))
 }
 
-fn sscanf_put(results: &mut Vec<Value>, slot: usize, v: Value) {
-    while results.len() <= slot {
-        results.push(Value::Null);
-    }
-    results[slot] = v;
-}
-
-/// Return the total number of result slots `format` defines, i.e. the size of
-/// the array sscanf() returns when no ref arguments are given. PHP pads with
-/// NULL for slots no conversion could fill.
-fn count_sscanf_total_slots(format: &[u8]) -> usize {
-    let mut next_slot: usize = 0;
-    let mut max_slot_seen: Option<usize> = None;
-    let mut i = 0;
-    while i < format.len() {
-        if format[i] != b'%' {
-            i += 1;
-            continue;
-        }
-        i += 1;
-        if i >= format.len() {
-            break;
-        }
-        if format[i] == b'%' {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < format.len() && format[i].is_ascii_digit() {
-            i += 1;
-        }
-        let mut cur_slot: Option<usize> = None;
-        if i > start && i < format.len() && format[i] == b'$' {
-            let n: usize = std::str::from_utf8(&format[start..i])
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            i += 1;
-            if n > 0 {
-                cur_slot = Some(n - 1);
-            }
-        } else {
-            i = start;
-        }
-        let mut suppress = false;
-        if i < format.len() && format[i] == b'*' {
-            suppress = true;
-            i += 1;
-        }
-        while i < format.len() && format[i].is_ascii_digit() {
-            i += 1;
-        }
-        while i < format.len() && matches!(format[i], b'h' | b'l' | b'L' | b'j' | b'z' | b't' | b'q') {
-            i += 1;
-        }
-        if i >= format.len() {
-            break;
-        }
-        let spec = format[i];
-        i += 1;
-        if spec == b'[' {
-            if i < format.len() && format[i] == b'^' {
-                i += 1;
-            }
-            if i < format.len() && format[i] == b']' {
-                i += 1;
-            }
-            while i < format.len() && format[i] != b']' {
-                i += 1;
-            }
-            if i < format.len() {
-                i += 1;
-            }
-        }
-        if suppress {
-            continue;
-        }
-        let slot = cur_slot.unwrap_or(next_slot);
-        max_slot_seen = Some(max_slot_seen.map_or(slot, |m| m.max(slot)));
-        next_slot = slot + 1;
-    }
-    max_slot_seen.map_or(0, |m| m + 1)
-}
-
-/// Count how many output slots each variable receives via scanf conversion
-/// specifiers in `format`. Used by sscanf_fn to detect var/specifier mismatch
-/// before performing the scan, mirroring PHP's ValidateFormat phase.
-fn validate_sscanf_format(format: &[u8], num_vars: usize) -> Result<(), String> {
-    // PHP caps positional index at SCAN_MAX_ARGS (255) when no ref vars are given.
-    const SCAN_MAX_ARGS: usize = 255;
-    let mut nassign: Vec<usize> = vec![0; num_vars];
-    let mut next_slot: usize = 0;
-    let mut got_xpg = false;
-    let mut i = 0;
-    while i < format.len() {
-        if format[i] != b'%' {
-            i += 1;
-            continue;
-        }
-        i += 1;
-        if i >= format.len() {
-            break;
-        }
-        if format[i] == b'%' {
-            i += 1;
-            continue;
-        }
-        // Positional spec: %N$
-        let start = i;
-        while i < format.len() && format[i].is_ascii_digit() {
-            i += 1;
-        }
-        let mut cur_slot: Option<usize> = None;
-        if i > start && i < format.len() && format[i] == b'$' {
-            // Parse as u64 so we can detect overflow before clamping into usize.
-            let raw: u64 = std::str::from_utf8(&format[start..i])
-                .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            i += 1;
-            if raw == 0 {
-                return Err("\"%n$\" argument index out of range".to_string());
-            }
-            // numVars == 0 (no ref args) caps at SCAN_MAX_ARGS.
-            // numVars > 0 caps at numVars.
-            let cap = if num_vars == 0 { SCAN_MAX_ARGS as u64 } else { num_vars as u64 };
-            if raw > cap {
-                return Err("\"%n$\" argument index out of range".to_string());
-            }
-            let n = raw as usize;
-            cur_slot = Some(n - 1);
-            got_xpg = true;
-        } else {
-            i = start;
-        }
-        // Suppression %*
-        let mut suppress = false;
-        if i < format.len() && format[i] == b'*' {
-            suppress = true;
-            i += 1;
-        }
-        // Width digits
-        while i < format.len() && format[i].is_ascii_digit() {
-            i += 1;
-        }
-        // Length modifiers
-        while i < format.len() && matches!(format[i], b'h' | b'l' | b'L' | b'j' | b'z' | b't' | b'q') {
-            i += 1;
-        }
-        if i >= format.len() {
-            break;
-        }
-        let spec = format[i];
-        i += 1;
-        // Skip past `[...]` set body for %[ scanset.
-        if spec == b'[' {
-            if i < format.len() && format[i] == b'^' {
-                i += 1;
-            }
-            if i < format.len() && format[i] == b']' {
-                i += 1;
-            }
-            while i < format.len() && format[i] != b']' {
-                i += 1;
-            }
-            if i < format.len() {
-                i += 1;
-            }
-        }
-        if suppress {
-            continue;
-        }
-        let slot = cur_slot.unwrap_or(next_slot);
-        if slot < num_vars {
-            nassign[slot] += 1;
-        }
-        next_slot = slot + 1;
-    }
-    for &count in &nassign {
-        if count > 1 {
-            return Err("Variable is assigned by multiple \"%n$\" conversion specifiers".to_string());
-        }
-        if !got_xpg && count == 0 {
-            return Err("Variable is not assigned by any conversion specifiers".to_string());
-        }
-    }
-    Ok(())
-}
-
-fn sscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let input = args.first().unwrap_or(&Value::Null).to_php_string();
-    let format = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    let input_bytes = input.as_bytes();
-    let format_bytes = format.as_bytes();
-
-    let has_refs = args.len() > 2;
-    // PHP validates that every supplied ref var is assigned by some specifier
-    // and that no slot is assigned twice. This runs before any scanning so the
-    // ValueError fires even when the input would have produced fewer results.
-    // Even without ref args, validate to catch out-of-range positional indices
-    // (e.g. "%2147483648$s") which would otherwise blow up allocation.
-    if let Err(msg) = validate_sscanf_format(format_bytes, if has_refs { args.len() - 2 } else { 0 }) {
-        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError { message: msg, line: vm.current_line });
-    }
-    let mut results: Vec<Value> = Vec::new();
-    let mut input_pos = 0usize;
-    let mut fmt_pos = 0usize;
-    let mut nconversions: usize = 0;
-    let mut underflow = false;
-    // Next default output slot (0-based). %N$X overrides this to N-1.
-    let mut next_slot: usize = 0;
-    // Slot to use for the *current* conversion (set per conversion).
-    let mut cur_slot: usize = 0;
-    // Helper: write into the slot, growing results with Nulls as needed.
-    // Captured by closure later; for now we inline via a macro-like fn.
-
-    while fmt_pos < format_bytes.len() {
-        if format_bytes[fmt_pos] == b'%' {
-            fmt_pos += 1;
-            if fmt_pos >= format_bytes.len() { break; }
-
-            // Handle %% literal
-            if format_bytes[fmt_pos] == b'%' {
-                if input_pos < input_bytes.len() && input_bytes[input_pos] == b'%' {
-                    input_pos += 1;
-                }
-                fmt_pos += 1;
-                continue;
-            }
-
-            // Handle argument swapping like %2$s — positional placement.
-            // PHP accepts multi-digit positions; we parse the full digit run
-            // followed by '$' as the position.
-            let swap_arg: Option<usize> = {
-                let start = fmt_pos;
-                while fmt_pos < format_bytes.len() && format_bytes[fmt_pos].is_ascii_digit() {
-                    fmt_pos += 1;
-                }
-                if fmt_pos > start && fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b'$' {
-                    let n: usize = std::str::from_utf8(&format_bytes[start..fmt_pos])
-                        .ok()
-                        .and_then(|s| s.parse().ok())
-                        .unwrap_or(0);
-                    fmt_pos += 1; // skip '$'
-                    if n > 0 { Some(n) } else { None }
-                } else {
-                    // Not a positional spec — rewind so width parsing sees the digits.
-                    fmt_pos = start;
-                    None
-                }
-            };
-            // Determine the slot for this conversion. With %N$X use N-1;
-            // otherwise use the next sequential slot. After this conversion,
-            // next_slot becomes cur_slot + 1.
-            cur_slot = match swap_arg {
-                Some(n) => n - 1,
-                None => next_slot,
-            };
-
-            // Handle width
-            let mut suppress = false;
-            if fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b'*' {
-                suppress = true;
-                fmt_pos += 1;
-            }
-            let mut width: Option<usize> = None;
-            let width_start = fmt_pos;
-            while fmt_pos < format_bytes.len() && format_bytes[fmt_pos].is_ascii_digit() {
-                fmt_pos += 1;
-            }
-            if fmt_pos > width_start {
-                width = std::str::from_utf8(&format_bytes[width_start..fmt_pos]).ok().and_then(|s| s.parse().ok());
-            }
-
-            // Skip length modifiers (h, l, L, j, z, t, q, hh, ll) — they don't
-            // change the result type in PHP fscanf/sscanf.
-            while fmt_pos < format_bytes.len() {
-                match format_bytes[fmt_pos] {
-                    b'h' | b'l' | b'L' | b'j' | b'z' | b't' | b'q' => fmt_pos += 1,
-                    _ => break,
-                }
-            }
-
-            if fmt_pos >= format_bytes.len() { break; }
-            let spec = format_bytes[fmt_pos];
-            fmt_pos += 1;
-
-            // Skip leading whitespace for numeric types and %s (NOSKIP for %c and %[)
-            // PHP/C isspace: space, \t, \n, \v, \f, \r
-            match spec {
-                b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b'f' | b'e' | b'g' | b'E' | b'G' | b's' => {
-                    while input_pos < input_bytes.len() && matches!(input_bytes[input_pos], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
-                        input_pos += 1;
-                    }
-                }
-                _ => {}
-            }
-
-            // Check for underflow: if at EOF when trying to start a conversion
-            // (other than %n which doesn't consume input), bail.
-            if input_pos >= input_bytes.len() && spec != b'n' {
-                underflow = true;
-                break;
-            }
-
-            match spec {
-                b'd' | b'i' | b'u' => {
-                    // Read integer. Width counts total characters consumed,
-                    // including any leading sign.
-                    let start = input_pos;
-                    let max = width.unwrap_or(usize::MAX);
-                    let mut count = 0usize;
-                    if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') && count < max {
-                        input_pos += 1;
-                        count += 1;
-                    }
-                    while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() && count < max {
-                        input_pos += 1;
-                        count += 1;
-                    }
-                    // If only the sign was consumed (no digits), reject.
-                    let digit_len = input_pos - start - (if input_bytes.get(start) == Some(&b'-') || input_bytes.get(start) == Some(&b'+') { 1 } else { 0 });
-                    if digit_len > 0 {
-                        if !suppress {
-                            let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
-                            let val = s.parse::<i64>().unwrap_or(0);
-                            sscanf_put(&mut results, cur_slot, Value::Long(val));
-                        }
-                    } else {
-                        // Conversion failed: roll back the input cursor and stop
-                        // parsing entirely. PHP leaves any remaining ref args at
-                        // their previous values (does NOT assign NULL).
-                        input_pos = start;
-                        break;
-                    }
-                }
-                b'x' | b'X' => {
-                    // Read hex integer with optional leading sign and `0x` prefix.
-                    // If no digits match, roll back and stop parsing (PHP returns
-                    // the partial result up to this point).
-                    let entry_pos = input_pos;
-                    let max = width.unwrap_or(usize::MAX);
-                    let mut count = 0;
-                    let mut negative = false;
-                    if input_pos < input_bytes.len()
-                        && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+')
-                        && count < max
-                    {
-                        negative = input_bytes[input_pos] == b'-';
-                        input_pos += 1;
-                        count += 1;
-                    }
-                    if input_pos + 1 < input_bytes.len()
-                        && input_bytes[input_pos] == b'0'
-                        && (input_bytes[input_pos + 1] == b'x' || input_bytes[input_pos + 1] == b'X')
-                        && count + 2 <= max
-                    {
-                        input_pos += 2;
-                        count += 2;
-                    }
-                    let digit_start = input_pos;
-                    while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_hexdigit() && count < max {
-                        input_pos += 1;
-                        count += 1;
-                    }
-                    if input_pos == digit_start {
-                        input_pos = entry_pos;
-                        break;
-                    }
-                    if !suppress {
-                        let s = std::str::from_utf8(&input_bytes[digit_start..input_pos]).unwrap_or("0");
-                        let mut val = i64::from_str_radix(s, 16).unwrap_or(0);
-                        if negative {
-                            val = -val;
-                        }
-                        sscanf_put(&mut results, cur_slot, Value::Long(val));
-                    }
-                }
-                b'o' => {
-                    // Read octal integer with optional leading sign. As with %x,
-                    // if no digits match, roll back and stop parsing.
-                    let entry_pos = input_pos;
-                    let max = width.unwrap_or(usize::MAX);
-                    let mut count = 0;
-                    let mut negative = false;
-                    if input_pos < input_bytes.len()
-                        && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+')
-                        && count < max
-                    {
-                        negative = input_bytes[input_pos] == b'-';
-                        input_pos += 1;
-                        count += 1;
-                    }
-                    let digit_start = input_pos;
-                    while input_pos < input_bytes.len() && input_bytes[input_pos] >= b'0' && input_bytes[input_pos] <= b'7' && count < max {
-                        input_pos += 1;
-                        count += 1;
-                    }
-                    if input_pos == digit_start {
-                        input_pos = entry_pos;
-                        break;
-                    }
-                    if !suppress {
-                        let s = std::str::from_utf8(&input_bytes[digit_start..input_pos]).unwrap_or("0");
-                        let mut val = i64::from_str_radix(s, 8).unwrap_or(0);
-                        if negative {
-                            val = -val;
-                        }
-                        sscanf_put(&mut results, cur_slot, Value::Long(val));
-                    }
-                }
-                b'f' | b'e' | b'g' | b'E' | b'G' => {
-                    let start = input_pos;
-                    if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
-                        input_pos += 1;
-                    }
-                    let int_start = input_pos;
-                    let mut saw_digit = false;
-                    while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() {
-                        input_pos += 1;
-                        saw_digit = true;
-                    }
-                    if input_pos < input_bytes.len() && input_bytes[input_pos] == b'.' {
-                        input_pos += 1;
-                        while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() {
-                            input_pos += 1;
-                            saw_digit = true;
-                        }
-                    }
-                    // Optional exponent.
-                    if saw_digit && input_pos < input_bytes.len() && (input_bytes[input_pos] == b'e' || input_bytes[input_pos] == b'E') {
-                        let exp_start = input_pos;
-                        input_pos += 1;
-                        if input_pos < input_bytes.len() && (input_bytes[input_pos] == b'-' || input_bytes[input_pos] == b'+') {
-                            input_pos += 1;
-                        }
-                        let exp_digit_start = input_pos;
-                        while input_pos < input_bytes.len() && input_bytes[input_pos].is_ascii_digit() {
-                            input_pos += 1;
-                        }
-                        if input_pos == exp_digit_start {
-                            // No digits after e — roll back exponent.
-                            input_pos = exp_start;
-                        }
-                    }
-                    if !saw_digit {
-                        // No digits matched — roll back and stop parsing.
-                        input_pos = start;
-                        let _ = int_start;
-                        break;
-                    } else if !suppress {
-                        let s = std::str::from_utf8(&input_bytes[start..input_pos]).unwrap_or("0");
-                        let val = s.parse::<f64>().unwrap_or(0.0);
-                        sscanf_put(&mut results, cur_slot, Value::Double(val));
-                    }
-                }
-                b's' => {
-                    // Read non-whitespace string. If no characters consumed,
-                    // stop parsing — PHP leaves remaining ref args untouched.
-                    let start = input_pos;
-                    let max = width.unwrap_or(usize::MAX);
-                    let mut count = 0;
-                    while input_pos < input_bytes.len() && !matches!(input_bytes[input_pos], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') && count < max {
-                        input_pos += 1;
-                        count += 1;
-                    }
-                    if input_pos == start {
-                        break;
-                    }
-                    if !suppress {
-                        sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
-                    }
-                }
-                b'c' => {
-                    // Read up to width characters (default 1). Does not skip
-                    // leading whitespace and accepts any byte (including
-                    // whitespace), matching PHP/C scanf semantics.
-                    let n = width.unwrap_or(1);
-                    let start = input_pos;
-                    let mut count = 0;
-                    while input_pos < input_bytes.len() && count < n {
-                        input_pos += 1;
-                        count += 1;
-                    }
-                    if input_pos == start {
-                        break;
-                    }
-                    if !suppress {
-                        sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
-                    }
-                }
-                b'n' => {
-                    // Number of characters consumed so far
-                    if !suppress {
-                        sscanf_put(&mut results, cur_slot, Value::Long(input_pos as i64));
-                    }
-                }
-                b'[' => {
-                    // Character class [abc] or [^abc]. Supports ranges like
-                    // [0-9], [a-z]. A `]` as first char is literal.
-                    let negated = fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b'^';
-                    if negated { fmt_pos += 1; }
-                    let mut raw_set: Vec<u8> = Vec::new();
-                    if fmt_pos < format_bytes.len() && format_bytes[fmt_pos] == b']' {
-                        raw_set.push(b']');
-                        fmt_pos += 1;
-                    }
-                    while fmt_pos < format_bytes.len() && format_bytes[fmt_pos] != b']' {
-                        raw_set.push(format_bytes[fmt_pos]);
-                        fmt_pos += 1;
-                    }
-                    if fmt_pos < format_bytes.len() { fmt_pos += 1; } // skip ]
-
-                    // Build expanded set, processing ranges (a-b).
-                    let mut in_set_check = |c: u8| -> bool {
-                        let mut i = 0;
-                        while i < raw_set.len() {
-                            if i + 2 < raw_set.len() && raw_set[i + 1] == b'-' {
-                                let lo = raw_set[i];
-                                let hi = raw_set[i + 2];
-                                if lo <= c && c <= hi {
-                                    return true;
-                                }
-                                i += 3;
-                            } else {
-                                if raw_set[i] == c {
-                                    return true;
-                                }
-                                i += 1;
-                            }
-                        }
-                        false
-                    };
-
-                    let start = input_pos;
-                    let max = width.unwrap_or(usize::MAX);
-                    let mut count = 0;
-                    while input_pos < input_bytes.len() && count < max {
-                        let in_set = in_set_check(input_bytes[input_pos]);
-                        if (negated && in_set) || (!negated && !in_set) {
-                            break;
-                        }
-                        input_pos += 1;
-                        count += 1;
-                    }
-                    if input_pos == start {
-                        break;
-                    }
-                    if !suppress {
-                        sscanf_put(&mut results, cur_slot, Value::String(PhpString::from_vec(input_bytes[start..input_pos].to_vec())));
-                    }
-                }
-                _ => {
-                    // Bad scan conversion character — PHP throws ValueError.
-                    let ch_str = if (32..=126).contains(&spec) {
-                        format!("{}", spec as char)
-                    } else {
-                        format!("\\x{:02x}", spec)
-                    };
-                    let msg = format!("Bad scan conversion character \"{}\"", ch_str);
-                    let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-                    vm.current_exception = Some(exc);
-                    return Err(VmError { message: msg, line: vm.current_line });
-                }
-            }
-            // Advance the default output slot for the next conversion.
-            // Suppressed conversions (`%*`) still don't consume a slot, but
-            // since we never wrote, the slot is naturally available; sticking
-            // to "next conversion after a non-suppressed write" matches PHP.
-            if !suppress {
-                next_slot = cur_slot + 1;
-            }
-            nconversions += 1;
-        } else if matches!(format_bytes[fmt_pos], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
-            // Whitespace in format matches any amount of whitespace in input
-            fmt_pos += 1;
-            while input_pos < input_bytes.len() && matches!(input_bytes[input_pos], b' ' | b'\t' | b'\n' | b'\x0b' | b'\x0c' | b'\r') {
-                input_pos += 1;
-            }
-        } else {
-            // Literal match: a mismatch stops parsing entirely (matches
-            // PHP/C scanf — refusing to skip the literal keeps the rest
-            // of the format unattempted).
-            if input_pos >= input_bytes.len() || input_bytes[input_pos] != format_bytes[fmt_pos] {
-                break;
-            }
-            input_pos += 1;
-            fmt_pos += 1;
-        }
-    }
-
-    // Underflow + no conversions yet → PHP returns NULL (no refs) or -1 (refs).
-    if underflow && nconversions == 0 {
-        if has_refs {
-            return Ok(Value::Long(-1));
-        } else {
-            return Ok(Value::Null);
-        }
-    }
-
-    if has_refs {
-        // With reference args, PHP only assigns the ref args that
-        // successfully matched; refs corresponding to slots that were
-        // never filled (or filled with NULL by an explicit empty %s/%c/%[
-        // match) keep their previous value. Return value is the number
-        // of successful conversions.
-        let mut successful = 0usize;
-        for (i, val) in results.iter().enumerate() {
-            if matches!(val, Value::Null) {
-                continue;
-            }
-            successful += 1;
-            if let Some(arg) = args.get(i + 2) {
-                if let Value::Reference(r) = arg {
-                    *r.borrow_mut() = val.clone();
-                }
-            }
-        }
-        Ok(Value::Long(successful as i64))
-    } else {
-        // Array-return form: pad to the total slot count so unfilled
-        // slots are explicit NULLs in the returned array.
-        let total_slots = count_sscanf_total_slots(format_bytes);
-        while results.len() < total_slots {
-            results.push(Value::Null);
-        }
-        let mut arr = PhpArray::new();
-        for val in results {
-            arr.push(val);
-        }
-        Ok(Value::Array(Rc::new(RefCell::new(arr))))
-    }
-}
 // === Shell ===
 
 /// Throw a ValueError from a builtin.
@@ -10085,7 +9445,11 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let raw_fid = arg.to_long();
     let is_special_writer = raw_fid == 1 || raw_fid == 2 || raw_fid == 3;
     let fid = if is_special_writer { raw_fid } else { require_open_stream(vm, arg, "fwrite")? };
-    let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let data = match args.get(1) {
+        Some(v @ Value::Object(_)) => vm.value_to_string_checked(v)?,
+        Some(v) => v.to_php_string(),
+        None => PhpString::from_bytes(b""),
+    };
     let bytes = data.as_bytes();
     // PHP: if $length is provided and >= 0, write min(length, strlen(data)) bytes.
     // If $length is negative, write 0 bytes (treat as 0).
@@ -10131,6 +9495,66 @@ fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // PHP returns the number of bytes from the user's input that were
     // accepted, regardless of how many post-filter bytes were emitted.
     Ok(Value::Long(original_len as i64))
+}
+
+/// Whether `fid` names an open stream handle.
+pub(crate) fn has_file_handle(fid: i64) -> bool {
+    FILE_HANDLES.with(|h| h.borrow().contains_key(&fid))
+}
+
+fn stream_mode_clean(fid: i64) -> Option<String> {
+    FILE_HANDLES.with(|h| {
+        h.borrow().get(&fid).map(|fh| fh.mode.chars().filter(|&c| c != 'b' && c != 't').collect())
+    })
+}
+
+/// `php_stream_get_line(stream, NULL/buf, maxlen + 1, &len)` for the
+/// standard functions built on it (fgetcsv, fscanf): reads one line
+/// (through the regular fgets() path), or at most `maxlen` bytes.
+/// Read errors on write-only streams are reported under `func`.
+pub(crate) fn stream_get_line(vm: &mut Vm, func: &str, handle: &Value, maxlen: Option<usize>) -> Option<Vec<u8>> {
+    let fid = handle.to_long();
+    if let Some(m) = stream_mode_clean(fid) {
+        if matches!(m.as_str(), "w" | "a" | "x" | "c") {
+            let line = vm.current_line;
+            vm.emit_notice_at(&format!("{}(): Read of 8192 bytes failed with errno=9 Bad file descriptor", func), line);
+            return None;
+        }
+    }
+    let mut a = vec![handle.clone()];
+    if let Some(n) = maxlen {
+        a.push(Value::Long((n as i64).saturating_add(1)));
+    }
+    match fgets_fn(vm, &a) {
+        Ok(Value::String(s)) => Some(s.as_bytes().to_vec()),
+        _ => None,
+    }
+}
+
+/// `php_stream_write()` for functions built on it (fputcsv). Returns the
+/// number of bytes written, or None on failure (write errors on read-only
+/// streams are reported under `func`).
+pub(crate) fn stream_write(vm: &mut Vm, func: &str, handle: &Value, data: &[u8]) -> Option<i64> {
+    let fid = handle.to_long();
+    if let Some(m) = stream_mode_clean(fid) {
+        let is_special = FILE_HANDLES.with(|h| {
+            h.borrow().get(&fid).map(|fh| !matches!(fh.special, SpecialStream::None)).unwrap_or(false)
+        });
+        if m == "r" {
+            if !is_special {
+                let line = vm.current_line;
+                vm.emit_notice_at(
+                    &format!("{}(): Write of {} bytes failed with errno=9 Bad file descriptor", func, data.len()),
+                    line,
+                );
+            }
+            return None;
+        }
+    }
+    match fwrite_fn(vm, &[handle.clone(), Value::String(PhpString::from_bytes(data))]) {
+        Ok(Value::Long(n)) => Some(n),
+        _ => None,
+    }
 }
 
 fn fgets_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -12501,161 +11925,6 @@ fn walk_recursive_inner(
     Ok(())
 }
 
-fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
-    // Validate length argument (treat null/0 as "no limit").
-    if let Some(len_val) = args.get(1) {
-        if !matches!(len_val, Value::Null) {
-            let len = len_val.to_long();
-            if len != 0 && (len < 0 || len > i64::MAX - 1) {
-                let msg = format!(
-                    "fgetcsv(): Argument #2 ($length) must be between 0 and {}",
-                    i64::MAX - 1
-                );
-                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
-            }
-        }
-    }
-    // Validate separator must be a single character.
-    if let Some(v) = args.get(2) {
-        if !matches!(v, Value::Null) {
-            let s = v.to_php_string();
-            if s.len() != 1 {
-                let msg = "fgetcsv(): Argument #3 ($separator) must be a single character".to_string();
-                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
-            }
-        }
-    }
-    // Validate enclosure must be a single character.
-    if let Some(v) = args.get(3) {
-        if !matches!(v, Value::Null) {
-            let s = v.to_php_string();
-            if s.len() != 1 {
-                let msg = "fgetcsv(): Argument #4 ($enclosure) must be a single character".to_string();
-                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
-            }
-        }
-    }
-    // Validate escape (may be empty or single character).
-    if let Some(v) = args.get(4) {
-        if !matches!(v, Value::Null) {
-            let s = v.to_php_string();
-            if s.len() > 1 {
-                let msg = "fgetcsv(): Argument #5 ($escape) must be empty or a single character".to_string();
-                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
-            }
-        }
-    }
-    let _length = args.get(1).and_then(|v| if matches!(v, Value::Null) { None } else { Some(v.to_long()) });
-    let separator = match args.get(2) {
-        Some(v) if !matches!(v, Value::Null) => {
-            let s = v.to_php_string();
-            let b = s.as_bytes();
-            if b.is_empty() { b',' } else { b[0] }
-        }
-        _ => b',',
-    };
-    let enclosure = match args.get(3) {
-        Some(v) if !matches!(v, Value::Null) => {
-            let s = v.to_php_string();
-            let b = s.as_bytes();
-            if b.is_empty() { b'"' } else { b[0] }
-        }
-        _ => b'"',
-    };
-    let escape = match args.get(4) {
-        Some(v) if !matches!(v, Value::Null) => {
-            let s = v.to_php_string();
-            let b = s.as_bytes();
-            if b.is_empty() { None } else { Some(b[0]) }
-        }
-        _ => {
-            // PHP 8.4+ deprecation: implicit default escape will change.
-            let line = vm.current_line;
-            vm.emit_deprecated_at(
-                "fgetcsv(): the $escape parameter must be provided as its default value will change",
-                line,
-            );
-            Some(b'\\')
-        }
-    };
-
-    // Read one line at a time. When the CSV parser reports an unterminated
-    // enclosure, keep appending more lines and re-parse.
-    let mut buf: Vec<u8> = Vec::new();
-    let mut first_chunk = true;
-    let mut hit_eof = false;
-    let arr: PhpArray = loop {
-        let chunk = FILE_HANDLES.with(|handles| {
-            let mut handles = handles.borrow_mut();
-            let fh = handles.get_mut(&fid)?;
-            let mut local = Vec::new();
-            let mut byte = [0u8; 1];
-            loop {
-                match fh.file.read(&mut byte) {
-                    Ok(0) => {
-                        fh.eof = true;
-                        break;
-                    }
-                    Ok(_) => {
-                        local.push(byte[0]);
-                        if byte[0] == b'\n' { break; }
-                    }
-                    Err(_) => break,
-                }
-            }
-            Some(local)
-        });
-        match chunk {
-            None => {
-                // No file handle.
-                return Ok(Value::False);
-            }
-            Some(line) => {
-                if line.is_empty() {
-                    // EOF — stop accumulating.
-                    hit_eof = true;
-                    if buf.is_empty() {
-                        return Ok(Value::False);
-                    }
-                    break crate::strings::parse_csv_fields_ex(&buf, separator, enclosure, escape).0;
-                }
-                buf.extend_from_slice(&line);
-            }
-        }
-        // Strip trailing CR/LF for parsing attempt.
-        let mut try_bytes = buf.clone();
-        if try_bytes.last() == Some(&b'\n') {
-            try_bytes.pop();
-            if try_bytes.last() == Some(&b'\r') {
-                try_bytes.pop();
-            }
-        }
-        // Blank line at start: PHP returns array(NULL).
-        if first_chunk && try_bytes.is_empty() {
-            let mut a = PhpArray::new();
-            a.push(Value::Null);
-            return Ok(Value::Array(Rc::new(RefCell::new(a))));
-        }
-        first_chunk = false;
-        let (fields, unterminated) = crate::strings::parse_csv_fields_ex(&try_bytes, separator, enclosure, escape);
-        if unterminated {
-            continue;
-        }
-        break fields;
-    };
-    let _ = hit_eof;
-    Ok(Value::Array(Rc::new(RefCell::new(arr))))
-}
-
 fn fileperms_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
@@ -14312,149 +13581,6 @@ fn chgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-fn fputcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let fid = args.first().unwrap_or(&Value::Null).to_long();
-    let fields = match args.get(1) {
-        Some(Value::Array(arr)) => arr.clone(),
-        _ => return Ok(Value::False),
-    };
-    // Validate separator/enclosure/escape — each must be a single character
-    // (escape may be empty). PHP throws ValueError for invalid sizes. Null
-    // arguments are treated as not-provided (named-arg gaps).
-    if let Some(v) = args.get(2) {
-        if !matches!(v, Value::Null) {
-            let s = v.to_php_string();
-            if s.len() != 1 {
-                let msg = "fputcsv(): Argument #3 ($separator) must be a single character".to_string();
-                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
-            }
-        }
-    }
-    if let Some(v) = args.get(3) {
-        if !matches!(v, Value::Null) {
-            let s = v.to_php_string();
-            if s.len() != 1 {
-                let msg = "fputcsv(): Argument #4 ($enclosure) must be a single character".to_string();
-                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
-            }
-        }
-    }
-    if let Some(v) = args.get(4) {
-        if !matches!(v, Value::Null) {
-            let s = v.to_php_string();
-            if s.len() > 1 {
-                let msg = "fputcsv(): Argument #5 ($escape) must be empty or a single character".to_string();
-                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError { message: msg, line: vm.current_line });
-            }
-        }
-    }
-    let separator = match args.get(2) {
-        Some(v) if !matches!(v, Value::Null) => {
-            let s = v.to_php_string();
-            let b = s.as_bytes();
-            if b.is_empty() { b',' } else { b[0] }
-        }
-        _ => b',',
-    };
-    let enclosure = match args.get(3) {
-        Some(v) if !matches!(v, Value::Null) => {
-            let s = v.to_php_string();
-            let b = s.as_bytes();
-            if b.is_empty() { b'"' } else { b[0] }
-        }
-        _ => b'"',
-    };
-    let escape: Option<u8> = match args.get(4) {
-        Some(v) if !matches!(v, Value::Null) => {
-            let s = v.to_php_string();
-            let b = s.as_bytes();
-            if b.is_empty() { None } else { Some(b[0]) }
-        }
-        _ => {
-            let line = vm.current_line;
-            vm.emit_deprecated_at(
-                "fputcsv(): the $escape parameter must be provided as its default value will change",
-                line,
-            );
-            Some(b'\\')
-        }
-    };
-
-    // User-provided end-of-line sequence (PHP 8.1+), default "\n".
-    let eol: Vec<u8> = match args.get(5) {
-        Some(v) if !matches!(v, Value::Null | Value::Undef) => v.to_php_string().as_bytes().to_vec(),
-        _ => b"\n".to_vec(),
-    };
-    let mut line: Vec<u8> = Vec::new();
-    let arr = fields.borrow();
-    let mut first = true;
-    for (_, val) in arr.iter() {
-        if !first {
-            line.push(separator);
-        }
-        first = false;
-        // PHP emits "Array to string conversion" warning when fputcsv encounters
-        // an array element (and writes literal "Array").
-        if matches!(val, Value::Array(_)) {
-            let cur_line = vm.current_line;
-            vm.emit_warning_at("Array to string conversion", cur_line);
-        }
-        let s = val.to_php_string();
-        // Check if we need to enclose (delimiter, enclosure, escape, \n, \r,
-        // \t, or space anywhere in the field — matches PHP behavior).
-        let s_bytes = s.as_bytes();
-        let needs_enclosure = s_bytes.iter().any(|&b| {
-            b == separator
-                || b == enclosure
-                || escape.map(|e| b == e).unwrap_or(false)
-                || b == b'\n'
-                || b == b'\r'
-                || b == b'\t'
-                || b == b' '
-        });
-        if needs_enclosure {
-            line.push(enclosure);
-            let mut escaped = false;
-            for &c in s_bytes {
-                if let Some(e) = escape {
-                    if c == e && !escaped {
-                        escaped = true;
-                        line.push(c);
-                        continue;
-                    }
-                }
-                if c == enclosure && !escaped {
-                    line.push(enclosure);
-                }
-                escaped = false;
-                line.push(c);
-            }
-            line.push(enclosure);
-        } else {
-            line.extend_from_slice(s_bytes);
-        }
-    }
-    line.extend_from_slice(&eol);
-
-    let bytes = line.as_slice();
-    let len = bytes.len();
-
-    FILE_HANDLES.with(|handles| {
-        let mut handles = handles.borrow_mut();
-        if let Some(fh) = handles.get_mut(&fid) {
-            let _ = fh.file.write_all(bytes);
-        }
-    });
-
-    Ok(Value::Long(len as i64))
-}
-
 fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let has_read_filters = crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
@@ -14951,54 +14077,6 @@ fn parse_memory_value(val: &Value) -> i64 {
         (s, 1i64)
     };
     num_str.parse::<i64>().unwrap_or(128 * 1024 * 1024) * multiplier
-}
-
-fn fscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // fscanf($handle, $format, ...$vars) - read line from file and parse with sscanf
-    if args.len() < 2 {
-        return Ok(Value::Null);
-    }
-    let fid = args[0].to_long();
-    // Read a line from the file
-    let line = FILE_HANDLES.with(|handles| {
-        let mut handles = handles.borrow_mut();
-        if let Some(fh) = handles.get_mut(&fid) {
-            let mut buf = Vec::new();
-            let mut byte = [0u8; 1];
-            loop {
-                match fh.file.read(&mut byte) {
-                    Ok(0) => {
-                        fh.eof = true;
-                        break;
-                    }
-                    Ok(_) => {
-                        buf.push(byte[0]);
-                        if byte[0] == b'\n' {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-            if buf.is_empty() && fh.eof {
-                None
-            } else {
-                Some(String::from_utf8_lossy(&buf).to_string())
-            }
-        } else {
-            None
-        }
-    });
-
-    match line {
-        None => Ok(Value::False),
-        Some(line_str) => {
-            // Call sscanf with the line and remaining args
-            let mut sscanf_args = vec![Value::String(PhpString::from_string(line_str))];
-            sscanf_args.extend_from_slice(&args[1..]);
-            sscanf_fn(vm, &sscanf_args)
-        }
-    }
 }
 
 fn fgetc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

@@ -10043,39 +10043,6 @@ impl Vm {
         }
     }
 
-    fn parse_csv_line(line: &str, delim: char, enclosure: char) -> Vec<String> {
-        let mut fields = Vec::new();
-        let mut current = String::new();
-        let mut in_enclosure = false;
-        let chars: Vec<char> = line.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            let ch = chars[i];
-            if in_enclosure {
-                if ch == enclosure {
-                    if i + 1 < chars.len() && chars[i + 1] == enclosure {
-                        current.push(enclosure);
-                        i += 2;
-                        continue;
-                    }
-                    in_enclosure = false;
-                } else {
-                    current.push(ch);
-                }
-            } else if ch == enclosure {
-                in_enclosure = true;
-            } else if ch == delim {
-                fields.push(current.clone());
-                current.clear();
-            } else {
-                current.push(ch);
-            }
-            i += 1;
-        }
-        fields.push(current);
-        fields
-    }
-
     /// Check if a class name is a known built-in class
     pub fn is_known_builtin_class(&self, class_lower: &[u8]) -> bool {
         is_known_builtin_class_name(class_lower)
@@ -16006,6 +15973,10 @@ impl Vm {
                                         }
                                     } else {
                                         named_ok = self.spl_map_named_args(spl_class, spl_method, &mut spl_args, &call.named_args);
+                                    }
+                                } else if !call.named_args.is_empty() {
+                                    if let Err(n) = crate::spl_csv::merge_spl_file_named_args(spl_class, spl_method, &mut spl_args, &call.named_args) {
+                                        named_err = n;
                                     }
                                 }
                                 let result = if let Some(n) = named_err {
