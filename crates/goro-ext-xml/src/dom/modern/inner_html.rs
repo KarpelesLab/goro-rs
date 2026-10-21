@@ -146,8 +146,27 @@ pub fn w_inner_html(vm: &mut Vm, _o: &Obj, n: NodeId, v: &Value) -> R<()> {
         Some(f) => f,
         None => return Err(()),
     };
-    tree::with(|t| crate::dom::node::remove_all_children(t, n));
-    if node::pre_insert(vm, Some(frag), n, None) {
+    // a template element's contents live in its template contents fragment
+    let target = tree::with(|t| {
+        if t.nodes[n].t == NType::Element
+            && ns_is(t, t.nodes[n].ns, XHTML_NS)
+            && t.nodes[n].name == "template"
+        {
+            match t.nodes[n].template {
+                Some(f) => f,
+                None => {
+                    let doc = t.nodes[n].doc;
+                    let f = t.new_fragment(doc);
+                    t.nodes[n].template = Some(f);
+                    f
+                }
+            }
+        } else {
+            n
+        }
+    });
+    tree::with(|t| crate::dom::node::remove_all_children(t, target));
+    if node::pre_insert(vm, Some(frag), target, None) {
         Ok(())
     } else {
         Err(())

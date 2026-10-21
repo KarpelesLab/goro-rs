@@ -184,6 +184,9 @@ pub struct Node {
     /// For text nodes created by the parser: whether the node is a
     /// "noenc" text (already escaped). Unused for now.
     pub flags: u32,
+    /// The template contents (a document fragment) of an HTML <template>
+    /// element of a modern document (php_dom_*_templated_content).
+    pub template: Option<NodeId>,
 }
 
 impl Node {
@@ -206,6 +209,7 @@ impl Node {
             atype: 0,
             wrapper: None,
             flags: 0,
+            template: None,
         }
     }
 }

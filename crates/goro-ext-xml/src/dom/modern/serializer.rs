@@ -478,7 +478,11 @@ impl<'a> Ser<'a> {
             } else {
                 indent = -1;
             }
-            let mut c = t.nodes[element].children;
+            let mut c = if ns == Some(XHTML_NS) && name == "template" {
+                t.nodes[element].template.and_then(|f| t.nodes[f].children)
+            } else {
+                t.nodes[element].children
+            };
             while let Some(x) = c {
                 if should_format {
                     self.indents(indent);

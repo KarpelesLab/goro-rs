@@ -2478,7 +2478,13 @@ pub fn reflection_class_method(
         }
         b"newinstancewithoutconstructor" => {
             // Internal final classes cannot be created without their ctor.
-            let no_ctorless: &[&[u8]] = &[b"generator", b"fiber", b"closure"];
+            let no_ctorless: &[&[u8]] = &[
+                b"generator",
+                b"fiber",
+                b"closure",
+                b"dom\\htmldocument",
+                b"dom\\xmldocument",
+            ];
             if no_ctorless.contains(&class_lower.as_slice()) {
                 let canonical = rcls(vm, &class_lower)
                     .map(|c| String::from_utf8_lossy(&c.name).to_string())

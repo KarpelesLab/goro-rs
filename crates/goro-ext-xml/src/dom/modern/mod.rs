@@ -75,7 +75,8 @@ pub fn modern_base_for(n: NodeId, base: Base) -> Base {
             }
         }
         Base::Element => {
-            if tree::with(|t| ns_is_html_and_doc_is_html(t, n)) {
+            // dom_get_element_ce: any element in the HTML namespace
+            if tree::with(|t| ns_is(t, t.nodes[n].ns, XHTML_NS)) {
                 Base::MHtmlElement
             } else {
                 Base::MElement

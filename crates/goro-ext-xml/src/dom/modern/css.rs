@@ -1689,8 +1689,8 @@ fn finish(vm: &mut Vm, ctx: Ctx) -> R<()> {
     Ok(())
 }
 
-fn quirks(_n: NodeId) -> bool {
-    false
+fn quirks(n: NodeId) -> bool {
+    doc_props(Some(doc_of_node(n).unwrap_or(n))).quirks_mode != 0
 }
 
 /// querySelectorAll: matching descendants of `root` in tree order.

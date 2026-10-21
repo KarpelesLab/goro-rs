@@ -104,6 +104,23 @@ fn r_head(vm: &mut Vm, _o: &Obj, n: NodeId) -> R<Value> {
 }
 
 fn w_body(vm: &mut Vm, _o: &Obj, d: NodeId, v: &Value) -> R<()> {
+    // typed property ?Dom\HTMLElement
+    let bad_type = match v {
+        Value::Null => false,
+        Value::Object(no) => !obj_is(vm, no, "Dom\\HTMLElement"),
+        _ => true,
+    };
+    if bad_type {
+        throw_error(
+            vm,
+            b"TypeError",
+            &format!(
+                "Cannot assign {} to property Dom\\Document::$body of type ?Dom\\HTMLElement",
+                crate::dom::type_name_of(v)
+            ),
+        );
+        return Err(());
+    }
     if let Value::Object(no) = v {
         if let Some(nn) = node_of(no) {
             let is_body = tree::with(|t| accept_body(&t.nodes[nn].name));
@@ -941,8 +958,7 @@ pub fn get_elements_by_class_name(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value>
     a.count(vm, 1, 1)?;
     let names = a.path_str(vm, 0, "classNames")?;
     let n = need_node(vm, o)?;
-    let quirks = false;
-    let _ = n;
+    let quirks = doc_props(Some(doc_of_node(n).unwrap_or(n))).quirks_mode == 1;
     let classes = tokenlist::ordered_set_parse(&names, quirks);
     Ok(mlist_obj(
         vm,

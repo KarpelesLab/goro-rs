@@ -578,7 +578,7 @@ pub fn convert(
                 if node.tag == html5::TEMPLATE && node.ns == html5::NS_HTML {
                     if create_default_ns {
                         let frag = t.new_fragment(Some(doc));
-                        t.nodes[frag].parent = Some(el);
+                        t.nodes[el].template = Some(frag);
                         templates.push((el, frag));
                         child_parent = frag;
                     }
@@ -730,12 +730,8 @@ pub fn build_document(parsed: &Parsed, options: i64) -> NodeId {
         }
         tpl
     });
-    with_doc_props(d, |props| {
-        props.quirks_mode = p.compat_mode;
-        for (el, frag) in templates {
-            props.templates.insert(el, frag);
-        }
-    });
+    let _ = templates;
+    with_doc_props(d, |props| props.quirks_mode = p.compat_mode);
     d
 }
 
@@ -872,6 +868,10 @@ fn read_html_file(vm: &mut Vm, fname: &str, path: &str) -> R<(Vec<u8>, String)> 
     let is_wrapper = (path.contains("://") && !lower.starts_with("file://"))
         || lower.starts_with("php:")
         || lower.starts_with("data:");
+    if lower == "php://memory" || lower.starts_with("php://temp") {
+        // a freshly opened memory stream is always empty
+        return Ok((Vec::new(), path.to_string()));
+    }
     if is_wrapper {
         let f = match vm.functions.get(&b"file_get_contents"[..]).copied() {
             Some(f) => f,
@@ -882,7 +882,11 @@ fn read_html_file(vm: &mut Vm, fname: &str, path: &str) -> R<(Vec<u8>, String)> 
             fargs.push(Value::False);
             fargs.push(ctx);
         }
+        // the wrapper's own diagnostics are not part of createFromFile's
+        let saved = vm.error_reporting;
+        vm.error_reporting = 0;
         let r = f(vm, &fargs);
+        vm.error_reporting = saved;
         if vm.current_exception.is_some() {
             return Err(());
         }

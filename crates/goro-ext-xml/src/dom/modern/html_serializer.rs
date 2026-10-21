@@ -156,7 +156,11 @@ fn node(t: &Tree, out: &mut String, n: NodeId) {
             if serializes_as_void(t, n) {
                 return;
             }
-            let mut c = nd.children;
+            let mut c = if is_html(t, n) && nd.name == "template" {
+                nd.template.and_then(|f| t.nodes[f].children)
+            } else {
+                nd.children
+            };
             while let Some(x) = c {
                 node(t, out, x);
                 c = t.nodes[x].next;
@@ -194,7 +198,10 @@ pub fn serialize_children(n: NodeId) -> String {
         if t.nodes[n].t == NType::Element && serializes_as_void(t, n) {
             return out;
         }
-        let mut c = t.nodes[n].children;
+        let mut c = match t.nodes[n].template {
+            Some(f) => t.nodes[f].children,
+            None => t.nodes[n].children,
+        };
         while let Some(x) = c {
             node(t, &mut out, x);
             c = t.nodes[x].next;
@@ -227,15 +234,10 @@ pub fn parse_fragment(_vm: &mut Vm, context: NodeId, input: &str) -> Option<Node
     let p =
         super::html_document::parse_fragment_input(&name, ns.as_deref(), quirks, input.as_bytes());
     let root = p.fragment_root()?;
-    let (frag, templates) = tree::with(|t| {
+    let frag = tree::with(|t| {
         let frag = t.new_fragment(Some(doc));
-        let tpl = super::html_document::convert(t, &p, root, doc, frag, true);
-        (frag, tpl)
-    });
-    with_doc_props(doc, |props| {
-        for (el, f) in templates {
-            props.templates.insert(el, f);
-        }
+        super::html_document::convert(t, &p, root, doc, frag, true);
+        frag
     });
     Some(frag)
 }
