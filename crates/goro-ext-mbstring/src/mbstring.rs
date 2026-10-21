@@ -36,6 +36,7 @@ pub fn register(vm: &mut Vm) {
     crate::entities::register(vm);
     crate::misc::register(vm);
     crate::gpc::register(vm);
+    crate::mbregex::register(vm);
 }
 
 /* ===== Helpers ===== */

@@ -319,6 +319,7 @@ pub fn parse_encoding_list(st: &MbState, value: &[u8]) -> Result<Vec<&'static En
 }
 
 fn set_internal_encoding_ini(vm: &mut Vm, st: &mut MbState, name: &[u8]) {
+    crate::mbregex::on_internal_encoding_ini(name);
     let enc = if name.is_empty() { None } else { mbfl::name2encoding(name) };
     let enc = match enc {
         Some(e) => e,
