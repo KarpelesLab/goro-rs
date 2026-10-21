@@ -779,7 +779,12 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
             let class_info = vm.classes.get(&class_lower).cloned();
 
             // Properties are in declaration order (Vec preserves insertion order)
-            let props: Vec<_> = obj_borrow.properties.clone();
+            // Unshared references (held only by this slot) print without `&`;
+            // deref them before cloning bumps their refcount.
+            let props: Vec<_> = obj_borrow.properties.iter().map(|(k, v)| (k.clone(), match v {
+                Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => r.borrow().clone(),
+                _ => v.clone(),
+            })).collect();
             let obj_class_name = obj_borrow.class_name.clone();
             drop(obj_borrow);
             for (name, value) in &props {
@@ -1074,7 +1079,12 @@ fn var_dump_value_ref(vm: &mut Vm, val: &Value, indent: usize, prefix: &str, see
             }
             let class_lower: Vec<u8> = obj_borrow.class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
             let class_info = vm.classes.get(&class_lower).cloned();
-            let props: Vec<_> = obj_borrow.properties.clone();
+            // Unshared references (held only by this slot) print without `&`;
+            // deref them before cloning bumps their refcount.
+            let props: Vec<_> = obj_borrow.properties.iter().map(|(k, v)| (k.clone(), match v {
+                Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => r.borrow().clone(),
+                _ => v.clone(),
+            })).collect();
             let obj_class_name = obj_borrow.class_name.clone();
             drop(obj_borrow);
             for (name, value) in &props {

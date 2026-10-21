@@ -824,6 +824,66 @@ impl Compiler {
                 // Reference land back in the array slot (and the slot
                 // is auto-vivified instead of producing an
                 // "Undefined array key" warning).
+                // Unknown callee at compile time: an array element or property
+                // argument may need to be passed by reference. Decide at runtime.
+                let dim_or_prop = matches!(&arg.value.kind, ExprKind::ArrayAccess { index: Some(_), .. })
+                    || matches!(&arg.value.kind, ExprKind::PropertyAccess { nullsafe: false, .. });
+                if !is_byref && dim_or_prop {
+                    let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
+                    let jmp_ref = self.op_array.emit(Op {
+                        opcode: OpCode::JmpIfArgByRef,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let v = self.compile_expr(&arg.value)?;
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SendVal,
+                        op1: v,
+                        op2: OperandType::Const(pos_idx),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let jmp_end = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let ref_start = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp_ref, ref_start);
+                    let ref_tmp = match &arg.value.kind {
+                        ExprKind::ArrayAccess { array, index: Some(idx_expr) } => {
+                            let arr_op = self.compile_dim_write_base(array)?;
+                            let idx_op = self.compile_expr(idx_expr)?;
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayGetRef,
+                                op1: arr_op,
+                                op2: idx_op,
+                                result: OperandType::Tmp(t),
+                                line,
+                            });
+                            t
+                        }
+                        ExprKind::PropertyAccess { object, property, .. } => {
+                            self.compile_property_ref(object, property, line)?
+                        }
+                        _ => unreachable!(),
+                    };
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SendRef,
+                        op1: OperandType::Tmp(ref_tmp),
+                        op2: OperandType::Const(pos_idx),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp_end, end);
+                    continue;
+                }
                 let val = if is_byref {
                     if let ExprKind::ArrayAccess { array, index } = &arg.value.kind {
                         if let Some(idx_expr) = index {

@@ -336,6 +336,9 @@ pub enum OpCode {
     /// PropertyGet, but a missing/null property is initialised to an array,
     /// a shared array is separated, and readonly properties are rejected.
     PropertyGetW,
+    /// Jump to op1 (JmpTarget) if the pending call's next positional
+    /// parameter is by-reference (runtime FUNC_ARG dispatch).
+    JmpIfArgByRef,
 }
 
 /// A compiled function / script
@@ -486,7 +489,7 @@ impl OpArray {
     pub fn patch_jump(&mut self, op_index: u32, target: u32) {
         let op = &mut self.ops[op_index as usize];
         match op.opcode {
-            OpCode::Jmp | OpCode::SaveJump => op.op1 = OperandType::JmpTarget(target),
+            OpCode::Jmp | OpCode::SaveJump | OpCode::JmpIfArgByRef => op.op1 = OperandType::JmpTarget(target),
             OpCode::JmpZ | OpCode::JmpNz | OpCode::ForeachNext | OpCode::ForeachNextRef => {
                 op.op2 = OperandType::JmpTarget(target);
             }

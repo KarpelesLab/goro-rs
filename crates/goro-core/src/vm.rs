@@ -2999,6 +2999,20 @@ impl Vm {
         let err_id = self.next_object_id;
         self.next_object_id += 1;
         let mut err_obj = PhpObject::new(class_name.to_vec(), err_id);
+        // self/parent/static only reach a class lookup when no class scope
+        // resolved them; PHP reports that condition instead.
+        let mut message = message.to_string();
+        if class_name == b"Error" {
+            for kw in ["self", "parent", "static"] {
+                if message == format!("Class \"{}\" not found", kw)
+                    || message.starts_with(&format!("Call to undefined method {}::", kw))
+                {
+                    message = format!("Cannot access \"{}\" when no class scope is active", kw);
+                    break;
+                }
+            }
+        }
+        let message = message.as_str();
         err_obj.set_property(
             b"message".to_vec(),
             Value::String(PhpString::from_string(message.to_string())),
@@ -25637,6 +25651,22 @@ impl Vm {
                         .iter()
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
+                    if matches!(class_lower.as_slice(), b"self" | b"parent" | b"static")
+                        && self.current_class_scope().is_none()
+                    {
+                        let msg = format!(
+                            "Cannot access \"{}\" when no class scope is active",
+                            String::from_utf8_lossy(&class_lower)
+                        );
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            continue;
+                        }
+                        return Err(VmError { message: format!("Uncaught Error: {}", msg), line: op.line });
+                    }
 
                     let result = if class_lower == b"closure" {
                         // Special case: closures in goro-rs may be strings/arrays, not objects
@@ -28810,9 +28840,43 @@ impl Vm {
                             }
                             return Err(VmError { message: format!("Uncaught TypeError: {}", msg), line: op.line });
                         }
-                        self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                        // ArrayAccess: the element is fetched via offsetGet (by value).
+                        let v = self.call_object_method(&arr_val, b"offsetGet", &[key_val.clone()]).unwrap_or(Value::Null);
+                        self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                    } else if matches!(arr_val, Value::Null | Value::Undef) && matches!(op.op1, OperandType::Cv(_)) {
+                        // Write fetch on an unset/null variable vivifies an array.
+                        let r = Rc::new(RefCell::new(Value::Null));
+                        let mut new_arr = PhpArray::new();
+                        new_arr.set(Self::value_to_array_key(key_val), Value::Reference(r.clone()));
+                        if let OperandType::Cv(ai) = op.op1 {
+                            let arr_v = Value::Array(Rc::new(RefCell::new(new_arr)));
+                            match cvs.get_mut(ai as usize) {
+                                Some(Value::Reference(cr)) => { *cr.borrow_mut() = arr_v; }
+                                Some(slot) => { *slot = arr_v; }
+                                None => {}
+                            }
+                        }
+                        self.write_operand(&op.result, Value::Reference(r), &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
                         self.write_operand(&op.result, Value::Null, &mut cvs, &mut tmps, &static_cv_keys);
+                    }
+                }
+
+                OpCode::JmpIfArgByRef => {
+                    let by_ref = self.pending_calls.last().and_then(|call| {
+                        let idx = call.args.len();
+                        let name_lower: Vec<u8> = call.name.as_bytes().iter().map(|b| b.to_ascii_lowercase()).collect();
+                        self.user_functions.get(&name_lower).map(|f| {
+                            match f.by_ref_params.get(idx) {
+                                Some(b) => *b,
+                                None => f.variadic_param.is_some() && f.by_ref_params.last().copied().unwrap_or(false),
+                            }
+                        })
+                    }).unwrap_or(false);
+                    if by_ref {
+                        if let OperandType::JmpTarget(t) = op.op1 {
+                            ip = t as usize;
+                        }
                     }
                 }
 
@@ -28853,7 +28917,17 @@ impl Vm {
                                 deny = Some(format!("Cannot modify readonly property {}::${}", class_display, prop_str));
                             }
                         }
-                        if let Some(msg) = deny {
+                        let overloaded = !obj.borrow().has_property(prop_name.as_bytes())
+                            && self.classes.get(&class_lower).map(|c| c.get_method(b"__get").is_some()).unwrap_or(false);
+                        if overloaded && deny.is_none() {
+                            // Overloaded property: read through __get (by value).
+                            let v = self.call_object_method(&obj_val, b"__get", &[Value::String(prop_name.clone())]).unwrap_or(Value::Null);
+                            if !matches!(v, Value::Object(_) | Value::Reference(_)) {
+                                let class_display = crate::value::display_class_name(&class_name_orig);
+                                self.emit_notice_at(&format!("Indirect modification of overloaded property {}::${} has no effect", class_display, prop_name.to_string_lossy()), op.line);
+                            }
+                            v
+                        } else if let Some(msg) = deny {
                             let cur = obj.borrow().get_property(prop_name.as_bytes());
                             if matches!(cur, Value::Object(_)) {
                                 cur
