@@ -322,12 +322,14 @@ fn invoke_method_inner(
     }
     // Pass references only to by-ref parameters; drop surplus arguments
     // unless the method is variadic.
+    // by_ref_params is indexed by CV slot, which counts the hidden `$this`.
+    let hidden = (op.param_count as usize).saturating_sub(op.param_attributes.len());
     let mut call_args = Vec::with_capacity(args.len());
     for (i, a) in args.into_iter().enumerate() {
         if i >= declared && op.variadic_param.is_none() {
             break;
         }
-        let by_ref = op.by_ref_params.get(i).copied().unwrap_or(false);
+        let by_ref = op.by_ref_params.get(i + hidden).copied().unwrap_or(false);
         if by_ref {
             call_args.push(a);
         } else {
