@@ -4488,7 +4488,7 @@ impl Vm {
             let defaults: Vec<(Vec<u8>, Value)> = self.classes.get(&class_lower)
                 .map(|ce| {
                     ce.properties.iter()
-                        .filter(|p| !p.is_static)
+                        .filter(|p| !p.is_static && !p.is_virtual)
                         .map(|p| (p.name.clone(), p.default.clone()))
                         .collect()
                 })
@@ -20718,8 +20718,24 @@ impl Vm {
                                 };
                                 return Err(VmError { message: msg, line: op.line });
                             }
-                            // Redirect to real for initialized proxy.
-                            let target = self.proxy_redirect(obj);
+                            // Redirect to real for initialized proxy (the real
+                            // instance may itself be a lazy object: initialize it too).
+                            let mut target = self.proxy_redirect(obj);
+                            for _ in 0..16 {
+                                let is_lazy = matches!(target.borrow().get_property(b"__lazy_state"), Value::String(_));
+                                if !is_lazy || Rc::ptr_eq(&target, obj) {
+                                    break;
+                                }
+                                self.maybe_run_lazy_init(&target);
+                                if self.current_exception.is_some() {
+                                    break;
+                                }
+                                let next = self.proxy_redirect(&target);
+                                if Rc::ptr_eq(&next, &target) {
+                                    break;
+                                }
+                                target = next;
+                            }
                             // Current class scope determines which private/
                             // protected slots are visible during iteration.
                             let scope_lower: Option<Vec<u8>> = self.current_class_scope()
@@ -20823,8 +20839,23 @@ impl Vm {
                                     value.clone(),
                                 );
                             }
-                            let arr_val = Value::Array(Rc::new(RefCell::new(arr)));
                             drop(obj_borrow);
+                            if self.class_has_hooked_props(&obj_class_lower) {
+                                match self.hooked_object_iteration_array(&target, &arr) {
+                                    Ok(a) => arr = a,
+                                    Err(e) => {
+                                        if self.current_exception.is_some() {
+                                            if let Some((c, f, _, _, pc)) = exception_handlers.pop() {
+                                                pending_calls_catch_depth = Some(pc);
+                                                ip = if c > 0 { c } else { f } as usize;
+                                                continue;
+                                            }
+                                        }
+                                        return Err(e);
+                                    }
+                                }
+                            }
+                            let arr_val = Value::Array(Rc::new(RefCell::new(arr)));
                             self.write_operand(
                                 &op.result,
                                 arr_val,
@@ -24024,7 +24055,9 @@ impl Vm {
                             let oid = obj.borrow().object_id;
                             let guard_active = self.magic_prop_guards.contains(&(oid, pn.to_vec(), 1u8));
                             let is_lazy_uninit = (is_proxy && !already_real) || is_ghost;
-                            let skip_init = is_lazy_uninit && has_isset && !prop_declared && !guard_active;
+                            let skip_init = is_lazy_uninit
+                                && ((has_isset && !prop_declared && !guard_active)
+                                    || self.has_unguarded_get_hook(&class_lower, pn));
                             if !skip_init {
                                 self.maybe_run_lazy_init(obj);
                                 if guard_active && is_proxy {
@@ -24138,6 +24171,30 @@ impl Vm {
                                 }
                             self.write_operand(&op.result, if r { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
                             continue;
+                        }
+                    }
+                    // isset() on an accessible property with a get hook calls the
+                    // hook (zend_std_has_property): set iff the result is not null.
+                    if let Value::Object(obj) = &obj_val {
+                        let pn = prop_name.as_bytes();
+                        if let Some(hook_res) = self.call_get_hook_if_accessible(obj, pn) {
+                            match hook_res {
+                                Ok(v) => {
+                                    let set = !matches!(v, Value::Null | Value::Undef);
+                                    self.write_operand(&op.result, if set { Value::True } else { Value::False }, &mut cvs, &mut tmps, &static_cv_keys);
+                                    continue;
+                                }
+                                Err(e) => {
+                                    if self.current_exception.is_some() {
+                                        if let Some((c, f, _, _, pc)) = exception_handlers.pop() {
+                                            pending_calls_catch_depth = Some(pc);
+                                            ip = if c > 0 { c } else { f } as usize;
+                                            continue;
+                                        }
+                                    }
+                                    return Err(e);
+                                }
+                            }
                         }
                     }
                     let result = if let Value::Object(obj) = &obj_val {
@@ -24440,7 +24497,13 @@ impl Vm {
                             let oid = obj.borrow().object_id;
                             let guard_active = self.magic_prop_guards.contains(&(oid, pn.to_vec(), 3u8));
                             let is_lazy_uninit = (is_proxy && !already_real) || is_ghost;
-                            let skip_init = is_lazy_uninit && has_unset && !prop_declared && !guard_active;
+                            // Hooked properties can't be unset: the error is raised
+                            // without initializing the object.
+                            let is_hooked_prop = self.classes.get(&class_lower)
+                                .map(|c| c.properties.iter().any(|p| p.name == pn && !p.is_static && (p.has_get_hook || p.has_set_hook)))
+                                .unwrap_or(false);
+                            let skip_init = is_lazy_uninit
+                                && ((has_unset && !prop_declared && !guard_active) || is_hooked_prop);
                             if !skip_init {
                                 self.maybe_run_lazy_init(obj);
                                 if guard_active && is_proxy {
@@ -29509,7 +29572,23 @@ impl Vm {
                                 let oid = ob.object_id;
                                 let guard_active = self.magic_prop_guards
                                     .contains(&(oid, pn.to_vec(), 0u8));
-                                if is_ghost {
+                                // A property with a get hook: the hook runs on the
+                                // still-lazy object; only state it observes (e.g. the
+                                // backing value) triggers initialization.
+                                let has_get_hook_here = {
+                                    let mut m = b"__property_get_".to_vec();
+                                    m.extend(pn.iter().map(|b| b.to_ascii_lowercase()));
+                                    self.classes.get(&class_lower).map(|c| c.methods.contains_key(&m)).unwrap_or(false)
+                                };
+                                let in_own_hook = has_get_hook_here && {
+                                    let mut k = class_lower.clone();
+                                    k.extend_from_slice(b"::");
+                                    k.extend_from_slice(pn);
+                                    self.property_hook_stack.iter().any(|s| s.starts_with(&k))
+                                };
+                                if has_get_hook_here && !in_own_hook && (is_ghost || (is_proxy && !already_real)) {
+                                    true
+                                } else if is_ghost {
                                     has_get && !is_declared
                                 } else if is_proxy && !already_real {
                                     has_get && !is_declared && !guard_active
@@ -33347,6 +33426,155 @@ impl Vm {
                 break;
             }
         }
+    }
+
+    /// Declared non-static properties of a class in declaration order
+    /// (ancestors first; a redeclaration keeps the inherited position).
+    pub fn ordered_instance_prop_defs(&self, class_lower: &[u8]) -> Vec<crate::object::PropertyDef> {
+        let mut chain: Vec<Vec<u8>> = Vec::new();
+        let mut cur = class_lower.to_vec();
+        for _ in 0..64 {
+            let Some(c) = self.classes.get(&cur) else { break };
+            chain.push(cur.clone());
+            match &c.parent {
+                Some(p) => cur = p.iter().map(|b| b.to_ascii_lowercase()).collect(),
+                None => break,
+            }
+        }
+        let mut out: Vec<crate::object::PropertyDef> = Vec::new();
+        for cl in chain.iter().rev() {
+            let Some(c) = self.classes.get(cl) else { continue };
+            for p in c.properties.iter().filter(|p| !p.is_static) {
+                if let Some(existing) = out.iter_mut().find(|e| e.name == p.name && e.visibility != Visibility::Private) {
+                    *existing = p.clone();
+                } else if !out.iter().any(|e| e.name == p.name && e.declaring_class == p.declaring_class) {
+                    out.push(p.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// True if any declared instance property of the class has a hook.
+    pub fn class_has_hooked_props(&self, class_lower: &[u8]) -> bool {
+        self.ordered_instance_prop_defs(class_lower).iter().any(|p| p.has_get_hook || p.has_set_hook)
+    }
+
+    /// By-value iteration snapshot of an object whose class has hooked
+    /// properties (zend_hooked_object_get_iterator): declared properties in
+    /// declaration order (get hooks are called; virtual properties without
+    /// get hook are skipped), then dynamic properties. `visible` is the
+    /// plain (storage based) snapshot for the current scope.
+    pub fn hooked_object_iteration_array(&mut self, obj: &Rc<RefCell<PhpObject>>, visible: &PhpArray) -> Result<PhpArray, VmError> {
+        self.hooked_object_props_array(obj, visible, false)
+    }
+
+    /// Like hooked_object_iteration_array; with `public_only` the current
+    /// scope is ignored (json_encode() and similar consumers).
+    pub fn hooked_object_props_array(&mut self, obj: &Rc<RefCell<PhpObject>>, visible: &PhpArray, public_only: bool) -> Result<PhpArray, VmError> {
+        let class_lower: Vec<u8> = obj.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let defs = self.ordered_instance_prop_defs(&class_lower);
+        let scope_lower: Option<Vec<u8>> = if public_only {
+            None
+        } else {
+            self.current_class_scope().map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect())
+        };
+        let mut out = PhpArray::new();
+        for d in &defs {
+            let accessible = match d.visibility {
+                Visibility::Public => true,
+                Visibility::Protected => scope_lower.as_deref().is_some_and(|s| self.scope_can_see_protected(s, &class_lower)),
+                Visibility::Private => scope_lower.as_deref() == Some(d.declaring_class.as_slice())
+                    || scope_lower.as_deref().is_some_and(|s| s.eq_ignore_ascii_case(&d.declaring_class)),
+            };
+            if !accessible {
+                continue;
+            }
+            let key = ArrayKey::String(PhpString::from_vec(d.name.clone()));
+            if self.has_unguarded_get_hook(&class_lower, &d.name) {
+                match self.call_get_hook_if_accessible(obj, &d.name) {
+                    Some(Ok(v)) => {
+                        out.set(key, v);
+                    }
+                    Some(Err(e)) => return Err(e),
+                    None => {}
+                }
+                continue;
+            }
+            if d.is_virtual && (d.has_get_hook || d.has_set_hook) {
+                continue;
+            }
+            if let Some(v) = visible.get(&key) {
+                out.set(key, v.clone());
+            }
+        }
+        for (k, v) in visible.iter() {
+            if let ArrayKey::String(s) = k {
+                if defs.iter().any(|d| d.name == s.as_bytes()) {
+                    continue;
+                }
+            }
+            out.set(k.clone(), v.clone());
+        }
+        Ok(out)
+    }
+
+    /// True if `class_lower` has a get hook for `pn` and we are not currently
+    /// executing a hook of that property (where accesses hit the backing store).
+    fn has_unguarded_get_hook(&self, class_lower: &[u8], pn: &[u8]) -> bool {
+        let mut m = b"__property_get_".to_vec();
+        m.extend(pn.iter().map(|b| b.to_ascii_lowercase()));
+        if !self.classes.get(class_lower).map(|c| c.methods.contains_key(&m)).unwrap_or(false) {
+            return false;
+        }
+        let mut k = class_lower.to_vec();
+        k.extend_from_slice(b"::");
+        k.extend_from_slice(pn);
+        !self.property_hook_stack.iter().any(|s| s.starts_with(&k))
+    }
+
+    /// isset() on a property with a get hook: if the property is accessible
+    /// from the current scope, run the hook and return its result.
+    fn call_get_hook_if_accessible(&mut self, obj: &Rc<RefCell<PhpObject>>, pn: &[u8]) -> Option<Result<Value, VmError>> {
+        let (class_lower, class_name_orig) = {
+            let ob = obj.borrow();
+            (ob.class_name.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>(), ob.class_name.clone())
+        };
+        if !self.has_unguarded_get_hook(&class_lower, pn) {
+            return None;
+        }
+        let caller_scope_l = self.current_class_scope().map(|s| s.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>());
+        if let Some((vis, declaring_class, _, _, _)) = self.find_property_def_for_scope(&class_lower, pn, caller_scope_l.as_deref()) {
+            if vis != Visibility::Public {
+                let caller_scope = self.current_class_scope();
+                let pn_s = String::from_utf8_lossy(pn).to_string();
+                if self.check_visibility(vis, &declaring_class, &class_name_orig, &pn_s, true, caller_scope.as_deref()).is_some() {
+                    return None;
+                }
+            }
+        }
+        let mut m = b"__property_get_".to_vec();
+        m.extend(pn.iter().map(|b| b.to_ascii_lowercase()));
+        let (method, hook_declaring) = {
+            let md = self.classes.get(&class_lower)?.get_method(&m)?;
+            (md.op_array.clone(), md.declaring_class.clone())
+        };
+        let mut fn_cvs = vec![Value::Undef; method.cv_names.len()];
+        if !fn_cvs.is_empty() {
+            fn_cvs[0] = Value::Object(obj.clone());
+        }
+        let mut hook_key = class_lower.clone();
+        hook_key.extend_from_slice(b"::");
+        hook_key.extend_from_slice(pn);
+        hook_key.extend_from_slice(b"::get");
+        self.property_hook_stack.push(hook_key);
+        self.class_scope_stack.push(hook_declaring);
+        self.called_class_stack.push(class_name_orig);
+        let r = self.execute_op_array(&method, fn_cvs);
+        self.called_class_stack.pop();
+        self.class_scope_stack.pop();
+        self.property_hook_stack.pop();
+        Some(r)
     }
 
     /// Create the internal "graceful exit" unwinding object (zend_ce_graceful_exit).

@@ -321,6 +321,36 @@ fn resolve_json_serializable_depth(
                 }
                 // Already in `seen`: fall through to plain encoding below
             }
+            // Objects with hooked properties: public properties in declaration
+            // order, get hooks are called, virtual properties without get skipped.
+            if vm.class_has_hooked_props(&class_lower) {
+                let visible = {
+                    let ob = obj.borrow();
+                    let mut a = PhpArray::new();
+                    for (k, v) in ob.properties.iter() {
+                        if k.starts_with(b"__") || k.first() == Some(&0) || matches!(v, Value::Undef) {
+                            continue;
+                        }
+                        a.set(goro_core::array::ArrayKey::String(PhpString::from_vec(k.clone())), v.clone());
+                    }
+                    a
+                };
+                let props = match vm.hooked_object_props_array(obj, &visible, true) {
+                    Ok(p) => p,
+                    Err(_) => return val.clone(),
+                };
+                let new_obj_id = vm.next_object_id();
+                let mut new_obj = goro_core::object::PhpObject::new(b"stdClass".to_vec(), new_obj_id);
+                for (k, v) in props.iter() {
+                    let name = match k {
+                        goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                        goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+                    };
+                    let resolved = resolve_json_serializable_depth(vm, v, depth + 1, seen);
+                    new_obj.set_property(name, resolved);
+                }
+                return Value::Object(Rc::new(RefCell::new(new_obj)));
+            }
             // No JsonSerializable: collect private/protected property names so they can be filtered.
             // We build a HashSet and store it on the cloned object via an internal __json_nonpublic prop.
             // Cleaner: filter the cloned object in place by removing private/protected properties.
