@@ -31107,7 +31107,38 @@ impl Vm {
                             if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
                                 // Copy trait methods
                                 // Trait methods override inherited parent methods, but NOT the class's own methods
+                                // (zend_traits_copy_functions / zend_add_trait_method)
                                 for (method_name, method) in &trait_def.methods {
+                                    // Abstract trait methods are bound in a second pass (after all
+                                    // concrete trait methods), like zend_do_traits_method_binding.
+                                    if method.is_abstract {
+                                        continue;
+                                    }
+                                    // Does an alias rule apply to this trait's method?
+                                    let alias_applies = |alias_trait: &Option<Vec<u8>>| -> bool {
+                                        match alias_trait {
+                                            Some(t) => t.eq_ignore_ascii_case(&trait_def.name) || t.eq_ignore_ascii_case(&trait_lower),
+                                            None => {
+                                                // Unqualified alias: applies to the first used trait with the method.
+                                                let first = trait_names.iter().find(|tn| {
+                                                    let tl: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                                    self.classes.get(&tl).map(|t| t.methods.contains_key(method_name)).unwrap_or(false)
+                                                });
+                                                first.map(|f| f.eq_ignore_ascii_case(&trait_lower)).unwrap_or(false)
+                                            }
+                                        }
+                                    };
+                                    // Candidate copies: (key, display name, method copy)
+                                    let mut copies: Vec<(Vec<u8>, Vec<u8>, crate::object::MethodDef)> = Vec::new();
+                                    for adapt in &trait_adaptations {
+                                        if let crate::object::TraitAdaptation::Alias { trait_name: at, method: am, new_name: Some(nn), new_visibility } = adapt {
+                                            if am.eq_ignore_ascii_case(method_name) && alias_applies(at) {
+                                                let mut m = method.clone();
+                                                if let Some(v) = new_visibility { m.visibility = *v; }
+                                                copies.push((nn.iter().map(|b| b.to_ascii_lowercase()).collect(), nn.clone(), m));
+                                            }
+                                        }
+                                    }
                                     // Check if this method is excluded by an insteadof rule
                                     let mut excluded = false;
                                     for adapt in &trait_adaptations {
@@ -31129,51 +31160,81 @@ impl Vm {
                                             }
                                         }
                                     }
-                                    if excluded {
-                                        continue;
-                                    }
-                                    // Only skip if the method was directly defined in this class (not inherited from parent)
-                                    if own_method_names.contains(method_name) {
-                                        continue;
-                                    }
-                                    // If the trait method is abstract and the class already has a
-                                    // concrete inherited implementation (from parent class), keep the
-                                    // inherited one — the abstract trait declaration acts purely as a
-                                    // "this method must exist" requirement, which is satisfied.
-                                    if method.is_abstract {
-                                        if let Some(existing) = class.methods.get(method_name) {
-                                            if !existing.is_abstract {
-                                                continue;
+                                    if !excluded {
+                                        let mut m = method.clone();
+                                        for adapt in &trait_adaptations {
+                                            if let crate::object::TraitAdaptation::Alias { trait_name: at, method: am, new_name: None, new_visibility: Some(v) } = adapt {
+                                                if am.eq_ignore_ascii_case(method_name) && alias_applies(at) {
+                                                    m.visibility = *v;
+                                                }
                                             }
                                         }
+                                        copies.push((method_name.clone(), method.name.clone(), m));
                                     }
-                                    // Composition collision: if another trait already contributed
-                                    // this method name (and no insteadof/alias resolved it), it's a
-                                    // fatal error.
-                                    if let Some(prev_trait) = method_from_trait.get(method_name) {
-                                        if prev_trait != &trait_def.name {
-                                            let prev_trait_display = String::from_utf8_lossy(prev_trait).to_string();
-                                            let cur_trait_display = String::from_utf8_lossy(&trait_def.name).to_string();
-                                            let class_display = String::from_utf8_lossy(&class.name).to_string();
-                                            let method_display = String::from_utf8_lossy(&method.name).to_string();
-                                            return Err(VmError {
-                                                message: format!(
-                                                    "Trait method {}::{} has not been applied as {}::{}, because of collision with {}::{}",
-                                                    cur_trait_display, method_display, class_display, method_display, prev_trait_display, method_display
-                                                ),
-                                                line: op.line,
-                                            });
+                                    for (key, display, mut m) in copies {
+                                        if let Some(existing) = class.methods.get(&key) {
+                                            // Same function reached through different traits: no conflict.
+                                            let same_fn = existing.op_array.decl_line == m.op_array.decl_line
+                                                && existing.op_array.end_line == m.op_array.end_line
+                                                && existing.op_array.filename == m.op_array.filename
+                                                && existing.name.eq_ignore_ascii_case(&m.name);
+                                            if same_fn && existing.visibility == m.visibility && method_from_trait.contains_key(&key) {
+                                                continue;
+                                            }
+                                            // Members from the current class override trait methods
+                                            if own_method_names.contains(&key) {
+                                                continue;
+                                            }
+                                            if let Some(prev_trait) = method_from_trait.get(&key) {
+                                                if !existing.is_abstract {
+                                                    return Err(VmError {
+                                                        message: format!(
+                                                            "Trait method {}::{} has not been applied as {}::{}, because of collision with {}::{}",
+                                                            String::from_utf8_lossy(&trait_def.name), String::from_utf8_lossy(&m.name),
+                                                            String::from_utf8_lossy(&class.name), String::from_utf8_lossy(&display),
+                                                            String::from_utf8_lossy(prev_trait), String::from_utf8_lossy(&existing.name)
+                                                        ),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
                                         }
+                                        // Trait methods should have scope of the using class
+                                        m.declaring_class = class_name_lower.clone();
+                                        m.op_array.scope_class = Some(class_name_lower.clone());
+                                        // Patch __CLASS__ references in literals (only marked ones)
+                                        let trait_name_original = trait_def.name.clone();
+                                        patch_class_literals(&mut m, &trait_name_original, &class.name);
+                                        m.name = display.clone();
+                                        // A trait method replacing an inherited parent method is
+                                        // checked against it like an own method would be.
+                                        if !method_from_trait.contains_key(&key) {
+                                            let inherited = class.parent.as_ref()
+                                                .map(|pn| pn.iter().map(|b| b.to_ascii_lowercase()).collect::<Vec<u8>>())
+                                                .and_then(|pl| self.classes.get(&pl))
+                                                .and_then(|pc| pc.methods.get(&key).cloned());
+                                            if let Some(pm) = inherited {
+                                                if pm.visibility != Visibility::Private {
+                                                    if pm.is_final {
+                                                        let pdecl = self.classes.get(&pm.declaring_class).map(|c| c.name.clone()).unwrap_or_else(|| pm.declaring_class.clone());
+                                                        return Err(VmError {
+                                                            message: format!("Cannot override final method {}::{}()", String::from_utf8_lossy(&pdecl), String::from_utf8_lossy(&pm.name)),
+                                                            line: op.line,
+                                                        });
+                                                    }
+                                                    if key.as_slice() != b"__construct" || pm.is_abstract {
+                                                        let pdecl = self.classes.get(&pm.declaring_class).map(|c| c.name.clone()).unwrap_or_else(|| pm.declaring_class.clone());
+                                                        if let Some((err_msg, _)) = self.variance_check_method(&class, &m, &pdecl, &pm) {
+                                                            let l = if m.op_array.decl_line > 0 { m.op_array.decl_line } else { op.line };
+                                                            return Err(VmError { message: err_msg, line: l });
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        class.methods.insert(key.clone(), m);
+                                        method_from_trait.insert(key, trait_def.name.clone());
                                     }
-                                    let mut m = method.clone();
-                                    // Trait methods should have scope of the using class
-                                    m.declaring_class = class_name_lower.clone();
-                                    m.op_array.scope_class = Some(class_name_lower.clone());
-                                    // Patch __CLASS__ references in literals (only marked ones)
-                                    let trait_name_original = trait_def.name.clone();
-                                    patch_class_literals(&mut m, &trait_name_original, &class.name);
-                                    class.methods.insert(method_name.clone(), m);
-                                    method_from_trait.insert(method_name.clone(), trait_def.name.clone());
                                 }
                                 // Copy trait properties
                                 let child_prop_names: Vec<Vec<u8>> =
@@ -31299,6 +31360,37 @@ impl Vm {
                             }
                         }
 
+                        // Second pass: bind abstract trait methods. An existing method (own,
+                        // inherited or from another trait) satisfies the requirement; its
+                        // signature is checked against the abstract one further below.
+                        for trait_name in &trait_names {
+                            let trait_lower: Vec<u8> =
+                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
+                                for (method_name, method) in &trait_def.methods {
+                                    if !method.is_abstract || class.methods.contains_key(method_name) {
+                                        continue;
+                                    }
+                                    let mut excluded = false;
+                                    for adapt in &trait_adaptations {
+                                        if let crate::object::TraitAdaptation::Precedence { trait_name: prec_trait, method: prec_method, instead_of } = adapt {
+                                            if prec_method.eq_ignore_ascii_case(method_name) && !prec_trait.eq_ignore_ascii_case(&trait_lower)
+                                                && instead_of.iter().any(|n| n.eq_ignore_ascii_case(&trait_lower)) {
+                                                excluded = true;
+                                            }
+                                        }
+                                    }
+                                    if excluded {
+                                        continue;
+                                    }
+                                    let mut m = method.clone();
+                                    m.declaring_class = class_name_lower.clone();
+                                    m.op_array.scope_class = Some(class_name_lower.clone());
+                                    class.methods.insert(method_name.clone(), m);
+                                }
+                            }
+                        }
+
                         // Apply trait aliases
                         for adapt in &trait_adaptations {
                             if let crate::object::TraitAdaptation::Alias {
@@ -31336,6 +31428,15 @@ impl Vm {
                                     found
                                 };
 
+                                if source_method.as_ref().map(|m| !m.is_abstract && !own_method_names.contains(&method_lower) || (!m.is_abstract && new_name.is_some())).unwrap_or(false)
+                                    && (alias_trait.is_some() || trait_names.iter().any(|tn| {
+                                        let tl: Vec<u8> = tn.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        self.classes.get(&tl).map(|t| t.methods.contains_key(&method_lower)).unwrap_or(false)
+                                    }))
+                                {
+                                    // Already applied while copying trait methods.
+                                    continue;
+                                }
                                 if let Some(mut m) = source_method {
                                     m.declaring_class = class_name_lower.clone();
                                     m.op_array.scope_class = Some(class_name_lower.clone());
