@@ -26668,6 +26668,34 @@ impl Vm {
                                 return Err(VmError { message: format!("Uncaught Error: {}", err_msg), line: op.line });
                             }
                         };
+                        // Typed class constants: verify the (lazily evaluated) value
+                        // like zend_verify_class_constant_type (strict, int->float only).
+                        let val = {
+                            let tinfo = self.classes.get(&class_lower)
+                                .filter(|c| !c.static_properties.contains_key(prop_name.as_bytes()))
+                                .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
+                                .and_then(|m| m.declared_type.clone().map(|t| (t, m.declaring_class.clone())));
+                            if let Some((t, decl)) = tinfo {
+                                let mut v2 = val.clone();
+                                Self::coerce_value_to_type(&mut v2, &t, true);
+                                if !self.value_satisfies_type_strict(&v2, &t, Some(&decl)) {
+                                    let decl_name = self.classes.get(&decl).map(|c| c.name.clone()).unwrap_or(decl.clone());
+                                    let tstr = variance::type_to_string(&variance::TypeView::from_param_type(&t), None);
+                                    let err_msg = format!("Cannot assign {} to class constant {}::{} of type {}",
+                                        Self::value_type_name(&v2), String::from_utf8_lossy(&decl_name), prop_name.to_string_lossy(), tstr);
+                                    let exc = self.create_exception(b"TypeError", &err_msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() { pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError { message: format!("Uncaught TypeError: {}", err_msg), line: op.line });
+                                }
+                                v2
+                            } else {
+                                val
+                            }
+                        };
                         // Check for #[\Deprecated] attribute on class constants
                         if prop_name.as_bytes() != b"class" {
                             // First, emit deprecation banners for any class constants
@@ -30635,6 +30663,20 @@ impl Vm {
                                                 });
                                             }
                                         }
+                                        if let Some(meta) = parent_meta {
+                                            if let Some(pt) = &meta.declared_type {
+                                                if !is_private {
+                                                    let child_t = class.constants_meta.get(const_name).and_then(|m| m.declared_type.clone());
+                                                    if let Some((msg, unresolved)) = self.variance_class_constant(&class, const_name, &meta.declaring_class, pt, child_t.as_ref()) {
+                                                        if unresolved && is_early_attempt {
+                                                            variance::defer(&class.name);
+                                                            continue 'exec;
+                                                        }
+                                                        return Err(VmError { message: msg, line: op.line });
+                                                    }
+                                                }
+                                            }
+                                        }
                                     } else if !is_private {
                                         class
                                             .constants
@@ -30734,6 +30776,16 @@ impl Vm {
                                     if class.constants.contains_key(const_name) {
                                         // Child overrides interface constant - check if interface's is final
                                         if let Some(meta) = iface.constants_meta.get(const_name) {
+                                            if let Some(pt) = &meta.declared_type {
+                                                let child_t = class.constants_meta.get(const_name).and_then(|m| m.declared_type.clone());
+                                                if let Some((msg, unresolved)) = self.variance_class_constant(&class, const_name, &meta.declaring_class, pt, child_t.as_ref()) {
+                                                    if unresolved && is_early_attempt {
+                                                        variance::defer(&class.name);
+                                                        continue 'exec;
+                                                    }
+                                                    return Err(VmError { message: msg, line: op.line });
+                                                }
+                                            }
                                             if meta.is_final {
                                                 let child_display = String::from_utf8_lossy(&class.name).to_string();
                                                 let iface_display = String::from_utf8_lossy(iface_name).to_string();

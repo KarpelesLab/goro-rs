@@ -1072,3 +1072,93 @@ impl Vm {
         type_to_string(&tv, None)
     }
 }
+
+impl Vm {
+    /// class_constant_types_compatible + emit_incompatible_class_constant_error.
+    /// Returns the error message when the child constant's type is incompatible.
+    pub(crate) fn variance_class_constant(
+        &self,
+        cur: &ClassEntry,
+        const_name: &[u8],
+        parent_decl_class: &[u8],
+        parent_type: &ParamType,
+        child_type: Option<&ParamType>,
+    ) -> Option<(String, bool)> {
+        let cur_lc = LinkClass::from_entry(cur);
+        let ctx = Ctx::new(self, &cur_lc);
+        let parent_lc = self.variance_scope_for(&ctx, parent_decl_class, parent_decl_class);
+        let pt = TypeView::from_param_type(parent_type);
+        let st = match child_type {
+            None => Status::Error,
+            Some(ct) => ctx.covariant(&cur_lc, &TypeView::from_param_type(ct), &parent_lc, &pt),
+        };
+        if st == Status::Success {
+            return None;
+        }
+        Some((format!(
+            "Type of {}::{} must be compatible with {}::{} of type {}",
+            String::from_utf8_lossy(&cur.name),
+            String::from_utf8_lossy(const_name),
+            String::from_utf8_lossy(&parent_lc.name),
+            String::from_utf8_lossy(const_name),
+            type_to_string(&pt, Some(&parent_lc))
+        ), st == Status::Unresolved))
+    }
+}
+
+impl Vm {
+    /// Strict type check of a value against a declared type (no coercion),
+    /// with real class-hierarchy checks for objects.
+    pub(crate) fn value_satisfies_type_strict(&self, v: &Value, pt: &ParamType, scope: Option<&[u8]>) -> bool {
+        let tv = TypeView::from_param_type(pt);
+        let bit = match v {
+            Value::Null | Value::Undef => T_NULL,
+            Value::False => T_FALSE,
+            Value::True => T_TRUE,
+            Value::Long(_) => T_LONG,
+            Value::Double(_) => T_DOUBLE,
+            Value::String(_) => T_STRING,
+            Value::Array(_) => T_ARRAY,
+            Value::Object(o) => {
+                if tv.mask & T_OBJECT != 0 {
+                    return true;
+                }
+                let cname = o.borrow().class_name.clone();
+                let dummy = LinkClass { name: Vec::new(), parent: None, interfaces: Vec::new(), is_final: false, has_tostring: false, builtin: false, is_trait: false };
+                let ctx = Ctx::new(self, &dummy);
+                let oc = match ctx.lookup(&cname) {
+                    Some(c) => c,
+                    None => return false,
+                };
+                let scope_lc = scope.and_then(|sc| ctx.lookup(sc));
+                if tv.mask & T_STATIC != 0 {
+                    if let Some(sc) = &scope_lc {
+                        if ctx.instanceof(&oc, sc) {
+                            return true;
+                        }
+                    }
+                }
+                let is_a = |n: &[u8]| -> bool {
+                    let n: Vec<u8> = match &scope_lc {
+                        Some(sc) if n.eq_ignore_ascii_case(b"self") => sc.name.clone(),
+                        Some(sc) if n.eq_ignore_ascii_case(b"parent") => sc.parent.clone().unwrap_or_default(),
+                        _ => n.to_vec(),
+                    };
+                    match ctx.lookup(&n) {
+                        Some(t) => ctx.instanceof(&oc, &t),
+                        None => false,
+                    }
+                };
+                if tv.is_intersection {
+                    return tv.all_names().iter().all(|n| is_a(n));
+                }
+                return tv.elems.iter().any(|e| match e {
+                    TElem::Name(n) => is_a(n),
+                    TElem::Inter(ns) => ns.iter().all(|n| is_a(n)),
+                });
+            }
+            _ => return true,
+        };
+        tv.mask & bit != 0
+    }
+}
