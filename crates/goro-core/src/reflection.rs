@@ -182,7 +182,12 @@ pub(crate) fn rcls<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a crate::object::Cl
 
 /// Whether the class is an internal one (no user declaration).
 pub(crate) fn is_internal_class(vm: &Vm, lower: &[u8]) -> bool {
-    !vm.classes.contains_key(lower) && rcls(vm, lower).is_some()
+    match vm.classes.get(lower) {
+        // Extension classes are registered without a declaring file
+        // (userland classes get theirs from DeclareClass).
+        Some(c) => c.filename.is_none() && c.start_line == 0,
+        None => rcls(vm, lower).is_some(),
+    }
 }
 
 /// Find a method of a class, including methods inherited from internal
@@ -2255,7 +2260,7 @@ pub fn reflection_class_method(
         }
         b"isinternal" => {
             // User-defined classes are not internal
-            let is_internal = !vm.classes.contains_key(&class_lower);
+            let is_internal = is_internal_class(vm, &class_lower);
             Some(if is_internal {
                 Value::True
             } else {
@@ -2263,7 +2268,8 @@ pub fn reflection_class_method(
             })
         }
         b"isuserdefined" => {
-            let is_user = vm.classes.contains_key(&class_lower);
+            let is_user =
+                vm.classes.contains_key(&class_lower) && !is_internal_class(vm, &class_lower);
             Some(if is_user { Value::True } else { Value::False })
         }
         b"isanonymous" => {
@@ -2467,12 +2473,10 @@ pub fn reflection_class_method(
                         if !prop.is_static {
                             continue;
                         }
-                        // For the runtime class entry, properties[] also includes
-                        // inherited slots — filter out inherited privates by
-                        // comparing declaring_class to the current link.
-                        if prop.visibility == Visibility::Private
-                            && prop.declaring_class.as_slice() != link.as_slice()
-                        {
+                        // properties_info order: each class's own
+                        // declarations, then its parent's (inherited slots
+                        // are visited at their declaring link).
+                        if !prop.declaring_class.eq_ignore_ascii_case(link) {
                             continue;
                         }
                         if idx > 0 && prop.visibility == Visibility::Private {
@@ -2498,10 +2502,8 @@ pub fn reflection_class_method(
                         if prop.is_static {
                             continue;
                         }
-                        // Skip inherited private props (declaring_class != link).
-                        if prop.visibility == Visibility::Private
-                            && prop.declaring_class.as_slice() != link.as_slice()
-                        {
+                        // Own declarations of this link (see above).
+                        if !prop.declaring_class.eq_ignore_ascii_case(link) {
                             continue;
                         }
                         if idx > 0 && prop.visibility == Visibility::Private {
@@ -2540,34 +2542,42 @@ pub fn reflection_class_method(
             // declaring_class != self are inherited; private inherited ones
             // must be excluded.
             let mut result = PhpArray::new();
-            if let Some(ce) = rcls(vm, &class_lower) {
-                for prop in &ce.properties {
-                    if !prop.is_static {
-                        continue;
+            // properties_info order: own declarations, then the parent's.
+            let mut chain: Vec<Vec<u8>> = vec![class_lower.clone()];
+            while let Some(p) = rcls(vm, chain.last().unwrap()).and_then(|c| c.parent.clone()) {
+                if chain.len() > 64 {
+                    break;
+                }
+                chain.push(p.to_ascii_lowercase());
+            }
+            let mut entries: Vec<(Vec<u8>, Value)> = Vec::new();
+            for (idx, link) in chain.iter().enumerate() {
+                if let Some(lce) = rcls(vm, link) {
+                    for prop in &lce.properties {
+                        if !prop.is_static || !prop.declaring_class.eq_ignore_ascii_case(link) {
+                            continue;
+                        }
+                        if idx > 0 && prop.visibility == Visibility::Private {
+                            continue;
+                        }
+                        entries.push((prop.name.clone(), prop.default.clone()));
                     }
-                    let decl_lower: Vec<u8> = prop
-                        .declaring_class
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    let is_inherited = decl_lower != class_lower;
-                    if is_inherited && prop.visibility == Visibility::Private {
-                        continue;
-                    }
-                    let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
-                    if result.get(&key).is_none() {
-                        // Static value is stored on the declaring class
-                        let val = vm
-                            .static_prop_raw(&class_lower, &prop.name)
-                            .unwrap_or_else(|| prop.default.clone());
-                        result.set(key, val);
-                    }
+                }
+            }
+            for (name, default) in entries {
+                let key = ArrayKey::String(PhpString::from_vec(name.clone()));
+                if result.get(&key).is_none() {
+                    // Static value is stored on the declaring class
+                    let val = vm.static_prop_raw(&class_lower, &name).unwrap_or(default);
+                    result.set(key, val);
                 }
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
         b"getfilename" => {
-            if let Some(ce) = vm.classes.get(&class_lower) {
+            if is_internal_class(vm, &class_lower) {
+                Some(Value::False)
+            } else if let Some(ce) = vm.classes.get(&class_lower) {
                 if let Some(ref filename) = ce.filename {
                     Some(Value::String(PhpString::from_string(filename.clone())))
                 } else {
@@ -2663,7 +2673,13 @@ pub fn reflection_class_method(
         }
         b"getextension" | b"getextensionname" => {
             let ext = if is_internal_class(vm, &class_lower) {
-                crate::stubs::find_class(&class_lower).map(|c| c.ext)
+                crate::stubs::find_class(&class_lower)
+                    .map(|c| c.ext)
+                    .or_else(|| {
+                        // ext/dom has no stubs here.
+                        (class_lower.starts_with(b"dom") && !class_lower.starts_with(b"domain"))
+                            .then_some("dom")
+                    })
             } else {
                 None
             };
@@ -9812,7 +9828,57 @@ pub fn reflection_extension_method(
             }
             Some(Value::Array(Rc::new(RefCell::new(result))))
         }
-        b"getdependencies" => Some(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
+        b"getdependencies" => {
+            // The modules' zend_module_dep tables.
+            let deps: &[(&str, &str)] = match ext_lower.as_str() {
+                "dom" => &[
+                    ("libxml", "Required"),
+                    ("lexbor", "Required"),
+                    ("domxml", "Conflicts"),
+                ],
+                "exif" => &[("standard", "Required"), ("mbstring", "Optional")],
+                "libxml" | "mysqlnd" | "openssl" | "sodium" => &[("standard", "Required")],
+                "mbstring" | "pgsql" | "zip" => &[("pcre", "Required")],
+                "mysqli" => &[("spl", "Required"), ("mysqlnd", "Required")],
+                "pdo" => &[("spl", "Required")],
+                "pdo_mysql" => &[("pdo", "Required"), ("mysqlnd", "Required")],
+                "pdo_firebird" | "pdo_odbc" | "pdo_pgsql" | "pdo_sqlite" | "pdo_dblib" => {
+                    &[("pdo", "Required")]
+                }
+                "phar" => &[
+                    ("apc", "Optional"),
+                    ("bz2", "Optional"),
+                    ("openssl", "Optional"),
+                    ("zlib", "Optional"),
+                    ("standard", "Optional"),
+                    ("hash", "Required"),
+                    ("spl", "Required"),
+                ],
+                "session" => &[("spl", "Optional")],
+                "simplexml" => &[("libxml", "Required"), ("spl", "Required")],
+                "snmp" => &[("spl", "Required")],
+                "soap" => &[
+                    ("date", "Required"),
+                    ("libxml", "Required"),
+                    ("session", "Optional"),
+                ],
+                "standard" => &[("uri", "Required"), ("session", "Optional")],
+                "spl" => &[("json", "Required")],
+                "uri" => &[("lexbor", "Required")],
+                "xml" | "xmlwriter" => &[("libxml", "Required")],
+                "xmlreader" => &[("dom", "Required"), ("libxml", "Required")],
+                "xsl" => &[("libxml", "Required"), ("dom", "Required")],
+                _ => &[],
+            };
+            let mut out = PhpArray::new();
+            for (n, k) in deps {
+                out.set(
+                    ArrayKey::String(PhpString::from_bytes(n.as_bytes())),
+                    Value::String(PhpString::from_bytes(k.as_bytes())),
+                );
+            }
+            Some(Value::Array(Rc::new(RefCell::new(out))))
+        }
         b"info" => {
             // Mimic PHP's per-extension MINFO block. Print the section banner,
             // then a minimal block of key=>value entries.
