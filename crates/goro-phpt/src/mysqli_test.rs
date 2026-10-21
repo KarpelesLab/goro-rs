@@ -78,6 +78,31 @@ fn find_mysqld() -> Option<PathBuf> {
     None
 }
 
+/// A command for the server binaries, run without the address space limit
+/// the goro binary sets for itself (mysqld needs much more virtual memory).
+fn server_command<S: AsRef<std::ffi::OsStr>>(bin: S) -> Command {
+    let mut cmd = Command::new(bin);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: only async-signal-safe libc calls between fork and exec.
+        unsafe {
+            cmd.pre_exec(|| {
+                let mut lim = libc::rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
+                if libc::getrlimit(libc::RLIMIT_AS, &mut lim) == 0 {
+                    lim.rlim_cur = lim.rlim_max;
+                    libc::setrlimit(libc::RLIMIT_AS, &lim);
+                }
+                Ok(())
+            });
+        }
+    }
+    cmd
+}
+
 /// Find a free TCP port by binding a socket and asking the OS.
 fn find_free_port() -> Option<u16> {
     use std::net::TcpListener;
@@ -114,7 +139,7 @@ pub fn try_start() -> Option<EmbeddedMysql> {
             .find(|p| std::path::Path::new(p).exists())
             .map(PathBuf::from);
         if let Some(install_bin) = install_db {
-            Command::new(install_bin)
+            server_command(install_bin)
                 .arg(format!("--datadir={}", datadir.display()))
                 .arg("--auth-root-authentication-method=normal")
                 .arg("--skip-test-db")
@@ -122,7 +147,7 @@ pub fn try_start() -> Option<EmbeddedMysql> {
                 .stderr(Stdio::null())
                 .status()
         } else {
-            Command::new(&bin)
+            server_command(&bin)
                 .arg("--initialize-insecure")
                 .arg(format!("--datadir={}", datadir.display()))
                 .arg(format!("--log-error={}", errlog.display()))
@@ -132,7 +157,7 @@ pub fn try_start() -> Option<EmbeddedMysql> {
                 .status()
         }
     } else {
-        Command::new(&bin)
+        server_command(&bin)
             .arg("--initialize-insecure")
             .arg(format!("--datadir={}", datadir.display()))
             .arg(format!("--log-error={}", errlog.display()))
@@ -153,7 +178,7 @@ pub fn try_start() -> Option<EmbeddedMysql> {
     }
 
     // 2. Spawn the daemon.
-    let mut cmd = Command::new(&bin);
+    let mut cmd = server_command(&bin);
     cmd.arg(format!("--datadir={}", datadir.display()))
         .arg(format!("--socket={}", socket.display()))
         .arg(format!("--pid-file={}", pidfile.display()))
@@ -175,9 +200,12 @@ pub fn try_start() -> Option<EmbeddedMysql> {
             .arg("--interactive-timeout=60")
             .arg("--thread-cache-size=64")
             .arg("--performance-schema=OFF")
+            // LOAD DATA LOCAL INFILE tests need it
+            .arg("--local-infile=1")
             .arg("--skip-log-bin");
     } else {
         cmd.arg("--skip-networking=0")
+            .arg("--local-infile=1")
             .arg("--max-connections=1000")
             .arg("--skip-log-bin");
     }

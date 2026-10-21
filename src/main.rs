@@ -11,14 +11,20 @@ fn main() {
     // HARD memory limit: 2GB virtual address space.
     // This MUST be set before anything else to prevent OOM kills.
     // Without this, runaway PHP scripts can allocate 100GB+ and crash the machine.
+    // Only the soft limit is lowered (the hard limit is kept) so that helper
+    // processes such as the test runner's embedded MySQL server can be
+    // started without it.
     #[cfg(unix)]
     unsafe {
         unsafe extern "C" {
+            fn getrlimit(resource: i32, rlim: *mut [u64; 2]) -> i32;
             fn setrlimit(resource: i32, rlim: *const [u64; 2]) -> i32;
         }
         let limit: u64 = 2 * 1024 * 1024 * 1024; // 2GB
-        let rlim: [u64; 2] = [limit, limit]; // [soft, hard]
-        setrlimit(9, &rlim); // 9 = RLIMIT_AS on Linux
+        let mut cur: [u64; 2] = [u64::MAX, u64::MAX];
+        getrlimit(9, &mut cur); // 9 = RLIMIT_AS on Linux
+        let rlim: [u64; 2] = [limit.min(cur[1]), cur[1]]; // [soft, hard]
+        setrlimit(9, &rlim);
     }
 
     let args: Vec<String> = std::env::args().collect();
