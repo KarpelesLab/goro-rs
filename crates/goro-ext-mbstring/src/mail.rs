@@ -15,6 +15,89 @@ use crate::zpp::*;
 
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_send_mail", mb_send_mail);
+    vm.register_function(b"mail", mail_fn);
+}
+
+/// SKIP_LONG_HEADER_SEP + control-char replacement + trailing space trim
+/// applied by PHP_FUNCTION(mail) to $to and $subject.
+fn sanitize_header_value(v: &[u8]) -> Vec<u8> {
+    let mut out = v.to_vec();
+    while let Some(&c) = out.last() {
+        if matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c) {
+            out.pop();
+        } else {
+            break;
+        }
+    }
+    let mut i = 0;
+    while i < out.len() {
+        if out[i] == 0 {
+            break;
+        }
+        if out[i] < 0x20 || out[i] == 0x7f {
+            // SKIP_LONG_HEADER_SEP: CRLF followed by space/tab is kept
+            if out[i] == b'\r' && out.get(i + 1) == Some(&b'\n') && matches!(out.get(i + 2), Some(b' ') | Some(b'\t')) {
+                i += 3;
+                while i < out.len() && matches!(out[i], b' ' | b'\t') {
+                    i += 1;
+                }
+                continue;
+            }
+            out[i] = b' ';
+        }
+        i += 1;
+    }
+    out
+}
+
+/// PHP_FUNCTION(mail)
+fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let f = "mail";
+    if args.len() < 3 {
+        let msg = format!("mail() expects at least 3 arguments, {} given", args.len());
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError { message: msg, line: vm.current_line });
+    }
+    let to = path_arg(vm, f, args, 0, "to")?;
+    let subject = path_arg(vm, f, args, 1, "subject")?;
+    let message = path_arg(vm, f, args, 2, "message")?;
+    let headers: Option<Vec<u8>> = match args.get(3).map(|v| v.deref()) {
+        None | Some(Value::Null) => None,
+        Some(Value::Array(a)) => Some(build_headers(vm, &Value::Array(a))?),
+        Some(_) => {
+            let h = str_arg(vm, f, args, 3, "additional_headers")?;
+            if h.contains(&0) {
+                return Err(arg_value_error(vm, f, 4, "additional_headers", "must not contain any null bytes"));
+            }
+            let mut end = h.len();
+            while end > 0 && matches!(h[end - 1], b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0) {
+                end -= 1;
+            }
+            Some(h[..end].to_vec())
+        }
+    };
+    let extra = match args.get(4) {
+        Some(_) => {
+            let e = path_arg(vm, f, args, 4, "additional_params")?;
+            Some(e)
+        }
+        None => None,
+    };
+    let to_r = sanitize_header_value(&to);
+    let subject_r = sanitize_header_value(&subject);
+    let force = ini_bytes(vm, "mail.force_extra_parameters").filter(|v| !v.is_empty());
+    let extra_cmd = match (force, extra) {
+        (Some(fp), _) => Some(escape_shell_cmd(&fp)),
+        (None, Some(e)) => Some(escape_shell_cmd(&e)),
+        (None, None) => None,
+    };
+    let hdr = headers.filter(|h| !h.is_empty());
+    let ok = php_mail(vm, f, &to_r, &subject_r, &message, hdr.as_deref(), extra_cmd.as_deref());
+    if vm.current_exception.is_some() {
+        return Ok(Value::Null);
+    }
+    Ok(if ok { Value::True } else { Value::False })
 }
 
 fn ini_bytes(vm: &Vm, key: &str) -> Option<Vec<u8>> {
@@ -337,6 +420,45 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
             }
         }
     };
+    if let Some(log) = ini_bytes(vm, "mail.log").filter(|v| !v.is_empty()) {
+        let mut line = format!(
+            "mail() on [{}:{}]: To: {} -- Headers: {} -- Subject: {}",
+            vm.current_file, vm.current_line,
+            String::from_utf8_lossy(to),
+            String::from_utf8_lossy(headers.unwrap_or(b"")),
+            String::from_utf8_lossy(subject)
+        ).into_bytes();
+        if headers.is_some() {
+            for c in line.iter_mut() {
+                if *c == b'\r' || *c == b'\n' {
+                    *c = b' ';
+                }
+            }
+        }
+        if log != b"syslog" {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+            let days = now.div_euclid(86400);
+            let secs = now.rem_euclid(86400);
+            // civil_from_days
+            let z = days + 719468;
+            let era = z.div_euclid(146097);
+            let doe = z - era * 146097;
+            let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+            let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+            let mp = (5 * doy + 2) / 153;
+            let d = doy - (153 * mp + 2) / 5 + 1;
+            let m = if mp < 10 { mp + 3 } else { mp - 9 };
+            let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+            let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+            let mut entry = format!("[{:02}-{}-{:04} {:02}:{:02}:{:02} UTC] ", d, months[(m - 1) as usize], y, secs / 3600, (secs / 60) % 60, secs % 60).into_bytes();
+            entry.extend_from_slice(&line);
+            entry.push(b'\n');
+            let path = String::from_utf8_lossy(&log).to_string();
+            if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = fh.write_all(&entry);
+            }
+        }
+    }
     let mut hdr: Option<Vec<u8>> = headers.map(|h| h.to_vec());
     if ini_bool(vm, "mail.add_x_header") {
         let file = vm.current_file.clone();
@@ -397,11 +519,29 @@ pub fn php_mail(vm: &mut Vm, func: &str, to: &[u8], subject: &[u8], message: &[u
                 let _ = stdin.write_all(&data);
             }
             match c.wait() {
-                Ok(st) => st.code() == Some(0),
+                Ok(st) => {
+                    use std::os::unix::process::ExitStatusExt;
+                    if let Some(sig) = st.signal() {
+                        let name = match sig { 1 => "Hangup", 2 => "Interrupt", 3 => "Quit", 6 => "Aborted", 9 => "Killed", 13 => "Broken pipe", 14 => "Alarm clock", 15 => "Terminated", _ => "Unknown signal" };
+                        vm.emit_warning(&format!("{}(): Sendmail killed by signal {} ({})", func, sig, name));
+                        return false;
+                    }
+                    let ret = st.code().unwrap_or(-1);
+                    // EX_OK (0) and EX_TEMPFAIL (75) count as success
+                    if ret != 0 && ret != 75 {
+                        vm.emit_warning(&format!("{}(): Sendmail exited with non-zero exit code {}", func, ret));
+                        false
+                    } else {
+                        true
+                    }
+                }
                 Err(_) => false,
             }
         }
-        Err(_) => false,
+        Err(_) => {
+            vm.emit_warning(&format!("{}(): Could not execute mail delivery program '{}'", func, String::from_utf8_lossy(&sendmail_path)));
+            false
+        }
     }
 }
 

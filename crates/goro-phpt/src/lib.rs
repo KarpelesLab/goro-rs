@@ -776,9 +776,25 @@ fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
                     }
                 }
                 // Strip surrounding quotes from INI values (e.g. "ISO-8859-1" -> ISO-8859-1)
-                if (value.starts_with('"') && value.ends_with('"'))
-                    || (value.starts_with('\'') && value.ends_with('\''))
-                {
+                if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+                    // zend_ini_escape_string(): \\, \" and \$ are unescaped
+                    let inner = &value[1..value.len() - 1];
+                    let mut out = String::with_capacity(inner.len());
+                    let mut chars = inner.chars().peekable();
+                    while let Some(c) = chars.next() {
+                        if c == '\\' {
+                            match chars.peek() {
+                                Some('"') | Some('\\') | Some('$') => {
+                                    out.push(chars.next().unwrap());
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                        out.push(c);
+                    }
+                    value = out;
+                } else if value.starts_with('\'') && value.ends_with('\'') && value.len() >= 2 {
                     value = value[1..value.len() - 1].to_string();
                 } else {
                     // Unquoted INI boolean literals (zend_ini_scanner BOOL_TRUE/FALSE, NULL_NULL).
