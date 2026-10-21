@@ -143,6 +143,102 @@ impl PhpGenerator {
         }
     }
 
+    /// Opcodes the generator executor implements itself: suspension,
+    /// exception / finally bookkeeping kept in the generator frame, foreach
+    /// iterator state, calls (fiber suspension) and a few hot simple ops.
+    /// Everything else is delegated to the VM (Vm::execute_single_op).
+    fn generator_owned_op(op: OpCode) -> bool {
+        matches!(
+            op,
+            OpCode::Yield
+                | OpCode::YieldFrom
+                | OpCode::GeneratorReturn
+                | OpCode::Return
+                | OpCode::Throw
+                | OpCode::TryBegin
+                | OpCode::TryEnd
+                | OpCode::CatchException
+                | OpCode::TypeCheck
+                | OpCode::SaveReturn
+                | OpCode::SaveJump
+                | OpCode::ReturnDeferred
+                | OpCode::ForeachInit
+                | OpCode::ForeachNext
+                | OpCode::ForeachKey
+                | OpCode::ForeachInitRef
+                | OpCode::ForeachNextRef
+                | OpCode::InitFCall
+                | OpCode::InitDynamicStaticCall
+                | OpCode::InitMethodCall
+                | OpCode::SendVal
+                | OpCode::SendValRaw
+                | OpCode::SendNamedVal
+                | OpCode::SendUnpack
+                | OpCode::SendRef
+                | OpCode::DoFCall
+                | OpCode::ExitOp
+                | OpCode::BindGlobal
+                | OpCode::StaticVarInit
+                | OpCode::Jmp
+                | OpCode::JmpZ
+                | OpCode::JmpNz
+                | OpCode::Assign
+                | OpCode::LoadConst
+                | OpCode::QmAssign
+                | OpCode::Nop
+                | OpCode::FreeTmps
+        )
+    }
+
+    /// Arithmetic / comparison on plain numbers (and string concatenation)
+    /// has no side effects: keep those hot opcodes in the generator loop.
+    fn scalar_fast_path(&self, op: &crate::opcode::Op, literals: &[Value]) -> bool {
+        let num = |v: &Value| matches!(v, Value::Long(_) | Value::Double(_));
+        match op.opcode {
+            OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Less
+            | OpCode::LessEqual
+            | OpCode::Greater
+            | OpCode::GreaterEqual
+            | OpCode::Equal
+            | OpCode::NotEqual => {
+                num(&self.read_operand(&op.op1, literals))
+                    && num(&self.read_operand(&op.op2, literals))
+            }
+            OpCode::Identical | OpCode::NotIdentical => {
+                let ok = |v: &Value| {
+                    matches!(
+                        v,
+                        Value::Long(_)
+                            | Value::Double(_)
+                            | Value::String(_)
+                            | Value::True
+                            | Value::False
+                            | Value::Null
+                    )
+                };
+                ok(&self.read_operand(&op.op1, literals))
+                    && ok(&self.read_operand(&op.op2, literals))
+            }
+            OpCode::Concat => {
+                let ok = |v: &Value| matches!(v, Value::Long(_) | Value::String(_));
+                ok(&self.read_operand(&op.op1, literals))
+                    && ok(&self.read_operand(&op.op2, literals))
+            }
+            OpCode::PreIncrement
+            | OpCode::PostIncrement
+            | OpCode::PreDecrement
+            | OpCode::PostDecrement => {
+                matches!(op.op1, OperandType::Cv(_))
+                    && matches!(self.read_operand(&op.op1, literals), Value::Long(n) if n > i64::MIN + 1 && n < i64::MAX - 1)
+            }
+            OpCode::ArrayNew => true,
+            _ => false,
+        }
+    }
+
     /// Values owned by the suspended generator frame (for the cycle collector).
     pub(crate) fn for_each_gc_child(&self, f: &mut dyn FnMut(&Value)) {
         for v in self
@@ -489,6 +585,36 @@ impl PhpGenerator {
 
             let op = &op_array.ops[ip];
             ip += 1;
+
+            if !Self::generator_owned_op(op.opcode)
+                && !self.scalar_fast_path(op, &op_array.literals)
+            {
+                // Shared semantics: run the VM's implementation of the opcode
+                // on this frame's variables.
+                match vm.execute_single_op(&op_array, ip - 1, &mut self.cvs, &mut self.tmps) {
+                    Ok(next) => ip = next,
+                    Err(e) => {
+                        if vm.exit_requested {
+                            self.state = GeneratorState::Completed;
+                            self.ip = ip;
+                            return Ok(false);
+                        }
+                        if vm.current_exception.is_some() {
+                            if let Some((catch_target, _, _)) = self.exception_handlers.last() {
+                                let ct = *catch_target as usize;
+                                self.exception_handlers.pop();
+                                ip = ct;
+                                continue;
+                            }
+                        }
+                        self.state = GeneratorState::Completed;
+                        self.current_value = Value::Null;
+                        self.ip = ip;
+                        return Err(e);
+                    }
+                }
+                continue;
+            }
 
             match op.opcode {
                 OpCode::Yield => {
@@ -868,6 +994,36 @@ impl PhpGenerator {
 
                 // Re-implement all the VM opcodes that a generator might use
                 OpCode::Nop => {}
+
+                OpCode::FreeTmps => {
+                    if let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) {
+                        let end = (b as usize).min(self.tmps.len());
+                        let mut freed = false;
+                        for slot in self.tmps[(a as usize).min(end)..end].iter_mut() {
+                            if matches!(
+                                slot,
+                                Value::Object(_) | Value::Array(_) | Value::Reference(_)
+                            ) {
+                                freed = true;
+                            }
+                            *slot = Value::Undef;
+                        }
+                        if freed {
+                            let had = vm.current_exception.is_some();
+                            vm.run_pending_destructors_pub();
+                            if !had && vm.current_exception.is_some() {
+                                if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception from destructor".into(),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                    }
+                }
 
                 OpCode::EmitNotice => {
                     let msg_val = self.read_operand(&op.op1, &op_array.literals);
@@ -2589,8 +2745,25 @@ impl PhpGenerator {
                     return Ok(false);
                 }
 
-                // For any unhandled opcode, skip it silently
-                _ => {}
+                // Every other opcode runs through the VM's implementation on
+                // this frame's variables.
+                _ => match vm.execute_single_op(&op_array, ip - 1, &mut self.cvs, &mut self.tmps) {
+                    Ok(next) => ip = next,
+                    Err(e) => {
+                        if vm.current_exception.is_some() {
+                            if let Some((catch_target, _, _)) = self.exception_handlers.last() {
+                                let ct = *catch_target as usize;
+                                self.exception_handlers.pop();
+                                ip = ct;
+                                continue;
+                            }
+                        }
+                        self.state = GeneratorState::Completed;
+                        self.current_value = Value::Null;
+                        self.ip = ip;
+                        return Err(e);
+                    }
+                },
             }
         }
     }

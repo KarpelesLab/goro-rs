@@ -14325,9 +14325,55 @@ impl Vm {
         mut cvs: Vec<Value>,
         cv_frame: bool,
     ) -> Result<Value, VmError> {
-        let mut ip: usize = 0;
         let temp_count = op_array.temp_count as usize;
         let mut tmps: Vec<Value> = vec![Value::Undef; temp_count];
+        self.execute_frame(op_array, &mut cvs, &mut tmps, None)
+    }
+
+    /// Execute the single opcode at `ip` on a suspended frame's variables
+    /// (the generator executor delegates the opcodes it does not implement).
+    /// Returns the index of the next opcode.
+    pub(crate) fn execute_single_op(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        cvs: &mut Vec<Value>,
+        tmps: &mut Vec<Value>,
+    ) -> Result<usize, VmError> {
+        let was_global = self.is_global_scope;
+        self.is_global_scope = false;
+        let r = self.execute_frame(op_array, cvs, tmps, Some(ip));
+        self.is_global_scope = was_global;
+        // A write to $GLOBALS[...] may have changed the symbol table's shape.
+        if let Some(op) = op_array.ops.get(ip) {
+            for o in [&op.op1, &op.op2, &op.result] {
+                if let OperandType::Cv(i) = o {
+                    if op_array.cv_names.get(*i as usize).map(|n| n.as_slice()) == Some(b"GLOBALS")
+                    {
+                        self.globals_gen = self.globals_gen.wrapping_add(1);
+                    }
+                }
+            }
+        }
+        match r {
+            Ok(Value::Long(n)) => Ok(n as usize),
+            Ok(_) => Ok(ip + 1),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn execute_frame(
+        &mut self,
+        op_array: &OpArray,
+        cvs: &mut Vec<Value>,
+        tmps: &mut Vec<Value>,
+        single_step: Option<usize>,
+    ) -> Result<Value, VmError> {
+        let mut ip: usize = single_step.unwrap_or(0);
+        let temp_count = op_array.temp_count as usize;
+        let mut cvs = cvs;
+        let mut tmps = tmps;
+        let mut stepped = false;
         let mut foreach_positions: HashMap<u32, usize> = HashMap::new();
         // Snapshot of array keys at foreach init (for stable iteration)
         let mut foreach_keys: HashMap<u32, Vec<ArrayKey>> = HashMap::new();
@@ -14344,11 +14390,15 @@ impl Vm {
         // Saved pending_calls depth to restore when entering a catch block
         let mut pending_calls_catch_depth: Option<usize> = None;
         // $GLOBALS is the symbol table itself.
-        let globals_cv: Option<u32> = op_array
-            .cv_names
-            .iter()
-            .position(|n| n == b"GLOBALS")
-            .map(|i| i as u32);
+        let globals_cv: Option<u32> = if single_step.is_some() {
+            None
+        } else {
+            op_array
+                .cv_names
+                .iter()
+                .position(|n| n == b"GLOBALS")
+                .map(|i| i as u32)
+        };
         if let Some(i) = globals_cv {
             if let Some(slot) = cvs.get_mut(i as usize) {
                 *slot = Value::Array(self.globals.clone());
@@ -14358,7 +14408,9 @@ impl Vm {
         // of the same name (see symtab.rs).
         let global_bound = self.is_global_scope;
         let mut gbind = crate::symtab::GlobalBinding::new(if global_bound { cvs.len() } else { 0 });
-        if global_bound {
+        if single_step.is_some() {
+            // A suspended frame's variables are already set up.
+        } else if global_bound {
             self.symtab_rebind_all(&mut cvs, &op_array.cv_names, &mut gbind);
         } else {
             // Bind auto-global CVs ($_SERVER, $_GET, ...) to the shared global
@@ -14378,6 +14430,12 @@ impl Vm {
             self.set_cv_frame_vars(&cvs);
         }
         'exec: loop {
+            if single_step.is_some() {
+                if stepped {
+                    return Ok(Value::Long(ip as i64));
+                }
+                stepped = true;
+            }
             // exit() unwinds every frame (zend_throw_unwind_exit).
             if self.exit_requested {
                 return Ok(Value::Null);
