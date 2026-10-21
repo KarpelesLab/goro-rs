@@ -4739,7 +4739,19 @@ pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<V
         _ => "include",
     };
     FN_STACK.with(|st| st.borrow_mut().push(name));
+    // Functions called from the INCLUDE_OR_EVAL opline (the wrapper's
+    // methods, the error handler) are top-level calls whose backtraces show
+    // an include/require frame.
+    let frame = (
+        name.to_string(),
+        vm.current_file.clone(),
+        vm.current_line,
+        Vec::new(),
+        false,
+    );
+    vm.call_stack.push(frame.clone());
     let r = include_open(vm, p);
+    vm.call_stack.pop();
     let res = match r {
         Ok(Some(src)) => Some(Ok(src)),
         Ok(None) => {
@@ -4754,10 +4766,12 @@ pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<V
                     );
                     Some(Err(throw(vm, b"Error", &msg)))
                 } else {
+                    vm.call_stack.push(frame);
                     vm.emit_warning(&format!(
                         "{}(): Failed opening '{}' for inclusion (include_path='{}')",
                         name, path, inc
                     ));
+                    vm.call_stack.pop();
                     Some(Err(VmError {
                         message: String::new(),
                         line: vm.current_line,

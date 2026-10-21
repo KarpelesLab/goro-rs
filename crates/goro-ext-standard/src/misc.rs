@@ -13427,8 +13427,8 @@ fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let frames: Vec<(String, String, u32, Vec<Value>, bool)> =
         vm.call_stack.iter().rev().cloned().collect();
-    for (idx, (func_name, file, line, frame_args, is_method)) in frames.iter().enumerate() {
-        let frame_args = &vm.trace_frame_args(func_name, frame_args);
+    for (idx, (func_name, file, line, _, is_method)) in frames.iter().enumerate() {
+        let frame_args = &vm.trace_frame_args(func_name, Vm::trace_frame_args_at(&frames, idx));
         if idx >= max_frames {
             break;
         }
@@ -13519,8 +13519,8 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     let mut lines = Vec::new();
     let frames: Vec<(String, String, u32, Vec<Value>, bool)> =
         vm.call_stack.iter().rev().cloned().collect();
-    for (i, (func_name, file, line, frame_args, is_instance)) in frames.iter().enumerate() {
-        let frame_args = &vm.trace_frame_args(func_name, frame_args);
+    for (i, (func_name, file, line, _, is_instance)) in frames.iter().enumerate() {
+        let frame_args = &vm.trace_frame_args(func_name, Vm::trace_frame_args_at(&frames, i));
         if i >= max_frames {
             break;
         }

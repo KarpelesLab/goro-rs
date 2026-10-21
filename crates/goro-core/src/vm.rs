@@ -249,6 +249,9 @@ impl Vm {
 /// Type alias for the class map (used by external crates)
 pub type ClassMap = crate::fxhash::FxIndexMap<Vec<u8>, ClassEntry>;
 
+/// A `call_stack` entry: (function, file, line called from, args, is_instance_method).
+pub type CallFrame = (String, String, u32, Vec<Value>, bool);
+
 /// VM runtime error
 #[derive(Debug, Clone)]
 pub struct VmError {
@@ -4260,6 +4263,32 @@ impl Vm {
         out
     }
 
+    /// zend_fetch_debug_backtrace(): the argument of an include/require
+    /// frame is include_filename, the file the frame inside it was called
+    /// from (the included file). There is none when the include frame is the
+    /// innermost one or that frame was not called from user code, nor for
+    /// the argument-less frame of a function called by the include opline
+    /// itself (error handler, stream wrapper methods). `frames` is innermost
+    /// first; returns the frame's args.
+    pub fn trace_frame_args_at(frames: &[CallFrame], idx: usize) -> &[Value] {
+        let f = &frames[idx];
+        let is_include = matches!(
+            f.0.as_str(),
+            "include" | "include_once" | "require" | "require_once"
+        );
+        if is_include
+            && idx
+                .checked_sub(1)
+                .and_then(|i| frames.get(i))
+                .is_none_or(|inner| {
+                    inner.1.is_empty() || inner.1 == "[internal function]" || inner.2 == 0
+                })
+        {
+            return &[];
+        }
+        &f.3
+    }
+
     pub fn build_exception_trace(&mut self) -> Value {
         self.sync_builtin_frames();
         self.sync_frame_args();
@@ -4281,9 +4310,10 @@ impl Vm {
             });
         let frame_list: Vec<(String, String, u32, Vec<Value>, bool)> =
             self.call_stack.iter().rev().cloned().collect();
-        for (idx, (func_name, file, line, args, is_method)) in frame_list.iter().enumerate() {
+        for (idx, (func_name, file, line, _, is_method)) in frame_list.iter().enumerate() {
+            let args: &[Value] = Self::trace_frame_args_at(&frame_list, idx);
             let wrapped;
-            let args: &Vec<Value> = if sensitive
+            let args: &[Value] = if sensitive
                 || (!args.is_empty() && self.internal_sensitive_param_flags(func_name).is_some())
             {
                 wrapped = self.trace_frame_args(func_name, args);
@@ -8030,15 +8060,17 @@ impl Vm {
         let mut lines = Vec::new();
         // The call stack is ordered from outermost to innermost
         // PHP shows it innermost first
-        for (i, (func_name, file, line, args, is_instance)) in
-            self.call_stack.iter().rev().enumerate()
-        {
+        let frames: Vec<CallFrame> = self.call_stack.iter().rev().cloned().collect();
+        for (i, (func_name, file, line, _, is_instance)) in frames.iter().enumerate() {
             let file_display = if file == "Unknown.php" || file.is_empty() {
                 &self.current_file
             } else {
                 file
             };
-            let args_str = format_trace_args_with_limit(args, self.exception_string_param_max_len);
+            let args_str = format_trace_args_with_limit(
+                Self::trace_frame_args_at(&frames, i),
+                self.exception_string_param_max_len,
+            );
             // For instance methods, replace `::` with `->`. Skip the rewrite for
             // closure display names (`{closure:...}`) which may embed `Class::method()`.
             let display_name = if *is_instance && !func_name.starts_with("{closure:") {
@@ -34264,7 +34296,15 @@ impl Vm {
                                     "{}(): Failed opening '{}' for inclusion (include_path='{}')",
                                     kind_name, inc_path, include_path
                                 );
+                                self.call_stack.push((
+                                    kind_name.to_string(),
+                                    old_file.clone(),
+                                    op.line,
+                                    Vec::new(),
+                                    false,
+                                ));
                                 self.emit_warning_at(&warning_msg2, op.line);
+                                self.call_stack.pop();
                                 Value::False
                             }
                         }
