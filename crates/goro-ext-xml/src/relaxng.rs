@@ -713,16 +713,91 @@ fn lib_compare(
     }
 }
 
-/// xmlSchemaCheckFacet for a built-in type, without error reporting (as
-/// called from RelaxNG): 0 when the facet value is acceptable.
-fn check_facet(facet: &mut xst::Facet, vt: i32) -> i32 {
+/// xmlSchemaNormalizeValue for a built-in type (None when unchanged)
+fn normalize_builtin(vt: i32, value: &str) -> Option<String> {
+    match vt {
+        xst::STRING | xst::ANYSIMPLETYPE => None,
+        xst::NORMSTRING => xst::whitespace_replace(value),
+        _ => xst::collapse_string(value),
+    }
+}
+
+/// An error of the temporary schema parser context xmlSchemaCheckFacet
+/// uses (xmlSchemaSimpleTypeErr).
+fn simple_type_err(errs: &mut Vec<XmlError>, code: i32, value: &str, vt: i32, list: bool) {
+    let msg = format!(
+        "'{}' is not a valid value of the {} type 'xs:{}'.\n",
+        value,
+        if list { "list" } else { "atomic" },
+        xst::builtin_name(vt)
+    );
+    errs.push(node_error(xe::FROM_SCHEMASP, code, ERR_ERROR, None, msg));
+}
+
+/// xmlSchemaVCheckCVCSimpleType(pctxt, NULL, builtin type, value, &val,
+/// fireErrors = 1, normalize = 1, isNormalized)
+fn check_cvc_simple_type(
+    errs: &mut Vec<XmlError>,
+    vt: i32,
+    value: &str,
+    normalized: bool,
+) -> (i32, Option<xst::Val>) {
+    if xst::is_list(vt) {
+        let norm = if normalized {
+            None
+        } else {
+            normalize_builtin(vt, value)
+        };
+        let value = norm.as_deref().unwrap_or(value);
+        let item = xst::list_item_type(vt).unwrap_or(xst::NMTOKEN);
+        let mut ret = 0;
+        for tok in value
+            .split([' ', '\t', '\n', '\r'])
+            .filter(|s| !s.is_empty())
+        {
+            let (r, _) = check_cvc_simple_type(errs, item, tok, true);
+            if r != 0 {
+                if r < 0 {
+                    return (-1, None);
+                }
+                ret = xe::SCHEMAV_CVC_DATATYPE_VALID_1_2_2;
+                break;
+            }
+        }
+        if ret > 0 {
+            let shown = xst::collapse_string(value).unwrap_or_else(|| value.to_string());
+            simple_type_err(errs, ret, &shown, vt, true);
+        }
+        return (ret, None);
+    }
+    let norm = if normalized {
+        None
+    } else {
+        normalize_builtin(vt, value)
+    };
+    let value = norm.as_deref().unwrap_or(value);
+    let (mut ret, v) = xst::val_predef_type_node_no_norm(vt, value, true, None);
+    if ret != 0 {
+        if ret < 0 {
+            return (-1, None);
+        }
+        ret = xe::SCHEMAV_CVC_DATATYPE_VALID_1_2_1;
+        simple_type_err(errs, ret, value, vt, false);
+    }
+    (ret, v)
+}
+
+/// xmlSchemaCheckFacet for a built-in type as called from RelaxNG (only the
+/// errors of the value checks and regexp compilation are reported): 0 when
+/// the facet value is acceptable.
+fn check_facet(facet: &mut xst::Facet, vt: i32, errs: &mut Vec<XmlError>) -> i32 {
     match facet.typ {
         xst::FACET_MININCLUSIVE
         | xst::FACET_MINEXCLUSIVE
         | xst::FACET_MAXINCLUSIVE
         | xst::FACET_MAXEXCLUSIVE
         | xst::FACET_ENUMERATION => {
-            let (ret, v) = xst::val_predef_type_node(vt, &facet.value, true, None);
+            let (ret, v) = check_cvc_simple_type(errs, vt, &facet.value, false);
             if ret != 0 {
                 return if ret < 0 { -1 } else { 1 };
             }
@@ -734,7 +809,20 @@ fn check_facet(facet: &mut xst::Facet, vt: i32) -> i32 {
                 facet.regexp = Some(Rc::new(r));
                 0
             }
-            Err(_) => 1,
+            Err(msgs) => {
+                // raised without any channel: only recorded
+                for m in msgs {
+                    let mut e = XmlError::simple(
+                        xe::FROM_REGEXP,
+                        xe::REGEXP_COMPILE_ERROR,
+                        crate::parser::ERR_FATAL,
+                        format!("{}\n", m),
+                    );
+                    e.formatted = Vec::new();
+                    errs.push(e);
+                }
+                1
+            }
         },
         xst::FACET_TOTALDIGITS
         | xst::FACET_FRACTIONDIGITS
@@ -774,6 +862,7 @@ fn lib_facet(
     val: Option<&str>,
     strval: &str,
     value: Option<&xst::Val>,
+    errs: &mut Vec<XmlError>,
 ) -> Option<i32> {
     if lib != Lib::Xsd {
         return None;
@@ -798,7 +887,7 @@ fn lib_facet(
         _ => return Some(-1),
     };
     let mut facet = xst::Facet::new(ft, val.unwrap_or(""));
-    if check_facet(&mut facet, vt) != 0 {
+    if check_facet(&mut facet, vt, errs) != 0 {
         return Some(-1);
     }
     let ret = xst::validate_facet(Some(vt), &facet, strval, value);
@@ -5530,6 +5619,7 @@ impl ValidCtxt {
                 schema.defs[c].value.as_deref(),
                 vstr.as_deref().unwrap_or(""),
                 result.as_ref(),
+                &mut self.errors,
             ) {
                 if t != 0 {
                     ret = -1;
