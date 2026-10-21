@@ -26,6 +26,8 @@ pub struct Globals {
     pub error_no: i64,
     pub error_msg: Option<Vec<u8>>,
     pub report_mode: i64,
+    /// mysqli.rollback_on_cached_plink (PHP_INI_SYSTEM)
+    pub rollback_on_cached_plink: bool,
 }
 
 thread_local! {
@@ -36,9 +38,36 @@ thread_local! {
         error_no: 0,
         error_msg: None,
         report_mode: MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT,
+        rollback_on_cached_plink: false,
     }) };
     /// EG(persistent_list) entries of mysqli: hash_key -> free links
-    static PLIST: RefCell<HashMap<String, Vec<ConnRef>>> = RefCell::new(HashMap::new());
+    static PLIST: RefCell<PList> = RefCell::new(PList(HashMap::new()));
+}
+
+/// The cached persistent links. They live until the process exits: closing
+/// them while thread-locals are being torn down would touch the (already
+/// destroyed) statistics, so they are left for the OS to close.
+struct PList(HashMap<String, Vec<ConnRef>>);
+
+impl std::ops::Deref for PList {
+    type Target = HashMap<String, Vec<ConnRef>>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for PList {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for PList {
+    fn drop(&mut self) {
+        for (_, links) in self.0.drain() {
+            std::mem::forget(links);
+        }
+    }
 }
 
 pub fn report_mode() -> i64 {
@@ -405,12 +434,18 @@ pub fn php_mysqli_close(mysql: &mut MyMysql, close_type: CloseType, resource_sta
                     c.current_result = None;
                     c.last_message = None;
                 }
-                PLIST.with(|p| p.borrow_mut().entry(key).or_default().push(conn));
-                MYG.with(|g| {
-                    let mut g = g.borrow_mut();
-                    g.num_inactive_persistent += 1;
-                    g.num_active_persistent -= 1;
-                });
+                let rollback = MYG.with(|g| g.borrow().rollback_on_cached_plink);
+                if rollback
+                    && !conn
+                        .borrow_mut()
+                        .tx_commit_or_rollback(false, TRANS_COR_NO_OPT, None)
+                {
+                    conn.borrow_mut().close(close_type);
+                } else {
+                    PLIST.with(|p| p.borrow_mut().entry(key).or_default().push(conn));
+                    MYG.with(|g| g.borrow_mut().num_inactive_persistent += 1);
+                }
+                MYG.with(|g| g.borrow_mut().num_active_persistent -= 1);
             }
             mysql.persistent = false;
         }
@@ -567,6 +602,8 @@ pub fn common_connect(
                 );
             } else {
                 persistent = true;
+                let rb = ini_bool(vm, "mysqli.rollback_on_cached_plink", false);
+                MYG.with(|g| g.borrow_mut().rollback_on_cached_plink = rb);
                 let key = format!(
                     "mysqli_{}_{}{}{}{}{}",
                     String::from_utf8_lossy(&h2),
@@ -1516,6 +1553,10 @@ pub fn mysqli_options(vm: &mut Vm, f: &Func, args: &[Value]) -> Value {
             let s = match &value {
                 Value::String(s) => s.as_bytes().to_vec(),
                 other => {
+                    if matches!(other, Value::Array(_)) {
+                        let line = vm.current_line;
+                        vm.emit_warning_at("Array to string conversion", line);
+                    }
                     let had = vm.current_exception.is_some();
                     let s = vm.value_to_string(other);
                     if !had && vm.current_exception.is_some() {

@@ -1078,6 +1078,94 @@ const INI: &[(&str, Option<&str>, bool)] = &[
     ("mysqlnd.sha256_server_public_key", None, false),
 ];
 
+/// Text-mode DISPLAY_INI_ENTRIES() of the entries starting with `prefix`
+fn info_ini_entries(vm: &Vm, prefix: &str, out: &mut String) {
+    out.push_str("\nDirective => Local Value => Master Value\n");
+    for (name, _, _) in INI.iter().filter(|(n, _, _)| n.starts_with(prefix)) {
+        let raw = vm
+            .constants
+            .get(name.as_bytes())
+            .map(|v| v.to_php_string().to_string_lossy())
+            .unwrap_or_default();
+        let shown = match *name {
+            "mysqli.allow_persistent"
+            | "mysqli.allow_local_infile"
+            | "mysqli.rollback_on_cached_plink"
+            | "mysqlnd.collect_statistics"
+            | "mysqlnd.collect_memory_statistics" => {
+                let on = matches!(
+                    raw.to_ascii_lowercase().as_str(),
+                    "1" | "on" | "yes" | "true"
+                );
+                if on { "On" } else { "Off" }.to_string()
+            }
+            "mysqli.max_links" | "mysqli.max_persistent" if raw == "-1" => "Unlimited".to_string(),
+            _ if raw.is_empty() => "no value".to_string(),
+            _ => raw,
+        };
+        out.push_str(&format!("{} => {} => {}\n", name, shown, shown));
+    }
+}
+
+/// PHP_MINFO(mysqli) and PHP_MINFO(mysqlnd), text mode
+fn minfo(vm: &mut Vm) -> String {
+    let mut out = String::new();
+    let (active_p, inactive_p, links) = link::MYG.with(|g| {
+        let g = g.borrow();
+        (
+            g.num_active_persistent,
+            g.num_inactive_persistent,
+            g.num_links,
+        )
+    });
+    out.push_str("\nmysqli\n\n");
+    out.push_str("MysqlI Support => enabled\n");
+    out.push_str(&format!(
+        "Client API library version => {}\n",
+        link::client_info(vm)
+    ));
+    out.push_str(&format!("Active Persistent Links => {}\n", active_p));
+    out.push_str(&format!("Inactive Persistent Links => {}\n", inactive_p));
+    out.push_str(&format!("Active Links => {}\n", links));
+    info_ini_entries(vm, "mysqli.", &mut out);
+    out.push_str("\nmysqlnd\n\n");
+    out.push_str("mysqlnd => enabled\n");
+    out.push_str(&format!("Version => {}\n", link::client_info(vm)));
+    out.push_str("Compression => supported\n");
+    out.push_str("core SSL => not supported\n");
+    out.push_str("extended SSL => not supported\n");
+    let ini = |vm: &Vm, k: &str| {
+        vm.constants
+            .get(k.as_bytes())
+            .map(|v| v.to_php_string().to_string_lossy())
+            .unwrap_or_default()
+    };
+    out.push_str(&format!(
+        "Command buffer size => {}\n",
+        ini(vm, "mysqlnd.net_cmd_buffer_size")
+    ));
+    out.push_str(&format!(
+        "Read buffer size => {}\n",
+        ini(vm, "mysqlnd.net_read_buffer_size")
+    ));
+    out.push_str(&format!(
+        "Read timeout => {}\n",
+        ini(vm, "mysqlnd.net_read_timeout")
+    ));
+    out.push_str("Collecting statistics => Yes\n");
+    out.push_str("Collecting memory statistics => No\n");
+    out.push_str("Tracing => n/a\n");
+    out.push_str("Loaded plugins => mysqlnd,auth_plugin_mysql_native_password,auth_plugin_mysql_clear_password,auth_plugin_caching_sha2_password,auth_plugin_sha256_password\n");
+    out.push_str("API Extensions => mysqli\n");
+    info_ini_entries(vm, "mysqlnd.", &mut out);
+    out.push_str("\nmysqlnd statistics =>  \n");
+    let values = mysqlnd::stats::global_values();
+    for (name, v) in mysqlnd::stats::NAMES.iter().zip(values) {
+        out.push_str(&format!("{} => {}\n", name, v));
+    }
+    out
+}
+
 fn ini_set_hook(vm: &mut Vm, key: &[u8], value: &Value) -> bool {
     if let Some((_, _, changeable)) = INI.iter().find(|(n, _, _)| n.as_bytes() == key) {
         if !changeable {
@@ -1147,6 +1235,7 @@ pub fn register(vm: &mut Vm) {
         vm.ini_set_hooks
             .insert(name.as_bytes().to_vec(), ini_set_hook);
     }
+    vm.phpinfo_hooks.push(minfo);
 
     // classes: the VM knows internal classes by name (their shape comes from
     // the stubs); only the exception needs an entry for its property.
