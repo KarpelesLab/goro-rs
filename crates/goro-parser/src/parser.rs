@@ -3786,7 +3786,7 @@ impl Parser {
         match self.peek().clone() {
             TokenKind::Minus => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::UnaryOp {
@@ -3798,7 +3798,7 @@ impl Parser {
             }
             TokenKind::Plus => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::UnaryOp {
@@ -3810,7 +3810,7 @@ impl Parser {
             }
             TokenKind::BooleanNot => {
                 self.advance();
-                let mut operand = self.parse_unary()?;
+                let mut operand = self.parse_pow()?;
                 // `instanceof` binds tighter than `!`: !$a instanceof B is !($a instanceof B)
                 while matches!(self.peek(), TokenKind::Instanceof) {
                     self.advance();
@@ -3834,7 +3834,7 @@ impl Parser {
             }
             TokenKind::Tilde => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::UnaryOp {
@@ -3870,7 +3870,7 @@ impl Parser {
             }
             TokenKind::IntCast => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::Cast(CastType::Int, Box::new(operand)),
@@ -3878,7 +3878,7 @@ impl Parser {
             }
             TokenKind::FloatCast => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::Cast(CastType::Float, Box::new(operand)),
@@ -3886,7 +3886,7 @@ impl Parser {
             }
             TokenKind::StringCast => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::Cast(CastType::String, Box::new(operand)),
@@ -3894,7 +3894,7 @@ impl Parser {
             }
             TokenKind::BoolCast => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::Cast(CastType::Bool, Box::new(operand)),
@@ -3902,7 +3902,7 @@ impl Parser {
             }
             TokenKind::ArrayCast => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::Cast(CastType::Array, Box::new(operand)),
@@ -3910,7 +3910,7 @@ impl Parser {
             }
             TokenKind::ObjectCast => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::Cast(CastType::Object, Box::new(operand)),
@@ -3924,7 +3924,7 @@ impl Parser {
             }
             TokenKind::At => {
                 self.advance();
-                let operand = self.parse_unary()?;
+                let operand = self.parse_pow()?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::Suppress(Box::new(operand)),
