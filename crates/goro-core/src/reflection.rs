@@ -1646,8 +1646,7 @@ pub fn reflection_class_method(
         }
         b"getinterfacenames" => {
             // Collect all interfaces reachable via implements/extends chains.
-            let mut collected: Vec<Vec<u8>> = Vec::new();
-            collect_all_interfaces(vm, &class_lower, &mut collected);
+            let collected: Vec<Vec<u8>> = class_all_interface_names(vm, &class_lower).into_iter().map(|n| n.into_bytes()).collect();
             let mut names = PhpArray::new();
             for iface in collected {
                 names.push(Value::String(PhpString::from_vec(iface)));
@@ -1664,8 +1663,12 @@ pub fn reflection_class_method(
             Some(Value::Array(Rc::new(RefCell::new(names))))
         }
         b"getinterfaces" => {
-            let mut collected: Vec<Vec<u8>> = Vec::new();
-            collect_all_interfaces(vm, &class_lower, &mut collected);
+            let mut collected: Vec<Vec<u8>> = class_all_interface_names(vm, &class_lower).into_iter().map(|n| n.into_bytes()).collect();
+            if vm.class_implements_interface(&class_lower, b"stringable")
+                && !collected.iter().any(|n| n.eq_ignore_ascii_case(b"Stringable"))
+            {
+                collected.push(b"Stringable".to_vec());
+            }
             let mut result = PhpArray::new();
             for iface in collected {
                 let iface_name = String::from_utf8_lossy(&iface).to_string();
@@ -9757,25 +9760,33 @@ pub(crate) fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<Stri
             Some(c) => c,
             None => return out,
         };
+        // User interfaces keep their first extended interface as `parent`.
+        let mut declared: Vec<Vec<u8>> = Vec::new();
         if let Some(p) = &ce.parent {
-            out = compute(vm, &p.to_ascii_lowercase(), depth + 1);
+            if ce.is_interface {
+                declared.push(p.clone());
+            } else {
+                out = compute(vm, &p.to_ascii_lowercase(), depth + 1);
+            }
         }
+        declared.extend(ce.interfaces.iter().cloned());
         let n_parent = out.len();
-        for i in &ce.interfaces {
+        for i in &declared {
             let cn = canon(vm, i);
             if !out.iter().any(|x| x.eq_ignore_ascii_case(&cn)) {
                 out.push(cn);
             }
         }
-        let mut idx = n_parent;
-        while idx < out.len() && idx < 256 {
+        // zend_do_inherit_interfaces(): each declared interface's own list
+        // is appended (walked backwards), skipping ones already present.
+        let n_declared = out.len();
+        for idx in n_parent..n_declared {
             let il = out[idx].to_ascii_lowercase();
-            for pi in compute(vm, il.as_bytes(), depth + 1) {
+            for pi in compute(vm, il.as_bytes(), depth + 1).into_iter().rev() {
                 if !out.iter().any(|x| x.eq_ignore_ascii_case(&pi)) {
                     out.push(pi);
                 }
             }
-            idx += 1;
         }
         out
     }
