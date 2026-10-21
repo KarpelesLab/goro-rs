@@ -1188,8 +1188,19 @@ impl Compiler {
                 if is_call {
                     self.is_discarding_result = true;
                 }
+                let tmp_start = self.op_array.temp_count;
                 self.compile_expr(expr)?;
                 self.is_discarding_result = false;
+                let tmp_end = self.op_array.temp_count;
+                if tmp_end > tmp_start {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::FreeTmps,
+                        op1: OperandType::Tmp(tmp_start),
+                        op2: OperandType::Tmp(tmp_end),
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                }
                 Ok(())
             }
 

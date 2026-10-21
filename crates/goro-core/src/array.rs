@@ -475,5 +475,8 @@ impl Drop for PhpArray {
         if bytes > 0 {
             memory_free(bytes);
         }
+        for (_, v) in self.entries.iter() {
+            crate::gc::on_child_released(v);
+        }
     }
 }

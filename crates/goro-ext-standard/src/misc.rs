@@ -7880,8 +7880,8 @@ fn enum_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     Ok(Value::False)
 }
-fn gc_collect_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+fn gc_collect_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(vm.gc_collect_cycles()))
 }
 fn gc_enabled_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let enabled = vm
@@ -11823,34 +11823,21 @@ fn compact_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn gc_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
-    result.set(
-        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"running")),
-        Value::False,
-    );
-    result.set(
-        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"protected")),
-        Value::False,
-    );
-    result.set(
-        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"full")),
-        Value::False,
-    );
-    result.set(
-        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"runs")),
-        Value::Long(0),
-    );
-    result.set(
-        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"collected")),
-        Value::Long(0),
-    );
-    result.set(
-        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"threshold")),
-        Value::Long(10000),
-    );
-    result.set(
-        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"roots")),
-        Value::Long(0),
-    );
+    let mut put = |k: &[u8], v: Value| {
+        result.set(goro_core::array::ArrayKey::String(PhpString::from_bytes(k)), v);
+    };
+    put(b"running", if goro_core::gc::gc_active() { Value::True } else { Value::False });
+    put(b"protected", Value::False);
+    put(b"full", Value::False);
+    put(b"runs", Value::Long(goro_core::gc::gc_runs()));
+    put(b"collected", Value::Long(goro_core::gc::gc_collected()));
+    put(b"threshold", Value::Long(10001));
+    put(b"buffer_size", Value::Long(16384));
+    put(b"roots", Value::Long(goro_core::gc::gc_root_count()));
+    put(b"application_time", Value::Double(0.0));
+    put(b"collector_time", Value::Double(0.0));
+    put(b"destructor_time", Value::Double(0.0));
+    put(b"free_time", Value::Double(0.0));
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 

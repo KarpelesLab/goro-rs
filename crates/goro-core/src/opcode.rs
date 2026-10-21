@@ -54,6 +54,9 @@ pub struct Op {
 pub enum OpCode {
     /// No operation
     Nop,
+    /// Release temporaries [op1 Tmp, op2 Tmp) at the end of an expression
+    /// statement (PHP frees TMP_VARs right after their last use).
+    FreeTmps,
 
     // ---- Arithmetic ----
     Add,

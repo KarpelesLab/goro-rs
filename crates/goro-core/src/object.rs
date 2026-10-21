@@ -192,10 +192,35 @@ pub struct PhpObject {
     /// Properties stored as ordered Vec to preserve declaration order
     pub properties: Vec<(Vec<u8>, Value)>,
     pub object_id: u64,
+    /// Registered with the cycle collector (see gc.rs).
+    pub gc_tracked: GcFlag,
+}
+
+/// A flag that is *not* copied by `Clone` (a cloned object is a new,
+/// untracked allocation).
+#[derive(Debug, Default)]
+pub struct GcFlag(std::cell::Cell<bool>);
+impl Clone for GcFlag {
+    fn clone(&self) -> Self {
+        GcFlag::default()
+    }
+}
+impl GcFlag {
+    #[inline]
+    pub fn get(&self) -> bool {
+        self.0.get()
+    }
+    #[inline]
+    pub fn set(&self, v: bool) {
+        self.0.set(v)
+    }
 }
 
 impl Drop for PhpObject {
     fn drop(&mut self) {
+        for (_, v) in self.properties.iter() {
+            crate::gc::on_child_released(v);
+        }
         // Don't recycle the sentinel zero id.
         if self.object_id != 0 {
             // Use try_with so we don't panic during thread-local
@@ -212,6 +237,7 @@ impl PhpObject {
             class_name,
             properties: Vec::new(),
             object_id,
+            gc_tracked: GcFlag::default(),
         }
     }
 

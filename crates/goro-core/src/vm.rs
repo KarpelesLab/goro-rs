@@ -363,7 +363,7 @@ pub struct Vm {
     /// to short-circuit recursive magic-method calls (PHP behavior).
     pub magic_prop_guards: std::collections::HashSet<(u64, Vec<u8>, u8)>,
     /// Objects with __destruct methods, tracked for shutdown-time destruction
-    destructible_objects: Vec<Value>,
+    pub(crate) destructible_objects: Vec<Value>,
     /// Stack of "called class" names for late static binding (static::)
     pub called_class_stack: Vec<Vec<u8>>,
     /// Stack of "defining class" names for visibility checks (lowercase)
@@ -3927,6 +3927,44 @@ impl Vm {
         self.run_pending_destructors();
     }
 
+    /// gc_collect_cycles(): run the cycle collector (see gc.rs).
+    pub fn gc_collect_cycles(&mut self) -> i64 {
+        crate::gc::collect_cycles(self, None)
+    }
+
+    /// Run an automatic collection if the root buffer filled up.
+    #[inline]
+    pub(crate) fn gc_maybe_auto(&mut self) {
+        if crate::gc::gc_pending() {
+            let enabled = self
+                .constants
+                .get(b"zend.enable_gc".as_ref())
+                .map(|v| v.is_truthy())
+                .unwrap_or(true);
+            crate::gc::auto_collect(self, enabled);
+        }
+    }
+
+    /// Call __destruct on a garbage object found by the cycle collector.
+    pub(crate) fn gc_run_destructor(&mut self, obj_rc: &Rc<RefCell<PhpObject>>) {
+        self.destructible_objects.retain(|v| !matches!(v, Value::Object(o) if Rc::ptr_eq(o, obj_rc)));
+        obj_rc.borrow_mut().set_property(b"__destructed".to_vec(), Value::True);
+        let class_lower: Vec<u8> = obj_rc.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let destruct_op = self.classes.get(&class_lower)
+            .and_then(|c| c.get_method(b"__destruct"))
+            .map(|m| m.op_array.clone());
+        if let Some(destruct_op) = destruct_op {
+            let class_name_orig = obj_rc.borrow().class_name.clone();
+            let mut fn_cvs = vec![Value::Undef; destruct_op.cv_names.len()];
+            if !fn_cvs.is_empty() { fn_cvs[0] = Value::Object(obj_rc.clone()); }
+            self.called_class_stack.push(class_name_orig);
+            self.class_scope_stack.push(class_lower);
+            let _ = self.execute_fn(&destruct_op, fn_cvs);
+            self.class_scope_stack.pop();
+            self.called_class_stack.pop();
+        }
+    }
+
     fn run_pending_destructors(&mut self) {
         loop {
             let len = self.destructible_objects.len();
@@ -3984,7 +4022,7 @@ impl Vm {
                     if !fn_cvs.is_empty() { fn_cvs[0] = obj_val.clone(); }
                     self.called_class_stack.push(class_name_orig);
                     self.class_scope_stack.push(class_lower.clone());
-                    let _ = self.execute_op_array(&destruct_op, fn_cvs);
+                    let _ = self.execute_fn(&destruct_op, fn_cvs);
                     self.class_scope_stack.pop();
                     self.called_class_stack.pop();
                 }
@@ -15556,7 +15594,7 @@ impl Vm {
                     }
                     self.called_class_stack.push(class_name_orig);
                     self.class_scope_stack.push(class_lower.clone());
-                    let _ = self.execute_op_array(&destruct_op, fn_cvs);
+                    let _ = self.execute_fn(&destruct_op, fn_cvs);
                     self.class_scope_stack.pop();
                     self.called_class_stack.pop();
                 }
@@ -15708,6 +15746,30 @@ impl Vm {
 
             match op.opcode {
                 OpCode::Nop => {}
+
+                OpCode::FreeTmps => {
+                    if let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) {
+                        let mut freed = false;
+                        let end = (b as usize).min(tmps.len());
+                        for slot in tmps[(a as usize).min(end)..end].iter_mut() {
+                            match slot {
+                                Value::Undef => {}
+                                Value::Object(_) | Value::Array(_) | Value::Reference(_) => {
+                                    freed = true;
+                                    if matches!(slot, Value::Object(_)) {
+                                        crate::gc::possible_root(slot);
+                                    }
+                                    *slot = Value::Undef;
+                                }
+                                _ => *slot = Value::Undef,
+                            }
+                        }
+                        if freed {
+                            self.run_pending_destructors();
+                            self.gc_maybe_auto();
+                        }
+                    }
+                }
 
                 OpCode::Echo => {
                     let val = self.read_operand_warn(&op.op1, &cvs, &tmps, &op_array.literals, op_array, op.line);
@@ -27476,6 +27538,7 @@ impl Vm {
                     // Directly replace the CV slot with Undef (breaks reference links)
                     if let OperandType::Cv(idx) = op.op1 {
                         if let Some(slot) = cvs.get_mut(idx as usize) {
+                            crate::gc::possible_root(slot);
                             if let Value::Generator(gen_rc) = slot {
                                 let gen_clone = gen_rc.clone();
                                 *slot = Value::Undef;
@@ -27586,6 +27649,7 @@ impl Vm {
                         }
                         return Err(VmError { message: "Uncaught exception from destructor".into(), line: op.line });
                     }
+                    self.gc_maybe_auto();
                 }
 
                 OpCode::ArrayUnset => {
@@ -35005,6 +35069,9 @@ impl Vm {
         tmps: &mut [Value],
         static_cv_keys: &HashMap<u32, Vec<u8>>,
     ) {
+        if let Value::Object(o) = &value {
+            crate::gc::track_object(o);
+        }
         match operand {
             OperandType::Cv(idx) => {
                 // PHP copy-on-write: when assigning an array to a CV,

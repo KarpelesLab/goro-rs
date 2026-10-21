@@ -3,6 +3,7 @@ pub mod basedir;
 pub mod compiler;
 pub mod errdisplay;
 pub mod fiber;
+pub mod gc;
 pub mod function;
 pub mod generator;
 pub mod ini_quantity;
