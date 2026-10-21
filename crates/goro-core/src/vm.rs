@@ -24630,10 +24630,10 @@ impl Vm {
                                 .saturating_sub(implicit_args as u32)
                                 .saturating_sub(captures);
                             let required = user_fn.required_param_count;
-                            // Don't check for __call/__callStatic/constructors
+                            // Don't check for __call/__callStatic (their arguments
+                            // are packed below)
                             let is_special = func_name_lower.ends_with(b"::__call")
-                                || func_name_lower.ends_with(b"::__callstatic")
-                                || func_name_lower.ends_with(b"::__construct");
+                                || func_name_lower.ends_with(b"::__callstatic");
                             if !is_special && provided < required {
                                 let display_name = if !user_fn.display_name.is_empty() {
                                     String::from_utf8_lossy(&user_fn.display_name).into_owned()
@@ -24664,9 +24664,16 @@ impl Vm {
                                     }
                                     fname
                                 };
+                                // ($this is not a parameter, passed yet or not, as for
+                                // parent::__construct())
+                                let this_param = if captures > 0 {
+                                    0
+                                } else {
+                                    u32::from(method_expects_this)
+                                };
                                 let total_params = user_fn
                                     .param_count
-                                    .saturating_sub(implicit_args as u32)
+                                    .saturating_sub(this_param)
                                     .saturating_sub(captures);
                                 let has_optional = total_params > required;
                                 let qualifier = if has_optional { "at least" } else { "exactly" };
