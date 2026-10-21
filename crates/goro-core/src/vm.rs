@@ -19104,8 +19104,14 @@ impl Vm {
                         }
                     } else {
                         let name = name_val.to_php_string();
-                        // Direct static call on a trait (deprecated since 8.1)
-                        if let Some(pos) = name.as_bytes().windows(2).position(|w| w == b"::") {
+                        // Direct static call on a trait (deprecated since 8.1);
+                        // a first-class callable reported it when created.
+                        if let Some(pos) = name
+                            .as_bytes()
+                            .windows(2)
+                            .position(|w| w == b"::")
+                            .filter(|_| !from_closure)
+                        {
                             let cls = &name.as_bytes()[..pos];
                             let cls_lower: Vec<u8> =
                                 cls.iter().map(|b| b.to_ascii_lowercase()).collect();
@@ -31750,12 +31756,9 @@ impl Vm {
                                 ip = *catch_target as usize;
                                 continue;
                             }
+                            let _ = (cls, msg);
                             return Err(VmError {
-                                message: format!(
-                                    "Uncaught {}: {}",
-                                    String::from_utf8_lossy(cls),
-                                    msg
-                                ),
+                                message: self.uncaught_exception_message(),
                                 line: op.line,
                             });
                         }
@@ -32764,7 +32767,6 @@ impl Vm {
                                         &mut tmps,
                                         &static_cv_keys,
                                     );
-                                    ip += 1;
                                     continue;
                                 }
                                 // Check for deferred closure marker
@@ -32781,6 +32783,27 @@ impl Vm {
                                     if let Some(op_array) = closure_op {
                                         // Register as a user function and return the closure name
                                         let closure_val = self.instantiate_const_closure(op_array);
+                                        if self.current_exception.is_some() {
+                                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                                exception_handlers.pop()
+                                            {
+                                                pending_calls_catch_depth = Some(saved_pc);
+                                                ip = catch_target as usize;
+                                                continue;
+                                            }
+                                            return Err(VmError {
+                                                message: self.uncaught_exception_message(),
+                                                line: op.line,
+                                            });
+                                        }
+                                        // Evaluated once: later reads see the same Closure.
+                                        if let Some(c) = self.classes.get_mut(&class_lower) {
+                                            if let Some(slot) =
+                                                c.constants.get_mut(prop_name.as_bytes())
+                                            {
+                                                *slot = closure_val.clone();
+                                            }
+                                        }
                                         self.write_operand(
                                             &op.result,
                                             closure_val,
@@ -32788,7 +32811,6 @@ impl Vm {
                                             &mut tmps,
                                             &static_cv_keys,
                                         );
-                                        ip += 1;
                                         continue;
                                     }
                                 }
@@ -42289,10 +42311,14 @@ impl Vm {
                                         let closure_name = s.as_bytes()
                                             [b"__deferred_closure__::".len()..]
                                             .to_vec();
+                                        // A first-class callable resolves its target
+                                        // (possibly this very class) when the constant
+                                        // is first read.
                                         let closure_op = class
                                             .const_closures
                                             .iter()
                                             .find(|op| op.name == closure_name)
+                                            .filter(|op| op.fcc_desc.is_none())
                                             .cloned();
                                         if let Some(op_array) = closure_op {
                                             let name_copy = op_array.name.clone();
@@ -42377,10 +42403,12 @@ impl Vm {
                                 if s.as_bytes().starts_with(b"__deferred_closure__::") {
                                     let closure_name =
                                         &s.as_bytes()[b"__deferred_closure__::".len()..];
+                                    // First-class callables resolve on instantiation.
                                     let closure_op = class
                                         .const_closures
                                         .iter()
                                         .find(|op| op.name == closure_name)
+                                        .filter(|op| op.fcc_desc.is_none())
                                         .cloned();
                                     if let Some(op_array) = closure_op {
                                         let name = op_array.name.clone();

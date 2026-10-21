@@ -540,8 +540,18 @@ impl Vm {
         scope: Option<Vec<u8>>,
     ) -> FccResult {
         let (_, caps) = closure_parts(&wrapper);
+        // Op-array scopes are lowercase; errors name the class as declared.
+        let scope = scope.map(|s| {
+            self.classes
+                .get(&lower(&s))
+                .map(|c| c.name.clone())
+                .unwrap_or(s)
+        });
         if let Some(name) = desc.strip_prefix(b"f:") {
             return self.fcc_function(name, true);
+        }
+        if let Some(name) = desc.strip_prefix(b"F:") {
+            return self.fcc_function(name, false);
         }
         if desc == b"d:" {
             let callable = caps.first().map(|v| v.deref()).unwrap_or(Value::Null);
@@ -551,9 +561,29 @@ impl Vm {
             let obj = caps.first().map(|v| v.deref()).unwrap_or(Value::Null);
             return self.fcc_method(obj, m, wrapper, scope);
         }
-        if let Some(rest) = desc.strip_prefix(b"s:") {
+        // "S:" is a static method callable in a constant expression.
+        let const_expr = desc.starts_with(b"S:");
+        if let Some(rest) = desc
+            .strip_prefix(b"s:")
+            .or_else(|| desc.strip_prefix(b"S:"))
+        {
             if let Some(p) = rest.windows(2).rposition(|w| w == b"::") {
                 let (cls, m) = (rest[..p].to_vec(), rest[p + 2..].to_vec());
+                if const_expr {
+                    // zend_ast_evaluate(): a __callStatic() trampoline cannot
+                    // back a constant-expression callable.
+                    let magic = self.classes.get(&lower(&cls)).is_some_and(|c| {
+                        c.get_method(&lower(&m)).is_none()
+                            && c.get_method(b"__callstatic").is_some()
+                    });
+                    if magic {
+                        return Err((
+                            b"Error",
+                            "Creating a callable for the magic __callStatic() method is not supported in constant expressions"
+                                .to_string(),
+                        ));
+                    }
+                }
                 return self.fcc_static(&cls, &m, this, wrapper, scope);
             }
         }
@@ -810,6 +840,8 @@ impl Vm {
         };
         let canon = ce.name.clone();
         let ml = lower(m);
+        let is_trait = ce.is_trait;
+        let is_abstract = ce.methods.get(&ml).is_some_and(|md| md.is_abstract);
         let method = ce.methods.get(&ml).map(|md| {
             (
                 md.is_static,
@@ -848,6 +880,37 @@ impl Vm {
                 let mut n = canon.clone();
                 n.extend_from_slice(b"::");
                 n.extend_from_slice(&mname);
+                // zend_std_get_static_method(): abstract methods cannot be
+                // called; static trait methods are deprecated.
+                if is_abstract && (is_static || bound_this.is_none()) {
+                    let decl_name = self
+                        .classes
+                        .get(&lower(&decl))
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| canon.clone());
+                    return Err((
+                        b"Error",
+                        format!(
+                            "Cannot call abstract method {}::{}()",
+                            String::from_utf8_lossy(&decl_name),
+                            String::from_utf8_lossy(&mname)
+                        ),
+                    ));
+                }
+                if is_static && is_trait {
+                    let line = self.current_line;
+                    self.emit_deprecated_at(
+                        &format!(
+                            "Calling static trait method {}::{} is deprecated, it should only be called on a class using the trait",
+                            String::from_utf8_lossy(&canon),
+                            String::from_utf8_lossy(&mname)
+                        ),
+                        line,
+                    );
+                    if self.current_exception.is_some() {
+                        return Err((b"", String::new()));
+                    }
+                }
                 if is_static {
                     return Ok(self.make_closure_object(str_val(&n)));
                 }

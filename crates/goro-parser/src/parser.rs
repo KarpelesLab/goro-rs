@@ -372,6 +372,9 @@ impl Parser {
 
     fn parse_attributes(&mut self) -> ParseResult<Vec<Attribute>> {
         let mut attrs = Vec::new();
+        // zend_compile_attributes() reports `#[A(...)]` while compiling the
+        // declaration, i.e. on the line of the token after the attributes.
+        let mut fcc_arg = false;
         while matches!(self.peek(), TokenKind::AttributeOpen) {
             self.advance();
             loop {
@@ -421,12 +424,7 @@ impl Parser {
                 let args = if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
                     let a = self.parse_arguments()?;
-                    if self.first_class_callable_flag {
-                        return Err(ParseError {
-                            message: "Cannot create Closure as attribute argument".into(),
-                            span: self.span(),
-                        });
-                    }
+                    fcc_arg |= self.first_class_callable_flag;
                     self.expect(&TokenKind::CloseParen)?;
                     a
                 } else {
@@ -441,6 +439,12 @@ impl Parser {
                 }
             }
             self.expect(&TokenKind::CloseBracket)?;
+        }
+        if fcc_arg {
+            return Err(ParseError {
+                message: "Cannot create Closure as attribute argument".into(),
+                span: self.span(),
+            });
         }
         Ok(attrs)
     }

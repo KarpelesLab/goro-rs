@@ -394,13 +394,13 @@ impl Compiler {
             is_in_trait: false,
             warnings: Vec::new(),
             is_discarding_result: false,
+            in_const_expr: false,
             assign_result_discarded: false,
             is_in_function_body: false,
             is_in_class_method: false,
             this_always_bound: false,
             quiet_this: false,
             keep_relative_class_names: false,
-            in_const_expr: false,
             is_top_level: false,
             in_hoisting_pass: false,
             hoisted_class_idx: HashMap::new(),
@@ -487,17 +487,18 @@ impl Compiler {
         // Nested closure: parent already has a display_name like `{closure:...}`.
         if !self.op_array.display_name.is_empty() {
             name.extend_from_slice(&self.op_array.display_name);
-        } else if let Some(class) = &self.current_class {
-            // Method or class-level context. The parent op_array.name is the bare
-            // method name (e.g. "bar"). For top-level class scope (property/const
-            // initializers compiled by a fresh sub-compiler), op_array.name may be empty;
-            // in that case we still want `Class::` even without method.
+        } else if let Some(class) = self
+            .current_class
+            .as_ref()
+            .filter(|_| !self.op_array.name.is_empty())
+        {
+            // Inside a method: `Class::method()`. Class-level initializers
+            // (constants, attributes, defaults) have no active function and
+            // use the file name, like the top-level script.
             name.extend_from_slice(class);
-            if !self.op_array.name.is_empty() {
-                name.extend_from_slice(b"::");
-                name.extend_from_slice(&self.op_array.name);
-                name.extend_from_slice(b"()");
-            }
+            name.extend_from_slice(b"::");
+            name.extend_from_slice(&self.op_array.name);
+            name.extend_from_slice(b"()");
         } else if !self.op_array.name.is_empty() {
             // Inside a global/namespaced function.
             name.extend_from_slice(&self.op_array.name);
@@ -844,13 +845,8 @@ impl Compiler {
                 }
                 // Attribute argument expressions must be constant expressions.
                 for arg in &attr.args {
-                    if let Some(msg) = Self::const_expr_compile_error(&arg.value, true) {
+                    if let Some(msg) = Self::const_expr_error(&arg.value, true) {
                         self.deferred_fatal_errors.push(msg);
-                        break;
-                    }
-                    if !Self::is_const_attr_expr(&arg.value) {
-                        self.deferred_fatal_errors
-                            .push("Constant expression contains invalid operations".to_string());
                         break;
                     }
                 }
@@ -1043,6 +1039,10 @@ impl Compiler {
         // Fully qualified name (starts with \) -- strip leading \ and use as-is
         if name.starts_with(b"\\") {
             return name[1..].to_vec();
+        }
+        // `namespace\foo` is relative to the current namespace.
+        if name.len() > 10 && name[..10].eq_ignore_ascii_case(b"namespace\\") {
+            return self.prefix_with_namespace(&name[10..]);
         }
 
         if let Some(pos) = name.iter().position(|&b| b == b'\\') {
@@ -3452,6 +3452,16 @@ impl Compiler {
                                 line: func_compiler.op_array.decl_line,
                             });
                         }
+                        if let Some(message) = param
+                            .default
+                            .as_ref()
+                            .and_then(|d| Self::const_expr_error(d, true))
+                        {
+                            return Err(CompileError {
+                                message,
+                                line: func_compiler.op_array.decl_line,
+                            });
+                        }
                     }
                 }
 
@@ -3720,9 +3730,9 @@ impl Compiler {
                         continue;
                     }
                     // This is a const declaration: const FOO = value;
-                    if let Some(msg) = Self::const_expr_compile_error(value, true) {
+                    if let Some(message) = Self::const_expr_error(value, true) {
                         return Err(CompileError {
-                            message: msg,
+                            message,
                             line: value.span.line,
                         });
                     }
@@ -4499,6 +4509,23 @@ impl Compiler {
                     let cname = String::from_utf8_lossy(&qualified_name).to_string();
                     let mut seen_consts: Vec<Vec<u8>> = Vec::new();
                     for member in body.iter() {
+                        // Property defaults and enum case values are constant
+                        // expressions without `new`.
+                        let init = match member {
+                            ClassMember::Property {
+                                default: Some(d), ..
+                            } => Some(d),
+                            ClassMember::EnumCase { value: Some(v), .. } => Some(v),
+                            _ => None,
+                        };
+                        if let Some(e) = init {
+                            if let Some(message) = Self::const_expr_error(e, false) {
+                                return Err(CompileError {
+                                    message,
+                                    line: e.span.line,
+                                });
+                            }
+                        }
                         match member {
                             ClassMember::ClassConstant {
                                 name: cn,
@@ -4519,15 +4546,8 @@ impl Compiler {
                                         line,
                                     });
                                 }
-                                if matches!(
-                                    value.kind,
-                                    ExprKind::InterpolatedString(_) | ExprKind::Variable(_)
-                                ) {
-                                    return Err(CompileError {
-                                        message: "Constant expression contains invalid operations"
-                                            .into(),
-                                        line,
-                                    });
+                                if let Some(message) = Self::const_expr_error(value, false) {
+                                    return Err(CompileError { message, line });
                                 }
                                 if seen_consts.iter().any(|c| c == cn) {
                                     return Err(CompileError {
@@ -5006,7 +5026,7 @@ impl Compiler {
                             }
                             if let Some(msg) = default
                                 .as_ref()
-                                .and_then(|e| Self::const_expr_compile_error(e, false))
+                                .and_then(|e| Self::const_expr_error(e, false))
                             {
                                 return Err(CompileError {
                                     message: msg,
@@ -5571,7 +5591,7 @@ impl Compiler {
                                                     cc.op_array.fcc_target_name =
                                                         Some(func_name.clone());
                                                     cc.op_array.fcc_desc = Some(
-                                                        [b"s:".as_slice(), &func_name].concat(),
+                                                        [b"S:".as_slice(), &func_name].concat(),
                                                     );
                                                     let name_idx =
                                                         cc.op_array.add_literal(Value::String(
@@ -7599,7 +7619,7 @@ impl Compiler {
                             type_hint: const_type_hint,
                             doc_comment: const_doc_comment,
                         } => {
-                            if let Some(msg) = Self::const_expr_compile_error(const_expr, false) {
+                            if let Some(msg) = Self::const_expr_error(const_expr, false) {
                                 return Err(CompileError {
                                     message: msg,
                                     line: const_expr.span.line,
@@ -8136,7 +8156,7 @@ impl Compiler {
                                                     cc.op_array.fcc_target_name =
                                                         Some(func_name.clone());
                                                     cc.op_array.fcc_desc = Some(
-                                                        [b"s:".as_slice(), &func_name].concat(),
+                                                        [b"S:".as_slice(), &func_name].concat(),
                                                     );
                                                     let name_idx =
                                                         cc.op_array.add_literal(Value::String(
@@ -15524,7 +15544,12 @@ impl Compiler {
         let fcc_desc: Option<Vec<u8>> = match target {
             CallableTarget::Function(name_expr) => match &name_expr.kind {
                 ExprKind::Identifier(n) => {
-                    let mut d = b"f:".to_vec();
+                    // Only unqualified names fall back to the global function.
+                    let mut d = if n.contains(&b'\\') {
+                        b"F:".to_vec()
+                    } else {
+                        b"f:".to_vec()
+                    };
                     d.extend_from_slice(&self.resolve_function_name(n));
                     Some(d)
                 }
@@ -15557,7 +15582,11 @@ impl Compiler {
                     } else {
                         class_n.clone()
                     };
-                    let mut d = b"s:".to_vec();
+                    let mut d = if self.in_const_expr {
+                        b"S:".to_vec()
+                    } else {
+                        b"s:".to_vec()
+                    };
                     d.extend_from_slice(&resolved);
                     d.extend_from_slice(b"::");
                     d.extend_from_slice(method);
@@ -15867,89 +15896,32 @@ impl Compiler {
         }
     }
 
-    /// Check whether an expression is allowed inside an attribute argument.
-    /// PHP requires these to be constant expressions; function calls,
-    /// method calls, dynamic ops, and similar runtime constructs are
-    /// rejected at compile time with "Constant expression contains
-    /// invalid operations".
-    /// Compile errors zend_compile_const_expr() raises for constant
-    /// expressions. `new_ok`: `new` is allowed (it is not in class constants
-    /// and property defaults). Only the specific diagnostics are reported;
-    /// other invalid operations are left to the existing checks.
-    fn const_expr_compile_error(expr: &Expr, new_ok: bool) -> Option<String> {
+    /// zend_compile_const_expr(): the compile error a constant expression
+    /// (initializer, attribute argument, constant value) raises, if any.
+    /// `allow_dynamic` is false for class constants and property defaults,
+    /// which reject `new` and object casts.
+    pub(crate) fn const_expr_error(expr: &Expr, allow_dynamic: bool) -> Option<String> {
         use goro_parser::ast::ExprKind as E;
-        let rec = |e: &Expr| Self::const_expr_compile_error(e, new_ok);
-        match &expr.kind {
-            E::New { class, args } => {
-                if !new_ok {
-                    return Some("New expressions are not supported in this context".into());
-                }
-                if !matches!(class.kind, E::Identifier(_)) {
-                    return Some("Cannot use dynamic class name in constant expression".into());
-                }
-                args.iter().find_map(|a| rec(&a.value))
-            }
-            E::Cast(goro_parser::ast::CastType::Object, _) => {
-                Some("Object casts are not supported in this context".into())
-            }
-            E::Cast(_, inner) => rec(inner),
-            E::ClassConstAccess { class, constant } => match &class.kind {
-                E::Identifier(n) if n.eq_ignore_ascii_case(b"static") => {
-                    if constant.eq_ignore_ascii_case(b"class") {
-                        Some(
-                            "static::class cannot be used for compile-time class name resolution"
-                                .into(),
-                        )
-                    } else {
-                        Some("\"static::\" is not allowed in compile-time constants".into())
-                    }
-                }
-                E::Identifier(_) => None,
-                _ if constant.eq_ignore_ascii_case(b"class") => {
-                    Some("(expression)::class cannot be used in constant expressions".into())
-                }
-                _ => Some(
-                    "Dynamic class names are not allowed in compile-time class constant references"
-                        .into(),
-                ),
-            },
-            E::DynamicClassConstAccess { class, constant } => match &class.kind {
-                E::Identifier(n) if n.eq_ignore_ascii_case(b"static") => {
-                    Some("\"static::\" is not allowed in compile-time constants".into())
-                }
-                E::Identifier(_) => rec(constant),
-                _ => Some(
-                    "Dynamic class names are not allowed in compile-time class constant references"
-                        .into(),
-                ),
-            },
-            E::ArrayAccess { index: None, .. } => Some("Cannot use [] for reading".into()),
-            E::ArrayAccess {
-                array,
-                index: Some(i),
-            } => rec(array).or_else(|| rec(i)),
-            E::PropertyAccess {
-                object, property, ..
-            } => rec(object).or_else(|| rec(property)),
-            E::Array(elems) => elems
-                .iter()
-                .find_map(|el| el.key.as_ref().and_then(rec).or_else(|| rec(&el.value))),
-            E::BinaryOp { left, right, .. } => rec(left).or_else(|| rec(right)),
-            E::UnaryOp { operand, .. } => rec(operand),
-            E::Ternary {
-                condition,
-                if_true,
-                if_false,
-            } => rec(condition)
-                .or_else(|| if_true.as_ref().and_then(|e| rec(e)))
-                .or_else(|| rec(if_false)),
-            E::NullCoalesce { left, right } => rec(left).or_else(|| rec(right)),
+        const INVALID: &str = "Constant expression contains invalid operations";
+        let rec = |e: &Expr| Self::const_expr_error(e, allow_dynamic);
+        let is_name = |e: &Expr| matches!(e.kind, E::Identifier(_));
+        let name_of = |e: &Expr| match &e.kind {
+            E::Identifier(n) => Some(n.clone()),
             _ => None,
-        }
-    }
-
-    fn is_const_attr_expr(expr: &Expr) -> bool {
-        use goro_parser::ast::ExprKind as E;
+        };
+        // zend_compile_const_expr_class_reference()
+        let class_reference = |class: &Expr| -> Option<String> {
+            match name_of(class) {
+                Some(n) if n.starts_with(b"__anonymous_class_") => {
+                    Some("Cannot use anonymous class in constant expression".into())
+                }
+                Some(n) if n.eq_ignore_ascii_case(b"static") => {
+                    Some("\"static\" is not allowed in compile-time constants".into())
+                }
+                Some(_) => None,
+                None => Some("Cannot use dynamic class name in constant expression".into()),
+            }
+        };
         match &expr.kind {
             E::Int(_)
             | E::Float(_)
@@ -15958,95 +15930,147 @@ impl Compiler {
             | E::False
             | E::Null
             | E::ConstantAccess(_)
-            | E::Identifier(_)
-            | E::ClassConstAccess { .. } => true,
-            E::InterpolatedString(_) => false, // variables inside
-            E::BinaryOp { left, right, .. } => {
-                Self::is_const_attr_expr(left) && Self::is_const_attr_expr(right)
+            | E::Identifier(_) => None,
+            // A heredoc without interpolation is a plain string.
+            E::InterpolatedString(parts) => {
+                if parts
+                    .iter()
+                    .all(|p| matches!(p, goro_parser::ast::StringPart::Literal(_)))
+                {
+                    None
+                } else {
+                    Some(INVALID.into())
+                }
             }
+            E::BinaryOp { left, right, .. } => rec(left).or_else(|| rec(right)),
             E::UnaryOp { operand, op, .. } => {
                 use goro_parser::ast::UnaryOp as U;
                 if matches!(
                     op,
                     U::PreIncrement | U::PreDecrement | U::PostIncrement | U::PostDecrement
                 ) {
-                    return false;
+                    return Some(INVALID.into());
                 }
-                Self::is_const_attr_expr(operand)
+                rec(operand)
+            }
+            E::Cast(ct, inner) => {
+                if *ct == goro_parser::ast::CastType::Object && !allow_dynamic {
+                    return Some("Object casts are not supported in this context".into());
+                }
+                rec(inner)
             }
             E::Ternary {
                 condition,
                 if_true,
                 if_false,
-            } => {
-                Self::is_const_attr_expr(condition)
-                    && if_true
-                        .as_ref()
-                        .map(|e| Self::is_const_attr_expr(e))
-                        .unwrap_or(true)
-                    && Self::is_const_attr_expr(if_false)
+            } => rec(condition)
+                .or_else(|| if_true.as_deref().and_then(rec))
+                .or_else(|| rec(if_false)),
+            E::NullCoalesce { left, right } => rec(left).or_else(|| rec(right)),
+            E::ArrayAccess { index: None, .. } => Some("Cannot use [] for reading".into()),
+            E::ArrayAccess { array, index } => {
+                rec(array).or_else(|| index.as_deref().and_then(rec))
             }
-            E::NullCoalesce { left, right } => {
-                Self::is_const_attr_expr(left) && Self::is_const_attr_expr(right)
-            }
-            E::Array(elements) => elements.iter().all(|e| {
-                e.key.as_ref().map(Self::is_const_attr_expr).unwrap_or(true)
-                    && Self::is_const_attr_expr(&e.value)
-            }),
-            E::New { class: _, args } => {
-                // Object literal new C(...) is allowed as long as args are const
-                args.iter().all(|a| Self::is_const_attr_expr(&a.value))
-            }
-            // Property / dimension fetches and casts on constant operands
-            // (PHP 8.2+ const expressions); specific errors are raised by
-            // const_expr_compile_error.
+            E::Array(elements) => elements
+                .iter()
+                .find_map(|e| e.key.as_ref().and_then(rec).or_else(|| rec(&e.value))),
             E::PropertyAccess {
                 object, property, ..
+            } => rec(object).or_else(|| {
+                if is_name(property) {
+                    None
+                } else {
+                    rec(property)
+                }
+            }),
+            E::ClassConstAccess { class, constant } => {
+                if constant.eq_ignore_ascii_case(b"class") {
+                    // zend_compile_const_expr_class_name()
+                    match name_of(class) {
+                        Some(n) if n.eq_ignore_ascii_case(b"static") => Some(
+                            "static::class cannot be used for compile-time class name resolution"
+                                .into(),
+                        ),
+                        Some(_) => None,
+                        None => Some(
+                            "(expression)::class cannot be used in constant expressions".into(),
+                        ),
+                    }
+                } else {
+                    // zend_compile_const_expr_class_const()
+                    match name_of(class) {
+                        Some(n) if n.eq_ignore_ascii_case(b"static") => {
+                            Some("\"static::\" is not allowed in compile-time constants".into())
+                        }
+                        Some(_) => None,
+                        None => Some(
+                            "Dynamic class names are not allowed in compile-time class constant references"
+                                .into(),
+                        ),
+                    }
+                }
+            }
+            E::DynamicClassConstAccess { class, constant } => {
+                if !is_name(class) {
+                    return Some(
+                        "Dynamic class names are not allowed in compile-time class constant references"
+                            .into(),
+                    );
+                }
+                if name_of(class).is_some_and(|n| n.eq_ignore_ascii_case(b"static")) {
+                    return Some("\"static::\" is not allowed in compile-time constants".into());
+                }
+                rec(constant)
+            }
+            E::New { class, args } => {
+                if !allow_dynamic {
+                    return Some("New expressions are not supported in this context".into());
+                }
+                if let Some(e) = class_reference(class) {
+                    return Some(e);
+                }
+                let mut named = false;
+                for a in args {
+                    if a.unpack {
+                        return Some(
+                            "Argument unpacking in constant expressions is not supported".into(),
+                        );
+                    }
+                    if a.name.is_some() {
+                        named = true;
+                    } else if named {
+                        return Some("Cannot use positional argument after named argument".into());
+                    }
+                }
+                args.iter().find_map(|a| rec(&a.value))
+            }
+            E::Closure {
+                is_static,
+                use_vars,
+                ..
             } => {
-                Self::is_const_attr_expr(object)
-                    && (matches!(property.kind, E::Identifier(_))
-                        || Self::is_const_attr_expr(property))
+                if !*is_static {
+                    Some("Closures in constant expressions must be static".into())
+                } else if !use_vars.is_empty() {
+                    Some("Cannot use(...) variables in constant expression".into())
+                } else {
+                    None
+                }
             }
-            E::ArrayAccess { array, index } => {
-                Self::is_const_attr_expr(array)
-                    && index
-                        .as_ref()
-                        .map(|i| Self::is_const_attr_expr(i))
-                        .unwrap_or(true)
-            }
-            E::Cast(_, inner) => Self::is_const_attr_expr(inner),
-            E::DynamicClassConstAccess { constant, .. } => Self::is_const_attr_expr(constant),
-            // These are non-const:
-            E::Variable(_)
-            | E::DynamicVariable(_)
-            | E::Assign { .. }
-            | E::CompoundAssign { .. }
-            | E::AssignRef { .. }
-            | E::DynamicStaticPropertyAccess { .. }
-            | E::StaticPropertyAccess { .. }
-            | E::MethodCall { .. }
-            | E::StaticMethodCall { .. }
-            | E::DynamicStaticMethodCall { .. }
-            | E::FunctionCall { .. }
-            | E::Match { .. }
-            | E::Closure { .. }
-            | E::ArrowFunction { .. }
-            | E::Instanceof { .. }
-            | E::Print(_)
-            | E::Exit(_)
-            | E::Empty(_)
-            | E::Isset(_)
-            | E::Eval(_)
-            | E::Include { .. }
-            | E::Yield(_, _)
-            | E::YieldFrom(_)
-            | E::Clone(_)
-            | E::CloneWith { .. }
-            | E::Spread(_)
-            | E::Pipe { .. }
-            | E::ThrowExpr(_)
-            | E::Suppress(_)
-            | E::FirstClassCallable(_) => false,
+            E::FirstClassCallable(target) => match target {
+                goro_parser::ast::CallableTarget::Function(name) => match &name.kind {
+                    E::Identifier(_) | E::String(_) => None,
+                    E::Int(_) | E::Float(_) | E::True | E::False | E::Null | E::Array(_) => {
+                        Some("Illegal function name".into())
+                    }
+                    _ => Some("Cannot use dynamic function name in constant expression".into()),
+                },
+                goro_parser::ast::CallableTarget::StaticMethod { class, .. } => {
+                    class_reference(class)
+                }
+                goro_parser::ast::CallableTarget::Method { .. } => Some(INVALID.into()),
+            },
+            _ => Some(INVALID.into()),
         }
     }
 
@@ -18632,6 +18656,13 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
                 ),
                 line,
             });
+        }
+        if let Some(message) = p
+            .default
+            .as_ref()
+            .and_then(|d| Compiler::const_expr_error(d, true))
+        {
+            return Err(CompileError { message, line });
         }
     }
     Ok(())
