@@ -1574,7 +1574,7 @@ fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
     if is_static && modern::is_static_method(b, &m) {
         return true;
     }
-    if b.is_modern() && m == "__construct" && modern::is_node_base(b) {
+    if b.is_modern() && m == "__construct" && (modern::is_node_base(b) || b == Base::MTokenList) {
         return true;
     }
     // non-static methods called statically error out in call_method
@@ -1695,14 +1695,29 @@ fn call_method(
         Some(Value::Object(o)) => o.clone(),
         _ => return Value::Null,
     };
-    if m == "__construct" && b.is_modern() && modern::is_node_base(b) {
-        let cn = goro_core::value::display_class_name(&o.borrow().class_name).to_string();
+    if m == "__construct" && b.is_modern() && (modern::is_node_base(b) || b == Base::MTokenList) {
+        // private (final) constructors: `new Dom\Element()` & co. are not allowed
+        let declaring = if b == Base::MTokenList {
+            "Dom\\TokenList"
+        } else {
+            "Dom\\Node"
+        };
+        let scope = match vm.called_class_stack.last() {
+            Some(c) => format!(
+                "scope {}",
+                vm.classes
+                    .get(&c.to_ascii_lowercase())
+                    .map(|ce| String::from_utf8_lossy(&ce.name).into_owned())
+                    .unwrap_or_else(|| String::from_utf8_lossy(c).into_owned())
+            ),
+            None => "global scope".to_string(),
+        };
         throw_error(
             vm,
             b"Error",
             &format!(
-                "Cannot directly construct {}, use document methods instead",
-                cn
+                "Call to private {}::__construct() from {}",
+                declaring, scope
             ),
         );
         return Value::Null;
