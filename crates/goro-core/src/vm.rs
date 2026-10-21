@@ -13923,6 +13923,14 @@ impl Vm {
     }
 }
 
+/// Auto-global variable names other than $GLOBALS.
+pub(crate) fn is_auto_global_name(name: &[u8]) -> bool {
+    matches!(
+        name,
+        b"_SERVER" | b"_GET" | b"_POST" | b"_COOKIE" | b"_FILES" | b"_REQUEST" | b"_ENV"
+    )
+}
+
 /// Standalone, `self`-free predicate for "is this a built-in/internal class name?".
 /// Mirrors `Vm::is_known_builtin_class` so the compiler (which has no Vm) can use it
 /// for early-binding decisions. Keep the two lists in sync.
@@ -15838,6 +15846,23 @@ impl Vm {
                     cvs[i] = Value::Array(Rc::new(RefCell::new(globals_arr)));
                 }
                 break;
+            }
+        }
+        // Bind auto-global CVs ($_SERVER, $_GET, ...) to the shared global
+        // slot so reads, writes and unset of elements act on the real global.
+        for (i, cv_name) in op_array.cv_names.iter().enumerate() {
+            if is_auto_global_name(cv_name) && matches!(cvs.get(i), Some(Value::Undef)) {
+                if let Some(gv) = self.globals.get_mut(cv_name.as_slice()) {
+                    let r = match gv {
+                        Value::Reference(r) => r.clone(),
+                        other => {
+                            let r = Rc::new(RefCell::new(std::mem::replace(other, Value::Null)));
+                            *other = Value::Reference(r.clone());
+                            r
+                        }
+                    };
+                    cvs[i] = Value::Reference(r);
+                }
             }
         }
 
@@ -21131,9 +21156,66 @@ impl Vm {
                                 false
                             };
                             if !method_is_static {
-                                // Check if current scope has $this
-                                if let Some(this_val @ Value::Object(_)) = cvs.first() {
-                                    call.args.insert(0, this_val.clone());
+                                // Check if current scope has a compatible $this
+                                let declaring_lower: Option<Vec<u8>> = func_name_lower
+                                    .windows(2)
+                                    .position(|w| w == b"::")
+                                    .and_then(|pos| {
+                                        self.classes.get(&func_name_lower[..pos])
+                                            .and_then(|c| c.get_method(&func_name_lower[pos + 2..]))
+                                            .map(|m| m.declaring_class.iter().map(|b| b.to_ascii_lowercase()).collect())
+                                    });
+                                let caller_this = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                                    match cvs.first() {
+                                        Some(v @ Value::Object(_)) => Some(v.clone()),
+                                        Some(Value::Reference(r)) if matches!(&*r.borrow(), Value::Object(_)) => Some(r.borrow().clone()),
+                                        _ => None,
+                                    }
+                                } else {
+                                    None
+                                };
+                                let compatible = match (&caller_this, &declaring_lower) {
+                                    (Some(Value::Object(o)), Some(decl)) => {
+                                        let oc: Vec<u8> = o.borrow().class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                        oc == *decl || self.class_extends(&oc, decl)
+                                            || self.classes.get(decl).map(|c| c.is_trait).unwrap_or(false)
+                                    }
+                                    (Some(_), None) => true,
+                                    _ => false,
+                                };
+                                if compatible {
+                                    call.args.insert(0, caller_this.unwrap());
+                                } else if declaring_lower.is_some()
+                                    && !func_name_lower.ends_with(b"::__construct")
+                                {
+                                    let orig = call.name.to_string_lossy();
+                                    let (cls, meth) = match orig.find("::") {
+                                        Some(p) => (orig[..p].to_string(), orig[p + 2..].to_string()),
+                                        None => (orig.clone(), String::new()),
+                                    };
+                                    let cls_display = self.classes.get(&func_name_lower[..func_name_lower.windows(2).position(|w| w == b"::").unwrap_or(0)])
+                                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                        .unwrap_or(cls);
+                                    let meth_display = String::from_utf8_lossy(&user_fn.name).to_string();
+                                    let meth_display = if meth_display.is_empty() { meth } else {
+                                        meth_display.rsplit("::").next().unwrap_or(&meth_display).to_string()
+                                    };
+                                    let err_msg = format!("Non-static method {}::{}() cannot be called statically", cls_display, meth_display);
+                                    self.called_class_stack.pop();
+                                    self.class_scope_stack.pop();
+                                    self.is_global_scope = was_global;
+                                    self.call_stack.pop();
+                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) = exception_handlers.last() {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: format!("Uncaught Error: {}", err_msg),
+                                        line: op.line,
+                                    });
                                 }
                             }
                         }
@@ -27874,6 +27956,11 @@ impl Vm {
                 OpCode::UnsetCv => {
                     // Directly replace the CV slot with Undef (breaks reference links)
                     if let OperandType::Cv(idx) = op.op1 {
+                        if let Some(name) = op_array.cv_names.get(idx as usize) {
+                            if is_auto_global_name(name) {
+                                self.globals.remove(name.as_slice());
+                            }
+                        }
                         if let Some(slot) = cvs.get_mut(idx as usize) {
                             crate::gc::possible_root(slot);
                             if let Value::Generator(gen_rc) = slot {
@@ -35395,6 +35482,10 @@ impl Vm {
                             // Try to load the superglobal from vm globals
                             if let Some(global_val) = self.globals.get(name.as_slice()) {
                                 return global_val.clone().deref();
+                            }
+                            if is_auto_global_name(name) {
+                                let varname = String::from_utf8_lossy(name);
+                                self.emit_warning_at(&format!("Undefined global variable ${}", varname), line);
                             }
                         } else {
                             let varname = String::from_utf8_lossy(name);

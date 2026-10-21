@@ -1389,7 +1389,7 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
     // touch $_SERVER themselves typically expect the "Undefined global
     // variable" warning, so don't auto-populate it for them.
     let source_str = std::str::from_utf8(source).unwrap_or("");
-    if source_str.contains("php_cli_server") {
+    {
         use goro_core::array::{ArrayKey, PhpArray};
         let mut server = PhpArray::new();
         let script_name = filename.to_string();
@@ -1397,13 +1397,40 @@ fn execute_php_inner_impl(source: &[u8], ini_settings: &[(String, String)], file
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "phpt".to_string());
+        // The cli_server helper expects web-style script paths; a plain
+        // CLI run reports the script path as given.
+        let self_path = if source_str.contains("php_cli_server") {
+            format!("/{}", base_name)
+        } else {
+            script_name.clone()
+        };
         server.set(
             ArrayKey::String(PhpString::from_bytes(b"PHP_SELF")),
-            Value::String(PhpString::from_string(format!("/{}", base_name))),
+            Value::String(PhpString::from_string(self_path.clone())),
         );
         server.set(
             ArrayKey::String(PhpString::from_bytes(b"SCRIPT_NAME")),
-            Value::String(PhpString::from_string(format!("/{}", base_name))),
+            Value::String(PhpString::from_string(self_path)),
+        );
+        server.set(
+            ArrayKey::String(PhpString::from_bytes(b"PATH_TRANSLATED")),
+            Value::String(PhpString::from_string(script_name.clone())),
+        );
+        server.set(
+            ArrayKey::String(PhpString::from_bytes(b"DOCUMENT_ROOT")),
+            Value::String(PhpString::from_bytes(b"")),
+        );
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        server.set(
+            ArrayKey::String(PhpString::from_bytes(b"REQUEST_TIME_FLOAT")),
+            Value::Double(now),
+        );
+        server.set(
+            ArrayKey::String(PhpString::from_bytes(b"REQUEST_TIME")),
+            Value::Long(now as i64),
         );
         server.set(
             ArrayKey::String(PhpString::from_bytes(b"SCRIPT_FILENAME")),
