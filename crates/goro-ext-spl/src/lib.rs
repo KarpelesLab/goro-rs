@@ -550,31 +550,58 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // --- Class introspection functions ---
 
-fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let (class_name, from_string) = match args.first().unwrap_or(&Value::Null) {
+/// Common argument handling of class_implements/class_parents/class_uses:
+/// Ok(Some(class name)), Ok(None) after the "does not exist" warning, or a
+/// TypeError for invalid argument types.
+fn class_arg(vm: &mut Vm, fname: &str, args: &[Value]) -> Result<Option<(Vec<u8>, bool)>, VmError> {
+    let (class_name, from_string) = match args.first().map(|v| v.deref()).unwrap_or(Value::Null) {
         Value::String(s) => (s.as_bytes().to_vec(), true),
         Value::Object(obj) => (obj.borrow().class_name.clone(), false),
-        _ => return Ok(Value::False),
+        other => {
+            let msg = format!(
+                "{}(): Argument #1 ($object_or_class) must be of type object|string, {} given",
+                fname,
+                Vm::value_type_name(&other)
+            );
+            let line = vm.current_line;
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return Err(VmError { message: msg, line });
+        }
     };
-    let autoload = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
-    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
     if from_string {
-        let exists = vm.classes.contains_key(&class_lower)
-            || vm.is_known_builtin_class(&class_lower);
+        let autoload = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
+        let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        let exists = vm.classes.contains_key(&class_lower) || vm.is_known_builtin_class(&class_lower);
         if !exists {
             if autoload {
                 vm.try_autoload_class(&class_name);
+                if vm.current_exception.is_some() {
+                    return Ok(None);
+                }
             }
-            let still_exists = vm.classes.contains_key(&class_lower)
-                || vm.is_known_builtin_class(&class_lower);
-            if !still_exists {
+            let still = vm.classes.contains_key(&class_lower) || vm.is_known_builtin_class(&class_lower);
+            if !still {
                 let suffix = if autoload { " and could not be loaded" } else { "" };
-                let class_str = String::from_utf8_lossy(&class_name);
-                vm.emit_warning(&format!("class_implements(): Class {} does not exist{}", class_str, suffix));
-                return Ok(Value::False);
+                vm.emit_warning(&format!(
+                    "{}(): Class {} does not exist{}",
+                    fname,
+                    String::from_utf8_lossy(&class_name),
+                    suffix
+                ));
+                return Ok(None);
             }
         }
     }
+    Ok(Some((class_name, from_string)))
+}
+
+fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let class_name = match class_arg(vm, "class_implements", args)? {
+        Some((c, _)) => c,
+        None => return Ok(Value::False),
+    };
+    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
     let mut result = PhpArray::new();
 
     // Get interfaces from the class definition
@@ -631,32 +658,11 @@ fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn class_parents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let (class_name, from_string) = match args.first().unwrap_or(&Value::Null) {
-        Value::String(s) => (s.as_bytes().to_vec(), true),
-        Value::Object(obj) => (obj.borrow().class_name.clone(), false),
-        _ => return Ok(Value::False),
+    let class_name = match class_arg(vm, "class_parents", args)? {
+        Some((c, _)) => c,
+        None => return Ok(Value::False),
     };
-    let autoload = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-    // If the class came from a string argument, it must exist (or be
-    // loadable). PHP emits a warning and returns false otherwise.
-    if from_string {
-        let exists = vm.classes.contains_key(&class_lower)
-            || vm.is_known_builtin_class(&class_lower);
-        if !exists {
-            if autoload {
-                vm.try_autoload_class(&class_name);
-            }
-            let still_exists = vm.classes.contains_key(&class_lower)
-                || vm.is_known_builtin_class(&class_lower);
-            if !still_exists {
-                let suffix = if autoload { " and could not be loaded" } else { "" };
-                let class_str = String::from_utf8_lossy(&class_name);
-                vm.emit_warning(&format!("class_parents(): Class {} does not exist{}", class_str, suffix));
-                return Ok(Value::False);
-            }
-        }
-    }
     let mut result = PhpArray::new();
 
     let mut current = class_lower;
@@ -688,10 +694,9 @@ fn class_parents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn class_uses_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_name = match args.first().unwrap_or(&Value::Null) {
-        Value::String(s) => s.as_bytes().to_vec(),
-        Value::Object(obj) => obj.borrow().class_name.clone(),
-        _ => return Ok(Value::False),
+    let class_name = match class_arg(vm, "class_uses", args)? {
+        Some((c, _)) => c,
+        None => return Ok(Value::False),
     };
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
     let mut result = PhpArray::new();
