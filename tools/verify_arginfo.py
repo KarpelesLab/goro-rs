@@ -373,6 +373,7 @@ def c_bodies():
     for root, dirs, files in os.walk(PHP_SRC):
         if "/tests" in root:
             continue
+        consts = None
         for fn in files:
             if fn.endswith(".c"):
                 try:
@@ -384,7 +385,101 @@ def c_bodies():
                     _C_BODIES.setdefault(key.lower(), []).append(m.group(4))
                 for m in hpat.finditer(txt):
                     _C_HELPERS.setdefault(m.group(1), []).append(m.group(2))
+                if MACRO_FUNC.search(txt):
+                    if consts is None:
+                        consts = dir_int_macros(root, files)
+                    for name, body in macro_functions(txt, consts):
+                        _C_BODIES.setdefault("zif_" + name.lower(), []).append(body)
     return _C_BODIES
+
+
+# A function-like macro whose expansion is a PHP_FUNCTION definition.
+MACRO_FUNC = re.compile(r"^#define\s+\w+\([^)]*\)\s*\\\s*\n\s*(?:static\s+)?(?:PHP|ZEND)_FUNCTION\(", re.M)
+
+
+def dir_int_macros(root, files):
+    """Integer-valued object-like macros (`#define NAME 0x1f`) of the .c/.h
+    files of a directory."""
+    out = {}
+    for fn in files:
+        if fn.endswith((".c", ".h")):
+            try:
+                txt = open(os.path.join(root, fn), errors="replace").read()
+            except OSError:
+                continue
+            for m in re.finditer(r"^#define\s+(\w+)[ \t]+\(?\s*(-?(?:0[xX][0-9a-fA-F]+|\d+))\s*\)?[ \t]*(?:/\*.*?\*/)?[ \t]*$", txt, re.M):
+                out[m.group(1)] = int(m.group(2), 0)
+    return out
+
+
+def macro_functions(txt, consts):
+    """(function name, body) of the PHP_FUNCTIONs that function-like macros
+    define, e.g. ext/zlib's `#define PHP_ZLIB_ENCODE_FUNC(name,
+    default_encoding) PHP_FUNCTION(name) { ... }` invoked as
+    `PHP_ZLIB_ENCODE_FUNC(gzdeflate, PHP_ZLIB_ENCODING_RAW);`: the macro's
+    body with the invocation's arguments substituted, and `if (<argument>)
+    { A } else { B }` folded when the argument is an integer constant (so a
+    body with one zpp block per branch has the single block of that
+    invocation)."""
+    out = []
+    for m in re.finditer(r"^#define\s+(\w+)\(([^)]*)\)((?:[^\n]*\\\n)+[^\n]*)", txt, re.M):
+        mname, params = m.group(1), [x.strip() for x in m.group(2).split(",")]
+        text = re.sub(r"\\\n", "\n", m.group(3))
+        fm = re.search(r"(?:PHP|ZEND)_FUNCTION\(\s*(\w+)\s*\)\s*\{", text)
+        if not fm or fm.group(1) not in params:
+            continue
+        body = brace_block(text, fm.end() - 1)
+        if body is None:
+            continue
+        for inv in re.finditer(r"^%s\(([^)]*)\)" % re.escape(mname), txt, re.M):
+            args = [x.strip() for x in inv.group(1).split(",")]
+            if len(args) != len(params):
+                continue
+            env = dict(zip(params, args))
+            b = re.sub(r"\b(%s)\b" % "|".join(map(re.escape, params)), lambda x: env[x.group(1)], body)
+            out.append((env[fm.group(1)], fold_ifs(b, consts)))
+    return out
+
+
+def brace_block(text, start):
+    """The text inside the brace block opening at text[start] == "{"."""
+    depth = 0
+    for i in range(start, len(text)):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:i]
+    return None
+
+
+def fold_ifs(body, consts):
+    """Fold `if (<integer constant>) { A } else { B }` to A or B."""
+    while True:
+        for m in re.finditer(r"\bif\s*\(\s*(-?\w+)\s*\)\s*\{", body):
+            c = m.group(1)
+            try:
+                val = int(c, 0)
+            except ValueError:
+                if c not in consts:
+                    continue
+                val = consts[c]
+            then = brace_block(body, m.end() - 1)
+            if then is None:
+                continue
+            end = m.end() + len(then) + 1
+            other, tail = "", end
+            rest = re.match(r"\s*else\s*\{", body[end:])
+            if rest:
+                other = brace_block(body, end + rest.end() - 1)
+                if other is None:
+                    continue
+                tail = end + rest.end() + len(other) + 1
+            body = body[:m.start()] + (then if val else other) + body[tail:]
+            break
+        else:
+            return body
 
 
 _C_HELPERS = {}
