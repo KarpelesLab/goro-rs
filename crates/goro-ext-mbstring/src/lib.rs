@@ -1,3 +1,7 @@
+pub mod mbfl;
+pub mod mbstring;
+pub mod state;
+pub mod zpp;
 use std::cell::RefCell;
 use std::rc::Rc;
 use goro_core::array::{ArrayKey, PhpArray};
@@ -71,6 +75,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_ereg_search_setpos", mb_ereg_search_setpos_fn);
     vm.register_function(b"mb_split", mb_split_fn);
     vm.register_function(b"mb_send_mail", mb_send_mail_fn);
+    // New libmbfl-based implementations (override the legacy ones above)
+    if std::env::var_os("GORO_MB_NEW").is_some() { mbstring::register(vm); }
 
     // Register parameter names for named argument support
     vm.builtin_param_names.insert(b"mb_strcut".to_vec(), vec![b"string".to_vec(), b"start".to_vec(), b"length".to_vec(), b"encoding".to_vec()]);
