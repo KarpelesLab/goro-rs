@@ -3078,10 +3078,15 @@ impl Vm {
     #[inline]
     pub fn alloc_object_id(&mut self) -> u64 {
         // Try global drop-recycled pool first (most PHP-accurate).
+        // An id may have been recorded in both pools (explicit unset + Drop);
+        // drop any duplicate so it is never handed out twice.
         if let Some(id) = crate::object::FREED_OBJECT_IDS.with(|ids| ids.borrow_mut().pop()) {
+            self.free_object_ids.retain(|&x| x != id);
+            crate::object::FREED_OBJECT_IDS.with(|ids| ids.borrow_mut().retain(|&x| x != id));
             return id;
         }
         if let Some(id) = self.free_object_ids.pop() {
+            self.free_object_ids.retain(|&x| x != id);
             return id;
         }
         let id = self.next_object_id;
