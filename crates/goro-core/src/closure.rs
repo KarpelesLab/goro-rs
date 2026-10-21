@@ -289,7 +289,7 @@ impl Vm {
                     statics.set(k, v);
                 }
             }
-            if statics.len() > 0 {
+            if !statics.is_empty() {
                 props.push((
                     b"static".to_vec(),
                     Value::Array(Rc::new(RefCell::new(statics))),
@@ -602,13 +602,7 @@ impl Vm {
             Value::String(s) => {
                 let b = s.as_bytes().to_vec();
                 if let Some(p) = b.windows(2).position(|w| w == b"::") {
-                    return self.fcc_static(
-                        &b[..p].to_vec(),
-                        &b[p + 2..].to_vec(),
-                        None,
-                        wrapper,
-                        scope,
-                    );
+                    return self.fcc_static(&b[..p], &b[p + 2..], None, wrapper, scope);
                 }
                 self.fcc_function(&b, false)
             }
@@ -624,13 +618,9 @@ impl Vm {
                     (Some(o @ Value::Object(_)), Some(Value::String(m))) => {
                         self.fcc_method(o, m.as_bytes(), wrapper, scope)
                     }
-                    (Some(Value::String(c)), Some(Value::String(m))) => self.fcc_static(
-                        &c.as_bytes().to_vec(),
-                        &m.as_bytes().to_vec(),
-                        None,
-                        wrapper,
-                        scope,
-                    ),
+                    (Some(Value::String(c)), Some(Value::String(m))) => {
+                        self.fcc_static(c.as_bytes(), m.as_bytes(), None, wrapper, scope)
+                    }
                     _ => Err((
                         b"Error",
                         "Array callback must have exactly two elements".to_string(),
@@ -863,14 +853,13 @@ impl Vm {
                 }
                 match bound_this {
                     Some(t) => {
-                        let key = lower(&n);
-                        if !self.user_functions.contains_key(&key) {
+                        self.user_functions.entry(lower(&n)).or_insert_with(|| {
                             let mut op = op;
                             if op.attributes.is_empty() && !attrs.is_empty() {
                                 op.attributes = attrs;
                             }
-                            self.user_functions.insert(key, op);
-                        }
+                            op
+                        });
                         let mut arr = PhpArray::new();
                         arr.push(str_val(&n));
                         arr.push(t);
@@ -1046,7 +1035,7 @@ impl Vm {
                 let b = s.as_bytes().to_vec();
                 if let Some(p) = b.windows(2).position(|w| w == b"::") {
                     let cls = self.callable_class_relative(&b[..p], scope.as_deref())?;
-                    return self.from_callable_method(&cls, &b[p + 2..], None, this, scope);
+                    return self.resolve_callable_method(&cls, &b[p + 2..], None, this, scope);
                 }
                 let name = b.strip_prefix(b"\\").unwrap_or(&b).to_vec();
                 let l = lower(&name);
@@ -1094,11 +1083,17 @@ impl Vm {
                             ),
                             None => (ocls, m.clone()),
                         };
-                        self.from_callable_method(&cls, &meth, Some(Value::Object(o)), None, scope)
+                        self.resolve_callable_method(
+                            &cls,
+                            &meth,
+                            Some(Value::Object(o)),
+                            None,
+                            scope,
+                        )
                     }
                     Some(Value::String(c)) => {
                         let cls = self.callable_class_relative(c.as_bytes(), scope.as_deref())?;
-                        self.from_callable_method(&cls, &m, None, this, scope)
+                        self.resolve_callable_method(&cls, &m, None, this, scope)
                     }
                     _ => Err("first array member is not a valid class name or object".to_string()),
                 }
@@ -1111,7 +1106,13 @@ impl Vm {
                     .map(|c| c.get_method(b"__invoke").is_some())
                     .unwrap_or(false);
                 if has_invoke {
-                    self.from_callable_method(&cn, b"__invoke", Some(callable.clone()), None, scope)
+                    self.resolve_callable_method(
+                        &cn,
+                        b"__invoke",
+                        Some(callable.clone()),
+                        None,
+                        scope,
+                    )
                 } else {
                     Err("no array or string given".to_string())
                 }
@@ -1120,7 +1121,7 @@ impl Vm {
         }
     }
 
-    fn from_callable_method(
+    fn resolve_callable_method(
         &mut self,
         cls: &[u8],
         m: &[u8],
@@ -1271,14 +1272,9 @@ impl Vm {
         }
         // __call/__callStatic trampolines: the target is "Class::method".
         let target: Vec<u8> = if is_tramp {
-            match self
-                .user_functions
+            self.user_functions
                 .get(&lower(&name))
-                .and_then(|o| o.fcc_target_name.clone())
-            {
-                Some(t) => t,
-                None => return None,
-            }
+                .and_then(|o| o.fcc_target_name.clone())?
         } else {
             name.clone()
         };
@@ -1501,7 +1497,7 @@ impl Vm {
             nop.name = new_name.clone();
             nop.scope_class = frame_scope.cloned();
             nop.closure_called_class = called;
-            self.user_functions.insert(nl, nop);
+            self.user_functions.entry(nl).or_insert(nop);
         }
         if caps.is_empty() {
             return str_val(&new_name);

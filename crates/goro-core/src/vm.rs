@@ -4923,15 +4923,15 @@ impl Vm {
 
     /// Scope for a closure invoked imperatively (callbacks): its scope class
     /// and called class (the bound $this's class, else the scope).
-    pub(crate) fn closure_frame_enter(&mut self, op_array: &OpArray, cvs: &[Value]) -> bool {
+    pub(crate) fn closure_frame_enter(&mut self, op_array: &OpArray, cvs: &[Value]) -> u8 {
         if !crate::closure::is_closure_fn_name(&op_array.name)
             && !op_array.name.starts_with(b"__closure_fcc_")
         {
-            return false;
+            return 0;
         }
         let scope = match &op_array.scope_class {
             Some(s) => s.clone(),
-            None => return false,
+            None => return 0,
         };
         let called = match (op_array.cv_names.first().map(|n| n.as_slice()), cvs.first()) {
             (Some(b"this"), Some(Value::Object(o))) => o.borrow().class_name.clone(),
@@ -4944,11 +4944,11 @@ impl Vm {
         };
         self.class_scope_stack.push(scope);
         self.called_class_stack.push(called);
-        true
+        2
     }
 
-    pub(crate) fn closure_frame_leave(&mut self, pushed: bool) {
-        if pushed {
+    pub(crate) fn closure_frame_leave(&mut self, pushed: u8) {
+        if pushed >= 2 {
             self.class_scope_stack.pop();
             self.called_class_stack.pop();
         }
