@@ -12124,6 +12124,17 @@ impl Vm {
                         v.clone(),
                     );
                 }
+                // A global frame suspended in a builtin call (e.g. a callback
+                // invoked by a builtin) holds the current global values.
+                if let Some((stash_cvs, names)) = self.global_cv_stash.as_ref() {
+                    // SAFETY: see global_stash_get.
+                    let names = unsafe { &*names.0 };
+                    for (n, v) in names.iter().zip(stash_cvs.iter()) {
+                        if !matches!(v, Value::Undef) && n.as_slice() != b"GLOBALS" {
+                            globals_arr.set(ArrayKey::String(PhpString::from_vec(n.clone())), v.clone());
+                        }
+                    }
+                }
                 if i < cvs.len() {
                     cvs[i] = Value::Array(Rc::new(RefCell::new(globals_arr)));
                 }
