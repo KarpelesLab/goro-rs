@@ -12587,6 +12587,18 @@ fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             });
         }
+        // sapi_header_op(): a script setting Content-Length cannot know the
+        // compressed size, so zlib output compression is switched off
+        // (req #44164).
+        if name.eq_ignore_ascii_case(b"Content-Length") {
+            let key = b"zlib.output_compression".to_vec();
+            if let Some(hook) = _vm.ini_set_hooks.get(&key).copied() {
+                let zero = Value::String(PhpString::from_bytes(b"0"));
+                if hook(_vm, &key, &zero) {
+                    _vm.constants.insert(key, zero);
+                }
+            }
+        }
         if replace {
             // Remove existing headers with the same name (case-insensitive)
             SENT_HEADERS.with(|h| {

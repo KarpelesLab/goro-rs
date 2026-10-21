@@ -1248,6 +1248,16 @@ pub fn parse_str_into(vm: &mut Vm, data: &[u8], arr: &Rc<RefCell<PhpArray>>) {
 }
 
 pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
+    // php_request_startup(): SAPI_PHP_VERSION_HEADER (the CLI SAPI has
+    // no headers).
+    if req.cgi && ini_bool(ini("expose_php"), true) {
+        let version = vm
+            .constants
+            .get(b"PHP_VERSION".as_slice())
+            .map(|v| v.to_php_string().to_string_lossy())
+            .unwrap_or_default();
+        crate::misc::sapi_add_header(format!("X-Powered-By: PHP/{}", version).as_bytes(), true);
+    }
     let variables_order = ini("variables_order").unwrap_or_else(|| "EGPCS".to_string());
     let has = |c: char| variables_order.chars().any(|x| x.eq_ignore_ascii_case(&c));
     let max_vars = ini("max_input_vars")

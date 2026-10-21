@@ -49,12 +49,17 @@ fn initbuf_size(s: usize) -> usize {
 /// returns `Some(output)` to replace the data or `None` to pass it through.
 pub type ObInternalFn = fn(&mut Vm, &[u8], i64) -> Option<Vec<u8>>;
 
+/// Internal handler that can fail: `Some(output)` is SUCCESS, `None` is
+/// FAILURE (the handler gets disabled and its input passes through).
+pub type ObInternalFallibleFn = fn(&mut Vm, &[u8], i64) -> Option<Vec<u8>>;
+
 #[derive(Clone)]
 pub enum ObKind {
     Default,
     Devnull,
     User(Value),
     Internal(ObInternalFn),
+    InternalFallible(ObInternalFallibleFn),
 }
 
 #[derive(Clone)]
@@ -335,6 +340,24 @@ impl Vm {
                     ObStatus::Success
                 } else {
                     ObStatus::NoData
+                };
+                if self.ob_index_of(id).is_none() {
+                    still_have_handler = false;
+                }
+            }
+            ObKind::InternalFallible(f) => {
+                let data = self.ob_stack[idx].clone();
+                status = match f(self, &data, ctx.op) {
+                    Some(out) => {
+                        let empty = out.is_empty();
+                        ctx.out = Some(out);
+                        if empty {
+                            ObStatus::NoData
+                        } else {
+                            ObStatus::Success
+                        }
+                    }
+                    None => ObStatus::Failure,
                 };
                 if self.ob_index_of(id).is_none() {
                     still_have_handler = false;

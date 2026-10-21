@@ -35,6 +35,79 @@ pub fn register(vm: &mut Vm) {
     }
 }
 
+/// php_output_handler_alias_ctor_t: builds the internal handler an alias
+/// name stands for (name, chunk_size, flags).
+pub type ObAliasCtor = fn(&mut Vm, &[u8], usize, i64) -> Option<ObHandler>;
+
+/// php_output_handler_conflict_check_t: Ok to start handler `name`?
+pub type ObConflictCheck = fn(&mut Vm, &[u8]) -> bool;
+
+thread_local! {
+    /// php_output_handler_aliases
+    static OB_ALIASES: RefCell<Vec<(Vec<u8>, ObAliasCtor)>> = const { RefCell::new(Vec::new()) };
+    /// php_output_handler_conflicts
+    static OB_CONFLICTS: RefCell<Vec<(Vec<u8>, ObConflictCheck)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// php_output_handler_alias_register()
+pub fn register_output_handler_alias(name: &[u8], ctor: ObAliasCtor) {
+    OB_ALIASES.with(|a| a.borrow_mut().push((name.to_vec(), ctor)));
+}
+
+/// php_output_handler_conflict_register()
+pub fn register_output_handler_conflict(name: &[u8], check: ObConflictCheck) {
+    OB_CONFLICTS.with(|a| a.borrow_mut().push((name.to_vec(), check)));
+}
+
+fn output_handler_alias(name: &[u8]) -> Option<ObAliasCtor> {
+    OB_ALIASES.with(|a| {
+        a.borrow()
+            .iter()
+            .find(|(n, _)| n.as_slice() == name)
+            .map(|(_, f)| *f)
+    })
+}
+
+/// php_output_handler_start(): run the conflict checks, then start.
+pub fn output_handler_start(vm: &mut Vm, handler: Option<ObHandler>) -> bool {
+    if let Some(h) = &handler {
+        let check = OB_CONFLICTS.with(|a| {
+            a.borrow()
+                .iter()
+                .find(|(n, _)| n.as_slice() == h.name.as_slice())
+                .map(|(_, f)| *f)
+        });
+        if let Some(check) = check {
+            let name = h.name.clone();
+            if !check(vm, &name) {
+                return false;
+            }
+        }
+    }
+    vm.ob_handler_start(handler)
+}
+
+/// php_output_handler_create_user() for a callable or alias name.
+fn create_user_handler(
+    vm: &mut Vm,
+    cb: &Value,
+    chunk: usize,
+    flags: i64,
+) -> Result<Option<ObHandler>, String> {
+    if let Value::String(n) = cb {
+        if let Some(ctor) = output_handler_alias(n.as_bytes()) {
+            return Ok(ctor(vm, n.as_bytes(), chunk, flags));
+        }
+    }
+    let name = ob_callable_name(vm, cb)?;
+    Ok(Some(Vm::ob_make_handler(
+        name,
+        ObKind::User(cb.clone()),
+        chunk,
+        flags,
+    )))
+}
+
 /// php_request_startup(): start the `output_handler` INI handler, or a
 /// default buffer when `output_buffering` is enabled.
 pub fn request_startup(vm: &mut Vm) {
@@ -46,8 +119,8 @@ pub fn request_startup(vm: &mut Vm) {
     let handler = ini(vm, b"output_handler").unwrap_or_default();
     if !handler.is_empty() {
         let cb = Value::String(PhpString::from_string(handler.clone()));
-        let h = match ob_callable_name(vm, &cb) {
-            Ok(name) => Some(Vm::ob_make_handler(name, ObKind::User(cb), 0, OBH_STDFLAGS)),
+        let h = match create_user_handler(vm, &cb, 0, OBH_STDFLAGS) {
+            Ok(h) => h,
             Err(e) => {
                 vm.write_output(
                     format!("\nWarning: (null)(): {} in Unknown on line 0\n", e).as_bytes(),
@@ -55,7 +128,7 @@ pub fn request_startup(vm: &mut Vm) {
                 None
             }
         };
-        vm.ob_handler_start(h);
+        output_handler_start(vm, h);
         return;
     }
     let ob = ini(vm, b"output_buffering").unwrap_or_default();
@@ -289,20 +362,15 @@ fn ob_start(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 chunk,
                 flags,
             )),
-            _ => match ob_callable_name(vm, &cb) {
-                Ok(name) => Some(Vm::ob_make_handler(
-                    name,
-                    ObKind::User(cb.clone()),
-                    chunk,
-                    flags,
-                )),
+            _ => match create_user_handler(vm, &cb, chunk, flags) {
+                Ok(h) => h,
                 Err(e) => {
                     vm.emit_warning(&format!("ob_start(): {}", e));
                     None
                 }
             },
         };
-        let ok = vm.ob_handler_start(handler);
+        let ok = output_handler_start(vm, handler);
         if vm.ob_pending_fatal.is_some() {
             return Value::False;
         }

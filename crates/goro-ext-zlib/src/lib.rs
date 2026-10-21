@@ -1,8 +1,9 @@
 use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::vm::{Vm, VmError};
+use goro_core::vm::Vm;
 
 mod codec;
+mod output;
 
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"zlib");
@@ -14,8 +15,8 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"gzdecode", codec::gzdecode);
     vm.register_function(b"zlib_encode", codec::zlib_encode);
     vm.register_function(b"zlib_decode", codec::zlib_decode);
-    vm.register_function(b"zlib_get_coding_type", zlib_get_coding_type);
-    vm.register_function(b"ob_gzhandler", ob_gzhandler_fn);
+    vm.register_function(b"zlib_get_coding_type", output::zlib_get_coding_type);
+    vm.register_function(b"ob_gzhandler", output::ob_gzhandler);
 
     // gzopen() & co. and the gz* aliases of the stream functions are served
     // by the stream layer of ext/standard.
@@ -192,16 +193,5 @@ pub fn register(vm: &mut Vm) {
         Value::String(PhpString::from_bytes(goro_zlib::ZLIB_VERSION.as_bytes())),
     );
     codec::register_classes(vm);
-}
-
-fn zlib_get_coding_type(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // In CLI mode, no content encoding is active
-    Ok(Value::False)
-}
-
-fn ob_gzhandler_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // ob_gzhandler($data, $flags) - we don't actually compress, just pass through
-    // since we have no way to know the Accept-Encoding header
-    let data = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(Value::String(data))
+    output::register(vm);
 }

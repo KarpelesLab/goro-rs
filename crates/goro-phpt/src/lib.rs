@@ -386,7 +386,15 @@ pub fn run_test_with_dir_and_filename(
     if let Some(skipif) = test.skipif_section() {
         let skipif_trimmed = skipif.trim();
         if !skipif_trimmed.is_empty() {
-            match execute_php_with_timeout(skipif_trimmed.as_bytes(), 5, test_dir, &ini_settings) {
+            // run-tests.php runs SKIPIF before merging the test's --INI--,
+            // with output_handler= and zlib.output_compression=Off: an
+            // output handler must not mangle the "skip" message.
+            let skipif_ini: Vec<(String, String)> = ini_settings
+                .iter()
+                .filter(|(k, _)| k != "output_handler" && k != "zlib.output_compression")
+                .cloned()
+                .collect();
+            match execute_php_with_timeout(skipif_trimmed.as_bytes(), 5, test_dir, &skipif_ini) {
                 Ok(output) => {
                     let output_str = String::from_utf8_lossy(&output).to_lowercase();
                     if output_str.contains("skip") {
@@ -1756,6 +1764,15 @@ fn execute_php_inner_impl(
                 if !k.is_empty() && !v.is_empty() {
                     unsafe {
                         std::env::set_var(k, v);
+                    }
+                    // The child's environment is imported into $_SERVER.
+                    if let Some(Value::Array(server)) = vm.get_global(b"_SERVER") {
+                        server.borrow_mut().set(
+                            goro_core::array::ArrayKey::String(PhpString::from_string(
+                                k.to_string(),
+                            )),
+                            Value::String(PhpString::from_string(v.to_string())),
+                        );
                     }
                 }
             }
