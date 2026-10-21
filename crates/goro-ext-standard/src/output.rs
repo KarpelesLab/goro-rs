@@ -1237,7 +1237,11 @@ fn var_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u6
                 // classes, keep the full internal name (including the NUL-byte
                 // separator and file:line suffix) so that the debug output matches
                 // PHP's "class@anonymous<NUL>/file.php:line$counter::method" layout.
-                let class_display = String::from_utf8_lossy(scope).to_string();
+                // The scope may be stored lowercased: show the declared name.
+                let class_display = match vm.classes.get(&scope.to_ascii_lowercase()) {
+                    Some(ce) => String::from_utf8_lossy(&ce.name).to_string(),
+                    None => String::from_utf8_lossy(scope).to_string(),
+                };
                 format!("{}::{}", class_display, raw_name)
             } else {
                 raw_name
