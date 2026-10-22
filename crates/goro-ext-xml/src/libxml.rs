@@ -20,6 +20,8 @@ struct State {
     pending: String,
     entity_loader: Option<Value>,
     streams_context: Option<Value>,
+    /// LIBXML(entity_loader_disabled)
+    entity_loader_disabled: bool,
 }
 
 thread_local! {
@@ -116,6 +118,11 @@ pub fn user_entity_load(
             }
         },
     }
+}
+
+/// LIBXML(entity_loader_disabled): libxml_disable_entity_loader(true).
+pub fn entity_loader_disabled() -> bool {
+    STATE.with(|s| s.borrow().entity_loader_disabled)
 }
 
 /// The stream context set with libxml_set_streams_context().
@@ -358,9 +365,13 @@ fn libxml_set_streams_context(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     }
 }
 
-fn libxml_disable_entity_loader(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn libxml_disable_entity_loader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     vm.emit_deprecated("Function libxml_disable_entity_loader() is deprecated since 8.0, as external entity loading is disabled by default");
-    Ok(Value::False)
+    let disable = args.first().map(|v| v.deref().is_truthy()).unwrap_or(true);
+    // php_libxml_disable_entity_loader()
+    let old =
+        STATE.with(|s| std::mem::replace(&mut s.borrow_mut().entity_loader_disabled, disable));
+    Ok(if old { Value::True } else { Value::False })
 }
 
 fn libxml_set_external_entity_loader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

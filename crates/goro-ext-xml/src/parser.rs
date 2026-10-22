@@ -5995,6 +5995,10 @@ pub fn set_ext_loader(l: Option<ExtLoader>) -> Option<ExtLoader> {
 
 /// The default loader: local files (plain paths or file:// URLs).
 pub fn default_ext_load(url: &str) -> ExtLoadResult {
+    // php_libxml_input_buffer_create_filename(): libxml_disable_entity_loader()
+    if crate::libxml::entity_loader_disabled() {
+        return Err(None);
+    }
     let path = if let Some(rest) = url.strip_prefix("file://") {
         let rest = rest.strip_prefix("localhost").unwrap_or(rest);
         percent_decode_str(rest)

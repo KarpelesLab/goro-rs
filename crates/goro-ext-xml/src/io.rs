@@ -70,6 +70,10 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
         }
         return r;
     }
+    // php_libxml_input_buffer_create_filename()
+    if crate::libxml::entity_loader_disabled() {
+        return None;
+    }
     let path = strip_file_scheme(filename);
     let lower = filename.to_ascii_lowercase();
     if lower == "php://memory" || lower.starts_with("php://temp") {
@@ -92,6 +96,10 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
             Ok(Value::String(s)) => Some(s.as_bytes().to_vec()),
             _ => None,
         };
+    }
+    // The plain files wrapper (without REPORT_ERRORS) checks open_basedir.
+    if !goro_core::basedir::check_open_basedir_ex(vm, "", &path, false) {
+        return None;
     }
     let full = resolve_path(vm, &path);
     std::fs::read(&full).ok()
