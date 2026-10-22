@@ -1457,17 +1457,78 @@ fn crypt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 // ---------- password.c ----------
 
-#[derive(Clone, Copy, PartialEq)]
-enum PasswordAlgo {
-    Bcrypt,
+/// Options array of password_hash() / password_needs_rehash().
+pub type PasswordOptions<'a> = Option<&'a Rc<RefCell<PhpArray>>>;
+
+/// A password hashing algorithm registered by another extension
+/// (php_password_algo, php_password_algo_register()): ext/sodium's argon2i
+/// and argon2id. `hash` returns Ok(None) on failure, with an exception
+/// pending or not ("Password hashing failed for unknown reason").
+pub struct PasswordAlgoHandler {
+    pub name: &'static str,
+    pub hash: fn(&mut Vm, &[u8], PasswordOptions) -> Result<Option<Vec<u8>>, VmError>,
+    pub verify: fn(&[u8], &[u8]) -> bool,
+    pub needs_rehash: fn(&mut Vm, &[u8], PasswordOptions) -> bool,
+    pub get_info: fn(&mut PhpArray, &[u8]),
 }
 
-/// The registered password algorithms (php_password_algos); argon2 is not built.
+type AlgoEntry = (&'static [u8], &'static PasswordAlgoHandler);
+
+static EXT_PASSWORD_ALGOS: std::sync::Mutex<Vec<AlgoEntry>> = std::sync::Mutex::new(Vec::new());
+
+fn ext_password_algos() -> Vec<AlgoEntry> {
+    EXT_PASSWORD_ALGOS
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default()
+}
+
+/// php_password_algo_register(): false when `ident` is taken.
+pub fn password_algo_register(ident: &'static [u8], algo: &'static PasswordAlgoHandler) -> bool {
+    if ident == b"2y" {
+        return false;
+    }
+    let Ok(mut g) = EXT_PASSWORD_ALGOS.lock() else {
+        return false;
+    };
+    if g.iter().any(|(i, _)| *i == ident) {
+        return false;
+    }
+    g.push((ident, algo));
+    true
+}
+
+/// php_password_algo_find() for another extension: whether `ident` is
+/// registered.
+pub fn password_algo_registered(ident: &[u8]) -> bool {
+    password_algo_find(ident).is_some()
+}
+
+#[derive(Clone, Copy)]
+enum PasswordAlgo {
+    Bcrypt,
+    Ext(&'static PasswordAlgoHandler),
+}
+
+impl PartialEq for PasswordAlgo {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PasswordAlgo::Bcrypt, PasswordAlgo::Bcrypt) => true,
+            (PasswordAlgo::Ext(a), PasswordAlgo::Ext(b)) => std::ptr::eq(*a, *b),
+            _ => false,
+        }
+    }
+}
+
+/// The registered password algorithms (php_password_algos).
 fn password_algo_find(ident: &[u8]) -> Option<PasswordAlgo> {
     if ident == b"2y" {
         Some(PasswordAlgo::Bcrypt)
     } else {
-        None
+        ext_password_algos()
+            .into_iter()
+            .find(|(i, _)| *i == ident)
+            .map(|(_, a)| PasswordAlgo::Ext(a))
     }
 }
 
@@ -1496,6 +1557,8 @@ fn password_algo_valid(algo: PasswordAlgo, hash: &[u8]) -> bool {
         PasswordAlgo::Bcrypt => {
             hash.len() == 60 && hash[0] == b'$' && hash[1] == b'2' && hash[2] == b'y'
         }
+        // (no `valid` handler)
+        PasswordAlgo::Ext(_) => true,
     }
 }
 
@@ -1536,7 +1599,8 @@ fn bcrypt_scan_cost(hash: &[u8], default: i64) -> i64 {
     if neg { v.wrapping_neg() } else { v }
 }
 
-fn option_long(vm: &mut Vm, options: Option<&Rc<RefCell<PhpArray>>>, key: &[u8]) -> Option<i64> {
+/// zval_get_long() of `options[key]`, None when it is not set.
+pub fn option_long(vm: &mut Vm, options: PasswordOptions, key: &[u8]) -> Option<i64> {
     let v = options.and_then(|o| o.borrow().get_str(key).cloned())?;
     let v = v.deref();
     Some(match &v {
@@ -1702,9 +1766,11 @@ fn password_hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let digest = match algo {
         PasswordAlgo::Bcrypt => bcrypt_hash(vm, password.as_bytes(), options.as_ref())?,
+        PasswordAlgo::Ext(a) => (a.hash)(vm, password.as_bytes(), options.as_ref())?,
     };
     match digest {
         Some(d) => Ok(Value::String(PhpString::from_vec(d))),
+        None if vm.current_exception.is_some() => Ok(Value::Null),
         None => Err(throw(
             vm,
             b"Error",
@@ -1720,6 +1786,7 @@ fn password_verify_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let hash = zpp_str(vm, F, 1, "hash", &args[1])?;
     let ok = match password_algo_identify_ex(hash.as_bytes(), Some(PasswordAlgo::Bcrypt)) {
         Some(PasswordAlgo::Bcrypt) => bcrypt_verify(password.as_bytes(), hash.as_bytes()),
+        Some(PasswordAlgo::Ext(a)) => (a.verify)(password.as_bytes(), hash.as_bytes()),
         None => false,
     };
     Ok(if ok { Value::True } else { Value::False })
@@ -1755,6 +1822,13 @@ fn password_get_info_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         key(b"cost"),
                         Value::Long(bcrypt_scan_cost(hash, PHP_PASSWORD_BCRYPT_COST)),
                     );
+                }
+                PasswordAlgo::Ext(e) => {
+                    ret.set(
+                        key(b"algoName"),
+                        Value::String(PhpString::from_bytes(e.name.as_bytes())),
+                    );
+                    (e.get_info)(&mut options, hash);
                 }
             }
             ret.set(key(b"options"), new_array(options));
@@ -1794,6 +1868,7 @@ fn password_needs_rehash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 option_long(vm, options.as_ref(), b"cost").unwrap_or(PHP_PASSWORD_BCRYPT_COST);
             old_cost != new_cost
         }
+        PasswordAlgo::Ext(a) => (a.needs_rehash)(vm, hash.as_bytes(), options.as_ref()),
     };
     Ok(if needs { Value::True } else { Value::False })
 }
@@ -1802,6 +1877,9 @@ fn password_algos_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     check_arg_count(vm, "password_algos", args, 0, 0)?;
     let mut arr = PhpArray::new();
     arr.push(Value::String(PhpString::from_bytes(b"2y")));
+    for (ident, _) in ext_password_algos() {
+        arr.push(Value::String(PhpString::from_bytes(ident)));
+    }
     Ok(new_array(arr))
 }
 
