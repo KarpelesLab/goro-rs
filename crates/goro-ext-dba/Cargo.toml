@@ -1,0 +1,12 @@
+[package]
+name = "goro-ext-dba"
+version = "0.1.0"
+edition = "2024"
+description = "PHP dba extension (cdb, cdb_make, inifile and flatfile handlers) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+libc = "0.2"

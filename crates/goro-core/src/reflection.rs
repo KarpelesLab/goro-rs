@@ -10327,6 +10327,7 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
             "DomainException",
         ],
         "bcmath" => &["BcMath\\Number"],
+        "dba" => &["Dba\\Connection"],
         "ftp" => &["FTP\\Connection"],
         "xsl" => &["XSLTProcessor"],
         "shmop" => &["Shmop"],
@@ -10370,6 +10371,7 @@ fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
     match ext {
         "bcmath" => &["bcmath.scale"],
         "gd" => &["gd.jpeg_ignore_warning"],
+        "dba" => &["dba.default_handler"],
         "filter" => &["filter.default", "filter.default_flags"],
         "exif" => &[
             "exif.encode_unicode",

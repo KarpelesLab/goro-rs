@@ -17926,6 +17926,7 @@ const MODULE_ORDER: &[&str] = &[
     "calendar",
     "ctype",
     "curl",
+    "dba",
     "dom",
     "hash",
     "fileinfo",
