@@ -9,6 +9,5 @@ workspace = true
 
 [dependencies]
 goro-core = { path = "../goro-core" }
-num-bigint = "0.4"
-num-traits = "0.2"
-num-integer = "0.1"
+# Only the integer layer: no rationals/floats/polynomials etc.
+puremp = { version = "0.2.5", default-features = false, features = ["std", "int"] }
