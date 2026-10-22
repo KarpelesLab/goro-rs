@@ -36029,6 +36029,15 @@ impl Vm {
                             {
                                 let h = self.foreach_iterator_handle();
                                 foreach_iter_handles.insert(t, h);
+                                // FE_RESET frees a temporary aggregate once
+                                // it has its iterator.
+                                if let OperandType::Tmp(src) = op.op1 {
+                                    if src != t {
+                                        if let Some(slot) = tmps.get_mut(src as usize) {
+                                            *slot = Value::Undef;
+                                        }
+                                    }
+                                }
                             }
                             if let Some(iter_val) = iter_obj {
                                 match &iter_val {
