@@ -35,7 +35,9 @@
 //! * `.conn2 FILE` (open a second connection), `.2 SQL` (run SQL on it,
 //!   rows prefixed with `2: `), `.busy MS` (busy timeout), `.sleep MS`;
 //! * `.auth on|off|deny CODE|ignore CODE`: authorizer printing its calls;
-//! * `.hooks on|off`: update/commit/rollback hooks printing their calls.
+//! * `.hooks on|off`: update/commit/rollback hooks printing their calls;
+//! * `.prep N SQL` (named statement N in 0..7, kept open), `.step N [K]`,
+//!   `.resetn N`, `.final N`: interleaved stepping of several statements.
 
 #![allow(non_snake_case)]
 
@@ -53,6 +55,7 @@ struct Bind {
 }
 
 struct St {
+    named: [Option<StmtId>; 8],
     db2: Option<Box<Sqlite3>>,
     out: std::io::StdoutLock<'static>,
     binds: Vec<Bind>,
@@ -716,6 +719,62 @@ fn meta_command(db: &mut Sqlite3, last: Option<StmtId>, zLine: &[u8], st: &mut S
             let rc = sqlite3_busy_timeout(db, atoi(&az[1]) as i32);
             w(st, format!("busy rc={}\n", rc).as_bytes());
         }
+        b".prep" if n >= 3 => {
+            let id = (atoi(&az[1]) & 7) as usize;
+            let sql = rest(2);
+            if let Some(s0) = st.named[id].take() {
+                sqlite3_finalize(db, s0);
+            }
+            let mut stmt = None;
+            let mut tail = 0usize;
+            let rc = sqlite3_prepare_v2(db, Some(&sql), -1, &mut stmt, &mut tail);
+            st.named[id] = stmt;
+            w(st, format!("prep {} rc={}", id, rc).as_bytes());
+            if rc != 0 {
+                let m = errmsg(db);
+                w(st, b" ");
+                w(st, &m);
+            }
+            w(st, b"\n");
+        }
+        b".step" if n >= 2 => {
+            let id = (atoi(&az[1]) & 7) as usize;
+            let mut cnt = if n >= 3 { atoi(&az[2]) } else { 1 };
+            while let Some(sid) = st.named[id] {
+                if cnt <= 0 {
+                    break;
+                }
+                cnt -= 1;
+                let rc = sqlite3_step(db, sid);
+                if rc == SQLITE_ROW {
+                    w(st, format!("{}: ", id).as_bytes());
+                    print_row(db, sid, st);
+                } else {
+                    w(st, format!("{}: rc={}", id, rc).as_bytes());
+                    if rc != SQLITE_DONE {
+                        let m = errmsg(db);
+                        w(st, b" ");
+                        w(st, &m);
+                    }
+                    w(st, b"\n");
+                    break;
+                }
+            }
+        }
+        b".resetn" if n >= 2 => {
+            let id = (atoi(&az[1]) & 7) as usize;
+            if let Some(sid) = st.named[id] {
+                let rc = sqlite3_reset(db, sid);
+                w(st, format!("resetn {} rc={}\n", id, rc).as_bytes());
+            }
+        }
+        b".final" if n >= 2 => {
+            let id = (atoi(&az[1]) & 7) as usize;
+            if let Some(sid) = st.named[id].take() {
+                let rc = sqlite3_finalize(db, sid);
+                w(st, format!("final {} rc={}\n", id, rc).as_bytes());
+            }
+        }
         b".auth" if n >= 2 => {
             if az[1] == b"off" {
                 goro_sqlite::auth::sqlite3_set_authorizer(db, None);
@@ -822,6 +881,7 @@ fn main() {
         out: std::io::stdout().lock(),
         binds: Vec::new(),
         db2: None,
+        named: [None; 8],
         typed: 0,
         changes: std::env::var_os("SQLTEST_CHANGES").is_some(),
     };
@@ -908,6 +968,11 @@ fn main() {
     }
     if let Some(l) = last.take() {
         sqlite3_finalize(&mut db, l);
+    }
+    for k in 0..8 {
+        if let Some(sid) = st.named[k].take() {
+            sqlite3_finalize(&mut db, sid);
+        }
     }
     if let Some(mut d) = st.db2.take() {
         sqlite3_close(&mut d);
