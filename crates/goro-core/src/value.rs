@@ -1255,6 +1255,9 @@ impl Value {
             (Value::Long(a), Value::Double(b)) | (Value::Double(b), Value::Long(a)) => {
                 *a as f64 == *b
             }
+            // Generator objects have no properties: any two compare equal
+            // (zend_std_compare_objects()).
+            (Value::Generator(_), Value::Generator(_)) => true,
             (Value::String(a), Value::String(b)) => {
                 // PHP 8: if both strings are numeric, compare as numbers
                 // First try comparing as integers (handles large numbers that lose f64 precision)
@@ -1486,6 +1489,7 @@ impl Value {
                 // === for objects means same instance
                 std::ptr::eq(a.as_ptr(), b.as_ptr())
             }
+            (Value::Generator(a), Value::Generator(b)) => Rc::ptr_eq(a, b),
             (Value::Resource(a), Value::Resource(b)) => a == b,
             _ => false,
         }
