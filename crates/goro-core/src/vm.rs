@@ -15587,8 +15587,33 @@ impl Vm {
         }
     }
 
-    /// Max output buffer size (64MB) to prevent OOM from infinite echo loops
-    pub(crate) const MAX_OUTPUT_SIZE: usize = 64 * 1024 * 1024;
+    /// Max size of output held in memory (1 GiB), to prevent OOM from
+    /// infinite echo loops. CLI top-level output is flushed to stdout long
+    /// before that (see `push_top_output`).
+    pub(crate) const MAX_OUTPUT_SIZE: usize = 1024 * 1024 * 1024;
+
+    /// Pending top-level CLI output above this size goes to stdout right away.
+    const CLI_FLUSH_THRESHOLD: usize = 1024 * 1024;
+
+    /// Append to the top-level (unbuffered) output. In the CLI, large
+    /// pending output is written to stdout instead of piling up in memory.
+    pub(crate) fn push_top_output(&mut self, data: &[u8]) {
+        if self.cli_direct_output
+            && self.ob_stack.is_empty()
+            && self.output.len() + data.len() > Self::CLI_FLUSH_THRESHOLD
+        {
+            use std::io::Write;
+            let out = std::mem::take(&mut self.output);
+            let mut so = std::io::stdout().lock();
+            let _ = so.write_all(&out);
+            let _ = so.write_all(data);
+            let _ = so.flush();
+            return;
+        }
+        if self.output.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
+            self.output.extend_from_slice(data);
+        }
+    }
 
     /// The buffer that write_output() currently appends to.
     pub fn active_output_buffer(&mut self) -> &mut Vec<u8> {
@@ -15651,9 +15676,7 @@ impl Vm {
     /// descriptor 1 directly, bypassing the output layer (no output
     /// buffers, no output handlers).
     pub fn write_stdout_stream(&mut self, data: &[u8]) {
-        if self.output.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
-            self.output.extend_from_slice(data);
-        }
+        self.push_top_output(data);
         if self.cli_direct_output && !self.output.is_empty() {
             use std::io::Write;
             let out = std::mem::take(&mut self.output);

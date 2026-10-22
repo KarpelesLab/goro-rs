@@ -167,9 +167,7 @@ impl Vm {
             if !data.is_empty() {
                 self.mark_output_started();
             }
-            if self.output.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
-                self.output.extend_from_slice(data);
-            }
+            self.push_top_output(data);
             if self.cli_write_through {
                 self.flush_cli_output();
             }
@@ -496,8 +494,8 @@ impl Vm {
             if !out.is_empty() {
                 self.mark_output_started();
             }
-            if !out.is_empty() && self.output.len() + out.len() <= Self::MAX_OUTPUT_SIZE {
-                self.output.extend_from_slice(&out);
+            if !out.is_empty() {
+                self.push_top_output(&out);
             }
         }
     }
