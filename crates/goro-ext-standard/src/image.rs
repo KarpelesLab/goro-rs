@@ -198,6 +198,18 @@ fn php_image_type_to_mime_type(image_type: i64) -> &'static str {
     }
 }
 
+/// php_image_type_to_mime_type()
+pub fn image_type_to_mime_type(image_type: i64) -> &'static str {
+    php_image_type_to_mime_type(image_type)
+}
+
+/// php_getimagetype() on the content of a stream (`input` names it in
+/// the "Error reading from" notice).
+pub fn image_type_from_bytes(vm: &mut Vm, func: &str, data: Vec<u8>, input: &[u8]) -> i64 {
+    let mut s = ImgStream::new(data);
+    getimagetype(vm, func, &mut s, input)
+}
+
 fn image_type_to_mime_type_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let t = zpp_long(vm, "image_type_to_mime_type", 1, "image_type", args.first())?;
     Ok(Value::String(PhpString::from_bytes(

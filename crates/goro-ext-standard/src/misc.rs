@@ -9118,7 +9118,7 @@ fn php_dirname_bytes(path: &[u8]) -> Vec<u8> {
 
 /// PHP php_basename for Unix: strips trailing slashes, then returns the
 /// substring from the last slash onward.
-fn php_basename_bytes(path: &[u8]) -> Vec<u8> {
+pub(crate) fn php_basename_bytes(path: &[u8]) -> Vec<u8> {
     if path.is_empty() {
         return Vec::new();
     }
