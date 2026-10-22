@@ -34559,6 +34559,26 @@ impl Vm {
                             line: op.line,
                         });
                     }
+                    // `instanceof self / static / parent` names the scope's class,
+                    // the called class, or the scope's parent.
+                    let class_lower: Vec<u8> = match class_lower.as_slice() {
+                        b"self" => self
+                            .current_class_scope()
+                            .map(|c| c.to_ascii_lowercase())
+                            .unwrap_or(class_lower),
+                        b"static" => self
+                            .called_class_stack
+                            .last()
+                            .map(|c| c.to_ascii_lowercase())
+                            .or_else(|| self.current_class_scope().map(|c| c.to_ascii_lowercase()))
+                            .unwrap_or(class_lower),
+                        b"parent" => self
+                            .current_class_scope()
+                            .and_then(|c| self.classes.get(&c.to_ascii_lowercase()))
+                            .and_then(|ce| ce.parent.as_ref().map(|p| p.to_ascii_lowercase()))
+                            .unwrap_or(class_lower),
+                        _ => class_lower,
+                    };
 
                     let result = if class_lower == b"closure" {
                         // Special case: closures in goro-rs may be strings/arrays, not objects
