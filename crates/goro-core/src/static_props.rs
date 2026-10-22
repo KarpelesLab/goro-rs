@@ -557,6 +557,20 @@ impl Vm {
             Some(Value::Reference(r)) => r.borrow().clone(),
             Some(v) => v.clone(),
         };
+        if let Value::String(s) = &deferred {
+            // A bare constant that is still undefined throws.
+            if let Some(c) = s.as_bytes().strip_prefix(b"__deferred_global_const__::") {
+                let short = c.rsplit(|&b| b == b'\\').next().unwrap_or(c);
+                if self.deferred_global_const(c).is_none()
+                    && crate::stubs::find_constant(short).is_none()
+                {
+                    return Err(SpErr::Throw(
+                        b"Error",
+                        format!("Undefined constant \"{}\"", String::from_utf8_lossy(c)),
+                    ));
+                }
+            }
+        }
         if matches!(&deferred, Value::String(s) if s.as_bytes().starts_with(b"__deferred_")) {
             // A thunk runs in the scope of the class holding the slot (a
             // trait's default: the class using it).
