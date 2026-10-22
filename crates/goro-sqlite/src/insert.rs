@@ -278,8 +278,14 @@ fn readsTable(db: &mut Sqlite3, iDb: i32, pTab: &TableRef) -> bool {
             }
         }
         if isVirtual && opcode == OP_VOpen {
-            // TODO(vtab): C compares pOp->p4.pVtab with sqlite3GetVTable(db,pTab).
-            return true;
+            let pVTab = crate::vtab::sqlite3GetVTable(db, pTab);
+            let same = match (&sqlite3VdbeGetOp(db.v(), i).p4, pVTab) {
+                (P4::Vtab(a), Some(b)) => Rc::ptr_eq(a, &b),
+                _ => false,
+            };
+            if same {
+                return true;
+            }
         }
     }
     false
@@ -433,7 +439,7 @@ pub fn sqlite3ComputeGeneratedColumns(db: &mut Sqlite3, iRegStore: i32, pTab: &T
 fn autoIncBegin(db: &mut Sqlite3, iDb: i32, pTab: &TableRef) -> i32 {
     let mut memId = 0;
     if (pTab.borrow().tabFlags & TF_Autoincrement) != 0 && (db.mDbFlags & DBFLAG_Vacuum) == 0 {
-        let pSeqTab = db.aDb[iDb as usize].pSchema.pSeqTab.clone();
+        let pSeqTab = db.aDb[iDb as usize].pSchema.borrow().pSeqTab.clone();
 
         /* Verify that the sqlite_sequence table exists and is an ordinary
          ** rowid table with exactly two columns.
@@ -581,7 +587,12 @@ pub fn sqlite3AutoincrementBegin(db: &mut Sqlite3) {
     let aAinc = db.ppr().pAinc.clone();
     for p in aAinc.iter() {
         let memId = p.regCtr;
-        let pSeqTab = db.aDb[p.iDb as usize].pSchema.pSeqTab.clone().unwrap();
+        let pSeqTab = db.aDb[p.iDb as usize]
+            .pSchema
+            .borrow()
+            .pSeqTab
+            .clone()
+            .unwrap();
         sqlite3OpenTable(db, 0, p.iDb, &pSeqTab, OP_OpenRead as i32);
         let zName = p.pTab.as_ref().unwrap().borrow().zName.clone();
         sqlite3VdbeLoadString(db.v(), memId - 1, &zName);
@@ -667,7 +678,12 @@ fn autoIncrementEnd(db: &mut Sqlite3) {
         let iRec = sqlite3GetTempReg(db);
         let a = sqlite3VdbeCurrentAddr(db.v()) + 7;
         sqlite3VdbeAddOp3(db.v(), OP_Le, memId + 2, a, memId);
-        let pSeqTab = db.aDb[p.iDb as usize].pSchema.pSeqTab.clone().unwrap();
+        let pSeqTab = db.aDb[p.iDb as usize]
+            .pSchema
+            .borrow()
+            .pSeqTab
+            .clone()
+            .unwrap();
         sqlite3OpenTable(db, 0, p.iDb, &pSeqTab, OP_OpenWrite as i32);
         let v = db.v();
         let a = sqlite3VdbeAddOpList(v, &autoIncEnd, 0);
@@ -1722,16 +1738,15 @@ pub fn sqlite3Insert(
                  ** do the insertion.
                  */
                 if isVirtual {
-                    crate::vtab::sqlite3GetVTable(db, &pTab);
+                    let pVTab = crate::vtab::sqlite3VtabP4(db, &pTab);
                     crate::vtab::sqlite3VtabMakeWritable(db, &pTab);
-                    // TODO(vtab): P4 should be the VTable (P4_VTAB).
                     sqlite3VdbeAddOp4(
                         db.v(),
                         OP_VUpdate,
                         1,
                         nCol + 2,
                         regIns,
-                        P4::None,
+                        pVTab,
                         P4_VTAB as i32,
                     );
                     sqlite3VdbeChangeP5(

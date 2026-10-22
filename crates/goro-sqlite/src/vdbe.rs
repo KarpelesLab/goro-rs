@@ -2270,7 +2270,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             }
             if rc == SQLITE_OK
                 && p5 != 0
-                && (iMeta != p3 || db.aDb[p1 as usize].pSchema.iGeneration != p4_i!())
+                && (iMeta != p3 || db.aDb[p1 as usize].pSchema.borrow().iGeneration != p4_i!())
             {
                 // IMPLEMENTATION-OF: R-03189-51135 As each SQL statement
                 // runs, the schema version is checked to ensure that the
@@ -2280,7 +2280,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
                 // If the schema-cookie from the database file matches the
                 // cookie stored with the in-memory representation of the
                 // schema, do not reload the schema from the database file.
-                if db.aDb[p1 as usize].pSchema.schema_cookie != iMeta {
+                if db.aDb[p1 as usize].pSchema.borrow().schema_cookie != iMeta {
                     crate::build::sqlite3ResetOneSchema(db, p1);
                 }
                 p.expired = 1;
@@ -2314,13 +2314,13 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             if p2 == BTREE_SCHEMA_VERSION {
                 // When the schema cookie changes, record the new cookie
                 // internally
-                db.aDb[p1 as usize].pSchema.schema_cookie =
+                db.aDb[p1 as usize].pSchema.borrow_mut().schema_cookie =
                     (p3 as u32).wrapping_sub(p5 as u32) as i32;
                 db.mDbFlags |= DBFLAG_SchemaChange;
                 crate::fkey::sqlite3FkClearTriggerCache(db, p1);
             } else if p2 == BTREE_FILE_FORMAT {
                 // Record changes in the file format
-                db.aDb[p1 as usize].pSchema.file_format = p3 as u8;
+                db.aDb[p1 as usize].pSchema.borrow_mut().file_format = p3 as u8;
             }
             if p1 == 1 {
                 // Invalidate all prepared statements whenever the TEMP
@@ -3047,8 +3047,11 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             } else if pC.deferredMoveto != 0 {
                 v = pC.movetoTarget;
             } else if pC.eCurType == CURTYPE_VTAB {
-                verr!(db, p, b"virtual tables are not supported");
-                abort!(SQLITE_ERROR);
+                let mut iv = 0i64;
+                let rc = pC.pVCur.as_mut().expect("vtab cursor").xRowid(&mut iv);
+                vcsr_import_errmsg(db, p, p1);
+                chk!(rc);
+                v = iv;
             } else {
                 chk!(sqlite3VdbeCursorRestore(pC));
                 if pC.nullRow != 0 {
@@ -3957,14 +3960,43 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         }
 
         // Opcode: TableLock P1 P2 P3 P4 *
+        // Synopsis: iDb=P1 root=P2 write=P3
         //
-        // Obtain a lock on a particular table.  This opcode is only used
-        // when SQLITE_OMIT_SHARED_CACHE is not defined: a no-op here.
-        OP_TableLock => Ok(Fl::Next),
+        // Obtain a lock on a particular table. This instruction is only used
+        // when the shared-cache feature is enabled.
+        //
+        // P1 is the index of the database in sqlite3.aDb[] of the database
+        // on which the lock is acquired.  A readlock is obtained if P3==0 or
+        // a write lock if P3==1.
+        //
+        // P2 contains the root-page of the table to lock.
+        //
+        // P4 contains a pointer to the name of the table being locked. This
+        // is only used to generate an error message if the lock cannot be
+        // obtained.
+        OP_TableLock => {
+            let isWriteLock = p3 as u8;
+            if isWriteLock != 0 || 0 == (db.flags & SQLITE_ReadUncommit) {
+                debug_assert!(p1 >= 0 && p1 < db.nDb());
+                debug_assert!(isWriteLock == 0 || isWriteLock == 1);
+                let pBt = db.aDb[p1 as usize].pBt.clone().expect("btree");
+                let rc = crate::btree::sqlite3BtreeLockTable(&pBt, p2, isWriteLock);
+                if rc != 0 {
+                    if (rc & 0xFF) == SQLITE_LOCKED {
+                        let z = p4_z!().unwrap_or_default();
+                        verr!(db, p, b"database table is locked: %s", &z);
+                    }
+                    abort!(rc);
+                }
+            }
+            Ok(Fl::Next)
+        }
 
-        // Virtual table opcodes.  Virtual tables are not ported yet.
+        // Virtual table opcodes.
         OP_VBegin | OP_VCreate | OP_VDestroy | OP_VOpen | OP_VCheck | OP_VInitIn | OP_VFilter
-        | OP_VColumn | OP_VNext | OP_VRename | OP_VUpdate => op_vtab_unsupported(db, p, s),
+        | OP_VColumn | OP_VNext | OP_VRename | OP_VUpdate => {
+            op_vtab(db, p, s, pc, opcode, p1, p2, p3, p5)
+        }
 
         // Opcode: Pagecount P1 P2 * * *
         //
@@ -5068,7 +5100,7 @@ fn op_open(
     let wrFlag;
     if opcode == OP_OpenWrite {
         wrFlag = BTREE_WRCSR | (p5 & OPFLAG_FORDELETE) as i32;
-        let ff = db.aDb[iDb as usize].pSchema.file_format;
+        let ff = db.aDb[iDb as usize].pSchema.borrow().file_format;
         if ff < p.minWriteFileFormat {
             p.minWriteFileFormat = ff;
         }
@@ -5771,10 +5803,466 @@ fn op_journalmode(
     Ok(Fl::Next)
 }
 
+/// Import the error messages left by a virtual table cursor method (the
+/// cursor's own message, then the vtab's: C sqlite3VtabImportErrmsg(p,
+/// pVCur->pVtab)).
+fn vcsr_import_errmsg(db: &mut Sqlite3, p: &mut Vdbe, iCur: i32) {
+    let (z, t) = {
+        let c = p.apCsr[iCur as usize]
+            .as_deref_mut()
+            .expect("VDBE cursor not open");
+        (
+            c.pVCur
+                .as_mut()
+                .and_then(|x| x.zErrMsg().and_then(|z| z.take())),
+            c.pVCurTab.clone(),
+        )
+    };
+    if let Some(z) = z {
+        p.zErrMsg = Some(z);
+    }
+    if let Some(t) = t {
+        let vt = t.borrow().pVtab.clone();
+        if let Some(vt) = vt {
+            sqlite3VtabImportErrmsg(db, p, &vt);
+        }
+    }
+}
+
+thread_local! {
+    /// The nullFunc of OP_VColumn.
+    static NULL_FUNC: FuncDefRef = Rc::new(FuncDef {
+        nArg: 0,
+        funcFlags: SQLITE_RESULT_SUBTYPE,
+        pUserData: FuncUserData::None,
+        xSFunc: None,
+        xFinalize: None,
+        xValue: None,
+        xInverse: None,
+        zName: Vec::new(),
+        pDestructor: None,
+    });
+}
+
+/// The P4_VTAB operand of instruction pc.
+fn p4_vtab(p: &Vdbe, pc: i32) -> Option<VTableRef> {
+    match &p.aOp[pc as usize].p4 {
+        P4::Vtab(v) => Some(v.clone()),
+        _ => None,
+    }
+}
+
 /// The virtual-table opcodes (OP_VBegin, OP_VCreate, OP_VDestroy,
 /// OP_VOpen, OP_VCheck, OP_VInitIn, OP_VFilter, OP_VColumn, OP_VNext,
-/// OP_VRename, OP_VUpdate).  Virtual tables are not ported yet.
-fn op_vtab_unsupported(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex> {
-    verr!(db, p, b"virtual tables are not supported");
-    abort_rc!(s, SQLITE_ERROR);
+/// OP_VRename, OP_VUpdate).
+#[allow(clippy::too_many_arguments)]
+fn op_vtab(
+    db: &mut Sqlite3,
+    p: &mut Vdbe,
+    s: &mut ExecState,
+    pc: i32,
+    opcode: u8,
+    p1: i32,
+    p2: i32,
+    p3: i32,
+    p5: u16,
+) -> Result<Fl, Ex> {
+    let encoding = s.encoding;
+    match opcode {
+        // Opcode: VBegin * * * P4 *
+        //
+        // P4 may be a pointer to an sqlite3_vtab structure. If so, call
+        // the xBegin method for that table.
+        //
+        // Also, whether or not P4 is set, check that this is not being
+        // called from within a callback to a virtual table xSync() method.
+        // If it is, the error code will be set to SQLITE_LOCKED.
+        OP_VBegin => {
+            let pVTab = p4_vtab(p, pc);
+            let rc = crate::vtab::sqlite3VtabBegin(db, pVTab.as_ref());
+            if let Some(pVTab) = &pVTab {
+                let vt = pVTab.borrow().pVtab.clone();
+                if let Some(vt) = vt {
+                    sqlite3VtabImportErrmsg(db, p, &vt);
+                }
+            }
+            chk_rc!(s, rc);
+            Ok(Fl::Next)
+        }
+
+        // Opcode: VCreate P1 P2 * * *
+        //
+        // P2 is a register that holds the name of a virtual table in
+        // database P1. Call the xCreate method for that table.
+        OP_VCreate => {
+            let mut sMem = p.aMem[p2 as usize].clone();
+            let zTab = sqlite3_value_text(&mut sMem).map(|z| z.to_vec());
+            let mut rc = SQLITE_OK;
+            if let Some(zTab) = zTab {
+                rc = crate::vtab::sqlite3VtabCallCreate(db, p1, Some(&zTab), &mut p.zErrMsg);
+            }
+            chk_rc!(s, rc);
+            Ok(Fl::Next)
+        }
+
+        // Opcode: VDestroy P1 * * P4 *
+        //
+        // P4 is the name of a virtual table in database P1.  Call the
+        // xDestroy method of that table.
+        OP_VDestroy => {
+            let z = match &p.aOp[pc as usize].p4 {
+                P4::Z(z) => Some(z.clone()),
+                _ => None,
+            };
+            db.nVDestroy += 1;
+            let rc = crate::vtab::sqlite3VtabCallDestroy(db, p1, z.as_deref());
+            db.nVDestroy -= 1;
+            chk_rc!(s, rc);
+            Ok(Fl::Next)
+        }
+
+        // Opcode: VOpen P1 * * P4 *
+        //
+        // P4 is a pointer to a virtual table object, an sqlite3_vtab
+        // structure.  P1 is a cursor number.  This opcode opens a cursor to
+        // the virtual table and stores that cursor in P1.
+        OP_VOpen => {
+            let pVTab = p4_vtab(p, pc).expect("OP_VOpen without P4_VTAB");
+            if let Some(pCur) = p.apCsr[p1 as usize].as_deref() {
+                if pCur.eCurType == CURTYPE_VTAB
+                    && pCur
+                        .pVCurTab
+                        .as_ref()
+                        .is_some_and(|t| Rc::ptr_eq(t, &pVTab))
+                {
+                    // This opcode is a no-op if the cursor is already open
+                    return Ok(Fl::Next);
+                }
+            }
+            let pVtab = pVTab.borrow().pVtab.clone();
+            let Some(pVtab) = pVtab else {
+                abort_rc!(s, SQLITE_LOCKED);
+            };
+            let r = pVtab.borrow_mut().xOpen(db);
+            sqlite3VtabImportErrmsg(db, p, &pVtab);
+            let pVCur = match r {
+                Ok(c) => c,
+                Err(rc) => abort_rc!(s, if rc == SQLITE_OK { SQLITE_ERROR } else { rc }),
+            };
+
+            // Initialize vdbe cursor object
+            allocateCursor(db, p, p1, 0, CURTYPE_VTAB);
+            let pCur = p.apCsr[p1 as usize].as_deref_mut().unwrap();
+            pCur.pVCur = Some(pVCur);
+            pCur.pVCurTab = Some(pVTab.clone());
+            pVTab.borrow_mut().nCursor += 1;
+            Ok(Fl::Next)
+        }
+
+        // Opcode: VCheck P1 P2 P3 P4 *
+        //
+        // P4 is a pointer to a Table object that is a virtual table in
+        // schema P1 that supports the xIntegrity() method.  This opcode
+        // runs the xIntegrity() method for that virtual table, using P3 as
+        // the integer argument.  If an error is reported back, the table
+        // name is prepended to the error message and that message is stored
+        // in P2.  If no errors are seen, register P2 is set to NULL.
+        OP_VCheck => {
+            sqlite3VdbeMemSetNull(&mut p.aMem[p2 as usize]); // Innocent until proven guilty
+            let pTab = match &p.aOp[pc as usize].p4 {
+                P4::Tab(t) => t.clone(),
+                _ => panic!("OP_VCheck without P4_TABLEREF"),
+            };
+            debug_assert!(pTab.borrow().IsVirtual());
+            let pVTab = pTab.borrow().u.vtab.p.first().cloned();
+            let Some(pVTab) = pVTab else {
+                return Ok(Fl::Next);
+            };
+            let pVtab = pVTab.borrow().pVtab.clone().expect("sqlite3_vtab");
+            crate::vtab::sqlite3VtabLock(&pVTab);
+            let zSchema = db.aDb[p1 as usize].zDbSName.clone().unwrap_or_default();
+            let zName = pTab.borrow().zName.clone();
+            let mut zErr: Option<ZStr> = None;
+            let rc = pVtab
+                .borrow_mut()
+                .xIntegrity(db, &zSchema, &zName, p3, &mut zErr);
+            crate::vtab::sqlite3VtabUnlock(db, &pVTab);
+            chk_rc!(s, rc);
+            if let Some(z) = zErr {
+                crate::vdbemem::sqlite3ValueSetStr(&mut p.aMem[p2 as usize], -1, &z, SQLITE_UTF8);
+            }
+            Ok(Fl::Next)
+        }
+
+        // Opcode: VInitIn P1 P2 P3 * *
+        // Synopsis: r[P2]=ValueList(P1,P3)
+        //
+        // Set register P2 to be a pointer to a ValueList object for cursor
+        // P1 with cache register P3 and output register P3+1.  This
+        // ValueList object can be used as the first argument to
+        // sqlite3_vtab_in_first() and sqlite3_vtab_in_next() to extract all
+        // of the values stored in the P1 cursor.  Register P3 is used to
+        // hold the values returned by sqlite3_vtab_in_first() and
+        // sqlite3_vtab_in_next().
+        OP_VInitIn => {
+            let pCsr = p.apCsr[p1 as usize]
+                .as_deref()
+                .and_then(|c| c.pCursor.clone())
+                .expect("btree cursor");
+            let pRhs = Rc::new(std::cell::RefCell::new(crate::vdbeapi::ValueList {
+                pCsr,
+                pOut: Mem::default(),
+            }));
+            let pOut = out2Prerelease(&mut p.aMem[p2 as usize]);
+            pOut.flags = MEM_Null;
+            crate::vdbemem::sqlite3VdbeMemSetPointer(pOut, pRhs, Some(b"ValueList"));
+            Ok(Fl::Next)
+        }
+
+        // Opcode: VFilter P1 P2 P3 P4 *
+        // Synopsis: iplan=r[P3] zplan='P4'
+        //
+        // P1 is a cursor opened using VOpen.  P2 is an address to jump to
+        // if the filtered result set is empty.
+        //
+        // P4 is either NULL or a string that was generated by the
+        // xBestIndex method of the module.  The interpretation of the P4
+        // string is left to the module implementation.
+        //
+        // This opcode invokes the xFilter method on the virtual table
+        // specified by P1.  The integer query plan parameter to xFilter is
+        // stored in register P3. Register P3+1 stores the argc parameter to
+        // be passed to the xFilter method. Registers P3+2..P3+1+argc are the
+        // argc additional parameters which are passed to xFilter as argv.
+        // Register P3+2 becomes argv[0] when passed to xFilter.
+        //
+        // A jump is made to P2 if the result set after filtering would be
+        // empty.
+        OP_VFilter => {
+            let iQuery = p.aMem[p3 as usize].u.i as i32;
+            let nArg = p.aMem[(p3 + 1) as usize].u.i as usize;
+            let idxStr = match &p.aOp[pc as usize].p4 {
+                P4::Z(z) => Some(z.clone()),
+                _ => None,
+            };
+            let (rc, res) = {
+                let Vdbe { aMem, apCsr, .. } = &mut *p;
+                let pCur = apCsr[p1 as usize]
+                    .as_deref_mut()
+                    .expect("VDBE cursor not open");
+                debug_assert!(pCur.eCurType == CURTYPE_VTAB);
+                let pVCur = pCur.pVCur.as_mut().expect("vtab cursor");
+                let s0 = (p3 + 2) as usize;
+                let args = &mut aMem[s0..s0 + nArg];
+                let rc = pVCur.xFilter(db, iQuery, idxStr.as_deref(), args);
+                (rc, if rc == SQLITE_OK { pVCur.xEof() } else { false })
+            };
+            vcsr_import_errmsg(db, p, p1);
+            chk_rc!(s, rc);
+            p.apCsr[p1 as usize].as_deref_mut().unwrap().nullRow = 0;
+            if res {
+                s.pc = p2 - 1;
+            }
+            Ok(Fl::Next)
+        }
+
+        // Opcode: VColumn P1 P2 P3 * P5
+        // Synopsis: r[P3]=vcolumn(P2)
+        //
+        // Store in register P3 the value of the P2-th column of the current
+        // row of the virtual-table of cursor P1.
+        //
+        // If the VColumn opcode is being used to fetch the value of an
+        // unchanging column during an UPDATE operation, then the P5 value
+        // is OPFLAG_NOCHNG.  This will cause the sqlite3_vtab_nochange()
+        // function to return true inside the xColumn method of the virtual
+        // table implementation.  The P5 column might also contain other
+        // bits (OPFLAG_LENGTHARG or OPFLAG_TYPEOFARG) but those bits are
+        // unused by OP_VColumn.
+        OP_VColumn => {
+            let nullRow = p.apCsr[p1 as usize]
+                .as_deref()
+                .expect("VDBE cursor not open")
+                .nullRow;
+            if nullRow != 0 {
+                sqlite3VdbeMemSetNull(&mut p.aMem[p3 as usize]);
+                return Ok(Fl::Next);
+            }
+            let mut dest = std::mem::take(&mut p.aMem[p3 as usize]);
+            if (p5 & OPFLAG_NOCHNG) != 0 {
+                sqlite3VdbeMemSetNull(&mut dest);
+                dest.flags = MEM_Null | MEM_Zero;
+                dest.u.nZero = 0;
+            } else {
+                dest.MemSetTypeFlag(MEM_Null);
+            }
+            let (rc, isError) = {
+                let pCur = p.apCsr[p1 as usize].as_deref_mut().unwrap();
+                debug_assert!(pCur.eCurType == CURTYPE_VTAB);
+                let pVCur = pCur.pVCur.as_mut().expect("vtab cursor");
+                let mut ctx = Context {
+                    db: &mut *db,
+                    pOut: &mut dest,
+                    pFunc: NULL_FUNC.with(|f| f.clone()),
+                    pMem: None,
+                    pAuxData: None,
+                    iOp: pc,
+                    isError: 0,
+                    enc: encoding,
+                    skipFlag: 0,
+                    argc: 0,
+                    zErr: None,
+                    pColl: None,
+                    piCurrentTime: None,
+                    pOpInfo: None,
+                };
+                let rc = pVCur.xColumn(&mut ctx, p2);
+                (rc, ctx.isError)
+            };
+            p.aMem[p3 as usize] = dest;
+            vcsr_import_errmsg(db, p, p1);
+            let mut rc = rc;
+            if isError > 0 {
+                let z = sqlite3_value_text(&mut p.aMem[p3 as usize]).map(|x| x.to_vec());
+                verr!(db, p, b"%s", z.as_deref());
+                rc = isError;
+            }
+            sqlite3VdbeChangeEncoding(db, &mut p.aMem[p3 as usize], encoding as i32);
+            chk_rc!(s, rc);
+            Ok(Fl::Next)
+        }
+
+        // Opcode: VNext P1 P2 * * *
+        //
+        // Advance virtual table P1 to the next row in its result set and
+        // jump to instruction P2.  Or, if the virtual table has reached the
+        // end of its result set, then fall through to the next instruction.
+        OP_VNext => {
+            let (rc, res) = {
+                let pCur = p.apCsr[p1 as usize]
+                    .as_deref_mut()
+                    .expect("VDBE cursor not open");
+                debug_assert!(pCur.eCurType == CURTYPE_VTAB);
+                if pCur.nullRow != 0 {
+                    return Ok(Fl::Next);
+                }
+                let pVCur = pCur.pVCur.as_mut().expect("vtab cursor");
+
+                // Invoke the xNext() method of the module. There is no way
+                // for the underlying implementation to return an error if one
+                // occurs during xNext(). Instead, if an error occurs, true is
+                // returned (indicating that data is available) and the error
+                // code returned when xColumn or some other method is next
+                // invoked on the save virtual table cursor.
+                let rc = pVCur.xNext(db);
+                (rc, if rc == SQLITE_OK { pVCur.xEof() } else { false })
+            };
+            vcsr_import_errmsg(db, p, p1);
+            chk_rc!(s, rc);
+            if !res {
+                // If there is data, jump to P2
+                s.pc = p2 - 1;
+            }
+            Ok(Fl::Check)
+        }
+
+        // Opcode: VRename P1 * * P4 *
+        //
+        // P4 is a pointer to a virtual table object, an sqlite3_vtab
+        // structure.  This opcode invokes the corresponding xRename method.
+        // The value in register P1 is passed as the zName argument to the
+        // xRename method.
+        OP_VRename => {
+            let isLegacy = db.flags & SQLITE_LegacyAlter;
+            db.flags |= SQLITE_LegacyAlter;
+            let pVTab = p4_vtab(p, pc).expect("OP_VRename without P4_VTAB");
+            let pVtab = pVTab.borrow().pVtab.clone().expect("sqlite3_vtab");
+            debug_assert!(p.readOnly == 0);
+            let rc = sqlite3VdbeChangeEncoding(db, &mut p.aMem[p1 as usize], SQLITE_UTF8 as i32);
+            chk_rc!(s, rc);
+            let zName = p.aMem[p1 as usize].bytes().to_vec();
+            let rc = pVtab.borrow_mut().xRename(db, &zName);
+            if isLegacy == 0 {
+                db.flags &= !SQLITE_LegacyAlter;
+            }
+            sqlite3VtabImportErrmsg(db, p, &pVtab);
+            p.expired = 0;
+            chk_rc!(s, rc);
+            Ok(Fl::Next)
+        }
+
+        // Opcode: VUpdate P1 P2 P3 P4 P5
+        // Synopsis: data=r[P3@P2]
+        //
+        // P4 is a pointer to a virtual table object, an sqlite3_vtab
+        // structure.  This opcode invokes the corresponding xUpdate method.
+        // P2 values are contiguous memory cells starting at P3 to pass to
+        // the xUpdate invocation. The value in register (P3+P2-1)
+        // corresponds to the p2th element of the argv array passed to
+        // xUpdate.
+        //
+        // The xUpdate method will do a DELETE or an INSERT or both.  The
+        // argv[0] element (which corresponds to memory cell P3) is the
+        // rowid of a row to delete.  If argv[0] is NULL then no deletion
+        // occurs.  The argv[1] element is the rowid of the new row.  This
+        // can be NULL to have the virtual table select the new rowid for
+        // itself.  The subsequent elements in the array are the values of
+        // columns in the new row.
+        //
+        // If P2==1 then no insert is performed.  argv[0] is the rowid of a
+        // row to delete.
+        //
+        // P1 is a boolean flag. If it is set to true and the xUpdate call
+        // is successful, then the value returned by
+        // sqlite3_last_insert_rowid() is set to the value of the rowid for
+        // the row just inserted.
+        //
+        // P5 is the error actions (OE_Replace, OE_Fail, OE_Ignore, etc) to
+        // apply in the case of a constraint failure on an insert or update.
+        OP_VUpdate => {
+            debug_assert!(p.readOnly == 0);
+            if db.mallocFailed != 0 {
+                return Err(Ex::NoMem);
+            }
+            let pVTab = p4_vtab(p, pc).expect("OP_VUpdate without P4_VTAB");
+            let pVtab = pVTab.borrow().pVtab.clone();
+            let Some(pVtab) = pVtab else {
+                abort_rc!(s, SQLITE_LOCKED);
+            };
+            let nArg = p2 as usize;
+            let hasUpdate = pVtab.borrow().has_xUpdate();
+            if hasUpdate {
+                let vtabOnConflict = db.vtabOnConflict;
+                let mut rowid: i64 = 0;
+                db.vtabOnConflict = p5 as u8;
+                let mut rc = {
+                    let s0 = p3 as usize;
+                    let args = &mut p.aMem[s0..s0 + nArg];
+                    pVtab.borrow_mut().xUpdate(db, args, &mut rowid)
+                };
+                db.vtabOnConflict = vtabOnConflict;
+                sqlite3VtabImportErrmsg(db, p, &pVtab);
+                if rc == SQLITE_OK && p1 != 0 {
+                    debug_assert!(nArg > 1 && (p.aMem[p3 as usize].flags & MEM_Null) != 0);
+                    db.lastRowid = rowid;
+                }
+                if (rc & 0xff) == SQLITE_CONSTRAINT && pVTab.borrow().bConstraint != 0 {
+                    if p5 == OE_Ignore as u16 {
+                        rc = SQLITE_OK;
+                    } else {
+                        p.errorAction = if p5 == OE_Replace as u16 {
+                            OE_Abort
+                        } else {
+                            p5 as u8
+                        };
+                    }
+                } else {
+                    p.nChange += 1;
+                }
+                chk_rc!(s, rc);
+            }
+            Ok(Fl::Next)
+        }
+        _ => unreachable!(),
+    }
 }

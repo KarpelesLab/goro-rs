@@ -110,8 +110,8 @@ pub fn sqlite3TriggerList(db: &mut Sqlite3, pTab: &TableRef) -> Vec<TriggerRef> 
     if db.aDb.len() < 2 {
         return pList;
     }
-    let pTmpSchema = db.aDb[1].pSchema.id;
-    let temps: Vec<TriggerRef> = db.aDb[1].pSchema.trigHash.values();
+    let pTmpSchema = db.aDb[1].pSchema.borrow().id;
+    let temps: Vec<TriggerRef> = db.aDb[1].pSchema.borrow().trigHash.values();
     for pTrig in temps.iter() {
         let (ts, tableNull, matchName, bRet, op) = {
             let t = pTrig.borrow();
@@ -217,7 +217,7 @@ pub fn sqlite3BeginTrigger(
             let pTab = sqlite3SrcListLookup(db, pTableName);
             if db.init.busy == 0 && pName2.n == 0 {
                 if let Some(t) = &pTab {
-                    if t.borrow().pSchema == db.aDb[1].pSchema.id {
+                    if t.borrow().pSchema == db.aDb[1].pSchema.borrow().id {
                         iDb = 1;
                     }
                 }
@@ -263,7 +263,13 @@ pub fn sqlite3BeginTrigger(
                 break 'cleanup;
             }
             if !db.ppr().IN_RENAME_OBJECT() {
-                if db.aDb[iDb as usize].pSchema.trigHash.find(&zName).is_some() {
+                if db.aDb[iDb as usize]
+                    .pSchema
+                    .borrow()
+                    .trigHash
+                    .find(&zName)
+                    .is_some()
+                {
                     if noErr == 0 {
                         errmsg!(db, "trigger %T already exists", &pName);
                     } else if db.init.busy != 0 {
@@ -353,7 +359,7 @@ pub fn sqlite3BeginTrigger(
             let mut trig = Trigger {
                 zName,
                 table: zTable.clone(),
-                pSchema: db.aDb[iDb as usize].pSchema.id,
+                pSchema: db.aDb[iDb as usize].pSchema.borrow().id,
                 pTabSchema: pTab.borrow().pSchema,
                 op: op as u8,
                 tr_tm: if tr_tm == TK_BEFORE as i32 {
@@ -527,6 +533,7 @@ pub fn sqlite3FinishTrigger(db: &mut Sqlite3, pStepList: TriggerStepId, pAll: &T
                 }
                 let _old = db.aDb[iDb as usize]
                     .pSchema
+                    .borrow_mut()
                     .trigHash
                     .insert(&zName, pLink.clone());
                 let (ls, lts, ltable) = {
@@ -537,6 +544,7 @@ pub fn sqlite3FinishTrigger(db: &mut Sqlite3, pStepList: TriggerStepId, pAll: &T
                     let iTabDb = db.schema_index(lts);
                     let pTab = db.aDb[iTabDb as usize]
                         .pSchema
+                        .borrow()
                         .tblHash
                         .find(&ltable)
                         .cloned();
@@ -638,7 +646,7 @@ fn triggerStepAllocate(
     if db.ppr().nErr == 0 {
         let qualified = match &db.ppr().pNewTrigger {
             Some(pNew) => {
-                pNew.borrow().pSchema != db.aDb[1].pSchema.id
+                pNew.borrow().pSchema != db.aDb[1].pSchema.borrow().id
                     && db.src(pTabList).a[0].u4.zDatabase.is_some()
             }
             None => false,
@@ -883,7 +891,12 @@ pub fn sqlite3DropTrigger(db: &mut Sqlite3, pName: SrcListId, noErr: i32) {
                 i += 1;
                 continue;
             }
-            pTrigger = db.aDb[j as usize].pSchema.trigHash.find(&zName).cloned();
+            pTrigger = db.aDb[j as usize]
+                .pSchema
+                .borrow()
+                .trigHash
+                .find(&zName)
+                .cloned();
             if pTrigger.is_some() {
                 break;
             }
@@ -918,7 +931,12 @@ fn tableOfTrigger(db: &Sqlite3, pTrigger: &TriggerRef) -> Option<TableRef> {
     if i < 0 {
         return None;
     }
-    db.aDb[i as usize].pSchema.tblHash.find(&table).cloned()
+    db.aDb[i as usize]
+        .pSchema
+        .borrow()
+        .tblHash
+        .find(&table)
+        .cloned()
 }
 
 /// C: `void sqlite3DropTriggerPtr(Parse *pParse, Trigger *pTrigger)`
@@ -972,7 +990,11 @@ pub fn sqlite3DropTriggerPtr(db: &mut Sqlite3, pTrigger: &TriggerRef) {
 /// Remove a trigger from the hash tables of the sqlite* pointer.
 pub fn sqlite3UnlinkAndDeleteTrigger(db: &mut Sqlite3, iDb: i32, zName: Option<&[u8]>) {
     let zName = zName.unwrap_or(b"");
-    let pTrigger = db.aDb[iDb as usize].pSchema.trigHash.remove(zName);
+    let pTrigger = db.aDb[iDb as usize]
+        .pSchema
+        .borrow_mut()
+        .trigHash
+        .remove(zName);
     if let Some(pTrigger) = pTrigger {
         let same = {
             let t = pTrigger.borrow();
@@ -1023,7 +1045,7 @@ fn tempTriggersExist(db: &Sqlite3) -> bool {
     if db.aDb.len() < 2 {
         return false;
     }
-    db.aDb[1].pSchema.trigHash.count() != 0
+    db.aDb[1].pSchema.borrow().trigHash.count() != 0
 }
 
 /// Return a list of all triggers on table pTab if there exists at least
@@ -1739,7 +1761,7 @@ pub fn sqlite3CodeRowTrigger(
             /* Sanity checking:  The schema for the trigger and for the table are
              ** always defined.  The trigger must be in the same schema as the table
              ** or else it must be a TEMP trigger. */
-            debug_assert!(t.pSchema == t.pTabSchema || t.pSchema == db.aDb[1].pSchema.id);
+            debug_assert!(t.pSchema == t.pTabSchema || t.pSchema == db.aDb[1].pSchema.borrow().id);
             (
                 t.op as i32,
                 t.tr_tm as i32,

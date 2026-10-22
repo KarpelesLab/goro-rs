@@ -45,6 +45,7 @@ use crate::expr::*;
 use crate::int::*;
 use crate::util::*;
 use crate::vdbeaux::*;
+use crate::vtab::{IndexConstraint, IndexConstraintUsage, IndexInfo, IndexOrderBy};
 use crate::wherecode::*;
 use crate::whereexpr::*;
 use std::rc::Rc;
@@ -1797,38 +1798,627 @@ fn sqlite3ConstructBloomFilter(
 }
 
 // ---------------------------------------------------------------------------
-// Virtual table interfaces.  The virtual table module (vtab.c) is not
-// ported yet, so these are minimal: no sqlite3_index_info object is ever
-// built and whereLoopAddVirtual() produces no plans.
+// Virtual table interfaces of the query planner.
 // ---------------------------------------------------------------------------
 
-/// C: `const char * sqlite3_vtab_collation(sqlite3_index_info *pIdxInfo, int iCons)`
-/// (virtual tables not available: returns NULL)
-pub fn sqlite3_vtab_collation(pIdxInfo: /*sqlite3_index_info**/ (), iCons: i32) -> Option<ZStr> {
+/// SMASKBIT32(n): 1<<n if n<=31, else 0
+#[inline]
+fn SMASKBIT32(n: i32) -> u32 {
+    if (0..=31).contains(&n) { 1u32 << n } else { 0 }
+}
+
+/// Return term iTerm of the WhereClause passed as the first argument.
+/// Terms are numbered from 0 upwards, starting with the terms in
+/// pWC->a[], then those in pWC->pOuter->a[] (if any), and so on.
+fn termFromWhereClause(wi: &WhereInfo, pWC: WcId, iTerm: i32) -> Option<TermId> {
+    let mut p = Some(pWC);
+    let mut iTerm = iTerm;
+    while let Some(w) = p {
+        let n = wi.wc(w).nTerm();
+        if iTerm < n {
+            return Some(TermId::new(w, iTerm as usize));
+        }
+        iTerm -= n;
+        p = wi.wc(w).pOuter;
+    }
     None
 }
 
+/// Allocate and populate an sqlite3_index_info structure.
+fn allocateIndexInfo(
+    db: &mut Sqlite3,
+    wi: &mut WhereInfo,
+    pWC: WcId,
+    mUnusable: Bitmask,
+    pSrc: SrcItemId,
+    pmNoOmit: &mut u16,
+) -> IndexInfo {
+    let mut mNoOmit: u16 = 0;
+    let mut eDistinct = 0;
+    let pOrderBy = wi.pOrderBy;
+    let pTab = item_tab(db, pSrc);
+    debug_assert!(pTab.borrow().IsVirtual());
+    let (iCursor, jointype, rowidUsed, colUsed) = {
+        let it = db.item(pSrc);
+        (it.iCursor, it.fg.jointype, it.fg.rowidUsed, it.colUsed)
+    };
+
+    // Find all WHERE clause constraints referring to this virtual table.
+    // Mark each term with the TERM_OK flag.  Set nTerm to the number of
+    // terms found.
+    let mut nTerm = 0usize;
+    let mut p = Some(pWC);
+    while let Some(w) = p {
+        for i in 0..wi.wc(w).a.len() {
+            let t = {
+                let t = &mut wi.wcm(w).a[i];
+                t.wtFlags &= !TERM_OK;
+                *t
+            };
+            if t.leftCursor != iCursor {
+                continue;
+            }
+            if (t.prereqRight & mUnusable) != 0 {
+                continue;
+            }
+            if (t.eOperator & !WO_EQUIV) == 0 {
+                continue;
+            }
+            if (t.wtFlags & TERM_VNULL) != 0 {
+                continue;
+            }
+            debug_assert!((t.eOperator & (WO_OR | WO_AND)) == 0);
+            if (jointype & (JT_LEFT | JT_LTORJ | JT_RIGHT)) != 0
+                && constraintCompatibleWithOuterJoin(db, &t, pSrc) == 0
+            {
+                continue;
+            }
+            nTerm += 1;
+            wi.wcm(w).a[i].wtFlags |= TERM_OK;
+        }
+        p = wi.wc(w).pOuter;
+    }
+
+    // If the ORDER BY clause contains only columns in the current virtual
+    // table then allocate space for the aOrderBy part of the
+    // sqlite3_index_info structure.
+    let mut nOrderBy = 0;
+    if pOrderBy.nn() {
+        let n = db.el(pOrderBy).nExpr() as usize;
+        let mut i = 0;
+        while i < n {
+            let (pExpr, sortFlags) = {
+                let it = &db.el(pOrderBy).a[i];
+                (it.pExpr, it.fg.sortFlags)
+            };
+
+            // Skip over constant terms in the ORDER BY clause
+            if crate::expr::sqlite3ExprIsConstant(db, false, pExpr) != 0 {
+                i += 1;
+                continue;
+            }
+
+            // Virtual tables are unable to deal with NULLS FIRST
+            if (sortFlags & KEYINFO_ORDER_BIGNULL) != 0 {
+                break;
+            }
+
+            // First case - a direct column references without a COLLATE
+            // operator
+            let (op, iTable, pLeft) = {
+                let e = db.ex(pExpr);
+                (e.op, e.iTable, e.pLeft)
+            };
+            if op == TK_COLUMN && iTable == iCursor {
+                i += 1;
+                continue;
+            }
+
+            // 2nd case - a column reference with a COLLATE operator.  Only
+            // match of the COLLATE operator matches the collation of the
+            // column.
+            if op == TK_COLLATE && pLeft.nn() {
+                let (op2, iTable2, iColumn2) = {
+                    let e2 = db.ex(pLeft);
+                    (e2.op, e2.iTable, e2.iColumn)
+                };
+                if op2 == TK_COLUMN && iTable2 == iCursor {
+                    db.exm(pExpr).iColumn = iColumn2;
+                    if iColumn2 < 0 {
+                        // Collseq does not matter for rowid
+                        i += 1;
+                        continue;
+                    }
+                    let zColl =
+                        crate::build::sqlite3ColumnColl(&pTab.borrow().aCol[iColumn2 as usize])
+                            .unwrap_or_else(|| crate::global::sqlite3StrBINARY.to_vec());
+                    let zTok = db.ex(pExpr).u.zToken.clone();
+                    if crate::util::sqlite3_stricmp(zTok.as_deref(), Some(&zColl)) == 0 {
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+
+            // No matches cause a break out of the loop
+            break;
+        }
+        if i == n {
+            let bSortByGroup = ((wi.wctrlFlags & WHERE_SORTBYGROUP) != 0) as i32;
+            nOrderBy = n;
+            if (wi.wctrlFlags & WHERE_DISTINCTBY) != 0 && rowidUsed == 0 {
+                eDistinct = 2 + bSortByGroup;
+            } else if (wi.wctrlFlags & WHERE_GROUPBY) != 0 {
+                eDistinct = 1 - bSortByGroup;
+            } else if (wi.wctrlFlags & WHERE_WANT_DISTINCT) != 0 {
+                eDistinct = 3;
+            }
+        }
+    }
+
+    // Allocate the sqlite3_index_info structure
+    let mut pIdxInfo = IndexInfo {
+        aConstraintUsage: vec![IndexConstraintUsage::default(); nTerm],
+        colUsed,
+        ..Default::default()
+    };
+    if !pTab.borrow().HasRowid() {
+        // Ensure that all bits associated with PK columns are set. This is
+        // to ensure they are available for cases like RIGHT joins or OR
+        // loops.
+        let pPk = crate::build::sqlite3PrimaryKeyIndex(&pTab).expect("PRIMARY KEY");
+        let pk = pPk.borrow();
+        for i in 0..pk.nKeyCol as usize {
+            let mut iCol = pk.aiColumn[i] as i32;
+            debug_assert!(iCol >= 0);
+            if iCol >= BMS - 1 {
+                iCol = BMS - 1;
+            }
+            pIdxInfo.colUsed |= MASKBIT(iCol);
+        }
+    }
+    pIdxInfo.hidden.eDistinct = eDistinct;
+    pIdxInfo.hidden.mIn = 0;
+    let mut i: i32 = 0;
+    let mut j: i32 = 0;
+    let mut p = Some(pWC);
+    while let Some(w) = p {
+        for k in 0..wi.wc(w).a.len() {
+            let t = wi.wc(w).a[k];
+            let iTermOffset = i;
+            i += 1;
+            if (t.wtFlags & TERM_OK) == 0 {
+                continue;
+            }
+            let mut c = IndexConstraint {
+                iColumn: t.u.x.leftColumn,
+                iTermOffset,
+                ..Default::default()
+            };
+            let mut op = t.eOperator & WO_ALL;
+            if op == WO_IN {
+                if (t.wtFlags & TERM_SLICE) == 0 {
+                    pIdxInfo.hidden.mIn |= SMASKBIT32(j);
+                }
+                op = WO_EQ;
+            }
+            if op == WO_AUX {
+                c.op = t.eMatchOp;
+            } else if (op & (WO_ISNULL | WO_IS)) != 0 {
+                if op == WO_ISNULL {
+                    c.op = SQLITE_INDEX_CONSTRAINT_ISNULL as u8;
+                } else {
+                    c.op = SQLITE_INDEX_CONSTRAINT_IS as u8;
+                }
+            } else {
+                c.op = op as u8;
+                // The direct assignment in the previous line is possible
+                // only because the WO_ and SQLITE_INDEX_CONSTRAINT_ codes
+                // are identical.
+                debug_assert!(
+                    (t.eOperator & (WO_IN | WO_EQ | WO_LT | WO_LE | WO_GT | WO_GE | WO_AUX)) != 0
+                );
+                if (op & (WO_LT | WO_LE | WO_GT | WO_GE)) != 0 {
+                    let pRight = db.ex(t.pExpr).pRight;
+                    if crate::expr::sqlite3ExprIsVector(db, pRight) != 0 {
+                        if j < 16 {
+                            mNoOmit |= 1 << j;
+                        }
+                        if op == WO_LT {
+                            c.op = WO_LE as u8;
+                        }
+                        if op == WO_GT {
+                            c.op = WO_GE as u8;
+                        }
+                    }
+                }
+            }
+            pIdxInfo.aConstraint.push(c);
+            pIdxInfo.hidden.aExpr.push(t.pExpr);
+            j += 1;
+        }
+        p = wi.wc(w).pOuter;
+    }
+    debug_assert!(j as usize == nTerm);
+    pIdxInfo.hidden.aRhs = vec![None; nTerm];
+    let mut i = 0;
+    while i < nOrderBy {
+        let (pExpr, sortFlags) = {
+            let it = &db.el(pOrderBy).a[i];
+            (it.pExpr, it.fg.sortFlags)
+        };
+        i += 1;
+        if crate::expr::sqlite3ExprIsConstant(db, false, pExpr) != 0 {
+            continue;
+        }
+        let iColumn = db.ex(pExpr).iColumn as i32;
+        pIdxInfo.aOrderBy.push(IndexOrderBy {
+            iColumn,
+            desc: sortFlags & KEYINFO_ORDER_DESC,
+        });
+    }
+
+    *pmNoOmit = mNoOmit;
+    pIdxInfo
+}
+
+/// Free and zero the sqlite3_index_info.idxStr value if needed.
+fn freeIdxStr(pIdxInfo: &mut IndexInfo) {
+    if pIdxInfo.needToFreeIdxStr != 0 {
+        pIdxInfo.idxStr = None;
+        pIdxInfo.needToFreeIdxStr = 0;
+    }
+}
+
+/// The table object reference passed as the second argument to this
+/// function must represent a virtual table. This function invokes the
+/// xBestIndex() method of the virtual table with the sqlite3_index_info
+/// object that comes in as the 3rd argument to this function.
+///
+/// If an error occurs, pParse is populated with an error message and an
+/// appropriate error code is returned.  A return of SQLITE_CONSTRAINT from
+/// xBestIndex is not considered an error.  SQLITE_CONSTRAINT indicates that
+/// the current configuration of "unusable" flags in sqlite3_index_info can
+/// not result in a valid plan.
+fn vtabBestIndex(db: &mut Sqlite3, pTab: &TableRef, p: &mut IndexInfo) -> i32 {
+    debug_assert!(pTab.borrow().IsVirtual());
+    let pVtab = crate::vtab::sqlite3GetVtab(db, pTab).expect("sqlite3_vtab");
+    db.nSchemaLock += 1;
+    let rc = pVtab.borrow_mut().xBestIndex(db, p);
+    db.nSchemaLock -= 1;
+
+    if rc != SQLITE_OK && rc != SQLITE_CONSTRAINT {
+        if rc == SQLITE_NOMEM {
+            db.mallocFailed = 1;
+        } else {
+            let z = pVtab.borrow_mut().zErrMsg().clone();
+            match z {
+                None => {
+                    let e = crate::mainapi::sqlite3ErrStr(rc);
+                    crate::errmsg!(db, "%s", e.as_deref());
+                }
+                Some(z) => {
+                    crate::errmsg!(db, "%s", &z);
+                }
+            }
+        }
+    }
+    let bAllSchemas =
+        crate::vtab::sqlite3GetVTable(db, pTab).is_some_and(|v| v.borrow().bAllSchemas != 0);
+    if bAllSchemas {
+        sqlite3VtabUsesAllSchemas(db);
+    }
+    *pVtab.borrow_mut().zErrMsg() = None;
+    rc
+}
+
+/// Return true if pTerm is a virtual table LIMIT or OFFSET term.
+fn isLimitTerm(pTerm: &WhereTerm) -> bool {
+    debug_assert!(pTerm.eOperator == WO_AUX || pTerm.eMatchOp == 0);
+    pTerm.eMatchOp as i32 >= SQLITE_INDEX_CONSTRAINT_LIMIT
+        && pTerm.eMatchOp as i32 <= SQLITE_INDEX_CONSTRAINT_OFFSET
+}
+
+/// Return true if the first nCons constraints in the pUsage array are
+/// marked as in-use (have argvIndex>0). False otherwise.
+fn allConstraintsUsed(aUsage: &[IndexConstraintUsage], nCons: usize) -> bool {
+    aUsage[..nCons].iter().all(|u| u.argvIndex > 0)
+}
+
+/// Argument pIdxInfo is already populated with all constraints that may be
+/// used by the virtual table identified by pBuilder->pNew->iTab. This
+/// function marks a subset of those constraints usable, invokes the
+/// xBestIndex method and adds the returned plan to pBuilder.
+///
+/// A constraint is marked usable if:
+///
+///   * Argument mUsable indicates that its prerequisites are available, and
+///
+///   * It is not one of the operators specified in the mExclude mask passed
+///     as the fourth argument (which in practice is either WO_IN or 0).
+///
+/// Argument mPrereq is a mask of tables that must be scanned before the
+/// virtual table in question. These are added to the plans prerequisites
+/// before it is added to pBuilder.
+///
+/// Output parameter *pbIn is set to true if the plan added to pBuilder uses
+/// one or more WO_IN terms, or false otherwise.
+#[allow(clippy::too_many_arguments)]
+fn whereLoopAddVirtualOne(
+    db: &mut Sqlite3,
+    wi: &mut WhereInfo,
+    pBuilder: &mut WhereLoopBuilder,
+    mPrereq: Bitmask,
+    mUsable: Bitmask,
+    mExclude: u16,
+    pIdxInfo: &mut IndexInfo,
+    mNoOmit: u16,
+    pbIn: &mut i32,
+    mut pbRetryLimit: Option<&mut i32>,
+) -> i32 {
+    let pWC = pBuilder.pWC;
+    let pSrc = SrcItemId(wi.pTabList, pBuilder.pNew.iTab as u32);
+    let nConstraint = pIdxInfo.aConstraint.len();
+    let pTab = item_tab(db, pSrc);
+
+    debug_assert!((mUsable & mPrereq) == mPrereq);
+    *pbIn = 0;
+    pBuilder.pNew.prereq = mPrereq;
+
+    // Set the usable flag on the subset of constraints identified by
+    // arguments mUsable and mExclude.
+    for i in 0..nConstraint {
+        let pTerm = termFromWhereClause(wi, pWC, pIdxInfo.aConstraint[i].iTermOffset)
+            .expect("constraint term");
+        let t = wi.t(pTerm);
+        pIdxInfo.aConstraint[i].usable = 0;
+        if (t.prereqRight & mUsable) == t.prereqRight
+            && (t.eOperator & mExclude) == 0
+            && (pbRetryLimit.is_some() || !isLimitTerm(t))
+        {
+            pIdxInfo.aConstraint[i].usable = 1;
+        }
+    }
+
+    // Initialize the output fields of the sqlite3_index_info structure
+    for u in pIdxInfo.aConstraintUsage.iter_mut() {
+        *u = IndexConstraintUsage::default();
+    }
+    debug_assert!(pIdxInfo.needToFreeIdxStr == 0);
+    pIdxInfo.idxStr = None;
+    pIdxInfo.idxNum = 0;
+    pIdxInfo.orderByConsumed = 0;
+    pIdxInfo.estimatedCost = 1e99 / 2.0;
+    pIdxInfo.estimatedRows = 25;
+    pIdxInfo.idxFlags = 0;
+    pIdxInfo.hidden.mHandleIn = 0;
+
+    // Invoke the virtual table xBestIndex() method
+    let rc = vtabBestIndex(db, &pTab, pIdxInfo);
+    if rc != 0 {
+        if rc == SQLITE_CONSTRAINT {
+            // If the xBestIndex method returns SQLITE_CONSTRAINT, that means
+            // that the particular combination of parameters provided is
+            // unusable.  Make no entries in the loop table.
+            freeIdxStr(pIdxInfo);
+            return SQLITE_OK;
+        }
+        return rc;
+    }
+
+    let mut mxTerm: i32 = -1;
+    debug_assert!(pBuilder.pNew.aLTerm.len() >= nConstraint);
+    for i in 0..nConstraint {
+        pBuilder.pNew.set_lterm(i, None);
+    }
+    pBuilder.pNew.u.vtab = WhereLoopVtab::default();
+    let zTabName = pTab.borrow().zName.clone();
+    for i in 0..nConstraint {
+        let iTerm = pIdxInfo.aConstraintUsage[i].argvIndex - 1;
+        if iTerm >= 0 {
+            let j = pIdxInfo.aConstraint[i].iTermOffset;
+            let pTerm = if iTerm as usize >= nConstraint || j < 0 {
+                None
+            } else {
+                termFromWhereClause(wi, pWC, j)
+            };
+            let Some(pTerm) = pTerm.filter(|_| {
+                pBuilder.pNew.lterm(iTerm as usize).is_none() && pIdxInfo.aConstraint[i].usable != 0
+            }) else {
+                crate::errmsg!(db, "%s.xBestIndex malfunction", &zTabName);
+                freeIdxStr(pIdxInfo);
+                return SQLITE_ERROR;
+            };
+            let t = *wi.t(pTerm);
+            let pNew = &mut pBuilder.pNew;
+            pNew.prereq |= t.prereqRight;
+            debug_assert!((iTerm as usize) < pNew.aLTerm.len());
+            pNew.set_lterm(iTerm as usize, Some(pTerm));
+            if iTerm > mxTerm {
+                mxTerm = iTerm;
+            }
+            if pIdxInfo.aConstraintUsage[i].omit != 0 {
+                if i < 16 && ((1 << i) & mNoOmit) == 0 {
+                    pNew.u.vtab.omitMask |= 1 << iTerm;
+                }
+                if t.eMatchOp as i32 == SQLITE_INDEX_CONSTRAINT_OFFSET {
+                    pNew.u.vtab.bOmitOffset = 1;
+                }
+            }
+            if (SMASKBIT32(i as i32) & pIdxInfo.hidden.mHandleIn) != 0 {
+                pNew.u.vtab.mHandleIn |= MASKBIT32(iTerm);
+            } else if (t.eOperator & WO_IN) != 0 {
+                // A virtual table that is constrained by an IN clause may
+                // not consume the ORDER BY clause because (1) the order of
+                // IN terms is not necessarily related to the order of output
+                // terms and (2) Multiple outputs from a single IN value will
+                // not merge together.
+                pIdxInfo.orderByConsumed = 0;
+                pIdxInfo.idxFlags &= !SQLITE_INDEX_SCAN_UNIQUE;
+                *pbIn = 1;
+                debug_assert!((mExclude & WO_IN) == 0);
+            }
+
+            // Unless pbRetryLimit is non-NULL, there should be no
+            // LIMIT/OFFSET terms. And if there are any, they should follow
+            // all other terms.
+            debug_assert!(pbRetryLimit.is_some() || !isLimitTerm(&t));
+
+            if isLimitTerm(&t) && (*pbIn != 0 || !allConstraintsUsed(&pIdxInfo.aConstraintUsage, i))
+            {
+                // If there is an IN(...) term handled as an == (separate
+                // call to xFilter for each value on the RHS of the IN) and a
+                // LIMIT or OFFSET term handled as well, the plan is
+                // unusable. Similarly, if there is a LIMIT/OFFSET and there
+                // are other unused terms, the plan cannot be used. In these
+                // cases set variable *pbRetryLimit to true to tell the
+                // caller to retry with LIMIT and OFFSET disabled.
+                freeIdxStr(pIdxInfo);
+                if let Some(r) = pbRetryLimit.as_deref_mut() {
+                    *r = 1;
+                }
+                return SQLITE_OK;
+            }
+        }
+    }
+
+    pBuilder.pNew.nLTerm = (mxTerm + 1) as u16;
+    for i in 0..=mxTerm {
+        if pBuilder.pNew.lterm(i as usize).is_none() {
+            // The non-zero argvIdx values must be contiguous.  Raise an
+            // error if they are not
+            crate::errmsg!(db, "%s.xBestIndex malfunction", &zTabName);
+            freeIdxStr(pIdxInfo);
+            return SQLITE_ERROR;
+        }
+    }
+    {
+        let pNew = &mut pBuilder.pNew;
+        pNew.u.vtab.idxNum = pIdxInfo.idxNum;
+        pNew.u.vtab.needFree = pIdxInfo.needToFreeIdxStr as u8;
+        pIdxInfo.needToFreeIdxStr = 0;
+        pNew.u.vtab.idxStr = pIdxInfo.idxStr.clone();
+        pNew.u.vtab.isOrdered = if pIdxInfo.orderByConsumed != 0 {
+            pIdxInfo.aOrderBy.len() as i8
+        } else {
+            0
+        };
+        pNew.u.vtab.bIdxNumHex = ((pIdxInfo.idxFlags & SQLITE_INDEX_SCAN_HEX) != 0) as u8;
+        pNew.rSetup = 0;
+        pNew.rRun = sqlite3LogEstFromDouble(pIdxInfo.estimatedCost);
+        pNew.nOut = sqlite3LogEst(pIdxInfo.estimatedRows as u64);
+
+        // Set the WHERE_ONEROW flag if the xBestIndex() method indicated
+        // that the scan will visit at most one row. Clear it otherwise.
+        if (pIdxInfo.idxFlags & SQLITE_INDEX_SCAN_UNIQUE) != 0 {
+            pNew.wsFlags |= WHERE_ONEROW;
+        } else {
+            pNew.wsFlags &= !WHERE_ONEROW;
+        }
+    }
+    let rc = whereLoopInsert(db, wi, pBuilder);
+    if pBuilder.pNew.u.vtab.needFree != 0 {
+        pBuilder.pNew.u.vtab.idxStr = None;
+        pBuilder.pNew.u.vtab.needFree = 0;
+    }
+    rc
+}
+
+/// C: `const char * sqlite3_vtab_collation(sqlite3_index_info *pIdxInfo, int iCons)`
+///
+/// Return the collating sequence for a constraint passed into xBestIndex.
+///
+/// Return a pointer to the collation name:
+///
+///    1. If there is an explicit COLLATE operator on the constraint, return
+///       it.
+///
+///    2. Else, if the column has an alternative collation, return that.
+///
+///    3. Otherwise, return "BINARY".
+///
+/// Rust: takes the connection (the C HiddenIndexInfo.pParse).
+pub fn sqlite3_vtab_collation(db: &mut Sqlite3, pIdxInfo: &IndexInfo, iCons: i32) -> Option<ZStr> {
+    let mut zRet = None;
+    if iCons >= 0 && iCons < pIdxInfo.nConstraint() {
+        let pX = pIdxInfo.hidden.aExpr[iCons as usize];
+        let mut pC = None;
+        if db.ex(pX).pLeft.nn() {
+            pC = crate::expr::sqlite3ExprCompareCollSeq(db, pX);
+        }
+        zRet = Some(match pC {
+            Some(c) => c.zName.clone(),
+            None => crate::global::sqlite3StrBINARY.to_vec(),
+        });
+    }
+    zRet
+}
+
 /// C: `int sqlite3_vtab_in(sqlite3_index_info *pIdxInfo, int iCons, int bHandle)`
-/// (virtual tables not available: returns 0)
-pub fn sqlite3_vtab_in(pIdxInfo: /*sqlite3_index_info**/ (), iCons: i32, bHandle: i32) -> i32 {
+///
+/// Return true if constraint iCons is really an IN(...) constraint, or
+/// false otherwise. If iCons is an IN(...) constraint, set (if bHandle!=0)
+/// or clear (if bHandle==0) the flag to handle it using an iterator.
+pub fn sqlite3_vtab_in(pIdxInfo: &mut IndexInfo, iCons: i32, bHandle: i32) -> i32 {
+    let m = SMASKBIT32(iCons);
+    let pHidden = &mut pIdxInfo.hidden;
+    if (m & pHidden.mIn) != 0 {
+        if bHandle == 0 {
+            pHidden.mHandleIn &= !m;
+        } else if bHandle > 0 {
+            pHidden.mHandleIn |= m;
+        }
+        return 1;
+    }
     0
 }
 
 /// C: `int sqlite3_vtab_rhs_value( sqlite3_index_info *pIdxInfo, int iCons, sqlite3_value **ppVal )`
-/// (virtual tables not available: SQLITE_MISUSE, as for an out-of-range iCons)
+///
+/// This interface is callable from within the xBestIndex callback only.
+///
+/// If possible, set (*ppVal) to point to an object containing the value on
+/// the right-hand-side of constraint iCons.
+///
+/// Rust: takes the connection; *ppVal receives a copy of the value.
 pub fn sqlite3_vtab_rhs_value(
     db: &mut Sqlite3,
-    pIdxInfo: /*sqlite3_index_info**/ (),
+    pIdxInfo: &mut IndexInfo,
     iCons: i32,
-    ppVal: &mut [Mem],
+    ppVal: &mut Option<Mem>,
 ) -> i32 {
-    SQLITE_MISUSE
+    let mut rc = SQLITE_OK;
+    let mut pVal = None;
+    if iCons < 0 || iCons >= pIdxInfo.nConstraint() {
+        rc = SQLITE_MISUSE;
+    } else {
+        let i = iCons as usize;
+        if pIdxInfo.hidden.aRhs[i].is_none() {
+            let pRight = db.ex(pIdxInfo.hidden.aExpr[i]).pRight;
+            let enc = db.ENC();
+            rc = crate::vdbemem::sqlite3ValueFromExpr(
+                db,
+                pRight,
+                enc,
+                SQLITE_AFF_BLOB,
+                &mut pIdxInfo.hidden.aRhs[i],
+            );
+        }
+        pVal = pIdxInfo.hidden.aRhs[i].as_deref().cloned();
+    }
+    if rc == SQLITE_OK && pVal.is_none() {
+        rc = SQLITE_NOTFOUND;
+    }
+    *ppVal = pVal;
+    rc
 }
 
 /// C: `int sqlite3_vtab_distinct(sqlite3_index_info *pIdxInfo)`
-/// (virtual tables not available: returns 0)
-pub fn sqlite3_vtab_distinct(pIdxInfo: /*sqlite3_index_info**/ ()) -> i32 {
-    0
+///
+/// Return true if ORDER BY clause may be handled as DISTINCT.
+pub fn sqlite3_vtab_distinct(pIdxInfo: &IndexInfo) -> i32 {
+    debug_assert!(pIdxInfo.hidden.eDistinct >= 0 && pIdxInfo.hidden.eDistinct <= 3);
+    pIdxInfo.hidden.eDistinct
 }
 
 /// Cause the prepared statement that is associated with a call to
@@ -1855,8 +2445,26 @@ pub fn sqlite3VtabUsesAllSchemas(db: &mut Sqlite3) {
 /// Add all WhereLoop objects for a table of the join identified by
 /// pBuilder->pNew->iTab.  That table is guaranteed to be a virtual table.
 ///
-/// NOTE: the virtual table module is not ported yet; no xBestIndex call is
-/// possible, so no WhereLoop is added.
+/// If there are no LEFT or CROSS JOIN joins in the query, both mPrereq and
+/// mUnusable are set to 0. Otherwise, mPrereq is a mask of all FROM clause
+/// entries that occur before the virtual table in the FROM clause and are
+/// separated from it by at least one LEFT or CROSS JOIN. Similarly, the
+/// mUnusable mask contains all FROM clause entries that occur after the
+/// virtual table and are separated from it by at least one LEFT or CROSS
+/// JOIN.
+///
+/// For example, if the query were:
+///
+///   ... FROM t1, t2 LEFT JOIN t3, t4, vt CROSS JOIN t5, t6;
+///
+/// then mPrereq corresponds to (t1, t2) and mUnusable to (t5, t6).
+///
+/// All the tables in mPrereq must be scanned before the current virtual
+/// table. So any terms for which all prerequisites are satisfied by mPrereq
+/// may be specified as "usable" in all calls to xBestIndex.  Conversely,
+/// all tables in mUnusable must be scanned after the current virtual
+/// table, so any terms for which the prerequisites overlap with mUnusable
+/// should always be configured as "not-usable" for xBestIndex.
 fn whereLoopAddVirtual(
     db: &mut Sqlite3,
     wi: &mut WhereInfo,
@@ -1864,7 +2472,136 @@ fn whereLoopAddVirtual(
     mPrereq: Bitmask,
     mUnusable: Bitmask,
 ) -> i32 {
-    SQLITE_OK
+    let mut rc;
+    let mut bIn = 0;
+    let mut mNoOmit: u16 = 0;
+    let mut bRetry = 0;
+
+    debug_assert!((mPrereq & mUnusable) == 0);
+    let pWC = pBuilder.pWC;
+    let pSrc = SrcItemId(wi.pTabList, pBuilder.pNew.iTab as u32);
+    debug_assert!(item_tab(db, pSrc).borrow().IsVirtual());
+    let mut p = allocateIndexInfo(db, wi, pWC, mUnusable, pSrc, &mut mNoOmit);
+    {
+        let pNew = &mut pBuilder.pNew;
+        pNew.rSetup = 0;
+        pNew.wsFlags = WHERE_VIRTUALTABLE;
+        pNew.nLTerm = 0;
+        pNew.u.vtab.needFree = 0;
+    }
+    let nConstraint = p.aConstraint.len();
+    whereLoopResize(&mut pBuilder.pNew, nConstraint as i32);
+
+    // First call xBestIndex() with all constraints usable.
+    rc = whereLoopAddVirtualOne(
+        db,
+        wi,
+        pBuilder,
+        mPrereq,
+        ALLBITS,
+        0,
+        &mut p,
+        mNoOmit,
+        &mut bIn,
+        Some(&mut bRetry),
+    );
+    if bRetry != 0 {
+        debug_assert!(rc == SQLITE_OK);
+        rc = whereLoopAddVirtualOne(
+            db, wi, pBuilder, mPrereq, ALLBITS, 0, &mut p, mNoOmit, &mut bIn, None,
+        );
+    }
+
+    // If the call to xBestIndex() with all terms enabled produced a plan
+    // that does not require any source tables (IOW: a plan with mBest==0)
+    // and does not use an IN(...) operator, then there is no point in
+    // making any further calls to xBestIndex() since they will all return
+    // the same result (if the xBestIndex() implementation is sane).
+    let mBest = pBuilder.pNew.prereq & !mPrereq;
+    if rc == SQLITE_OK && (mBest != 0 || bIn != 0) {
+        let mut seenZero = false; // True if a plan with no prereqs seen
+        let mut seenZeroNoIN = false; // Plan with no prereqs and no IN(...) seen
+        let mut mPrev: Bitmask = 0;
+        let mut mBestNoIn: Bitmask = 0;
+
+        // If the plan produced by the earlier call uses an IN(...) term,
+        // call xBestIndex again, this time with IN(...) terms disabled.
+        if bIn != 0 {
+            rc = whereLoopAddVirtualOne(
+                db, wi, pBuilder, mPrereq, ALLBITS, WO_IN, &mut p, mNoOmit, &mut bIn, None,
+            );
+            debug_assert!(bIn == 0);
+            mBestNoIn = pBuilder.pNew.prereq & !mPrereq;
+            if mBestNoIn == 0 {
+                seenZero = true;
+                seenZeroNoIN = true;
+            }
+        }
+
+        // Call xBestIndex once for each distinct value of
+        // (prereqRight & ~mPrereq) in the set of terms that apply to the
+        // current virtual table.
+        while rc == SQLITE_OK {
+            let mut mNext: Bitmask = ALLBITS;
+            debug_assert!(mNext > 0);
+            for i in 0..nConstraint {
+                let iTerm = p.aConstraint[i].iTermOffset;
+                let t = termFromWhereClause(wi, pWC, iTerm).expect("term");
+                let mThis = wi.t(t).prereqRight & !mPrereq;
+                if mThis > mPrev && mThis < mNext {
+                    mNext = mThis;
+                }
+            }
+            mPrev = mNext;
+            if mNext == ALLBITS {
+                break;
+            }
+            if mNext == mBest || mNext == mBestNoIn {
+                continue;
+            }
+            rc = whereLoopAddVirtualOne(
+                db,
+                wi,
+                pBuilder,
+                mPrereq,
+                mNext | mPrereq,
+                0,
+                &mut p,
+                mNoOmit,
+                &mut bIn,
+                None,
+            );
+            if pBuilder.pNew.prereq == mPrereq {
+                seenZero = true;
+                if bIn == 0 {
+                    seenZeroNoIN = true;
+                }
+            }
+        }
+
+        // If the calls to xBestIndex() in the above loop did not find a
+        // plan that requires no source tables at all (i.e. one guaranteed to
+        // be usable), make a call here with all source tables disabled
+        if rc == SQLITE_OK && !seenZero {
+            rc = whereLoopAddVirtualOne(
+                db, wi, pBuilder, mPrereq, mPrereq, 0, &mut p, mNoOmit, &mut bIn, None,
+            );
+            if bIn == 0 {
+                seenZeroNoIN = true;
+            }
+        }
+
+        // If the calls to xBestIndex() have so far failed to find a plan
+        // that requires no source tables at all and does not use an IN(...)
+        // operator, make a final call to obtain one here.
+        if rc == SQLITE_OK && !seenZeroNoIN {
+            rc = whereLoopAddVirtualOne(
+                db, wi, pBuilder, mPrereq, mPrereq, WO_IN, &mut p, mNoOmit, &mut bIn, None,
+            );
+        }
+    }
+
+    rc
 }
 
 /// If it is not NULL, pTerm is a term that provides an upper or lower
@@ -6120,17 +6857,8 @@ pub fn sqlite3WhereBegin(
             if (tabFlags & TF_Ephemeral) != 0 || isView {
                 // Do nothing
             } else if (wsFlags & WHERE_VIRTUALTABLE) != 0 {
-                // NOTE: virtual tables are not supported yet (no VTable
-                // object to pass as P4_VTAB).
-                sqlite3VdbeAddOp4(
-                    db.v(),
-                    OP_VOpen,
-                    iCursor,
-                    0,
-                    0,
-                    P4::Tab(pTab.clone()),
-                    P4_VTAB as i32,
-                );
+                let pVTab = crate::vtab::sqlite3VtabP4(db, &pTab);
+                sqlite3VdbeAddOp4(db.v(), OP_VOpen, iCursor, 0, 0, pVTab, P4_VTAB as i32);
             } else if isVirtual {
                 // noop
             } else if ((wsFlags & WHERE_IDX_ONLY) == 0 && (wctrlFlags & WHERE_OR_SUBCLAUSE) == 0)

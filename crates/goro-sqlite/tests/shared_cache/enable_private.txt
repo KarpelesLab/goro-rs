@@ -1,0 +1,49 @@
+# sqlite3_enable_shared_cache, cache=private, relative vs absolute names
+@enable 1
+@open 1 $DIR/shc_t3.db
+@open 2 $DIR/./shc_t3.db
+@open 3 file:$DIR/shc_t3.db?cache=private
+1: CREATE TABLE t(x); INSERT INTO t VALUES(1);
+2: BEGIN; INSERT INTO t VALUES(2);
+1: SELECT * FROM t;
+3: SELECT * FROM t;
+2: COMMIT;
+3: SELECT * FROM t;
+@enable 0
+@open 4 $DIR/shc_t3.db
+4: SELECT count(*) FROM t;
+@open 5 file:$DIR/shc_t3.db?cache=shared
+5: SELECT count(*) FROM t;
+5: BEGIN EXCLUSIVE;
+1: SELECT count(*) FROM t;
+4: SELECT count(*) FROM t;
+5: COMMIT;
+# write-lock vs read cursor in the other connection, pending flag
+@prep 1 r SELECT x FROM t
+@step r
+2: BEGIN; INSERT INTO t VALUES(3);
+2: UPDATE t SET x=x+1;
+@step r
+@step r
+@step r
+@fin r
+2: UPDATE t SET x=x+1;
+2: COMMIT;
+1: SELECT * FROM t;
+# open read txn in 1, 2 writes on another table
+1: CREATE TABLE o(y);
+@prep 1 r2 SELECT x FROM t
+@step r2
+2: INSERT INTO o VALUES(1);
+2: DROP TABLE o;
+@fin r2
+2: DROP TABLE o;
+1: SELECT * FROM o;
+# close the writer while it has a transaction open
+2: BEGIN; INSERT INTO t VALUES(100);
+@close 2
+1: SELECT count(*) FROM t;
+@close 1
+@close 3
+@close 4
+@close 5

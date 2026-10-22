@@ -119,7 +119,6 @@ const azCompileOpt: &[&[u8]] = &[
     b"MAX_VDBE_OP=250000000",
     b"MAX_WORKER_THREADS=8",
     b"MUTEX_PTHREADS",
-    b"OMIT_SHARED_CACHE",
     b"SYSTEM_MALLOC",
     b"TEMP_STORE=1",
     b"THREADSAFE=1",
@@ -589,7 +588,7 @@ fn functionDestroy(db: &mut Sqlite3, p: &FuncDef) {
 /// db. This is called when db is being closed.
 fn disconnectAllVtab(db: &mut Sqlite3) {
     for i in 0..db.aDb.len() {
-        let tabs = db.aDb[i].pSchema.tblHash.values();
+        let tabs = db.aDb[i].pSchema.borrow().tblHash.values();
         for pTab in tabs.iter() {
             let isVirtual = pTab.borrow().IsVirtual();
             if isVirtual {
@@ -597,7 +596,13 @@ fn disconnectAllVtab(db: &mut Sqlite3) {
             }
         }
     }
-    // Rust: no db->aModule (eponymous virtual tables) yet.
+    let mods: Vec<ModuleRef> = db.aModule.iter().map(|(_, m)| m.clone()).collect();
+    for pMod in mods.iter() {
+        let pEpoTab = pMod.borrow().pEpoTab.clone();
+        if let Some(pEpoTab) = pEpoTab {
+            crate::vtab::sqlite3VtabDisconnect(db, &pEpoTab);
+        }
+    }
     crate::vtab::sqlite3VtabUnlockList(db);
 }
 
@@ -742,17 +747,22 @@ pub fn sqlite3LeaveMutexAndCloseZombie(db: &mut Sqlite3) {
     // Close all database connections
     for j in 0..db.aDb.len() {
         if let Some(pBt) = db.aDb[j].pBt.take() {
+            // The schema belongs to the BtShared: sqlite3BtreeClose() frees
+            // it (xFreeSchema) if this is the last connection using it.
+            let bFree = crate::btree::sqlite3BtreeConnectionCount(&pBt) <= 1;
             sqlite3BtreeClose(db, &pBt);
             if j != 1 {
-                // C: pDb->pSchema = 0 (the schema belonged to the btree and
-                // was freed with it).
-                crate::callback::sqlite3SchemaClear(db, j as i32);
+                if bFree {
+                    crate::callback::sqlite3SchemaClear(db, j as i32);
+                }
+                // C: pDb->pSchema = 0
+                db.aDb[j].pSchema = Schema::null();
             }
         }
     }
     // Clear the TEMP schema separately and last
     crate::callback::sqlite3SchemaClear(db, 1);
-    debug_assert!(db.aDb[1].pSchema.trigHash.count() == 0);
+    debug_assert!(db.aDb[1].pSchema.borrow().trigHash.count() == 0);
     crate::vtab::sqlite3VtabUnlockList(db);
 
     // Free up the array of auxiliary databases
@@ -789,6 +799,12 @@ pub fn sqlite3LeaveMutexAndCloseZombie(db: &mut Sqlite3) {
         }
     }
     db.aCollSeq.clear();
+    let mods: Vec<ModuleRef> = db.aModule.iter().map(|(_, m)| m.clone()).collect();
+    for pMod in mods.iter() {
+        crate::vtab::sqlite3VtabEponymousTableClear(db, pMod);
+        crate::vtab::sqlite3VtabModuleUnref(db, pMod);
+    }
+    db.aModule.clear();
 
     sqlite3Error(db, SQLITE_OK); // Deallocates any cached error strings.
     db.pErr = None;
@@ -2423,7 +2439,7 @@ fn sqlite3NewConnection(pVfs: Rc<Vfs>, flags: u32) -> Box<Sqlite3> {
         pBt: None,
         safety_level: 0,
         bSyncSet: 0,
-        pSchema: Schema::default(),
+        pSchema: Schema::null(),
     };
     let mut aLimit = aHardLimit;
     aLimit[SQLITE_LIMIT_WORKER_THREADS as usize] = SQLITE_DEFAULT_WORKER_THREADS;
@@ -2432,7 +2448,6 @@ fn sqlite3NewConnection(pVfs: Rc<Vfs>, flags: u32) -> Box<Sqlite3> {
         parses: Vec::new(),
         aVdbe: Vec::new(),
         builtinFuncs: sqlite3BuiltinFunctions(),
-        nextSchemaId: 0,
         pVfs,
         pDfltColl: None,
         aDb: vec![mkdb(), mkdb()],
@@ -2511,6 +2526,11 @@ fn sqlite3NewConnection(pVfs: Rc<Vfs>, flags: u32) -> Box<Sqlite3> {
         xWalCallback: None,
         walAutoCkpt: 0,
         pDbData: Vec::new(),
+        aModule: Hash::new(),
+        aVTrans: None,
+        nVTrans: 0,
+        pVtabCtx: Vec::new(),
+        pDisconnect: Vec::new(),
     })
 }
 
@@ -2536,7 +2556,7 @@ fn openDatabase(
 
     if (flags & SQLITE_OPEN_PRIVATECACHE as u32) != 0 {
         flags &= !(SQLITE_OPEN_SHAREDCACHE as u32);
-    } else if sqlite3GlobalConfig().sharedCacheEnabled != 0 {
+    } else if crate::global::sqlite3SharedCacheEnabled() != 0 {
         flags |= SQLITE_OPEN_SHAREDCACHE as u32;
     }
 
@@ -2676,7 +2696,7 @@ fn openDatabase(
         dbr.aDb[0].pBt = pBt.clone();
         dbr.aDb[0].pSchema = crate::callback::sqlite3SchemaGet(dbr, pBt.as_ref());
         if dbr.mallocFailed == 0 {
-            let enc = dbr.aDb[0].pSchema.enc; // SCHEMA_ENC(db)
+            let enc = dbr.aDb[0].pSchema.borrow().enc; // SCHEMA_ENC(db)
             crate::callback::sqlite3SetTextEncoding(dbr, enc);
         }
         dbr.aDb[1].pSchema = crate::callback::sqlite3SchemaGet(dbr, None);
@@ -2778,7 +2798,7 @@ pub fn sqlite3_open16(zFilename: &[u8], ppDb: &mut Option<Box<Sqlite3>>) -> i32 
     );
     if let Some(db) = ppDb.as_deref_mut() {
         if rc == SQLITE_OK && !db.DbHasProperty(0, DB_SchemaLoaded) {
-            db.aDb[0].pSchema.enc = SQLITE_UTF16NATIVE;
+            db.aDb[0].pSchema.borrow_mut().enc = SQLITE_UTF16NATIVE;
             db.enc = SQLITE_UTF16NATIVE;
         }
     }

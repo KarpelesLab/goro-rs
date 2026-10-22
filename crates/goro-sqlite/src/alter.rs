@@ -330,10 +330,19 @@ fn alter_rename_table(db: &mut Sqlite3, pSrc: SrcListId, pName: &Token) {
     if sqlite3ViewGetColumnNames(db, &pTab) != 0 {
         return;
     }
-    // FIXME(vtab): when virtual tables are ported, a virtual table whose
-    // module has an xRename() method must be renamed with OP_VRename below
-    // (C: pVTab = sqlite3GetVTable(db, pTab); if xRename==0, pVTab = 0).
-    let pVTab: Option<()> = None;
+    let mut pVTab: Option<VTableRef> = None;
+    if pTab.borrow().IsVirtual() {
+        pVTab = crate::vtab::sqlite3GetVTable(db, &pTab);
+        let hasRename = pVTab.as_ref().is_some_and(|v| {
+            v.borrow()
+                .pVtab
+                .as_ref()
+                .is_some_and(|t| t.borrow().has_xRename())
+        });
+        if !hasRename {
+            pVTab = None;
+        }
+    }
 
     // Begin a transaction for database iDb. Then modify the schema cookie
     // (since the ALTER TABLE modifies the schema). Call sqlite3MayAbort(),
@@ -411,11 +420,11 @@ fn alter_rename_table(db: &mut Sqlite3, pSrc: SrcListId, pName: &Token) {
     // one is defined. The xRename() callback will modify the names
     // of any resources used by the v-table implementation (including other
     // SQLite tables) that are identified by the name of the virtual table.
-    if pVTab.is_some() {
+    if let Some(pVTab) = pVTab {
         db.pp().nMem += 1;
         let i = db.ppr().nMem;
         sqlite3VdbeLoadString(db.v(), i, &zName);
-        sqlite3VdbeAddOp4(db.v(), OP_VRename, i, 0, 0, P4::None, P4_VTAB as i32);
+        sqlite3VdbeAddOp4(db.v(), OP_VRename, i, 0, 0, P4::Vtab(pVTab), P4_VTAB as i32);
     }
 
     renameReloadSchema(db, iDb, INITFLAG_AlterRename as u16);
@@ -710,7 +719,7 @@ fn alter_begin_add_column(db: &mut Sqlite3, pSrc: SrcListId) {
     pNew.aCol = aCol;
     pNew.zName = zName;
     pNew.u.tab.pDfltList = Tree::from_id(pDfltList);
-    pNew.pSchema = db.aDb[iDb as usize].pSchema.id;
+    pNew.pSchema = db.aDb[iDb as usize].pSchema.borrow().id;
     pNew.u.tab.addColOffset = addColOffset;
     db.pp().pNewTable = Some(Rc::new(RefCell::new(pNew)));
 }

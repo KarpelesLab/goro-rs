@@ -268,7 +268,7 @@ pub fn sqlite3FinishCoding(db: &mut Sqlite3) {
             }
             let (cookie, iGen) = {
                 let s = &db.aDb[iDb as usize].pSchema;
-                (s.schema_cookie, s.iGeneration)
+                (s.borrow().schema_cookie, s.borrow().iGeneration)
             };
             let v = db.v();
             sqlite3VdbeUsesBtree(v, iDb);
@@ -293,8 +293,8 @@ pub fn sqlite3FinishCoding(db: &mut Sqlite3) {
             .cloned()
             .collect();
         for t in locks {
-            // C passes sqlite3GetVTable(db, pTab) as P4_VTAB.
-            sqlite3VdbeAddOp4(db.v(), OP_VBegin, 0, 0, 0, P4::Tab(t), P4_VTAB as i32);
+            let vtab = crate::vtab::sqlite3VtabP4(db, &t);
+            sqlite3VdbeAddOp4(db.v(), OP_VBegin, 0, 0, 0, vtab, P4_VTAB as i32);
         }
         db.pp().nVtabLock = 0;
 
@@ -481,7 +481,7 @@ pub fn sqlite3NestedParse(db: &mut Sqlite3, zFormat: Option<&[u8]>, args: &[PfAr
 
 #[inline]
 fn tbl_find(db: &Sqlite3, iDb: usize, zName: &[u8]) -> Option<TableRef> {
-    db.aDb[iDb].pSchema.tblHash.find(zName).cloned()
+    db.aDb[iDb].pSchema.borrow().tblHash.find(zName).cloned()
 }
 
 /// C: `Table * sqlite3FindTable(sqlite3 *db, const char *zName, const char *zDatabase)`
@@ -593,9 +593,21 @@ pub fn sqlite3LocateTable(
         // If zName is the not the name of a table in the schema created using
         // CREATE, then check to see if it is the name of an virtual table that
         // can be an eponymous virtual table.
-        //
-        // Rust: eponymous virtual tables (pragma_*, json_each, ...) need the
-        // module registry, which is not available yet.
+        if (db.ppr().prepFlags as i32 & SQLITE_PREPARE_NO_VTAB) == 0 && db.init.busy == 0 {
+            let z = zName.unwrap_or(b"");
+            let mut pMod = db.aModule.find(z).cloned();
+            if pMod.is_none() && crate::util::sqlite3StrNICmp(Some(z), Some(b"pragma_"), 7) == 0 {
+                pMod = crate::pragma::sqlite3PragmaVtabRegister(db, Some(z));
+            }
+            if pMod.is_none() && crate::util::sqlite3StrNICmp(Some(z), Some(b"json"), 4) == 0 {
+                pMod = crate::json::sqlite3JsonVtabRegister(db, Some(z));
+            }
+            if let Some(pMod) = pMod {
+                if crate::vtab::sqlite3VtabEponymousTableInit(db, &pMod) != 0 {
+                    return pMod.borrow().pEpoTab.clone();
+                }
+            }
+        }
         if (flags & LOCATE_NOERR as u32) != 0 {
             return None;
         }
@@ -695,7 +707,7 @@ pub fn sqlite3FindIndex(
         if zDb.is_some() && crate::attach::sqlite3DbIsNamed(db, j, zDb) == 0 {
             continue;
         }
-        if let Some(p) = db.aDb[j as usize].pSchema.idxHash.find(zName) {
+        if let Some(p) = db.aDb[j as usize].pSchema.borrow().idxHash.find(zName) {
             return Some(p.clone());
         }
     }
@@ -720,6 +732,7 @@ pub fn sqlite3FreeIndex(db: &mut Sqlite3, p: &IndexRef) {
 pub fn sqlite3UnlinkAndDeleteIndex(db: &mut Sqlite3, iDb: i32, zIdxName: Option<&[u8]>) {
     let pIndex = db.aDb[iDb as usize]
         .pSchema
+        .borrow_mut()
         .idxHash
         .remove(zIdxName.unwrap_or(b""));
     if let Some(pIndex) = pIndex {
@@ -958,7 +971,7 @@ fn deleteTable(db: &mut Sqlite3, pTable: &TableRef) {
             };
             let i = db.schema_index(sid);
             if i >= 0 {
-                let h = &mut db.aDb[i as usize].pSchema.idxHash;
+                let h = &mut db.aDb[i as usize].pSchema.borrow_mut().idxHash;
                 let same = h.find(&zName).map_or(false, |x| Rc::ptr_eq(x, pIndex));
                 if same {
                     h.remove(&zName);
@@ -1016,6 +1029,7 @@ pub fn sqlite3UnlinkAndDeleteTable(db: &mut Sqlite3, iDb: i32, zTabName: Option<
     debug_assert!(iDb >= 0 && iDb < db.nDb());
     let p = db.aDb[iDb as usize]
         .pSchema
+        .borrow_mut()
         .tblHash
         .remove(zTabName.unwrap_or(b""));
     if let Some(p) = p {
@@ -1477,7 +1491,7 @@ fn start_table_common(
         let pTable: TableRef = Rc::new(RefCell::new(Table {
             zName: zName.clone(),
             iPKey: -1,
-            pSchema: db.aDb[iDb as usize].pSchema.id,
+            pSchema: db.aDb[iDb as usize].pSchema.borrow().id,
             nTabRef: 1,
             nRowLogEst: 200,
             ..Default::default()
@@ -1606,16 +1620,16 @@ pub fn sqlite3DeleteReturning(db: &mut Sqlite3) {
         Some(r) => r.zName.clone(),
         None => return,
     };
-    let pHash = &mut db.aDb[1].pSchema.trigHash;
+    let pTrig = db.aDb[1].pSchema.borrow().trigHash.find(&zName).cloned();
     let isOurs = match (
-        pHash.find(&zName),
+        pTrig.as_ref(),
         db.parses.last().and_then(|p| p.u1.d.pReturning.as_ref()),
     ) {
         (Some(t), Some(r)) => Rc::ptr_eq(t, &r.retTrig),
         _ => false,
     };
     if isOurs {
-        db.aDb[1].pSchema.trigHash.remove(&zName);
+        db.aDb[1].pSchema.borrow_mut().trigHash.remove(&zName);
     }
 }
 
@@ -1640,7 +1654,7 @@ pub fn sqlite3AddReturning(db: &mut Sqlite3, pList: ExprListId) {
         sqlite3ErrorMsg(db, b"cannot use RETURNING in a trigger", &[]);
     }
     db.pp().bReturning = 1;
-    let sid = db.aDb[1].pSchema.id;
+    let sid = db.aDb[1].pSchema.borrow().id;
     let retTrig: TriggerRef = Rc::new(RefCell::new(Trigger {
         op: TK_RETURNING,
         tr_tm: TRIGGER_AFTER,
@@ -1684,7 +1698,11 @@ pub fn sqlite3AddReturning(db: &mut Sqlite3, pList: ExprListId) {
     if db.mallocFailed != 0 {
         return;
     }
-    db.aDb[1].pSchema.trigHash.insert(&zName, retTrig);
+    db.aDb[1]
+        .pSchema
+        .borrow_mut()
+        .trigHash
+        .insert(&zName, retTrig);
 }
 
 /// C: `void sqlite3AddColumn(Parse *pParse, Token sName, Token sType)`
@@ -2318,7 +2336,7 @@ pub fn sqlite3AddGenerated(db: &mut Sqlite3, mut pExpr: ExprId, pType: Option<&T
 /// IMPLEMENTATION-OF: R-34230-56049 SQLite automatically increments
 /// the schema-version whenever the schema changes.
 pub fn sqlite3ChangeCookie(db: &mut Sqlite3, iDb: i32) {
-    let c = (1u32.wrapping_add(db.aDb[iDb as usize].pSchema.schema_cookie as u32)) as i32;
+    let c = (1u32.wrapping_add(db.aDb[iDb as usize].pSchema.borrow().schema_cookie as u32)) as i32;
     sqlite3VdbeAddOp3(db.v(), OP_SetCookie, iDb, BTREE_SCHEMA_VERSION, c);
 }
 
@@ -2785,26 +2803,34 @@ fn convertToWithoutRowidTable(db: &mut Sqlite3, pTab: &TableRef) {
 ///
 /// Return true if pTab is a virtual table and zName is a shadow table name
 /// for that virtual table.
-///
-/// Rust: virtual table modules (and their xShadowName methods) are not
-/// available yet, so no table is a shadow table.
 pub fn sqlite3IsShadowTableOf(db: &mut Sqlite3, pTab: &TableRef, zName: Option<&[u8]>) -> i32 {
-    let _ = db;
-    let t = pTab.borrow();
-    if !t.IsVirtual() {
+    let (nName, zMod) = {
+        let t = pTab.borrow();
+        if !t.IsVirtual() {
+            return 0;
+        }
+        let nName = t.zName.len();
+        let z = zName.unwrap_or(b"");
+        if !strneq(z, &t.zName, nName as i32) {
+            return 0;
+        }
+        if z.get(nName) != Some(&b'_') {
+            return 0;
+        }
+        (nName, t.u.vtab.azArg.first().cloned().unwrap_or_default())
+    };
+    let Some(pMod) = db.aModule.find(&zMod).cloned() else {
+        return 0;
+    };
+    let pModule = pMod.borrow().pModule.clone();
+    if pModule.iVersion() < 3 {
         return 0;
     }
-    let nName = t.zName.len();
+    if !pModule.has_xShadowName() {
+        return 0;
+    }
     let z = zName.unwrap_or(b"");
-    if !strneq(z, &t.zName, nName as i32) {
-        return 0;
-    }
-    if z.get(nName) != Some(&b'_') {
-        return 0;
-    }
-    // pMod = sqlite3HashFind(&db->aModule, pTab->u.vtab.azArg[0]): no module
-    // registry yet.
-    0
+    pModule.xShadowName(&z[nName + 1..]) as i32
 }
 
 /// C: `void sqlite3MarkAllShadowTablesOf(sqlite3 *db, Table *pTab)`
@@ -2813,11 +2839,47 @@ pub fn sqlite3IsShadowTableOf(db: &mut Sqlite3, pTab: &TableRef, zName: Option<&
 /// exists and has an xShadowName method, then loop over all other ordinary
 /// tables within the same schema looking for shadow tables of pTab, and mark
 /// any shadow tables seen using the TF_Shadow flag.
-///
-/// Rust: no module registry yet (no module has an xShadowName method).
 pub fn sqlite3MarkAllShadowTablesOf(db: &mut Sqlite3, pTab: &TableRef) {
-    let _ = db;
     debug_assert!(pTab.borrow().IsVirtual());
+    let (zMod, zName, pSchema) = {
+        let t = pTab.borrow();
+        (
+            t.u.vtab.azArg.first().cloned().unwrap_or_default(),
+            t.zName.clone(),
+            t.pSchema,
+        )
+    };
+    let Some(pMod) = db.aModule.find(&zMod).cloned() else {
+        return;
+    };
+    let pModule = pMod.borrow().pModule.clone();
+    if pModule.iVersion() < 3 {
+        return;
+    }
+    if !pModule.has_xShadowName() {
+        return;
+    }
+    let nName = zName.len();
+    let iDb = db.schema_index(pSchema);
+    if iDb < 0 {
+        return;
+    }
+    let tables = db.aDb[iDb as usize].pSchema.borrow().tblHash.values();
+    for pOther in tables.iter() {
+        let mut o = pOther.borrow_mut();
+        if !o.IsOrdinaryTable() {
+            continue;
+        }
+        if (o.tabFlags & TF_Shadow) != 0 {
+            continue;
+        }
+        if strneq(&o.zName, &zName, nName as i32)
+            && o.zName.get(nName) == Some(&b'_')
+            && pModule.xShadowName(&o.zName[nName + 1..])
+        {
+            o.tabFlags |= TF_Shadow;
+        }
+    }
 }
 
 /// C: `int sqlite3ShadowTableName(sqlite3 *db, const char *zName)`
@@ -3197,7 +3259,7 @@ pub fn sqlite3EndTable(
         // Check to see if we need to create an sqlite_sequence table for
         // keeping track of autoincrement keys.
         if (p.borrow().tabFlags & TF_Autoincrement) != 0 && !db.ppr().IN_SPECIAL_PARSE() {
-            if db.aDb[iDb as usize].pSchema.pSeqTab.is_none() {
+            if db.aDb[iDb as usize].pSchema.borrow().pSeqTab.is_none() {
                 sqlite3NestedParse(
                     db,
                     Some(b"CREATE TABLE %Q.sqlite_sequence(name,seq)"),
@@ -3234,7 +3296,11 @@ pub fn sqlite3EndTable(
         });
         publish_table(db, &p);
         let i = iDb as usize;
-        let pOld = db.aDb[i].pSchema.tblHash.insert(&zTabName, p.clone());
+        let pOld = db.aDb[i]
+            .pSchema
+            .borrow_mut()
+            .tblHash
+            .insert(&zTabName, p.clone());
         if pOld.is_some() {
             debug_assert!(false);
             return;
@@ -3247,7 +3313,7 @@ pub fn sqlite3EndTable(
         // so that INSERT can find the table easily.
         debug_assert!(db.ppr().nested == 0);
         if zTabName == b"sqlite_sequence" {
-            db.aDb[i].pSchema.pSeqTab = Some(p.clone());
+            db.aDb[i].pSchema.borrow_mut().pSeqTab = Some(p.clone());
         }
     }
 
@@ -3483,7 +3549,7 @@ fn viewGetColumnNames(db: &mut Sqlite3, pTable: &TableRef) -> i32 {
     }
     let iDb = db.schema_index(pTable.borrow().pSchema);
     if iDb >= 0 {
-        db.aDb[iDb as usize].pSchema.schemaFlags |= DB_UnresetViews;
+        db.aDb[iDb as usize].pSchema.borrow_mut().schemaFlags |= DB_UnresetViews;
     }
     if db.mallocFailed != 0 {
         sqlite3DeleteColumnNames(db, pTable);
@@ -3507,7 +3573,8 @@ fn sqliteViewResetAll(db: &mut Sqlite3, idx: i32) {
     if !db.DbHasProperty(idx, DB_UnresetViews) {
         return;
     }
-    for pTab in db.aDb[idx as usize].pSchema.tblHash.values() {
+    let tabs = db.aDb[idx as usize].pSchema.borrow().tblHash.values();
+    for pTab in tabs {
         if pTab.borrow().IsView() {
             sqlite3DeleteColumnNames(db, &pTab);
         }
@@ -3534,13 +3601,13 @@ fn sqliteViewResetAll(db: &mut Sqlite3, idx: i32) {
 /// in order to be certain that we got the right one.
 pub fn sqlite3RootPageMoved(db: &mut Sqlite3, iDb: i32, iFrom: Pgno, iTo: Pgno) {
     let s = &db.aDb[iDb as usize].pSchema;
-    for (_, pTab) in s.tblHash.iter() {
+    for (_, pTab) in s.borrow().tblHash.iter() {
         let mut t = pTab.borrow_mut();
         if t.tnum == iFrom {
             t.tnum = iTo;
         }
     }
-    for (_, pIdx) in s.idxHash.iter() {
+    for (_, pIdx) in s.borrow().idxHash.iter() {
         let mut x = pIdx.borrow_mut();
         if x.tnum == iFrom {
             x.tnum = iTo;
@@ -3718,10 +3785,12 @@ pub fn sqlite3CodeDropTable(db: &mut Sqlite3, pTab: &TableRef, iDb: i32, isView:
 /// Return TRUE if shadow tables should be read-only in the current
 /// context.
 ///
-/// Rust: no virtual-table context (db->pVtabCtx) or vtab transactions exist
-/// yet, so those two conditions are always satisfied.
 pub fn sqlite3ReadOnlyShadowTables(db: &mut Sqlite3) -> i32 {
-    if (db.flags & SQLITE_Defensive) != 0 && db.nVdbeExec == 0 {
+    if (db.flags & SQLITE_Defensive) != 0
+        && db.pVtabCtx.is_empty()
+        && db.nVdbeExec == 0
+        && !crate::vtab::sqlite3VtabInSync(db)
+    {
         return 1;
     }
     0
@@ -3996,7 +4065,7 @@ pub fn sqlite3CreateForeignKey(
         let sid = p.borrow().pSchema;
         let iDb = db.schema_index(sid);
         if iDb >= 0 {
-            let h = &mut db.aDb[iDb as usize].pSchema.fkeyHash;
+            let h = &mut db.aDb[iDb as usize].pSchema.borrow_mut().fkeyHash;
             if let Some(list) = h.find_mut(&zTo) {
                 list.insert(0, pFKey.clone());
             } else {
@@ -4326,7 +4395,7 @@ pub fn sqlite3CreateIndex(
                 pTab = crate::delete::sqlite3SrcListLookup(db, pTblName);
                 if n2.n == 0 {
                     if let Some(t) = &pTab {
-                        if t.borrow().pSchema == db.aDb[1].pSchema.id {
+                        if t.borrow().pSchema == db.aDb[1].pSchema.borrow().id {
                             iDb = 1;
                         }
                     }
@@ -4345,7 +4414,7 @@ pub fn sqlite3CreateIndex(
                 Some(t) => t.clone(),
                 None => break 'exit_create_index,
             };
-            if iDb == 1 && db.aDb[iDb as usize].pSchema.id != t.borrow().pSchema {
+            if iDb == 1 && db.aDb[iDb as usize].pSchema.borrow().id != t.borrow().pSchema {
                 let z = t.borrow().zName.clone();
                 errmsg!(
                     db,
@@ -4515,7 +4584,7 @@ pub fn sqlite3CreateIndex(
             x.onError = onError as u8;
             x.uniqNotNull = (onError != OE_None as i32) as u8;
             x.idxType = idxType;
-            x.pSchema = db.aDb[iDb as usize].pSchema.id;
+            x.pSchema = db.aDb[iDb as usize].pSchema.borrow().id;
             x.nKeyCol = nExpr as u16;
         }
         if pPIWhere.nn() {
@@ -4531,7 +4600,7 @@ pub fn sqlite3CreateIndex(
         }
 
         // Check to see if we should honor DESC requests on index columns
-        let sortOrderMask: u8 = if db.aDb[iDb as usize].pSchema.file_format >= 4 {
+        let sortOrderMask: u8 = if db.aDb[iDb as usize].pSchema.borrow().file_format >= 4 {
             0xff // Honor DESC
         } else {
             0 // Ignore DESC
@@ -4781,6 +4850,7 @@ pub fn sqlite3CreateIndex(
                 publish_index(db, &idx);
                 let p = db.aDb[iDb as usize]
                     .pSchema
+                    .borrow_mut()
                     .idxHash
                     .insert(&zName, idx.clone());
                 if p.is_some() {
@@ -6076,7 +6146,8 @@ pub fn sqlite3Reindex(db: &mut Sqlite3, pName1: Option<&Token>, pName2: Option<&
             if iReDb >= 0 && iReDb != iDb {
                 continue;
             }
-            for pTab in db.aDb[iDb as usize].pSchema.tblHash.values() {
+            let tabs = db.aDb[iDb as usize].pSchema.borrow().tblHash.values();
+            for pTab in tabs {
                 if pTab.borrow().IsVirtual() {
                     continue;
                 }
@@ -6148,7 +6219,13 @@ pub fn sqlite3KeyInfoOfIndex(db: &mut Sqlite3, pIdx: &IndexRef) -> Option<KeyInf
             (x.bNoQuery, x.pSchema, x.zName.clone())
         };
         let i = db.schema_index(sid);
-        let inHash = i >= 0 && db.aDb[i as usize].pSchema.idxHash.find(&zName).is_some();
+        let inHash = i >= 0
+            && db.aDb[i as usize]
+                .pSchema
+                .borrow()
+                .idxHash
+                .find(&zName)
+                .is_some();
         if bNoQuery == 0 && inHash {
             // Deactivate the index because it contains an unknown collating
             // sequence.  The only way to reactive the index is to reload the

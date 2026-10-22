@@ -234,7 +234,9 @@ pub fn sqlite3InitCallback(
     }
     if pData.pzErrMsg.is_none() {
         let pX = &db.aDb[iDb as usize].pSchema;
-        if (pX.tblHash.count() as u64 + pX.idxHash.count() as u64 + pX.trigHash.count() as u64)
+        if (pX.borrow().tblHash.count() as u64
+            + pX.borrow().idxHash.count() as u64
+            + pX.borrow().trigHash.count() as u64)
             > db.aLimit[SQLITE_LIMIT_SCHEMA as usize] as u32 as u64
         {
             pData.pzErrMsg = Some(mprintf!(db, b"too many schema objects"));
@@ -347,7 +349,8 @@ pub fn sqlite3InitOne(db: &mut Sqlite3, iDb: i32, pzErrMsg: &mut Option<ZStr>, m
             if (db.flags & SQLITE_ResetDatabase) != 0 {
                 meta = [0; 5];
             }
-            db.aDb[iDb as usize].pSchema.schema_cookie = meta[(BTREE_SCHEMA_VERSION - 1) as usize];
+            db.aDb[iDb as usize].pSchema.borrow_mut().schema_cookie =
+                meta[(BTREE_SCHEMA_VERSION - 1) as usize];
 
             // If opening a non-empty database, check the text encoding. For the
             // main database, set sqlite3.enc to the encoding of the main
@@ -375,15 +378,15 @@ pub fn sqlite3InitOne(db: &mut Sqlite3, iDb: i32, pzErrMsg: &mut Option<ZStr>, m
                 }
             }
             let enc = db.ENC();
-            db.aDb[iDb as usize].pSchema.enc = enc;
+            db.aDb[iDb as usize].pSchema.borrow_mut().enc = enc;
 
-            if db.aDb[iDb as usize].pSchema.cache_size == 0 {
+            if db.aDb[iDb as usize].pSchema.borrow().cache_size == 0 {
                 let mut size =
                     crate::util::sqlite3AbsInt32(meta[(BTREE_DEFAULT_CACHE_SIZE - 1) as usize]);
                 if size == 0 {
                     size = SQLITE_DEFAULT_CACHE_SIZE;
                 }
-                db.aDb[iDb as usize].pSchema.cache_size = size;
+                db.aDb[iDb as usize].pSchema.borrow_mut().cache_size = size;
                 sqlite3BtreeSetCacheSize(db, &pBt, size);
             }
 
@@ -392,7 +395,7 @@ pub fn sqlite3InitOne(db: &mut Sqlite3, iDb: i32, pzErrMsg: &mut Option<ZStr>, m
             // file_format==3    Version 3.1.4.  // ditto but with non-NULL defaults
             // file_format==4    Version 3.3.0.  // DESC indices.  Boolean constants
             {
-                let s = &mut db.aDb[iDb as usize].pSchema;
+                let mut s = db.aDb[iDb as usize].pSchema.borrow_mut();
                 s.file_format = meta[(BTREE_FILE_FORMAT - 1) as usize] as u8;
                 if s.file_format == 0 {
                     s.file_format = 1;
@@ -493,7 +496,7 @@ pub fn sqlite3Init(db: &mut Sqlite3, pzErrMsg: &mut Option<ZStr>) -> i32 {
     let commit_internal = (db.mDbFlags & DBFLAG_SchemaChange) == 0;
 
     debug_assert!(db.init.busy == 0);
-    db.enc = db.aDb[0].pSchema.enc; // ENC(db) = SCHEMA_ENC(db);
+    db.enc = db.aDb[0].pSchema.borrow().enc; // ENC(db) = SCHEMA_ENC(db);
     debug_assert!(db.nDb() > 0);
     // Do the main schema first
     if !db.DbHasProperty(0, DB_SchemaLoaded) {
@@ -573,7 +576,7 @@ fn schemaIsValid(db: &mut Sqlite3) {
         // set Parse.rc to SQLITE_SCHEMA.
         let mut cookie: u32 = 0;
         sqlite3BtreeGetMeta(&pBt, BTREE_SCHEMA_VERSION, &mut cookie);
-        if cookie as i32 != db.aDb[iDb as usize].pSchema.schema_cookie {
+        if cookie as i32 != db.aDb[iDb as usize].pSchema.borrow().schema_cookie {
             if db.DbHasProperty(iDb, DB_SchemaLoaded) {
                 db.pp().rc = SQLITE_SCHEMA;
             }
@@ -827,8 +830,9 @@ fn sqlite3PrepareText(
             }
         }
 
-        // Rust: there is no db->pDisconnect list (virtual tables are not
-        // supported yet), so sqlite3VtabUnlockList() is not needed here.
+        if !db.pDisconnect.is_empty() {
+            crate::vtab::sqlite3VtabUnlockList(db);
+        }
 
         let n = if nBytes >= 0 {
             (nBytes as usize).min(zSql.len())

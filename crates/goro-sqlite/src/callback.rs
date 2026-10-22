@@ -6,6 +6,7 @@
 use crate::global::sqlite3UpperToLower;
 use crate::int::*;
 // sqlite3StrICmp() folds ASCII case only, like eq_ignore_ascii_case().
+use std::cell::RefCell;
 use std::rc::Rc;
 
 /// The hash table of built-in SQL functions (C `FuncDefHash`, the global
@@ -527,12 +528,23 @@ pub fn sqlite3FuncDefReplace(db: &mut Sqlite3, pOld: &FuncDefRef, pNew: FuncDef)
 ///
 /// The Schema.cache_size variable is not cleared.
 ///
-/// Rust: the schema is db.aDb[iDb].pSchema.
+/// Rust: the schema is db.aDb[iDb].pSchema (possibly shared with other
+/// connections of a shared cache); `db` is the connection running the
+/// clear (C uses a dummy connection object when the BtShared frees it).
 pub fn sqlite3SchemaClear(db: &mut Sqlite3, iDb: i32) {
-    let i = iDb as usize;
-    let temp1 = std::mem::take(&mut db.aDb[i].pSchema.tblHash);
-    let temp2 = std::mem::take(&mut db.aDb[i].pSchema.trigHash);
-    db.aDb[i].pSchema.idxHash.clear();
+    let p = db.aDb[iDb as usize].pSchema.clone();
+    schemaClear(db, &p);
+}
+
+/// sqlite3SchemaClear() on a schema object.
+pub fn schemaClear(db: &mut Sqlite3, p: &SchemaP) {
+    let (temp1, temp2) = {
+        let mut s = p.borrow_mut();
+        let t1 = std::mem::take(&mut s.tblHash);
+        let t2 = std::mem::take(&mut s.trigHash);
+        s.idxHash.clear();
+        (t1, t2)
+    };
     for pTrig in temp2.values() {
         crate::trigger::sqlite3DeleteTrigger(db, &pTrig);
     }
@@ -541,7 +553,7 @@ pub fn sqlite3SchemaClear(db: &mut Sqlite3, iDb: i32) {
         crate::build::sqlite3DeleteTable(db, &pTab);
     }
     drop(temp1);
-    let s = &mut db.aDb[i].pSchema;
+    let mut s = p.borrow_mut();
     s.fkeyHash.clear();
     s.pSeqTab = None;
     if (s.schemaFlags & DB_SchemaLoaded) != 0 {
@@ -550,22 +562,42 @@ pub fn sqlite3SchemaClear(db: &mut Sqlite3, iDb: i32) {
     s.schemaFlags &= !(DB_SchemaLoaded | DB_ResetWanted);
 }
 
+/// Source of SchemaId values.  Process-wide (not per connection) because
+/// connections on a shared cache share their Schema objects.
+static NEXT_SCHEMA_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A new, empty Schema object (the zeroed allocation of sqlite3SchemaGet())
+/// with a new SchemaId (ids start at 1; SchemaId(0) is never handed out).
+fn newSchema() -> Schema {
+    let id = NEXT_SCHEMA_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    Schema {
+        id: SchemaId(id),
+        ..Default::default()
+    }
+}
+
 /// C: `Schema * sqlite3SchemaGet(sqlite3 *db, Btree *pBt)`
 ///
 /// Find and return the schema associated with a BTree.  Create
 /// a new one if necessary.
 ///
-/// Rust: without shared cache every Btree has its own schema, so this
-/// always returns a fresh (empty) Schema with a new SchemaId (ids start at
-/// 1; SchemaId(0) is never handed out).
-pub fn sqlite3SchemaGet(db: &mut Sqlite3, pBt: Option<&BtreeP>) -> Schema {
-    let _ = pBt;
-    db.nextSchemaId += 1;
-    Schema {
-        id: SchemaId(db.nextSchemaId),
-        enc: SQLITE_UTF8,
-        ..Default::default()
+/// Rust: the schema of a btree is kept by its BtShared
+/// (sqlite3BtreeSchema()), so connections on a shared cache get the same
+/// object.
+pub fn sqlite3SchemaGet(db: &mut Sqlite3, pBt: Option<&BtreeP>) -> SchemaP {
+    let _ = db;
+    let p = match pBt {
+        Some(b) => crate::btree::sqlite3BtreeSchema(b, Some(&newSchema)).expect("schema"),
+        None => Rc::new(RefCell::new(newSchema())),
+    };
+    {
+        let mut s = p.borrow_mut();
+        if s.file_format == 0 {
+            /* sqlite3HashInit() of the (empty) hash tables */
+            s.enc = SQLITE_UTF8;
+        }
     }
+    p
 }
 
 #[cfg(test)]

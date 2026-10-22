@@ -16,11 +16,20 @@ Reference sources (read-only, do not copy them into the repo):
 
 Compile-time configuration we mirror: the default amalgamation build plus
 `SQLITE_ENABLE_COLUMN_METADATA`, `SQLITE_ENABLE_MATH_FUNCTIONS`,
-`SQLITE_OMIT_SHARED_CACHE`, default `SQLITE_DQS=3`, no
+shared cache compiled in (with the `SQLITE_THREADSAFE=0` flavour of
+btmutex.c: no mutexes, `db->noSharedCache` stays 0; no unlock-notify),
+default `SQLITE_DQS=3`, no
 `SQLITE_ENABLE_EXPLAIN_COMMENTS`, no `SQLITE_DEBUG` (asserts become
 `debug_assert!`), UTF-8 only (UTF-16 entry points may stay unimplemented),
-no load_extension, no mmap.  Virtual tables, WAL and JSON come later: keep
-their call sites but stubs may return errors.
+no load_extension, no mmap of the database file (the WAL -shm file is
+mapped, see below).  JSON (json.rs) and WAL (wal.rs) are ported.
+
+Virtual tables (vtab.rs) are ported: a module is an `Rc<dyn VtabModule>`
+(its pAux is captured by the implementation), an instance a
+`Box<dyn Vtab>` held by the per-connection `VTable` (`Table::u.vtab.p`),
+a cursor a `Box<dyn VtabCursor>` stored in `VdbeCursor::pVCur`.  See the
+traits at the top of vtab.rs for the contract (optional C methods are
+default methods plus `has_*` predicates).
 
 ## Layout
 
@@ -124,8 +133,16 @@ hold one across a call that might borrow the same object (clone the Rc or
 copy the fields out first).  Panics from a double borrow are bugs.
 
 `Table::pSchema`, `Index::pSchema` ... are `SchemaId`s; the schema itself is
-`db.aDb[i].pSchema` (owned by the Db); `db.schema_index(id)` is
-`sqlite3SchemaToIndex()`.
+`db.aDb[i].pSchema`, a `SchemaP = Rc<RefCell<Schema>>`.  As in C the
+Schema of a database file belongs to its BtShared (sqlite3BtreeSchema()),
+so connections on a shared cache share the object (and its tables, indexes
+and triggers); the TEMP schema belongs to the Db alone, and a detached
+slot holds `Schema::null()`.  Access it with short borrows:
+`db.aDb[i].pSchema.borrow().tblHash.find(..).cloned()`,
+`db.aDb[i].pSchema.borrow_mut().schema_cookie = ..`; never keep the borrow
+across a call that takes `db` (bind `.values()` to a local before a loop).
+`db.schema_index(id)` is `sqlite3SchemaToIndex()`.  SchemaIds are unique
+in the process.  Schema objects must not hold per-connection state.
 
 ### 4. Strings are bytes
 
@@ -186,6 +203,13 @@ out of its slot so that `sqlite3VdbeExec(db, &mut v)` can borrow both.
 * files: `os.rs` / `os_unix.rs` implement the VFS over `std::fs` plus POSIX
   advisory locks (`libc::fcntl`), with SQLite's exact locking protocol so
   that the real `sqlite3` CLI can share databases with us.
+* WAL: `wal.rs` is a complete port of wal.c.  The wal-index lives in the
+  "-shm" file, mapped `MAP_SHARED` with `libc::mmap` by os_unix.rs (one
+  `UnixShmNode` per inode and process, POSIX locks on bytes 120..128 of
+  the -shm file), so goro and the C library can use the same WAL
+  database concurrently.  The mapped memory is seen as `&[AtomicU32]`
+  (`os::ShmRegion`); the WAL reaches the shm methods of the database
+  file through an `os::ShmHandle` obtained when the WAL is opened.
 
 ### 8. Asserts, testcase(), debugging aids
 

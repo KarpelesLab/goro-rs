@@ -77,7 +77,7 @@ fn btree_nbackup_add(p: &BtreeP, delta: i32) {
 /// C `pTo->pBt->btsFlags &= ~BTS_PAGESIZE_FIXED`.
 fn btree_clear_pagesize_fixed(p: &BtreeP) {
     let pBt = p.borrow().pBt.clone();
-    pBt.borrow_mut().btsFlags &= !(BTS_PAGESIZE_FIXED as u16);
+    pBt.borrow_mut().btsFlags &= !(crate::consts::BTS_PAGESIZE_FIXED as u16);
 }
 
 /// PENDING_BYTE_PAGE(pBt)

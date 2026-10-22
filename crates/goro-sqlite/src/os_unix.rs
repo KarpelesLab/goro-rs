@@ -2,12 +2,24 @@
 //!
 //! Only the POSIX advisory-locking flavour ("unix", "unix-excl") and the
 //! no-locking flavour ("unix-none") are implemented; the dot-file, flock,
-//! AFP, proxy and VxWorks variants, mmap and the WAL shared-memory
-//! methods are not.  The locking protocol is byte-for-byte that of C
-//! SQLite (PENDING / RESERVED / SHARED byte ranges, F_SETLK through the
-//! libc crate, per-inode lock sharing within the process with deferred
-//! close of file descriptors), so that databases can be shared with the
-//! real sqlite3 library.
+//! AFP, proxy and VxWorks variants and mmap of the database file are not.
+//! The locking protocol is byte-for-byte that of C SQLite (PENDING /
+//! RESERVED / SHARED byte ranges, F_SETLK through the libc crate,
+//! per-inode lock sharing within the process with deferred close of file
+//! descriptors), so that databases can be shared with the real sqlite3
+//! library.
+//!
+//! The WAL shared memory (the wal-index) is implemented like C: the
+//! "-shm" file next to the database is mapped `MAP_SHARED` with
+//! `libc::mmap`, one `unixShmNode` per inode and process (shared by all
+//! connections of the process), WAL locks are POSIX advisory locks on
+//! bytes 120..127 of the -shm file plus the dead-man-switch byte 128.
+//! This is the only way to be coherent with other processes (and with
+//! the C library) that map the same file.  The mapped memory is exposed
+//! to the rest of the crate as `&[AtomicU32]` (see `MappedRegion` and
+//! `crate::os::ShmRegion`), so that all accesses to memory that other
+//! processes modify concurrently are atomic; the only unsafe code is the
+//! mmap/munmap calls and the creation of that slice.
 
 use crate::int::*;
 use crate::os::{FcntlArg, SqliteFile, Vfs};
@@ -98,6 +110,9 @@ struct UnixInodeInfo {
     nRef: AtomicI32,
     /// C pLockMutex and the fields it protects
     lock: Mutex<InodeLock>,
+    /// Shared memory associated with this inode (C pShmNode; created,
+    /// read and cleared while holding the big lock INODE_LIST)
+    pShmNode: Mutex<Option<Arc<UnixShmNode>>>,
 }
 
 /// All unixInodeInfo objects of the process (C inodeList); the mutex is
@@ -146,6 +161,9 @@ pub struct UnixFile {
     /// C mmapSizeMax: configured FCNTL_MMAP_SIZE value (nothing is ever
     /// mapped; the value is only reported back, as C does)
     mmapSizeMax: i64,
+    /// Shared memory segment information (C pShm): the handle given to
+    /// the WAL by unixShmHandle()
+    pShm: Option<crate::os::ShmHandle>,
 }
 
 fn errno_of(e: &std::io::Error) -> i32 {
@@ -325,6 +343,7 @@ fn findInodeInfo(list: &mut Vec<Arc<UnixInodeInfo>>, pFile: &mut UnixFile) -> i3
                     bProcessLock: 0,
                     pUnused: Vec::new(),
                 }),
+                pShmNode: Mutex::new(None),
             });
             list.insert(0, p.clone());
             p
@@ -594,6 +613,13 @@ fn unixLock(pFile: &mut UnixFile, eFileLock: i32) -> i32 {
             // We are trying for an exclusive lock but another thread in
             // this same process is still holding a shared lock.
             rc = SQLITE_BUSY;
+        } else if unixIsSharingShmNode(pFile) {
+            // We are in WAL mode and attempting to delete the SHM and WAL
+            // files due to closing the connection or changing out of WAL
+            // mode, but another process still holds locks on the SHM file,
+            // thus indicating that database locks have been broken,
+            // perhaps due to a rogue close(open(dbFile)) or similar.
+            rc = SQLITE_BUSY;
         } else {
             // The request was for a RESERVED or EXCLUSIVE lock.  It is
             // assumed that there is a SHARED or greater lock on the file
@@ -735,6 +761,7 @@ fn closeUnixFile(pFile: &mut UnixFile) -> i32 {
     pFile.eFileLock = 0;
     pFile.ctrlFlags = 0;
     pFile.zPath = None;
+    pFile.pShm = None;
     SQLITE_OK
 }
 
@@ -1159,13 +1186,810 @@ pub(crate) fn unixFileControl(pFile: &mut UnixFile, op: i32, pArg: FcntlArg) -> 
             }
             SQLITE_OK
         }
-        (SQLITE_FCNTL_EXTERNAL_READER, FcntlArg::Int(p)) => {
-            // No shared memory: there is never an external reader.
-            *p = 0;
-            SQLITE_OK
-        }
+        (SQLITE_FCNTL_EXTERNAL_READER, FcntlArg::Int(p)) => unixFcntlExternalReader(pFile, p),
         _ => SQLITE_NOTFOUND,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Shared memory: the -shm file of WAL mode (C unixShmNode / unixShm)
+// ---------------------------------------------------------------------------
+
+/// First lock byte of the -shm file (C UNIX_SHM_BASE)
+const UNIX_SHM_BASE: i64 = (22 + SQLITE_SHM_NLOCK as i64) * 4;
+/// The dead-man switch byte (C UNIX_SHM_DMS)
+const UNIX_SHM_DMS: i64 = UNIX_SHM_BASE + SQLITE_SHM_NLOCK as i64;
+
+/// A `MAP_SHARED` mapping of (part of) a -shm file, seen as 32-bit words.
+///
+/// Safety: the mapping is created by mmap() with the length of `nWord`
+/// u32 words and page alignment, and stays valid until Drop calls
+/// munmap(), so the slice returned by `words()` (whose lifetime is bound
+/// to `&self`) never dangles.  `AtomicU32` has the size and alignment of
+/// `u32` and every bit pattern is a valid value, and all accesses through
+/// it are atomic, so concurrent modification of the memory by other
+/// threads or processes is not a data race from Rust's point of view.  A
+/// read-only mapping (PROT_READ) is never written to by the WAL code (it
+/// only writes to the wal-index while holding locks or in states that a
+/// read-only connection never reaches).  As in C, if another process
+/// truncates the -shm file under a live mapping, an access may raise
+/// SIGBUS.
+pub struct MappedRegion {
+    ptr: std::ptr::NonNull<AtomicU32>,
+    nWord: usize,
+}
+
+// SAFETY: the mapping is plain shared memory accessed only through
+// atomics; it is not tied to the thread that created it.
+unsafe impl Send for MappedRegion {}
+// SAFETY: see above (all accesses are atomic).
+unsafe impl Sync for MappedRegion {}
+
+impl MappedRegion {
+    /// Map nByte bytes of file h starting at offset iOff (C osMmap()).
+    fn map(h: &File, nByte: usize, bReadonly: bool, iOff: i64) -> Option<MappedRegion> {
+        let prot = if bReadonly {
+            libc::PROT_READ
+        } else {
+            libc::PROT_READ | libc::PROT_WRITE
+        };
+        // SAFETY: a fresh mapping (addr NULL) of a file descriptor we own;
+        // the result is checked against MAP_FAILED before use.
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                nByte,
+                prot,
+                libc::MAP_SHARED,
+                h.as_raw_fd(),
+                iOff as libc::off_t,
+            )
+        };
+        if p == libc::MAP_FAILED {
+            return None;
+        }
+        Some(MappedRegion {
+            ptr: std::ptr::NonNull::new(p as *mut AtomicU32)?,
+            nWord: nByte / 4,
+        })
+    }
+
+    /// The mapped memory.
+    #[inline]
+    pub fn words(&self) -> &[AtomicU32] {
+        // SAFETY: see the type documentation: ptr..ptr+nWord is a live
+        // mapping for the lifetime of self.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.nWord) }
+    }
+}
+
+impl Drop for MappedRegion {
+    fn drop(&mut self) {
+        // SAFETY: unmaps exactly the mapping created in map(); no slice
+        // into it can outlive self.
+        unsafe {
+            libc::munmap(self.ptr.as_ptr() as *mut libc::c_void, self.nWord * 4);
+        }
+    }
+}
+
+/// The mutable part of a unixShmNode, protected by the C pShmMutex.
+struct ShmNodeState {
+    /// Size of shared-memory regions
+    szRegion: i32,
+    /// Mapped shared-memory regions (nRegion is the length)
+    apRegion: Vec<crate::os::ShmPage>,
+    /// True if no DMS lock held
+    isUnlocked: bool,
+    /// # shared locks on slot, -1==excl lock
+    aLock: [i32; SQLITE_SHM_NLOCK as usize],
+}
+
+/// Object used to represent a shared memory buffer (C unixShmNode).
+///
+/// When multiple connections of the process reference the same
+/// wal-index, each has its own unixShm object, but they all point to a
+/// single instance of this object: each wal-index is opened only once per
+/// process.  Each node is connected to a single unixInodeInfo (C
+/// pInode->pShmNode), created only when needed.
+pub struct UnixShmNode {
+    /// Name of the mmapped file
+    zFilename: ZStr,
+    /// Open file descriptor (None: the unix-excl heap-memory case)
+    hShm: Option<File>,
+    /// True if read-only
+    isReadonly: bool,
+    /// Number of unixShm objects pointing to this (changed while holding
+    /// the big lock)
+    nRef: AtomicI32,
+    /// C pShmMutex and the fields it protects
+    st: Mutex<ShmNodeState>,
+}
+
+fn lockShmNode(p: &UnixShmNode) -> MutexGuard<'_, ShmNodeState> {
+    p.st.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The state of an open shared memory connection (C unixShm).
+pub struct UnixShm {
+    /// The underlying unixShmNode object
+    pShmNode: Arc<UnixShmNode>,
+    /// Mask of shared locks held
+    sharedMask: u16,
+    /// Mask of exclusive locks held
+    exclMask: u16,
+}
+
+/// The shared-memory side of one database file handle (what C reaches
+/// through `pDbFd`: the unixFile fields used by the shm methods, plus
+/// `pDbFd->pShm`).  See `crate::os::ShmHandle`.
+pub struct UnixShmConn {
+    /// The inode of the database file
+    pInode: Arc<UnixInodeInfo>,
+    /// The database file name (C layout, with URI parameters)
+    zPath: ZStr,
+    /// fstat() of the database file: (mode, uid, gid), None on failure
+    dbStat: Option<(u32, u32, u32)>,
+    /// C pDbFd->pShm
+    p: Option<UnixShm>,
+}
+
+impl Drop for UnixShmConn {
+    /// Safety net: a shm connection whose WAL went away without
+    /// sqlite3OsShmUnmap() still releases its reference to the node.
+    fn drop(&mut self) {
+        if self.p.is_some() {
+            unixShmUnmap(self, 0);
+        }
+    }
+}
+
+/// True if the file implements xShmMap (posixIoMethods).
+pub(crate) fn unixHasShm(pFile: &UnixFile) -> bool {
+    pFile.pMethod == UnixMethods::Posix && pFile.pInode.is_some()
+}
+
+/// Return the shared-memory handle of database file pFile (created on
+/// first use; see `crate::os::sqlite3OsShmHandle`).
+pub(crate) fn unixShmHandle(pFile: &mut UnixFile) -> Option<crate::os::ShmHandle> {
+    if !unixHasShm(pFile) {
+        return None;
+    }
+    if let Some(h) = &pFile.pShm {
+        return Some(h.clone());
+    }
+    let dbStat = pFile
+        .h
+        .as_ref()
+        .and_then(|h| h.metadata().ok())
+        .map(|m| (m.mode(), m.uid(), m.gid()));
+    let h = Rc::new(std::cell::RefCell::new(UnixShmConn {
+        pInode: pFile.pInode.clone().unwrap(),
+        zPath: pFile.zPath.clone().unwrap_or_default(),
+        dbStat,
+        p: None,
+    }));
+    pFile.pShm = Some(h.clone());
+    Some(h)
+}
+
+/// F_GETLK on fd h: returns the l_type of the lock that would block a lock
+/// of type lockType on bytes iOff..iOff+n (F_UNLCK if none), or None if
+/// fcntl() fails.
+fn osGetLk(h: &File, lockType: i32, iOff: i64, n: i64) -> Option<i32> {
+    let mut f = to_libc_flock(&Flock {
+        l_type: lockType,
+        l_start: iOff,
+        l_len: n,
+    });
+    // SAFETY: F_GETLK with a valid, initialized struct flock.
+    if unsafe { libc::fcntl(h.as_raw_fd(), libc::F_GETLK, &mut f as *mut libc::flock) } < 0 {
+        None
+    } else {
+        Some(f.l_type as i32)
+    }
+}
+
+/// Use F_GETLK to check whether or not there are any readers with open
+/// wal-mode transactions in other processes on database file pFile.
+fn unixFcntlExternalReader(pFile: &mut UnixFile, piOut: &mut i32) -> i32 {
+    let mut rc = SQLITE_OK;
+    *piOut = 0;
+    if let Some(h) = &pFile.pShm {
+        let c = h.borrow();
+        if let Some(p) = &c.p {
+            let pShmNode = &p.pShmNode;
+            let _g = lockShmNode(pShmNode);
+            if let Some(hShm) = &pShmNode.hShm {
+                match osGetLk(
+                    hShm,
+                    libc::F_WRLCK as i32,
+                    UNIX_SHM_BASE + 3,
+                    SQLITE_SHM_NLOCK as i64 - 3,
+                ) {
+                    None => rc = SQLITE_IOERR_LOCK,
+                    Some(t) => *piOut = (t != libc::F_UNLCK as i32) as i32,
+                }
+            }
+        }
+    }
+    rc
+}
+
+/// If pFile has a -shm file open and it is sharing that file with some
+/// other connection, either in the same process or in a separate process,
+/// then return true.  Return false if either pFile does not have a -shm
+/// file open or if it is the only connection to that -shm file across the
+/// entire system.
+///
+/// This routine is not required for correct operation.  It adds extra
+/// robustness in cases where database file locks have been erroneously
+/// deleted in a WAL-mode database by doing close(open(DATABASE_PATHNAME))
+/// or similar.
+fn unixIsSharingShmNode(pFile: &UnixFile) -> bool {
+    let Some(h) = &pFile.pShm else {
+        return false;
+    };
+    let c = h.borrow();
+    let Some(p) = &c.p else {
+        return false;
+    };
+    if (pFile.ctrlFlags & UNIXFILE_EXCL) != 0 {
+        return false;
+    }
+    match &p.pShmNode.hShm {
+        Some(hShm) => osGetLk(hShm, libc::F_WRLCK as i32, UNIX_SHM_DMS, 1)
+            .is_some_and(|t| t != libc::F_UNLCK as i32),
+        None => false,
+    }
+}
+
+/// Apply posix advisory locks for all bytes from ofst through ofst+n-1.
+/// The pShmMutex of the node must be held (or the node not yet
+/// published).
+fn unixShmSystemLock(pShmNode: &UnixShmNode, lockType: i32, ofst: i64, n: i64) -> i32 {
+    let mut rc = SQLITE_OK;
+    debug_assert!(
+        (ofst == UNIX_SHM_DMS && n == 1)
+            || (ofst >= UNIX_SHM_BASE && ofst + n <= UNIX_SHM_BASE + SQLITE_SHM_NLOCK as i64)
+    );
+    // Shared locks never span more than one byte
+    debug_assert!(n == 1 || lockType != libc::F_RDLCK as i32);
+    if let Some(h) = &pShmNode.hShm {
+        let f = Flock {
+            l_type: lockType,
+            l_start: ofst,
+            l_len: n,
+        };
+        if osSetPosixAdvisoryLock(h, &f) == -1 {
+            rc = SQLITE_BUSY;
+        }
+    }
+    rc
+}
+
+/// Return the minimum number of 32KB shm regions that should be mapped at
+/// a time, assuming that each mapping must be an integer multiple of the
+/// current system page-size.
+fn unixShmRegionPerMap() -> i32 {
+    let shmsz = 32 * 1024; // SHM region size
+    // SAFETY: sysconf() has no preconditions.
+    let pgsz = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as i32;
+    if pgsz < shmsz {
+        return 1;
+    }
+    pgsz / shmsz
+}
+
+/// Remove the unixShmNode of pInode if its reference count is zero (C
+/// unixShmPurge()).  The big lock must be held.  The -shm file descriptor
+/// is closed (releasing this process's locks on it) when the node is
+/// dropped; each mapping is released when its last region is dropped.
+fn unixShmPurge(pInode: &UnixInodeInfo) {
+    let mut slot = pInode.pShmNode.lock().unwrap_or_else(|e| e.into_inner());
+    if slot
+        .as_ref()
+        .is_some_and(|p| p.nRef.load(Ordering::SeqCst) == 0)
+    {
+        *slot = None;
+    }
+}
+
+/// The DMS lock has not yet been taken on shm file pShmNode. Attempt to
+/// take it now. Return SQLITE_OK if successful, or an SQLite error code
+/// otherwise.
+///
+/// If the DMS cannot be locked because this is a readonly_shm=1
+/// connection and no other process already holds a lock, return
+/// SQLITE_READONLY_CANTINIT and set pShmNode->isUnlocked=1.
+fn unixLockSharedMemory(pShmNode: &UnixShmNode, st: &mut ShmNodeState) -> i32 {
+    let mut rc = SQLITE_OK;
+    let Some(hShm) = pShmNode.hShm.as_ref() else {
+        return SQLITE_OK;
+    };
+
+    // Use F_GETLK to determine the locks other processes are holding on
+    // the DMS byte. If it indicates that another process is holding a
+    // SHARED lock, then this process may also take a SHARED lock and
+    // proceed with opening the *-shm file.
+    //
+    // Or, if no other process is holding any lock, then this process is
+    // the first to open it. In this case take an EXCLUSIVE lock on the DMS
+    // byte and truncate the *-shm file to zero bytes in size. Then
+    // downgrade to a SHARED lock on the DMS byte.
+    //
+    // If another process is holding an EXCLUSIVE lock on the DMS byte,
+    // return SQLITE_BUSY to the caller (it will try again).
+    match osGetLk(hShm, libc::F_WRLCK as i32, UNIX_SHM_DMS, 1) {
+        None => rc = SQLITE_IOERR_LOCK,
+        Some(t) if t == libc::F_UNLCK as i32 => {
+            if pShmNode.isReadonly {
+                st.isUnlocked = true;
+                rc = SQLITE_READONLY_CANTINIT;
+            } else {
+                rc = unixShmSystemLock(pShmNode, libc::F_WRLCK as i32, UNIX_SHM_DMS, 1);
+                // The first connection to attach must truncate the -shm
+                // file.  We truncate to 3 bytes (an arbitrary small number,
+                // less than the -shm header size) rather than 0 as a system
+                // debugging aid, to help detect if a -shm file truncation
+                // is legitimate or is the work or a rogue process.
+                if rc == SQLITE_OK {
+                    if let Err(e) = hShm.set_len(3) {
+                        rc = unixLogError(
+                            SQLITE_IOERR_SHMOPEN,
+                            "ftruncate",
+                            Some(&pShmNode.zFilename),
+                            errno_of(&e),
+                        );
+                    }
+                }
+            }
+        }
+        Some(t) if t == libc::F_WRLCK as i32 => rc = SQLITE_BUSY,
+        Some(_) => {}
+    }
+
+    if rc == SQLITE_OK {
+        rc = unixShmSystemLock(pShmNode, libc::F_RDLCK as i32, UNIX_SHM_DMS, 1);
+    }
+    rc
+}
+
+/// Create the unixShmNode of a database file (the part of C
+/// unixOpenSharedMemory() run when pInode->pShmNode is NULL).  The big
+/// lock must be held.  On error, the partially built node is dropped,
+/// which closes its file descriptor (C unixShmPurge()).
+fn unixCreateShmNode(pDbFd: &UnixShmConn, rc: &mut i32) -> Option<Arc<UnixShmNode>> {
+    // Use the fstat() of the database file to figure out its
+    // permissions. If a new *-shm file is created, an attempt will be made
+    // to create it with the same permissions.
+    let Some((st_mode, st_uid, st_gid)) = pDbFd.dbStat else {
+        *rc = SQLITE_IOERR_FSTAT;
+        return None;
+    };
+    let mut zShm = crate::os::zpath_name(&pDbFd.zPath).to_vec();
+    zShm.extend_from_slice(b"-shm");
+
+    let mut hShm: Option<File> = None;
+    let mut isReadonly = false;
+    let bProcessLock = lockInode(&pDbFd.pInode).bProcessLock;
+    if bProcessLock == 0 {
+        if crate::os::uri_boolean(Some(&pDbFd.zPath), b"readonly_shm", 0) == 0 {
+            hShm = robust_open(
+                &zShm,
+                libc::O_RDWR | libc::O_CREAT | libc::O_NOFOLLOW,
+                st_mode & 0o777,
+            )
+            .ok();
+        }
+        if hShm.is_none() {
+            match robust_open(&zShm, libc::O_RDONLY | libc::O_NOFOLLOW, st_mode & 0o777) {
+                Ok(f) => hShm = Some(f),
+                Err(e) => {
+                    *rc = unixLogError(SQLITE_CANTOPEN, "open", Some(&zShm), e);
+                    return None;
+                }
+            }
+            isReadonly = true;
+        }
+
+        // If this process is running as root, make sure that the SHM file
+        // is owned by the same user that owns the original database.
+        // Otherwise, the original owner will not be able to connect.
+        // SAFETY: geteuid() has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            if let Some(f) = &hShm {
+                let _ = std::os::unix::fs::fchown(f, Some(st_uid), Some(st_gid));
+            }
+        }
+    }
+    let node = Arc::new(UnixShmNode {
+        zFilename: zShm,
+        hShm,
+        isReadonly,
+        nRef: AtomicI32::new(0),
+        st: Mutex::new(ShmNodeState {
+            szRegion: 0,
+            apRegion: Vec::new(),
+            isUnlocked: false,
+            aLock: [0; SQLITE_SHM_NLOCK as usize],
+        }),
+    });
+    if bProcessLock == 0 {
+        *rc = unixLockSharedMemory(&node, &mut lockShmNode(&node));
+        if *rc != SQLITE_OK && *rc != SQLITE_READONLY_CANTINIT {
+            return None;
+        }
+    }
+    Some(node)
+}
+
+/// Open a shared-memory area associated with open database file pDbFd.
+/// This particular implementation uses mmapped files.
+///
+/// The file used to implement shared-memory is in the same directory as
+/// the open database file and has the same name as the open database
+/// file with the "-shm" suffix added.
+///
+/// When opening a new shared-memory file, if no other instances of that
+/// file are currently open, in this process or in other processes, then
+/// the file must be truncated to zero length or have its header cleared.
+///
+/// If the original database file (pDbFd) is using the "unix-excl" VFS
+/// that means that an exclusive lock is held on the database file and
+/// that no other processes are able to read or write the database.  In
+/// that case, we do not really need shared memory.  No shared memory file
+/// is created.  The shared memory will be simulated with heap memory.
+fn unixOpenSharedMemory(pDbFd: &mut UnixShmConn) -> i32 {
+    let mut rc = SQLITE_OK;
+    debug_assert!(pDbFd.p.is_none());
+
+    // Check to see if a unixShmNode object already exists. Reuse an
+    // existing one if present. Create a new one if necessary.
+    let list = unixEnterMutex();
+    let existing = pDbFd
+        .pInode
+        .pShmNode
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    let pShmNode = match existing {
+        Some(p) => p,
+        None => match unixCreateShmNode(pDbFd, &mut rc) {
+            Some(p) => {
+                *pDbFd
+                    .pInode
+                    .pShmNode
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
+                p
+            }
+            None => {
+                drop(list);
+                return rc;
+            }
+        },
+    };
+
+    // Make the new connection a child of the unixShmNode
+    pShmNode.nRef.fetch_add(1, Ordering::SeqCst);
+    pDbFd.p = Some(UnixShm {
+        pShmNode,
+        sharedMask: 0,
+        exclMask: 0,
+    });
+    drop(list);
+    rc
+}
+
+/// This function is called to obtain a pointer to region iRegion of the
+/// shared-memory associated with the database file fd. Shared-memory
+/// regions are numbered starting from zero. Each shared-memory region is
+/// szRegion bytes in size.
+///
+/// If an error occurs, an error code is returned and *pp is set to NULL.
+///
+/// Otherwise, if the bExtend parameter is 0 and the requested
+/// shared-memory region has not been allocated (by any client, including
+/// one running in a separate process), then *pp is set to NULL and
+/// SQLITE_OK returned. If bExtend is non-zero and the requested
+/// shared-memory region has not yet been allocated, it is allocated by
+/// this function.
+///
+/// If the shared-memory region has already been allocated or is allocated
+/// by this call as described above, then it is mapped into this processes
+/// address space (if it is not already), *pp is set to point to the
+/// mapped memory and SQLITE_OK returned.
+pub(crate) fn unixShmMap(
+    pDbFd: &mut UnixShmConn,
+    iRegion: i32,
+    szRegion: i32,
+    bExtend: i32,
+    pp: &mut Option<crate::os::ShmPage>,
+) -> i32 {
+    let mut rc = SQLITE_OK;
+    let nShmPerMap = unixShmRegionPerMap();
+
+    // If the shared-memory file has not yet been opened, open it now.
+    if pDbFd.p.is_none() {
+        rc = unixOpenSharedMemory(pDbFd);
+        if rc != SQLITE_OK {
+            *pp = None;
+            return rc;
+        }
+    }
+
+    let pShmNode = pDbFd.p.as_ref().unwrap().pShmNode.clone();
+    let mut st = lockShmNode(&pShmNode);
+    'shmpage_out: {
+        if st.isUnlocked {
+            rc = unixLockSharedMemory(&pShmNode, &mut st);
+            if rc != SQLITE_OK {
+                break 'shmpage_out;
+            }
+            st.isUnlocked = false;
+        }
+        debug_assert!(szRegion == st.szRegion || st.apRegion.is_empty());
+
+        // Minimum number of regions required to be mapped.
+        let nReqRegion = ((iRegion + nShmPerMap) / nShmPerMap) * nShmPerMap;
+
+        if (st.apRegion.len() as i32) < nReqRegion {
+            let nByte = nReqRegion as i64 * szRegion as i64; // Minimum required file size
+            st.szRegion = szRegion;
+
+            if let Some(hShm) = &pShmNode.hShm {
+                // The requested region is not mapped into this processes
+                // address space.  Check to see if it has been allocated
+                // (i.e. if the wal-index file is large enough to contain
+                // the requested region).
+                let st_size = match hShm.metadata() {
+                    Ok(m) => m.len() as i64,
+                    Err(_) => {
+                        rc = SQLITE_IOERR_SHMSIZE;
+                        break 'shmpage_out;
+                    }
+                };
+
+                if st_size < nByte {
+                    // The requested memory region does not exist. If
+                    // bExtend is set to false, exit early. *pp will be set
+                    // to NULL and SQLITE_OK returned.
+                    if bExtend == 0 {
+                        break 'shmpage_out;
+                    }
+
+                    // Alternatively, if bExtend is true, extend the file.
+                    // Do this by writing a single byte to the end of each
+                    // (OS) page being allocated or extended. Technically,
+                    // we need only write to the last page in order to
+                    // extend the file. But writing to all new pages forces
+                    // the OS to allocate them immediately, which reduces
+                    // the chances of SIGBUS while accessing the mapped
+                    // region later on.
+                    const PGSZ: i64 = 4096;
+                    debug_assert!((nByte % PGSZ) == 0);
+                    for iPg in (st_size / PGSZ)..(nByte / PGSZ) {
+                        let off = (iPg * PGSZ + PGSZ - 1) as u64;
+                        let ok = loop {
+                            match hShm.write_at(&[0u8], off) {
+                                Ok(1) => break true,
+                                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                                _ => break false,
+                            }
+                        };
+                        if !ok {
+                            rc = unixLogError(
+                                SQLITE_IOERR_SHMSIZE,
+                                "write",
+                                Some(&pShmNode.zFilename),
+                                last_errno(),
+                            );
+                            break 'shmpage_out;
+                        }
+                    }
+                }
+            }
+
+            // Map the requested memory region into this processes address
+            // space.
+            while (st.apRegion.len() as i32) < nReqRegion {
+                let nMap = szRegion as usize * nShmPerMap as usize;
+                let nWord = szRegion as usize / 4;
+                match &pShmNode.hShm {
+                    Some(hShm) => {
+                        let iOff = szRegion as i64 * st.apRegion.len() as i64;
+                        match MappedRegion::map(hShm, nMap, pShmNode.isReadonly, iOff) {
+                            None => {
+                                rc = unixLogError(
+                                    SQLITE_IOERR_SHMMAP,
+                                    "mmap",
+                                    Some(&pShmNode.zFilename),
+                                    last_errno(),
+                                );
+                                break 'shmpage_out;
+                            }
+                            Some(m) => {
+                                let m = Arc::new(m);
+                                for i in 0..nShmPerMap as usize {
+                                    st.apRegion.push(Arc::new(crate::os::ShmRegion::mapped(
+                                        m.clone(),
+                                        i * nWord,
+                                        nWord,
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                    None => {
+                        for _ in 0..nShmPerMap {
+                            st.apRegion
+                                .push(Arc::new(crate::os::ShmRegion::new_heap(szRegion as usize)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // shmpage_out:
+    *pp = st.apRegion.get(iRegion as usize).cloned();
+    if pShmNode.isReadonly && rc == SQLITE_OK {
+        rc = SQLITE_READONLY;
+    }
+    drop(st);
+    rc
+}
+
+/// Change the lock state for a shared-memory segment.
+///
+/// Note that the relationship between SHARED and EXCLUSIVE locks is a
+/// little different here than in posix.  In xShmLock(), one can go from
+/// unlocked to shared and back or from unlocked to exclusive and back.
+/// But one may not go from shared to exclusive or from exclusive to
+/// shared.
+pub(crate) fn unixShmLock(pDbFd: &mut UnixShmConn, ofst: i32, n: i32, flags: i32) -> i32 {
+    let mut rc = SQLITE_OK;
+    let mask: u16 = ((1u32 << (ofst + n)) - (1u32 << ofst)) as u16; // Mask of locks to take or release
+
+    let Some(p) = pDbFd.p.as_mut() else {
+        return SQLITE_IOERR_SHMLOCK;
+    };
+    let pShmNode = p.pShmNode.clone();
+
+    debug_assert!(ofst >= 0 && ofst + n <= SQLITE_SHM_NLOCK);
+    debug_assert!(n >= 1);
+    debug_assert!(
+        flags == (SQLITE_SHM_LOCK | SQLITE_SHM_SHARED)
+            || flags == (SQLITE_SHM_LOCK | SQLITE_SHM_EXCLUSIVE)
+            || flags == (SQLITE_SHM_UNLOCK | SQLITE_SHM_SHARED)
+            || flags == (SQLITE_SHM_UNLOCK | SQLITE_SHM_EXCLUSIVE)
+    );
+    debug_assert!(n == 1 || (flags & SQLITE_SHM_EXCLUSIVE) != 0);
+
+    // Check if there is any work to do. There are three cases:
+    //
+    //    a) An unlock operation where there are locks to unlock,
+    //    b) An shared lock where the requested lock is not already held
+    //    c) An exclusive lock where the requested lock is not already held
+    //
+    // The SQLite core never requests an exclusive lock that it already
+    // holds.
+    debug_assert!(flags != (SQLITE_SHM_EXCLUSIVE | SQLITE_SHM_LOCK) || 0 == (p.exclMask & mask));
+    if ((flags & SQLITE_SHM_UNLOCK) != 0 && ((p.exclMask | p.sharedMask) & mask) != 0)
+        || (flags == (SQLITE_SHM_SHARED | SQLITE_SHM_LOCK) && 0 == (p.sharedMask & mask))
+        || flags == (SQLITE_SHM_EXCLUSIVE | SQLITE_SHM_LOCK)
+    {
+        let mut st = lockShmNode(&pShmNode);
+        let ofs = ofst as usize;
+        let nn = n as usize;
+        let base = UNIX_SHM_BASE + ofst as i64;
+        if (flags & SQLITE_SHM_UNLOCK) != 0 {
+            // Case (a) - unlock.
+            let mut bUnlock = true;
+            debug_assert!((p.exclMask & p.sharedMask) == 0);
+
+            // If this is a SHARED lock being unlocked, it is possible that
+            // other clients within this process are holding the same
+            // SHARED lock. In this case, set bUnlock to 0 so that the posix
+            // lock is not removed from the file-descriptor below.
+            if (flags & SQLITE_SHM_SHARED) != 0 {
+                debug_assert!(n == 1);
+                debug_assert!(st.aLock[ofs] >= 1);
+                if st.aLock[ofs] > 1 {
+                    bUnlock = false;
+                    st.aLock[ofs] -= 1;
+                    p.sharedMask &= !mask;
+                }
+            }
+
+            if bUnlock {
+                rc = unixShmSystemLock(&pShmNode, libc::F_UNLCK as i32, base, n as i64);
+                if rc == SQLITE_OK {
+                    for x in &mut st.aLock[ofs..ofs + nn] {
+                        *x = 0;
+                    }
+                    p.sharedMask &= !mask;
+                    p.exclMask &= !mask;
+                }
+            }
+        } else if (flags & SQLITE_SHM_SHARED) != 0 {
+            // Case (b) - a shared lock.
+            if st.aLock[ofs] < 0 {
+                // An exclusive lock is held by some other connection. BUSY.
+                rc = SQLITE_BUSY;
+            } else if st.aLock[ofs] == 0 {
+                rc = unixShmSystemLock(&pShmNode, libc::F_RDLCK as i32, base, n as i64);
+            }
+
+            // Get the local shared locks
+            if rc == SQLITE_OK {
+                p.sharedMask |= mask;
+                st.aLock[ofs] += 1;
+            }
+        } else {
+            // Case (c) - an exclusive lock.
+            debug_assert!((p.sharedMask & mask) == 0);
+            debug_assert!((p.exclMask & mask) == 0);
+
+            // Make sure no sibling connections hold locks that will block
+            // this lock.  If any do, return SQLITE_BUSY right away.
+            if st.aLock[ofs..ofs + nn].iter().any(|&x| x != 0) {
+                rc = SQLITE_BUSY;
+            }
+
+            // Get the exclusive locks at the system level. Then if
+            // successful also update the in-memory values.
+            if rc == SQLITE_OK {
+                rc = unixShmSystemLock(&pShmNode, libc::F_WRLCK as i32, base, n as i64);
+                if rc == SQLITE_OK {
+                    p.exclMask |= mask;
+                    for x in &mut st.aLock[ofs..ofs + nn] {
+                        *x = -1;
+                    }
+                }
+            }
+        }
+    }
+    rc
+}
+
+/// Implement a memory barrier or memory fence on shared memory.
+///
+/// All loads and stores begun before the barrier must complete before any
+/// load or store begun after the barrier.
+pub(crate) fn unixShmBarrier() {
+    std::sync::atomic::fence(Ordering::SeqCst);
+    // Also mutex, for redundancy
+    drop(unixEnterMutex());
+}
+
+/// Close a connection to shared-memory.  Delete the underlying storage if
+/// deleteFlag is true.
+///
+/// If there is no shared memory associated with the connection then this
+/// routine is a harmless no-op.
+pub(crate) fn unixShmUnmap(pDbFd: &mut UnixShmConn, deleteFlag: i32) -> i32 {
+    let Some(p) = pDbFd.p.take() else {
+        return SQLITE_OK;
+    };
+    let pShmNode = p.pShmNode.clone();
+    // Free the connection p
+    drop(p);
+
+    // If pShmNode->nRef has reached 0, then close the underlying
+    // shared-memory file, too
+    let list = unixEnterMutex();
+    debug_assert!(pShmNode.nRef.load(Ordering::SeqCst) > 0);
+    if pShmNode.nRef.fetch_sub(1, Ordering::SeqCst) == 1 {
+        if deleteFlag != 0 && pShmNode.hShm.is_some() {
+            let _ = std::fs::remove_file(os_path(&pShmNode.zFilename));
+        }
+        drop(pShmNode);
+        unixShmPurge(&pDbFd.pInode);
+    }
+    drop(list);
+    SQLITE_OK
 }
 
 /// Initialize sectorSize and deviceCharacteristics of the file.
@@ -1218,6 +2042,7 @@ fn fillInUnixFile(
         sectorSize: 0,
         deviceCharacteristics: 0,
         mmapSizeMax: crate::global::sqlite3GlobalConfig().szMmap,
+        pShm: None,
     };
     if crate::os::uri_boolean(
         if (ctrlFlags & UNIXFILE_URI) != 0 {

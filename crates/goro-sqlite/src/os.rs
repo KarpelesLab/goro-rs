@@ -268,36 +268,116 @@ pub fn sqlite3OsDeviceCharacteristics(id: &mut crate::os::SqliteFile) -> i32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared memory (the wal-index)
+// ---------------------------------------------------------------------------
+
+/// One region (32KB page) of the wal-index (C `volatile u32*` returned by
+/// xShmMap()).
+///
+/// The content is seen as an array of `AtomicU32` (native byte order, like
+/// the C code which accesses it as `u32`/`u16` arrays): the memory may be
+/// shared with other threads and, through a `MAP_SHARED` mapping of the
+/// -shm file, with other processes (including the C library), so every
+/// access is atomic.  A region is either heap memory (heap-memory WAL
+/// mode, unreliable read-only shm, or the unix-excl VFS) or a mapping of
+/// the -shm file owned by os_unix.rs.  Regions are reference counted: a
+/// mapping is unmapped when the last user drops it.
+pub struct ShmRegion(ShmRegionKind);
+
+enum ShmRegionKind {
+    Heap(Box<[std::sync::atomic::AtomicU32]>),
+    Mapped(std::sync::Arc<crate::os_unix::MappedRegion>, usize, usize),
+}
+
+impl ShmRegion {
+    /// A zeroed heap region of nByte bytes (C sqlite3MallocZero()).
+    pub fn new_heap(nByte: usize) -> ShmRegion {
+        ShmRegion(ShmRegionKind::Heap(
+            (0..nByte / 4)
+                .map(|_| std::sync::atomic::AtomicU32::new(0))
+                .collect(),
+        ))
+    }
+
+    /// `nWord` words starting at word `iOff` of a mapping.
+    pub(crate) fn mapped(
+        m: std::sync::Arc<crate::os_unix::MappedRegion>,
+        iOff: usize,
+        nWord: usize,
+    ) -> ShmRegion {
+        ShmRegion(ShmRegionKind::Mapped(m, iOff, nWord))
+    }
+
+    /// The content of the region as 32-bit words.
+    #[inline]
+    pub fn w(&self) -> &[std::sync::atomic::AtomicU32] {
+        match &self.0 {
+            ShmRegionKind::Heap(b) => b,
+            ShmRegionKind::Mapped(m, off, n) => &m.words()[*off..*off + *n],
+        }
+    }
+}
+
+/// A wal-index page handed out by xShmMap() (C `void volatile*`).
+pub type ShmPage = std::sync::Arc<ShmRegion>;
+
+/// The shared-memory methods of an open database file (C xShmMap,
+/// xShmLock, xShmBarrier and xShmUnmap of `pDbFd->pMethods`, with the
+/// per-connection state C keeps in `unixFile.pShm`).
+///
+/// Signature change: the WAL module cannot keep a pointer to the pager's
+/// database file, so it obtains this handle from the file once (see
+/// sqlite3OsShmHandle()) and passes it to the sqlite3OsShm*() functions.
+/// The database file keeps a clone of the handle, for the file-control and
+/// locking code that needs to know about the shared memory.
+pub type ShmHandle = Rc<RefCell<crate::os_unix::UnixShmConn>>;
+
+/// The shared-memory handle of database file `pDbFd`, or None if its VFS
+/// does not implement shared memory (C `pMethods->iVersion<2 ||
+/// pMethods->xShmMap==0`).
+pub fn sqlite3OsShmHandle(pDbFd: &mut crate::os::SqliteFile) -> Option<ShmHandle> {
+    match pDbFd {
+        SqliteFile::Unix(f) => crate::os_unix::unixShmHandle(f),
+        _ => None,
+    }
+}
+
+/// True if the VFS of `pDbFd` implements shared memory (xShmMap!=0).
+pub fn sqlite3OsHasShm(pDbFd: &crate::os::SqliteFile) -> bool {
+    match pDbFd {
+        SqliteFile::Unix(f) => crate::os_unix::unixHasShm(f),
+        _ => false,
+    }
+}
+
 /// C: `int sqlite3OsShmLock(sqlite3_file *id, int offset, int n, int flags)`
-/// (no shared memory in this port)
-pub fn sqlite3OsShmLock(id: &mut crate::os::SqliteFile, offset: i32, n: i32, flags: i32) -> i32 {
-    let _ = (id, offset, n, flags);
-    SQLITE_IOERR_SHMLOCK
+pub fn sqlite3OsShmLock(id: &ShmHandle, offset: i32, n: i32, flags: i32) -> i32 {
+    crate::os_unix::unixShmLock(&mut id.borrow_mut(), offset, n, flags)
 }
 
 /// C: `void sqlite3OsShmBarrier(sqlite3_file *id)`
-pub fn sqlite3OsShmBarrier(id: &mut crate::os::SqliteFile) {
+pub fn sqlite3OsShmBarrier(id: &ShmHandle) {
     let _ = id;
-    std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    crate::os_unix::unixShmBarrier();
 }
 
 /// C: `int sqlite3OsShmUnmap(sqlite3_file *id, int deleteFlag)`
-pub fn sqlite3OsShmUnmap(id: &mut crate::os::SqliteFile, deleteFlag: i32) -> i32 {
-    let _ = (id, deleteFlag);
-    SQLITE_OK
+pub fn sqlite3OsShmUnmap(id: &ShmHandle, deleteFlag: i32) -> i32 {
+    crate::os_unix::unixShmUnmap(&mut id.borrow_mut(), deleteFlag)
 }
 
 /// C: `int sqlite3OsShmMap( sqlite3_file *id, int iPage, int pgsz, int bExtend, void volatile **pp )`
-/// (no shared memory in this port: always fails like a VFS without xShmMap)
+///
+/// Signature change: `pp` receives the region (None for C NULL).
 pub fn sqlite3OsShmMap(
-    id: &mut crate::os::SqliteFile,
+    id: &ShmHandle,
     iPage: i32,
     pgsz: i32,
     bExtend: i32,
-    pp: /*void***/ (),
+    pp: &mut Option<ShmPage>,
 ) -> i32 {
-    let _ = (id, iPage, pgsz, bExtend, pp);
-    SQLITE_IOERR_SHMMAP
+    crate::os_unix::unixShmMap(&mut id.borrow_mut(), iPage, pgsz, bExtend, pp)
 }
 
 /// C: `int sqlite3OsFetch(sqlite3_file *id, i64 iOff, int iAmt, void **pp)`

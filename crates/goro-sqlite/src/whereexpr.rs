@@ -411,13 +411,16 @@ fn isAuxiliaryVtabOperator(
         // SQLITE_INDEX_CONSTRAINT_FUNCTION.
         //
         //      OVERLOADED(vtab_column,expression)
-        //
-        // NOTE: requires the virtual table module (xFindFunction), which
-        // is not available yet in this port; such functions are not
-        // reported as auxiliary operators.
         let pCol = db.el(pList).a[0].pExpr;
         if ExprIsVtab(db, pCol) {
-            // sqlite3GetVTable(db, pCol->y.pTab)->pVtab->pModule->xFindFunction
+            let zTok = db.ex(pExpr).u.zToken.clone().unwrap_or_default();
+            let i = crate::vtab::sqlite3VtabFindFunctionScore(db, pCol, 2, &zTok);
+            if i >= SQLITE_INDEX_CONSTRAINT_FUNCTION {
+                *peOp2 = i as u8;
+                *ppRight = db.el(pList).a[1].pExpr;
+                *ppLeft = pCol;
+                return 1;
+            }
         }
     } else if op >= TK_EQ {
         // Comparison operators are a common case.  Save a few comparisons

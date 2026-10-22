@@ -1,0 +1,51 @@
+# schema resets, stale statements, temp triggers on shared tables, autoinc
+@open 1 file:t4mem?mode=memory&cache=shared
+@open 2 file:t4mem?mode=memory&cache=shared
+1: CREATE TABLE t(id INTEGER PRIMARY KEY AUTOINCREMENT, v); INSERT INTO t(v) VALUES('a');
+2: INSERT INTO t(v) VALUES('b'); SELECT * FROM sqlite_sequence;
+@prep 2 s SELECT * FROM t ORDER BY id
+1: CREATE TEMP TRIGGER tt AFTER INSERT ON main.t BEGIN SELECT 1; INSERT INTO log VALUES(new.v); END; CREATE TEMP TABLE log(v);
+1: INSERT INTO t(v) VALUES('c'); SELECT * FROM log;
+2: INSERT INTO t(v) VALUES('d'); SELECT * FROM t;
+1: SELECT * FROM log;
+1: ALTER TABLE t RENAME TO t2;
+@step s
+@fin s
+2: SELECT * FROM t2 ORDER BY id;
+1: SELECT * FROM log;
+1: INSERT INTO t2(v) VALUES('e'); SELECT * FROM log;
+1: BEGIN; CREATE TABLE x(a); INSERT INTO x VALUES(1); ROLLBACK;
+2: SELECT * FROM x;
+1: SELECT * FROM x;
+2: BEGIN; CREATE TABLE y(a); ROLLBACK;
+1: SELECT name FROM sqlite_schema ORDER BY 1;
+2: CREATE TABLE p(a PRIMARY KEY) WITHOUT ROWID; CREATE TABLE c(b REFERENCES p);
+1: PRAGMA foreign_keys=1; INSERT INTO c VALUES(1);
+2: INSERT INTO c VALUES(1); SELECT * FROM c;
+1: CREATE VIEW vv AS SELECT * FROM c;
+2: SELECT * FROM vv;
+2: PRAGMA schema_version;
+1: PRAGMA schema_version;
+1: PRAGMA writable_schema=1;
+1: PRAGMA table_info(t2);
+2: PRAGMA table_list;
+2: DROP VIEW vv;
+1: SELECT * FROM vv;
+1: PRAGMA journal_mode;
+2: PRAGMA journal_mode=off;
+1: PRAGMA journal_mode;
+2: PRAGMA page_size;
+@prep 1 a SELECT * FROM t2
+@prep 2 b SELECT * FROM t2
+@step a
+@step b
+1: INSERT INTO t2(v) VALUES('f');
+@step a
+@step b
+@fin a
+@fin b
+1: INSERT INTO t2(v) VALUES('f'); SELECT count(*) FROM t2;
+@close 1
+2: SELECT count(*) FROM t2; SELECT * FROM log;
+2: SELECT seq FROM sqlite_sequence;
+@close 2

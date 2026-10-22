@@ -221,12 +221,7 @@ pub fn sqlite3WhereAddExplainText(
             str.extend_from_slice(b"?)");
         } else if (flags & WHERE_VIRTUALTABLE) != 0 {
             str.extend_from_slice(b" VIRTUAL TABLE INDEX ");
-            let z = pLoop
-                .u
-                .vtab
-                .idxStr
-                .clone()
-                .unwrap_or_else(|| b"(null)".to_vec());
+            let z = pLoop.u.vtab.idxStr.clone().unwrap_or_default();
             if pLoop.u.vtab.bIdxNumHex != 0 {
                 str.extend_from_slice(format!("0x{:x}:", pLoop.u.vtab.idxNum).as_bytes());
             } else {

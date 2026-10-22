@@ -1,0 +1,57 @@
+# PHP pdo_sqlite_filename_uri: two connections on file::memory:?cache=shared
+@open 1 file::memory:?cache=shared
+1: CREATE TABLE t(id INT);
+@open 2 file::memory:?cache=shared
+2: SELECT * FROM t;
+2: INSERT INTO t VALUES(1),(2);
+1: SELECT * FROM t;
+# a private :memory: is not shared
+@open 3 :memory:
+3: SELECT * FROM t;
+# mode=memory with a name
+@open 4 file:foo?mode=memory&cache=shared
+@open 5 file:foo?mode=memory&cache=shared
+4: CREATE TABLE a(x); INSERT INTO a VALUES('hello');
+5: SELECT * FROM a;
+5: CREATE INDEX ai ON a(x);
+4: SELECT name FROM sqlite_schema;
+4: PRAGMA integrity_check;
+# PHP transaction mode test
+4: BEGIN DEFERRED;
+5: BEGIN IMMEDIATE;
+5: ROLLBACK;
+4: ROLLBACK;
+4: BEGIN IMMEDIATE;
+5: BEGIN IMMEDIATE;
+4: ROLLBACK;
+4: BEGIN EXCLUSIVE;
+5: BEGIN IMMEDIATE;
+5: SELECT * FROM a;
+4: ROLLBACK;
+# table locks
+@prep 4 r SELECT * FROM a
+@step r
+5: INSERT INTO a VALUES('w');
+@fin r
+5: INSERT INTO a VALUES('w');
+5: BEGIN; INSERT INTO a VALUES('w2');
+4: SELECT * FROM a;
+4: PRAGMA read_uncommitted=1;
+4: SELECT * FROM a;
+5: COMMIT;
+4: SELECT count(*) FROM a;
+# schema lock
+5: BEGIN; CREATE TABLE b(y);
+4: PRAGMA read_uncommitted=0;
+4: SELECT * FROM b;
+4: SELECT 1;
+5: COMMIT;
+4: SELECT * FROM b;
+4: ATTACH 'file:foo?mode=memory&cache=shared' AS aux;
+@close 5
+4: SELECT count(*) FROM a;
+@close 4
+@open 6 file:foo?mode=memory&cache=shared
+6: SELECT name FROM sqlite_schema;
+@close 1
+@close 2
