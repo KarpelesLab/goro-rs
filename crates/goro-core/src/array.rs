@@ -42,8 +42,14 @@ impl std::fmt::Display for ArrayKey {
 /// index of positions into `entries`.
 #[derive(Debug)]
 pub struct PhpArray {
-    /// Current storage mode
+    /// Current storage mode. `entries[..head]` are dead slots left by
+    /// removals at the front (see `head`); positions handed out by the
+    /// public API count live entries only.
     entries: Vec<(ArrayKey, Value)>,
+    /// Number of dead slots at the start of `entries` (always 0 while the
+    /// array is packed), so removing the first entry or inserting before it
+    /// is O(1) amortized.
+    head: u32,
     /// Next integer key to use for append ($arr[] = val)
     next_int_key: i64,
     /// Internal array pointer position (for current/next/prev/reset/end)
@@ -125,11 +131,7 @@ fn dup_nested_array(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> Option<Val
 impl Clone for PhpArray {
     fn clone(&self) -> Self {
         // zend_array_dup(): a table of the same size.
-        let zcap = if self.entries.is_empty() {
-            0
-        } else {
-            self.zcap.max(8)
-        };
+        let zcap = if self.is_empty() { 0 } else { self.zcap.max(8) };
         let zpacked = if self.untracked {
             self.packed
         } else {
@@ -144,14 +146,14 @@ impl Clone for PhpArray {
         // are copied as plain values, unless they point back at this array.
         // Closure values (arrays holding captured variables) are copied as-is.
         let self_ptr = self as *const PhpArray;
-        let is_closure = matches!(self.entries.first(), Some((_, Value::String(s)))
+        let is_closure = matches!(self.live().first(), Some((_, Value::String(s)))
             if s.as_bytes().starts_with(b"__closure_") || s.as_bytes().starts_with(b"__arrow_"));
         let entries = if is_closure {
-            self.entries.clone()
+            self.live().to_vec()
         } else {
             CLONE_STACK.with(|st| st.borrow_mut().push(self_ptr));
             let e = self
-                .entries
+                .live()
                 .iter()
                 .map(|(k, v)| {
                     let v2 = match v {
@@ -180,17 +182,24 @@ impl Clone for PhpArray {
             });
             e
         };
-        Self {
+        let mut copy = Self {
             entries,
+            head: 0,
             next_int_key: self.next_int_key,
             pointer: self.pointer,
             packed: self.packed,
-            index: self.index.clone(),
+            index: Vec::new(),
             gc_buffered: std::cell::Cell::new(false),
             zcap,
             zpacked,
             untracked: false,
+        };
+        if self.head == 0 {
+            copy.index = self.index.clone();
+        } else {
+            copy.rebuild_index();
         }
+        copy
     }
 }
 
@@ -198,6 +207,7 @@ impl PhpArray {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            head: 0,
             next_int_key: i64::MIN,
             pointer: 0,
             packed: true,
@@ -212,6 +222,7 @@ impl PhpArray {
     pub fn with_capacity(cap: usize) -> Self {
         Self {
             entries: Vec::with_capacity(cap),
+            head: 0,
             next_int_key: i64::MIN,
             pointer: 0,
             packed: true,
@@ -223,8 +234,30 @@ impl PhpArray {
         }
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.entries.len() - self.head as usize
+    }
+
+    /// The live entries.
+    #[inline]
+    fn live(&self) -> &[(ArrayKey, Value)] {
+        &self.entries[self.head as usize..]
+    }
+
+    #[inline]
+    fn live_mut(&mut self) -> &mut [(ArrayKey, Value)] {
+        let h = self.head as usize;
+        &mut self.entries[h..]
+    }
+
+    /// Drop the dead front slots (positions move: the index is rebuilt).
+    fn compact(&mut self) {
+        if self.head > 0 {
+            self.entries.drain(..self.head as usize);
+            self.head = 0;
+            self.rebuild_index();
+        }
     }
 
     /* ----- memory_limit accounting ----- */
@@ -252,7 +285,7 @@ impl PhpArray {
     /// packed grow) when full. False when memory_limit forbids the growth.
     #[inline]
     fn reserve_one(&mut self) -> bool {
-        self.entries.len() < self.zcap as usize || self.grow_table()
+        self.len() < self.zcap as usize || self.grow_table()
     }
 
     #[cold]
@@ -299,7 +332,7 @@ impl PhpArray {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.len() == 0
     }
 
     /* ----- index maintenance ----- */
@@ -318,15 +351,16 @@ impl PhpArray {
 
     fn rebuild_index(&mut self) {
         if self.packed
-            || self.entries.len() < INDEX_THRESHOLD
+            || self.len() < INDEX_THRESHOLD
             || self.entries.len() >= u32::MAX as usize / 4
         {
             self.index = Vec::new();
             return;
         }
-        let cap = (self.entries.len() * 2).next_power_of_two().max(16);
+        let cap = (self.len() * 2).next_power_of_two().max(16);
         let mut index = vec![0u32; cap];
-        for (pos, (k, _)) in self.entries.iter().enumerate() {
+        let head = self.head as usize;
+        for (pos, (k, _)) in self.entries.iter().enumerate().skip(head) {
             Self::index_insert_slot(&mut index, hash_key(k), pos);
         }
         self.index = index;
@@ -344,12 +378,12 @@ impl PhpArray {
             return;
         }
         if self.index.is_empty() {
-            if self.entries.len() >= INDEX_THRESHOLD {
+            if self.len() >= INDEX_THRESHOLD {
                 self.rebuild_index();
             }
             return;
         }
-        if (self.entries.len()) * 2 > self.index.len() {
+        if self.len() * 2 > self.index.len() {
             self.rebuild_index();
             return;
         }
@@ -371,19 +405,19 @@ impl PhpArray {
             return true;
         }
         let mut prev = -1i64;
-        for (k, _) in &self.entries {
+        for (k, _) in self.live() {
             match k {
                 ArrayKey::Int(n) if *n > prev => prev = *n,
                 _ => return false,
             }
         }
-        let table = self.entries.len().next_power_of_two().max(8) as i64;
+        let table = self.len().next_power_of_two().max(8) as i64;
         prev < table
     }
 
     fn recompute_packed(&mut self) {
         self.packed = self
-            .entries
+            .live()
             .iter()
             .enumerate()
             .all(|(i, (k, _))| matches!(k, ArrayKey::Int(n) if *n == i as i64));
@@ -414,9 +448,11 @@ impl PhpArray {
                 i = (i + 1) & mask;
             }
         }
-        self.entries
+        let head = self.head as usize;
+        self.live()
             .iter()
             .position(|(k, _)| matches!(k, ArrayKey::Int(n) if *n == key))
+            .map(|p| p + head)
     }
 
     #[inline]
@@ -441,9 +477,11 @@ impl PhpArray {
                 i = (i + 1) & mask;
             }
         }
-        self.entries
+        let head = self.head as usize;
+        self.live()
             .iter()
             .position(|(k, _)| matches!(k, ArrayKey::String(s) if s.as_bytes() == key))
+            .map(|p| p + head)
     }
 
     #[inline]
@@ -555,6 +593,9 @@ impl PhpArray {
     }
 
     fn pop_entry_raw(&mut self) -> Option<(ArrayKey, Value)> {
+        if self.is_empty() {
+            return None;
+        }
         let e = self.entries.pop()?;
         if !self.packed && !self.index.is_empty() {
             // Remove the slot pointing at the popped position, then
@@ -577,7 +618,149 @@ impl PhpArray {
                 }
             }
         }
+        if self.is_empty() && self.head > 0 {
+            self.entries.clear();
+            self.head = 0;
+            self.index = Vec::new();
+        }
         Some(e)
+    }
+
+    /// Remove the index slot of the entry at (physical) position `pos`,
+    /// re-inserting the rest of its probe cluster (backward-shift).
+    fn index_remove(&mut self, pos: usize) {
+        if self.index.is_empty() {
+            return;
+        }
+        let want = pos as u32 + 1;
+        let mask = self.index.len() - 1;
+        let mut i = (hash_key(&self.entries[pos].0) as usize) & mask;
+        while self.index[i] != 0 && self.index[i] != want {
+            i = (i + 1) & mask;
+        }
+        if self.index[i] != want {
+            return;
+        }
+        self.index[i] = 0;
+        let mut j = (i + 1) & mask;
+        while self.index[j] != 0 {
+            let p = self.index[j];
+            self.index[j] = 0;
+            let h = hash_key(&self.entries[(p - 1) as usize].0);
+            Self::index_insert_slot(&mut self.index, h, (p - 1) as usize);
+            j = (j + 1) & mask;
+        }
+    }
+
+    /// Remove the first entry (O(1) amortized: its slot becomes dead).
+    fn remove_front_raw(&mut self) -> Value {
+        let pos = self.head as usize;
+        if self.packed {
+            // Key 0 goes: the rest is no longer packed.
+            self.packed = false;
+            self.head += 1;
+            let v = std::mem::take(&mut self.entries[pos].1);
+            self.entries[pos].0 = ArrayKey::Int(0);
+            self.rebuild_index();
+            self.sync_packed();
+            return v;
+        }
+        self.index_remove(pos);
+        let v = std::mem::take(&mut self.entries[pos].1);
+        self.entries[pos].0 = ArrayKey::Int(0);
+        self.head += 1;
+        if self.head as usize >= 32 && self.head as usize > self.len() {
+            self.compact();
+        } else if !self.index.is_empty() && self.len() < INDEX_THRESHOLD {
+            self.index = Vec::new();
+        }
+        v
+    }
+
+    /// Insert an entry before the first one (the key must not exist yet).
+    /// O(1) amortized. Silently ignored when memory_limit forbids it.
+    pub fn push_front(&mut self, key: ArrayKey, value: Value) {
+        if !self.reserve_one() {
+            return;
+        }
+        if let ArrayKey::Int(n) = &key
+            && *n >= self.next_int_key
+        {
+            self.next_int_key = n.saturating_add(1);
+        }
+        if self.head == 0 {
+            // Make room at the front.
+            let room = self.len().max(8);
+            let mut e = Vec::with_capacity(room + self.entries.len() + 1);
+            e.resize_with(room, || (ArrayKey::Int(0), Value::Null));
+            e.append(&mut self.entries);
+            self.entries = e;
+            self.head = room as u32;
+            // (positions moved: rebuilt below)
+            self.index = Vec::new();
+        }
+        self.head -= 1;
+        let pos = self.head as usize;
+        self.entries[pos] = (key, value);
+        if self.len() > 1 {
+            self.pointer += 1;
+        }
+        self.recompute_packed();
+        if self.packed {
+            self.compact();
+        } else {
+            self.rebuild_index_after_insert(pos);
+        }
+        self.sync_packed();
+    }
+
+    /// Index maintenance after an entry was placed at (physical) `pos`
+    /// outside of the append path.
+    fn rebuild_index_after_insert(&mut self, pos: usize) {
+        if self.index.is_empty() || self.len() * 2 > self.index.len() {
+            self.rebuild_index();
+        } else {
+            let h = hash_key(&self.entries[pos].0);
+            Self::index_insert_slot(&mut self.index, h, pos);
+        }
+    }
+
+    /// Insert an entry at insertion-order position `pos` (the key must not
+    /// exist yet). O(n). Silently ignored when memory_limit forbids it.
+    pub fn insert_at(&mut self, pos: usize, key: ArrayKey, value: Value) {
+        if pos == 0 {
+            return self.push_front(key, value);
+        }
+        if pos >= self.len() {
+            if !self.reserve_one() {
+                return;
+            }
+            if let ArrayKey::Int(n) = &key
+                && *n >= self.next_int_key
+            {
+                self.next_int_key = n.saturating_add(1);
+            }
+            self.entries.push((key, value));
+            self.after_push();
+            self.sync_packed();
+            return;
+        }
+        if !self.reserve_one() {
+            return;
+        }
+        if let ArrayKey::Int(n) = &key
+            && *n >= self.next_int_key
+        {
+            self.next_int_key = n.saturating_add(1);
+        }
+        self.compact();
+        self.entries.insert(pos, (key, value));
+        if pos < self.pointer {
+            self.pointer += 1;
+        }
+        self.recompute_packed();
+        self.rebuild_index();
+        self.sync_packed();
     }
 
     /// Remove and return the last entry, adjusting the next free integer
@@ -595,6 +778,7 @@ impl PhpArray {
 
     /// Remove and return the first element (like array_shift)
     pub fn shift(&mut self) -> Option<Value> {
+        self.compact();
         if self.entries.is_empty() {
             None
         } else {
@@ -611,6 +795,7 @@ impl PhpArray {
         if !self.reserve_one() {
             return;
         }
+        self.compact();
         self.entries.insert(0, (ArrayKey::Int(0), value));
         // Re-key all integer-keyed entries
         let mut next = 0i64;
@@ -635,21 +820,47 @@ impl PhpArray {
         v
     }
 
+    /// Remove an entry by key and hand its value over to the caller (no
+    /// release bookkeeping: the value lives on).
+    pub fn take(&mut self, key: &ArrayKey) -> Option<Value> {
+        self.remove_inner(key)
+    }
+
     fn remove_inner(&mut self, key: &ArrayKey) -> Option<Value> {
         if let Some(pos) = self.find(key) {
             // The internal pointer keeps designating the same element (or,
             // past the end, the slot the next append fills): entries after
             // the removed one move down.
-            if pos < self.pointer {
+            if pos - (self.head as usize) < self.pointer {
                 self.pointer -= 1;
             }
             if pos + 1 == self.entries.len() {
                 return self.pop_entry_raw().map(|(_, v)| v);
             }
+            if pos == self.head as usize {
+                return Some(self.remove_front_raw());
+            }
+            if self.packed || self.index.is_empty() {
+                let v = self.entries.remove(pos).1;
+                self.packed = false;
+                self.rebuild_index();
+                self.sync_packed();
+                return Some(v);
+            }
+            // Hash: drop the entry's slot, then renumber the positions of
+            // the entries that moved down (no rehash).
+            self.index_remove(pos);
             let v = self.entries.remove(pos).1;
-            self.packed = false;
-            self.rebuild_index();
-            self.sync_packed();
+            if self.len() < INDEX_THRESHOLD {
+                self.index = Vec::new();
+            } else {
+                let moved = pos as u32 + 1;
+                for slot in self.index.iter_mut() {
+                    if *slot > moved {
+                        *slot -= 1;
+                    }
+                }
+            }
             Some(v)
         } else {
             None
@@ -659,34 +870,35 @@ impl PhpArray {
     /// Recalculate the next_int_key based on current entries.
     /// Called after array_pop to ensure array_push uses the correct key.
     pub fn recalculate_next_int_key(&mut self) {
-        self.next_int_key = i64::MIN;
-        for (key, _) in &self.entries {
+        let mut next = i64::MIN;
+        for (key, _) in self.live() {
             if let ArrayKey::Int(n) = key {
-                if *n >= self.next_int_key {
-                    self.next_int_key = n + 1;
+                if *n >= next {
+                    next = n + 1;
                 }
             }
         }
+        self.next_int_key = next;
     }
 
     /// Iterate over entries in order
     pub fn iter(&self) -> impl Iterator<Item = (&ArrayKey, &Value)> {
-        self.entries.iter().map(|(k, v)| (k, v))
+        self.live().iter().map(|(k, v)| (k, v))
     }
 
     /// Iterate over entries mutably
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&ArrayKey, &mut Value)> {
-        self.entries.iter_mut().map(|(k, v)| (k as &ArrayKey, v))
+        self.live_mut().iter_mut().map(|(k, v)| (k as &ArrayKey, v))
     }
 
     /// Get keys
     pub fn keys(&self) -> impl Iterator<Item = &ArrayKey> {
-        self.entries.iter().map(|(k, _)| k)
+        self.live().iter().map(|(k, _)| k)
     }
 
     /// Get values
     pub fn values(&self) -> impl Iterator<Item = &Value> {
-        self.entries.iter().map(|(_, v)| v)
+        self.live().iter().map(|(_, v)| v)
     }
 
     /// Check if a key exists
@@ -696,17 +908,17 @@ impl PhpArray {
 
     /// The entry at insertion-order position `pos`.
     pub fn entry_at(&self, pos: usize) -> Option<(&ArrayKey, &Value)> {
-        self.entries.get(pos).map(|(k, v)| (k, v))
+        self.live().get(pos).map(|(k, v)| (k, v))
     }
 
     /// Mutable value of the entry at insertion-order position `pos`.
     pub fn value_at_mut(&mut self, pos: usize) -> Option<&mut Value> {
-        self.entries.get_mut(pos).map(|(_, v)| v)
+        self.live_mut().get_mut(pos).map(|(_, v)| v)
     }
 
     /// Insertion-order position of `key`.
     pub fn position_of(&self, key: &ArrayKey) -> Option<usize> {
-        self.find(key)
+        self.find(key).map(|p| p - self.head as usize)
     }
 }
 
