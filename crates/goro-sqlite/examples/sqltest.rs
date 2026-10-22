@@ -150,8 +150,8 @@ fn hexval(c: u8) -> u8 {
 }
 
 fn unhex(z: &[u8]) -> Vec<u8> {
-    z.chunks_exact(2)
-        .map(|p| hexval(p[0]) * 16 + hexval(p[1]))
+    (0..z.len() / 2)
+        .map(|i| hexval(z[2 * i]) * 16 + hexval(z[2 * i + 1]))
         .collect()
 }
 
@@ -434,7 +434,7 @@ fn meta_command(db: &mut Sqlite3, last: Option<StmtId>, zLine: &[u8], st: &mut S
                 ];
                 let mut m = String::from("stmtstatus");
                 for op in ops {
-                    m.push_str(&format!(" {}", sqlite3_stmt_status(db, id, op as i32, 0)));
+                    m.push_str(&format!(" {}", sqlite3_stmt_status(db, id, op, 0)));
                 }
                 m.push('\n');
                 w(st, m.as_bytes());

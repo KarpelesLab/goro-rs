@@ -4515,7 +4515,7 @@ mod tests {
             /* the fast path chosen by FindCompare must agree */
             let mut p2 = unpacked(&ki, vals);
             let f = sqlite3VdbeFindCompare(&mut p2);
-            assert_eq!(f(&rec, &mut p2).signum(), exp);
+            assert_eq!(f(rec.len() as i32, &rec, &mut p2).signum(), exp);
         }
 
         /* DESC first column inverts the result */
@@ -4524,7 +4524,7 @@ mod tests {
         assert_eq!(sqlite3VdbeRecordCompare(rec.len() as i32, &rec, &mut p), -1);
         let mut p = unpacked(&kid, vec![mInt(4)]);
         let f = sqlite3VdbeFindCompare(&mut p);
-        assert_eq!(f(&rec, &mut p), -1);
+        assert_eq!(f(rec.len() as i32, &rec, &mut p), -1);
 
         /* string fast path */
         let rs = makeRecord(&mut [mStr(b"abc"), mInt(1)]);
@@ -4538,7 +4538,7 @@ mod tests {
         ] {
             let mut p = unpacked(&ki1, vec![mStr(s)]);
             let f = sqlite3VdbeFindCompare(&mut p);
-            assert_eq!(f(&rs, &mut p).signum(), exp, "{:?}", s);
+            assert_eq!(f(rs.len() as i32, &rs, &mut p).signum(), exp, "{:?}", s);
         }
 
         /* NULLS FIRST/LAST (BIGNULL) */

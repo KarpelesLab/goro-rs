@@ -985,16 +985,31 @@ mod tests {
 
     #[test]
     fn window_keywords() {
-        assert_eq!(analyzeWindowKeyword(b" w AS (x)"), TK_WINDOW as i32);
-        assert_eq!(analyzeWindowKeyword(b" w, x"), TK_ID as i32);
-        assert_eq!(analyzeOverKeyword(b" (x)", TK_RP as i32), TK_OVER as i32);
-        assert_eq!(analyzeOverKeyword(b" w", TK_RP as i32), TK_OVER as i32);
-        assert_eq!(analyzeOverKeyword(b" (x)", TK_ID as i32), TK_ID as i32);
-        assert_eq!(analyzeOverKeyword(b" FROM", TK_RP as i32), TK_ID as i32);
+        assert_eq!(analyzeWindowKeyword(b" w AS (x)", &mut 0), TK_WINDOW as i32);
+        assert_eq!(analyzeWindowKeyword(b" w, x", &mut 0), TK_ID as i32);
         assert_eq!(
-            analyzeFilterKeyword(b" /*c*/ (", TK_RP as i32),
+            analyzeOverKeyword(b" (x)", TK_RP as i32, &mut 0),
+            TK_OVER as i32
+        );
+        assert_eq!(
+            analyzeOverKeyword(b" w", TK_RP as i32, &mut 0),
+            TK_OVER as i32
+        );
+        assert_eq!(
+            analyzeOverKeyword(b" (x)", TK_ID as i32, &mut 0),
+            TK_ID as i32
+        );
+        assert_eq!(
+            analyzeOverKeyword(b" FROM", TK_RP as i32, &mut 0),
+            TK_ID as i32
+        );
+        assert_eq!(
+            analyzeFilterKeyword(b" /*c*/ (", TK_RP as i32, &mut 0),
             TK_FILTER as i32
         );
-        assert_eq!(analyzeFilterKeyword(b" x", TK_RP as i32), TK_ID as i32);
+        assert_eq!(
+            analyzeFilterKeyword(b" x", TK_RP as i32, &mut 0),
+            TK_ID as i32
+        );
     }
 }
