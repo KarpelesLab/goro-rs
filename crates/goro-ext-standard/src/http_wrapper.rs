@@ -208,6 +208,7 @@ const NOTIFY_MIME_TYPE_IS: i64 = 4;
 const NOTIFY_FILE_SIZE_IS: i64 = 5;
 const NOTIFY_REDIRECTED: i64 = 6;
 const NOTIFY_PROGRESS: i64 = 7;
+const NOTIFY_COMPLETED: i64 = 8;
 const NOTIFY_FAILURE: i64 = 9;
 const NOTIFY_AUTH_RESULT: i64 = 10;
 const SEVERITY_INFO: i64 = 0;
@@ -981,10 +982,9 @@ fn http_wrap_ex(
                 headers,
                 &mut info,
             );
-            if let Some(e) = info.error.take() {
-                fail(vm, func, orig_url, &e);
-                return None;
-            }
+            // (an invalid last line is dropped: the stream still opens,
+            // without the wrapper's error being displayed)
+            info.error = None;
         }
         let body = &raw[resp.pos.min(raw.len())..];
 
@@ -1104,11 +1104,36 @@ fn finish(vm: &mut Vm, ctx: Option<&Value>, info: &HeaderInfo, body: &[u8]) -> O
         0,
         info.file_size,
     );
-    Some(if info.chunked {
+    let body = if info.chunked {
         dechunk(body)
     } else {
         body.to_vec()
-    })
+    };
+    // Reading the body to its end: php_stream_notify_progress_increment()
+    // as the socket delivers it, then php_stream_notify_completed() at EOF.
+    if !body.is_empty() {
+        notify(
+            vm,
+            ctx,
+            NOTIFY_PROGRESS,
+            SEVERITY_INFO,
+            None,
+            0,
+            body.len() as i64,
+            info.file_size,
+        );
+    }
+    notify(
+        vm,
+        ctx,
+        NOTIFY_COMPLETED,
+        SEVERITY_INFO,
+        None,
+        0,
+        body.len() as i64,
+        info.file_size,
+    );
+    Some(body)
 }
 
 /// get_headers()

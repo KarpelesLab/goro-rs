@@ -10223,6 +10223,8 @@ pub(crate) fn flush_cli_output(vm: &mut Vm) {
 
 thread_local! {
     static FILE_HANDLES: RefCell<StdHashMap<i64, FileHandle>> = RefCell::new(StdHashMap::new());
+    /// stream->wrapperdata of http streams (their response headers).
+    static HTTP_WRAPPER_DATA: RefCell<StdHashMap<i64, Value>> = RefCell::new(StdHashMap::new());
     /// Directory handles keyed by resource id. Each entry stores the directory
     /// path (for rewind) and a remaining list of entry names that we pop from
     /// the back to feed readdir().
@@ -11112,6 +11114,20 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let _ = std::fs::remove_file(&tmp_path);
             let fid = alloc_file_handle(f, &mode);
             goro_core::value::register_resource(fid, b"stream");
+            // The http wrapper's stream: its meta data, with the response
+            // headers as stream->wrapperdata.
+            FILE_HANDLES.with(|h| {
+                if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                    fh.wrapper_type = "http".to_string();
+                    fh.stream_type = "tcp_socket/ssl".to_string();
+                    fh.seekable = false;
+                    fh.uri = filename.clone();
+                }
+            });
+            let headers = http_wrapper::last_response_headers();
+            if !matches!(headers, Value::Null) {
+                HTTP_WRAPPER_DATA.with(|w| w.borrow_mut().insert(fid, headers));
+            }
             return Ok(Value::Resource(fid));
         }
         return Ok(Value::False);
@@ -20014,6 +20030,9 @@ fn stream_get_meta_data_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
                 ArrayKey::String(PhpString::from_bytes(b"eof")),
                 if fh.eof { Value::True } else { Value::False },
             );
+            if let Some(wd) = HTTP_WRAPPER_DATA.with(|w| w.borrow().get(&fid).cloned()) {
+                arr.set(ArrayKey::String(PhpString::from_bytes(b"wrapper_data")), wd);
+            }
             if !fh.wrapper_type.is_empty() {
                 arr.set(
                     ArrayKey::String(PhpString::from_bytes(b"wrapper_type")),
