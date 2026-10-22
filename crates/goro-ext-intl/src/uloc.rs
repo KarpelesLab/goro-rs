@@ -1277,9 +1277,10 @@ pub fn display_language(id: &[u8], display: &str) -> Result<String, i32> {
             return Ok(n.to_string());
         }
         // a deprecated code: its replacement's name (uloc_getCurrentLanguageID())
-        if let Some(r) = intl::locale::canonicalize(&code) {
-            let l = r.split('-').next().unwrap_or("");
-            if l != code && !l.is_empty() && l != "und" {
+        if let Some(l) = intl::locale::canonicalize(&code) {
+            // only a replacement by a plain language
+            let l = l.as_str();
+            if l != code && !l.is_empty() && l != "und" && l.bytes().all(|b| b.is_ascii_lowercase()) {
                 if let Some(n) = chain_lookup(data::LANGUAGES, display, l) {
                     return Ok(n.to_string());
                 }

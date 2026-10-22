@@ -754,12 +754,12 @@ fn lookup_loc_range(
     let mut cur: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
     for (_, v) in h.iter() {
         let Value::String(v) = v.deref() else {
-            crate::zpp::arg_type_error(vm, &c.name, 2, "languageTag", "must only contain string values");
+            crate::zpp::arg_type_error(vm, &c.name, 2, "locale", "must only contain string values");
             return None;
         };
         let b = v.as_bytes();
         if b.contains(&0) {
-            crate::zpp::value_error(vm, &c.name, 2, "languageTag", "must not contain any null bytes");
+            crate::zpp::value_error(vm, &c.name, 2, "locale", "must not contain any null bytes");
             return None;
         }
         if b.is_empty() {

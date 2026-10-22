@@ -290,6 +290,14 @@ fn collation_locales(name: &str) -> (String, String) {
     ("root".to_string(), "root".to_string())
 }
 
+/// ICU's collation locales (the ICUDATA-coll package).
+pub fn collation_locale_list() -> Vec<String> {
+    data::COLLATION_LOCALES
+        .iter()
+        .map(|(l, _, _)| l.to_string())
+        .collect()
+}
+
 /// Collator_object
 #[derive(Default)]
 pub struct CollatorObject {
