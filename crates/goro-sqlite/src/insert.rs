@@ -278,8 +278,14 @@ fn readsTable(db: &mut Sqlite3, iDb: i32, pTab: &TableRef) -> bool {
             }
         }
         if isVirtual && opcode == OP_VOpen {
-            // TODO(vtab): C compares pOp->p4.pVtab with sqlite3GetVTable(db,pTab).
-            return true;
+            let pVTab = crate::vtab::sqlite3GetVTable(db, pTab);
+            let same = match (&sqlite3VdbeGetOp(db.v(), i).p4, pVTab) {
+                (P4::Vtab(a), Some(b)) => Rc::ptr_eq(a, &b),
+                _ => false,
+            };
+            if same {
+                return true;
+            }
         }
     }
     false
@@ -1722,16 +1728,15 @@ pub fn sqlite3Insert(
                  ** do the insertion.
                  */
                 if isVirtual {
-                    crate::vtab::sqlite3GetVTable(db, &pTab);
+                    let pVTab = crate::vtab::sqlite3VtabP4(db, &pTab);
                     crate::vtab::sqlite3VtabMakeWritable(db, &pTab);
-                    // TODO(vtab): P4 should be the VTable (P4_VTAB).
                     sqlite3VdbeAddOp4(
                         db.v(),
                         OP_VUpdate,
                         1,
                         nCol + 2,
                         regIns,
-                        P4::None,
+                        pVTab,
                         P4_VTAB as i32,
                     );
                     sqlite3VdbeChangeP5(

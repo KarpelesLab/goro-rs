@@ -6138,10 +6138,17 @@ fn selectExpander(pWalker: &mut Walker, p: SelectId) -> i32 {
                         let t = pTab.borrow().u.view.pSelect.clone();
                         let vs = db.tree(&t);
                         sqlite3SrcItemAttachSubquery(db, pFrom, vs, 1);
+                    } else if pTab.borrow().IsVirtual()
+                        && (db.item(pFrom).fg.fromDDL != 0
+                            || (db.ppr().prepFlags as i32 & SQLITE_PREPARE_FROM_DDL) != 0)
+                    {
+                        let risk = crate::vtab::sqlite3GetVTable(db, &pTab)
+                            .map_or(0, |v| v.borrow().eVtabRisk as i32);
+                        if risk > ((db.flags & SQLITE_TrustedSchema) != 0) as i32 {
+                            let z = pTab.borrow().zName.clone();
+                            errmsg!(db, b"unsafe use of virtual table \"%s\"", &z);
+                        }
                     }
-                    /* (Virtual tables: the "unsafe use of virtual table" check
-                     ** needs the sqlite3_module risk level, which the vtab port
-                     ** does not provide yet.) */
                     let nCol = pTab.borrow().nCol;
                     pTab.borrow_mut().nCol = -1;
                     pWalker.eCode = 1; /* Turn on Select.selId renumbering */

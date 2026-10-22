@@ -83,12 +83,29 @@ pub fn sqlite3CodeChangeCount(v: &mut Vdbe, regCounter: i32, zColName: Option<&[
 ///      is for a top-level SQL statement.
 fn vtabIsReadOnly(db: &mut Sqlite3, pTab: &TableRef) -> i32 {
     debug_assert!(pTab.borrow().IsVirtual());
-    // TODO(vtab): C tests sqlite3GetVTable(db,pTab)->pMod->pModule->xUpdate==0
-    // (return 1), then, within triggers or DDL, raises "unsafe use of
-    // virtual table \"%s\"" when pTab->u.vtab.p->eVtabRisk >
-    // ((db->flags & SQLITE_TrustedSchema)!=0).  The VTable object is not
-    // modelled yet.
-    crate::vtab::sqlite3GetVTable(db, pTab);
+    let Some(pVTab) = crate::vtab::sqlite3GetVTable(db, pTab) else {
+        return 1;
+    };
+    let hasUpdate = pVTab
+        .borrow()
+        .pVtab
+        .as_ref()
+        .is_some_and(|v| v.borrow().has_xUpdate());
+    if !hasUpdate {
+        return 1;
+    }
+
+    // Within triggers:
+    //   *  Do not allow DELETE, INSERT, or UPDATE of SQLITE_VTAB_DIRECTONLY
+    //      virtual tables
+    //   *  Only allow DELETE, INSERT, or UPDATE of non-SQLITE_VTAB_INNOCUOUS
+    //      virtual tables if PRAGMA trusted_schema=ON.
+    if (!sqlite3IsToplevel(db) || (db.ppr().prepFlags as i32 & SQLITE_PREPARE_FROM_DDL) != 0)
+        && pVTab.borrow().eVtabRisk as i32 > ((db.flags & SQLITE_TrustedSchema) != 0) as i32
+    {
+        let zName = pTab.borrow().zName.clone();
+        errmsg!(db, "unsafe use of virtual table \"%s\"", &zName);
+    }
     0
 }
 
@@ -658,7 +675,7 @@ pub fn sqlite3DeleteFrom(
 
             /* Delete the row */
             if pTab.borrow().IsVirtual() {
-                crate::vtab::sqlite3GetVTable(db, &pTab);
+                let pVTab = crate::vtab::sqlite3VtabP4(db, &pTab);
                 crate::vtab::sqlite3VtabMakeWritable(db, &pTab);
                 debug_assert!(eOnePass == ONEPASS_OFF || eOnePass == ONEPASS_SINGLE);
                 sqlite3MayAbort(db);
@@ -668,8 +685,7 @@ pub fn sqlite3DeleteFrom(
                         db.pp().isMultiWrite = 0;
                     }
                 }
-                // TODO(vtab): P4 should be the VTable (P4_VTAB).
-                sqlite3VdbeAddOp4(db.v(), OP_VUpdate, 0, 1, iKey, P4::None, P4_VTAB as i32);
+                sqlite3VdbeAddOp4(db.v(), OP_VUpdate, 0, 1, iKey, pVTab, P4_VTAB as i32);
                 sqlite3VdbeChangeP5(db.v(), OE_Abort as u16);
             } else {
                 let count = (db.ppr().nested == 0) as u8; /* True to count changes */

@@ -2119,7 +2119,14 @@ pub fn sqlite3Pragma(
 
         PragTyp_MODULE_LIST => {
             db.pp().nMem = 1;
-            // Rust: no virtual table modules are registered yet (C db->aModule).
+            let names: Vec<ZStr> = db
+                .aModule
+                .iter()
+                .map(|(_, m)| m.borrow().zName.clone())
+                .collect();
+            for zName in names.iter() {
+                sqlite3VdbeMultiLoad(db.v(), 1, b"s", &[PfArg::Str(Some(zName))]);
+            }
         }
 
         PragTyp_PRAGMA_LIST => {
@@ -3357,8 +3364,50 @@ fn pragmaIntegrityCheck(
         }
 
         // Second pass to invoke the xIntegrity method on all virtual
-        // tables.  Rust: virtual tables are not supported yet (no
-        // sqlite3_vtab objects), so there is nothing to check.
+        // tables.
+        for pTab in pTbls.iter() {
+            if tableSkipIntegrityCheck(pTab, pObjTab.as_ref()) {
+                continue;
+            }
+            let (isOrd, isVirt, nCol, zMod) = {
+                let t = pTab.borrow();
+                (
+                    t.IsOrdinaryTable(),
+                    t.IsVirtual(),
+                    t.nCol,
+                    t.u.vtab.azArg.first().cloned().unwrap_or_default(),
+                )
+            };
+            if isOrd {
+                continue;
+            }
+            if !isVirt {
+                continue;
+            }
+            if nCol <= 0 && db.aModule.find(&zMod).is_none() {
+                continue;
+            }
+            crate::build::sqlite3ViewGetColumnNames(db, pTab);
+            let pVTab = pTab.borrow().u.vtab.p.first().cloned();
+            let Some(pVTab) = pVTab else { continue };
+            let (pVtab, iVersion) = {
+                let v = pVTab.borrow();
+                (v.pVtab.clone(), v.pMod.borrow().pModule.iVersion())
+            };
+            let Some(pVtab) = pVtab else { continue };
+            if iVersion < 4 {
+                continue;
+            }
+            if !pVtab.borrow().has_xIntegrity() {
+                continue;
+            }
+            sqlite3VdbeAddOp3(db.v(), OP_VCheck, i, 3, isQuick as i32);
+            pTab.borrow_mut().nTabRef += 1;
+            sqlite3VdbeAppendP4(db.v(), P4::Tab(pTab.clone()), P4_TABLEREF as i32);
+            let a1 = sqlite3VdbeAddOp1(db.v(), OP_IsNull, 3);
+            integrityCheckResultRow(db.v());
+            sqlite3VdbeJumpHere(db.v(), a1);
+        }
     }
     {
         const endCode: [VdbeOpList; 7] = [
@@ -3585,23 +3634,298 @@ fn pragmaOptimize(db: &mut Sqlite3, zRight: Option<&[u8]>, zDb: Option<&[u8]>, i
     }
 }
 
+// ---------------------------------------------------------------------------
+// Implementation of an eponymous virtual table that runs a pragma.
+// ---------------------------------------------------------------------------
+
+/// The pragma virtual table module (C pragmaVtabModule with pAux = the
+/// PragmaName).
+struct PragmaVtabModule {
+    pName: &'static PragmaName,
+}
+
+/// struct PragmaVtab
+struct PragmaVtab {
+    /// C base.zErrMsg
+    zErrMsg: Option<ZStr>,
+    /// Name of the pragma
+    pName: &'static PragmaName,
+    /// Number of hidden columns
+    nHidden: u8,
+    /// Index of the first hidden column
+    iHidden: u8,
+}
+
+/// struct PragmaVtabCursor
+struct PragmaVtabCursor {
+    /// C pVtab->zErrMsg (see VtabCursor::zErrMsg)
+    zErrMsg: Option<ZStr>,
+    pName: &'static PragmaName,
+    iHidden: u8,
+    /// The pragma statement to run
+    pPragma: Option<StmtId>,
+    /// Current rowid
+    iRowid: i64,
+    /// Value of the argument and schema
+    azArg: [Option<ZStr>; 2],
+}
+
+impl crate::vtab::VtabModule for PragmaVtabModule {
+    fn iVersion(&self) -> i32 {
+        0
+    }
+    fn has_xCreate(&self) -> bool {
+        false
+    }
+    fn has_xDestroy(&self) -> bool {
+        false
+    }
+
+    /// Pragma virtual table module xConnect method.
+    fn xConnect(
+        &self,
+        db: &mut Sqlite3,
+        _argv: &[&[u8]],
+        pzErr: &mut Option<ZStr>,
+    ) -> Result<Box<dyn crate::vtab::Vtab>, i32> {
+        let pPragma = self.pName;
+        let mut cSep = b'(';
+        let mut acc: Vec<u8> = b"CREATE TABLE x".to_vec();
+        let mut i = 0;
+        let mut j = pPragma.iPragCName as usize;
+        while i < pPragma.nPragCName as usize {
+            acc.push(cSep);
+            acc.push(b'"');
+            acc.extend_from_slice(pragCName[j]);
+            acc.push(b'"');
+            cSep = b',';
+            i += 1;
+            j += 1;
+        }
+        if i == 0 {
+            acc.extend_from_slice(b"(\"");
+            acc.extend_from_slice(pPragma.zName);
+            acc.push(b'"');
+            i += 1;
+        }
+        let mut jj = 0;
+        if (pPragma.mPragFlg & PragFlg_Result1) != 0 {
+            acc.extend_from_slice(b",arg HIDDEN");
+            jj += 1;
+        }
+        if (pPragma.mPragFlg & (PragFlg_SchemaOpt | PragFlg_SchemaReq)) != 0 {
+            acc.extend_from_slice(b",schema HIDDEN");
+            jj += 1;
+        }
+        acc.push(b')');
+        let rc = crate::vtab::sqlite3_declare_vtab(db, Some(&acc));
+        if rc == SQLITE_OK {
+            Ok(Box::new(PragmaVtab {
+                zErrMsg: None,
+                pName: pPragma,
+                iHidden: i as u8,
+                nHidden: jj as u8,
+            }))
+        } else {
+            *pzErr = crate::mainapi::sqlite3_errmsg(db);
+            Err(rc)
+        }
+    }
+}
+
+impl crate::vtab::Vtab for PragmaVtab {
+    /// Figure out the best index to use to search a pragma virtual table.
+    ///
+    /// There are not really any index choices.  But we want to encourage
+    /// the query planner to give == constraints on as many hidden
+    /// parameters as possible, and especially on the first hidden
+    /// parameter.  So return a high cost if hidden parameters are
+    /// unconstrained.
+    fn xBestIndex(&mut self, _db: &mut Sqlite3, pIdxInfo: &mut crate::vtab::IndexInfo) -> i32 {
+        pIdxInfo.estimatedCost = 1.0;
+        if self.nHidden == 0 {
+            return SQLITE_OK;
+        }
+        let mut seen = [0usize; 2];
+        for (i, pConstraint) in pIdxInfo.aConstraint.iter().enumerate() {
+            if pConstraint.iColumn < self.iHidden as i32 {
+                continue;
+            }
+            if pConstraint.op as i32 != SQLITE_INDEX_CONSTRAINT_EQ {
+                continue;
+            }
+            if pConstraint.usable == 0 {
+                return SQLITE_CONSTRAINT;
+            }
+            let j = (pConstraint.iColumn - self.iHidden as i32) as usize;
+            debug_assert!(j < 2);
+            seen[j] = i + 1;
+        }
+        if seen[0] == 0 {
+            pIdxInfo.estimatedCost = 2147483647.0;
+            pIdxInfo.estimatedRows = 2147483647;
+            return SQLITE_OK;
+        }
+        let j = seen[0] - 1;
+        pIdxInfo.aConstraintUsage[j].argvIndex = 1;
+        pIdxInfo.aConstraintUsage[j].omit = 1;
+        pIdxInfo.estimatedCost = 20.0;
+        pIdxInfo.estimatedRows = 20;
+        if seen[1] != 0 {
+            let j = seen[1] - 1;
+            pIdxInfo.aConstraintUsage[j].argvIndex = 2;
+            pIdxInfo.aConstraintUsage[j].omit = 1;
+        }
+        SQLITE_OK
+    }
+
+    /// Create a new cursor for the pragma virtual table
+    fn xOpen(&mut self, _db: &mut Sqlite3) -> Result<Box<dyn crate::vtab::VtabCursor>, i32> {
+        Ok(Box::new(PragmaVtabCursor {
+            zErrMsg: None,
+            pName: self.pName,
+            iHidden: self.iHidden,
+            pPragma: None,
+            iRowid: 0,
+            azArg: [None, None],
+        }))
+    }
+
+    fn zErrMsg(&mut self) -> &mut Option<ZStr> {
+        &mut self.zErrMsg
+    }
+}
+
+impl PragmaVtabCursor {
+    /// Clear all content from pragma virtual table cursor.
+    fn pragmaVtabCursorClear(&mut self, db: &mut Sqlite3) {
+        if let Some(st) = self.pPragma.take() {
+            crate::vdbeapi::sqlite3_finalize(db, st);
+        }
+        self.iRowid = 0;
+        self.azArg = [None, None];
+    }
+}
+
+impl crate::vtab::VtabCursor for PragmaVtabCursor {
+    /// Pragma virtual table module xFilter method.
+    fn xFilter(
+        &mut self,
+        db: &mut Sqlite3,
+        _idxNum: i32,
+        _idxStr: Option<&[u8]>,
+        argv: &mut [Mem],
+    ) -> i32 {
+        self.pragmaVtabCursorClear(db);
+        let mut j = if (self.pName.mPragFlg & PragFlg_Result1) != 0 {
+            0
+        } else {
+            1
+        };
+        for a in argv.iter_mut() {
+            let zText = crate::vdbeapi::sqlite3_value_text(a).map(|z| z.to_vec());
+            debug_assert!(j < 2);
+            debug_assert!(self.azArg[j].is_none());
+            if let Some(z) = zText {
+                self.azArg[j] = Some(z);
+            }
+            j += 1;
+        }
+        let mut acc: Vec<u8> = b"PRAGMA ".to_vec();
+        if let Some(a1) = &self.azArg[1] {
+            acc.extend(crate::printf::sqlite3_mprintf(
+                b"%Q.",
+                &[PfArg::Str(Some(a1))],
+            ));
+        }
+        acc.extend_from_slice(self.pName.zName);
+        if let Some(a0) = &self.azArg[0] {
+            acc.extend(crate::printf::sqlite3_mprintf(
+                b"=%Q",
+                &[PfArg::Str(Some(a0))],
+            ));
+        }
+        if acc.len() > db.aLimit[SQLITE_LIMIT_SQL_LENGTH as usize] as usize {
+            return SQLITE_NOMEM;
+        }
+        let mut pStmt: Option<StmtId> = None;
+        let mut tail = 0usize;
+        let rc = crate::prepare::sqlite3_prepare_v2(db, Some(&acc), -1, &mut pStmt, &mut tail);
+        self.pPragma = pStmt;
+        if rc != SQLITE_OK {
+            self.zErrMsg = crate::mainapi::sqlite3_errmsg(db);
+            return rc;
+        }
+        self.xNext(db)
+    }
+
+    /// Advance the pragma virtual table cursor to the next row
+    fn xNext(&mut self, db: &mut Sqlite3) -> i32 {
+        let mut rc = SQLITE_OK;
+
+        // Increment the xRowid value
+        self.iRowid += 1;
+        let st = self.pPragma.expect("pragma statement");
+        if SQLITE_ROW != crate::vdbeapi::sqlite3_step(db, st) {
+            rc = crate::vdbeapi::sqlite3_finalize(db, st);
+            self.pPragma = None;
+            self.pragmaVtabCursorClear(db);
+        }
+        rc
+    }
+
+    /// Pragma virtual table module xEof method.
+    fn xEof(&mut self) -> bool {
+        self.pPragma.is_none()
+    }
+
+    /// The xColumn method simply returns the corresponding column from the
+    /// PRAGMA.
+    fn xColumn(&mut self, ctx: &mut Context, i: i32) -> i32 {
+        if i < self.iHidden as i32 {
+            let st = self.pPragma.expect("pragma statement");
+            let mut v = crate::vdbeapi::sqlite3_column_value(ctx.db, st, i)
+                .cloned()
+                .unwrap_or_default();
+            crate::vdbeapi::sqlite3_result_value(ctx, &mut v);
+        } else {
+            let z = self.azArg[(i - self.iHidden as i32) as usize].clone();
+            crate::vdbeapi::sqlite3_result_text(ctx, z.as_deref(), -1);
+        }
+        SQLITE_OK
+    }
+
+    /// Pragma virtual table module xRowid method.
+    fn xRowid(&mut self, p: &mut i64) -> i32 {
+        *p = self.iRowid;
+        SQLITE_OK
+    }
+
+    /// Close a pragma virtual table cursor
+    fn xCloseDb(&mut self, db: &mut Sqlite3) -> i32 {
+        self.pragmaVtabCursorClear(db);
+        SQLITE_OK
+    }
+
+    fn zErrMsg(&mut self) -> Option<&mut Option<ZStr>> {
+        Some(&mut self.zErrMsg)
+    }
+}
+
 /// C: `Module * sqlite3PragmaVtabRegister(sqlite3 *db, const char *zName)`
 ///
 /// Check to see if zTabName is really the name of a pragma.  If it is,
 /// then register an eponymous virtual table for that pragma and return
 /// a pointer to the Module object for the new virtual table.
-///
-/// Rust: the virtual-table layer does not exist yet, so no pragma
-/// eponymous virtual table is ever registered (always None).
-pub fn sqlite3PragmaVtabRegister(db: &mut Sqlite3, zName: Option<&[u8]>) -> Option<()> {
-    let _ = db;
+pub fn sqlite3PragmaVtabRegister(db: &mut Sqlite3, zName: Option<&[u8]>) -> Option<ModuleRef> {
     let zName = zName?;
     debug_assert!(zName.len() >= 7 && zName[..7].eq_ignore_ascii_case(b"pragma_"));
     let pName = pragmaLocate(&zName[7.min(zName.len())..])?;
     if (pName.mPragFlg & (PragFlg_Result0 | PragFlg_Result1)) == 0 {
         return None;
     }
-    None
+    debug_assert!(db.aModule.find(zName).is_none());
+    crate::vtab::sqlite3VtabCreateModule(db, zName, Some(Rc::new(PragmaVtabModule { pName })), None)
 }
 
 #[cfg(test)]

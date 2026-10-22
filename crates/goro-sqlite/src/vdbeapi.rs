@@ -849,29 +849,97 @@ pub fn sqlite3VdbeValueListFree(pToDelete: &mut [u8]) {
     let _ = pToDelete;
 }
 
+/// The ValueList object of OP_VInitIn (C struct ValueList): the cursor
+/// holding the RHS values of an IN operator and the value most recently
+/// extracted from it (C pOut, register P3 of OP_VInitIn).
+pub struct ValueList {
+    pub pCsr: BtCursorP,
+    pub pOut: Mem,
+}
+
 /// Implementation of sqlite3_vtab_in_first() (if bNext==0) and
-/// sqlite3_vtab_in_next() (if bNext!=0).  Virtual tables are not supported
-/// yet: no value is ever a ValueList, so this returns SQLITE_ERROR as C
-/// does for a value that is not a ValueList.
-fn valueFromValueList(pVal: &mut Mem, ppOut: &mut [Mem], bNext: i32) -> i32 {
-    let _ = (ppOut, bNext);
-    if (pVal.flags & MEM_Dyn) == 0
+/// sqlite3_vtab_in_next() (if bNext!=0).
+///
+/// Rust: *ppOut receives a copy of the value (C: a pointer to the
+/// ValueList's output register).
+fn valueFromValueList(
+    db: &mut Sqlite3,
+    pVal: Option<&mut Mem>,
+    ppOut: &mut Option<Mem>,
+    bNext: i32,
+) -> i32 {
+    *ppOut = None;
+    let Some(pVal) = pVal else {
+        return SQLITE_MISUSE;
+    };
+    let pRhs = if (pVal.flags & MEM_Dyn) == 0
         || pVal.u.zPType.as_deref() != Some("ValueList")
         || pVal.eSubtype != b'p'
     {
+        None
+    } else {
+        pVal.pPtr
+            .clone()
+            .and_then(|p| p.downcast::<std::cell::RefCell<ValueList>>().ok())
+    };
+    let Some(pRhs) = pRhs else {
         return SQLITE_ERROR;
+    };
+    let pCsr = pRhs.borrow().pCsr.clone();
+    let mut rc;
+    if bNext != 0 {
+        rc = crate::btree::sqlite3BtreeNext(&pCsr, 0);
+    } else {
+        let mut dummy = 0;
+        rc = crate::btree::sqlite3BtreeFirst(db, &pCsr, &mut dummy);
+        debug_assert!(rc == SQLITE_OK || crate::btree::sqlite3BtreeEof(&pCsr) != 0);
+        if crate::btree::sqlite3BtreeEof(&pCsr) != 0 {
+            rc = SQLITE_DONE;
+        }
     }
-    SQLITE_ERROR
+    if rc == SQLITE_OK {
+        let mut sMem = Mem::default();
+        let sz = crate::btree::sqlite3BtreePayloadSize(&pCsr);
+        rc = crate::vdbemem::sqlite3VdbeMemFromBtreeZeroOffset(&pCsr, sz, &mut sMem);
+        if rc == SQLITE_OK {
+            let zBuf = sMem.bytes().to_vec();
+            let mut iSerial = 0u32;
+            let iOff = 1
+                + crate::util::sqlite3GetVarint32(&zBuf[1.min(zBuf.len())..], &mut iSerial)
+                    as usize;
+            let enc = db.enc;
+            let mut r = pRhs.borrow_mut();
+            let pOut = &mut r.pOut;
+            crate::vdbeaux::sqlite3VdbeSerialGet(&zBuf[iOff.min(zBuf.len())..], iSerial, pOut);
+            pOut.enc = enc;
+            if (pOut.flags & MEM_Ephem) != 0
+                && crate::vdbemem::sqlite3VdbeMemMakeWriteable(db, pOut) != 0
+            {
+                rc = SQLITE_NOMEM;
+            } else {
+                *ppOut = Some(pOut.clone());
+            }
+        }
+    }
+    rc
 }
 
 /// C: `int sqlite3_vtab_in_first(sqlite3_value *pVal, sqlite3_value **ppOut)`
-pub fn sqlite3_vtab_in_first(pVal: &mut Mem, ppOut: &mut [Mem]) -> i32 {
-    valueFromValueList(pVal, ppOut, 0)
+pub fn sqlite3_vtab_in_first(
+    db: &mut Sqlite3,
+    pVal: Option<&mut Mem>,
+    ppOut: &mut Option<Mem>,
+) -> i32 {
+    valueFromValueList(db, pVal, ppOut, 0)
 }
 
 /// C: `int sqlite3_vtab_in_next(sqlite3_value *pVal, sqlite3_value **ppOut)`
-pub fn sqlite3_vtab_in_next(pVal: &mut Mem, ppOut: &mut [Mem]) -> i32 {
-    valueFromValueList(pVal, ppOut, 1)
+pub fn sqlite3_vtab_in_next(
+    db: &mut Sqlite3,
+    pVal: Option<&mut Mem>,
+    ppOut: &mut Option<Mem>,
+) -> i32 {
+    valueFromValueList(db, pVal, ppOut, 1)
 }
 
 /// C: `sqlite3_int64 sqlite3StmtCurrentTime(sqlite3_context *p)`

@@ -594,7 +594,13 @@ fn disconnectAllVtab(db: &mut Sqlite3) {
             }
         }
     }
-    // Rust: no db->aModule (eponymous virtual tables) yet.
+    let mods: Vec<ModuleRef> = db.aModule.iter().map(|(_, m)| m.clone()).collect();
+    for pMod in mods.iter() {
+        let pEpoTab = pMod.borrow().pEpoTab.clone();
+        if let Some(pEpoTab) = pEpoTab {
+            crate::vtab::sqlite3VtabDisconnect(db, &pEpoTab);
+        }
+    }
     crate::vtab::sqlite3VtabUnlockList(db);
 }
 
@@ -786,6 +792,12 @@ pub fn sqlite3LeaveMutexAndCloseZombie(db: &mut Sqlite3) {
         }
     }
     db.aCollSeq.clear();
+    let mods: Vec<ModuleRef> = db.aModule.iter().map(|(_, m)| m.clone()).collect();
+    for pMod in mods.iter() {
+        crate::vtab::sqlite3VtabEponymousTableClear(db, pMod);
+        crate::vtab::sqlite3VtabModuleUnref(db, pMod);
+    }
+    db.aModule.clear();
 
     sqlite3Error(db, SQLITE_OK); // Deallocates any cached error strings.
     db.pErr = None;
@@ -2508,6 +2520,11 @@ fn sqlite3NewConnection(pVfs: Rc<Vfs>, flags: u32) -> Box<Sqlite3> {
         xWalCallback: None,
         walAutoCkpt: 0,
         pDbData: Vec::new(),
+        aModule: Hash::new(),
+        aVTrans: None,
+        nVTrans: 0,
+        pVtabCtx: Vec::new(),
+        pDisconnect: Vec::new(),
     })
 }
 

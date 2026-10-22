@@ -215,7 +215,14 @@ pub struct TableView {
 #[derive(Clone, Default)]
 pub struct TableVtab {
     pub nArg: i32,
+    /// Module arguments: azArg[0] is the module name, azArg[1] the
+    /// database name (C: NULL in the schema, set to the schema name by
+    /// vtabCallConstructor()), azArg[2] the table name, then the
+    /// arguments of CREATE VIRTUAL TABLE.
     pub azArg: Vec<ZStr>,
+    /// The per-connection VTable objects of this virtual table (C
+    /// u.vtab.p list, head first).
+    pub p: Vec<VTableRef>,
 }
 
 #[derive(Clone, Default)]
@@ -561,6 +568,64 @@ pub struct Sqlite3 {
     pub walAutoCkpt: i32,
     /// sqlite3_set_clientdata() list, most recent first (C pDbData).
     pub pDbData: Vec<DbClientData>,
+    /// Registered virtual table modules (C db->aModule).
+    pub aModule: Hash<ModuleRef>,
+    /// Virtual tables with open transactions (C db->aVTrans).  None is the
+    /// C NULL pointer (see sqlite3VtabInSync()); nVTrans is the C count,
+    /// which may be non-zero while aVTrans is None (inside xSync).
+    pub aVTrans: Option<Vec<VTableRef>>,
+    pub nVTrans: i32,
+    /// Context stack of the xCreate/xConnect calls in progress (C
+    /// db->pVtabCtx list; the last element is the head).
+    pub pVtabCtx: Vec<VtabCtx>,
+    /// Disconnect these VTables at the next opportunity (C db->pDisconnect).
+    pub pDisconnect: Vec<VTableRef>,
+}
+
+/// Each SQLite module (virtual table type) registered using
+/// sqlite3_create_module() is represented by an instance of this
+/// structure (C Module).
+pub struct Module {
+    /// The module implementation (C pModule; its pAux is captured by the
+    /// implementation object).
+    pub pModule: Rc<dyn crate::vtab::VtabModule>,
+    pub zName: ZStr,
+    pub nRefModule: i32,
+    /// Module destructor (C xDestroy(pAux)).
+    pub xDestroy: Option<Rc<dyn Fn()>>,
+    /// Eponymous table for this module.
+    pub pEpoTab: Option<TableRef>,
+}
+pub type ModuleRef = Rc<RefCell<Module>>;
+
+/// A virtual table instance (C sqlite3_vtab*).
+pub type VtabRef = Rc<RefCell<Box<dyn crate::vtab::Vtab>>>;
+
+/// The object of a virtual table held by one connection (C VTable).
+pub struct VTable {
+    pub pMod: ModuleRef,
+    /// The virtual table instance (None once xDestroy succeeded).
+    pub pVtab: Option<VtabRef>,
+    /// Number of pointers to this structure.
+    pub nRef: i32,
+    /// True if constraints are supported.
+    pub bConstraint: u8,
+    /// True if might use any attached schema.
+    pub bAllSchemas: u8,
+    /// Riskiness of allowing hacker access.
+    pub eVtabRisk: u8,
+    /// Depth of the SAVEPOINT stack.
+    pub iSavepoint: i32,
+    /// Number of open cursors (C pVtab->nRef of the sqlite3_vtab).
+    pub nCursor: i32,
+}
+pub type VTableRef = Rc<RefCell<VTable>>;
+
+/// Context of an xCreate/xConnect call in progress (C VtabCtx).
+pub struct VtabCtx {
+    pub pVTable: VTableRef,
+    pub pTab: TableRef,
+    pub bDeclared: i32,
 }
 
 /// Client data attached to a connection (sqlite3_set_clientdata()).
@@ -1651,6 +1716,8 @@ pub enum P4 {
     Tab(TableRef),
     /// P4_INDEX
     Idx(IndexRef),
+    /// P4_VTAB
+    Vtab(VTableRef),
     /// P4_SUBRTNSIG
     SubrtnSig(Box<SubrtnSig>),
 }
@@ -1854,6 +1921,10 @@ pub struct VdbeCursor {
     /// CURTYPE_PSEUDO cursors, seekResult is the register holding the
     /// record, as in C.
     pub aType: Vec<u32>,
+    /// uc.pVCur: the cursor of a CURTYPE_VTAB cursor.
+    pub pVCur: Option<Box<dyn crate::vtab::VtabCursor>>,
+    /// The virtual table of pVCur (C pVCur->pVtab).
+    pub pVCurTab: Option<VTableRef>,
 }
 
 #[derive(Clone, Default)]

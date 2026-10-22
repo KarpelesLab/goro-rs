@@ -19,8 +19,15 @@ Compile-time configuration we mirror: the default amalgamation build plus
 `SQLITE_OMIT_SHARED_CACHE`, default `SQLITE_DQS=3`, no
 `SQLITE_ENABLE_EXPLAIN_COMMENTS`, no `SQLITE_DEBUG` (asserts become
 `debug_assert!`), UTF-8 only (UTF-16 entry points may stay unimplemented),
-no load_extension, no mmap.  Virtual tables, WAL and JSON come later: keep
-their call sites but stubs may return errors.
+no load_extension, no mmap.  WAL and JSON come later: keep their call
+sites but stubs may return errors.
+
+Virtual tables (vtab.rs) are ported: a module is an `Rc<dyn VtabModule>`
+(its pAux is captured by the implementation), an instance a
+`Box<dyn Vtab>` held by the per-connection `VTable` (`Table::u.vtab.p`),
+a cursor a `Box<dyn VtabCursor>` stored in `VdbeCursor::pVCur`.  See the
+traits at the top of vtab.rs for the contract (optional C methods are
+default methods plus `has_*` predicates).
 
 ## Layout
 
