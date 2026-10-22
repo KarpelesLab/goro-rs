@@ -155,6 +155,7 @@ fn normalize_ns_const_name(name: &[u8]) -> Vec<u8> {
 pub fn register(vm: &mut Vm) {
     register_std_streams();
     xp_socket::install_hooks(vm);
+    ftp_wrapper::register();
     vm.register_function(b"fnmatch", fnmatch_fn);
     for (n, v) in [
         ("FNM_NOESCAPE", libc::FNM_NOESCAPE),
@@ -10705,6 +10706,10 @@ pub(crate) mod xp_socket;
 /// The http:// and https:// wrapper.
 #[path = "http_wrapper.rs"]
 mod http_wrapper;
+
+/// The ftp:// and ftps:// wrapper.
+#[path = "ftp_wrapper.rs"]
+mod ftp_wrapper;
 
 /// proc_open() family.
 #[path = "proc_open.rs"]
