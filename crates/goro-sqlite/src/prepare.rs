@@ -688,7 +688,9 @@ fn sqlite3Prepare(
     } else {
         zSql
     };
-    let mut nWin = 1usize << 16;
+    // Initial window: up to the first top-level semicolon (where the parse
+    // normally stops) plus some lookahead.
+    let mut nWin = firstSemicolonEnd(full) + 64;
     loop {
         let wend = nWin.min(full.len());
         let (zText, partial) = match full[..wend].iter().position(|&c| c == 0) {
@@ -702,11 +704,48 @@ fn sqlite3Prepare(
             if let Some(mut v) = pStmt {
                 crate::vdbeaux::sqlite3VdbeFinalize(db, &mut v);
             }
-            nWin = nWin.saturating_mul(16);
+            nWin = nWin.saturating_mul(8).max(4096);
             continue;
         }
         return (rc, pStmt, zTail);
     }
+}
+
+/// Offset just past the first ';' of z that is not inside a quoted string,
+/// identifier or comment (z.len() if there is none; stops at a NUL).  Only
+/// used to size the text window of sqlite3Prepare(): an underestimate (a
+/// CREATE TRIGGER body) just makes the parse retry with a larger window.
+fn firstSemicolonEnd(z: &[u8]) -> usize {
+    let n = z.len();
+    let mut i = 0;
+    while i < n {
+        match z[i] {
+            0 => return i,
+            b';' => return i + 1,
+            q @ (b'\'' | b'"' | b'`' | b'[') => {
+                let close = if q == b'[' { b']' } else { q };
+                i += 1;
+                while i < n && z[i] != close {
+                    i += 1;
+                }
+            }
+            b'-' if i + 1 < n && z[i + 1] == b'-' => {
+                while i < n && z[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < n && z[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < n && !(z[i] == b'*' && z[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 1;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    n
 }
 
 /// The body of sqlite3Prepare(): parse zText (a prefix of the SQL text,
