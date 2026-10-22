@@ -80,10 +80,12 @@ Highlights beyond the core language:
   reflection, session, dom/simplexml/xml/xmlreader/xmlwriter (libxml2-style tree, lexbor
   HTML5 parser port), openssl (on [purecrypto](https://crates.io/crates/purecrypto)),
   mysqli (mysqlnd port), PDO with pdo_mysql (over the same mysqlnd), gmp, sockets, curl, bz2, tokenizer,
-  bcmath (libbcmath port), filter, iconv (glibc iconv emulation), zend_test.
+  bcmath (libbcmath port), filter, iconv (glibc iconv emulation), calendar, posix,
+  pcntl (fork, signals with async dispatch), ftp (with FTPS), shmop/sysvsem/sysvshm/sysvmsg,
+  gettext (libintl emulation reading .mo catalogs), zend_test.
 
 ### Not Yet Implemented
-- gd, pdo_sqlite/pdo_pgsql/…, ffi, ldap, pgsql, sqlite3, xsl, tidy, sodium (in progress: soap, phar, intl, zip, exif, fileinfo, posix, pcntl, calendar, ftp)
+- gd, pdo_sqlite/pdo_pgsql/…, ffi, ldap, pgsql, sqlite3, xsl, tidy, sodium (in progress: soap, phar, intl, zip, exif, fileinfo)
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
 - Exact opcache optimizer behaviour
 
@@ -123,7 +125,8 @@ Workspace crates:
 - `goro-ext-reflection` - Reflection extension (stub; most logic lives in `goro-core::reflection`)
 - `goro-ext-spl` - SPL extension (autoload helpers; SPL classes are compiled into `goro-core`)
 - `goro-ext-pdo` - PDO (ext/pdo) and the MySQL driver (ext/pdo_mysql)
-- `goro-ext-{bz2,curl,gmp,mbstring,mysqli,openssl,session,sockets,xml,zlib}` - misc extensions
+- `goro-ext-sysvipc` - shmop, sysvsem, sysvshm and sysvmsg
+- `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,xml,zlib}` - misc extensions
 - `goro-phpt` - PHPT test file runner
 
 ## Design Goals
