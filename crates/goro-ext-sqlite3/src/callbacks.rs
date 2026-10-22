@@ -28,7 +28,11 @@ fn call(vm: &mut Vm, cb: &Value, args: &[Value]) -> Option<Value> {
     if vm.current_exception.is_some() || vm.exit_requested {
         return None;
     }
-    match vm.call_callback(cb, args) {
+    // Messages raised once the callback returned are on the caller's line.
+    let line = vm.current_line;
+    let r = vm.call_callback(cb, args);
+    vm.current_line = line;
+    match r {
         Ok(v) => {
             if vm.current_exception.is_some() || vm.exit_requested {
                 None
