@@ -92,6 +92,32 @@ pub fn push_lexer_warning(msg: String, line: u32) {
     LEXER_WARNINGS.with(|d| d.borrow_mut().push((msg, line)));
 }
 
+/// The lexer's diagnostics in the order php-src raises them: the
+/// scanner's own (escape warnings, non-canonical casts) in source order,
+/// then those zend_compile emits for what was scanned (`${...}`
+/// interpolation). Items are (is_deprecation, message, line).
+pub fn order_lexer_diagnostics(
+    deprecations: &[(String, u32)],
+    warnings: &[(String, u32)],
+) -> Vec<(bool, String, u32)> {
+    let compile_time = |m: &str| m.starts_with("Using ${");
+    let mut scan: Vec<(bool, String, u32)> = deprecations
+        .iter()
+        .filter(|(m, _)| !compile_time(m))
+        .map(|(m, l)| (true, m.clone(), *l))
+        .chain(warnings.iter().map(|(m, l)| (false, m.clone(), *l)))
+        .collect();
+    scan.sort_by_key(|(_, _, l)| *l);
+    let mut compiled: Vec<(bool, String, u32)> = deprecations
+        .iter()
+        .filter(|(m, _)| compile_time(m))
+        .map(|(m, l)| (true, m.clone(), *l))
+        .collect();
+    compiled.sort_by_key(|(_, _, l)| *l);
+    scan.extend(compiled);
+    scan
+}
+
 /// Drain lexer warnings collected since the last call.
 pub fn take_lexer_warnings() -> Vec<(String, u32)> {
     LEXER_WARNINGS.with(|d| std::mem::take(&mut *d.borrow_mut()))

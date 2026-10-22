@@ -1643,11 +1643,14 @@ fn execute_php_inner_impl(
     let mut vm = Vm::new();
     vm.current_file = filename.to_string();
     // Emit lexer deprecations first (e.g. `${var}` syntax), then compile warnings.
-    for (msg, wline) in &lexer_deprecations {
-        vm.emit_deprecated_at(msg, *wline);
-    }
-    for (msg, wline) in &lexer_warnings {
-        vm.emit_warning_at(msg, *wline);
+    for (deprecation, msg, wline) in
+        goro_parser::order_lexer_diagnostics(&lexer_deprecations, &lexer_warnings)
+    {
+        if deprecation {
+            vm.emit_deprecated_at(&msg, wline);
+        } else {
+            vm.emit_warning_at(&msg, wline);
+        }
     }
     for (msg, wline) in &compile_warnings {
         vm.emit_compile_diagnostic(msg, *wline);

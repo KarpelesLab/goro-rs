@@ -286,11 +286,14 @@ pub fn compile(
 /// Load a compiled script into the engine: compile-time diagnostics and
 /// class declarations.
 pub fn load(vm: &mut Vm, compiled: &mut Compiled) {
-    for (msg, line) in &compiled.lexer_deprecations {
-        vm.emit_deprecated_at(msg, *line);
-    }
-    for (msg, line) in &compiled.lexer_warnings {
-        vm.emit_warning_at(msg, *line);
+    for (deprecation, msg, line) in
+        goro_parser::order_lexer_diagnostics(&compiled.lexer_deprecations, &compiled.lexer_warnings)
+    {
+        if deprecation {
+            vm.emit_deprecated_at(&msg, line);
+        } else {
+            vm.emit_warning_at(&msg, line);
+        }
     }
     for (msg, line) in &compiled.compile_warnings {
         vm.emit_compile_diagnostic(msg, *line);

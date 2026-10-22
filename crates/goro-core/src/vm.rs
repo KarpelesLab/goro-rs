@@ -37525,7 +37525,12 @@ impl Vm {
                             let script = goro_parser::multibyte::lex_script(&source, true);
                             let mut parser =
                                 goro_parser::Parser::new(script.tokens).with_source(&script.source);
-                            match parser.parse() {
+                            let parsed = parser.parse();
+                            let lex_diags = goro_parser::order_lexer_diagnostics(
+                                &goro_parser::take_lexer_deprecations(),
+                                &goro_parser::take_lexer_warnings(),
+                            );
+                            match parsed {
                                 Ok(program) => {
                                     let mut compiler = crate::compiler::Compiler::new();
                                     compiler.source_file = abs_path.as_bytes().to_vec();
@@ -37544,7 +37549,14 @@ impl Vm {
                                                     l.op1 = OperandType::Const(one);
                                                 }
                                             }
-                                            // Emit compile warnings
+                                            // The scanner's diagnostics, then the compiler's
+                                            for (deprecation, msg, wline) in lex_diags {
+                                                if deprecation {
+                                                    self.emit_deprecated_at(&msg, wline);
+                                                } else {
+                                                    self.emit_warning_at(&msg, wline);
+                                                }
+                                            }
                                             for (msg, wline) in &inc_warnings {
                                                 self.emit_compile_diagnostic(msg, *wline);
                                             }
@@ -37784,7 +37796,12 @@ impl Vm {
                         let mut lexer = goro_parser::Lexer::new(&source);
                         let tokens = lexer.tokenize();
                         let mut parser = goro_parser::Parser::new(tokens).with_source(&source);
-                        match parser.parse() {
+                        let parsed = parser.parse();
+                        let lex_diags = goro_parser::order_lexer_diagnostics(
+                            &goro_parser::take_lexer_deprecations(),
+                            &goro_parser::take_lexer_warnings(),
+                        );
+                        match parsed {
                             Ok(program) => {
                                 let mut compiler = crate::compiler::Compiler::new().with_this_cv();
                                 let eval_file =
@@ -37793,13 +37810,21 @@ impl Vm {
                                 compiler.source_file = eval_file.into_bytes();
                                 match compiler.compile(&program) {
                                     Ok((eval_op_array, eval_classes, eval_warnings)) => {
-                                        // Emit compile warnings (in the eval()'d code)
-                                        if !eval_warnings.is_empty() {
+                                        // Emit the scanner's and the compiler's
+                                        // diagnostics (in the eval()'d code)
+                                        if !eval_warnings.is_empty() || !lex_diags.is_empty() {
                                             let saved = std::mem::replace(
                                                 &mut self.current_file,
                                                 String::from_utf8_lossy(&compiler_file)
                                                     .into_owned(),
                                             );
+                                            for (deprecation, msg, wline) in lex_diags {
+                                                if deprecation {
+                                                    self.emit_deprecated_at(&msg, wline);
+                                                } else {
+                                                    self.emit_warning_at(&msg, wline);
+                                                }
+                                            }
                                             for (msg, wline) in &eval_warnings {
                                                 self.emit_compile_diagnostic(msg, *wline);
                                             }
