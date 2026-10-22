@@ -10050,6 +10050,30 @@ pub fn reflection_fiber_method(
 }
 
 /// ReflectionExtension no-arg method dispatch
+/// ReflectionZendExtension's methods (zend_extension's name, version,
+/// author, URL and copyright).
+pub fn reflection_zend_extension_method(
+    vm: &mut Vm,
+    method: &[u8],
+    obj: &Rc<RefCell<PhpObject>>,
+) -> Option<Value> {
+    let name = obj.borrow().get_property(b"name");
+    let s = |v: &str| Some(Value::String(PhpString::from_string(v.to_string())));
+    match method {
+        b"getname" => Some(name),
+        b"getversion" => Some(
+            vm.constants
+                .get(b"PHP_VERSION".as_slice())
+                .cloned()
+                .unwrap_or(Value::Null),
+        ),
+        b"getauthor" => s("Zend Technologies"),
+        b"geturl" => s("http://www.zend.com/"),
+        b"getcopyright" => s("Copyright (c)"),
+        _ => None,
+    }
+}
+
 pub fn reflection_extension_method(
     vm: &mut Vm,
     method: &[u8],

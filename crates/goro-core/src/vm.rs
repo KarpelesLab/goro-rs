@@ -10625,6 +10625,9 @@ impl Vm {
             b"reflectionextension" => {
                 crate::reflection::reflection_extension_method(self, method_lower, obj)
             }
+            b"reflectionzendextension" => {
+                crate::reflection::reflection_zend_extension_method(self, method_lower, obj)
+            }
             b"reflectionnamedtype" => {
                 crate::reflection::reflection_named_type_method(self, method_lower, obj)
             }
@@ -31053,6 +31056,7 @@ impl Vm {
                                                     "filter" => "filter".to_string(),
                                                     "tokenizer" => "tokenizer".to_string(),
                                                     "uri" => "uri".to_string(),
+                                                    "zend opcache" => "Zend OPcache".to_string(),
                                                     _ => raw.clone(),
                                                 };
                                                 obj_mut.set_property(
@@ -31061,6 +31065,53 @@ impl Vm {
                                                         canonical,
                                                     )),
                                                 );
+                                            }
+                                        }
+                                        b"reflectionzendextension" => {
+                                            // ReflectionZendExtension::__construct(string $name):
+                                            // the Zend extensions loaded (OPcache).
+                                            let raw = call
+                                                .args
+                                                .get(1)
+                                                .map(|v| v.to_php_string().to_string_lossy())
+                                                .unwrap_or_default();
+                                            if raw.eq_ignore_ascii_case("zend opcache")
+                                                && self
+                                                    .loaded_extensions
+                                                    .contains(b"zend opcache".as_slice())
+                                            {
+                                                obj_mut.set_property(
+                                                    b"name".to_vec(),
+                                                    Value::String(PhpString::from_bytes(
+                                                        b"Zend OPcache",
+                                                    )),
+                                                );
+                                            } else {
+                                                drop(obj_mut);
+                                                let msg = format!(
+                                                    "Zend Extension \"{}\" does not exist",
+                                                    raw
+                                                );
+                                                let exc = self.create_exception(
+                                                    b"ReflectionException",
+                                                    &msg,
+                                                    op.line,
+                                                );
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                                    exception_handlers.pop()
+                                                {
+                                                    pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    return Ok(Flow::Continue);
+                                                }
+                                                return Err(VmError {
+                                                    message: format!(
+                                                        "Uncaught ReflectionException: {}",
+                                                        msg
+                                                    ),
+                                                    line: op.line,
+                                                });
                                             }
                                         }
                                         b"reflectiongenerator" => {
