@@ -41081,6 +41081,30 @@ impl Vm {
                                 Value::False
                             }
                         } else if let Value::String(s) = &arr_val {
+                            // `$str[$obj] ?? d` (FETCH_DIM_IS): an array / object
+                            // offset is illegal (zend_illegal_string_offset());
+                            // isset() just reports false.
+                            if op.opcode == OpCode::ArrayIssetFetch
+                                && matches!(key_val.deref(), Value::Array(_) | Value::Object(_))
+                            {
+                                let msg = format!(
+                                    "Cannot access offset of type {} on string",
+                                    Self::value_type_name(&key_val.deref())
+                                );
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught TypeError: {}", msg),
+                                    line: op.line,
+                                });
+                            }
                             // String offset: isset($str[$idx])
                             // Non-numeric string keys should return false
                             let is_valid_offset = match &key_val {
