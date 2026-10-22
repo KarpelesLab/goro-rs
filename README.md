@@ -47,6 +47,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/bcmath (libbcmath port, `BcMath\Number`) | 165 | 165 | 100% |
 | ext/filter | 116 | 116 | 100% |
 | ext/iconv (glibc iconv emulation) | 68 | 68 | 100% |
+| ext/sodium (libsodium API on purecrypto) | 30 | 30 | 100% |
 | ext/gmp | 96 | 98 | 98.0% |
 | ext/ctype / ext/uri / ext/tokenizer | 218 | 219 | 99.5% |
 | ext/opcache (behavioural tests) | 300 | 303 | 99.0% |
@@ -82,10 +83,11 @@ Highlights beyond the core language:
   mysqli (mysqlnd port), PDO with pdo_mysql (over the same mysqlnd), gmp, sockets, curl, bz2, tokenizer,
   bcmath (libbcmath port), filter, iconv (glibc iconv emulation), calendar, posix,
   pcntl (fork, signals with async dispatch), ftp (with FTPS), shmop/sysvsem/sysvshm/sysvmsg,
-  gettext (libintl emulation reading .mo catalogs), zend_test.
+  gettext (libintl emulation reading .mo catalogs), sodium (libsodium API on purecrypto,
+  argon2i/argon2id `password_hash()`), zend_test.
 
 ### Not Yet Implemented
-- gd, pdo_sqlite/pdo_pgsql/…, ffi, ldap, pgsql, sqlite3, xsl, tidy, sodium (in progress: soap, phar, intl, zip, exif, fileinfo)
+- gd, pdo_sqlite/pdo_pgsql/…, ffi, ldap, pgsql, sqlite3, xsl, tidy (in progress: soap, phar, intl, zip, exif, fileinfo)
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
 - Exact opcache optimizer behaviour
 
@@ -126,7 +128,7 @@ Workspace crates:
 - `goro-ext-spl` - SPL extension (autoload helpers; SPL classes are compiled into `goro-core`)
 - `goro-ext-pdo` - PDO (ext/pdo) and the MySQL driver (ext/pdo_mysql)
 - `goro-ext-sysvipc` - shmop, sysvsem, sysvshm and sysvmsg
-- `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,xml,zlib}` - misc extensions
+- `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,sodium,xml,zlib}` - misc extensions
 - `goro-phpt` - PHPT test file runner
 
 ## Design Goals
