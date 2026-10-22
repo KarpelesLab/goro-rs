@@ -7905,7 +7905,7 @@ impl Vm {
         let target = self.proxy_redirect(obj);
         let ob = target.borrow();
         // SPL array handling
-        let spl_arr = ob.get_property(b"__spl_array");
+        let spl_arr = crate::spl_dll::spl_storage_view(&ob);
         if let Value::Array(a) = spl_arr {
             return Rc::new(RefCell::new(a.borrow().clone()));
         }

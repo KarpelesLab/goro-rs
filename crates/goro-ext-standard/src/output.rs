@@ -1109,7 +1109,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
 
             if is_spl_dll_class {
                 // SplDoublyLinkedList/SplStack/SplQueue: show flags and dllist private properties
-                let spl_arr = obj_borrow.get_property(b"__spl_array");
+                let spl_arr = goro_core::spl_dll::spl_storage_view(&obj_borrow);
                 let iter_mode = obj_borrow.get_property(b"__spl_iter_mode");
                 let flags_val = if let Value::Long(f) = iter_mode {
                     f
@@ -1836,7 +1836,7 @@ fn print_r_value_inner(
             );
 
             if is_spl_dllist_class {
-                let spl_arr = obj_borrow.get_property(b"__spl_array");
+                let spl_arr = goro_core::spl_dll::spl_storage_view(&obj_borrow);
                 let iter_mode = obj_borrow.get_property(b"__spl_iter_mode");
                 let flags_val = if let Value::Long(f) = iter_mode { f } else { 0 };
                 drop(obj_borrow);

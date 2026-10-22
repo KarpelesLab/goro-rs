@@ -1,8 +1,9 @@
 //! SplDoublyLinkedList / SplQueue / SplStack (php-src ext/spl/spl_dllist.c).
 //!
-//! Elements live in `__spl_array` (keys 0..n-1); each element also has a
-//! stable node id in the parallel `__spl_dll_ids` array so that traversal
-//! pointers survive insertions/removals like php-src's linked list nodes.
+//! Elements live in `__spl_array` in list order, each keyed by a stable
+//! node id (allocated from `__spl_dll_nid`, never reused), so traversal
+//! pointers survive insertions/removals like php-src's linked list nodes
+//! and every end operation is O(1) (amortized; see PhpArray::push_front).
 //! The object's own traversal state is `__spl_dll_cur` (node id or Null) /
 //! `__spl_dll_tpos`; foreach uses an independent InternalIterator.
 
@@ -11,7 +12,7 @@ use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
 use crate::object::PhpObject;
-use crate::spl::{mangle_private, obj_class_lower, val_arr};
+use crate::spl::{mangle_private, obj_class_lower, storage_arr, val_arr};
 use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::Vm;
@@ -29,43 +30,75 @@ fn set_prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8], v: Value) {
     obj.borrow_mut().set_property(name.to_vec(), v);
 }
 
-fn load(obj: &Rc<RefCell<PhpObject>>) -> (Vec<Value>, Vec<i64>) {
-    let vals: Vec<Value> = match prop(obj, b"__spl_array") {
-        Value::Array(a) => a.borrow().values().cloned().collect(),
-        _ => Vec::new(),
-    };
-    let mut ids: Vec<i64> = match prop(obj, b"__spl_dll_ids") {
-        Value::Array(a) => a.borrow().values().map(|v| v.to_long()).collect(),
-        _ => Vec::new(),
-    };
-    if ids.len() != vals.len() {
-        // Storage created elsewhere (e.g. old code paths): assign fresh ids.
-        let mut nid = match prop(obj, b"__spl_dll_nid") {
-            Value::Long(n) => n,
-            _ => 1,
-        };
-        ids = Vec::with_capacity(vals.len());
-        for _ in 0..vals.len() {
-            ids.push(nid);
-            nid += 1;
-        }
-        set_prop(obj, b"__spl_dll_nid", Value::Long(nid));
+/// The element storage, for reading (None: no storage yet).
+fn list(obj: &Rc<RefCell<PhpObject>>) -> Option<Rc<RefCell<PhpArray>>> {
+    match prop(obj, b"__spl_array") {
+        Value::Array(a) => Some(a),
+        _ => None,
     }
-    (vals, ids)
 }
 
-fn store(obj: &Rc<RefCell<PhpObject>>, vals: Vec<Value>, ids: Vec<i64>) {
-    let mut a = PhpArray::new();
-    for v in vals {
-        a.push(v);
+/// The element storage, unshared, for in-place updates. Storage filled
+/// elsewhere (keys that are not node ids) is re-keyed first.
+fn list_mut(obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpArray>> {
+    let a = storage_arr(obj, b"__spl_array");
+    if !obj.borrow().has_property(b"__spl_dll_nid") && !a.borrow().is_empty() {
+        let vals: Vec<Value> = a.borrow().values().cloned().collect();
+        let mut b = PhpArray::new();
+        for v in vals {
+            b.set(ArrayKey::Int(new_id(obj)), v);
+        }
+        *a.borrow_mut() = b;
     }
-    let mut b = PhpArray::new();
-    for i in ids {
-        b.push(Value::Long(i));
+    a
+}
+
+fn len(obj: &Rc<RefCell<PhpObject>>) -> usize {
+    list(obj).map(|a| a.borrow().len()).unwrap_or(0)
+}
+
+/// Node id of the element at list position `i`.
+fn id_at(a: &Rc<RefCell<PhpArray>>, i: usize) -> Option<i64> {
+    match a.borrow().entry_at(i) {
+        Some((ArrayKey::Int(n), _)) => Some(*n),
+        _ => None,
     }
-    let mut ob = obj.borrow_mut();
-    ob.set_property(b"__spl_array".to_vec(), val_arr(a));
-    ob.set_property(b"__spl_dll_ids".to_vec(), val_arr(b));
+}
+
+fn value_at(obj: &Rc<RefCell<PhpObject>>, i: usize) -> Option<Value> {
+    let a = list(obj)?;
+    let ab = a.borrow();
+    ab.entry_at(i).map(|(_, v)| v.clone())
+}
+
+/// List position of node `id` (None once the node was removed).
+fn pos_of(a: &Rc<RefCell<PhpArray>>, id: i64) -> Option<usize> {
+    a.borrow().position_of(&ArrayKey::Int(id))
+}
+
+fn values(obj: &Rc<RefCell<PhpObject>>) -> Vec<Value> {
+    match list(obj) {
+        Some(a) => a.borrow().values().cloned().collect(),
+        None => Vec::new(),
+    }
+}
+
+fn push_back(obj: &Rc<RefCell<PhpObject>>, v: Value) {
+    let a = list_mut(obj);
+    let id = new_id(obj);
+    a.borrow_mut().set(ArrayKey::Int(id), v);
+}
+
+/// Remove the first (or last) element, handing it to the caller.
+fn take_end(obj: &Rc<RefCell<PhpObject>>, last: bool) -> Option<Value> {
+    let a = list_mut(obj);
+    let mut ab = a.borrow_mut();
+    if last {
+        ab.pop()
+    } else {
+        let k = ab.entry_at(0).map(|(k, _)| k.clone())?;
+        ab.take(&k)
+    }
 }
 
 fn new_id(obj: &Rc<RefCell<PhpObject>>) -> i64 {
@@ -100,15 +133,19 @@ pub(crate) struct Cursor {
 
 impl Vm {
     fn dll_rewind_cursor(obj: &Rc<RefCell<PhpObject>>, flags: i64) -> Cursor {
-        let (_, ids) = load(obj);
+        let a = match list(obj) {
+            Some(a) => a,
+            None => return Cursor { cur: None, pos: 0 },
+        };
+        let n = a.borrow().len();
         if flags & IT_LIFO != 0 {
             Cursor {
-                cur: ids.last().copied(),
-                pos: ids.len() as i64 - 1,
+                cur: if n > 0 { id_at(&a, n - 1) } else { None },
+                pos: n as i64 - 1,
             }
         } else {
             Cursor {
-                cur: ids.first().copied(),
+                cur: id_at(&a, 0),
                 pos: 0,
             }
         }
@@ -120,15 +157,14 @@ impl Vm {
             Some(id) => id,
             None => return c,
         };
-        let (mut vals, mut ids) = load(obj);
-        let idx = ids.iter().position(|&i| i == cur);
+        let a = list_mut(obj);
         let lifo = flags & IT_LIFO != 0;
-        let next = match idx {
+        let next = match pos_of(&a, cur) {
             Some(i) => {
                 if lifo {
-                    if i > 0 { Some(ids[i - 1]) } else { None }
+                    if i > 0 { id_at(&a, i - 1) } else { None }
                 } else {
-                    ids.get(i + 1).copied()
+                    id_at(&a, i + 1)
                 }
             }
             None => None, // node was removed: its links are cut
@@ -136,19 +172,13 @@ impl Vm {
         let mut pos = c.pos;
         if lifo {
             pos -= 1;
-            if flags & IT_DELETE != 0 && !vals.is_empty() {
-                let v = vals.pop();
-                ids.pop();
-                store(obj, vals, ids);
+            if flags & IT_DELETE != 0 {
+                let v = take_end(obj, true);
                 drop(v);
             }
         } else if flags & IT_DELETE != 0 {
-            if !vals.is_empty() {
-                let v = vals.remove(0);
-                ids.remove(0);
-                store(obj, vals, ids);
-                drop(v);
-            }
+            let v = take_end(obj, false);
+            drop(v);
         } else {
             pos += 1;
         }
@@ -157,9 +187,9 @@ impl Vm {
 
     fn dll_cursor_value(obj: &Rc<RefCell<PhpObject>>, c: Cursor) -> Option<Value> {
         let id = c.cur?;
-        let (vals, ids) = load(obj);
-        let i = ids.iter().position(|&x| x == id)?;
-        vals.get(i).cloned()
+        let a = list(obj)?;
+        let ab = a.borrow();
+        ab.get(&ArrayKey::Int(id)).cloned()
     }
 
     fn dll_obj_cursor(obj: &Rc<RefCell<PhpObject>>) -> Cursor {
@@ -208,9 +238,8 @@ impl Vm {
             ))),
             Value::Long(flags),
         );
-        let (vals, _) = load(obj);
         let mut a = PhpArray::new();
-        for v in vals {
+        for v in values(obj) {
             a.push(v);
         }
         out.set(
@@ -280,28 +309,23 @@ impl Vm {
         let r = match method {
             b"push" | b"enqueue" => {
                 let v = a.first().cloned().unwrap_or(Value::Null).deref();
-                let (mut vals, mut ids) = load(obj);
-                vals.push(v);
-                ids.push(new_id(obj));
-                store(obj, vals, ids);
+                push_back(obj, v);
                 Value::Null
             }
             b"unshift" => {
                 let v = a.first().cloned().unwrap_or(Value::Null).deref();
-                let (mut vals, mut ids) = load(obj);
-                vals.insert(0, v);
-                ids.insert(0, new_id(obj));
-                store(obj, vals, ids);
+                let l = list_mut(obj);
+                let id = new_id(obj);
+                l.borrow_mut().push_front(ArrayKey::Int(id), v);
                 Value::Null
             }
             b"pop" => {
-                let (mut vals, mut ids) = load(obj);
-                match vals.pop() {
-                    Some(v) => {
-                        ids.pop();
-                        store(obj, vals, ids);
-                        v
-                    }
+                match if len(obj) > 0 {
+                    take_end(obj, true)
+                } else {
+                    None
+                } {
+                    Some(v) => v,
                     None => {
                         return self.spl_throw(
                             b"RuntimeException",
@@ -311,22 +335,18 @@ impl Vm {
                 }
             }
             b"shift" | b"dequeue" => {
-                let (mut vals, mut ids) = load(obj);
-                if vals.is_empty() {
+                if len(obj) == 0 {
                     return self.spl_throw(
                         b"RuntimeException",
                         "Can't shift from an empty datastructure",
                     );
                 }
-                let v = vals.remove(0);
-                ids.remove(0);
-                store(obj, vals, ids);
-                v
+                take_end(obj, false).unwrap_or(Value::Null)
             }
             b"top" => {
-                let (vals, _) = load(obj);
-                match vals.last() {
-                    Some(v) => v.clone(),
+                let n = len(obj);
+                match if n > 0 { value_at(obj, n - 1) } else { None } {
+                    Some(v) => v,
                     None => {
                         return self.spl_throw(
                             b"RuntimeException",
@@ -335,19 +355,14 @@ impl Vm {
                     }
                 }
             }
-            b"bottom" => {
-                let (vals, _) = load(obj);
-                match vals.first() {
-                    Some(v) => v.clone(),
-                    None => {
-                        return self.spl_throw(
-                            b"RuntimeException",
-                            "Can't peek at an empty datastructure",
-                        );
-                    }
+            b"bottom" => match value_at(obj, 0) {
+                Some(v) => v,
+                None => {
+                    return self
+                        .spl_throw(b"RuntimeException", "Can't peek at an empty datastructure");
                 }
-            }
-            b"count" => Value::Long(load(obj).0.len() as i64),
+            },
+            b"count" => Value::Long(len(obj) as i64),
             b"isempty" => {
                 // spl_dllist_object_count_elements: honours a count() override
                 let cl = obj_class_lower(obj);
@@ -361,7 +376,7 @@ impl Vm {
                         .map(|v| v.to_long())
                         .unwrap_or(0)
                 } else {
-                    load(obj).0.len() as i64
+                    len(obj) as i64
                 };
                 if n == 0 { Value::True } else { Value::False }
             }
@@ -395,7 +410,7 @@ impl Vm {
                     Some(n) => n,
                     None => return Some(Value::Null),
                 };
-                let n = load(obj).0.len() as i64;
+                let n = len(obj) as i64;
                 if i >= 0 && i < n {
                     Value::True
                 } else {
@@ -408,10 +423,9 @@ impl Vm {
                     Some(n) => n,
                     None => return Some(Value::Null),
                 };
-                let (vals, _) = load(obj);
                 let lifo = dll_flags(self, obj) & IT_LIFO != 0;
-                match Self::dll_offset_index(vals.len(), i, lifo) {
-                    Some(idx) => vals[idx].clone(),
+                match Self::dll_offset_index(len(obj), i, lifo).and_then(|idx| value_at(obj, idx)) {
+                    Some(v) => v,
                     None => return self.dll_out_of_range(func),
                 }
             }
@@ -420,22 +434,24 @@ impl Vm {
                 let v = a.get(1).cloned().unwrap_or(Value::Null).deref();
                 let idx_v = a.first().cloned().unwrap_or(Value::Null).deref();
                 if matches!(idx_v, Value::Null | Value::Undef) {
-                    let (mut vals, mut ids) = load(obj);
-                    vals.push(v);
-                    ids.push(new_id(obj));
-                    store(obj, vals, ids);
+                    push_back(obj, v);
                     return Some(Value::Null);
                 }
                 let i = match self.spl_arg_long(func, 1, "index", &idx_v) {
                     Some(n) => n,
                     None => return Some(Value::Null),
                 };
-                let (mut vals, ids) = load(obj);
                 let lifo = dll_flags(self, obj) & IT_LIFO != 0;
-                match Self::dll_offset_index(vals.len(), i, lifo) {
+                match Self::dll_offset_index(len(obj), i, lifo) {
                     Some(idx) => {
-                        let old = std::mem::replace(&mut vals[idx], v);
-                        store(obj, vals, ids);
+                        let l = list_mut(obj);
+                        let old = l
+                            .borrow_mut()
+                            .value_at_mut(idx)
+                            .map(|slot| std::mem::replace(slot, v));
+                        if let Some(o) = &old {
+                            crate::gc::on_child_released(o);
+                        }
                         drop(old);
                         Value::Null
                     }
@@ -448,13 +464,12 @@ impl Vm {
                     Some(n) => n,
                     None => return Some(Value::Null),
                 };
-                let (mut vals, mut ids) = load(obj);
                 let lifo = dll_flags(self, obj) & IT_LIFO != 0;
-                match Self::dll_offset_index(vals.len(), i, lifo) {
+                match Self::dll_offset_index(len(obj), i, lifo) {
                     Some(idx) => {
-                        let removed_id = ids.remove(idx);
-                        let old = vals.remove(idx);
-                        store(obj, vals, ids);
+                        let l = list_mut(obj);
+                        let removed_id = id_at(&l, idx).unwrap_or(0);
+                        let old = l.borrow_mut().remove(&ArrayKey::Int(removed_id));
                         let c = Self::dll_obj_cursor(obj);
                         if c.cur == Some(removed_id) {
                             Self::dll_set_obj_cursor(
@@ -478,21 +493,19 @@ impl Vm {
                     None => return Some(Value::Null),
                 };
                 let v = a.get(1).cloned().unwrap_or(Value::Null).deref();
-                let (mut vals, mut ids) = load(obj);
-                if i < 0 || i as usize > vals.len() {
+                let n = len(obj);
+                if i < 0 || i as usize > n {
                     return self.dll_out_of_range(func);
                 }
-                let id = new_id(obj);
-                if i as usize == vals.len() {
-                    vals.push(v);
-                    ids.push(id);
+                if i as usize == n {
+                    push_back(obj, v);
                 } else {
                     let lifo = dll_flags(self, obj) & IT_LIFO != 0;
-                    let at = Self::dll_offset_index(vals.len(), i, lifo).unwrap_or(0);
-                    vals.insert(at, v);
-                    ids.insert(at, id);
+                    let at = Self::dll_offset_index(n, i, lifo).unwrap_or(0);
+                    let l = list_mut(obj);
+                    let id = new_id(obj);
+                    l.borrow_mut().insert_at(at, ArrayKey::Int(id), v);
                 }
-                store(obj, vals, ids);
                 Value::Null
             }
             b"rewind" => {
@@ -540,26 +553,22 @@ impl Vm {
                 out.extend_from_slice(f.to_php_string().as_bytes());
                 // Walk the live list node by node: serializing an element may
                 // modify the list (only nodes still linked are visited).
-                let mut cur = load(obj).1.first().copied();
+                let mut cur = list(obj).and_then(|a| id_at(&a, 0));
                 while let Some(id) = cur {
-                    let (vals, ids) = load(obj);
-                    let pos = match ids.iter().position(|&x| x == id) {
-                        Some(p) => p,
-                        None => break,
-                    };
+                    let v =
+                        match list(obj).and_then(|a| a.borrow().get(&ArrayKey::Int(id)).cloned()) {
+                            Some(v) => v,
+                            None => break,
+                        };
                     out.push(b':');
                     let s = self
-                        .spl_call_builtin(b"serialize", &[vals[pos].clone()])
+                        .spl_call_builtin(b"serialize", &[v])
                         .unwrap_or(Value::Null);
                     out.extend_from_slice(s.to_php_string().as_bytes());
                     if self.current_exception.is_some() {
                         break;
                     }
-                    let ids = load(obj).1;
-                    cur = ids
-                        .iter()
-                        .position(|&x| x == id)
-                        .and_then(|p| ids.get(p + 1).copied());
+                    cur = list(obj).and_then(|a| pos_of(&a, id).and_then(|p| id_at(&a, p + 1)));
                 }
                 if let Some(h) = scope {
                     h(false);
@@ -580,7 +589,7 @@ impl Vm {
                 if data.is_empty() {
                     return Some(Value::Null);
                 }
-                store(obj, Vec::new(), Vec::new());
+                set_prop(obj, b"__spl_array", val_arr(PhpArray::new()));
                 let mut p = 0usize;
                 let flags = self.spl_unserialize_at(&data, &mut p);
                 match flags {
@@ -593,12 +602,7 @@ impl Vm {
                 while p < data.len() && data[p] == b':' {
                     p += 1;
                     match self.spl_unserialize_at(&data, &mut p) {
-                        Some(v) => {
-                            let (mut vals, mut ids) = load(obj);
-                            vals.push(v);
-                            ids.push(new_id(obj));
-                            store(obj, vals, ids);
-                        }
+                        Some(v) => push_back(obj, v),
                         None => {
                             let msg = format!("Error at offset {} of {} bytes", p, data.len());
                             return self.spl_throw(b"UnexpectedValueException", &msg);
@@ -615,7 +619,7 @@ impl Vm {
                 let mut out = PhpArray::new();
                 out.push(Value::Long(dll_flags(self, obj)));
                 let mut el = PhpArray::new();
-                for v in load(obj).0 {
+                for v in values(obj) {
                     el.push(v);
                 }
                 out.push(val_arr(el));
@@ -633,12 +637,10 @@ impl Vm {
                 match (flags, storage, members) {
                     (Some(Value::Long(f)), Some(Value::Array(st)), Some(Value::Array(m))) => {
                         set_prop(obj, b"__spl_iter_mode", Value::Long(f));
-                        let (mut vals, mut ids) = load(obj);
-                        for (_, v) in st.borrow().iter() {
-                            vals.push(v.clone());
-                            ids.push(new_id(obj));
+                        let st: Vec<Value> = st.borrow().values().cloned().collect();
+                        for v in st {
+                            push_back(obj, v);
                         }
-                        store(obj, vals, ids);
                         let m = m.borrow().clone();
                         self.spl_load_props(obj, &m);
                         Value::Null
@@ -736,5 +738,24 @@ impl Vm {
                 .iter()
                 .any(|m| c.get_method(m.as_bytes()).is_some()),
         }
+    }
+}
+
+/// An object's `__spl_array` storage as other code expects to see it: for
+/// a doubly linked list (keyed by node id) or an SplObjectStorage (keyed by
+/// object hash) a copy keyed by position.
+pub fn spl_storage_view(ob: &PhpObject) -> Value {
+    let v = ob.get_property(b"__spl_array");
+    match &v {
+        Value::Array(a)
+            if ob.has_property(b"__spl_dll_nid") || ob.has_property(b"__spl_objects") =>
+        {
+            let mut l = PhpArray::new();
+            for x in a.borrow().values() {
+                l.push(x.clone());
+            }
+            val_arr(l)
+        }
+        _ => v,
     }
 }

@@ -1,16 +1,17 @@
 //! SplObjectStorage and MultipleIterator (php-src ext/spl/spl_observer.c).
 //!
-//! Entries are kept in insertion order as three parallel arrays:
-//! `__spl_sos_keys` (hash key: object id, or the getHash() string),
-//! `__spl_objects` (the objects) and `__spl_array` (the associated data).
-//! `__spl_pos` is the iteration position, `__spl_index` the key() counter.
+//! Entries are kept in insertion order in two arrays keyed alike by the
+//! entry's hash key (object id, or the getHash() string): `__spl_objects`
+//! (the objects) and `__spl_array` (the associated data), so lookups are
+//! O(1). `__spl_pos` is the iteration position (an insertion-order index),
+//! `__spl_index` the key() counter.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
 use crate::object::PhpObject;
-use crate::spl::{mangle_private, obj_class_lower, skey, val_arr};
+use crate::spl::{mangle_private, obj_class_lower, skey, storage_arr, val_arr};
 use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::Vm;
@@ -19,49 +20,97 @@ const MIT_NEED_ALL: i64 = 1;
 const MIT_KEYS_ASSOC: i64 = 2;
 
 struct Entries {
-    keys: Vec<Value>,
     objs: Vec<Value>,
     infs: Vec<Value>,
 }
 
-fn arr_vals(v: Value) -> Vec<Value> {
-    match v {
-        Value::Array(a) => a.borrow().values().cloned().collect(),
-        _ => Vec::new(),
+fn arr_prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option<Rc<RefCell<PhpArray>>> {
+    match obj.borrow().get_property(name) {
+        Value::Array(a) => Some(a),
+        _ => None,
     }
 }
 
+/// Snapshot of the entries, in order.
 fn load(obj: &Rc<RefCell<PhpObject>>) -> Entries {
-    let ob = obj.borrow();
-    let objs = arr_vals(ob.get_property(b"__spl_objects"));
-    let infs = arr_vals(ob.get_property(b"__spl_array"));
-    let mut keys = arr_vals(ob.get_property(b"__spl_sos_keys"));
-    if keys.len() != objs.len() {
-        keys = objs
-            .iter()
-            .map(|o| match o {
-                Value::Object(x) => Value::Long(x.borrow().object_id as i64),
-                _ => Value::Null,
-            })
-            .collect();
+    let objs_a = arr_prop(obj, b"__spl_objects");
+    let infs_a = arr_prop(obj, b"__spl_array");
+    let mut objs = Vec::new();
+    let mut infs = Vec::new();
+    if let Some(oa) = objs_a {
+        let ob = oa.borrow();
+        let ib = infs_a.as_ref().map(|a| a.borrow());
+        for (k, o) in ob.iter() {
+            objs.push(o.clone());
+            infs.push(
+                ib.as_ref()
+                    .and_then(|i| i.get(k).cloned())
+                    .unwrap_or(Value::Null),
+            );
+        }
     }
-    let mut infs = infs;
-    infs.resize(objs.len(), Value::Null);
-    Entries { keys, objs, infs }
+    Entries { objs, infs }
 }
 
-fn store(obj: &Rc<RefCell<PhpObject>>, e: Entries) {
-    let mk = |v: Vec<Value>| {
-        let mut a = PhpArray::new();
-        for x in v {
-            a.push(x);
-        }
-        val_arr(a)
+fn count(obj: &Rc<RefCell<PhpObject>>) -> usize {
+    arr_prop(obj, b"__spl_objects")
+        .map(|a| a.borrow().len())
+        .unwrap_or(0)
+}
+
+/// Hash key of entry number `pos` (insertion order).
+fn key_at(obj: &Rc<RefCell<PhpObject>>, pos: i64) -> Option<ArrayKey> {
+    if pos < 0 {
+        return None;
+    }
+    let a = arr_prop(obj, b"__spl_objects")?;
+    let ab = a.borrow();
+    ab.entry_at(pos as usize).map(|(k, _)| k.clone())
+}
+
+fn obj_at(obj: &Rc<RefCell<PhpObject>>, pos: i64) -> Option<Value> {
+    if pos < 0 {
+        return None;
+    }
+    let a = arr_prop(obj, b"__spl_objects")?;
+    let ab = a.borrow();
+    ab.entry_at(pos as usize).map(|(_, v)| v.clone())
+}
+
+/// The data of entry number `pos` (Null when there is none).
+fn inf_at(obj: &Rc<RefCell<PhpObject>>, pos: i64) -> Value {
+    let k = match key_at(obj, pos) {
+        Some(k) => k,
+        None => return Value::Null,
     };
-    let mut ob = obj.borrow_mut();
-    ob.set_property(b"__spl_sos_keys".to_vec(), mk(e.keys));
-    ob.set_property(b"__spl_objects".to_vec(), mk(e.objs));
-    ob.set_property(b"__spl_array".to_vec(), mk(e.infs));
+    arr_prop(obj, b"__spl_array")
+        .and_then(|a| a.borrow().get(&k).cloned())
+        .unwrap_or(Value::Null)
+}
+
+/// Replace the data of the entry keyed `k`; returns the old data.
+fn set_inf(obj: &Rc<RefCell<PhpObject>>, k: ArrayKey, inf: Value) -> Option<Value> {
+    let infs = storage_arr(obj, b"__spl_array");
+    let mut ib = infs.borrow_mut();
+    match ib.get_mut(&k) {
+        Some(slot) => Some(std::mem::replace(slot, inf)),
+        None => {
+            ib.set(k, inf);
+            None
+        }
+    }
+}
+
+/// Array key standing for a storage hash key (an object id or a string).
+fn hkey(k: &Value) -> ArrayKey {
+    match k {
+        Value::Long(n) => ArrayKey::Int(*n),
+        Value::String(s) => match crate::fastpath::canonical_int_key(s.as_bytes()) {
+            Some(n) => ArrayKey::Int(n),
+            None => ArrayKey::String(s.clone()),
+        },
+        _ => ArrayKey::Int(0),
+    }
 }
 
 fn lprop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> i64 {
@@ -77,14 +126,6 @@ fn set_l(obj: &Rc<RefCell<PhpObject>>, name: &[u8], n: i64) {
 
 fn bv(b: bool) -> Value {
     if b { Value::True } else { Value::False }
-}
-
-fn same_key(a: &Value, b: &Value) -> bool {
-    match (a, b) {
-        (Value::Long(x), Value::Long(y)) => x == y,
-        (Value::String(x), Value::String(y)) => x.as_bytes() == y.as_bytes(),
-        _ => false,
-    }
 }
 
 impl Vm {
@@ -133,16 +174,18 @@ impl Vm {
             Some(k) => k,
             None => return false,
         };
-        let mut e = load(storage);
-        if let Some(i) = e.keys.iter().position(|k| same_key(k, &key)) {
-            let old = std::mem::replace(&mut e.infs[i], inf);
-            store(storage, e);
+        let k = hkey(&key);
+        let objs = storage_arr(storage, b"__spl_objects");
+        let exists = objs.borrow().contains_key(&k);
+        if exists {
+            let old = set_inf(storage, k, inf);
+            if let Some(old) = &old {
+                crate::gc::on_child_released(old);
+            }
             drop(old);
         } else {
-            e.keys.push(key);
-            e.objs.push(o.clone());
-            e.infs.push(inf);
-            store(storage, e);
+            objs.borrow_mut().set(k.clone(), o.clone());
+            set_inf(storage, k, inf);
         }
         true
     }
@@ -152,19 +195,19 @@ impl Vm {
             Some(k) => k,
             None => return false,
         };
-        let mut e = load(storage);
-        if let Some(i) = e.keys.iter().position(|k| same_key(k, &key)) {
-            e.keys.remove(i);
-            let ob = e.objs.remove(i);
-            let inf = e.infs.remove(i);
-            store(storage, e);
-            // Release after the entry is gone (destructors see the new state).
-            drop(inf);
-            drop(ob);
-            self.run_pending_destructors_pub();
-            return true;
+        let k = hkey(&key);
+        let objs = storage_arr(storage, b"__spl_objects");
+        if !objs.borrow().contains_key(&k) {
+            return false;
         }
-        false
+        let ob = objs.borrow_mut().remove(&k);
+        let infs = storage_arr(storage, b"__spl_array");
+        let inf = infs.borrow_mut().remove(&k);
+        // Release after the entry is gone (destructors see the new state).
+        drop(inf);
+        drop(ob);
+        self.run_pending_destructors_pub();
+        true
     }
 
     fn sos_find(
@@ -176,8 +219,8 @@ impl Vm {
             Some(k) => k,
             None => return Err(()),
         };
-        let e = load(storage);
-        Ok(e.keys.iter().position(|k| same_key(k, &key)))
+        let k = hkey(&key);
+        Ok(arr_prop(storage, b"__spl_objects").and_then(|a| a.borrow().position_of(&k)))
     }
 
     fn sos_reset(storage: &Rc<RefCell<PhpObject>>) {
@@ -333,7 +376,7 @@ impl Vm {
             b"offsetget" => {
                 let o = self.sos_obj_arg("SplObjectStorage::offsetGet", a.first())?;
                 match self.sos_find(obj, &o) {
-                    Ok(Some(i)) => load(obj).infs[i].clone(),
+                    Ok(Some(i)) => inf_at(obj, i as i64),
                     Ok(None) => {
                         return self.spl_throw(b"UnexpectedValueException", "Object not found");
                     }
@@ -384,21 +427,20 @@ impl Vm {
                 Self::sos_reset(obj);
                 Value::Long(load(obj).objs.len() as i64)
             }
-            b"count" => Value::Long(load(obj).objs.len() as i64),
+            b"count" => Value::Long(count(obj) as i64),
             b"rewind" => {
                 Self::sos_reset(obj);
                 Value::Null
             }
             b"valid" => {
                 let pos = lprop(obj, b"__spl_pos");
-                bv(pos >= 0 && (pos as usize) < load(obj).objs.len())
+                bv(pos >= 0 && (pos as usize) < count(obj))
             }
             b"key" => Value::Long(lprop(obj, b"__spl_index")),
             b"current" => {
                 let pos = lprop(obj, b"__spl_pos");
-                let e = load(obj);
-                match e.objs.get(pos.max(0) as usize).filter(|_| pos >= 0) {
-                    Some(o) => o.clone(),
+                match obj_at(obj, pos) {
+                    Some(o) => o,
                     None => {
                         return self.spl_throw(
                             b"RuntimeException",
@@ -407,22 +449,14 @@ impl Vm {
                     }
                 }
             }
-            b"getinfo" => {
-                let pos = lprop(obj, b"__spl_pos");
-                let e = load(obj);
-                if pos >= 0 {
-                    e.infs.get(pos as usize).cloned().unwrap_or(Value::Null)
-                } else {
-                    Value::Null
-                }
-            }
+            b"getinfo" => inf_at(obj, lprop(obj, b"__spl_pos")),
             b"setinfo" => {
-                let pos = lprop(obj, b"__spl_pos");
-                let mut e = load(obj);
-                if pos >= 0 && (pos as usize) < e.infs.len() {
+                if let Some(k) = key_at(obj, lprop(obj, b"__spl_pos")) {
                     let v = a.first().cloned().unwrap_or(Value::Null).deref();
-                    let old = std::mem::replace(&mut e.infs[pos as usize], v);
-                    store(obj, e);
+                    let old = set_inf(obj, k, v);
+                    if let Some(old) = &old {
+                        crate::gc::on_child_released(old);
+                    }
                     drop(old);
                 }
                 Value::Null
@@ -440,7 +474,7 @@ impl Vm {
                     },
                     None => 0,
                 };
-                let n = load(obj).objs.len() as i64;
+                let n = count(obj) as i64;
                 if p < 0 || p >= n {
                     let msg = format!("Seek position {} is out of range", p);
                     return self.spl_throw(b"OutOfBoundsException", &msg);
@@ -687,7 +721,7 @@ impl Vm {
                     Err(()) => Value::True,
                 },
                 _ => match self.sos_find(obj, &ko) {
-                    Ok(Some(i)) => load(obj).infs[i].clone(),
+                    Ok(Some(i)) => inf_at(obj, i as i64),
                     Ok(None) => {
                         return self.spl_throw(b"UnexpectedValueException", "Object not found");
                     }

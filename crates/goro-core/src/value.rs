@@ -1154,8 +1154,8 @@ impl Value {
                                 .collect()
                         };
                         let (av, bv) = (visible(&a_b), visible(&b_b));
-                        a_b.get_property(b"__spl_array")
-                            .equals(&b_b.get_property(b"__spl_array"))
+                        crate::spl_dll::spl_storage_view(&a_b)
+                            .equals(&crate::spl_dll::spl_storage_view(&b_b))
                             && av.len() == bv.len()
                             && av.iter().all(|(k, v)| v.equals(&b_b.get_property(k)))
                     } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
@@ -1646,9 +1646,8 @@ impl Value {
                 // spl_array_compare_objects(): the storages, then the
                 // (non-internal) properties.
                 if a_borrow.has_property(b"__spl_array") && b_borrow.has_property(b"__spl_array") {
-                    let cmp = a_borrow
-                        .get_property(b"__spl_array")
-                        .compare(&b_borrow.get_property(b"__spl_array"));
+                    let cmp = crate::spl_dll::spl_storage_view(&a_borrow)
+                        .compare(&crate::spl_dll::spl_storage_view(&b_borrow));
                     if cmp != 0 {
                         return cmp;
                     }
