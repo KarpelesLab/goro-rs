@@ -3034,7 +3034,7 @@ fn allocUnpackedRecord(pKeyInfo: &KeyInfoRef) -> Box<UnpackedRecord> {
 /// Given the nKey-byte encoding of a record in pKey[], populate the
 /// UnpackedRecord structure indicated by the fourth argument with the
 /// contents of the decoded record.
-pub fn sqlite3VdbeRecordUnpack(db: &mut Sqlite3, nKey: i32, pKey: &[u8], p: &mut UnpackedRecord) {
+pub fn sqlite3VdbeRecordUnpack(nKey: i32, pKey: &[u8], p: &mut UnpackedRecord) {
     recordUnpack(nKey, pKey, p)
 }
 
