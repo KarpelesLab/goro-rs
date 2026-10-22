@@ -696,7 +696,14 @@ impl Vm {
                 }
             }
             _ => {
-                if let Err(e) = self.call_callback(cb, &args) {
+                // A closure called by the engine: its frame is at the current
+                // line (zend_call_known_function from the running opcode).
+                if !from_builtin {
+                    self.ucf_call_line = Some(site_line);
+                }
+                let r = self.call_callback(cb, &args);
+                self.ucf_call_line = None;
+                if let Err(e) = r {
                     fatal = Some(e);
                 }
             }

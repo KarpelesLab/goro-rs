@@ -1008,6 +1008,10 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
     // If class is unknown, try autoloading
     if !class_exists {
         vm.try_autoload_class(class_name.as_bytes());
+        // An exception thrown by the autoloader propagates (zend_lookup_class).
+        if vm.current_exception.is_some() {
+            return false;
+        }
         class_exists =
             vm.classes.contains_key(&class_lower) || vm.is_known_builtin_class(&class_lower);
     }
@@ -1617,6 +1621,9 @@ fn reflection_property_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
     // PHP triggers autoload when ReflectionProperty resolves an unknown class.
     let (is_user_class, is_builtin) = if !is_user_class && !is_builtin {
         vm.try_autoload_class(class_name.as_bytes());
+        if vm.current_exception.is_some() {
+            return false;
+        }
         (
             vm.classes.contains_key(&class_lower),
             vm.is_known_builtin_class(&class_lower),

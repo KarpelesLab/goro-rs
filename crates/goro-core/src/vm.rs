@@ -3450,9 +3450,9 @@ impl Vm {
                     return false;
                 }
             }
-            // An exception thrown by an autoloader stops the chain.
+            // An exception thrown by an autoloader stops the chain, and the
+            // class is not found (spl_perform_autoload).
             if self.current_exception.is_some() {
-                found = self.classes.contains_key(&class_lower);
                 break;
             }
             // Check if the class was loaded
@@ -34835,7 +34835,14 @@ impl Vm {
 
                 OpCode::TypeCheck => match outlined(|| -> Result<Flow, VmError> {
                     // instanceof check: op1 = value, op2 = class name
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     let class_val = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .deref();
@@ -43301,6 +43308,15 @@ impl Vm {
                                 if let Some(e) = variance::take_autoload_fatal() {
                                     return Err(e);
                                 }
+                                // An exception thrown by the autoloader propagates:
+                                // the class is not declared.
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
                             }
                             if let Some(iface) = self.classes.get(&iface_lower).cloned() {
                                 // Check that we're implementing an interface, not a class
@@ -47050,6 +47066,15 @@ impl Vm {
                         if let Some(e) = variance::take_autoload_fatal() {
                             return Err(e);
                         }
+                        // An exception thrown by the autoloader aborts the `new`,
+                        // even when the class got declared (spl_perform_autoload).
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
                     }
                     // After autoload, if the class still doesn't exist (and isn't a
                     // known built-in) PHP throws an Error: `Class "X" not found`.
