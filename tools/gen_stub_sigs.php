@@ -44,6 +44,7 @@ $dirs = [
     'ext/bcmath' => 'bcmath',
     'ext/filter' => 'filter',
     'ext/iconv' => 'iconv',
+    'ext/posix' => 'posix',
     'ext/calendar' => 'calendar',
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',

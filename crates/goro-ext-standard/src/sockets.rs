@@ -2913,6 +2913,25 @@ pub fn ext_stream_fd(vm: &mut Vm, id: i64, func: &str) -> Option<i32> {
     }
 }
 
+/// php_stream_cast(PHP_STREAM_AS_FD | PHP_STREAM_CAST_INTERNAL) without
+/// reporting errors: None when `id` is not an open stream, Err(the stream
+/// type) when it has no descriptor.
+pub fn ext_stream_cast_fd(id: i64) -> Option<Result<i32, String>> {
+    if (1..=3).contains(&id) && !FILE_HANDLES.with(|h| h.borrow().contains_key(&id)) {
+        return Some(Ok((id - 1) as i32));
+    }
+    FILE_HANDLES.with(|h| {
+        h.borrow().get(&id).map(|fh| match fh.special {
+            SpecialStream::Stdin => Ok(0),
+            SpecialStream::Stdout | SpecialStream::Output => Ok(1),
+            SpecialStream::Stderr => Ok(2),
+            SpecialStream::Memory | SpecialStream::Temp => Err(fh.stream_type.clone()),
+            SpecialStream::None if fh.user_wrapper.is_some() => Err(fh.stream_type.clone()),
+            SpecialStream::None => Ok(fh.file.as_raw_fd()),
+        })
+    })
+}
+
 /// Whether `id` is an open stream resource.
 pub fn ext_is_stream(id: i64) -> bool {
     (1..=3).contains(&id) || FILE_HANDLES.with(|h| h.borrow().contains_key(&id))

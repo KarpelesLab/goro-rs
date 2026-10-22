@@ -36,7 +36,7 @@ pub use filters as stream_filters;
 /// imported/exported streams); see also `Vm::socket_stream_hooks`.
 pub mod sockets_streams {
     pub use crate::misc::xp_socket::{
-        ext_is_stream, ext_set_blocking, ext_stream_fd, ext_stream_from_fd,
+        ext_is_stream, ext_set_blocking, ext_stream_cast_fd, ext_stream_fd, ext_stream_from_fd,
     };
 }
 
