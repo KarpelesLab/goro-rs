@@ -68,7 +68,7 @@ impl GmpMt {
     /// gmp_randinit_mt() followed by gmp_randseed(seed).
     pub fn with_seed(seed: &Int) -> GmpMt {
         let modulus = Int::from(Nat::one().shl(19937)) - Int::from(20027u64);
-        let seed1 = (seed.rem_euclid(&modulus) + Int::from(2u64)).magnitude();
+        let seed1 = (seed.rem_euclid(&modulus) + Int::from(2u64)).into_magnitude();
         let seed2 = mangle_seed(&seed1);
 
         let mut mt = [0u32; N];

@@ -269,10 +269,10 @@ fn shift_operator_helper(vm: &mut Vm, op: &str, a: &Value, b: &Value) -> Result<
     Ok(bigint_to_gmp_value(
         vm,
         match op {
-            "**" => mp::pow(&n, shift as u64),
-            "<<" => mp::shl(&n, shift as u64),
+            "**" => n.pow(shift as u64),
+            "<<" => n.mul_2k(shift as u64),
             // mpz_fdiv_q_2exp
-            _ => mp::shr_floor(&n, shift as u64),
+            _ => n.div_2k_floor(shift as u64),
         },
     ))
 }
@@ -392,7 +392,7 @@ pub fn gmp_to_double(val: &Value) -> Option<f64> {
     if !is_gmp_object(val) {
         return None;
     }
-    get_gmp_value(val).map(|n| mp::get_d(&n))
+    get_gmp_value(val).map(|n| n.to_f64_trunc())
 }
 
 fn value_type_name_for_gmp(val: &Value) -> &'static str {
@@ -1283,7 +1283,7 @@ fn gmp_pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    Ok(bigint_to_gmp_value(vm, mp::pow(&base, exp as u64)))
+    Ok(bigint_to_gmp_value(vm, base.pow(exp as u64)))
 }
 
 fn gmp_powm(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1327,7 +1327,7 @@ fn gmp_sqrt(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    Ok(bigint_to_gmp_value(vm, mp::isqrt(&a)))
+    Ok(bigint_to_gmp_value(vm, a.isqrt()))
 }
 
 fn gmp_sqrtrem(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1342,8 +1342,7 @@ fn gmp_sqrtrem(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    let root = mp::isqrt(&a);
-    let rem = &a - &root * &root;
+    let (root, rem) = a.isqrt_rem();
     let root_val = bigint_to_gmp_value(vm, root);
     let rem_val = bigint_to_gmp_value(vm, rem);
     let mut arr = PhpArray::new();
@@ -1374,7 +1373,7 @@ fn gmp_root(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    Ok(bigint_to_gmp_value(vm, mp::root(&a, nth as u64)))
+    Ok(bigint_to_gmp_value(vm, a.root(nth as u64)))
 }
 
 fn gmp_rootrem(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1400,8 +1399,7 @@ fn gmp_rootrem(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    let root = mp::root(&a, nth as u64);
-    let rem = &a - mp::pow(&root, nth as u64);
+    let (root, rem) = a.root_rem(nth as u64);
     let root_val = bigint_to_gmp_value(vm, root);
     let rem_val = bigint_to_gmp_value(vm, rem);
     let mut arr = PhpArray::new();
@@ -1412,7 +1410,7 @@ fn gmp_rootrem(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn gmp_perfect_power(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_perfect_power", "num")?;
-    Ok(bool_value(mp::is_perfect_power(&a)))
+    Ok(bool_value(a.is_perfect_power()))
 }
 
 fn gmp_gcd(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1424,7 +1422,7 @@ fn gmp_gcd(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn gmp_gcdext(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_gcdext", "num1")?;
     let b = get_gmp_arg(vm, args, 1, "gmp_gcdext", "num2")?;
-    let (g, s, t) = mp::gcdext(&a, &b);
+    let (g, s, t) = a.extended_gcd(&b);
     let g_val = bigint_to_gmp_value(vm, g);
     let s_val = bigint_to_gmp_value(vm, s);
     let t_val = bigint_to_gmp_value(vm, t);
@@ -1523,7 +1521,7 @@ fn gmp_testbit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    Ok(if mp::tstbit(&a, index as u64) {
+    Ok(if a.test_bit(index as u64) {
         Value::True
     } else {
         Value::False
@@ -1705,7 +1703,7 @@ fn gmp_scan1(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn gmp_perfect_square(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_perfect_square", "num")?;
-    Ok(bool_value(mp::is_perfect_square(&a)))
+    Ok(bool_value(a.is_perfect_square()))
 }
 
 fn gmp_invert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1732,19 +1730,19 @@ fn gmp_invert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn gmp_jacobi(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_jacobi", "num1")?;
     let b = get_gmp_arg(vm, args, 1, "gmp_jacobi", "num2")?;
-    Ok(Value::Long(mp::kronecker(&a, &b) as i64))
+    Ok(Value::Long(a.kronecker(&b) as i64))
 }
 
 fn gmp_legendre(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_legendre", "num1")?;
     let b = get_gmp_arg(vm, args, 1, "gmp_legendre", "num2")?;
-    Ok(Value::Long(mp::kronecker(&a, &b) as i64))
+    Ok(Value::Long(a.kronecker(&b) as i64))
 }
 
 fn gmp_kronecker(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_kronecker", "num1")?;
     let b = get_gmp_arg(vm, args, 1, "gmp_kronecker", "num2")?;
-    Ok(Value::Long(mp::kronecker(&a, &b) as i64))
+    Ok(Value::Long(a.kronecker(&b) as i64))
 }
 
 fn gmp_binomial(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1759,7 +1757,7 @@ fn gmp_binomial(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    Ok(bigint_to_gmp_value(vm, mp::binomial(&n, k as u64)))
+    Ok(bigint_to_gmp_value(vm, Int::binomial_int(&n, k as u64)))
 }
 
 /// Validate gmp_import/gmp_export options. Returns (order, endian, error).
@@ -1843,7 +1841,7 @@ fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::from_vec(Vec::new())));
     }
 
-    let bytes = mp::to_bytes_be(&a);
+    let bytes = a.to_bytes_be();
 
     // Guard against malicious/huge word_size that would overflow when padding.
     // PHP's gmp_export rejects this with a ValueError.
@@ -1966,7 +1964,7 @@ fn gmp_import_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let combined: Vec<u8> = words.into_iter().flatten().collect();
-    let n = mp::from_bytes_be(&combined);
+    let n = Int::from_bytes_be(&combined);
     Ok(bigint_to_gmp_value(vm, n))
 }
 
