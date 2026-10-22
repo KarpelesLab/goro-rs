@@ -285,7 +285,15 @@ impl<'a> Fmt<'a> {
             }
             'M' | 'L' => {
                 if count <= 2 {
-                    pad(out, f[dc::MONTH] as i64 + 1, count)
+                    let mut m = f[dc::MONTH] as i64 + 1;
+                    // Hebrew non-leap years: Adar is 6, not 7
+                    if self.info.cal_type == "hebrew"
+                        && !is_hebrew_leap(f[dc::EXTENDED_YEAR] as i64)
+                        && m >= 7
+                    {
+                        m -= 1;
+                    }
+                    pad(out, m, count)
                 } else {
                     out.push_str(&self.month_name(count))
                 }
