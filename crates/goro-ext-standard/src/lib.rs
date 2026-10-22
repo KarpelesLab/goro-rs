@@ -1,6 +1,7 @@
 pub mod arrdiff;
 pub mod basedir_guard;
 pub mod browscap;
+pub mod bz2codec;
 pub mod crypt;
 mod crypt_blowfish_tables;
 pub mod csv;

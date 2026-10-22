@@ -1,12 +1,7 @@
-use std::io::{Read, Write};
-
-use bzip2::Compression;
-use bzip2::read::BzDecoder;
-use bzip2::write::BzEncoder;
-
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
+use goro_ext_standard::bz2codec;
 
 /// Register all bz2 extension functions
 pub fn register(vm: &mut Vm) {
@@ -65,9 +60,10 @@ fn php_bzcompress(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     };
 
-    // libbz2 takes the input length as a 32-bit unsigned int, so reject any
-    // string whose length cannot be expressed.
-    if data.as_bytes().len() > u32::MAX as usize {
+    // The output buffer (len + len / 100 + 600 bytes) has its size in a
+    // 32-bit unsigned int.
+    let len = data.as_bytes().len();
+    if len + len / 100 + 600 > u32::MAX as usize {
         let msg = format!(
             "bzcompress(): Argument #1 ($data) must have a length less than or equal to {}",
             u32::MAX
@@ -113,17 +109,13 @@ fn php_bzcompress(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
-    let level = Compression::new(block_size);
-    let mut encoder = BzEncoder::new(Vec::new(), level);
-
-    if encoder.write_all(data.as_bytes()).is_err() {
-        return Ok(Value::Long(-6));
-    }
-
-    match encoder.finish() {
-        Ok(compressed) => Ok(Value::String(PhpString::from_vec(compressed))),
-        Err(_) => Ok(Value::Long(-6)),
-    }
+    let work_factor = match args.get(2) {
+        Some(Value::Null) | Some(Value::Undef) | None => 0,
+        Some(v) => v.to_long() as u32,
+    };
+    // BZ2_bzBuffToBuffCompress()
+    let compressed = bz2codec::compress(data.as_bytes(), block_size, work_factor);
+    Ok(Value::String(PhpString::from_vec(compressed)))
 }
 
 /// bzdecompress(data, use_less_memory=false)
@@ -142,23 +134,10 @@ fn php_bzdecompress(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let _ = v.is_truthy();
     }
 
-    // PHP returns BZ_DATA_ERROR_MAGIC (-5) for non-bzip2 data
-    let bytes = data.as_bytes();
-    if bytes.len() < 4 || &bytes[..3] != b"BZh" || !(bytes[3] >= b'1' && bytes[3] <= b'9') {
-        return Ok(Value::Long(-5));
-    }
-
-    let mut decoder = BzDecoder::new(bytes);
-    let mut decompressed = Vec::new();
-
-    match decoder.read_to_end(&mut decompressed) {
-        Ok(_) => Ok(Value::String(PhpString::from_vec(decompressed))),
-        Err(e) => {
-            let code = match e.kind() {
-                std::io::ErrorKind::UnexpectedEof => -7, // BZ_UNEXPECTED_EOF
-                _ => -4,                                 // BZ_DATA_ERROR
-            };
-            Ok(Value::Long(code))
-        }
+    // BZ2_bzDecompress() until the end of the stream or of the input: a
+    // truncated stream gives the data decoded until then.
+    match bz2codec::decompress(data.as_bytes()) {
+        (out, Ok(_)) => Ok(Value::String(PhpString::from_vec(out))),
+        (_, Err(e)) => Ok(Value::Long(e.code() as i64)),
     }
 }

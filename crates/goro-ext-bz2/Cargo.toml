@@ -10,4 +10,3 @@ workspace = true
 [dependencies]
 goro-core = { path = "../goro-core" }
 goro-ext-standard = { path = "../goro-ext-standard" }
-bzip2 = "0.6"

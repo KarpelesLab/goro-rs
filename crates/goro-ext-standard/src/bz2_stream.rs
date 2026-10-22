@@ -5,6 +5,7 @@
 //! wrappers (the parent module) through its `NativeStream` ops.
 
 use super::*;
+use crate::bz2codec;
 use std::io::{Read, Write};
 
 const BZ_OK: i32 = 0;
@@ -21,20 +22,20 @@ const BUF_SIZE: usize = 5000;
 /// bzlib.c's bzFile.
 struct BzFile {
     file: std::fs::File,
-    dec: Option<bzip2::Decompress>,
-    enc: Option<bzip2::Compress>,
+    dec: Option<bz2codec::Decompress>,
+    enc: Option<bz2codec::Compress>,
     buf: Vec<u8>,
     pos: usize,
     at_eof: bool,
     last_err: i32,
 }
 
-fn map_err(e: bzip2::Error) -> i32 {
+fn map_err(e: bz2codec::Error) -> i32 {
     match e {
-        bzip2::Error::Sequence => BZ_SEQUENCE_ERROR,
-        bzip2::Error::Data => BZ_DATA_ERROR,
-        bzip2::Error::DataMagic => BZ_DATA_ERROR_MAGIC,
-        bzip2::Error::Param => BZ_PARAM_ERROR,
+        bz2codec::Error::Sequence => BZ_SEQUENCE_ERROR,
+        bz2codec::Error::Data => BZ_DATA_ERROR,
+        bz2codec::Error::DataMagic => BZ_DATA_ERROR_MAGIC,
+        bz2codec::Error::Param => BZ_PARAM_ERROR,
     }
 }
 
@@ -50,8 +51,8 @@ impl BzFile {
             .unwrap_or(9);
         BzFile {
             file,
-            dec: (!writing).then(|| bzip2::Decompress::new(false)),
-            enc: writing.then(|| bzip2::Compress::new(bzip2::Compression::new(block), 0)),
+            dec: (!writing).then(|| bz2codec::Decompress::new(false, false)),
+            enc: writing.then(|| bz2codec::Compress::new(block, 0)),
             buf: Vec::new(),
             pos: 0,
             at_eof: false,
@@ -100,7 +101,7 @@ impl BzFile {
                     self.last_err = map_err(e);
                     return -1;
                 }
-                Ok(bzip2::Status::StreamEnd) => {
+                Ok(bz2codec::Status::StreamEnd) => {
                     self.last_err = BZ_STREAM_END;
                     return produced as i64;
                 }
@@ -118,7 +119,7 @@ impl BzFile {
     }
 
     /// Run the compressor over `input` with `action`, writing its output.
-    fn compress(&mut self, input: &[u8], action: bzip2::Action) -> bool {
+    fn compress(&mut self, input: &[u8], action: bz2codec::Action) -> bool {
         let Some(enc) = self.enc.as_mut() else {
             self.last_err = BZ_SEQUENCE_ERROR;
             return false;
@@ -139,10 +140,12 @@ impl BzFile {
                     self.last_err = map_err(e);
                     return false;
                 }
-                Ok(bzip2::Status::StreamEnd) => return true,
+                Ok(bz2codec::Status::StreamEnd) => return true,
                 Ok(_) => {}
             }
-            if matches!(action, bzip2::Action::Run) && done >= input.len() && n < out.len() {
+            // BZ2_bzWrite() returns once all the input is taken (output
+            // still pending comes with the next write or the close)
+            if matches!(action, bz2codec::Action::Run) && done >= input.len() {
                 return true;
             }
         }
@@ -154,7 +157,7 @@ impl BzFile {
             self.last_err = BZ_OK;
             return 0;
         }
-        if self.compress(data, bzip2::Action::Run) {
+        if self.compress(data, bz2codec::Action::Run) {
             self.last_err = BZ_OK;
             data.len() as i64
         } else {
@@ -165,7 +168,7 @@ impl BzFile {
     /// BZ2_bzclose()
     fn close(&mut self) {
         if self.enc.is_some() && self.last_err == BZ_OK {
-            self.compress(&[], bzip2::Action::Finish);
+            self.compress(&[], bz2codec::Action::Finish);
             let _ = self.file.flush();
         }
         self.enc = None;

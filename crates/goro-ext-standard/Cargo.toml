@@ -16,5 +16,5 @@ libc = "0.2"
 md-5 = "0.10"
 sha2 = "0.10"
 goro-zlib = { path = "../goro-zlib" }
-bzip2 = "0.6"
+compcol = { version = "0.7.3", default-features = false, features = ["alloc", "bzip2"] }
 tempfile = "3"

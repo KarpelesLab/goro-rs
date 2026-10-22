@@ -1690,14 +1690,14 @@ enum BzStatus {
 }
 
 pub struct BzDecompress {
-    dec: Option<bzip2::Decompress>,
+    dec: Option<crate::bz2codec::Decompress>,
     status: BzStatus,
     small: bool,
     concatenated: bool,
 }
 
 pub struct BzCompress {
-    enc: bzip2::Compress,
+    enc: crate::bz2codec::Compress,
     is_flushed: bool,
 }
 
@@ -1757,7 +1757,7 @@ fn bz2_create(vm: &mut Vm, name: &[u8], params: Option<&Value>) -> Option<Builti
             }
         }
         Some(Builtin::BzCompress(Box::new(BzCompress {
-            enc: bzip2::Compress::new(bzip2::Compression::new(blocks), work),
+            enc: crate::bz2codec::Compress::new(blocks, work),
             is_flushed: true,
         })))
     } else {
@@ -1782,14 +1782,19 @@ impl BzDecompress {
             let mut bin = 0;
             while bin < buf.len() {
                 if self.status == BzStatus::Uninitialized {
-                    self.dec = Some(bzip2::Decompress::new(self.small));
+                    self.dec = Some(crate::bz2codec::Decompress::new(
+                        self.small,
+                        self.concatenated,
+                    ));
                     self.status = BzStatus::Running;
                 }
                 if self.status != BzStatus::Running {
                     total += buf.len();
                     break;
                 }
-                let desired = (buf.len() - bin).min(BZ_BUF);
+                // The whole bucket at once (php feeds BZ_BUF bytes at a
+                // time): compcol re-parses a partial block on each call.
+                let desired = buf.len() - bin;
                 let dec = self.dec.as_mut().unwrap();
                 let mut obuf = vec![0u8; BZ_BUF];
                 let before_in = dec.total_in();
@@ -1797,9 +1802,9 @@ impl BzDecompress {
                 let r = dec.decompress(&buf[bin..bin + desired], &mut obuf);
                 let used = (dec.total_in() - before_in) as usize;
                 let made = (dec.total_out() - before_out) as usize;
-                let ended = matches!(r, Ok(bzip2::Status::StreamEnd));
+                let ended = matches!(r, Ok(crate::bz2codec::Status::StreamEnd));
                 match r {
-                    Ok(bzip2::Status::StreamEnd) => {
+                    Ok(crate::bz2codec::Status::StreamEnd) => {
                         self.status = if self.concatenated {
                             BzStatus::Uninitialized
                         } else {
@@ -1840,7 +1845,7 @@ impl BzDecompress {
                     } else {
                         break;
                     }
-                    if !matches!(r, Ok(bzip2::Status::Ok)) {
+                    if !matches!(r, Ok(crate::bz2codec::Status::Ok)) {
                         break;
                     }
                 }
@@ -1854,7 +1859,13 @@ impl BzDecompress {
 }
 
 impl BzCompress {
-    fn run(&mut self, input: &[u8], action: bzip2::Action, out: &mut Brigade) -> Result<bool, ()> {
+    fn run(
+        &mut self,
+        input: &[u8],
+        action: crate::bz2codec::Action,
+        out: &mut Brigade,
+    ) -> Result<bool, ()> {
+        use crate::bz2codec::{Action, Status};
         let mut made_any = false;
         let mut pos = 0;
         loop {
@@ -1871,13 +1882,13 @@ impl BzCompress {
                 made_any = true;
             }
             match r {
-                Ok(bzip2::Status::StreamEnd) => return Ok(made_any),
-                Ok(bzip2::Status::RunOk) => {
+                Ok(Status::StreamEnd) => return Ok(made_any),
+                Ok(Status::RunOk) => {
                     if pos >= input.len() {
                         return Ok(made_any);
                     }
                 }
-                Ok(bzip2::Status::FlushOk) | Ok(bzip2::Status::FinishOk) => {}
+                Ok(Status::FlushOk) | Ok(Status::FinishOk) => {}
                 Ok(_) => {
                     if pos >= input.len() && made == 0 {
                         return Ok(made_any);
@@ -1885,7 +1896,7 @@ impl BzCompress {
                 }
                 Err(_) => return Err(()),
             }
-            if pos >= input.len() && made == 0 && matches!(action, bzip2::Action::Run) {
+            if pos >= input.len() && made == 0 && matches!(action, Action::Run) {
                 return Ok(made_any);
             }
         }
@@ -1908,13 +1919,13 @@ impl BzCompress {
                 continue;
             }
             let action = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
-                bzip2::Action::Finish
+                crate::bz2codec::Action::Finish
             } else if flags & PSFS_FLAG_FLUSH_INC != 0 {
-                bzip2::Action::Flush
+                crate::bz2codec::Action::Flush
             } else {
-                bzip2::Action::Run
+                crate::bz2codec::Action::Run
             };
-            self.is_flushed = !matches!(action, bzip2::Action::Run);
+            self.is_flushed = !matches!(action, crate::bz2codec::Action::Run);
             match self.run(&buf, action, out) {
                 Ok(true) => exit = PSFS_PASS_ON,
                 Ok(false) => {}
@@ -1925,9 +1936,9 @@ impl BzCompress {
             || (flags & PSFS_FLAG_FLUSH_INC != 0 && !self.is_flushed)
         {
             let action = if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
-                bzip2::Action::Finish
+                crate::bz2codec::Action::Finish
             } else {
-                bzip2::Action::Flush
+                crate::bz2codec::Action::Flush
             };
             if let Ok(true) = self.run(&[], action, out) {
                 exit = PSFS_PASS_ON;
