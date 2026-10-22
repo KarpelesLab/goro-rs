@@ -739,29 +739,104 @@ pub fn class_method_list(
     )
 }
 
+/// ReflectionClass::newInstance()/newInstanceArgs() of a class with a user
+/// constructor (or none): object_init_ex(), then the constructor called
+/// from internal code (zend_call_known_function: argument checks, no
+/// "called in"). An object whose constructor failed is not destructed.
+#[inline(never)]
+fn reflection_new_instance(
+    vm: &mut Vm,
+    canonical: &[u8],
+    class_lower: &[u8],
+    args: Value,
+) -> Value {
+    let mut positional = Vec::new();
+    let mut named: Vec<(Vec<u8>, Value)> = Vec::new();
+    if let Value::Array(a) = &args {
+        for (k, v) in a.borrow().iter() {
+            match k {
+                crate::array::ArrayKey::String(n) => named.push((n.as_bytes().to_vec(), v.clone())),
+                _ => positional.push(v.clone()),
+            }
+        }
+    }
+    let ctor = rmethod(vm, class_lower, b"__construct").cloned();
+    let has_dtor = rmethod(vm, class_lower, b"__destruct").is_some();
+    let obj_id = vm.alloc_object_id();
+    let mut new_obj = PhpObject::new(canonical.to_vec(), obj_id);
+    if let Some(ce) = rcls(vm, class_lower) {
+        let props: Vec<_> = ce
+            .properties
+            .iter()
+            .filter(|p| !p.is_static)
+            .map(|p| (p.name.clone(), p.default.clone()))
+            .collect();
+        for (name, default) in props {
+            let resolved = vm.resolve_deferred_value(&default);
+            new_obj.set_property(name, resolved);
+        }
+    }
+    let obj = Rc::new(RefCell::new(new_obj));
+    vm.run_object_create_hook(&obj);
+    if has_dtor {
+        vm.track_destructible(Value::Object(obj.clone()));
+    }
+    let Some(m) = ctor else {
+        return Value::Object(obj);
+    };
+    if has_dtor {
+        obj.borrow_mut()
+            .set_property(b"__ctor_pending".to_vec(), Value::True);
+    }
+    // zend_missing_arg_error() for an internal caller
+    let op = &m.op_array;
+    let required = op.required_param_count as usize;
+    if named.is_empty() && positional.len() < required {
+        let implicit = usize::from(op.cv_names.first().map(|n| n.as_slice()) == Some(b"this"));
+        let total = (op.param_count as usize).saturating_sub(implicit);
+        let q = if op.variadic_param.is_some() || total > required {
+            "at least"
+        } else {
+            "exactly"
+        };
+        let msg = format!(
+            "Too few arguments to function {}::__construct(), {} passed and {} {} expected",
+            crate::value::display_class_name(canonical),
+            positional.len(),
+            q,
+            required
+        );
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Value::Null;
+    }
+    vm.push_class_scope(m.declaring_class.to_ascii_lowercase());
+    vm.called_class_stack.push(canonical.to_vec());
+    let line = vm.current_line;
+    let r = vm.execute_fn_with_named_args(
+        &m.op_array,
+        positional,
+        named,
+        Some(Value::Object(obj.clone())),
+    );
+    vm.current_line = line;
+    vm.called_class_stack.pop();
+    vm.pop_class_scope();
+    if r.is_err() || vm.current_exception.is_some() {
+        return Value::Null;
+    }
+    if has_dtor {
+        obj.borrow_mut()
+            .properties
+            .retain(|(k, _)| k != b"__ctor_pending");
+    }
+    Value::Object(obj)
+}
+
 /// Compile and run a PHP snippet with the given local variables, inside the
 /// scope of `scope_lower` (so private/protected access, hooks, magic
 /// methods and type checks behave as for code in that class). Returns None
 /// if it threw (the exception is left in `vm.current_exception`).
-/// zend_call_function(): a by-reference constructor parameter given a
-/// value warns (the call goes on with the value).
-fn ctor_by_ref_warnings(vm: &mut Vm, class: &[u8], op: &OpArray, args: &[Value]) {
-    for (i, a) in args.iter().enumerate().skip(1) {
-        if op.by_ref_params.get(i).copied().unwrap_or(false) && !matches!(a, Value::Reference(_)) {
-            let msg = format!(
-                "{}::__construct(): Argument #{} (${}) must be passed by reference, value given",
-                crate::value::display_class_name(class),
-                i,
-                op.cv_names
-                    .get(i)
-                    .map(|n| String::from_utf8_lossy(n).to_string())
-                    .unwrap_or_default()
-            );
-            vm.emit_warning(&msg);
-        }
-    }
-}
-
 pub(crate) fn run_snippet_in_scope(
     vm: &mut Vm,
     src: &str,
@@ -4049,83 +4124,16 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         .unwrap_or(Value::Null),
                     );
                 }
-                let obj_id = vm.alloc_object_id();
-                let mut new_obj = PhpObject::new(canonical.clone(), obj_id);
-                // Set default property values
-                if let Some(ce) = rcls(vm, &class_lower) {
-                    let props: Vec<_> = ce
-                        .properties
-                        .iter()
-                        .filter(|p| !p.is_static)
-                        .map(|p| (p.name.clone(), p.default.clone()))
-                        .collect();
-                    for (name, default) in props {
-                        let resolved = vm.resolve_deferred_value(&default);
-                        new_obj.set_property(name, resolved);
-                    }
+                let mut a = PhpArray::new();
+                for arg in args.iter().skip(1) {
+                    a.push(arg.clone());
                 }
-                let new_val = Value::Object(Rc::new(RefCell::new(new_obj)));
-                if let Value::Object(o) = &new_val {
-                    vm.run_object_create_hook(o);
-                }
-
-                // Call constructor if it exists
-                if has_constructor {
-                    let ctor = rcls(vm, &class_lower)
-                        .and_then(|c| c.get_method(b"__construct"))
-                        .cloned();
-                    if let Some(ctor_method) = ctor {
-                        // Validate argument count: PHP throws ArgumentCountError
-                        // when too few constructor args are provided.
-                        let provided = args.len().saturating_sub(1);
-                        // For non-static methods param_count counts $this too,
-                        // so subtract 1; required_param_count already excludes $this.
-                        let required = ctor_method.op_array.required_param_count as usize;
-                        if provided < required {
-                            let canonical_name = String::from_utf8_lossy(&canonical).to_string();
-                            let raw_param_count = ctor_method.op_array.param_count as usize;
-                            let total_decl = raw_param_count
-                                .saturating_sub(if ctor_method.is_static { 0 } else { 1 });
-                            let quantifier = if total_decl == required {
-                                "exactly"
-                            } else {
-                                "at least"
-                            };
-                            let err_msg = format!(
-                                "Too few arguments to function {}::__construct(), {} passed and {} {} expected",
-                                canonical_name, provided, quantifier, required
-                            );
-                            let exc = vm.create_exception(
-                                b"ArgumentCountError",
-                                &err_msg,
-                                vm.current_line,
-                            );
-                            vm.current_exception = Some(exc);
-                            return Some(Value::Null);
-                        }
-                        let mut ctor_args = vec![new_val.clone()];
-                        for arg in args.iter().skip(1) {
-                            ctor_args.push(arg.clone());
-                        }
-                        let ctor_key = {
-                            let mut key = class_lower.clone();
-                            key.extend_from_slice(b"::__construct");
-                            key
-                        };
-                        vm.user_functions
-                            .insert(ctor_key.clone(), ctor_method.op_array.clone());
-                        let mut cvs = vec![Value::Undef; ctor_method.op_array.cv_names.len()];
-                        for (i, arg) in ctor_args.iter().enumerate() {
-                            if i < cvs.len() {
-                                cvs[i] = arg.clone();
-                            }
-                        }
-                        ctor_by_ref_warnings(vm, &canonical, &ctor_method.op_array, &ctor_args);
-                        let _ = vm.execute_op_array_pub(&ctor_method.op_array, cvs);
-                    }
-                }
-
-                Some(new_val)
+                Some(reflection_new_instance(
+                    vm,
+                    &canonical,
+                    &class_lower,
+                    Value::Array(Rc::new(RefCell::new(a))),
+                ))
             }
             b"newinstanceargs" => {
                 // Same as newInstance but takes an array of args
@@ -4230,69 +4238,12 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         .unwrap_or(Value::Null),
                     );
                 }
-                let obj_id = vm.alloc_object_id();
-                let mut new_obj = PhpObject::new(canonical.clone(), obj_id);
-                if let Some(ce) = rcls(vm, &class_lower) {
-                    let props: Vec<_> = ce
-                        .properties
-                        .iter()
-                        .filter(|p| !p.is_static)
-                        .map(|p| (p.name.clone(), p.default.clone()))
-                        .collect();
-                    for (name, default) in props {
-                        let resolved = vm.resolve_deferred_value(&default);
-                        new_obj.set_property(name, resolved);
-                    }
-                }
-                let new_val = Value::Object(Rc::new(RefCell::new(new_obj)));
-                if let Value::Object(o) = &new_val {
-                    vm.run_object_create_hook(o);
-                }
-
-                if has_constructor {
-                    let ctor = rcls(vm, &class_lower)
-                        .and_then(|c| c.get_method(b"__construct"))
-                        .cloned();
-                    if let Some(ctor_method) = ctor {
-                        // Validate argument count.
-                        let provided = ctor_args.len();
-                        let required = ctor_method.op_array.required_param_count as usize;
-                        if provided < required {
-                            let canonical_name = String::from_utf8_lossy(&canonical).to_string();
-                            let raw_param_count = ctor_method.op_array.param_count as usize;
-                            let total_decl = raw_param_count
-                                .saturating_sub(if ctor_method.is_static { 0 } else { 1 });
-                            let quantifier = if total_decl == required {
-                                "exactly"
-                            } else {
-                                "at least"
-                            };
-                            let err_msg = format!(
-                                "Too few arguments to function {}::__construct(), {} passed and {} {} expected",
-                                canonical_name, provided, quantifier, required
-                            );
-                            let exc = vm.create_exception(
-                                b"ArgumentCountError",
-                                &err_msg,
-                                vm.current_line,
-                            );
-                            vm.current_exception = Some(exc);
-                            return Some(Value::Null);
-                        }
-                        let mut all_args = vec![new_val.clone()];
-                        all_args.extend(ctor_args);
-                        let mut cvs = vec![Value::Undef; ctor_method.op_array.cv_names.len()];
-                        for (i, arg) in all_args.iter().enumerate() {
-                            if i < cvs.len() {
-                                cvs[i] = arg.clone();
-                            }
-                        }
-                        ctor_by_ref_warnings(vm, &canonical, &ctor_method.op_array, &all_args);
-                        let _ = vm.execute_op_array_pub(&ctor_method.op_array, cvs);
-                    }
-                }
-
-                Some(new_val)
+                Some(reflection_new_instance(
+                    vm,
+                    &canonical,
+                    &class_lower,
+                    args_arr.clone(),
+                ))
             }
             b"resetaslazyghost" | b"resetaslazyproxy" => {
                 // zend_object_make_lazy() on an existing object.
