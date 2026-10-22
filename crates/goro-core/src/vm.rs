@@ -2716,6 +2716,56 @@ impl Vm {
         }
     }
 
+    /// `class_name` and its ancestors are user classes, none declaring a
+    /// constructor.
+    fn user_class_without_ctor(&self, class_name: &[u8]) -> bool {
+        let mut cur = Some(class_name.to_ascii_lowercase());
+        for _ in 0..64 {
+            let Some(name) = cur else {
+                return true;
+            };
+            let Some(c) = self.classes.get(&name) else {
+                return false;
+            };
+            if c.filename.is_none() || c.methods.contains_key(b"__construct".as_slice()) {
+                return false;
+            }
+            cur = c.parent.as_ref().map(|p| p.to_ascii_lowercase());
+        }
+        false
+    }
+
+    /// The abstract (or interface) declaration of `__construct` that the
+    /// constructor of `class_name` implements: (its visibility, its class).
+    fn abstract_ctor_prototype(&self, class_name: &[u8]) -> Option<(Visibility, Vec<u8>)> {
+        let mut cur = Some(class_name.to_ascii_lowercase());
+        let mut found = None;
+        for _ in 0..64 {
+            let Some(c) = cur.as_ref().and_then(|n| self.classes.get(n)) else {
+                break;
+            };
+            if let Some(m) = c.methods.get(b"__construct".as_slice()) {
+                if m.is_abstract || c.is_interface {
+                    let decl = self
+                        .classes
+                        .get(&m.declaring_class.to_ascii_lowercase())
+                        .map(|d| d.name.clone())
+                        .unwrap_or_else(|| m.declaring_class.clone());
+                    found = Some((m.visibility, decl));
+                }
+            }
+            for iface in &c.interfaces {
+                if let Some(i) = self.classes.get(&iface.to_ascii_lowercase()) {
+                    if i.methods.contains_key(b"__construct".as_slice()) {
+                        found = Some((Visibility::Public, i.name.clone()));
+                    }
+                }
+            }
+            cur = c.parent.as_ref().map(|p| p.to_ascii_lowercase());
+        }
+        found
+    }
+
     /// A call's frame is about to be pushed at the next call_stack depth:
     /// remember the Closure object it was called through (InitFCall).
     fn note_closure_frame(&mut self, call_name: &PhpString, frame_name: &str) {
@@ -25444,6 +25494,30 @@ impl Vm {
                     } else {
                         // If it's a constructor call and the class has no __construct, silently succeed
                         let name_bytes = call.name.as_bytes();
+                        // `X::__construct()` / `parent::__construct()` name the
+                        // constructor of a class that has none
+                        // (ZEND_INIT_STATIC_METHOD_CALL: "Cannot call constructor").
+                        let no_ctor_static = name_bytes.len() > 13
+                            && name_bytes.ends_with(b"::__construct")
+                            && (is_forwarding_call
+                                || !matches!(call.args.first(), Some(Value::Object(_))))
+                            && self.user_class_without_ctor(&name_bytes[..name_bytes.len() - 13]);
+                        if no_ctor_static {
+                            let msg = "Cannot call constructor";
+                            let exc = self.create_exception(b"Error", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
                         if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
                             if let Some(Value::Object(obj_rc)) = call.args.first() {
                                 if obj_rc.borrow().has_property(b"__ctor_pending") {
@@ -41071,10 +41145,21 @@ impl Vm {
                                         }
                                         // Check visibility: child must have same or weaker visibility
                                         let mn_lower = method_name.as_slice();
-                                        if mn_lower != b"__construct"
-                                            && method.visibility != Visibility::Private
+                                        // A constructor is only checked against an abstract
+                                        // (or interface) prototype, reported as its class.
+                                        let ctor_proto = if mn_lower == b"__construct" {
+                                            self.abstract_ctor_prototype(parent_name)
+                                        } else {
+                                            None
+                                        };
+                                        let (proto_vis, proto_class) = match &ctor_proto {
+                                            Some((v, c)) => (*v, c.clone()),
+                                            None => (method.visibility, parent_name.to_vec()),
+                                        };
+                                        if (mn_lower != b"__construct" || ctor_proto.is_some())
+                                            && proto_vis != Visibility::Private
                                         {
-                                            let parent_vis_level = match method.visibility {
+                                            let parent_vis_level = match proto_vis {
                                                 Visibility::Public => 0,
                                                 Visibility::Protected => 1,
                                                 Visibility::Private => 2,
@@ -41089,22 +41174,21 @@ impl Vm {
                                                     String::from_utf8_lossy(&class.name)
                                                         .to_string();
                                                 let parent_display =
-                                                    String::from_utf8_lossy(parent_name)
+                                                    String::from_utf8_lossy(&proto_class)
                                                         .to_string();
                                                 let method_display =
                                                     String::from_utf8_lossy(&method.name)
                                                         .to_string();
-                                                let vis_str = match method.visibility {
+                                                let vis_str = match proto_vis {
                                                     Visibility::Public => "public",
                                                     Visibility::Protected => "protected",
                                                     Visibility::Private => "private",
                                                 };
-                                                let suffix =
-                                                    if method.visibility == Visibility::Public {
-                                                        ""
-                                                    } else {
-                                                        " or weaker"
-                                                    };
+                                                let suffix = if proto_vis == Visibility::Public {
+                                                    ""
+                                                } else {
+                                                    " or weaker"
+                                                };
                                                 // Report the overriding child method's declaration
                                                 // line (matches PHP behavior).
                                                 let report_line =
