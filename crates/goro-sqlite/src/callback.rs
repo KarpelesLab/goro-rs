@@ -34,7 +34,7 @@ pub fn sqlite3SetTextEncoding(db: &mut Sqlite3, enc: u8) {
 pub fn sqlite3GetCollSeq(
     db: &mut Sqlite3,
     enc: u8,
-    pColl: &CollSeqRef,
+    pColl: Option<&CollSeqRef>,
     zName: Option<&[u8]>,
 ) -> Option<CollSeqRef> {
     todo!("sqlite3GetCollSeq")
