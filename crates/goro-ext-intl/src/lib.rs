@@ -30,6 +30,8 @@ pub mod obj;
 pub mod zpp;
 // misc area helpers (break iterator rules, UnicodeSet patterns)
 pub mod breakiter_rules;
+pub mod translit_data;
+pub mod translit_rules;
 pub mod uset;
 
 pub use zpp::Obj;
@@ -480,15 +482,17 @@ fn native_ctor(vm: &Vm, class_lower: &[u8]) -> Option<(&'static str, &'static St
 // INI
 
 /// OnUpdateErrorLevel
-fn on_update_error_level(vm: &mut Vm, value: &[u8], _startup: bool) -> bool {
+fn on_update_error_level(vm: &mut Vm, value: &[u8], startup: bool) -> bool {
     let (v, err) = goro_core::ini_quantity::parse_quantity(value, true);
     if let Some(e) = err {
         vm.emit_warning(&format!("Invalid \"intl.error_level\" setting. {}", e));
     }
     if v as i64 != 0 {
-        vm.emit_deprecated(
-            "Using a value different than 0 for intl.error_level is deprecated, as the intl.error_level INI setting is deprecated. Instead the intl.use_exceptions INI setting should be enabled to throw exceptions on errors or intl_get_error_code()/intl_get_error_message() should be used to manually deal with errors",
-        );
+        // php_error_docref(): prefixed with the active function (ini_set())
+        vm.emit_deprecated(&format!(
+            "{}Using a value different than 0 for intl.error_level is deprecated, as the intl.error_level INI setting is deprecated. Instead the intl.use_exceptions INI setting should be enabled to throw exceptions on errors or intl_get_error_code()/intl_get_error_message() should be used to manually deal with errors",
+            if startup { "" } else { "ini_set(): " }
+        ));
     }
     true
 }
