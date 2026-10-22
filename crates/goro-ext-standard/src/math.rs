@@ -143,7 +143,7 @@ pub fn register(vm: &mut Vm) {
             b"string".to_vec(),
         ))))
     };
-    vm.register_builtin_param_types(b"number_format", vec![f(), i(), ns(), ns()]);
+    vm.register_builtin_param_types(b"number_format", vec![num(), i(), ns(), ns()]);
     vm.register_builtin_param_types(b"fdiv", vec![f(), f()]);
     // These validate their own arguments (check_math_num_arg/check_int_arg) and
     // emit the null / float-to-int deprecations themselves.
@@ -802,6 +802,10 @@ fn pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 };
             }
         }
+    }
+    // pow_function(): operands that cannot become numbers.
+    if let Some(msg) = Vm::check_unsupported_operand_types(base, exp, "**") {
+        return throw_err(vm, b"TypeError", msg);
     }
     // Emit deprecation warning for pow(0, negative)
     let base_f = base.to_double();
@@ -1958,4 +1962,48 @@ fn lcg_value_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         vm.current_line,
     );
     Ok(Value::Double(goro_core::random::combined_lcg()))
+}
+
+/// _php_math_number_format_long()
+pub(crate) fn number_format_long(
+    num: i64,
+    dec: i64,
+    dec_point: &[u8],
+    thousand_sep: &[u8],
+) -> Vec<u8> {
+    let mut is_negative = num < 0;
+    let mut tmpnum = num.unsigned_abs();
+    if dec < 0 {
+        if dec < -19 {
+            tmpnum = 0;
+        } else {
+            let power = 10u64.pow((-dec) as u32);
+            let rest = tmpnum % power;
+            tmpnum /= power;
+            tmpnum = if rest >= power / 2 {
+                tmpnum.wrapping_mul(power).wrapping_add(power)
+            } else {
+                tmpnum.wrapping_mul(power)
+            };
+        }
+        if tmpnum == 0 {
+            is_negative = false;
+        }
+    }
+    let digits = tmpnum.to_string().into_bytes();
+    let mut out = Vec::with_capacity(digits.len() * 2);
+    if is_negative {
+        out.push(b'-');
+    }
+    for (i, &c) in digits.iter().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.extend_from_slice(thousand_sep);
+        }
+        out.push(c);
+    }
+    if dec > 0 {
+        out.extend_from_slice(dec_point);
+        out.resize(out.len() + dec as usize, b'0');
+    }
+    out
 }

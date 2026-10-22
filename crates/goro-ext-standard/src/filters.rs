@@ -954,6 +954,14 @@ fn user_filter_create(
             &format!("Cannot instantiate {} {}", k, disp),
         ));
     }
+    if !vm.update_class_constants_ok(&cl) {
+        // object_init_ex() failed: the factory returns NULL.
+        docref_warning(
+            vm,
+            &format!("Unable to create or locate filter \"{}\"", lossy(name)),
+        );
+        return Ok(None);
+    }
     let id = vm.alloc_object_id();
     let mut obj = PhpObject::new(canonical.clone(), id);
     vm.apply_class_property_defaults(&mut obj, &cl);

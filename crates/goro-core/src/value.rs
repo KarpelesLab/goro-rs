@@ -917,39 +917,23 @@ impl Value {
         if let Value::Reference(r) = other {
             return self.pow(&r.borrow());
         }
-        match (self, other) {
-            (Value::Long(base), Value::Long(exp)) if *exp >= 0 => {
-                // Handle negative bases: result sign depends on exp parity
-                if *base < 0 {
-                    let abs_base = base.unsigned_abs();
-                    if let Ok(exp_u32) = u32::try_from(*exp) {
-                        match abs_base.checked_pow(exp_u32) {
-                            Some(result) => {
-                                let negative = exp_u32 % 2 == 1;
-                                if negative {
-                                    if result <= i64::MAX as u64 + 1 {
-                                        Value::Long(-(result as i64))
-                                    } else {
-                                        Value::Double((*base as f64).powf(*exp as f64))
-                                    }
-                                } else if result <= i64::MAX as u64 {
-                                    Value::Long(result as i64)
-                                } else {
-                                    Value::Double((*base as f64).powf(*exp as f64))
-                                }
-                            }
-                            _ => Value::Double((*base as f64).powf(*exp as f64)),
-                        }
-                    } else {
-                        Value::Double((*base as f64).powf(*exp as f64))
-                    }
-                } else {
-                    match (*base as u64).checked_pow(*exp as u32) {
-                        Some(result) if result <= i64::MAX as u64 => Value::Long(result as i64),
-                        _ => Value::Double((*base as f64).powf(*exp as f64)),
-                    }
-                }
+        // zendi_try_convert_scalar_to_number(): null/bool/numeric strings
+        // take part as int or float.
+        let num = |v: &Value| match v {
+            Value::Long(_) | Value::Double(_) => None,
+            Value::Null | Value::Undef | Value::True | Value::False | Value::String(_) => {
+                Some(v.to_numeric())
             }
+            _ => None,
+        };
+        let (a_conv, b_conv) = (num(self), num(other));
+        if a_conv.is_some() || b_conv.is_some() {
+            let a = a_conv.as_ref().unwrap_or(self);
+            let b = b_conv.as_ref().unwrap_or(other);
+            return a.pow(b);
+        }
+        match (self, other) {
+            (Value::Long(base), Value::Long(exp)) if *exp >= 0 => pow_long(*base, *exp),
             _ => Value::Double(self.to_double().powf(other.to_double())),
         }
     }
@@ -2554,4 +2538,38 @@ pub fn native_compare(a: &Value, b: &Value) -> Option<i64> {
         cv.compare(other)
     };
     Some(r)
+}
+
+/// pow_function_base() for long ** long (exp >= 0): square-and-multiply,
+/// falling back to doubles at the first overflow exactly like php-src.
+fn pow_long(base: i64, exp: i64) -> Value {
+    if exp == 0 {
+        return Value::Long(1);
+    }
+    if base == 0 {
+        return Value::Long(0);
+    }
+    let (mut l1, mut l2, mut i) = (1i64, base, exp);
+    while i >= 1 {
+        if i % 2 != 0 {
+            i -= 1;
+            match l1.checked_mul(l2) {
+                Some(v) => l1 = v,
+                None => {
+                    let dval = l1 as f64 * l2 as f64;
+                    return Value::Double(dval * (l2 as f64).powf(i as f64));
+                }
+            }
+        } else {
+            i /= 2;
+            match l2.checked_mul(l2) {
+                Some(v) => l2 = v,
+                None => {
+                    let dval = l2 as f64 * l2 as f64;
+                    return Value::Double(l1 as f64 * dval.powf(i as f64));
+                }
+            }
+        }
+    }
+    Value::Long(l1)
 }

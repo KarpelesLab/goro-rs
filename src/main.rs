@@ -210,6 +210,61 @@ fn load_php_ini(ini_path_override: Option<&[u8]>, ini_ignore: bool, ini: &mut In
     } else if let Ok(rc) = std::env::var("PHPRC") {
         search.push(rc.into());
     }
+    load_php_ini_file(search, ini);
+    scan_ini_dirs(ini);
+}
+
+/// php_init_config(): scan PHP_INI_SCAN_DIR for *.ini files (parsed after
+/// php.ini, in alphabetical order per directory).
+fn scan_ini_dirs(ini: &mut IniSettings) {
+    // No compile-time PHP_CONFIG_FILE_SCAN_DIR: only the environment.
+    let Some(env) = std::env::var_os("PHP_INI_SCAN_DIR") else {
+        return;
+    };
+    let env = env.as_bytes().to_vec();
+    if env.is_empty() {
+        return;
+    }
+    let mut scanned: Vec<Vec<u8>> = Vec::new();
+    for dir in env.split(|&c| c == b':').filter(|d| !d.is_empty()) {
+        let Ok(rd) = std::fs::read_dir(std::ffi::OsStr::from_bytes(dir)) else {
+            continue;
+        };
+        let mut names: Vec<Vec<u8>> = rd
+            .flatten()
+            .map(|e| e.file_name().as_bytes().to_vec())
+            .collect();
+        names.sort();
+        for name in names {
+            if name.len() < 5 || !name.ends_with(b".ini") {
+                continue;
+            }
+            let mut path = dir.to_vec();
+            if !path.ends_with(b"/") {
+                path.push(b'/');
+            }
+            path.extend_from_slice(&name);
+            let p = Path::new(std::ffi::OsStr::from_bytes(&path));
+            if !p.is_file() {
+                continue;
+            }
+            if let Ok(data) = std::fs::read(p) {
+                engine::parse_ini_text(&data, ini);
+                scanned.push(path);
+            }
+        }
+    }
+    if !scanned.is_empty() {
+        let mut list = Vec::new();
+        for (i, p) in scanned.iter().enumerate() {
+            list.extend_from_slice(p);
+            list.extend_from_slice(if i + 1 < scanned.len() { b",\n" } else { b"\n" });
+        }
+        goro_ext_standard::misc::set_ini_scanned_files(Some(list));
+    }
+}
+
+fn load_php_ini_file(search: Vec<std::path::PathBuf>, ini: &mut IniSettings) {
     for p in search {
         let candidates: Vec<std::path::PathBuf> = if p.is_dir() {
             vec![p.join("php-cli.ini"), p.join("php.ini")]

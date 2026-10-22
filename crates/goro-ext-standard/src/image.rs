@@ -1895,13 +1895,24 @@ fn open_and_read(vm: &mut Vm, func: &str, path: &str) -> Option<Vec<u8>> {
                 Value::String(PhpString::from_string(path.to_string())),
                 Value::String(PhpString::from_bytes(b"rb")),
             ];
-            let fp = crate::misc::fopen_fn(vm, &fargs).ok()?;
+            // (through the registered functions: userspace wrappers)
+            let f = |vm: &Vm, n: &[u8], d: goro_core::vm::BuiltinFn| {
+                vm.functions.get(n).copied().unwrap_or(d)
+            };
+            let fopen = f(vm, b"fopen", crate::misc::fopen_fn);
+            let fp = fopen(vm, &fargs).ok()?;
             let fid = match fp {
                 Value::Resource(n) | Value::Long(n) => n,
                 _ => return None,
             };
-            let data = crate::misc::stream_get_contents_fn(vm, &[Value::Resource(fid)]).ok();
-            let _ = crate::misc::fclose_fn(vm, &[Value::Resource(fid)]);
+            let get = f(
+                vm,
+                b"stream_get_contents",
+                crate::misc::stream_get_contents_fn,
+            );
+            let data = get(vm, &[Value::Resource(fid)]).ok();
+            let fclose = f(vm, b"fclose", crate::misc::fclose_fn);
+            let _ = fclose(vm, &[Value::Resource(fid)]);
             match data {
                 Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
                 _ => Some(Vec::new()),

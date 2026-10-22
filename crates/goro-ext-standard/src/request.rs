@@ -1480,6 +1480,13 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     REQUEST.with(|r| *r.borrow_mut() = Some(req.clone()));
     RAW_INPUT.with(|r| *r.borrow_mut() = Default::default());
     crate::info::set_web_sapi(req.cgi);
+    if req.cgi {
+        // Requests (--POST--, --GET--, ...) are served by the CGI SAPI.
+        vm.constants.insert(
+            b"PHP_SAPI".to_vec(),
+            Value::String(PhpString::from_bytes(b"cgi-fcgi")),
+        );
+    }
     // php_request_startup(): SAPI_PHP_VERSION_HEADER (the CLI SAPI has
     // no headers).
     if req.cgi && ini_bool(ini("expose_php"), true) {

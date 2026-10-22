@@ -16,7 +16,14 @@ use super::{STREAM_CONTEXTS, resolve_context_id, xp_socket};
 fn context_options(ctx: Option<&Value>) -> (PhpArray, Option<PhpArray>) {
     let mut http = PhpArray::new();
     let mut ssl = None;
-    match ctx.map(|c| c.deref()) {
+    // php_stream_context_from_zval(NULL, 0): FG(default_context)
+    let ctx = match ctx.map(|c| c.deref()) {
+        None | Some(Value::Null) | Some(Value::Undef) => crate::misc::DEFAULT_STREAM_CTX
+            .with(|d| d.get())
+            .map(Value::Resource),
+        other => other,
+    };
+    match ctx {
         Some(Value::Array(a)) => {
             let a = a.borrow();
             if let Some(Value::Array(h)) = a.get(&ArrayKey::String(PhpString::from_bytes(b"http")))

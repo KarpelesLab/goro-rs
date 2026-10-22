@@ -325,6 +325,33 @@ pub fn enter_reentry() -> Result<(), usize> {
     })
 }
 
+/// Charge `cost` bytes of native recursion (e.g. php_var_dump() of a
+/// nested object) against the emulated C stack; false when it would
+/// overflow (zend_call_stack_overflowed()), nothing being charged then.
+pub fn enter_native(cost: usize) -> bool {
+    if CTX.with(|c| c.get().emu_max) == UNSET {
+        configure(0, 0);
+    }
+    CTX.with(|cell| {
+        let mut c = cell.get();
+        if c.emu_max > 0 && c.emu_used + cost > c.emu_max {
+            return false;
+        }
+        c.emu_used += cost;
+        cell.set(c);
+        true
+    })
+}
+
+/// Undo `enter_native`.
+pub fn leave_native(cost: usize) {
+    CTX.with(|cell| {
+        let mut c = cell.get();
+        c.emu_used = c.emu_used.saturating_sub(cost);
+        cell.set(c);
+    });
+}
+
 /// Undo `enter_reentry`.
 #[inline]
 pub fn leave_reentry() {

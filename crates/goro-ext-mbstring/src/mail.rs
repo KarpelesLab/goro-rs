@@ -264,12 +264,17 @@ fn parse_mail_headers(s: &[u8]) -> Vec<(Vec<u8>, Vec<u8>)> {
     out
 }
 
+/// A header name as php_error_docref()'s "%s" prints it: up to its first NUL.
+fn cstr(key: &[u8]) -> &[u8] {
+    key.iter().position(|&c| c == 0).map_or(key, |p| &key[..p])
+}
+
 fn check_field_name(key: &[u8]) -> bool {
     !key.is_empty() && key.iter().all(|&c| (33..=126).contains(&c) && c != b':')
 }
 
 fn check_field_value(vm: &mut Vm, key: &[u8], val: &[u8]) -> Result<(), VmError> {
-    let k = String::from_utf8_lossy(key);
+    let k = String::from_utf8_lossy(cstr(key));
     let mut i = 0;
     while i < val.len() {
         let c = val[i];
@@ -331,7 +336,7 @@ fn build_header_elem(
                     vm,
                     format!(
                         "Header name \"{}\" contains invalid characters",
-                        String::from_utf8_lossy(key)
+                        String::from_utf8_lossy(cstr(key))
                     ),
                 ));
             }
@@ -354,7 +359,7 @@ fn build_header_elem(
                         vm,
                         format!(
                             "Header \"{}\" must only contain numeric keys, \"{}\" found",
-                            String::from_utf8_lossy(key),
+                            String::from_utf8_lossy(cstr(key)),
                             ks.to_string_lossy()
                         ),
                     ));
@@ -365,7 +370,7 @@ fn build_header_elem(
                         vm,
                         format!(
                             "Header \"{}\" must only contain values of type string, {} found",
-                            String::from_utf8_lossy(key),
+                            String::from_utf8_lossy(cstr(key)),
                             type_name(&v)
                         ),
                     ));
@@ -378,7 +383,7 @@ fn build_header_elem(
             vm,
             format!(
                 "Header \"{}\" must be of type array|string, {} given",
-                String::from_utf8_lossy(key),
+                String::from_utf8_lossy(cstr(key)),
                 type_name(&other)
             ),
         )),
@@ -588,14 +593,28 @@ pub fn php_mail(
             entry.extend_from_slice(&line);
             entry.push(b'\n');
             let path = String::from_utf8_lossy(&log).to_string();
-            if let Ok(mut fh) = std::fs::OpenOptions::new()
+            match std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&path)
             {
-                let _ = fh.write_all(&entry);
+                Ok(mut fh) => {
+                    let _ = fh.write_all(&entry);
+                }
+                Err(e) => {
+                    // php_stream_open_wrapper(REPORT_ERRORS)
+                    let msg = e.to_string();
+                    let msg = msg.split(" (os error").next().unwrap_or("").to_string();
+                    vm.emit_warning(&format!(
+                        "{}({}): Failed to open stream: {}",
+                        func, path, msg
+                    ));
+                }
             }
         }
+    }
+    if vm.current_exception.is_some() {
+        return false;
     }
     let mut hdr: Option<Vec<u8>> = headers.map(|h| h.to_vec());
     if ini_bool(vm, "mail.add_x_header") {

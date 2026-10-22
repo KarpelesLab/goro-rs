@@ -548,7 +548,13 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 });
             }
         };
-        *r.borrow_mut() = new_val;
+        // ZEND_TRY_ASSIGN_REF_TMP(): typed references verify the new value.
+        if _vm.try_assign_ref(r, new_val).is_err() {
+            return Err(VmError {
+                message: String::new(),
+                line: _vm.current_line,
+            });
+        }
         Ok(Value::True)
     } else {
         // Not a reference - can't modify

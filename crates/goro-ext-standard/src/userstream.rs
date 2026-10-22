@@ -990,6 +990,10 @@ fn create_object(
     if abstract_like {
         return Ok(None);
     }
+    // object_init_ex(): constant-expression defaults may throw.
+    if !vm.update_class_constants_ok(&cl) {
+        return Err(exc_err(vm));
+    }
     let id = vm.alloc_object_id();
     let mut obj = PhpObject::new(canonical.clone(), id);
     vm.apply_class_property_defaults(&mut obj, &cl);
@@ -4735,11 +4739,11 @@ fn do_opendir(
     us.borrow_mut().flags |= FLAG_NO_FCLOSE;
     CURRENT_DIR_RESOURCE.with(|c| c.set(Some(fid)));
     if createobject {
-        let id = vm.alloc_object_id();
-        let mut obj = PhpObject::new(b"Directory".to_vec(), id);
-        obj.set_property(b"path".to_vec(), s(&p));
-        obj.set_property(b"handle".to_vec(), Value::Resource(fid));
-        Ok(Some(Value::Object(Rc::new(RefCell::new(obj)))))
+        Ok(Some(super::dir_class::new_directory(
+            vm,
+            s(&p),
+            Value::Resource(fid),
+        )))
     } else {
         Ok(Some(Value::Resource(fid)))
     }
@@ -5414,6 +5418,47 @@ fn check_deprecated_directives(vm: &mut Vm) {
             0,
         );
     }
+    // php_module_startup(): removed directives set to a non-zero value make
+    // the startup fail with E_CORE_ERROR.
+    const REMOVED: &[&str] = &[
+        "allow_call_time_pass_reference",
+        "asp_tags",
+        "define_syslog_variables",
+        "highlight.bg",
+        "magic_quotes_gpc",
+        "magic_quotes_runtime",
+        "magic_quotes_sybase",
+        "register_globals",
+        "register_long_arrays",
+        "safe_mode",
+        "safe_mode_gid",
+        "safe_mode_include_dir",
+        "safe_mode_exec_dir",
+        "safe_mode_allowed_env_vars",
+        "safe_mode_protected_env_vars",
+        "zend.ze1_compatibility_mode",
+    ];
+    let hit = CFG_VARS.with(|c| {
+        let c = c.borrow();
+        REMOVED.iter().copied().find(|d| {
+            c.iter().rev().find(|(k, _)| k == d).is_some_and(|(_, v)| {
+                // ZEND_STRTOL(): leading digits
+                let t = v.trim_start();
+                let t = t.strip_prefix(['+', '-']).unwrap_or(t);
+                t.bytes().take_while(u8::is_ascii_digit).any(|b| b != b'0')
+            })
+        })
+    });
+    if let Some(d) = hit {
+        vm.display_error(
+            "Fatal error",
+            &format!("Directive '{}' is no longer available in PHP", d),
+            "Unknown",
+            0,
+        );
+        vm.exit_code = 1;
+        vm.exit_requested = true;
+    }
 }
 
 macro_rules! intercepts {
@@ -5641,4 +5686,9 @@ fn alloc_ext_stream(
 /// Serve goro_core::ext_stream::alloc()
 pub(crate) fn install_ext_streams() {
     goro_core::ext_stream::ALLOC.with(|a| a.set(Some(alloc_ext_stream)));
+}
+
+/// Whether `fid` is a userspace-wrapper directory stream (PHP_STREAM_FLAG_IS_DIR).
+pub(crate) fn is_user_dir(fid: i64) -> bool {
+    get_us(fid).is_some_and(|us| us.borrow().flags & FLAG_IS_DIR != 0)
 }

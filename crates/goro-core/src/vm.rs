@@ -4779,7 +4779,11 @@ impl Vm {
         }
     }
 
-    fn check_unsupported_operand_types(a: &Value, b: &Value, op_symbol: &str) -> Option<String> {
+    pub fn check_unsupported_operand_types(
+        a: &Value,
+        b: &Value,
+        op_symbol: &str,
+    ) -> Option<String> {
         let a_deref = a.deref();
         let b_deref = b.deref();
         // zendi_try_convert_scalar_to_number() fails for arrays and resources.
@@ -10851,47 +10855,6 @@ impl Vm {
             | b"random\\engine\\secure"
             | b"random\\randomizer" => {
                 crate::random::dispatch_random_method(self, class_lower, method_lower, obj)
-            }
-            b"directory" => {
-                // Directory objects for userspace wrapper streams carry no
-                // entry snapshot: forward to readdir()/rewinddir()/closedir().
-                if !obj.borrow().has_property(b"__dir_entries") {
-                    let fname: &[u8] = match method_lower {
-                        b"read" => b"readdir",
-                        b"rewind" => b"rewinddir",
-                        b"close" => b"closedir",
-                        _ => return None,
-                    };
-                    let handle = obj.borrow().get_property(b"handle");
-                    let f = self.functions.get(fname).copied()?;
-                    return Some(f(self, &[handle]).unwrap_or(Value::False));
-                }
-                match method_lower {
-                    b"read" => {
-                        let mut ob = obj.borrow_mut();
-                        let pos = ob.get_property(b"__dir_pos").to_long();
-                        let entries = ob.get_property(b"__dir_entries");
-                        if let Value::Array(arr) = &entries {
-                            let arr_borrow = arr.borrow();
-                            let entry = arr_borrow.get(&crate::array::ArrayKey::Int(pos));
-                            if let Some(val) = entry {
-                                ob.set_property(b"__dir_pos".to_vec(), Value::Long(pos + 1));
-                                Some(val.clone())
-                            } else {
-                                Some(Value::False)
-                            }
-                        } else {
-                            Some(Value::False)
-                        }
-                    }
-                    b"rewind" => {
-                        let mut ob = obj.borrow_mut();
-                        ob.set_property(b"__dir_pos".to_vec(), Value::Long(0));
-                        Some(Value::Null)
-                    }
-                    b"close" => Some(Value::Null),
-                    _ => None,
-                }
             }
             _ => None,
         }
@@ -32429,13 +32392,20 @@ impl Vm {
                                                     );
                                                 }
                                             } else if is_exc {
-                                                // Capture stack trace for exceptions
-                                                let trace = self.build_exception_trace();
-                                                self.filter_new_exception_trace(
-                                                    &class_lower,
-                                                    &trace,
-                                                );
-                                                obj_mut.set_property(b"trace".to_vec(), trace);
+                                                // The trace is captured when the object is
+                                                // created (zend_default_exception_new); the
+                                                // constructor only fills it in when missing.
+                                                if !matches!(
+                                                    obj_mut.get_property(b"trace"),
+                                                    Value::Array(_)
+                                                ) {
+                                                    let trace = self.build_exception_trace();
+                                                    self.filter_new_exception_trace(
+                                                        &class_lower,
+                                                        &trace,
+                                                    );
+                                                    obj_mut.set_property(b"trace".to_vec(), trace);
+                                                }
                                                 obj_mut.set_property(
                                                     b"previous".to_vec(),
                                                     Value::Null,

@@ -151,6 +151,10 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
         Kind::Link => {
             if let (Some(target), Some(link)) = (arg_str(args, 0), arg_str(args, 1)) {
                 if let Some(source_p) = basedir::expand_filepath(&link) {
+                    // virtual_file_ex(CWD_FILEPATH) resolves an existing path's symlinks.
+                    let source_p = std::fs::canonicalize(&source_p)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or(source_p);
                     let dir = dirname(&source_p);
                     let dest_p = if target.starts_with('/') {
                         basedir::expand_filepath(&target)

@@ -732,6 +732,17 @@ final class StreamBucket {
     );
     vm.register_function(b"headers_list", headers_list_fn);
     vm.register_function(b"dir", ctx_dir_fn_entry);
+    dir_class::register(vm);
+    // main.c mail.* INI defaults
+    for (k, v) in [
+        (&b"mail.cr_lf_mode"[..], &b"crlf"[..]),
+        (b"mail.add_x_header", b"0"),
+        (b"mail.mixed_lf_and_crlf", b"0"),
+    ] {
+        vm.constants
+            .entry(k.to_vec())
+            .or_insert_with(|| Value::String(PhpString::from_bytes(v)));
+    }
     vm.register_function(b"popen", popen_fn);
     vm.register_function(b"pclose", pclose_fn);
     vm.register_function(b"rewinddir", rewinddir_fn);
@@ -5206,10 +5217,16 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     }
-    // max_memory_limit and the stack limits are PHP_INI_SYSTEM
+    // max_memory_limit, the stack limits and the mail.* entries are
+    // PHP_INI_SYSTEM (|PHP_INI_PERDIR)
     if key == b"max_memory_limit"
         || key == b"zend.max_allowed_stack_size"
         || key == b"zend.reserved_stack_size"
+        || key == b"mail.cr_lf_mode"
+        || key == b"mail.add_x_header"
+        || key == b"mail.mixed_lf_and_crlf"
+        || key == b"mail.log"
+        || key == b"mail.force_extra_parameters"
     {
         return Ok(Value::False);
     }
@@ -5685,9 +5702,21 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Some(d) = &desc_str {
             cargs.push(Value::String(d.clone()));
         }
-        let mut full = vec![cb.clone()];
-        full.extend(cargs);
-        let _ = call_user_func(vm, &full);
+        // zend_call_function(): an uncallable callback throws.
+        let chk = vm.zend_is_callable_ex(&cb, 0);
+        if !chk.ok && vm.current_exception.is_none() {
+            let msg = format!(
+                "Invalid callback {}, {}",
+                String::from_utf8_lossy(&chk.name),
+                chk.error.unwrap_or_default()
+            );
+            let exc = vm.create_exception(b"Error", &msg, line);
+            vm.current_exception = Some(exc);
+        } else if chk.ok {
+            let mut full = vec![cb.clone()];
+            full.extend(cargs);
+            let _ = call_user_func(vm, &full);
+        }
         vm.current_line = line;
         if vm.current_exception.is_some() {
             return Err(VmError {
@@ -5735,6 +5764,11 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .map(|d| d.to_string_lossy())
             .unwrap_or_else(|| "Assertion".to_string());
         vm.emit_warning_at(&format!("assert(): {} failed", d), line);
+    }
+    if assert_ini_bool(vm, b"assert.bail", false) {
+        // zend_throw_unwind_exit()
+        vm.exit_requested = true;
+        return Ok(Value::Null);
     }
     Ok(Value::False)
 }
@@ -6492,6 +6526,29 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::Null) | Some(Value::Undef) | None => ",".to_string(),
         Some(v) => v.to_php_string().to_string_lossy(),
     };
+
+    // _php_math_number_format_long(): integers (and doubles >= 2^52 that
+    // fit a long) are formatted exactly.
+    let as_long = match val.deref() {
+        Value::Long(n) => Some(n),
+        Value::Double(d)
+            if (d >= 4503599627370496.0 || d <= -4503599627370496.0)
+                && (-9223372036854775808.0..9223372036854775808.0).contains(&d) =>
+        {
+            Some(d as i64)
+        }
+        _ => None,
+    };
+    if let Some(n) = as_long {
+        return Ok(Value::String(PhpString::from_vec(
+            crate::math::number_format_long(
+                n,
+                decimals_raw,
+                dec_point.as_bytes(),
+                thousands_sep.as_bytes(),
+            ),
+        )));
+    }
 
     // Handle negative decimal places: round to nearest 10^(-decimals)
     if decimals_raw < 0 {
@@ -8911,11 +8968,22 @@ fn getcwd_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
         Err(_) => Ok(Value::False),
     }
 }
-fn chdir_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn chdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "chdir", 1, "directory") {
+        return Err(e);
+    }
     match std::env::set_current_dir(&*path.to_string_lossy() as &str) {
         Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
+        Err(e) => {
+            let errno = e.raw_os_error().unwrap_or(0);
+            vm.emit_warning(&format!(
+                "chdir(): {} (errno {})",
+                xp_socket::strerror(errno),
+                errno
+            ));
+            Ok(Value::False)
+        }
     }
 }
 fn filesize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -10516,6 +10584,10 @@ use std::io::{Read as IoRead, Seek, SeekFrom, Write as IoWrite};
 /// Userspace stream wrappers (stream_wrapper_register classes).
 #[path = "userstream.rs"]
 pub(crate) mod userstream;
+
+/// The Directory class (ext/standard/dir.c).
+#[path = "dir_class.rs"]
+pub(crate) mod dir_class;
 
 /// Socket transports (tcp/udp/unix/udg) and socket stream functions.
 #[path = "sockets.rs"]
@@ -13212,9 +13284,18 @@ fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let dir_str = dir.to_string_lossy();
     let sort_order = args.get(1).map(|v| v.to_long()).unwrap_or(0); // 0 = ascending, 1 = descending
 
+    if dir.is_empty() {
+        let msg = "scandir(): Argument #1 ($directory) must not be empty";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
+    }
     if let Some(pattern) = dir_str.strip_prefix("glob://") {
         let mut names = glob_stream_entries(vm, pattern);
-        if sort_order == 1 {
+        if sort_order != 0 && sort_order != 2 {
             names.sort_by(|a, b| b.cmp(a));
         } else if sort_order == 0 {
             names.sort();
@@ -13232,10 +13313,11 @@ fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             for e in entries.flatten() {
                 names.push(e.file_name().to_string_lossy().to_string());
             }
-            if sort_order == 1 {
-                names.sort_by(|a, b| b.cmp(a));
-            } else {
+            // PHP_SCANDIR_SORT_ASCENDING (0), _NONE (2), anything else descends.
+            if sort_order == 0 {
                 names.sort();
+            } else if sort_order != 2 {
+                names.sort_by(|a, b| b.cmp(a));
             }
             let mut arr = PhpArray::new();
             for name in names {
@@ -17224,46 +17306,105 @@ fn filegroup_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(0))
 }
 
-fn chown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// php_do_chown() / php_do_chgrp() on a plain file (user wrappers are
+/// dispatched before reaching here).
+fn chown_common(
+    vm: &mut Vm,
+    args: &[Value],
+    name: &str,
+    group: bool,
+    link: bool,
+) -> Result<Value, VmError> {
     let filename = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = filename.to_string_lossy();
-    if path_str.is_empty() || !std::path::Path::new(&*path_str).exists() {
-        vm.emit_warning("chown(): No such file or directory");
+    let pname = if group { "group" } else { "user" };
+    if let Some(e) = path_arg_nul_error(vm, filename.as_bytes(), name, 1, "filename") {
+        return Err(e);
+    }
+    let who = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
+    let id: u32 = match &who {
+        Value::Long(n) => *n as u32,
+        Value::String(s) => {
+            let mut buf = s.as_bytes().to_vec();
+            buf.push(0);
+            let found = unsafe {
+                if group {
+                    let g = libc::getgrnam(buf.as_ptr() as *const libc::c_char);
+                    (!g.is_null()).then(|| (*g).gr_gid)
+                } else {
+                    let p = libc::getpwnam(buf.as_ptr() as *const libc::c_char);
+                    (!p.is_null()).then(|| (*p).pw_uid)
+                }
+            };
+            match found {
+                Some(id) => id,
+                None => {
+                    vm.emit_warning(&format!(
+                        "{}(): Unable to find {} for {}",
+                        name,
+                        if group { "gid" } else { "uid" },
+                        s.to_string_lossy()
+                    ));
+                    return Ok(Value::False);
+                }
+            }
+        }
+        Value::Double(d) if d.is_finite() && d.fract() == 0.0 => *d as i64 as u32,
+        Value::True | Value::False => who.to_long() as u32,
+        other => {
+            let msg = format!(
+                "{}(): Argument #2 (${}) must be of type string|int, {} given",
+                name,
+                pname,
+                Vm::value_type_name(other)
+            );
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
+        }
+    };
+    let mut path = filename.as_bytes().to_vec();
+    if path.len() >= 7 && path[..7].eq_ignore_ascii_case(b"file://") {
+        path.drain(..7);
+    }
+    path.push(0);
+    let (uid, gid) = if group {
+        (u32::MAX, id)
+    } else {
+        (id, u32::MAX)
+    };
+    let ret = unsafe {
+        let p = path.as_ptr() as *const libc::c_char;
+        if link {
+            libc::lchown(p, uid, gid)
+        } else {
+            libc::chown(p, uid, gid)
+        }
+    };
+    if ret == -1 {
+        let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        vm.emit_warning(&format!("{}(): {}", name, xp_socket::strerror(errno)));
         return Ok(Value::False);
     }
-    // We don't actually change ownership (root-only on Unix), but return true
-    // if the file exists (matches PHP's behavior when called as root or
-    // already-owner).
     Ok(Value::True)
+}
+
+fn chown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    chown_common(vm, args, "chown", false, false)
 }
 
 fn chgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = filename.to_string_lossy();
-    if path_str.is_empty() || !std::path::Path::new(&*path_str).exists() {
-        vm.emit_warning("chgrp(): No such file or directory");
-        return Ok(Value::False);
-    }
-    Ok(Value::True)
-}
-
-/// lchown()/lchgrp(): like chown()/chgrp(), on the link itself.
-fn lchown_common(vm: &mut Vm, args: &[Value], name: &str) -> Result<Value, VmError> {
-    let filename = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = filename.to_string_lossy();
-    if path_str.is_empty() || std::fs::symlink_metadata(&*path_str).is_err() {
-        vm.emit_warning(&format!("{}(): No such file or directory", name));
-        return Ok(Value::False);
-    }
-    Ok(Value::True)
+    chown_common(vm, args, "chgrp", true, false)
 }
 
 fn lchown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    lchown_common(vm, args, "lchown")
+    chown_common(vm, args, "lchown", false, true)
 }
 
 fn lchgrp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    lchown_common(vm, args, "lchgrp")
+    chown_common(vm, args, "lchgrp", true, true)
 }
 
 fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -17496,8 +17637,11 @@ fn php_uname_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(result)))
 }
 
-fn php_sapi_name_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"cli")))
+fn php_sapi_name_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(match vm.constants.get(b"PHP_SAPI".as_slice()) {
+        Some(Value::String(s)) => Value::String(s.clone()),
+        _ => Value::String(PhpString::from_bytes(b"cli")),
+    })
 }
 
 thread_local! {
@@ -17795,8 +17939,20 @@ fn php_ini_loaded_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
         .map_or(Value::False, |p| Value::String(PhpString::from_string(p))))
 }
 
+thread_local! {
+    /// php_ini_scanned_files: the additional .ini files parsed at startup.
+    static INI_SCANNED_FILES: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+/// Record the .ini files the SAPI scanned (php_ini_scanned_files()).
+pub fn set_ini_scanned_files(list: Option<Vec<u8>>) {
+    INI_SCANNED_FILES.with(|p| *p.borrow_mut() = list);
+}
+
 fn php_ini_scanned_files_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+    Ok(INI_SCANNED_FILES
+        .with(|p| p.borrow().clone())
+        .map_or(Value::False, |p| Value::String(PhpString::from_vec(p))))
 }
 
 /// ftok(): a System V IPC key from a path and a project identifier.
@@ -20892,30 +21048,11 @@ fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::False);
     }
     let did = alloc_dir_handle(path_str.to_string());
-    // Build entries snapshot for the Directory class methods (read/rewind/close).
-    let mut entries_arr = PhpArray::new();
-    if let Ok(names) = read_dir_entries(&path_str) {
-        // names is reversed (descending); reverse-iterate to get ascending.
-        for (i, name) in names.iter().rev().enumerate() {
-            entries_arr.set(
-                ArrayKey::Int(i as i64),
-                Value::String(PhpString::from_string(name.clone())),
-            );
-        }
-    }
-    let object_id = vm.alloc_object_id();
-    let mut obj = PhpObject::new(b"Directory".to_vec(), object_id);
-    obj.set_property(
-        b"path".to_vec(),
-        Value::String(PhpString::from_string(path_str.to_string())),
-    );
-    obj.set_property(b"handle".to_vec(), Value::Resource(did));
-    obj.set_property(b"__dir_pos".to_vec(), Value::Long(0));
-    obj.set_property(
-        b"__dir_entries".to_vec(),
-        Value::Array(Rc::new(RefCell::new(entries_arr))),
-    );
-    Ok(Value::Object(Rc::new(RefCell::new(obj))))
+    Ok(dir_class::new_directory(
+        vm,
+        Value::String(path.clone()),
+        Value::Resource(did),
+    ))
 }
 
 fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -21208,13 +21345,83 @@ fn disk_total_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn get_resources_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
 }
+thread_local! {
+    /// BG(syslog_device): openlog() keeps the ident pointer.
+    static SYSLOG_IDENT: RefCell<Option<std::ffi::CString>> = const { RefCell::new(None) };
+}
+
 fn closelog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    unsafe { libc::closelog() };
+    SYSLOG_IDENT.with(|s| *s.borrow_mut() = None);
     Ok(Value::True)
 }
-fn openlog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+
+fn openlog_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ident = args
+        .first()
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
+    let option = args.get(1).map(|v| v.to_long()).unwrap_or(0) as libc::c_int;
+    let facility = args.get(2).map(|v| v.to_long()).unwrap_or(0) as libc::c_int;
+    let b = ident.as_bytes();
+    let c = std::ffi::CString::new(
+        b.iter()
+            .take_while(|&&c| c != 0)
+            .copied()
+            .collect::<Vec<u8>>(),
+    )
+    .unwrap_or_default();
+    SYSLOG_IDENT.with(|s| {
+        let mut s = s.borrow_mut();
+        *s = Some(c);
+        let p = s.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+        unsafe { libc::openlog(p, option, facility) };
+    });
     Ok(Value::True)
 }
-fn syslog_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+
+/// php_syslog_str(): each line is a separate message; bytes are filtered
+/// per syslog.filter.
+fn syslog_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let priority = args.first().map(|v| v.to_long()).unwrap_or(0) as libc::c_int;
+    let message = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
+    let filter = vm
+        .constants
+        .get(b"syslog.filter".as_slice())
+        .map(|v| v.to_php_string().to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| "no-ctrl".to_string());
+    let send = |buf: &[u8]| {
+        let c = std::ffi::CString::new(
+            buf.iter()
+                .take_while(|&&c| c != 0)
+                .copied()
+                .collect::<Vec<u8>>(),
+        )
+        .unwrap_or_default();
+        unsafe { libc::syslog(priority, c"%s".as_ptr(), c.as_ptr()) };
+    };
+    if filter == "raw" {
+        send(message.as_bytes());
+        return Ok(Value::True);
+    }
+    let mut sbuf: Vec<u8> = Vec::new();
+    for &c in message.as_bytes() {
+        if (0x20..=0x7e).contains(&c) || (c >= 0x80 && filter != "ascii") {
+            sbuf.push(c);
+        } else if c == b'\n' {
+            send(&sbuf);
+            sbuf.clear();
+        } else if c < 0x20 && filter == "all" {
+            sbuf.push(c);
+        } else {
+            const X: &[u8; 16] = b"0123456789abcdef";
+            sbuf.extend_from_slice(&[b'\\', b'x', X[(c >> 4) as usize], X[(c & 15) as usize]]);
+        }
+    }
+    send(&sbuf);
     Ok(Value::True)
 }
 

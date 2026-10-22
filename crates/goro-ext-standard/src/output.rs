@@ -369,6 +369,9 @@ fn class_extends(vm: &Vm, class_lower: &[u8], ancestor: &[u8]) -> bool {
 }
 
 #[allow(clippy::if_same_then_else)] // branches mirror php-src
+/// C stack used by one php_var_dump() + php_object_property_dump() level.
+const VAR_DUMP_FRAME_COST: usize = 256;
+
 fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u64>) {
     if indent > 8000 {
         return;
@@ -593,9 +596,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                             for (i, (pname, has_default)) in info.params.iter().enumerate() {
                                 let is_variadic =
                                     info.is_variadic_last && i == info.params.len() - 1;
-                                let label = if is_variadic {
-                                    "<optional>"
-                                } else if *has_default {
+                                let label = if is_variadic || *has_default {
                                     "<optional>"
                                 } else {
                                     "<required>"
@@ -1354,8 +1355,14 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     vm.write_output(format!("{}  uninitialized({})\n", prefix, t).as_bytes());
                     continue;
                 }
+                // php_object_property_dump(): ZEND_CHECK_STACK_LIMIT
+                if !goro_core::stack::enter_native(VAR_DUMP_FRAME_COST) {
+                    vm.write_output(format!("{}  nesting level too deep", prefix).as_bytes());
+                    continue;
+                }
                 vm.write_output(&line);
                 var_dump_value(vm, &value, indent + 2, seen);
+                goro_core::stack::leave_native(VAR_DUMP_FRAME_COST);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
             seen.remove(&oid);
