@@ -64,7 +64,13 @@ impl PhpWriter {
 /// (xmlwriter_object_dtor), or as soon as the VM is available.
 fn on_object_free(addr: usize) {
     let slot = WRITERS
-        .try_with(|w| w.try_borrow_mut().ok().and_then(|mut m| m.remove(&addr)))
+        // (every object's release comes here: no hashing while there is
+        // no writer)
+        .try_with(|w| {
+            w.try_borrow_mut()
+                .ok()
+                .and_then(|mut m| if m.is_empty() { None } else { m.remove(&addr) })
+        })
         .ok()
         .flatten();
     if let Some(Slot {
