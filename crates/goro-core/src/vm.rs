@@ -2820,8 +2820,13 @@ impl Vm {
                     if let Some(parent_class) = self.classes.get(&parent_lower) {
                         if let Some(parent_method) = parent_class.get_method(method_name_lower) {
                             // Only walk up if the parent method is not private
-                            // (private methods are not inherited for visibility purposes)
-                            if parent_method.visibility != Visibility::Private {
+                            // (private methods are not inherited for visibility purposes).
+                            // A constructor only has a prototype when the parent's
+                            // is abstract (zend_get_function_root_class()).
+                            if parent_method.visibility != Visibility::Private
+                                && (method_name_lower != b"__construct"
+                                    || parent_method.is_abstract)
+                            {
                                 root = parent_lower.clone();
                                 current = parent_lower;
                                 continue;
