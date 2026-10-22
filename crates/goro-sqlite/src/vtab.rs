@@ -1575,3 +1575,200 @@ pub fn sqlite3_vtab_config(db: &mut Sqlite3, op: i32, args: &[PfArg]) -> i32 {
     }
     rc
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vdbeapi::*;
+
+    /// Run every statement of zSql; rows as "a|b", errors as "Error: msg".
+    fn run(db: &mut Sqlite3, zSql: &str) -> Vec<String> {
+        let sql = zSql.as_bytes().to_vec();
+        let mut out = Vec::new();
+        let mut off = 0usize;
+        while off < sql.len() {
+            let rest = sql[off..].to_vec();
+            let mut stmt: Option<StmtId> = None;
+            let mut tail = 0usize;
+            let rc = crate::prepare::sqlite3_prepare_v2(
+                db,
+                Some(&rest),
+                rest.len() as i32,
+                &mut stmt,
+                &mut tail,
+            );
+            if rc != SQLITE_OK {
+                let m = crate::mainapi::sqlite3_errmsg(db).unwrap_or_default();
+                out.push(format!("Error: {}", String::from_utf8_lossy(&m)));
+            }
+            if tail == 0 {
+                break;
+            }
+            off += tail;
+            let Some(id) = stmt else { continue };
+            loop {
+                let rc = sqlite3_step(db, id);
+                if rc != SQLITE_ROW {
+                    if rc != SQLITE_DONE {
+                        let m = crate::mainapi::sqlite3_errmsg(db).unwrap_or_default();
+                        out.push(format!("Error: {}", String::from_utf8_lossy(&m)));
+                    }
+                    break;
+                }
+                let n = sqlite3_column_count(db, id);
+                let cols: Vec<String> = (0..n)
+                    .map(|i| {
+                        let t = sqlite3_column_text(db, id, i).unwrap_or_default();
+                        String::from_utf8_lossy(&t).into_owned()
+                    })
+                    .collect();
+                out.push(cols.join("|"));
+            }
+            sqlite3_finalize(db, id);
+        }
+        out
+    }
+
+    /// A read-only module "seq": seq(n) returns the rows 1..=n (hidden
+    /// argument column "n", default 3).
+    struct SeqModule;
+    struct Seq {
+        zErrMsg: Option<ZStr>,
+    }
+    struct SeqCur {
+        i: i64,
+        n: i64,
+    }
+    impl VtabModule for SeqModule {
+        fn xConnect(
+            &self,
+            db: &mut Sqlite3,
+            _argv: &[&[u8]],
+            _pzErr: &mut Option<ZStr>,
+        ) -> Result<Box<dyn Vtab>, i32> {
+            let rc = sqlite3_declare_vtab(db, Some(b"CREATE TABLE x(value, n HIDDEN)"));
+            if rc != SQLITE_OK {
+                return Err(rc);
+            }
+            Ok(Box::new(Seq { zErrMsg: None }))
+        }
+        fn has_xCreate(&self) -> bool {
+            false
+        }
+    }
+    impl Vtab for Seq {
+        fn xBestIndex(&mut self, _db: &mut Sqlite3, info: &mut IndexInfo) -> i32 {
+            for i in 0..info.aConstraint.len() {
+                let c = info.aConstraint[i];
+                if c.iColumn == 1 && c.op as i32 == SQLITE_INDEX_CONSTRAINT_EQ {
+                    if c.usable == 0 {
+                        return SQLITE_CONSTRAINT;
+                    }
+                    info.aConstraintUsage[i].argvIndex = 1;
+                    info.aConstraintUsage[i].omit = 1;
+                    info.idxNum = 1;
+                }
+            }
+            info.estimatedCost = 10.0;
+            SQLITE_OK
+        }
+        fn xOpen(&mut self, _db: &mut Sqlite3) -> Result<Box<dyn VtabCursor>, i32> {
+            Ok(Box::new(SeqCur { i: 1, n: 3 }))
+        }
+        fn zErrMsg(&mut self) -> &mut Option<ZStr> {
+            &mut self.zErrMsg
+        }
+    }
+    impl VtabCursor for SeqCur {
+        fn xFilter(
+            &mut self,
+            _db: &mut Sqlite3,
+            idx: i32,
+            _s: Option<&[u8]>,
+            argv: &mut [Mem],
+        ) -> i32 {
+            self.i = 1;
+            self.n = if idx == 1 {
+                sqlite3_value_int64(&mut argv[0])
+            } else {
+                3
+            };
+            SQLITE_OK
+        }
+        fn xNext(&mut self, _db: &mut Sqlite3) -> i32 {
+            self.i += 1;
+            SQLITE_OK
+        }
+        fn xEof(&mut self) -> bool {
+            self.i > self.n
+        }
+        fn xColumn(&mut self, ctx: &mut Context, i: i32) -> i32 {
+            sqlite3_result_int64(ctx, if i == 0 { self.i } else { self.n });
+            SQLITE_OK
+        }
+        fn xRowid(&mut self, p: &mut i64) -> i32 {
+            *p = self.i;
+            SQLITE_OK
+        }
+    }
+
+    fn open() -> Box<Sqlite3> {
+        let mut pdb = None;
+        let rc = crate::mainapi::sqlite3_open_v2(
+            Some(b":memory:"),
+            &mut pdb,
+            (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) as i32,
+            None,
+        );
+        assert_eq!(rc, SQLITE_OK);
+        pdb.unwrap()
+    }
+
+    #[test]
+    fn eponymous_module() {
+        let mut db = open();
+        assert_eq!(
+            sqlite3_create_module(&mut db, Some(b"seq"), Some(Rc::new(SeqModule))),
+            SQLITE_OK
+        );
+        assert_eq!(run(&mut db, "select * from seq;"), ["1", "2", "3"]);
+        assert_eq!(run(&mut db, "select value, n from seq(2);"), ["1|2", "2|2"]);
+        assert_eq!(
+            run(
+                &mut db,
+                "select a.value, b.value from seq(2) a, seq(a.value) b;"
+            ),
+            ["1|1", "2|1", "2|2"]
+        );
+        assert_eq!(
+            run(&mut db, "create virtual table s using seq;"),
+            ["Error: no such module: seq"]
+        );
+        assert_eq!(run(&mut db, "pragma module_list;"), ["seq"]);
+        sqlite3_drop_modules(&mut db, None);
+        assert_eq!(
+            run(&mut db, "select * from seq;"),
+            ["Error: no such table: seq"]
+        );
+        crate::mainapi::sqlite3_close(&mut db);
+    }
+
+    #[test]
+    fn pragma_vtabs() {
+        let mut db = open();
+        assert_eq!(
+            run(
+                &mut db,
+                "create table t(a integer primary key, b text);\
+                 select name, type, pk from pragma_table_info('t');\
+                 select count(*) from sqlite_master m, pragma_table_info(m.name);"
+            ),
+            ["a|INTEGER|1", "b|TEXT|0", "2"]
+        );
+        assert_eq!(
+            run(&mut db, "create virtual table v using nosuch(x);"),
+            ["Error: no such module: nosuch"]
+        );
+        crate::mainapi::sqlite3_close(&mut db);
+    }
+}
