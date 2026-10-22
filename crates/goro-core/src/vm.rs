@@ -40357,8 +40357,12 @@ impl Vm {
                         let val = if let Some((_, class)) =
                             class_idx.and_then(|i| self.classes.get_index(i))
                         {
-                            // Cannot access trait constants directly
-                            if class.is_trait {
+                            // Cannot access trait constants directly (an
+                            // undefined one is reported as such first).
+                            if class.is_trait
+                                && (class.constants.contains_key(prop_name.as_bytes())
+                                    || prop_name.as_bytes() == b"class")
+                            {
                                 let class_display = crate::value::display_class_name(&class.name);
                                 let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
                                 let msg = format!(

@@ -64,7 +64,7 @@ pub fn without_internal_attributes<R>(f: impl FnOnce() -> R) -> R {
 }
 
 /// The config of internal attribute `name` (resolved, any case).
-fn internal_attribute(name: &[u8]) -> Option<InternalAttribute> {
+pub(crate) fn internal_attribute(name: &[u8]) -> Option<InternalAttribute> {
     let n = name
         .strip_prefix(b"\\")
         .unwrap_or(name)
@@ -374,6 +374,8 @@ pub struct Compiler {
     pub deferred_fatal_errors: Vec<String>,
     /// The attributes being compiled are those of a property hook.
     in_hook_attrs: bool,
+    /// The attributes being compiled are those of a closure.
+    attrs_scope_unknown: bool,
     /// Ids of the finally blocks enclosing the code being compiled.
     finally_path: Vec<u32>,
     finally_id_counter: u32,
@@ -666,6 +668,7 @@ impl Compiler {
             hoisted_class_idx: HashMap::new(),
             deferred_fatal_errors: Vec::new(),
             in_hook_attrs: false,
+            attrs_scope_unknown: false,
             finally_path: Vec::new(),
             finally_id_counter: 0,
             label_finally_paths: HashMap::new(),
@@ -1264,6 +1267,19 @@ impl Compiler {
             .collect()
     }
 
+    /// The attributes of a closure (or of its parameters): its scope is not
+    /// known at compile time (zend_is_scope_known()), so self is resolved
+    /// when the arguments are evaluated.
+    fn compile_closure_attributes(
+        &mut self,
+        attrs: &[goro_parser::ast::Attribute],
+    ) -> Vec<crate::object::RuntimeAttribute> {
+        let saved = std::mem::replace(&mut self.attrs_scope_unknown, true);
+        let r = self.compile_attributes(attrs);
+        self.attrs_scope_unknown = saved;
+        r
+    }
+
     /// The attributes of a property hook (a method target).
     fn compile_hook_attributes(
         &mut self,
@@ -1441,6 +1457,13 @@ impl Compiler {
                     ac.current_class = Some(cls.clone());
                     ac.op_array.scope_class =
                         Some(cls.iter().map(|b| b.to_ascii_lowercase()).collect());
+                }
+                // In a trait or a closure, self is the scope the arguments
+                // are evaluated in.
+                if self.attrs_scope_unknown || self.is_in_trait || self.in_trait_body {
+                    ac.in_const_expr = true;
+                    ac.is_in_trait = true;
+                    ac.keep_relative_class_names = true;
                 }
                 if let Some(p) = &self.current_parent_class {
                     ac.current_parent_class = Some(p.clone());
@@ -16249,7 +16272,8 @@ impl Compiler {
                     expr.span.line
                 };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
-                closure_compiler.op_array.attributes = self.compile_attributes(closure_attributes);
+                closure_compiler.op_array.attributes =
+                    self.compile_closure_attributes(closure_attributes);
                 closure_compiler.op_array.doc_comment = closure_doc_comment.clone();
                 // Propagate the closure's declared return type so ReflectionFunction
                 // observes it via `hasReturnType`/`getReturnType`.
@@ -16364,7 +16388,7 @@ impl Compiler {
                 // Compile parameter attributes
                 closure_compiler.op_array.param_attributes = params
                     .iter()
-                    .map(|p| self.compile_attributes(&p.attributes))
+                    .map(|p| self.compile_closure_attributes(&p.attributes))
                     .collect();
                 // Record by-ref params for closures (with offset for $this and use vars)
                 {
@@ -16670,11 +16694,11 @@ impl Compiler {
                     expr.span.line
                 };
                 closure_compiler.op_array.strict_types = self.op_array.strict_types;
-                closure_compiler.op_array.attributes = self.compile_attributes(attributes);
+                closure_compiler.op_array.attributes = self.compile_closure_attributes(attributes);
                 closure_compiler.op_array.doc_comment = arrow_doc_comment.clone();
                 closure_compiler.op_array.param_attributes = params
                     .iter()
-                    .map(|p| self.compile_attributes(&p.attributes))
+                    .map(|p| self.compile_closure_attributes(&p.attributes))
                     .collect();
                 // Propagate arrow function's declared return type.
                 if let Some(hint) = arrow_return_type {

@@ -4900,9 +4900,18 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 }
             }
             b"getattributes" => {
-                let attrs = rcls(vm, &class_lower)
+                let mut attrs = rcls(vm, &class_lower)
                     .map(|c| c.attributes.clone())
                     .unwrap_or_default();
+                // An internal attribute class is itself declared with
+                // #[Attribute(<its flags>)].
+                if attrs.is_empty()
+                    && rcls(vm, &class_lower).is_none_or(|c| c.filename.is_none())
+                {
+                    if let Some(cfg) = crate::compiler::internal_attribute(&class_lower) {
+                        attrs.push(internal_attribute_attribute(cfg.flags));
+                    }
+                }
                 let filter_name = args.get(1).and_then(|v| {
                     if matches!(v, Value::Null) {
                         None
@@ -6102,10 +6111,10 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                 }
             }
             b"getattributes" => {
-                let attrs = rcls(vm, &class_lower)
+                let (attrs, decl) = rcls(vm, &class_lower)
                     .and_then(|c| {
                         c.get_method(method_lower_bytes.as_bytes())
-                            .map(|m| m.attributes.clone())
+                            .map(|m| (m.attributes.clone(), Some(m.declaring_class.clone())))
                     })
                     .unwrap_or_default();
                 let filter_name = args.get(1).and_then(|v| {
@@ -6116,13 +6125,15 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                     }
                 });
                 let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-                Some(create_reflection_attributes(
+                let list = create_reflection_attributes(
                     vm,
                     &attrs,
                     filter_name.as_deref(),
                     filter_flags,
                     4,
-                ))
+                );
+                set_attr_scope(&list, decl, b"__reflection_attr_scope");
+                Some(list)
             }
             b"getclosure" => {
                 // Build a Closure value referring to this method. In this VM,
@@ -6695,7 +6706,13 @@ pub fn reflection_function_method(
         }
         b"getparameters" => {
             if let Some(op_array) = rfunc(vm, &func_lower).cloned() {
-                Some(create_reflection_parameters(vm, &op_array))
+                let list = create_reflection_parameters(vm, &op_array);
+                let closure = obj.borrow().get_property(b"__reflection_closure_obj");
+                if !matches!(closure, Value::Null | Value::Undef) {
+                    let scope = vm.closure_scope(&closure);
+                    set_attr_scope(&list, scope, b"__reflection_param_attr_scope");
+                }
+                Some(list)
             } else {
                 Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
             }
@@ -7275,13 +7292,19 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 } else {
                     2
                 };
-                Some(create_reflection_attributes(
+                let list = create_reflection_attributes(
                     vm,
                     &attrs,
                     filter_name.as_deref(),
                     filter_flags,
                     target,
-                ))
+                );
+                let closure = obj.borrow().get_property(b"__reflection_closure_obj");
+                if !matches!(closure, Value::Null | Value::Undef) {
+                    let scope = vm.closure_scope(&closure);
+                    set_attr_scope(&list, scope, b"__reflection_attr_scope");
+                }
+                Some(list)
             }
             b"getclosure" => {
                 // Return the function name as a callable string (treated as a
@@ -11217,30 +11240,41 @@ pub fn reflection_parameter_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -
                 if !matches!(&param_class, Value::Null) {
                     let class_lower = param_class.to_php_string().as_bytes().to_vec();
                     let method_lower = param_method.to_php_string().as_bytes().to_vec();
+                    let decl = rcls(vm, &class_lower)
+                        .and_then(|c| c.get_method(&method_lower))
+                        .map(|m| m.declaring_class.clone());
                     let attrs = rcls(vm, &class_lower)
                         .and_then(|c| c.get_method(&method_lower))
                         .and_then(|m| m.op_array.param_attributes.get(position))
                         .cloned()
                         .unwrap_or_default();
-                    Some(create_reflection_attributes(
+                    let list = create_reflection_attributes(
                         vm,
                         &attrs,
                         filter_name.as_deref(),
                         filter_flags,
                         32,
-                    ))
+                    );
+                    set_attr_scope(&list, decl, b"__reflection_attr_scope");
+                    Some(list)
                 } else {
                     let attrs = rfunc(vm, func_target.as_bytes())
                         .and_then(|op| op.param_attributes.get(param_idx))
                         .cloned()
                         .unwrap_or_default();
-                    Some(create_reflection_attributes(
+                    let list = create_reflection_attributes(
                         vm,
                         &attrs,
                         filter_name.as_deref(),
                         filter_flags,
                         32,
-                    ))
+                    );
+                    let scope = match obj.borrow().get_property(b"__reflection_param_attr_scope") {
+                        Value::String(s) => Some(s.as_bytes().to_vec()),
+                        _ => None,
+                    };
+                    set_attr_scope(&list, scope, b"__reflection_attr_scope");
+                    Some(list)
                 }
             }
             _ => None,
@@ -12885,14 +12919,73 @@ thread_local! {
 
 /// The (lazily evaluated) arguments array of a ReflectionAttribute.
 /// None if evaluating them threw.
+/// `#[Attribute(flags)]`, the attribute of an internal attribute class.
+fn internal_attribute_attribute(flags: u32) -> crate::object::RuntimeAttribute {
+    use crate::opcode::{Op, OpCode, OperandType};
+    let mut op = OpArray::new();
+    let arr = op.alloc_temp();
+    op.emit(Op {
+        opcode: OpCode::ArrayNew,
+        op1: OperandType::Unused,
+        op2: OperandType::Unused,
+        result: OperandType::Tmp(arr),
+        line: 0,
+    });
+    let f = op.add_literal(Value::Long(flags as i64));
+    op.emit(Op {
+        opcode: OpCode::ArrayAppend,
+        op1: OperandType::Tmp(arr),
+        op2: OperandType::Const(f),
+        result: OperandType::Unused,
+        line: 0,
+    });
+    op.emit(Op {
+        opcode: OpCode::Return,
+        op1: OperandType::Tmp(arr),
+        op2: OperandType::Unused,
+        result: OperandType::Unused,
+        line: 0,
+    });
+    op.param_default_repr = vec![Some(flags.to_string())];
+    crate::object::RuntimeAttribute {
+        name: b"Attribute".to_vec(),
+        args_op_array: op,
+        validation_error: None,
+    }
+}
+
+/// Set the class scope the attribute arguments of the ReflectionAttribute
+/// (or ReflectionParameter) objects in `list` are evaluated in: a trait
+/// method's attributes see the using class, a closure's its bound scope.
+fn set_attr_scope(list: &Value, scope: Option<Vec<u8>>, prop: &[u8]) {
+    let (Some(scope), Value::Array(a)) = (scope, list) else {
+        return;
+    };
+    for v in a.borrow().values() {
+        if let Value::Object(o) = v {
+            o.borrow_mut().set_property(
+                prop.to_vec(),
+                Value::String(PhpString::from_vec(scope.to_ascii_lowercase())),
+            );
+        }
+    }
+}
+
 fn attr_args_value(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>) -> Option<Value> {
     // Evaluated on every call: `new` in arguments yields fresh objects.
     let idx = obj
         .borrow()
         .get_property(b"__reflection_attr_args_op")
         .to_long() as usize;
-    let op = ATTR_ARG_OPS.with(|r| r.borrow().get(idx).cloned())?;
-    let pushed_scope = if let Some(ref scope) = op.scope_class {
+    let mut op = ATTR_ARG_OPS.with(|r| r.borrow().get(idx).cloned())?;
+    let scope_override = match obj.borrow().get_property(b"__reflection_attr_scope") {
+        Value::String(s) => Some(s.as_bytes().to_vec()),
+        _ => None,
+    };
+    if let Some(s) = &scope_override {
+        op.scope_class = Some(s.clone());
+    }
+    let pushed_scope = if let Some(ref scope) = scope_override.or_else(|| op.scope_class.clone()) {
         vm.push_class_scope(scope.clone());
         vm.called_class_stack.push(scope.clone());
         true
