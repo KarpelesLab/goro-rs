@@ -33242,6 +33242,7 @@ impl Vm {
                 },
 
                 OpCode::Return => match outlined(|| -> Result<Flow, VmError> {
+                    let had_exc = self.current_exception.is_some();
                     // By-ref returns fetch the operand for writing (no warning).
                     let val = if op_array.returns_by_ref {
                         // Keep the reference the compiler fetched for the
@@ -33267,6 +33268,17 @@ impl Vm {
                             op.line,
                         )
                     };
+                    // An error handler that threw on the operand's warning
+                    // ("Undefined variable") aborts the return.
+                    if !had_exc {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                    }
                     self.last_return_line = op.line;
                     // Emit implicit float-to-int deprecation BEFORE finally blocks run
                     // (so the warning appears in source order, before any side effects in finally).

@@ -9883,6 +9883,17 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(class) = vm.classes.get(&original_lower).cloned() {
         // Use the original class name (not alias) for the class entry
         let aliased_class = class;
+        // `Alias::m()` reaches the methods as `Class::m()` does.
+        for method in aliased_class.methods.values() {
+            let mut key = alias_lower.clone();
+            key.extend_from_slice(b"::");
+            key.extend(method.name.iter().map(|b| b.to_ascii_lowercase()));
+            let mut op = method.op_array.clone();
+            if op.attributes.is_empty() && !method.attributes.is_empty() {
+                std::rc::Rc::make_mut(&mut op).attributes = method.attributes.clone();
+            }
+            vm.user_functions.entry(key).or_insert(op);
+        }
         // Keep original class name so get_class() returns the canonical name
         vm.classes.insert(alias_lower.clone(), aliased_class);
         // Register bidirectional alias mappings so instanceof works correctly
@@ -9951,9 +9962,15 @@ fn is_subclass_of_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => return Ok(Value::False),
     };
     // is_subclass_of returns false if class_name == check_name (unlike is_a)
-    let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-    let check_lower: Vec<u8> = check_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-    if class_lower == check_lower {
+    // (an alias names the same class entry)
+    let canonical = |n: &[u8]| -> Vec<u8> {
+        let l = n.to_ascii_lowercase();
+        vm.classes
+            .get(&l)
+            .map(|c| c.name.to_ascii_lowercase())
+            .unwrap_or(l)
+    };
+    if canonical(&class_name) == canonical(&check_name) {
         return Ok(Value::False);
     }
     let result = class_is_a(vm, &class_name, &check_name);
@@ -10015,7 +10032,16 @@ fn class_is_a(vm: &Vm, class_name: &[u8], check_name: &[u8]) -> bool {
         match &class_entry.parent {
             Some(parent) => {
                 let parent_lower: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if parent_lower == check_lower {
+                // (a parent named by an alias of the class checked for)
+                let canonical = |n: &[u8]| {
+                    vm.classes
+                        .get(n)
+                        .map(|c| c.name.to_ascii_lowercase())
+                        .unwrap_or_else(|| n.to_vec())
+                };
+                if parent_lower == check_lower
+                    || canonical(&parent_lower) == canonical(&check_lower)
+                {
                     return true;
                 }
                 current = parent_lower;
