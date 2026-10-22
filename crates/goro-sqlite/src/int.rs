@@ -1524,6 +1524,10 @@ pub struct Walker<'a> {
     pub xExprCallback: Option<XExprCallback>,
     pub xSelectCallback: Option<XSelectCallback>,
     pub xSelectCallback2: Option<XSelectCallback2>,
+    /// C `pWalker->pParse!=0`: the walk happens on behalf of the current
+    /// parse (db.pp()).  Some walkers (e.g. sqlite3ExprIsConstant(0,...))
+    /// run without a Parse, which changes their behaviour.
+    pub pParse: bool,
     pub walkerDepth: i32,
     pub eCode: u16,
     pub mWFlags: u16,
@@ -1537,6 +1541,7 @@ impl<'a> Walker<'a> {
             xExprCallback: None,
             xSelectCallback: None,
             xSelectCallback2: None,
+            pParse: true,
             walkerDepth: 0,
             eCode: 0,
             mWFlags: 0,
