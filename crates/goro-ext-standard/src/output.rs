@@ -2697,6 +2697,12 @@ pub fn materialize_print_r(
                         .collect(),
                     _ => Vec::new(),
                 }
+            } else if let Some(t) = vm.spl_debug_info(o) {
+                // An SPL class's get_debug_info handler (inherited by
+                // subclasses: ArrayObject's storage, ...).
+                t.iter()
+                    .map(|(k, v)| (array_key_bytes(k), v.clone()))
+                    .collect()
             } else {
                 vm.object_debug_table(o)
                     .into_iter()

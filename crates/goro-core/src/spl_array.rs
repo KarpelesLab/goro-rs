@@ -96,7 +96,9 @@ impl Vm {
                         cur = o;
                         continue;
                     }
-                    return Table::Obj(o);
+                    // (an initialized lazy proxy's properties are its
+                    // instance's)
+                    return Table::Obj(self.proxy_redirect(&o));
                 }
                 _ => {
                     let a = Rc::new(RefCell::new(PhpArray::new()));
@@ -386,6 +388,58 @@ impl Vm {
             }
             other => Some(other),
         }
+    }
+
+    /// `$ao[k] = &$v` on an ArrayObject / ArrayIterator without a user
+    /// offsetGet(): the reference is bound into the storage
+    /// (spl_array_get_dimension_ptr()). None when `obj` is not one;
+    /// Some(false) with an exception pending.
+    pub(crate) fn ao_assign_ref(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        offset: Option<&Value>,
+        r: &Value,
+    ) -> Option<bool> {
+        let cl = obj_class_lower(obj);
+        self.spl_find_base(&cl, &[b"arrayobject", b"arrayiterator"])?;
+        if self.ao_user_has(obj, b"offsetget") {
+            return None;
+        }
+        if !matches!(r, Value::Reference(_)) {
+            return None;
+        }
+        if !self.ao_sort_check(obj) {
+            return Some(false);
+        }
+        let t = self.ao_table(obj);
+        let k = match offset.map(|o| o.deref()) {
+            None | Some(Value::Null) => None,
+            Some(o) => match self.ao_hash_key(obj, &o) {
+                Ok(k) => Some(k),
+                Err(tn) => {
+                    self.ao_illegal_offset(obj, &tn, b'w');
+                    return Some(false);
+                }
+            },
+        };
+        match &t {
+            Table::Arr(a) => {
+                let mut ab = a.borrow_mut();
+                match k {
+                    Some(k) => ab.set(k, r.clone()),
+                    None => ab.push(r.clone()),
+                }
+            }
+            Table::Obj(o) => {
+                let name = key_name(&k?);
+                let mut ob = o.borrow_mut();
+                match ob.properties.iter_mut().find(|(n, _)| *n == name) {
+                    Some((_, slot)) => *slot = r.clone(),
+                    None => ob.properties.push((name, r.clone())),
+                }
+            }
+        }
+        Some(self.current_exception.is_none())
     }
 
     pub(crate) fn ao_offset_set(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value, v: Value) {
@@ -978,6 +1032,21 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
         args: Option<&[Value]>,
     ) -> Option<Value> {
+        // A lazy object being wrapped is initialized when its property
+        // table is first used (zend_std_get_properties_ex()).
+        if !matches!(
+            method,
+            b"__construct" | b"getflags" | b"setflags" | b"getiteratorclass" | b"setiteratorclass"
+        ) {
+            if let Table::Obj(o) = self.ao_table(obj) {
+                if o.borrow().has_property(b"__lazy_state") {
+                    self.maybe_run_lazy_init(&o);
+                    if self.current_exception.is_some() {
+                        return Some(Value::Null);
+                    }
+                }
+            }
+        }
         // Serializable::unserialize(): one var_hash for all the pieces.
         if method == b"unserialize" {
             if let Some(h) = self.unserialize_scope_hook {
@@ -1349,9 +1418,8 @@ impl Vm {
                         Value::Array(_) => set_prop(obj, b"__spl_array", st.clone()),
                         _ => {
                             let func = format!("{}::unserialize", self.ao_base_name(obj));
-                            if !self.ao_set_array(obj, &st, 0, true, &func) {
-                                return Some(Value::Null);
-                            }
+                            // (the members are still loaded after a failure)
+                            let _ = self.ao_set_array(obj, &st, 0, true, &func);
                         }
                     }
                     if data.get(p) != Some(&b';') {
@@ -1426,10 +1494,11 @@ impl Vm {
                 None => Value::False,
             },
             b"getchildren" => {
-                let entry = match self.ao_current(obj) {
-                    Some((_, _, v)) => v.deref(),
+                let (entry_key, entry) = match self.ao_current(obj) {
+                    Some((_, k, v)) => (k, v.deref()),
                     None => return Some(Value::Null),
                 };
+                let entry_is_array = matches!(entry, Value::Array(_));
                 let f = ao_flags(obj);
                 if let Value::Object(eo) = &entry {
                     if f & CHILD_ARRAYS_ONLY != 0 {
@@ -1452,6 +1521,15 @@ impl Vm {
                 }
                 if self.current_exception.is_some() {
                     return Some(Value::Null);
+                }
+                // spl_instantiate_child_arg(): the child's array replaces the
+                // parent's element, so changes made through either one show
+                // in the other.
+                if entry_is_array {
+                    if let Value::Array(a) = prop(&child, b"__spl_array") {
+                        let t = self.ao_table(obj);
+                        self.table_set(&t, entry_key, Value::Array(a));
+                    }
                 }
                 Value::Object(child)
             }

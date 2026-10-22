@@ -22338,6 +22338,26 @@ impl Vm {
                                 });
                             }
                         }
+                        // $GLOBALS is read-only: it cannot be sent by reference
+                        // (to a callee unknown at compile time).
+                        if callee_expects_ref
+                            && matches!(&op.op1, OperandType::Cv(i) if op_array.cv_names.get(*i as usize).is_some_and(|n| n == b"GLOBALS"))
+                        {
+                            let msg = self.cannot_pass_by_ref_msg(arg_index);
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
                         if callee_expects_ref {
                             // Pass by reference: create a shared reference between caller CV and callee CV
                             if let OperandType::Cv(idx) = &op.op1 {
@@ -22394,7 +22414,7 @@ impl Vm {
                             {
                                 val.deref()
                             } else {
-                                val
+                                self.globals_by_value(val)
                             };
                             if let Some(call) = self.pending_calls.last_mut() {
                                 call.args.push(val);
@@ -22444,6 +22464,7 @@ impl Vm {
                         // For Tmp/Const operands, just read normally (no reference to preserve)
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
+                    let val = self.globals_by_value(val);
                     if let Some(call) = self.pending_calls.last_mut() {
                         call.args.push(val);
                     }
@@ -34605,6 +34626,12 @@ impl Vm {
                                         .iter()
                                         .map(|b| b.to_ascii_lowercase())
                                         .collect();
+                                    let (spl_ref_target, ref_obj) = match spl_ref_target {
+                                        Some(Ok(rc)) => (Some(rc), obj.clone()),
+                                        // The object an ArrayObject / ArrayIterator wraps
+                                        Some(Err(o)) => (None, o),
+                                        None => (None, obj.clone()),
+                                    };
                                     if let Some(rc) = spl_ref_target {
                                         rc
                                     } else if class_lower == b"weakmap" {
@@ -34644,7 +34671,7 @@ impl Vm {
                                     } else {
                                         // Plain objects: the live property table is
                                         // walked by ForeachNextRef.
-                                        let target = self.proxy_redirect(obj);
+                                        let target = self.proxy_redirect(&ref_obj);
                                         foreach_obj.insert(iter_idx, Rc::downgrade(&target));
                                         foreach_obj_cur.remove(&iter_idx);
                                         let mut holder = PhpArray::new();
@@ -38538,11 +38565,22 @@ impl Vm {
                                     fn_cvs[1] = Value::String(prop_name.clone());
                                 }
                                 self.magic_prop_guards.insert(isset_guard_key.clone());
+                                let class_disp =
+                                    self.frame_class_display(&magic_declaring, &class_name_orig);
                                 self.class_scope_stack.push(magic_declaring);
                                 self.called_class_stack.push(class_name_orig);
+                                // (the call's frame, for backtraces and func_get_args())
+                                self.call_stack.push((
+                                    format!("{}->__isset", class_disp),
+                                    self.current_file.clone(),
+                                    op.line,
+                                    vec![Value::String(prop_name.clone())],
+                                    true,
+                                ));
                                 let isset_result = self
                                     .execute_op_array(&method, fn_cvs)
                                     .unwrap_or(Value::False);
+                                self.call_stack.pop();
                                 self.called_class_stack.pop();
                                 self.class_scope_stack.pop();
                                 self.magic_prop_guards.remove(&isset_guard_key);
@@ -40230,7 +40268,25 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    if let Value::Object(_) = &arr_val {
+                    let ao_bound = match &arr_val {
+                        Value::Object(o) => self.ao_assign_ref(o, Some(&key_val), &ref_val),
+                        _ => None,
+                    };
+                    if let Some(ok) = ao_bound {
+                        if !ok {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: self.uncaught_exception_message(),
+                                line: op.line,
+                            });
+                        }
+                    } else if let Value::Object(_) = &arr_val {
                         if !self.assign_ref_to_object_dim(&arr_val, Some(key_val), op.line) {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                 exception_handlers.last()
@@ -40555,14 +40611,29 @@ impl Vm {
                                 line: op.line,
                             });
                         }
-                        // ArrayAccess: the element is fetched via offsetGet (by value).
-                        let v = self
-                            .call_object_method(
-                                &arr_val,
-                                b"offsetGet",
-                                std::slice::from_ref(&key_val),
-                            )
-                            .unwrap_or(Value::Null);
+                        // read_dimension(BP_VAR_W): offsetGet() (an
+                        // "Indirect modification" notice unless it returns a
+                        // reference), or ArrayObject's storage slot.
+                        let v = self.fetch_dim_from_object(
+                            &arr_val,
+                            Some(key_val),
+                            crate::fetch_w::DimFetch::W,
+                            op.line,
+                        );
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: self.uncaught_exception_message(),
+                                line: op.line,
+                            });
+                        }
+                        let v = v.unwrap_or(Value::Null);
                         self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if matches!(arr_val, Value::Null | Value::Undef)
                         && matches!(op.op1, OperandType::Cv(_))
@@ -52680,6 +52751,18 @@ impl Vm {
             self.dup_array_value(value)
         } else {
             value
+        }
+    }
+
+    /// `$GLOBALS` passed by value: a copy of the symbol table holding the
+    /// variables' values (zend_array_dup() on separation), so the callee
+    /// neither writes through to the globals nor sees their binding cells
+    /// as references.
+    #[inline]
+    fn globals_by_value(&self, value: Value) -> Value {
+        match &value {
+            Value::Array(a) if Rc::ptr_eq(a, &self.globals) => self.dup_array_value(value),
+            _ => value,
         }
     }
 

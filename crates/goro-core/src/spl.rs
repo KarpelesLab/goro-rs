@@ -891,7 +891,7 @@ impl Vm {
     pub(crate) fn spl_foreach_ref_target(
         &mut self,
         obj: &Rc<RefCell<PhpObject>>,
-    ) -> Result<Option<Rc<RefCell<PhpArray>>>, ()> {
+    ) -> Result<Option<Result<Rc<RefCell<PhpArray>>, Rc<RefCell<PhpObject>>>>, ()> {
         let cl = obj_class_lower(obj);
         if cl == b"weakmap" {
             return Ok(None);
@@ -915,10 +915,24 @@ impl Vm {
                 );
                 return Err(());
             }
-            return Ok(match obj.borrow().get_property(b"__spl_array") {
-                Value::Array(a) => Some(a),
-                _ => None,
-            });
+            let backing = obj.borrow().get_property(b"__spl_array");
+            return match backing {
+                Value::Array(a) => Ok(Some(Ok(a))),
+                // Backed by an object: its property table (or the
+                // storage of the ArrayObject it wraps) is iterated.
+                Value::Object(o) => {
+                    let ocl = obj_class_lower(&o);
+                    if self
+                        .spl_find_base(&ocl, &[b"arrayobject", b"arrayiterator"])
+                        .is_some()
+                    {
+                        self.spl_foreach_ref_target(&o)
+                    } else {
+                        Ok(Some(Err(o)))
+                    }
+                }
+                _ => Ok(None),
+            };
         }
         let is_iter = self.class_implements_interface(&cl, b"iterator")
             || crate::vm::is_builtin_subclass(&cl, b"iterator");
@@ -969,8 +983,9 @@ impl Vm {
                     crate::value::display_class_name(&obj.borrow().class_name),
                     String::from_utf8_lossy(&name)
                 );
+                let had_exc = self.current_exception.is_some();
                 self.emit_deprecated(&msg);
-                if self.current_exception.is_some() {
+                if !had_exc && self.current_exception.is_some() {
                     return;
                 }
             }
