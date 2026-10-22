@@ -229,6 +229,29 @@ pub fn check_arg(
     if mask & T_MIXED != 0 {
         return Some(v.clone());
     }
+    // Z_PARAM_FUNC / Z_PARAM_FUNC_OR_NULL
+    if mask & T_CALLABLE != 0 && mask & !(T_CALLABLE | T_NULL) == 0 {
+        if mask & T_NULL != 0 && matches!(v, Value::Null | Value::Undef) {
+            return Some(Value::Null);
+        }
+        let r = vm.zend_is_callable_ex(v, 0);
+        if vm.current_exception.is_some() {
+            return None;
+        }
+        if !r.ok {
+            let msg = format!(
+                "{}(): Argument #{} (${}) must be a valid callback{}, {}",
+                name,
+                i + 1,
+                pname,
+                if mask & T_NULL != 0 { " or null" } else { "" },
+                r.error.unwrap_or_default()
+            );
+            throw(vm, b"TypeError", &msg);
+            return None;
+        }
+        return Some(v.clone());
+    }
     let classes = type_classes(ty);
     let scalar = mask & (T_BOOL | T_INT | T_FLOAT | T_STRING);
     match v {
