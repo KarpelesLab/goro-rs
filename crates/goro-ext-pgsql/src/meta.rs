@@ -428,12 +428,18 @@ fn convert(
                     Value::Null => new_val = null_str(),
                     _ => err = 1,
                 }
-                if err != 0 && vm.current_exception.is_none() {
+                if err != 0 {
+                    // (after the ValueError of an invalid string, which
+                    // becomes its previous exception)
                     let m = format!(
                         "{}(): Field \"{}\" must be of type string|null|int|bool, {} given",
                         fname, fs, ty
                     );
+                    let prev = vm.current_exception.take();
                     throw(vm, b"TypeError", &m);
+                    if let (Some(prev), Some(Value::Object(e))) = (prev, &vm.current_exception) {
+                        e.borrow_mut().set_property(b"previous".to_vec(), prev);
+                    }
                 }
             }
             Oid | Int2 | Int4 | Int8 => {
