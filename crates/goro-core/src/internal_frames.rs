@@ -967,7 +967,8 @@ pub fn implicit_args(op_array: &crate::opcode::OpArray) -> usize {
 /// Whether call_stack frame `name` is the frame of a call to `op_array`.
 fn frame_is_for(name: &str, op_array: &crate::opcode::OpArray) -> bool {
     // `{closure:...}`, or `Class::{closure:...}` for a closure with a scope
-    if name.starts_with("{closure") || name.contains("::{closure") {
+    // (no other frame name ends with `}`)
+    if name.ends_with('}') && (name.starts_with("{closure") || name.contains("::{closure")) {
         return crate::closure::is_closure_fn_name(&op_array.name);
     }
     let last = |s: &[u8]| -> usize {

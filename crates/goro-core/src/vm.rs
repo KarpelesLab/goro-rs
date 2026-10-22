@@ -3221,28 +3221,19 @@ impl Vm {
     /// Scope-introspection functions may not be called dynamically
     /// ("Cannot call extract() dynamically"); returns the error message.
     pub fn forbidden_dynamic_call(name: &[u8]) -> Option<String> {
-        let l: Vec<u8> = name
-            .strip_prefix(b"\\")
-            .unwrap_or(name)
+        let n = name.strip_prefix(b"\\").unwrap_or(name);
+        const FORBIDDEN: [&[u8]; 6] = [
+            b"extract",
+            b"compact",
+            b"get_defined_vars",
+            b"func_get_args",
+            b"func_get_arg",
+            b"func_num_args",
+        ];
+        FORBIDDEN
             .iter()
-            .map(|b| b.to_ascii_lowercase())
-            .collect();
-        if matches!(
-            l.as_slice(),
-            b"extract"
-                | b"compact"
-                | b"get_defined_vars"
-                | b"func_get_args"
-                | b"func_get_arg"
-                | b"func_num_args"
-        ) {
-            Some(format!(
-                "Cannot call {}() dynamically",
-                String::from_utf8_lossy(&l)
-            ))
-        } else {
-            None
-        }
+            .find(|f| n.eq_ignore_ascii_case(f))
+            .map(|l| format!("Cannot call {}() dynamically", String::from_utf8_lossy(l)))
     }
 
     /// `class_name` and its ancestors are user classes, none declaring a
@@ -7307,26 +7298,24 @@ impl Vm {
         // and func_get_args() see it (zend_call_function pushes a frame too).
         // (std::str::from_utf8() validates ASCII much faster than the lossy
         // decoder; callbacks run this for every call)
-        let lossy = |b: &[u8]| match std::str::from_utf8(b) {
-            Ok(s) => s.to_owned(),
-            Err(_) => String::from_utf8_lossy(b).into_owned(),
-        };
-        let frame_display = if !op_array.display_name.is_empty() {
-            lossy(&op_array.display_name)
+        // (in the buffer of a finished call's frame)
+        let mut frame_display = self.string_pool.pop().unwrap_or_default();
+        if !op_array.display_name.is_empty() {
+            push_lossy(&mut frame_display, &op_array.display_name);
         } else if let Some(fcc) = &op_array.fcc_target_name {
-            lossy(fcc)
+            push_lossy(&mut frame_display, fcc);
         } else if let Some(sc) = &op_array.scope_class {
-            let raw = String::from_utf8_lossy(&op_array.name).to_string();
-            let m = raw.rsplit("::").next().unwrap_or(&raw).to_string();
-            let cname = self
-                .classes
-                .get(sc)
-                .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
-            format!("{}::{}", cname, m)
+            let raw = String::from_utf8_lossy(&op_array.name);
+            let m = raw.rsplit("::").next().unwrap_or(&raw);
+            match self.classes.get(sc) {
+                Some(c) => push_lossy(&mut frame_display, &c.name),
+                None => push_lossy(&mut frame_display, sc),
+            }
+            frame_display.push_str("::");
+            frame_display.push_str(m);
         } else {
-            String::from_utf8_lossy(&op_array.name).to_string()
-        };
+            push_lossy(&mut frame_display, &op_array.name);
+        }
         // RECV of a callback invoked by an internal function: weak-mode
         // checks and coercion (the caller is internal, so no "called in").
         if !op_array.param_types.is_empty() {
@@ -7385,10 +7374,11 @@ impl Vm {
         {
             let provided = call.args.len().saturating_sub(lead) as u32;
             let required = op_array.required_param_count;
-            let lname = op_array.name.to_ascii_lowercase();
-            let is_special = lname.ends_with(b"__call")
-                || lname.ends_with(b"__callstatic")
-                || lname.ends_with(b"__construct");
+            let ends = |suffix: &[u8]| {
+                let n = &op_array.name;
+                n.len() >= suffix.len() && n[n.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
+            };
+            let is_special = ends(b"__call") || ends(b"__callstatic") || ends(b"__construct");
             if !is_special && provided < required {
                 let mut fname = String::from_utf8_lossy(op_array.effective_name()).to_string();
                 if op_array.display_name.is_empty() && !fname.contains("::") {
@@ -7453,7 +7443,7 @@ impl Vm {
         }
 
         // Set up CVs
-        let mut func_cvs = vec![Value::Undef; op_array.cv_names.len()];
+        let mut func_cvs = self.take_values(op_array.cv_names.len());
         if let Some(variadic_idx) = op_array.variadic_param {
             let vi = variadic_idx as usize;
             // Arguments map to CVs after a missing $this (cv_shift).
@@ -7508,7 +7498,8 @@ impl Vm {
             return Ok(Value::Generator(gen_rc));
         }
 
-        let frame_args: Vec<Value> = call.args.iter().skip(lead).map(|v| v.deref()).collect();
+        let mut frame_args = self.take_values(0);
+        frame_args.extend(call.args.iter().skip(lead).map(|v| v.deref()));
         let is_instance =
             this_cv == 1 && lead > 0 && matches!(call.args.first(), Some(Value::Object(_)));
         // Callers that already recorded this frame (fibers, exception handlers)
@@ -7523,6 +7514,9 @@ impl Vm {
             };
             self.call_stack
                 .push((frame_display, file, line, frame_args, is_instance));
+        } else {
+            clear_values(&mut frame_args);
+            self.recycle_values(frame_args);
         }
         // Imperative call entry point: run in function scope, not global scope
         // (see execute_fn for why this matters with includes in callbacks).
@@ -7533,7 +7527,9 @@ impl Vm {
         self.closure_frame_leave(scope_pushed);
         self.is_global_scope = was_global;
         if pushed {
-            self.call_stack.pop();
+            if let Some(frame) = self.call_stack.pop() {
+                self.recycle_frame(frame);
+            }
         }
         result
     }

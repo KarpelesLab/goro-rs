@@ -2094,9 +2094,11 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         let looks_like_class_method = func_lower.windows(2).any(|w| w == b"::");
         if !looks_like_class_method {
             if let Some(user_fn) = vm.user_functions.get(fn_lower).cloned() {
-                let fallback = String::from_utf8_lossy(&func_name).into_owned();
-                let line = vm.current_line;
-                vm.check_user_function_deprecation(&user_fn, &fallback, line);
+                if !user_fn.attributes.is_empty() {
+                    let fallback = String::from_utf8_lossy(&func_name).into_owned();
+                    let line = vm.current_line;
+                    vm.check_user_function_deprecation(&user_fn, &fallback, line);
+                }
                 return vm.execute_fn_with_named_args(&user_fn, call_args, named_args, None);
             }
         }
