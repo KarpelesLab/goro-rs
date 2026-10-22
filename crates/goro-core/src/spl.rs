@@ -179,7 +179,7 @@ impl Vm {
             None => return Value::Null,
         };
         let decl_disp = self.builtin_canonical_name(&decl);
-        let method_disp = String::from_utf8_lossy(method_orig).to_string();
+        let method_disp = String::from_utf8_lossy(method_orig);
         let mut call_args: Vec<Value> = args.to_vec();
         // Generic zpp (verified stub arginfo of the method)
         if self.zpp_method_info(base, &method_lower).is_some() {
@@ -255,7 +255,10 @@ impl Vm {
                 return Value::Null;
             }
         }
-        let frame = format!("{}->{}", decl_disp, method_disp);
+        let mut frame = String::with_capacity(decl_disp.len() + 2 + method_disp.len());
+        frame.push_str(&decl_disp);
+        frame.push_str("->");
+        frame.push_str(&method_disp);
         self.call_stack.push((
             frame.clone(),
             self.current_file.clone(),
@@ -328,22 +331,16 @@ impl Vm {
         args: &[Value],
     ) -> Option<Value> {
         let mut chain: Vec<Vec<u8>> = vec![class_lower.to_vec()];
-        let mut cur = class_lower.to_vec();
         for _ in 0..50 {
+            let cur = chain.last().map(|c| c.as_slice()).unwrap_or_default();
             let next: Option<Vec<u8>> = self
                 .classes
-                .get(&cur)
-                .and_then(|c| c.parent.clone())
-                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
-                .or_else(|| {
-                    crate::vm::get_builtin_parent(&cur)
-                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
-                });
+                .get(cur)
+                .and_then(|c| c.parent.as_ref())
+                .map(|p| p.to_ascii_lowercase())
+                .or_else(|| crate::vm::get_builtin_parent(cur).map(|p| p.to_ascii_lowercase()));
             match next {
-                Some(n) => {
-                    chain.push(n.clone());
-                    cur = n;
-                }
+                Some(n) => chain.push(n),
                 None => break,
             }
         }

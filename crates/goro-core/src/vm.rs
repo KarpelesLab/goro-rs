@@ -16841,6 +16841,106 @@ impl Vm {
         simple
     }
 
+    /// INIT_METHOD_CALL `op` of a (non-magic) method on an object of one of
+    /// SPL's data structure classes themselves (no user class involved):
+    /// the general handler finds none of its special cases apply and sets
+    /// up a deferred SPL call (`__splx::method`, see spl_deferred_call).
+    /// False: nothing was done.
+    #[inline(never)]
+    fn init_spl_method_fast(
+        &mut self,
+        op: &crate::opcode::Op,
+        cvs: &[Value],
+        tmps: &mut [Value],
+        literals: &[Value],
+    ) -> bool {
+        let OperandType::Const(i) = op.op2 else {
+            return false;
+        };
+        let Some(Value::String(method)) = literals.get(i as usize) else {
+            return false;
+        };
+        let m = method.as_bytes();
+        if m.is_empty() || m.len() > 64 || m.starts_with(b"__") {
+            return false;
+        }
+        let obj_val = self.read_operand(&op.op1, cvs, tmps, literals);
+        let Value::Object(obj) = &obj_val else {
+            return false;
+        };
+        let mut cbuf = [0u8; 32];
+        let class_lower = {
+            let ob = obj.borrow();
+            let c = &ob.class_name;
+            if c.len() > cbuf.len() {
+                return false;
+            }
+            for (d, s) in cbuf.iter_mut().zip(c.iter()) {
+                *d = s.to_ascii_lowercase();
+            }
+            &cbuf[..c.len()]
+        };
+        if !matches!(
+            class_lower,
+            b"arrayobject"
+                | b"arrayiterator"
+                | b"recursivearrayiterator"
+                | b"splfixedarray"
+                | b"spldoublylinkedlist"
+                | b"splqueue"
+                | b"splstack"
+                | b"splobjectstorage"
+                | b"splminheap"
+                | b"splmaxheap"
+                | b"splpriorityqueue"
+        ) {
+            return false;
+        }
+        let mut mbuf = [0u8; 64];
+        for (d, s) in mbuf.iter_mut().zip(m) {
+            *d = s.to_ascii_lowercase();
+        }
+        let method_lower = &mbuf[..m.len()];
+        if self
+            .classes
+            .get(class_lower)
+            .is_some_and(|c| c.methods.contains_key(method_lower))
+            || !self.spl_should_defer(class_lower, method_lower)
+        {
+            return false;
+        }
+        // INIT_METHOD_CALL consumes a temporary object operand.
+        if let OperandType::Tmp(t) = op.op1 {
+            if let Some(slot @ Value::Object(_)) = tmps.get_mut(t as usize) {
+                *slot = Value::Undef;
+            }
+        }
+        let mut nm = b"__splx::".to_vec();
+        nm.extend_from_slice(m);
+        let mut args = self.take_values(0);
+        args.push(obj_val);
+        self.pending_calls.push(PendingCall {
+            name: PhpString::from_vec(nm),
+            args,
+            named_args: Vec::new(),
+            target: CallTarget::NONE,
+        });
+        true
+    }
+
+    /// Whether the call DO_FCALL `op` is about to make is a deferred SPL
+    /// method call (`__splx::method`, see spl_deferred_call); not while an
+    /// observer watches calls.
+    #[inline]
+    fn fast_splx_target(&self, op: &crate::opcode::Op) -> bool {
+        self.observer.is_none()
+            && !matches!(op.op1, OperandType::Const(_))
+            && self.pending_calls.last().is_some_and(|c| {
+                let n = c.name.as_bytes();
+                n.len() > 8 && n[..8].eq_ignore_ascii_case(b"__splx::")
+            })
+    }
+
     /// Whether the call DO_FCALL is about to make is one of a builtin by its
     /// plain name, without named arguments, that the builtin fast path runs
     /// (see resolve_call_target); not while an observer watches calls.
@@ -24766,6 +24866,77 @@ impl Vm {
                 }
                 // (An internal constructor or static method is observed
                 // inside the call.)
+                // A deferred SPL method call (see spl_deferred_call): what the
+                // general handler does for one, without walking its special
+                // names first (none of them is a `__splx::` name).
+                OpCode::DoFCall if self.fast_splx_target(op) => match outlined(
+                    || -> Result<Flow, VmError> {
+                        self.last_call_by_ref = false;
+                        let call = self.pending_calls.pop().expect("pending call");
+                        while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
+                        {
+                            self.closure_pending_calls.pop();
+                        }
+                        if self.closure_pending_calls.last() == Some(&self.pending_calls.len()) {
+                            self.closure_pending_calls.pop();
+                        }
+                        self.call_result_unused = None;
+                        let result = self.spl_deferred_call(
+                            &call.name.as_bytes()[8..],
+                            &call.args,
+                            &call.named_args,
+                            op.line,
+                            op_array.strict_types,
+                        );
+                        if self.fatal_emitted && self.current_exception.is_none() {
+                            return Err(VmError {
+                                message: String::new(),
+                                line: op.line,
+                            });
+                        }
+                        if let Some(exc_val) = self.current_exception.take() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                let catch_target = *catch_target;
+                                self.current_exception = Some(exc_val);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            } else {
+                                let msg = if let Value::Object(o) = &exc_val {
+                                    let ob = o.borrow();
+                                    format!(
+                                        "Uncaught {}: {}",
+                                        crate::value::display_class_name(&ob.class_name),
+                                        ob.get_property(b"message")
+                                            .to_php_string()
+                                            .to_string_lossy()
+                                    )
+                                } else {
+                                    "Unknown exception".to_string()
+                                };
+                                self.current_exception = Some(exc_val);
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        self.write_operand(
+                            &op.result,
+                            result,
+                            &mut cvs,
+                            &mut tmps,
+                            &static_cv_keys,
+                        );
+                        Ok(Flow::Next)
+                    },
+                )? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
                 OpCode::DoFCall => match self.observe_fcall().run(|| -> Result<Flow, VmError> {
                     self.last_call_by_ref = false;
                     let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
@@ -52744,6 +52915,10 @@ impl Vm {
                 OpCode::InitMethodCall => match outlined(|| -> Result<Flow, VmError> {
                     // A public method of a user class (see init_method_call_fast)
                     if self.init_method_call_fast(op_array, ip - 1, &cvs, &mut tmps) {
+                        return Ok(Flow::Next);
+                    }
+                    // A method of an SPL data structure (see init_spl_method_fast)
+                    if self.init_spl_method_fast(op, &cvs, &mut tmps, &op_array.literals) {
                         return Ok(Flow::Next);
                     }
                     let method_name = self
