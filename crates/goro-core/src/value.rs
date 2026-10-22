@@ -274,8 +274,12 @@ pub fn set_memory_limit(bytes: i64) {
 
 /// Reset memory tracking (for test isolation).
 pub fn memory_reset() {
-    MEMORY_USAGE.with(|m| m.set(0));
-    MEMORY_PEAK.with(|p| p.set(0));
+    // The request's first VM stack page, the objects store and the
+    // compiler's arena (init_compiler(): CG(arena)) are allocated at
+    // startup.
+    let vm_stack = crate::stack::vm_stack_reset() + crate::vm::OBJECT_STORE_INITIAL + 64 * 1024;
+    MEMORY_USAGE.with(|m| m.set(vm_stack));
+    MEMORY_PEAK.with(|p| p.set(vm_stack));
     MEMORY_OVERFLOW.with(|o| o.set(false));
     MEMORY_EXHAUSTED.with(|c| c.set(0));
 }

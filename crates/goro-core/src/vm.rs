@@ -34,6 +34,20 @@ thread_local! {
         RefCell::new(Default::default());
 }
 
+/// EG(objects_store) holds a pointer per object handle; it starts with
+/// room for 1024 and doubles when a new handle does not fit
+/// (zend_objects_store_put()).
+#[inline]
+fn object_store_grow(handle: u64) {
+    if handle >= 1024 && handle.is_power_of_two() {
+        let old = handle as usize * 8;
+        crate::value::memory_charge_reporting(old, old * 2);
+    }
+}
+
+/// The objects store allocated at startup (zend_objects_store_init()).
+pub const OBJECT_STORE_INITIAL: usize = 1024 * 8;
+
 pub(crate) fn current_vm_ptr() -> *mut Vm {
     CURRENT_VM_PTR.with(|c| c.get())
 }
@@ -4324,6 +4338,7 @@ impl Vm {
         if self.object_store_no_reuse {
             let id = self.next_object_id;
             self.next_object_id += 1;
+            object_store_grow(id);
             return id;
         }
         // Try global drop-recycled pool first (most PHP-accurate).
@@ -4341,6 +4356,7 @@ impl Vm {
         }
         let id = self.next_object_id;
         self.next_object_id += 1;
+        object_store_grow(id);
         id
     }
 
@@ -15496,6 +15512,19 @@ impl Vm {
         op_array: &OpArray,
         cvs: Vec<Value>,
     ) -> Result<Value, VmError> {
+        // The frame's CVs and TMPs live on the VM stack, whose pages count
+        // against memory_limit (zend_vm_stack_push_call_frame()).
+        let frame_size = (op_array.cv_names.len().max(cvs.len()) + op_array.temp_count as usize)
+            * 16
+            + crate::stack::CALL_FRAME_SIZE;
+        let _vm_frame = match crate::stack::vm_push(frame_size) {
+            Ok(f) => crate::stack::VmFrameGuard(f),
+            Err(_) => {
+                self.bind_next_frame = false;
+                self.bind_next_tab = None;
+                return Err(self.memory_limit_fatal());
+            }
+        };
         self.call_depth += 1;
         // Backtraces show the current values of the parameters.
         let cv_frame = self.register_cv_frame(op_array);

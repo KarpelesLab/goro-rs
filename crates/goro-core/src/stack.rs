@@ -51,6 +51,11 @@ pub struct StackCtx {
     /// zend.reserved_stack_size); 0 when unchecked, `UNSET` until
     /// configured.
     emu_max: usize,
+    /// The emulated VM stack (live in VM_USED / VM_CAP / VM_PAGE while
+    /// this context runs; only meaningful in a saved context).
+    vm_used: usize,
+    vm_cap: usize,
+    vm_page: usize,
 }
 
 thread_local! {
@@ -59,6 +64,9 @@ thread_local! {
             limit: 0,
             emu_used: 0,
             emu_max: UNSET,
+            vm_used: 0,
+            vm_cap: 0,
+            vm_page: VM_STACK_PAGE_SIZE,
         })
     };
     /// Bytes of extra segments in use on this thread.
@@ -67,6 +75,13 @@ thread_local! {
     /// zend.reserved_stack_size, and whether the emulated C stack is
     /// checked at all.
     static RESERVED: Cell<(usize, bool)> = const { Cell::new((DEFAULT_RESERVED, true)) };
+    /// Emulated VM stack (zend_vm_stack) of the running context: bytes
+    /// used in the current page (EG(vm_stack_top)), the current page's size
+    /// (EG(vm_stack_end); 0: not set up, frames are not accounted) and the
+    /// size new pages get (EG(vm_stack_page_size)).
+    static VM_USED: Cell<usize> = const { Cell::new(0) };
+    static VM_CAP: Cell<usize> = const { Cell::new(0) };
+    static VM_PAGE: Cell<usize> = const { Cell::new(VM_STACK_PAGE_SIZE) };
 }
 
 const UNSET: usize = usize::MAX;
@@ -276,12 +291,19 @@ pub fn emulated_size() -> usize {
 
 /// The current stack context (saved when switching to a fiber).
 pub fn save() -> StackCtx {
-    CTX.with(|c| c.get())
+    let mut c = CTX.with(|c| c.get());
+    c.vm_used = VM_USED.with(|v| v.get());
+    c.vm_cap = VM_CAP.with(|v| v.get());
+    c.vm_page = VM_PAGE.with(|v| v.get());
+    c
 }
 
 /// Switch back to a saved stack context.
 pub fn restore(ctx: StackCtx) {
     CTX.with(|c| c.set(ctx));
+    VM_USED.with(|v| v.set(ctx.vm_used));
+    VM_CAP.with(|v| v.set(ctx.vm_cap));
+    VM_PAGE.with(|v| v.set(ctx.vm_page));
 }
 
 /// Context of a fiber running on `stack`, whose emulated C stack has
@@ -297,7 +319,137 @@ pub fn fiber_ctx(stack: &DefaultStack, fiber_stack_size: usize) -> StackCtx {
         limit: stack.limit().get() + 64 * 1024,
         emu_used: 0,
         emu_max,
+        // (set up when the fiber starts: vm_stack_fiber_start())
+        vm_used: 0,
+        vm_cap: 0,
+        vm_page: FIBER_VM_STACK_SIZE,
     }
+}
+
+/// ZEND_VM_STACK_PAGE_SIZE: 16K zvals.
+pub const VM_STACK_PAGE_SIZE: usize = 256 * 1024;
+/// ZEND_FIBER_VM_STACK_SIZE: 1024 zvals.
+pub const FIBER_VM_STACK_SIZE: usize = 16 * 1024;
+/// ZEND_VM_STACK_HEADER_SLOTS * sizeof(zval)
+const VM_STACK_HEADER: usize = 32;
+/// ZEND_CALL_FRAME_SLOT * sizeof(zval): a zend_execute_data.
+pub const CALL_FRAME_SIZE: usize = 80;
+
+/// A call frame on the emulated VM stack, to hand back to `vm_pop`: the
+/// page's use before the frame and, when the frame needed a new page
+/// (ZEND_CALL_ALLOCATED), the previous page's size (else 0).
+#[derive(Clone, Copy, Debug)]
+pub struct VmFrame {
+    prev_used: usize,
+    prev_cap: usize,
+}
+
+/// VM stack accounting is not set up.
+const NO_FRAME: VmFrame = VmFrame {
+    prev_used: usize::MAX,
+    prev_cap: 0,
+};
+
+/// zend_vm_stack_init(): the request's first VM stack page. Returns its
+/// size (already in use when the request starts).
+pub fn vm_stack_reset() -> usize {
+    VM_PAGE.with(|v| v.set(VM_STACK_PAGE_SIZE));
+    VM_CAP.with(|v| v.set(VM_STACK_PAGE_SIZE));
+    VM_USED.with(|v| v.set(VM_STACK_HEADER));
+    VM_STACK_PAGE_SIZE
+}
+
+/// zend_vm_stack_push_call_frame(): reserve `size` bytes of VM stack for
+/// a call frame. A frame that does not fit in the current page gets a new
+/// one (zend_vm_stack_extend()); when that allocation is over
+/// memory_limit, Err(bytes) is the failed allocation (the memory-limit
+/// error is pending).
+#[inline]
+pub fn vm_push(size: usize) -> Result<VmFrame, usize> {
+    let cap = VM_CAP.with(|v| v.get());
+    let used = VM_USED.with(|v| v.get());
+    if size <= cap.wrapping_sub(used) {
+        VM_USED.with(|v| v.set(used + size));
+        return Ok(VmFrame {
+            prev_used: used,
+            prev_cap: 0,
+        });
+    }
+    if cap == 0 {
+        return Ok(NO_FRAME);
+    }
+    vm_extend(used, cap, size)
+}
+
+#[cold]
+#[inline(never)]
+fn vm_extend(used: usize, cap: usize, size: usize) -> Result<VmFrame, usize> {
+    let page = VM_PAGE.with(|v| v.get());
+    let alloc = if size < page - VM_STACK_HEADER {
+        page
+    } else {
+        // ZEND_VM_STACK_PAGE_ALIGNED_SIZE()
+        (size + VM_STACK_HEADER + page - 1) & !(page - 1)
+    };
+    if !crate::value::memory_alloc(alloc) {
+        return Err(alloc);
+    }
+    VM_USED.with(|v| v.set(VM_STACK_HEADER + size));
+    VM_CAP.with(|v| v.set(alloc));
+    Ok(VmFrame {
+        prev_used: used,
+        prev_cap: cap,
+    })
+}
+
+/// zend_vm_stack_free_call_frame(): release a frame from `vm_push` (the
+/// most recent one still pushed).
+#[inline]
+pub fn vm_pop(frame: VmFrame) {
+    if frame.prev_cap == 0 {
+        if frame.prev_used != usize::MAX {
+            VM_USED.with(|v| v.set(frame.prev_used));
+        }
+    } else {
+        vm_pop_page(frame);
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn vm_pop_page(frame: VmFrame) {
+    crate::value::memory_free(VM_CAP.with(|v| v.get()));
+    VM_USED.with(|v| v.set(frame.prev_used));
+    VM_CAP.with(|v| v.set(frame.prev_cap));
+}
+
+/// Pops a frame from `vm_push` when dropped (also when a fiber is
+/// unwound).
+pub struct VmFrameGuard(pub VmFrame);
+
+impl Drop for VmFrameGuard {
+    #[inline]
+    fn drop(&mut self) {
+        vm_pop(self.0);
+    }
+}
+
+/// zend_fiber_execute(): a starting fiber gets its own VM stack page
+/// (with a frame slot reserved for the fiber's bottom frame).
+pub fn vm_stack_fiber_start() {
+    VM_PAGE.with(|v| v.set(FIBER_VM_STACK_SIZE));
+    VM_CAP.with(|v| v.set(FIBER_VM_STACK_SIZE));
+    VM_USED.with(|v| v.set(VM_STACK_HEADER + CALL_FRAME_SIZE));
+    crate::value::memory_charge(FIBER_VM_STACK_SIZE);
+}
+
+/// zend_fiber_cleanup(): a finished fiber's VM stack is freed.
+pub fn vm_stack_fiber_end() {
+    let cap = VM_CAP.with(|v| v.replace(0));
+    if cap != 0 {
+        crate::value::memory_free(cap);
+    }
+    VM_USED.with(|v| v.set(0));
 }
 
 #[cfg(test)]

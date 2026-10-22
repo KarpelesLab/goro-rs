@@ -153,6 +153,16 @@ impl PhpFiber {
             Coroutine::with_stack(stack, move |yielder: &FiberYielder, input: FiberResume| {
                 // The fiber runs on its own stack.
                 crate::stack::restore(ctx);
+                // ...and its own VM stack, freed when it finishes (or is
+                // unwound).
+                struct VmStack;
+                impl Drop for VmStack {
+                    fn drop(&mut self) {
+                        crate::stack::vm_stack_fiber_end();
+                    }
+                }
+                crate::stack::vm_stack_fiber_start();
+                let _vm_stack = VmStack;
                 // Stash the yielder pointer so the parent can re-install it on
                 // every resume (the body wrapper code only runs on the very
                 // first invocation; subsequent resumes continue from inside
