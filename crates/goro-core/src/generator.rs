@@ -54,7 +54,8 @@ pub struct PhpGenerator {
     pub static_cv_keys: HashMap<u32, Vec<u8>>,
     /// Global variable keys
     pub global_cv_keys: HashMap<u32, Vec<u8>>,
-    /// Exception handlers
+    /// Exception handlers: (catch target, finally target,
+    /// error_reporting_stack depth at the TryBegin)
     pub exception_handlers: Vec<(u32, u32, u32)>,
     /// Current state
     pub state: GeneratorState,
@@ -265,10 +266,10 @@ impl PhpGenerator {
         }
     }
 
-    /// Opcodes the generator executor implements itself: suspension,
-    /// exception / finally bookkeeping kept in the generator frame, foreach
-    /// iterator state, calls (fiber suspension) and a few hot simple ops.
-    /// Everything else is delegated to the VM (Vm::execute_single_op).
+    /// Opcodes the generator executor implements itself: suspension and the
+    /// exception / finally bookkeeping kept in the generator frame.
+    /// Everything else is delegated to the VM (Vm::execute_single_op), apart
+    /// from the simple cases of local_fast_path().
     fn generator_owned_op(op: OpCode) -> bool {
         matches!(
             op,
@@ -280,30 +281,76 @@ impl PhpGenerator {
                 | OpCode::TryBegin
                 | OpCode::TryEnd
                 | OpCode::CatchException
-                | OpCode::TypeCheck
                 | OpCode::SaveReturn
                 | OpCode::SaveJump
                 | OpCode::ReturnDeferred
                 | OpCode::FinallyEnter
-                | OpCode::ExitOp
-                | OpCode::BindGlobal
-                | OpCode::StaticVarInit
-                | OpCode::Jmp
-                | OpCode::JmpZ
-                | OpCode::JmpNz
-                | OpCode::Assign
-                | OpCode::LoadConst
-                | OpCode::QmAssign
-                | OpCode::Nop
-                | OpCode::FreeTmps
         )
     }
 
-    /// Arithmetic / comparison on plain numbers (and string concatenation)
-    /// has no side effects: keep those hot opcodes in the generator loop.
-    fn scalar_fast_path(&self, op: &crate::opcode::Op, literals: &[Value]) -> bool {
+    /// Hot opcodes whose operands make them side-effect free (no warning,
+    /// destructor, typed reference or symbol table involved): run them in the
+    /// generator loop, with the same result as the VM's implementation.
+    fn local_fast_path(&self, vm: &Vm, op: &crate::opcode::Op, literals: &[Value]) -> bool {
         let num = |v: &Value| matches!(v, Value::Long(_) | Value::Double(_));
+        let undef_cv = |o: &OperandType| matches!(o, OperandType::Cv(i) if matches!(self.cvs.get(*i as usize), Some(Value::Undef) | None));
         match op.opcode {
+            OpCode::Nop | OpCode::Jmp | OpCode::LoadConst => true,
+            // Scalars only, no foreach state, no destructor pending.
+            OpCode::FreeTmps => {
+                !vm.has_release_work()
+                    && self.fe.snap.is_empty()
+                    && self.fe.obj.is_empty()
+                    && self.fe.iter_handles.is_empty()
+                    && match (op.op1, op.op2) {
+                        (OperandType::Tmp(a), OperandType::Tmp(b)) => {
+                            let end = (b as usize).min(self.tmps.len());
+                            self.tmps[(a as usize).min(end)..end].iter().all(|v| {
+                                !matches!(
+                                    v,
+                                    Value::Object(_)
+                                        | Value::Array(_)
+                                        | Value::Reference(_)
+                                        | Value::Generator(_)
+                                )
+                            })
+                        }
+                        _ => true,
+                    }
+            }
+            OpCode::QmAssign => !undef_cv(&op.op1),
+            OpCode::JmpZ | OpCode::JmpNz => {
+                !undef_cv(&op.op1)
+                    && !matches!(self.read_operand(&op.op1, literals), Value::Double(d) if d.is_nan())
+            }
+            // A scalar replaces a scalar in a plain variable (no reference,
+            // copy-on-write array, tracked object or release involved; see
+            // Vm::write_operand).
+            OpCode::Assign => {
+                let scalar = |v: Option<&Value>| {
+                    matches!(
+                        v,
+                        Some(
+                            Value::Null
+                                | Value::True
+                                | Value::False
+                                | Value::Long(_)
+                                | Value::Double(_)
+                                | Value::String(_)
+                        )
+                    )
+                };
+                let src = match op.op2 {
+                    OperandType::Cv(i) => self.cvs.get(i as usize),
+                    OperandType::Tmp(i) => self.tmps.get(i as usize),
+                    OperandType::Const(i) => literals.get(i as usize),
+                    _ => None,
+                };
+                self.symtab.is_none()
+                    && matches!(op.op1, OperandType::Cv(i) if matches!(self.cvs.get(i as usize), Some(Value::Undef)) || scalar(self.cvs.get(i as usize)))
+                    && scalar(src)
+                    && !matches!(op.result, OperandType::Cv(_))
+            }
             OpCode::Add
             | OpCode::Sub
             | OpCode::Mul
@@ -1149,38 +1196,13 @@ impl PhpGenerator {
             ip += 1;
 
             if !Self::generator_owned_op(op.opcode)
-                && !self.scalar_fast_path(op, &op_array.literals)
+                && !self.local_fast_path(vm, op, &op_array.literals)
             {
                 // Shared semantics: run the VM's implementation of the opcode
                 // on this frame's variables.
-                match vm.execute_single_op(
-                    &op_array,
-                    ip - 1,
-                    &mut self.cvs,
-                    &mut self.tmps,
-                    &mut self.symtab,
-                    &mut self.fe,
-                ) {
+                match self.run_on_vm(vm, &op_array, ip) {
                     Ok(next) => ip = next,
-                    Err(e) => {
-                        if vm.exit_requested {
-                            self.state = GeneratorState::Completed;
-                            self.ip = ip;
-                            return Ok(false);
-                        }
-                        if vm.current_exception.is_some() {
-                            if let Some((catch_target, _, _)) = self.exception_handlers.last() {
-                                let ct = *catch_target as usize;
-                                self.exception_handlers.pop();
-                                ip = ct;
-                                continue;
-                            }
-                        }
-                        self.state = GeneratorState::Completed;
-                        self.current_value = Value::Null;
-                        self.ip = ip;
-                        return Err(e);
-                    }
+                    Err(done) => return done,
                 }
                 continue;
             }
@@ -1575,100 +1597,29 @@ impl PhpGenerator {
                     return Ok(false);
                 }
 
-                // Re-implement all the VM opcodes that a generator might use
                 OpCode::Nop => {}
 
                 OpCode::FreeTmps => {
+                    // (local_fast_path: only scalars to drop)
                     if let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) {
                         let end = (b as usize).min(self.tmps.len());
-                        let mut freed = false;
                         for slot in self.tmps[(a as usize).min(end)..end].iter_mut() {
-                            if matches!(
-                                slot,
-                                Value::Object(_) | Value::Array(_) | Value::Reference(_)
-                            ) {
-                                freed = true;
-                            }
                             *slot = Value::Undef;
                         }
-                        if freed {
-                            let had = vm.current_exception.is_some();
-                            vm.run_pending_destructors_pub();
-                            if !had && vm.current_exception.is_some() {
-                                if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
-                                    ip = catch_target as usize;
-                                    continue;
-                                }
-                                return Err(VmError {
-                                    message: "Uncaught exception from destructor".into(),
-                                    line: op.line,
-                                });
-                            }
-                        }
                     }
-                }
-
-                OpCode::EmitNotice => {
-                    let msg_val = self.read_operand(&op.op1, &op_array.literals);
-                    let msg = msg_val.to_php_string().to_string_lossy();
-                    vm.emit_notice_at(&msg, op.line);
-                }
-
-                OpCode::Echo => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    let s = vm.value_to_string(&val);
-                    vm.write_output(s.as_bytes());
-                }
-
-                OpCode::Print => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    let s = val.to_php_string();
-                    vm.write_output(s.as_bytes());
-                    self.write_operand(&op.result, Value::Long(1));
                 }
 
                 OpCode::Assign => {
+                    // (local_fast_path: a scalar into a plain CV holding one)
                     let val = self.read_operand(&op.op2, &op_array.literals);
-                    let released = match op.op1 {
-                        OperandType::Cv(i) => matches!(
-                            self.cvs.get(i as usize),
-                            Some(Value::Object(_) | Value::Array(_))
-                        ),
-                        _ => false,
-                    };
                     if matches!(op.result, OperandType::Tmp(_)) {
-                        self.write_operand(&op.op1, val);
-                        let stored = match op.op1 {
-                            OperandType::Cv(i) => self
-                                .cvs
-                                .get(i as usize)
-                                .map(|v| v.deref())
-                                .unwrap_or(Value::Null),
-                            _ => Value::Null,
-                        };
-                        self.write_operand(&op.result, stored);
-                    } else {
-                        self.write_operand(&op.op1, val);
+                        self.write_operand(&op.result, val.clone());
                     }
+                    self.write_operand(&op.op1, val);
                     // The source temporary is consumed by the assignment.
                     if let OperandType::Tmp(t) = op.op2 {
                         if let Some(slot) = self.tmps.get_mut(t as usize) {
                             *slot = Value::Undef;
-                        }
-                    }
-                    if released {
-                        // The previous value may have lost its last holder.
-                        let had = vm.current_exception.is_some();
-                        vm.run_pending_destructors_pub();
-                        if !had && vm.current_exception.is_some() {
-                            if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
-                                ip = catch_target as usize;
-                                continue;
-                            }
-                            return Err(VmError {
-                                message: "Uncaught exception from destructor".into(),
-                                line: op.line,
-                            });
                         }
                     }
                 }
@@ -1688,89 +1639,24 @@ impl PhpGenerator {
                     self.write_operand(&op.result, v);
                 }
 
-                OpCode::AssignRef
-                    if matches!((op.op1, op.op2), (OperandType::Cv(_), OperandType::Tmp(_))) =>
-                {
-                    if let (OperandType::Cv(target_idx), OperandType::Tmp(tmp_idx)) =
-                        (op.op1, op.op2)
-                    {
-                        let ti = tmp_idx as usize;
-                        if ti < self.tmps.len() && (target_idx as usize) < self.cvs.len() {
-                            let r = if let Value::Reference(r) = &self.tmps[ti] {
-                                r.clone()
-                            } else {
-                                let r = Rc::new(RefCell::new(self.tmps[ti].clone()));
-                                self.tmps[ti] = Value::Reference(r.clone());
-                                r
-                            };
-                            self.cvs[target_idx as usize] = Value::Reference(r);
-                        }
-                    }
-                }
-
-                OpCode::AssignRef => {
-                    if let (OperandType::Cv(target_idx), OperandType::Cv(value_idx)) =
-                        (op.op1, op.op2)
-                    {
-                        let ti = target_idx as usize;
-                        let vi = value_idx as usize;
-                        let ref_cell = if let Value::Reference(r) = &self.cvs[vi] {
-                            r.clone()
-                        } else {
-                            let r = Rc::new(RefCell::new(self.cvs[vi].clone()));
-                            self.cvs[vi] = Value::Reference(r.clone());
-                            r
-                        };
-                        self.cvs[ti] = Value::Reference(ref_cell);
-                    }
-                }
-
                 OpCode::Add => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
                     self.write_operand(&op.result, a.add(&b));
                 }
+
                 OpCode::Sub => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
                     self.write_operand(&op.result, a.sub(&b));
                 }
+
                 OpCode::Mul => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
                     self.write_operand(&op.result, a.mul(&b));
                 }
-                OpCode::Div => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    match a.div(&b) {
-                        Ok(result) => self.write_operand(&op.result, result),
-                        Err(msg) => {
-                            return Err(VmError {
-                                message: msg.to_string(),
-                                line: op.line,
-                            });
-                        }
-                    }
-                }
-                OpCode::Mod => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    match a.modulo(&b) {
-                        Ok(result) => self.write_operand(&op.result, result),
-                        Err(msg) => {
-                            return Err(VmError {
-                                message: msg.to_string(),
-                                line: op.line,
-                            });
-                        }
-                    }
-                }
-                OpCode::Pow => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.result, a.pow(&b));
-                }
+
                 OpCode::Concat => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
@@ -1780,70 +1666,7 @@ impl PhpGenerator {
                     result.extend_from_slice(b_str.as_bytes());
                     self.write_operand(&op.result, Value::String(PhpString::from_vec(result)));
                 }
-                OpCode::Negate => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    self.write_operand(&op.result, a.negate());
-                }
 
-                OpCode::BitwiseAnd => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(a.to_long() & b.to_long()));
-                }
-                OpCode::BitwiseOr => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(a.to_long() | b.to_long()));
-                }
-                OpCode::BitwiseXor => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(a.to_long() ^ b.to_long()));
-                }
-                OpCode::BoolXor => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    let result = if a.is_truthy() ^ b.is_truthy() {
-                        Value::True
-                    } else {
-                        Value::False
-                    };
-                    self.write_operand(&op.result, result);
-                }
-                OpCode::BitwiseNot => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(!a.to_long()));
-                }
-                OpCode::ShiftLeft => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(
-                        &op.result,
-                        Value::Long(a.to_long().wrapping_shl(b.to_long() as u32)),
-                    );
-                }
-                OpCode::ShiftRight => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(
-                        &op.result,
-                        Value::Long(a.to_long().wrapping_shr(b.to_long() as u32)),
-                    );
-                }
-
-                OpCode::BooleanNot => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    self.write_operand(
-                        &op.result,
-                        if a.is_truthy() {
-                            Value::False
-                        } else {
-                            Value::True
-                        },
-                    );
-                }
-
-                // Comparisons
                 OpCode::Equal => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
@@ -1856,6 +1679,7 @@ impl PhpGenerator {
                         },
                     );
                 }
+
                 OpCode::NotEqual => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
@@ -1868,6 +1692,7 @@ impl PhpGenerator {
                         },
                     );
                 }
+
                 OpCode::Identical => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
@@ -1880,6 +1705,7 @@ impl PhpGenerator {
                         },
                     );
                 }
+
                 OpCode::NotIdentical => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
@@ -1892,6 +1718,7 @@ impl PhpGenerator {
                         },
                     );
                 }
+
                 OpCode::Less => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
@@ -1904,6 +1731,7 @@ impl PhpGenerator {
                         },
                     );
                 }
+
                 OpCode::LessEqual => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
@@ -1916,6 +1744,7 @@ impl PhpGenerator {
                         },
                     );
                 }
+
                 OpCode::Greater => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
@@ -1928,6 +1757,7 @@ impl PhpGenerator {
                         },
                     );
                 }
+
                 OpCode::GreaterEqual => {
                     let a = self.read_operand(&op.op1, &op_array.literals);
                     let b = self.read_operand(&op.op2, &op_array.literals);
@@ -1940,115 +1770,28 @@ impl PhpGenerator {
                         },
                     );
                 }
-                OpCode::Spaceship => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(a.compare(&b)));
-                }
 
-                // Compound assignments
-                OpCode::AssignAdd => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.add(&rhs));
-                }
-                OpCode::AssignSub => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.sub(&rhs));
-                }
-                OpCode::AssignMul => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.mul(&rhs));
-                }
-                OpCode::AssignDiv => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    match cv_val.div(&rhs) {
-                        Ok(result) => self.write_operand(&op.op1, result),
-                        Err(msg) => {
-                            return Err(VmError {
-                                message: msg.to_string(),
-                                line: op.line,
-                            });
-                        }
-                    }
-                }
-                OpCode::AssignMod => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    match cv_val.modulo(&rhs) {
-                        Ok(result) => self.write_operand(&op.op1, result),
-                        Err(msg) => {
-                            return Err(VmError {
-                                message: msg.to_string(),
-                                line: op.line,
-                            });
-                        }
-                    }
-                }
-                OpCode::AssignPow => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.pow(&rhs));
-                }
-                OpCode::AssignConcat => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.op1, cv_val.concat(&rhs));
-                }
-                OpCode::AssignBitwiseAnd => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() & rhs.to_long()));
-                }
-                OpCode::AssignBitwiseOr => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() | rhs.to_long()));
-                }
-                OpCode::AssignBitwiseXor => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(&op.op1, Value::Long(cv_val.to_long() ^ rhs.to_long()));
-                }
-                OpCode::AssignShiftLeft => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(
-                        &op.op1,
-                        Value::Long(cv_val.to_long().wrapping_shl(rhs.to_long() as u32)),
-                    );
-                }
-                OpCode::AssignShiftRight => {
-                    let cv_val = self.read_operand(&op.op1, &op_array.literals);
-                    let rhs = self.read_operand(&op.op2, &op_array.literals);
-                    self.write_operand(
-                        &op.op1,
-                        Value::Long(cv_val.to_long().wrapping_shr(rhs.to_long() as u32)),
-                    );
-                }
-
-                // Increment / Decrement
                 OpCode::PreIncrement => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     let new_val = val.add(&Value::Long(1));
                     self.write_operand(&op.op1, new_val.clone());
                     self.write_operand(&op.result, new_val);
                 }
+
                 OpCode::PreDecrement => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     let new_val = val.sub(&Value::Long(1));
                     self.write_operand(&op.op1, new_val.clone());
                     self.write_operand(&op.result, new_val);
                 }
+
                 OpCode::PostIncrement => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     let new_val = val.add(&Value::Long(1));
                     self.write_operand(&op.result, val);
                     self.write_operand(&op.op1, new_val);
                 }
+
                 OpCode::PostDecrement => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     let new_val = val.sub(&Value::Long(1));
@@ -2056,12 +1799,12 @@ impl PhpGenerator {
                     self.write_operand(&op.op1, new_val);
                 }
 
-                // Control flow
                 OpCode::Jmp => {
                     if let OperandType::JmpTarget(target) = op.op1 {
                         ip = target as usize;
                     }
                 }
+
                 OpCode::JmpZ => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     if !val.is_truthy() {
@@ -2070,6 +1813,7 @@ impl PhpGenerator {
                         }
                     }
                 }
+
                 OpCode::JmpNz => {
                     let val = self.read_operand(&op.op1, &op_array.literals);
                     if val.is_truthy() {
@@ -2079,205 +1823,22 @@ impl PhpGenerator {
                     }
                 }
 
-                // Casts
-                OpCode::CastInt => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    self.write_operand(&op.result, Value::Long(val.to_long()));
-                }
-                OpCode::CastFloat => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    self.write_operand(&op.result, Value::Double(val.to_double()));
-                }
-                OpCode::CastString => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    self.write_operand(&op.result, Value::String(val.to_php_string()));
-                }
-                OpCode::CastBool => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    self.write_operand(
-                        &op.result,
-                        if val.is_truthy() {
-                            Value::True
-                        } else {
-                            Value::False
-                        },
-                    );
-                }
-                OpCode::CastArray => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    let arr = match val {
-                        Value::Array(a) => a,
-                        other => {
-                            let mut arr = crate::array::PhpArray::new();
-                            arr.push(other);
-                            Rc::new(RefCell::new(arr))
-                        }
-                    };
-                    self.write_operand(&op.result, Value::Array(arr));
-                }
-                OpCode::CastObject => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    let obj = match val {
-                        Value::Object(o) => Value::Object(o),
-                        _ => {
-                            // Simplified - just create an empty stdClass for now
-                            let obj = crate::object::PhpObject::new(b"stdClass".to_vec(), 0);
-                            Value::Object(Rc::new(RefCell::new(obj)))
-                        }
-                    };
-                    self.write_operand(&op.result, obj);
-                }
-
-                // Arrays
                 OpCode::ArrayNew => {
                     let arr = Rc::new(RefCell::new(crate::array::PhpArray::new()));
                     self.write_operand(&op.result, Value::Array(arr));
                 }
-                OpCode::ArrayAppend => {
-                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
-                    let val = self.read_operand(&op.op2, &op_array.literals);
-                    if let Value::Array(arr) = arr_val {
-                        arr.borrow_mut().push(val);
-                    }
-                }
-                OpCode::ArraySet => {
-                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
-                    let val = self.read_operand(&op.op2, &op_array.literals);
-                    let key_val = self.read_operand(&op.result, &op_array.literals);
-                    if let Value::Array(arr) = arr_val {
-                        let key = Vm::value_to_array_key(key_val);
-                        arr.borrow_mut().set(key, val);
-                    }
-                }
-                OpCode::ArrayGet | OpCode::ListGet => {
-                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
-                    let key_val = self.read_operand(&op.op2, &op_array.literals);
-                    let result = if let Value::Array(arr) = &arr_val {
-                        let key = Vm::value_to_array_key(key_val.clone());
-                        arr.borrow().get(&key).cloned().unwrap_or(Value::Null)
-                    } else if matches!(op.opcode, OpCode::ArrayGet) {
-                        if let Value::String(s) = &arr_val {
-                            let idx = key_val.to_long();
-                            let bytes = s.as_bytes();
-                            if idx >= 0 && (idx as usize) < bytes.len() {
-                                Value::String(PhpString::one_char(bytes[idx as usize]))
-                            } else {
-                                Value::String(PhpString::empty())
-                            }
-                        } else {
-                            Value::Null
-                        }
-                    } else {
-                        Value::Null
-                    };
-                    self.write_operand(&op.result, result);
-                }
-
-                OpCode::ConstLookup => {
-                    let name = self
-                        .read_operand(&op.op1, &op_array.literals)
-                        .to_php_string();
-                    let val = vm.lookup_constant(name.as_bytes());
-                    self.write_operand(&op.result, val);
-                }
-
-                OpCode::MakeClosure => {
-                    let inner = self.read_operand(&op.op1, &op_array.literals);
-                    let inner = vm.closure_scope_at_creation(inner, op_array.scope_class.as_ref());
-                    let inner = vm.closure_with_own_statics(inner, None);
-                    let obj = vm.make_closure_object(inner);
-                    self.write_operand(&op.result, obj);
-                }
-                OpCode::MakeFcc => {
-                    let inner = self.read_operand(&op.op1, &op_array.literals);
-                    let desc = self
-                        .read_operand(&op.op2, &op_array.literals)
-                        .to_php_string();
-                    let this = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
-                        Some(self.read_operand(&OperandType::Cv(0), &op_array.literals))
-                            .filter(|v| matches!(v, Value::Object(_)))
-                    } else {
-                        None
-                    };
-                    match vm.make_fcc(inner, desc.as_bytes(), this, op_array.scope_class.clone()) {
-                        Ok(obj) => self.write_operand(&op.result, obj),
-                        Err((cls, msg)) => {
-                            if vm.current_exception.is_none() {
-                                let exc = vm.create_exception(cls, &msg, op.line);
-                                vm.current_exception = Some(exc);
-                            }
-                            if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
-                                ip = catch_target as usize;
-                                continue;
-                            }
-                            self.state = GeneratorState::Completed;
-                            self.ip = ip;
-                            return Err(VmError {
-                                message: format!(
-                                    "Uncaught {}: {}",
-                                    String::from_utf8_lossy(cls),
-                                    msg
-                                ),
-                                line: op.line,
-                            });
-                        }
-                    }
-                }
-                OpCode::DeclareFunction => {
-                    let name_val = self.read_operand(&op.op1, &op_array.literals);
-                    let func_idx_val = self.read_operand(&op.op2, &op_array.literals);
-                    let func_idx = func_idx_val.to_long() as usize;
-                    if let Some(func_op_array) = op_array.child_functions.get(func_idx) {
-                        let name = name_val.to_php_string();
-                        if let OperandType::Const(c) = op.result {
-                            if let Some(msg) = vm.function_redeclaration_error(name.as_bytes()) {
-                                let ty = op_array.literals[c as usize].to_long();
-                                return Err(vm.emit_fatal_typed_at(ty, &msg, op.line));
-                            }
-                        }
-                        vm.register_user_function(name.as_bytes(), func_op_array.clone());
-                    }
-                }
-
-                OpCode::StaticVarInit => {
-                    let key_val = self.read_operand(&op.result, &op_array.literals);
-                    let key = Vm::static_var_key(&op_array, key_val.to_php_string().as_bytes());
-                    let default = if vm.static_vars().contains_key(&key) {
-                        Value::Null
-                    } else {
-                        self.read_operand(&op.op2, &op_array.literals)
-                    };
-                    let cell = vm.static_var_cell(&key, default);
-                    if let OperandType::Cv(cv_idx) = op.op1 {
-                        if let Some(slot) = self.cvs.get_mut(cv_idx as usize) {
-                            *slot = cell;
-                        }
-                    }
-                }
-
-                OpCode::BindGlobal => {
-                    let name_val = self.read_operand(&op.op2, &op_array.literals);
-                    let name = name_val.to_php_string().as_bytes().to_vec();
-                    // The CV becomes a reference to the global (ZEND_BIND_GLOBAL).
-                    let target = match op.op1 {
-                        OperandType::Unused => op_array
-                            .cv_names
-                            .iter()
-                            .position(|n| *n == name)
-                            .map(|i| OperandType::Cv(i as u32)),
-                        o => Some(o),
-                    };
-                    if let Some(OperandType::Cv(cv_idx)) = target {
-                        let cell = vm.global_cell(&name);
-                        if let Some(slot) = self.cvs.get_mut(cv_idx as usize) {
-                            *slot = Value::Reference(cell);
-                        }
-                    }
-                }
 
                 OpCode::Throw => {
-                    let exc_val = self.read_operand(&op.op1, &op_array.literals);
-                    vm.current_exception = Some(exc_val);
+                    let exc_val = self.read_operand_r(vm, &op.op1, &op_array.literals, op.line);
+                    // Leave the `@` levels entered since the handler's try.
+                    match self.exception_handlers.last() {
+                        Some(&(_, _, depth)) => vm.restore_error_reporting_to(depth as usize),
+                        None => vm.restore_error_reporting_to(
+                            vm.error_reporting_stack.len().saturating_sub(1),
+                        ),
+                    }
+                    let exc = vm.thrown_exception(exc_val, op.line);
+                    vm.current_exception = Some(exc);
                     if let Some((catch_target, finally_target, _)) = self.exception_handlers.pop() {
                         // Prefer catch handler if present; otherwise jump to finally
                         // so the finally block runs and re-raises the pending exception
@@ -2310,7 +1871,11 @@ impl PhpGenerator {
                     if let (OperandType::JmpTarget(catch), OperandType::JmpTarget(finally_target)) =
                         (op.op1, op.op2)
                     {
-                        self.exception_handlers.push((catch, finally_target, 0));
+                        self.exception_handlers.push((
+                            catch,
+                            finally_target,
+                            vm.error_reporting_stack.len() as u32,
+                        ));
                     }
                 }
 
@@ -2557,305 +2122,50 @@ impl PhpGenerator {
                     // Otherwise continue (no pending return, jump, or exception)
                 }
 
-                OpCode::TypeCheck => {
-                    let exc_val = self.read_operand(&op.op1, &op_array.literals);
-                    let type_name = self.read_operand(&op.op2, &op_array.literals);
-                    let type_str = type_name.to_php_string();
-                    let type_lower: Vec<u8> = type_str
-                        .as_bytes()
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    let matches = if let Value::Object(obj) = &exc_val {
-                        let class_lower: Vec<u8> = obj
-                            .borrow()
-                            .class_name
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        class_lower == type_lower
-                            || crate::vm::is_builtin_subclass(&class_lower, &type_lower)
-                            || vm.class_extends(&class_lower, &type_lower)
-                            || type_lower == b"throwable"
-                    } else {
-                        false
-                    };
-                    self.write_operand(
-                        &op.result,
-                        if matches { Value::True } else { Value::False },
-                    );
-                }
-
-                OpCode::PropertyGet => {
-                    let obj_val = self.read_operand(&op.op1, &op_array.literals);
-                    let prop_name = self
-                        .read_operand(&op.op2, &op_array.literals)
-                        .to_php_string();
-                    let result = if let Value::Object(obj) = &obj_val {
-                        obj.borrow().get_property(prop_name.as_bytes())
-                    } else {
-                        Value::Null
-                    };
-                    self.write_operand(&op.result, result);
-                }
-
-                OpCode::PropertySet => {
-                    let obj_val = self.read_operand(&op.op1, &op_array.literals);
-                    let prop_name = self
-                        .read_operand(&op.op2, &op_array.literals)
-                        .to_php_string();
-                    let val = self.read_operand(&op.result, &op_array.literals);
-                    if let Value::Object(obj) = &obj_val {
-                        obj.borrow_mut()
-                            .set_property(prop_name.as_bytes().to_vec(), val);
-                    } else if let Value::Generator(_) = &obj_val {
-                        let prop_str = prop_name.to_string_lossy();
-                        let msg =
-                            format!("Cannot create dynamic property Generator::${}", prop_str);
-                        let exc = vm.create_exception(b"Error", &msg, op.line);
-                        vm.current_exception = Some(exc);
-                        return Err(VmError {
-                            message: format!("Uncaught Error: {}", msg),
-                            line: op.line,
-                        });
-                    }
-                }
-
-                OpCode::IssetCheck => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    let result = match val {
-                        Value::Null | Value::Undef => Value::False,
-                        _ => Value::True,
-                    };
-                    self.write_operand(&op.result, result);
-                }
-
-                OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
-                    // isset($arr[$key]) in generator context
-                    let arr_val = self.read_operand(&op.op1, &op_array.literals);
-                    let key_val = self.read_operand(&op.op2, &op_array.literals);
-                    let result = if let Value::Array(arr) = &arr_val {
-                        let key = Vm::value_to_array_key(key_val.clone());
-                        match arr.borrow().get(&key) {
-                            Some(v) if !matches!(v, Value::Null | Value::Undef) => Value::True,
-                            _ => Value::False,
-                        }
-                    } else if let Value::Object(obj) = &arr_val {
-                        let class_lower: Vec<u8> = obj
-                            .borrow()
-                            .class_name
-                            .iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        let is_spl_array = matches!(
-                            class_lower.as_slice(),
-                            b"arrayobject"
-                                | b"arrayiterator"
-                                | b"recursivearrayiterator"
-                                | b"splfixedarray"
-                                | b"splobjectstorage"
-                        );
-                        let has_user_offset = vm
-                            .classes
-                            .get(&class_lower)
-                            .map(|c| c.get_method(b"offsetexists").is_some())
-                            .unwrap_or(false);
-                        if is_spl_array || has_user_offset {
-                            let args = vec![arr_val.clone(), key_val.clone()];
-                            let exists_result = vm
-                                .handle_spl_docall(&class_lower, b"offsetexists", &args)
-                                .unwrap_or_else(|| {
-                                    vm.call_object_method(&arr_val, b"offsetexists", &[key_val])
-                                        .unwrap_or(Value::False)
-                                });
-                            if exists_result.is_truthy() {
-                                Value::True
-                            } else {
-                                Value::False
-                            }
-                        } else {
-                            Value::False
-                        }
-                    } else if let Value::String(s) = &arr_val {
-                        let idx = key_val.to_long();
-                        let len = s.as_bytes().len() as i64;
-                        if (idx >= 0 && idx < len) || (idx < 0 && (-idx) <= len) {
-                            Value::True
-                        } else {
-                            Value::False
-                        }
-                    } else {
-                        Value::False
-                    };
-                    self.write_operand(&op.result, result);
-                }
-
-                OpCode::ErrorSuppress => {
-                    vm.error_reporting_stack.push(vm.error_reporting);
-                    vm.error_reporting = crate::errdisplay::begin_silence(
-                        vm.error_reporting,
-                        matches!(op.op1, crate::opcode::OperandType::Const(_)),
-                    );
-                }
-
-                OpCode::ErrorRestore => {
-                    if let Some(saved) = vm.error_reporting_stack.pop() {
-                        vm.error_reporting =
-                            crate::errdisplay::end_silence(vm.error_reporting, saved);
-                    }
-                }
-
-                OpCode::UnsetCv => {
-                    let mut released = false;
-                    if let OperandType::Cv(idx) = op.op1 {
-                        if let Some(slot) = self.cvs.get_mut(idx as usize) {
-                            released = matches!(slot, Value::Object(_) | Value::Array(_));
-                            *slot = Value::Undef;
-                        }
-                    }
-                    if released {
-                        let had = vm.current_exception.is_some();
-                        vm.run_pending_destructors_pub();
-                        if !had && vm.current_exception.is_some() {
-                            if let Some((catch_target, _, _)) = self.exception_handlers.pop() {
-                                ip = catch_target as usize;
-                                continue;
-                            }
-                            return Err(VmError {
-                                message: "Uncaught exception from destructor".into(),
-                                line: op.line,
-                            });
-                        }
-                    }
-                }
-
-                OpCode::ArrayUnset => {
-                    let key_val = self.read_operand(&op.op2, &op_array.literals);
-                    let arr_val = if let OperandType::Cv(idx) = &op.op1 {
-                        self.cvs.get(*idx as usize).cloned()
-                    } else {
-                        None
-                    };
-                    if let Some(Value::Array(arr)) = arr_val {
-                        let key = Vm::value_to_array_key(key_val);
-                        arr.borrow_mut().remove(&key);
-                    }
-                }
-
-                OpCode::CloneObj => {
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    let cloned = match &val {
-                        Value::Object(_) if val.is_closure_obj() => vm.clone_closure(&val),
-                        Value::Object(obj) => {
-                            let obj_borrow = obj.borrow();
-                            let clone_id = vm.next_object_id();
-                            let mut new_obj = crate::object::PhpObject::new(
-                                obj_borrow.class_name.clone(),
-                                clone_id,
-                            );
-                            for (name, value) in &obj_borrow.properties {
-                                new_obj.set_property(name.clone(), value.clone());
-                            }
-                            Value::Object(Rc::new(RefCell::new(new_obj)))
-                        }
-                        other => other.clone(),
-                    };
-                    self.write_operand(&op.result, cloned);
-                }
-
-                OpCode::ArraySpread => {
-                    let target_val = if let OperandType::Tmp(idx) = &op.op1 {
-                        self.tmps.get(*idx as usize).cloned()
-                    } else if let OperandType::Cv(idx) = &op.op1 {
-                        self.cvs.get(*idx as usize).cloned()
-                    } else {
-                        None
-                    };
-                    let source = self.read_operand(&op.op2, &op_array.literals);
-                    if let (Some(Value::Array(target)), Value::Array(source_arr)) =
-                        (target_val, source)
-                    {
-                        let source_borrow = source_arr.borrow();
-                        let mut target_borrow = target.borrow_mut();
-                        for (key, val) in source_borrow.iter() {
-                            match key {
-                                crate::array::ArrayKey::Int(_) => {
-                                    target_borrow.push(val.clone());
-                                }
-                                crate::array::ArrayKey::String(s) => {
-                                    target_borrow.set(
-                                        crate::array::ArrayKey::String(s.clone()),
-                                        val.clone(),
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-
-                OpCode::FastConcat => {
-                    let a = self.read_operand(&op.op1, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &op_array.literals);
-                    let a_str = a.to_php_string();
-                    let b_str = b.to_php_string();
-                    let mut result = a_str.as_bytes().to_vec();
-                    result.extend_from_slice(b_str.as_bytes());
-                    self.write_operand(&op.result, Value::String(PhpString::from_vec(result)));
-                }
-
-                OpCode::GetClassName => {
-                    let obj = self.read_operand(&op.op1, &op_array.literals);
-                    let name = match &obj {
-                        Value::Object(o) => {
-                            Value::String(PhpString::from_vec(o.borrow().class_name.clone()))
-                        }
-                        _ => Value::String(PhpString::empty()),
-                    };
-                    self.write_operand(&op.result, name);
-                }
-
-                OpCode::ExitOp => {
-                    // exit/die inside a generator/fiber: output value and signal exit
-                    let val = self.read_operand(&op.op1, &op_array.literals);
-                    match &val {
-                        Value::Long(_) => {}
-                        _ => {
-                            let s = val.to_php_string();
-                            vm.write_output(s.as_bytes());
-                        }
-                    }
-                    self.state = GeneratorState::Completed;
-                    self.ip = ip;
-                    vm.exit_requested = true;
-                    return Ok(false);
-                }
-
                 // Every other opcode runs through the VM's implementation on
                 // this frame's variables.
-                _ => match vm.execute_single_op(
-                    &op_array,
-                    ip - 1,
-                    &mut self.cvs,
-                    &mut self.tmps,
-                    &mut self.symtab,
-                    &mut self.fe,
-                ) {
+                _ => match self.run_on_vm(vm, &op_array, ip) {
                     Ok(next) => ip = next,
-                    Err(e) => {
-                        if vm.current_exception.is_some() {
-                            if let Some((catch_target, _, _)) = self.exception_handlers.last() {
-                                let ct = *catch_target as usize;
-                                self.exception_handlers.pop();
-                                ip = ct;
-                                continue;
-                            }
-                        }
-                        self.state = GeneratorState::Completed;
-                        self.current_value = Value::Null;
-                        self.ip = ip;
-                        return Err(e);
-                    }
+                    Err(done) => return done,
                 },
+            }
+        }
+    }
+
+    /// Run the opcode before `ip` with the VM's implementation on this
+    /// frame's variables. Ok: where execution continues (an exception it
+    /// raised is dispatched to the frame's handlers); Err: what the resumption
+    /// returns (exit, or an exception leaving the generator).
+    fn run_on_vm(
+        &mut self,
+        vm: &mut Vm,
+        op_array: &OpArray,
+        ip: usize,
+    ) -> Result<usize, Result<bool, VmError>> {
+        match vm.execute_single_op(
+            op_array,
+            ip - 1,
+            &mut self.cvs,
+            &mut self.tmps,
+            &mut self.symtab,
+            &mut self.fe,
+        ) {
+            Ok(next) => Ok(next),
+            Err(e) => {
+                if vm.exit_requested {
+                    self.state = GeneratorState::Completed;
+                    self.ip = ip;
+                    return Err(Ok(false));
+                }
+                if vm.current_exception.is_some() {
+                    if let Some(target) = self.dispatch_exception() {
+                        return Ok(target);
+                    }
+                }
+                self.state = GeneratorState::Completed;
+                self.current_value = Value::Null;
+                self.ip = ip;
+                Err(Err(e))
             }
         }
     }

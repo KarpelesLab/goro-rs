@@ -6550,13 +6550,65 @@ impl Vm {
     /// Run destructors for objects that are only held by the destructible_objects list.
     /// In PHP, __destruct is called eagerly when the last user reference is dropped.
     /// Since destructible_objects keeps an Rc, we check for strong_count == 1.
+    /// ZEND_THROW's operand check: why `v` cannot be thrown, if it cannot.
+    pub(crate) fn throw_operand_error(&self, v: &Value) -> Option<&'static str> {
+        let Value::Object(obj) = v else {
+            return Some("Can only throw objects");
+        };
+        let class_lower: Vec<u8> = obj.borrow().class_name.to_ascii_lowercase();
+        let is_throwable = class_lower == b"exception"
+            || class_lower == b"error"
+            || is_builtin_subclass(&class_lower, b"exception")
+            || is_builtin_subclass(&class_lower, b"error")
+            || self.class_extends(&class_lower, b"exception")
+            || self.class_extends(&class_lower, b"error");
+        (!is_throwable).then_some("Cannot throw objects that do not implement Throwable")
+    }
+
+    /// A thrown exception takes the pending one (a finally block entered by
+    /// it is running) as its previous exception, when it has none.
+    pub(crate) fn chain_pending_exception(&mut self, exc_val: &Value) {
+        if let Some(prev_exc) = self
+            .current_exception
+            .take()
+            .filter(|e| !Self::is_graceful_exit(e))
+        {
+            if let Value::Object(new_obj) = exc_val {
+                let mut new_borrow = new_obj.borrow_mut();
+                if matches!(new_borrow.get_property(b"previous"), Value::Null) {
+                    new_borrow.set_property(b"previous".to_vec(), prev_exc);
+                }
+            }
+        }
+    }
+
+    /// The exception a `throw` of `v` raises (ZEND_THROW): `v` itself,
+    /// chained to the pending exception, or the Error for a value that
+    /// cannot be thrown.
+    pub(crate) fn thrown_exception(&mut self, v: Value, line: u32) -> Value {
+        if let Some(msg) = self.throw_operand_error(&v) {
+            return self.create_exception(b"Error", msg, line);
+        }
+        self.chain_pending_exception(&v);
+        v
+    }
+
+    /// Leave the `@` levels entered above `depth` of error_reporting_stack.
+    pub(crate) fn restore_error_reporting_to(&mut self, depth: usize) {
+        while self.error_reporting_stack.len() > depth {
+            if let Some(saved) = self.error_reporting_stack.pop() {
+                self.error_reporting = saved;
+            }
+        }
+    }
+
     pub fn run_pending_destructors_pub(&mut self) {
         self.run_pending_destructors();
     }
 
     /// Values released by the current opcode may need destruction work.
     #[inline]
-    fn has_release_work(&self) -> bool {
+    pub(crate) fn has_release_work(&self) -> bool {
         !self.destructible_objects.is_empty() || !self.finally_generators.is_empty()
     }
 
@@ -35178,10 +35230,8 @@ impl Vm {
                         self.error_reporting = saved;
                     }
 
-                    // Check that we're throwing an object
-                    if !matches!(&exc_val, Value::Object(_)) {
-                        let err_msg = "Can only throw objects".to_string();
-                        let err_exc = self.create_exception(b"Error", &err_msg, op.line);
+                    if let Some(err_msg) = self.throw_operand_error(&exc_val) {
+                        let err_exc = self.create_exception(b"Error", err_msg, op.line);
                         self.current_exception = Some(err_exc);
                         if let Some((catch_target, finally_target, _, _, saved_pc)) =
                             exception_handlers.pop()
@@ -35200,43 +35250,6 @@ impl Vm {
                         });
                     }
 
-                    // Check that the object implements Throwable
-                    if let Value::Object(obj) = &exc_val {
-                        let class_name = {
-                            let obj_ref = obj.borrow();
-                            obj_ref.class_name.clone()
-                        };
-                        let class_lower: Vec<u8> =
-                            class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        let is_throwable = class_lower == b"exception"
-                            || class_lower == b"error"
-                            || is_builtin_subclass(&class_lower, b"exception")
-                            || is_builtin_subclass(&class_lower, b"error")
-                            || self.class_extends(&class_lower, b"exception")
-                            || self.class_extends(&class_lower, b"error");
-                        if !is_throwable {
-                            let err_msg =
-                                "Cannot throw objects that do not implement Throwable".to_string();
-                            let err_exc = self.create_exception(b"Error", &err_msg, op.line);
-                            self.current_exception = Some(err_exc);
-                            if let Some((catch_target, finally_target, _, _, saved_pc)) =
-                                exception_handlers.pop()
-                            {
-                                pending_calls_catch_depth = Some(saved_pc);
-                                if catch_target > 0 {
-                                    ip = catch_target as usize;
-                                } else if finally_target > 0 {
-                                    ip = finally_target as usize;
-                                }
-                                return Ok(Flow::Continue);
-                            }
-                            return Err(VmError {
-                                message: format!("Uncaught Error: {}", err_msg),
-                                line: op.line,
-                            });
-                        }
-                    }
-
                     if let Some((catch_target, finally_target, _exc_tmp, _, saved_pending_calls)) =
                         exception_handlers.pop()
                     {
@@ -35244,22 +35257,9 @@ impl Vm {
                         // any stale pending calls from partially-evaluated expressions
                         self.pending_calls.truncate(saved_pending_calls);
 
-                        // If there's already a pending exception (e.g., we're inside a finally block
-                        // entered due to an exception), chain it as the "previous" of the new exception.
-                        if let Some(prev_exc) = self
-                            .current_exception
-                            .take()
-                            .filter(|e| !Self::is_graceful_exit(e))
-                        {
-                            if let Value::Object(ref new_obj) = exc_val {
-                                let mut new_borrow = new_obj.borrow_mut();
-                                // Only set previous if it's currently null
-                                let current_prev = new_borrow.get_property(b"previous");
-                                if matches!(current_prev, Value::Null) {
-                                    new_borrow.set_property(b"previous".to_vec(), prev_exc);
-                                }
-                            }
-                        }
+                        // A pending exception (a finally block entered by one)
+                        // becomes the "previous" of the new exception.
+                        self.chain_pending_exception(&exc_val);
                         // Store exception for the catch block to access
                         self.current_exception = Some(exc_val);
 
@@ -35274,20 +35274,7 @@ impl Vm {
                         }
                     } else {
                         // No handler - check if there's a pending finally from an outer scope
-                        // Chain previous exception if any
-                        if let Some(prev_exc) = self
-                            .current_exception
-                            .take()
-                            .filter(|e| !Self::is_graceful_exit(e))
-                        {
-                            if let Value::Object(ref new_obj) = exc_val {
-                                let mut new_borrow = new_obj.borrow_mut();
-                                let current_prev = new_borrow.get_property(b"previous");
-                                if matches!(current_prev, Value::Null) {
-                                    new_borrow.set_property(b"previous".to_vec(), prev_exc);
-                                }
-                            }
-                        }
+                        self.chain_pending_exception(&exc_val);
                         // Close any generators in CVs/tmps before propagating the exception
                         // (in PHP, generators run their finally blocks when destroyed)
                         for cv in cvs.iter_mut() {
