@@ -77,6 +77,8 @@ fn value_has_marker(v: &Value) -> bool {
 /// Name prefix of the op arrays compiled for lazily evaluated class
 /// constant expressions (see Compiler::compile_const_thunk).
 pub const CONST_THUNK_PREFIX: &str = "__const_thunk_";
+/// Reserved variable names standing for the operands of a pipe (`|>`).
+const PIPE_ALIAS_PREFIX: &[u8] = b"\0pipe";
 
 fn next_closure_id() -> u64 {
     CLOSURE_COUNTER.with(|c| {
@@ -1379,6 +1381,21 @@ impl Compiler {
         let mut has_named = false;
         let mut has_unpack = false;
         for (i, arg) in args.iter().enumerate() {
+            // The operand of a pipe: a temporary (ZEND_SEND_VAL_EX).
+            if matches!(&arg.value.kind, ExprKind::Variable(n) if n.starts_with(PIPE_ALIAS_PREFIX))
+            {
+                let v = self.compile_expr(&arg.value)?;
+                let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
+                let kind = self.op_array.add_literal(Value::Long(1));
+                self.op_array.emit(Op {
+                    opcode: OpCode::SendValChecked,
+                    op1: v,
+                    op2: OperandType::Const(pos_idx),
+                    result: OperandType::Const(kind),
+                    line,
+                });
+                continue;
+            }
             if arg.unpack {
                 // Cannot use argument unpacking after named arguments
                 if has_named {
@@ -10464,6 +10481,31 @@ impl Compiler {
                     });
                     self.compile_list_destructure(&nested, OperandType::Tmp(sub_arr), line)?;
                 } else if !matches!(&elem.value.kind, ExprKind::Null) {
+                    // zend_verify_list_assign_target() and
+                    // zend_ensure_writable_variable().
+                    let msg = match &elem.value.kind {
+                        ExprKind::FunctionCall { .. } | ExprKind::Pipe { .. } => {
+                            Some("Can't use function return value in write context")
+                        }
+                        ExprKind::MethodCall { .. }
+                        | ExprKind::StaticMethodCall { .. }
+                        | ExprKind::DynamicStaticMethodCall { .. } => {
+                            Some("Can't use method return value in write context")
+                        }
+                        ExprKind::ArrayAccess { .. }
+                        | ExprKind::PropertyAccess { .. }
+                        | ExprKind::StaticPropertyAccess { .. }
+                        | ExprKind::DynamicStaticPropertyAccess { .. }
+                        | ExprKind::DynamicVariable(_)
+                        | ExprKind::Variable(_) => None,
+                        _ => Some("Assignments can only happen to writable values"),
+                    };
+                    if let Some(msg) = msg {
+                        return Err(CompileError {
+                            message: msg.into(),
+                            line,
+                        });
+                    }
                     // Handle complex lvalues: $arr[0], $obj->prop, etc.
                     let tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
@@ -11239,6 +11281,103 @@ impl Compiler {
     }
 
     /// Compile a constant expression's value (see `in_const_expr`).
+    /// zend_compile_pipe(): the operand is evaluated first and passed as a
+    /// temporary (so by-reference parameters reject it); `f(...)`,
+    /// `C::m(...)` and `$o->m(...)` become direct calls, anything else is
+    /// evaluated next and called.
+    #[inline(never)]
+    fn compile_pipe(
+        &mut self,
+        expr: &Expr,
+        value: &Expr,
+        callable: &Expr,
+    ) -> CompileResult<OperandType> {
+        if matches!(
+            callable.kind,
+            ExprKind::ArrowFunction {
+                parenthesized: false,
+                ..
+            }
+        ) {
+            return Err(CompileError {
+                message: "Arrow functions on the right hand side of |> must be parenthesized"
+                    .into(),
+                line: callable.span.line,
+            });
+        }
+        let saved = self.tmp_aliases.len();
+        let hold = |c: &mut Self, v: OperandType, line: u32| -> Expr {
+            let held = match v {
+                OperandType::Tmp(_) | OperandType::Const(_) => v,
+                other => {
+                    let t = c.op_array.alloc_temp();
+                    c.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(t),
+                        op2: other,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    OperandType::Tmp(t)
+                }
+            };
+            let mut name = PIPE_ALIAS_PREFIX.to_vec();
+            name.extend_from_slice(c.tmp_aliases.len().to_string().as_bytes());
+            c.tmp_aliases.push((name.clone(), held));
+            Expr {
+                span: expr.span,
+                kind: ExprKind::Variable(name),
+            }
+        };
+        let v = self.compile_expr(value)?;
+        let arg = vec![Argument {
+            name: None,
+            value: hold(self, v, value.span.line),
+            unpack: false,
+        }];
+        let kind = match &callable.kind {
+            ExprKind::FirstClassCallable(CallableTarget::Function(name))
+                if !matches!(&name.kind, ExprKind::Identifier(n)
+                    if n.strip_prefix(b"\\").unwrap_or(n).eq_ignore_ascii_case(b"assert")) =>
+            {
+                ExprKind::FunctionCall {
+                    name: name.clone(),
+                    args: arg,
+                }
+            }
+            ExprKind::FirstClassCallable(CallableTarget::StaticMethod { class, method }) => {
+                ExprKind::StaticMethodCall {
+                    class: class.clone(),
+                    method: method.clone(),
+                    args: arg,
+                }
+            }
+            ExprKind::FirstClassCallable(CallableTarget::Method {
+                object,
+                method,
+                nullsafe: false,
+            }) => ExprKind::MethodCall {
+                object: object.clone(),
+                method: method.clone(),
+                args: arg,
+                nullsafe: false,
+            },
+            _ => {
+                let c = self.compile_expr(callable)?;
+                ExprKind::FunctionCall {
+                    name: Box::new(hold(self, c, callable.span.line)),
+                    args: arg,
+                }
+            }
+        };
+        let r = self.compile_expr(&Expr {
+            kind,
+            span: expr.span,
+        });
+        self.tmp_aliases.truncate(saved);
+        r
+    }
+
     fn compile_const_expr_value(&mut self, e: &Expr) -> CompileResult<OperandType> {
         let prev = std::mem::replace(&mut self.in_const_expr, true);
         let r = self.compile_expr(e);
@@ -12947,23 +13086,7 @@ impl Compiler {
                 Ok(OperandType::Tmp(result_tmp))
             }
 
-            ExprKind::Pipe { value, callable } => {
-                // $x |> $f compiles as $f($x)
-                // Desugar into a FunctionCall expression
-                let arg = Argument {
-                    name: None,
-                    value: (**value).clone(),
-                    unpack: false,
-                };
-                let synthetic_call = Expr {
-                    kind: ExprKind::FunctionCall {
-                        name: callable.clone(),
-                        args: vec![arg],
-                    },
-                    span: expr.span,
-                };
-                self.compile_expr(&synthetic_call)
-            }
+            ExprKind::Pipe { value, callable } => self.compile_pipe(expr, value, callable),
 
             ExprKind::NullCoalesce { left, right } => {
                 // $a ?? $b: if $a is not null, use $a, else use $b
