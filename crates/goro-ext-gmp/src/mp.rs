@@ -340,7 +340,7 @@ pub fn binomial(n: &Int, k: u64) -> Int {
     let mut num = Int::ONE;
     let mut i = 0u64;
     while i < k {
-        num = num * (n - Int::from(i));
+        num *= n - Int::from(i);
         i += 1;
     }
     num.div_exact(&Int::factorial(k))
@@ -385,7 +385,7 @@ pub fn pow(base: &Int, exp: u64) -> Int {
     let mut e = exp;
     while e > 0 {
         if e & 1 == 1 {
-            result = result * &b;
+            result *= &b;
         }
         e >>= 1;
         if e > 0 {
