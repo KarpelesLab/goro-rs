@@ -1452,7 +1452,11 @@ fn call_inaccessible_via_trampoline(
 ) -> Option<Result<Value, VmError>> {
     let m = r.trampoline.as_ref()?;
     let class = vm.classes.get(r.calling_scope.as_ref()?)?;
-    class.get_method(m)?;
+    // (a missing method of the class of the calling $this goes to its
+    // __call(): zend_std_get_static_method())
+    if class.get_method(m).is_none() && r.object.is_none() {
+        return None;
+    }
     let (target, magic): (Value, &[u8]) = match &r.object {
         Some(o) => (o.clone(), b"__call"),
         None => (
@@ -1712,9 +1716,22 @@ fn call_scoped_method_callable(
     if op.attributes.is_empty() && !method.attributes.is_empty() {
         std::rc::Rc::make_mut(&mut op).attributes = method.attributes.clone();
     }
+    // zend_is_callable_check_class(): parent/self take the frame's called
+    // scope when it is a subclass, else the class itself; a class name is
+    // called on itself (or on the object).
+    let frame_called = vm.called_class_stack.last().cloned();
+    let called = match prefix {
+        _ if this.is_some() => org_name,
+        b"parent" | b"self" => match frame_called {
+            Some(fc) if vm.class_extends(&lower_bytes(&fc), &target) => fc,
+            _ => class.name.clone(),
+        },
+        b"static" => frame_called.unwrap_or(org_name),
+        _ => class.name.clone(),
+    };
     let this = if method.is_static { None } else { this };
     let declaring = method.declaring_class.clone();
-    vm.called_class_stack.push(org_name);
+    vm.called_class_stack.push(called);
     vm.push_class_scope(declaring);
     let r = vm.execute_fn_with_named_args(&op, call_args.to_vec(), named_args.to_vec(), this);
     vm.pop_class_scope();
@@ -2013,7 +2030,25 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                             .collect();
                     }
                     if let Some(class) = vm.classes.get(&class_lower).cloned() {
-                        if let Some(method) = class.methods.get(&method_lower) {
+                        // A private method of the calling scope shadows the one
+                        // a subclass redeclared (ZEND_ACC_CHANGED).
+                        let shadow = vm
+                            .current_class_scope()
+                            .map(|c| c.to_ascii_lowercase())
+                            .filter(|sc| *sc != class_lower && vm.class_extends(&class_lower, sc))
+                            .and_then(|sc| {
+                                vm.classes
+                                    .get(&sc)
+                                    .and_then(|c| c.methods.get(&method_lower))
+                                    .filter(|m| {
+                                        m.visibility == goro_core::object::Visibility::Private
+                                            && m.declaring_class.eq_ignore_ascii_case(&sc)
+                                    })
+                                    .cloned()
+                            });
+                        if let Some(method) =
+                            shadow.as_ref().or_else(|| class.methods.get(&method_lower))
+                        {
                             // Check visibility before executing
                             let accessible = match method.visibility {
                                 goro_core::object::Visibility::Public => true,

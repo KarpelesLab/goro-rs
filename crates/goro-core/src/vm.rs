@@ -33524,8 +33524,21 @@ impl Vm {
                                                     frame_args,
                                                     false,
                                                 ));
-                                                self.called_class_stack
-                                                    .push(class_part.to_vec());
+                                                // A forwarding call (parent::/self::)
+                                                // keeps the called class.
+                                                let called = self
+                                                    .called_class_stack
+                                                    .last()
+                                                    .filter(|c| {
+                                                        is_forwarding_call
+                                                            && self.class_extends(
+                                                                &c.to_ascii_lowercase(),
+                                                                &class_lower,
+                                                            )
+                                                    })
+                                                    .cloned()
+                                                    .unwrap_or_else(|| class_part.to_vec());
+                                                self.called_class_stack.push(called);
                                                 self.class_scope_stack.push(declaring_class);
                                                 let result = self.execute_op_array_vm(
                                                     &call_static_op,
