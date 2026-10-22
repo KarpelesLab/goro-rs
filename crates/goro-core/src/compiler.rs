@@ -10618,6 +10618,72 @@ impl Compiler {
     /// PHP's zend_ensure_valid_class_fetch_type: inside a free function the
     /// (empty) class scope is known at compile time, so self/parent/static
     /// are rejected.
+    /// `X::class` for a named class (zend_compile_class_name): self/parent
+    /// resolve at compile time only when the scope is known.
+    #[inline(never)]
+    fn compile_class_name_const(
+        &mut self,
+        class_name: &[u8],
+        class_line: u32,
+        line: u32,
+    ) -> CompileResult<OperandType> {
+        let is_self = class_name.eq_ignore_ascii_case(b"self");
+        let is_parent = class_name.eq_ignore_ascii_case(b"parent");
+        let is_static = class_name.eq_ignore_ascii_case(b"static");
+        // zend_try_compile_const_expr_resolve_class_name():
+        // self/parent resolve at compile time only when the
+        // scope is known; otherwise ZEND_FETCH_CLASS_NAME runs.
+        let known = self.is_scope_known() && self.current_class.is_some();
+        if is_parent && known && self.current_parent_class.is_none() {
+            return Err(CompileError {
+                message: "Cannot use \"parent\" when current class scope has no parent".into(),
+                line: class_line,
+            });
+        }
+        let runtime =
+            is_static || (is_parent && !known) || (is_self && self.current_class.is_none());
+        if runtime {
+            let mut kind = if self.in_const_expr && !is_static {
+                b"const:".to_vec()
+            } else {
+                Vec::new()
+            };
+            kind.extend_from_slice(&class_name.to_ascii_lowercase());
+            let kind_idx = self
+                .op_array
+                .add_literal(Value::String(PhpString::from_vec(kind)));
+            let tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::GetClassName,
+                op1: OperandType::Unused,
+                op2: OperandType::Const(kind_idx),
+                result: OperandType::Tmp(tmp),
+                line,
+            });
+            return Ok(OperandType::Tmp(tmp));
+        }
+        if is_parent {
+            let parent = self.current_parent_class.clone().unwrap_or_default();
+            let idx = self
+                .op_array
+                .add_literal(Value::String(PhpString::from_vec(parent)));
+            return Ok(OperandType::Const(idx));
+        }
+        let resolved = if is_self {
+            self.current_class.clone().unwrap_or_default()
+        } else {
+            class_name.to_vec()
+        };
+        let idx = self
+            .op_array
+            .add_literal(Value::String(PhpString::from_vec(resolved)));
+        // Track self::class for trait patching
+        if is_self && self.is_in_trait {
+            self.op_array.class_const_literals.push(idx);
+        }
+        Ok(OperandType::Const(idx))
+    }
+
     /// zend_is_scope_known(): whether self/parent are fixed at compile time
     /// (not in closures, which can be rebound, nor in file-level code, which
     /// inherits the including scope, nor in traits).
@@ -15928,63 +15994,11 @@ impl Compiler {
 
                 // ClassName::class returns the class name as a string
                 if constant == b"class" {
-                    let is_self = class_name.eq_ignore_ascii_case(b"self");
-                    let is_parent = class_name.eq_ignore_ascii_case(b"parent");
-                    let is_static = class_name.eq_ignore_ascii_case(b"static");
-                    // zend_try_compile_const_expr_resolve_class_name():
-                    // self/parent resolve at compile time only when the
-                    // scope is known; otherwise ZEND_FETCH_CLASS_NAME runs.
-                    let known = self.is_scope_known() && self.current_class.is_some();
-                    if is_parent && known && self.current_parent_class.is_none() {
-                        return Err(CompileError {
-                            message: "Cannot use \"parent\" when current class scope has no parent"
-                                .into(),
-                            line: class.span.line,
-                        });
-                    }
-                    let runtime = is_static
-                        || (is_parent && !known)
-                        || (is_self && self.current_class.is_none());
-                    if runtime {
-                        let mut kind = if self.in_const_expr && !is_static {
-                            b"const:".to_vec()
-                        } else {
-                            Vec::new()
-                        };
-                        kind.extend_from_slice(&class_name.to_ascii_lowercase());
-                        let kind_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(kind)));
-                        let tmp = self.op_array.alloc_temp();
-                        self.op_array.emit(Op {
-                            opcode: OpCode::GetClassName,
-                            op1: OperandType::Unused,
-                            op2: OperandType::Const(kind_idx),
-                            result: OperandType::Tmp(tmp),
-                            line: expr.span.line,
-                        });
-                        return Ok(OperandType::Tmp(tmp));
-                    }
-                    if is_parent {
-                        let parent = self.current_parent_class.clone().unwrap_or_default();
-                        let idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(parent)));
-                        return Ok(OperandType::Const(idx));
-                    }
-                    let resolved = if is_self {
-                        self.current_class.clone().unwrap_or_default()
-                    } else {
-                        class_name.clone()
-                    };
-                    let idx = self
-                        .op_array
-                        .add_literal(Value::String(PhpString::from_vec(resolved)));
-                    // Track self::class for trait patching
-                    if is_self && self.is_in_trait {
-                        self.op_array.class_const_literals.push(idx);
-                    }
-                    return Ok(OperandType::Const(idx));
+                    return self.compile_class_name_const(
+                        &class_name,
+                        class.span.line,
+                        expr.span.line,
+                    );
                 }
 
                 // Try to find the constant at compile time in already-compiled classes
