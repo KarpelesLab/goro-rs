@@ -80,6 +80,35 @@ pub struct Parser {
 
 const MAX_PARSE_DEPTH: u32 = 512;
 
+/// Runs a closure with enough native stack: the engine installs one that
+/// continues on a fresh stack segment when the current one runs low
+/// (deeply nested expressions recurse deeply). Returns false when no more
+/// stack can be had (the closure did not run).
+pub type StackGrower = fn(&mut dyn FnMut()) -> bool;
+
+static STACK_GROWER: std::sync::OnceLock<StackGrower> = std::sync::OnceLock::new();
+
+/// Install the engine's stack grower (see StackGrower).
+pub fn set_stack_grower(f: StackGrower) {
+    let _ = STACK_GROWER.set(f);
+}
+
+/// Run `f` with room on the native stack (None: the stack is exhausted).
+fn with_stack<R>(f: impl FnOnce() -> R) -> Option<R> {
+    match STACK_GROWER.get() {
+        Some(grow) => {
+            let mut f = Some(f);
+            let mut out = None;
+            if grow(&mut || out = f.take().map(|f| f())) {
+                out
+            } else {
+                None
+            }
+        }
+        None => Some(f()),
+    }
+}
+
 impl Parser {
     /// `__halt_compiler();` at the top level: drop everything after it and
     /// resolve direct references to `__COMPILER_HALT_OFFSET__` (unqualified
@@ -3798,7 +3827,13 @@ impl Parser {
 
     pub fn parse_expression(&mut self) -> ParseResult<Expr> {
         self.enter_depth()?;
-        let result = self.parse_logical_or_low();
+        let span = self.current().span;
+        let result = with_stack(|| self.parse_logical_or_low()).unwrap_or_else(|| {
+            Err(ParseError {
+                message: "Maximum nesting depth exceeded".into(),
+                span,
+            })
+        });
         self.leave_depth();
         result
     }
@@ -4548,6 +4583,16 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> ParseResult<Expr> {
+        let span = self.span();
+        with_stack(|| self.parse_unary_inner()).unwrap_or_else(|| {
+            Err(ParseError {
+                message: "Maximum nesting depth exceeded".into(),
+                span,
+            })
+        })
+    }
+
+    fn parse_unary_inner(&mut self) -> ParseResult<Expr> {
         let span = self.span();
         match self.peek().clone() {
             TokenKind::Minus => {

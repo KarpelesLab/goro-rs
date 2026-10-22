@@ -470,7 +470,12 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
             // ($orig_ini_settings), before merging the test's --INI--: e.g.
             // an unsupported default_charset must not print startup
             // warnings in front of the "skip" message.
-            let skipif_ini: Vec<(String, String)> = Vec::new();
+            // (with the --EXTENSIONS-- it loads)
+            let skipif_ini: Vec<(String, String)> = ini_settings
+                .iter()
+                .take_while(|(k, _)| k == "extension")
+                .cloned()
+                .collect();
             // Written next to the test as run-tests.php does, so that
             // include('skipif.inc') and __DIR__ resolve.
             let skip_filename = match filename.strip_suffix(".php") {
@@ -1573,6 +1578,7 @@ fn execute_php_inner_impl(
     let lexer_warnings = goro_parser::take_lexer_warnings();
 
     // Parse
+    goro_core::stack::install_parser_stack_grower();
     let mut parser = Parser::new(tokens).with_source(source);
     let parsed = parser.parse();
     // Deprecations recorded by the lexer (e.g. `${var}` syntax) and the
@@ -1681,6 +1687,20 @@ fn execute_php_inner_impl(
     // ...in source order.
     lexer_deprecations.sort_by_key(|(_, line)| *line);
 
+    // The compiler checks the (emulated) C stack too.
+    {
+        let ini = |k: &str| {
+            ini_settings
+                .iter()
+                .rev()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.as_bytes())
+        };
+        goro_core::stack::configure_from_ini(
+            ini("zend.max_allowed_stack_size"),
+            ini("zend.reserved_stack_size"),
+        );
+    }
     // Compile (with the extensions' compile-time state: MINIT)
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::minit();

@@ -1261,6 +1261,7 @@ pub struct SocketStreamHooks {
 
 impl Vm {
     pub fn new() -> Self {
+        crate::stack::install_parser_stack_grower();
         let mut vm = Self {
             output: Vec::new(),
             cli_direct_output: false,
@@ -7410,10 +7411,18 @@ impl Vm {
                     } else {
                         decl.to_ascii_lowercase()
                     });
-                    let _ = self.execute_fn(&destruct_op, fn_cvs);
+                    let fatal_before = self.fatal_emitted;
+                    let r = self.execute_fn(&destruct_op, fn_cvs);
+                    // A fatal error (displayed already) in the destructor ends
+                    // the script: the releasing code does not continue
+                    // (zend_bailout()).
                     self.class_scope_stack.pop();
                     self.called_class_stack.pop();
                     self.call_stack.pop();
+                    if r.is_err() && !fatal_before && self.fatal_emitted {
+                        self.destructor_fatal();
+                        return;
+                    }
                 }
                 if let Some(old) = old_exc {
                     match self.current_exception.take() {
@@ -16799,6 +16808,9 @@ impl Vm {
     /// and the remaining objects are marked destructed without running their
     /// destructors. Returns true when shutdown destruction must stop.
     fn shutdown_exception_check(&mut self) -> bool {
+        if self.fatal_bailout {
+            return true;
+        }
         if self
             .current_exception
             .as_ref()
@@ -17015,10 +17027,30 @@ impl Vm {
                     .push((frame, String::new(), 0, Vec::new(), true));
                 self.called_class_stack.push(class_name_orig);
                 self.class_scope_stack.push(scope);
-                let _ = self.execute_fn(&destruct_op, fn_cvs);
+                let fatal_before = self.fatal_emitted;
+                let r = self.execute_fn(&destruct_op, fn_cvs);
                 self.class_scope_stack.pop();
                 self.called_class_stack.pop();
                 self.call_stack.pop();
+                if r.is_err() && !fatal_before && self.fatal_emitted {
+                    self.destructor_fatal();
+                }
+            }
+        }
+    }
+
+    /// A fatal error in a destructor: the script ends (zend_bailout()) and no
+    /// other destructor runs (php_error_cb():
+    /// zend_objects_store_mark_destructed()).
+    fn destructor_fatal(&mut self) {
+        self.fatal_bailout = true;
+        // (an exception in flight is abandoned with everything else)
+        self.current_exception = None;
+        for v in std::mem::take(&mut self.destructible_objects) {
+            if let Value::Object(o) = &v {
+                o.borrow().dtor_listed.set(false);
+                o.borrow_mut()
+                    .set_property(b"__destructed".to_vec(), Value::True);
             }
         }
     }
@@ -17071,26 +17103,13 @@ impl Vm {
     #[cold]
     fn configure_stack(&mut self) {
         self.stack_configured = true;
-        let ini = |vm: &Vm, key: &[u8]| -> i64 {
-            vm.constants
-                .get(key)
-                .map(|v| {
-                    let s = v.to_php_string();
-                    crate::ini_quantity::parse_quantity(s.as_bytes(), true).0 as i64
-                })
-                .unwrap_or(0)
-        };
+        let ini = |vm: &Vm, key: &[u8]| vm.constants.get(key).map(|v| v.to_php_string());
         let max = ini(self, b"zend.max_allowed_stack_size");
         let reserved = ini(self, b"zend.reserved_stack_size");
-        // OnUpdateReservedStackSize: below the minimum is rejected.
-        let reserved = if reserved > 0 && (reserved as usize) >= crate::stack::DEFAULT_RESERVED {
-            reserved as usize
-        } else {
-            0
-        };
-        // OnUpdateMaxAllowedStackSize: below -1 (unchecked) is rejected.
-        let max = if max < -1 { 0 } else { max };
-        crate::stack::configure(max, reserved);
+        crate::stack::configure_from_ini(
+            max.as_ref().map(|s| s.as_bytes()),
+            reserved.as_ref().map(|s| s.as_bytes()),
+        );
     }
 
     /// Whether the call DO_FCALL is about to make is a plain call that the

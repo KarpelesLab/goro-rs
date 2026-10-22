@@ -132,6 +132,18 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
         Value::String(PhpString::from_string(sapi.to_string())),
     );
     let startup_messages = goro_ext_standard::misc::apply_startup_ini(&mut vm, ini);
+    // The compiler checks the (emulated) C stack too: sized from the start.
+    {
+        let get = |k: &[u8]| vm.constants.get(k).map(|v| v.to_php_string());
+        let (max, reserved) = (
+            get(b"zend.max_allowed_stack_size"),
+            get(b"zend.reserved_stack_size"),
+        );
+        goro_core::stack::configure_from_ini(
+            max.as_ref().map(|s| s.as_bytes()),
+            reserved.as_ref().map(|s| s.as_bytes()),
+        );
+    }
     if !vm.startup_hooks.is_empty() {
         let prev = vm.take_output();
         for hook in vm.startup_hooks.clone() {
@@ -244,6 +256,7 @@ pub fn compile(
     let tokens = script.tokens;
     let source = script.source.as_slice();
     let lexer_warnings = goro_parser::take_lexer_warnings();
+    goro_core::stack::install_parser_stack_grower();
     let mut parser = Parser::new(tokens).with_source(source);
     let parsed = parser.parse();
     // Lexer and parser diagnostics, in source order (taken after the parse,

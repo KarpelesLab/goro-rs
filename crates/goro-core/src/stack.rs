@@ -161,6 +161,43 @@ fn current_limit() -> usize {
     limit
 }
 
+/// Let the parser grow the native stack too (deeply nested expressions).
+pub fn install_parser_stack_grower() {
+    goro_parser::parser::set_stack_grower(|f| with_room(f).is_ok());
+}
+
+/// Emulated C stack a level of expression compilation uses
+/// (zend_compile_expr() & co. check the stack limit at each level).
+pub const COMPILE_COST: usize = 256;
+
+/// Charge a level of expression compilation (zend_check_stack_limit() in
+/// the compiler). Returns the emulated stack size when it is exhausted.
+#[inline]
+pub fn enter_compile() -> Result<(), usize> {
+    if CTX.with(|c| c.get().emu_max) == UNSET {
+        configure(0, 0);
+    }
+    CTX.with(|cell| {
+        let mut c = cell.get();
+        if c.emu_max > 0 && c.emu_used + COMPILE_COST > c.emu_max {
+            return Err(c.emu_max);
+        }
+        c.emu_used += COMPILE_COST;
+        cell.set(c);
+        Ok(())
+    })
+}
+
+/// Undo `enter_compile`.
+#[inline]
+pub fn leave_compile() {
+    CTX.with(|cell| {
+        let mut c = cell.get();
+        c.emu_used = c.emu_used.saturating_sub(COMPILE_COST);
+        cell.set(c);
+    });
+}
+
 /// The stack was exhausted: `MAX_GROWN` bytes of extra segments are in use
 /// (or no more could be mapped).
 #[derive(Debug)]
@@ -252,6 +289,24 @@ pub fn configure(max_allowed: i64, reserved: usize) {
     });
 }
 
+/// configure() from the zend.max_allowed_stack_size and
+/// zend.reserved_stack_size INI values (OnUpdateMaxAllowedStackSize,
+/// OnUpdateReservedStackSize: invalid values are rejected).
+pub fn configure_from_ini(max: Option<&[u8]>, reserved: Option<&[u8]>) {
+    let q = |v: Option<&[u8]>| {
+        v.map(|s| crate::ini_quantity::parse_quantity(s, true).0 as i64)
+            .unwrap_or(0)
+    };
+    let (max, reserved) = (q(max), q(reserved));
+    let reserved = if reserved > 0 && (reserved as usize) >= DEFAULT_RESERVED {
+        reserved as usize
+    } else {
+        0
+    };
+    let max = if max < -1 { 0 } else { max };
+    configure(max, reserved);
+}
+
 /// Charge an executor re-entry against the emulated C stack. Returns the
 /// emulated stack size when it is exhausted (nothing is charged then).
 #[inline]
@@ -287,6 +342,33 @@ pub fn emulated_size() -> usize {
         configure(0, 0);
     }
     CTX.with(|c| c.get().emu_max)
+}
+
+/// zend_call_stack_get() and friends, in the emulated C stack's terms:
+/// (base, max_size, position, EG(stack_limit)). The base is the top of the
+/// running thread's stack; positions below it are the emulated use.
+pub fn call_stack_info() -> (usize, usize, usize, usize) {
+    if CTX.with(|c| c.get().emu_max) == UNSET {
+        configure(0, 0);
+    }
+    let c = CTX.with(|c| c.get());
+    let base = match thread_stack_bounds() {
+        Some((low, size)) if size < (1 << 40) => low + size,
+        _ => sp().next_multiple_of(1 << 20),
+    };
+    let (reserved, checked) = RESERVED.with(|r| r.get());
+    let max_size = if checked && c.emu_max > 0 {
+        c.emu_max + reserved
+    } else {
+        detected_stack_size()
+    };
+    let position = base.saturating_sub(c.emu_used);
+    let limit = if checked {
+        base.saturating_sub(c.emu_max)
+    } else {
+        0
+    };
+    (base, max_size, position, limit)
 }
 
 /// The current stack context (saved when switching to a fiber).

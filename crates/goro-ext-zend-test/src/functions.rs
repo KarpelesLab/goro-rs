@@ -109,6 +109,16 @@ const FUNCTIONS: &[(&str, BuiltinFn, u8)] = &[
     ),
     ("zend_get_map_ptr_last", zend_get_map_ptr_last, ALL),
     (
+        "zend_test_zend_call_stack_get",
+        zend_test_zend_call_stack_get,
+        ALL,
+    ),
+    (
+        "zend_test_zend_call_stack_use_all",
+        zend_test_zend_call_stack_use_all,
+        ALL,
+    ),
+    (
         "zend_test_fill_packed_array",
         zend_test_fill_packed_array,
         ARITY,
@@ -1004,6 +1014,32 @@ fn init_with_user_constructor(
         Err(e) if vm.current_exception.is_none() => Some(Err(e)),
         _ => Some(Ok(Value::Null)),
     }
+}
+
+/// zend_call_stack_get(): the (emulated) C stack: its base, size, the
+/// current position and EG(stack_limit).
+fn zend_test_zend_call_stack_get(_vm: &mut Vm, _args: &[Value]) -> R {
+    let (base, max_size, position, limit) = goro_core::stack::call_stack_info();
+    let mut a = PhpArray::new();
+    for (k, v) in [
+        ("base", format!("{:#x}", base)),
+        ("max_size", format!("{:#x}", max_size)),
+        ("position", format!("{:#x}", position)),
+        ("EG(stack_limit)", format!("{:#x}", limit)),
+    ] {
+        a.set(ArrayKey::String(PhpString::from_bytes(k.as_bytes())), s(&v));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(a))))
+}
+
+/// zend_call_stack_use_all(): recurse until 4K above the end of the stack;
+/// the number of levels (of an emulated 64-byte frame).
+fn zend_test_zend_call_stack_use_all(_vm: &mut Vm, _args: &[Value]) -> R {
+    let (base, max_size, position, _) = goro_core::stack::call_stack_info();
+    let room = max_size
+        .saturating_sub(base - position)
+        .saturating_sub(4096);
+    Ok(Value::Long((room / 64) as i64 + 1))
 }
 
 // ---------------------------------------------------------------------------

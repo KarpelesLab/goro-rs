@@ -12150,6 +12150,27 @@ impl Compiler {
     }
 
     fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        // zend_check_stack_limit()
+        if let Err(size) = crate::stack::enter_compile() {
+            return Err(CompileError {
+                message: format!(
+                    "Maximum call stack size of {} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached during compilation. Try splitting expression",
+                    size
+                ),
+                line: expr.span.line,
+            });
+        }
+        let r = crate::stack::with_room(|| self.compile_expr_inner(expr)).unwrap_or_else(|_| {
+            Err(CompileError {
+                message: "Maximum nesting depth exceeded".into(),
+                line: expr.span.line,
+            })
+        });
+        crate::stack::leave_compile();
+        r
+    }
+
+    fn compile_expr_inner(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         self.zend_lineno = expr.span.line;
         if self.memoize_mode != 0
             && Self::is_memoizable(expr)
