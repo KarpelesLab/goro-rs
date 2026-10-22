@@ -2612,6 +2612,10 @@ fn array_unshift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
         }
+        // Iterators over the array stay on their elements.
+        let n = new_values.len();
+        arr_mut.iterators_splice(0, 0, n);
+        arr_mut.iterators_move_to(&mut new_arr);
         *arr_mut = new_arr;
 
         Ok(Value::Long((new_values.len() + existing.len()) as i64))
@@ -3152,7 +3156,14 @@ fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     drop(entries);
-    *arr.borrow_mut() = new_arr;
+    {
+        // php_splice(): iterators over the array follow their elements.
+        let mut old = arr.borrow_mut();
+        let inserted = replacement.as_ref().map_or(0, |r| r.len());
+        old.iterators_splice(start, end - start, inserted);
+        old.iterators_move_to(&mut new_arr);
+        *old = new_arr;
+    }
 
     if !used_ret {
         // The removed elements are released now; a destructor that replaces

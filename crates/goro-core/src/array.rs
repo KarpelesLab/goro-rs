@@ -76,6 +76,12 @@ pub struct PhpArray {
     /// until either is modified. Recursion guards (var_dump(), print_r(),
     /// ...) key on it. See `identity`.
     ident: std::cell::Cell<u64>,
+    /// By-reference foreach iterators over this array (EG(ht_iterators)
+    /// entries pointing at it): each holds the insertion-order position of
+    /// the next element to fetch, kept in step with removals and
+    /// insertions the way zend_hash keeps its iterator positions. Dead
+    /// iterators (the loop is gone) are pruned lazily.
+    iters: Option<Box<Vec<std::rc::Weak<std::cell::Cell<usize>>>>>,
 }
 
 /// Size of a zend_array (56-byte header) whose data block holds `cap`
@@ -212,6 +218,7 @@ impl Clone for PhpArray {
             zpacked,
             untracked: false,
             ident: std::cell::Cell::new(if nested { 0 } else { self.identity() }),
+            iters: None,
         };
         if self.head == 0 {
             copy.index = self.index.clone();
@@ -237,6 +244,7 @@ impl PhpArray {
             zpacked: true,
             untracked: false,
             ident: std::cell::Cell::new(0),
+            iters: None,
         }
     }
 
@@ -254,6 +262,7 @@ impl PhpArray {
             zpacked: true,
             untracked: false,
             ident: std::cell::Cell::new(0),
+            iters: None,
         }
     }
 
@@ -283,6 +292,80 @@ impl PhpArray {
     #[inline(always)]
     fn separate(&mut self) {
         *self.ident.get_mut() = 0;
+    }
+
+    /* ----- foreach-by-reference iterators ----- */
+
+    /// Track a by-reference foreach iterator over this array.
+    pub fn iterator_attach(&mut self, it: &std::rc::Rc<std::cell::Cell<usize>>) {
+        let list = self.iters.get_or_insert_with(Default::default);
+        list.retain(|w| w.strong_count() > 0);
+        if !list.iter().any(|w| std::ptr::eq(w.as_ptr(), std::rc::Rc::as_ptr(it))) {
+            list.push(std::rc::Rc::downgrade(it));
+        }
+    }
+
+    /// Whether `it` is tracked by this array.
+    pub fn iterator_attached(&self, it: &std::rc::Rc<std::cell::Cell<usize>>) -> bool {
+        self.iters.as_ref().is_some_and(|l| {
+            l.iter()
+                .any(|w| std::ptr::eq(w.as_ptr(), std::rc::Rc::as_ptr(it)))
+        })
+    }
+
+    /// Hand this array's iterators over to `other` (the array that
+    /// replaces it, e.g. php_splice()'s output hash).
+    pub fn iterators_move_to(&mut self, other: &mut PhpArray) {
+        if let Some(list) = self.iters.take() {
+            other.iters = Some(list);
+        }
+    }
+
+    /// Iterator positions after php_splice(): positions inside the
+    /// removed range move after the replacement, later ones shift.
+    pub fn iterators_splice(&mut self, offset: usize, removed: usize, inserted: usize) {
+        self.iters_adjust(|p| {
+            if p < offset {
+                p
+            } else if p < offset + removed {
+                offset + inserted
+            } else {
+                p - removed + inserted
+            }
+        });
+    }
+
+    #[inline]
+    fn iters_adjust(&mut self, f: impl Fn(usize) -> usize) {
+        if let Some(list) = &mut self.iters {
+            Self::iters_adjust_cold(list, f);
+        }
+    }
+
+    #[cold]
+    fn iters_adjust_cold(
+        list: &mut Vec<std::rc::Weak<std::cell::Cell<usize>>>,
+        f: impl Fn(usize) -> usize,
+    ) {
+        list.retain(|w| match w.upgrade() {
+            Some(c) => {
+                c.set(f(c.get()));
+                true
+            }
+            None => false,
+        });
+    }
+
+    /// The element at live position `pos` was removed.
+    #[inline]
+    fn iters_removed_at(&mut self, pos: usize) {
+        self.iters_adjust(|p| if p > pos { p - 1 } else { p });
+    }
+
+    /// An element was inserted at live position `pos` (not appended).
+    #[inline]
+    fn iters_inserted_at(&mut self, pos: usize) {
+        self.iters_adjust(|p| if p >= pos { p + 1 } else { p });
     }
 
     #[inline]
@@ -661,6 +744,8 @@ impl PhpArray {
         if self.is_empty() {
             return None;
         }
+        let last = self.len() - 1;
+        self.iters_removed_at(last);
         let e = self.entries.pop()?;
         if !self.packed && !self.index.is_empty() {
             // Remove the slot pointing at the popped position, then
@@ -719,6 +804,7 @@ impl PhpArray {
 
     /// Remove the first entry (O(1) amortized: its slot becomes dead).
     fn remove_front_raw(&mut self) -> Value {
+        self.iters_removed_at(0);
         let pos = self.head as usize;
         if self.packed {
             // Key 0 goes: the rest is no longer packed.
@@ -768,6 +854,7 @@ impl PhpArray {
         self.head -= 1;
         let pos = self.head as usize;
         self.entries[pos] = (key, value);
+        self.iters_inserted_at(0);
         if self.len() > 1 {
             self.pointer += 1;
         }
@@ -822,6 +909,7 @@ impl PhpArray {
         }
         self.compact();
         self.entries.insert(pos, (key, value));
+        self.iters_inserted_at(pos);
         if pos < self.pointer {
             self.pointer += 1;
         }
@@ -850,6 +938,7 @@ impl PhpArray {
         if self.entries.is_empty() {
             None
         } else {
+            self.iters_removed_at(0);
             let v = self.entries.remove(0).1;
             self.recompute_packed();
             self.rebuild_index();
@@ -866,6 +955,7 @@ impl PhpArray {
         if !self.packed || self.entries.is_empty() {
             return None;
         }
+        self.iters_removed_at(0);
         let v = self.entries.remove(0).1;
         for (i, e) in self.entries.iter_mut().enumerate() {
             e.0 = ArrayKey::Int(i as i64);
@@ -887,6 +977,7 @@ impl PhpArray {
         }
         self.compact();
         self.entries.insert(0, (ArrayKey::Int(0), value));
+        self.iters_inserted_at(0);
         // Re-key all integer-keyed entries
         let mut next = 0i64;
         for entry in &mut self.entries {
@@ -931,6 +1022,7 @@ impl PhpArray {
             if pos == self.head as usize {
                 return Some(self.remove_front_raw());
             }
+            self.iters_removed_at(pos - self.head as usize);
             if self.packed || self.index.is_empty() {
                 let v = self.entries.remove(pos).1;
                 self.packed = false;

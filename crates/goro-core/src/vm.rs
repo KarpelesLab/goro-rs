@@ -565,6 +565,9 @@ pub(crate) struct ForeachState {
     /// By-reference foreach over a variable: its CV (FE_FETCH_RW reads the
     /// variable again at each iteration).
     pub(crate) ref_src: crate::fxhash::FxHashMap<u32, u32>,
+    /// By-reference foreach over an array: the iterator (position of the
+    /// next element) the array keeps in step with its modifications.
+    pub(crate) ref_iters: crate::fxhash::FxHashMap<u32, Rc<std::cell::Cell<usize>>>,
 }
 
 impl ForeachState {
@@ -591,7 +594,8 @@ impl ForeachState {
             gen_keys,
             weakmap_iter_keys,
             ref_arrays,
-            ref_src
+            ref_src,
+            ref_iters
         );
     }
 
@@ -20063,6 +20067,7 @@ impl Vm {
             weakmap_iter_keys,
             ref_arrays: foreach_ref_arrays,
             ref_src: foreach_ref_src,
+            ref_iters: foreach_ref_iters,
         } = fe;
         // Maps CV index -> static var key (for saving back on write)
         let static_cv_keys: crate::fxhash::FxHashMap<u32, Vec<u8>> = Default::default();
@@ -20725,6 +20730,7 @@ impl Vm {
                     // the array it pinned.
                     if let OperandType::Tmp(t) = op.op1 {
                         if !foreach_ref_arrays.is_empty() {
+                            foreach_ref_iters.remove(&t);
                             if let Some(a) = foreach_ref_arrays.remove(&t) {
                                 crate::gc::possible_root(&Value::Array(a));
                             }
@@ -23401,6 +23407,29 @@ impl Vm {
                                 message: format!("Uncaught TypeError: {}", err_msg),
                                 line: op.line,
                             });
+                        }
+                    }
+                    // An array iterated by reference is merged into in place
+                    // (add_function() with result == op1): the loop's
+                    // iterator stays on it.
+                    if let (Value::Array(a), Value::Array(b), false) =
+                        (cv_val.deref(), rhs.deref(), foreach_ref_arrays.is_empty())
+                    {
+                        if foreach_ref_arrays.values().any(|f| Rc::ptr_eq(f, &a)) {
+                            if !Rc::ptr_eq(&a, &b) {
+                                let add: Vec<(ArrayKey, Value)> = {
+                                    let (ab, bb) = (a.borrow(), b.borrow());
+                                    bb.iter()
+                                        .filter(|(k, _)| !ab.contains_key(k))
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect()
+                                };
+                                let mut ab = a.borrow_mut();
+                                for (k, v) in add {
+                                    ab.set(k, v);
+                                }
+                            }
+                            return Ok(Flow::Next);
                         }
                     }
                     self.write_operand(
@@ -38840,6 +38869,14 @@ impl Vm {
                     foreach_positions.insert(iter_idx, 0usize);
                     foreach_cur_key.remove(&iter_idx);
                     foreach_cur_ref.remove(&iter_idx);
+                    if foreach_ref_arrays.contains_key(&iter_idx) {
+                        // zend_hash_iterator_add(ht, 0)
+                        let it = Rc::new(std::cell::Cell::new(0usize));
+                        arr_rc.borrow_mut().iterator_attach(&it);
+                        foreach_ref_iters.insert(iter_idx, it);
+                    } else {
+                        foreach_ref_iters.remove(&iter_idx);
+                    }
                     Ok(Flow::Next)
                 })? {
                     Flow::Next => {}
@@ -39041,7 +39078,25 @@ impl Vm {
                         foreach_ref_arrays.contains_key(&iter_idx),
                     ) {
                         match cvs.get(src as usize).map(|v| v.deref()) {
-                            Some(Value::Array(_) | Value::Object(_)) | None => {}
+                            Some(Value::Array(a)) => {
+                                // Another array was assigned to the variable:
+                                // the iterator moves over to it, at its
+                                // internal pointer (zend_hash_iterator_pos_ex).
+                                let switch = foreach_ref_arrays
+                                    .get(&iter_idx)
+                                    .is_some_and(|cur| !Rc::ptr_eq(cur, &a));
+                                if switch {
+                                    if let Some(it) = foreach_ref_iters.get(&iter_idx) {
+                                        let p = a.borrow().pointer;
+                                        it.set(p);
+                                        a.borrow_mut().iterator_attach(it);
+                                        foreach_positions.insert(iter_idx, p);
+                                        foreach_cur_ref.remove(&iter_idx);
+                                        foreach_ref_arrays.insert(iter_idx, a);
+                                    }
+                                }
+                            }
+                            Some(Value::Object(_)) | None => {}
                             Some(other) => {
                                 let msg = format!(
                                     "foreach() argument must be of type array|object, {} given",
@@ -39059,7 +39114,17 @@ impl Vm {
                     }
                     let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
                     let done = if let Some(arr_rc) = foreach_ref_arrays.get(&iter_idx).cloned() {
-                        let next_pos = {
+                        let ref_iter = foreach_ref_iters.get(&iter_idx).cloned();
+                        let attached = ref_iter
+                            .as_ref()
+                            .filter(|it| arr_rc.borrow().iterator_attached(it));
+                        let next_pos = if let Some(it) = attached {
+                            // The array kept the iterator in step with its
+                            // modifications.
+                            it.get()
+                        } else {
+                            // Contents replaced wholesale: find the current
+                            // element again (by its reference).
                             let ab = arr_rc.borrow();
                             let is_cur = |v: Option<(&ArrayKey, &Value)>,
                                           cur: &std::rc::Weak<RefCell<Value>>| {
@@ -39117,6 +39182,10 @@ impl Vm {
                                     );
                                 }
                                 foreach_positions.insert(iter_idx, next_pos + 1);
+                                if let Some(it) = &ref_iter {
+                                    it.set(next_pos + 1);
+                                    arr_rc.borrow_mut().iterator_attach(it);
+                                }
                                 // The previous element's reference is now held by the
                                 // array alone (refcount 1): it is a plain value again.
                                 if let Some(prev) = prev.and_then(|w| w.upgrade()) {
@@ -39141,6 +39210,7 @@ impl Vm {
                     if done {
                         // The iteration is over: release the iterated array
                         // (for an object, its references to the property slots).
+                        foreach_ref_iters.remove(&iter_idx);
                         if foreach_ref_arrays.remove(&iter_idx).is_some() {
                             if let Some(slot) = tmps.get_mut(iter_idx as usize) {
                                 if matches!(slot, Value::Array(_)) {
