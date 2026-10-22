@@ -18,6 +18,7 @@ use goro_gd::{Font, Image};
 
 mod funcs;
 mod io;
+mod text;
 mod xform;
 mod zpp;
 
@@ -36,7 +37,7 @@ pub const HAVE_JPG: bool = false;
 pub const HAVE_WEBP: bool = false;
 pub const HAVE_AVIF: bool = false;
 pub const HAVE_XPM: bool = true;
-pub const HAVE_FREETYPE: bool = false;
+pub const HAVE_FREETYPE: bool = true;
 
 // ---------------------------------------------------------------------------
 // GdImage / GdFont objects
@@ -361,6 +362,7 @@ pub fn register(vm: &mut Vm) {
     funcs::register(vm);
     io::register(vm);
     xform::register(vm);
+    text::register(vm);
 }
 
 /// Register a function with its stub's parameter names.

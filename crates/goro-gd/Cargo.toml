@@ -9,3 +9,4 @@ workspace = true
 
 [dependencies]
 goro-zlib = { path = "../goro-zlib" }
+skrifa = "0.40.0"
