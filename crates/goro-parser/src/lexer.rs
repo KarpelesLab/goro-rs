@@ -2074,13 +2074,61 @@ impl<'a> Lexer<'a> {
     pub fn tokenize(&mut self) -> Vec<Token> {
         let _ = crate::take_lexer_error();
         let mut tokens = Vec::new();
+        // `__halt_compiler();` at the outermost scope stops the lexer
+        // (zend_stop_lexing()): what follows is data, not code.
+        let mut depth: i32 = 0;
+        let mut halt = 0u8;
+        let mut prev_member = false;
         loop {
             let token = self.next_token();
             if token.kind == TokenKind::Eof {
                 tokens.push(token);
                 break;
             }
+            let mut stop = false;
+            match &token.kind {
+                TokenKind::Whitespace(_)
+                | TokenKind::LineComment(_)
+                | TokenKind::BlockComment(_)
+                | TokenKind::DocComment(_) => {}
+                kind => {
+                    halt = match kind {
+                        TokenKind::Identifier(n)
+                            if depth == 0
+                                && !prev_member
+                                && n.eq_ignore_ascii_case(b"__halt_compiler") =>
+                        {
+                            1
+                        }
+                        TokenKind::OpenParen if halt == 1 => 2,
+                        TokenKind::CloseParen if halt == 2 => 3,
+                        TokenKind::Semicolon | TokenKind::CloseTag if halt == 3 => {
+                            stop = true;
+                            0
+                        }
+                        _ => 0,
+                    };
+                    match kind {
+                        TokenKind::OpenBrace => depth += 1,
+                        TokenKind::CloseBrace => depth -= 1,
+                        _ => {}
+                    }
+                    prev_member = matches!(
+                        kind,
+                        TokenKind::Arrow
+                            | TokenKind::NullsafeArrow
+                            | TokenKind::DoubleColon
+                            | TokenKind::Function
+                            | TokenKind::Backslash
+                    );
+                }
+            }
+            let span = token.span;
             tokens.push(token);
+            if stop {
+                tokens.push(Token::new(TokenKind::Eof, span));
+                break;
+            }
         }
         tokens
     }
