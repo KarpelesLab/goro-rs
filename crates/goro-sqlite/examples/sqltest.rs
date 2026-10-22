@@ -24,8 +24,9 @@
 //!   `.clear` (clear_bindings), `.info` (sql, expanded sql, flags,
 //!   parameters), `.err` (error codes and message), `.typed 0|1` (rows as
 //!   `T<bytes>:value`);
-//! * `.func NAME NARG`, `.agg NAME`, `.coll NAME`: register test functions
-//!   and a reverse-binary collation;
+//! * `.func NAME NARG [FLAGS]` (FLAGS: d deterministic, D directonly,
+//!   i innocuous, s subtype), `.agg NAME`, `.coll NAME`: register test
+//!   functions and a reverse-binary collation;
 //! * `.blob DB TABLE COL ROWID n | r OFF N | w OFF HEX`: incremental blob I/O;
 //! * `.backup FILE` / `.restore FILE`: backup API to/from another file;
 //! * `.meta DB TABLE COL`, `.limit ID VAL`, `.exec SQL`, `.complete SQL`,
@@ -416,6 +417,19 @@ fn meta_command(db: &mut Sqlite3, last: Option<StmtId>, zLine: &[u8], st: &mut S
         }
         b".typed" if n >= 2 => st.typed = atoi(&az[1]) != 0,
         b".func" if n >= 3 => {
+            let mut fl = SQLITE_UTF8 as i32 | SQLITE_DETERMINISTIC as i32;
+            if n >= 4 {
+                fl = SQLITE_UTF8 as i32;
+                for c in az[3].iter() {
+                    match c {
+                        b'd' => fl |= SQLITE_DETERMINISTIC as i32,
+                        b'D' => fl |= SQLITE_DIRECTONLY as i32,
+                        b'i' => fl |= SQLITE_INNOCUOUS as i32,
+                        b's' => fl |= SQLITE_SUBTYPE as i32,
+                        _ => {}
+                    }
+                }
+            }
             let name = az[1].clone();
             let f: XSFunc = Rc::new(move |ctx: &mut Context, argv: &mut [Mem]| {
                 let mut r = name.clone();
@@ -433,7 +447,7 @@ fn meta_command(db: &mut Sqlite3, last: Option<StmtId>, zLine: &[u8], st: &mut S
                 db,
                 Some(&az[1]),
                 atoi(&az[2]) as i32,
-                SQLITE_UTF8 as i32 | SQLITE_DETERMINISTIC as i32,
+                fl,
                 FuncUserData::None,
                 Some(f),
                 None,
