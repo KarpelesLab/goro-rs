@@ -199,13 +199,13 @@ pub fn sqlite3CreateFunc(
     zFunctionName: Option<&[u8]>,
     nArg: i32,
     enc: i32,
-    pUserData: &mut [u8],
-    xSFunc: /*fnptr: void (*xSFunc)(sqlite3_context*,int,sqlite3_value **)*/ (),
-    xStep: /*fnptr: void (*xStep)(sqlite3_context*,int,sqlite3_value **)*/ (),
-    xFinal: /*fnptr: void (*xFinal)(sqlite3_context*)*/ (),
-    xValue: /*fnptr: void (*xValue)(sqlite3_context*)*/ (),
-    xInverse: /*fnptr: void (*xInverse)(sqlite3_context*,int,sqlite3_value **)*/ (),
-    pDestructor: /*FuncDestructor**/ (),
+    pUserData: FuncUserData,
+    xSFunc: Option<XSFunc>,
+    xStep: Option<XSFunc>,
+    xFinal: Option<XFinal>,
+    xValue: Option<XFinal>,
+    xInverse: Option<XSFunc>,
+    pDestructor: Option<Rc<FuncDestructor>>,
 ) -> i32 {
     todo!("sqlite3CreateFunc")
 }

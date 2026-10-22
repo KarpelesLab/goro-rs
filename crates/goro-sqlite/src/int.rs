@@ -1742,6 +1742,18 @@ pub struct Context<'a> {
     pub argc: u16,
     /// Error message set by sqlite3_result_error (copied into pOut too).
     pub zErr: Option<ZStr>,
+    /// Collating sequence of the OP_CollSeq opcode immediately preceding
+    /// the function opcode, if any (what C sqlite3GetFuncCollSeq() reads
+    /// through pVdbe->aOp[iOp-1]).
+    pub pColl: Option<CollSeqRef>,
+    /// The statement's Vdbe.iCurrentTime (sqlite3StmtCurrentTime()); None
+    /// outside of a running statement.
+    pub pCurrentTime: Option<&'a mut i64>,
+    /// Opcode and P5 of the invoking instruction (C
+    /// pVdbe->aOp[iOp].opcode / .p5, used by sqlite3NotPureFunc()); 0 when
+    /// the function is not invoked by the VDBE.
+    pub opcode: u8,
+    pub p5: u16,
 }
 
 /// A cursor is a pointer into a single BTree within a database file.
