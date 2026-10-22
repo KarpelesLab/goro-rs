@@ -405,6 +405,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_bcmath::register(&mut vm);
                 goro_ext_filter::register(&mut vm);
                 goro_ext_iconv::register(&mut vm);
+                goro_ext_pcntl::register(&mut vm);
                 goro_ext_posix::register(&mut vm);
                 goro_ext_calendar::register(&mut vm);
                 // Loadable on request (see run_test_inner).
@@ -1052,6 +1053,28 @@ fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
     }
 }
 
+/// The process running the current test (in its forked runner child):
+/// processes it forks (pcntl_fork()) only add their output.
+#[cfg(unix)]
+static TEST_PID: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// The exit status of the script that finished last.
+#[cfg(unix)]
+static SCRIPT_EXIT: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// A process forked by the test script itself?
+fn in_test_grandchild() -> bool {
+    #[cfg(unix)]
+    {
+        let t = TEST_PID.load(std::sync::atomic::Ordering::Relaxed);
+        t != 0 && t != unsafe { libc::getpid() }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 fn execute_php_with_timeout_and_filename(
     source: &[u8],
     timeout_secs: u64,
@@ -1100,8 +1123,11 @@ fn execute_php_with_timeout_and_filename(
         }
 
         if pid == 0 {
-            // Child process
+            // Child process: the leader of a process group holding whatever
+            // the test starts, which is killed once the test is over.
             unsafe {
+                libc::setpgid(0, 0);
+                TEST_PID.store(libc::getpid(), std::sync::atomic::Ordering::Relaxed);
                 libc::close(read_fd);
                 libc::close(cap_r);
                 let _ = std::io::Write::flush(&mut std::io::stdout());
@@ -1146,6 +1172,10 @@ fn execute_php_with_timeout_and_filename(
                 }
                 r => r,
             };
+            // A process the test forked only contributes its output.
+            if in_test_grandchild() {
+                unsafe { libc::_exit(SCRIPT_EXIT.load(std::sync::atomic::Ordering::Relaxed)) };
+            }
             unsafe {
                 libc::close(1);
                 libc::close(2);
@@ -1207,12 +1237,38 @@ fn execute_php_with_timeout_and_filename(
             }
         };
         let start = std::time::Instant::now();
+        let exit_status;
         loop {
             let mut status = 0i32;
             let ret = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
             if ret > 0 {
+                exit_status = status;
                 drain(read_fd, &mut buf);
-                drain(cap_r, &mut captured);
+                // Like run-tests.php, the output is read until EOF: processes
+                // the test forked may still be writing (for a while).
+                let grace = std::time::Instant::now();
+                let mut chunk = [0u8; 65536];
+                loop {
+                    let n = unsafe {
+                        libc::read(cap_r, chunk.as_mut_ptr() as *mut libc::c_void, chunk.len())
+                    };
+                    if n > 0 {
+                        captured.extend_from_slice(&chunk[..n as usize]);
+                        continue;
+                    }
+                    if n == 0
+                        || grace.elapsed().as_secs() >= 2
+                        || start.elapsed().as_secs() >= timeout_secs
+                    {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                drain(read_fd, &mut buf);
+                // Nothing the test started outlives it.
+                unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
+                }
                 break; // Child exited
             }
             let got_out = drain(cap_r, &mut captured);
@@ -1227,8 +1283,9 @@ fn execute_php_with_timeout_and_filename(
                 return Err("waitpid error".to_string());
             }
             if start.elapsed().as_secs() >= timeout_secs {
-                // Kill the child
+                // Kill the child (and what it started)
                 unsafe {
+                    libc::kill(-pid, libc::SIGKILL);
                     libc::kill(pid, libc::SIGKILL);
                 }
                 unsafe {
@@ -1249,6 +1306,10 @@ fn execute_php_with_timeout_and_filename(
         }
 
         if buf.is_empty() {
+            // The test replaced itself (pcntl_exec()): what it printed.
+            if libc::WIFEXITED(exit_status) {
+                return Ok(captured);
+            }
             return Err("Fatal error: child produced no output".to_string());
         }
 
@@ -1339,7 +1400,7 @@ fn execute_php_inner(
     goro_ext_standard::request::shutdown();
 
     // Clean up the temporary file
-    if file_written {
+    if file_written && !in_test_grandchild() {
         let _ = std::fs::remove_file(filename);
     }
 
@@ -1591,6 +1652,7 @@ fn execute_php_inner_impl(
     goro_ext_bcmath::register(&mut vm);
     goro_ext_filter::register(&mut vm);
     goro_ext_iconv::register(&mut vm);
+    goro_ext_pcntl::register(&mut vm);
     goro_ext_posix::register(&mut vm);
     goro_ext_calendar::register(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
@@ -1848,6 +1910,18 @@ fn execute_php_inner_impl(
         }
         vm.finish_request(r)
     };
+    // EG(exit_status), for the processes the test forks.
+    let exit_status = if vm.exit_requested {
+        vm.exit_code as i32
+    } else if main_result.is_err() || vm.fatal_emitted {
+        255
+    } else {
+        0
+    };
+    #[cfg(unix)]
+    SCRIPT_EXIT.store(exit_status, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(not(unix))]
+    let _ = exit_status;
     match main_result {
         Ok(_) => Ok(vm.take_output()),
         Err(e) => {
