@@ -13630,9 +13630,6 @@ impl Vm {
     pub fn memory_limit_fatal(&mut self) -> VmError {
         let tried = crate::value::take_memory_exhausted();
         let limit = crate::value::memory_get_limit();
-        // zend_mm_safe_error(): the heap overflows the limit from now on, so
-        // the error can be reported.
-        crate::value::set_memory_limit(0);
         let msg = format!(
             "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
             limit, tried
