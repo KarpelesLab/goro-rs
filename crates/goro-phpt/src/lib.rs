@@ -561,6 +561,13 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
     } else {
         5
     };
+    // run-tests.php runs CLEAN with $orig_ini_settings: the extensions it
+    // loads, not the test's --INI--.
+    let clean_ini: Vec<(String, String)> = ini_settings
+        .iter()
+        .filter(|(k, _)| k == "extension")
+        .cloned()
+        .collect();
     let req = build_request(test, test_dir, filename);
     PHPT_REQUEST.with(|r| *r.borrow_mut() = Some(req));
     let source_bytes = match &external_source {
@@ -591,7 +598,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                         clean_trimmed.as_bytes(),
                         5,
                         test_dir,
-                        &ini_settings,
+                        &clean_ini,
                         &clean_filename,
                     );
                 }
@@ -617,7 +624,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 clean_trimmed.as_bytes(),
                 5,
                 test_dir,
-                &ini_settings,
+                &clean_ini,
                 &clean_filename,
             );
         }
