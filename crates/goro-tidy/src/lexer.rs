@@ -808,6 +808,12 @@ fn dec_lexsize(doc: &mut Doc, n: u32) {
     set_lexsize(doc, s.wrapping_sub(n));
 }
 
+/// `lexer->lexbuf[lexer->lexsize] = '\0'`
+fn nul_at_lexsize(doc: &mut Doc) {
+    let ls = doc.lxr().lexsize;
+    set_nul(doc, ls);
+}
+
 /// `lexer->lexbuf[i] = '\0'`
 fn set_nul(doc: &mut Doc, i: u32) {
     set_lexbyte(doc, i, 0);
@@ -1028,6 +1034,8 @@ fn parse_entity(doc: &mut Doc, mode: GetTokenMode) {
         break;
     }
 
+    // make sure entity is NULL terminated
+    nul_at_lexsize(doc);
     let ent = lexstr(doc, start);
 
     if tmbstr::tmbstrcmp(&ent, b"&apos") == 0
@@ -2174,6 +2182,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                         txtend_to_lexsize(doc);
                         unget(doc, c);
                         set_state(doc, LexerState::LexEndTag);
+                        nul_at_lexsize(doc);
                         curcol_add(doc, -2);
 
                         let (s, e) = (doc.lxr().txtstart, doc.lxr().txtend);
@@ -2273,6 +2282,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                         }
                     }
                     dec_lexsize(doc, 2);
+                    nul_at_lexsize(doc);
                     set_state(doc, LexerState::LexContent);
                     continue;
                 }
@@ -2461,6 +2471,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                         }
                         dec_lexsize(doc, 2);
                         txtend_to_lexsize(doc);
+                        nul_at_lexsize(doc);
                         let t = new_token(doc, NodeType::CommentTag);
                         let r = finish_token(doc, t);
                         c = read(doc);
@@ -2500,6 +2511,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                 let tok = parse_doc_type_decl(doc);
                 doc.lx().token = tok;
                 txtend_to_lexsize(doc);
+                nul_at_lexsize(doc);
                 set_state(doc, LexerState::LexContent);
                 doc.lx().waswhite = false;
 
@@ -2563,12 +2575,14 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                     }
                     doc.lx().txtstart = ts + i;
                     txtend_to_lexsize(doc);
+                    nul_at_lexsize(doc);
                     t = new_token(doc, NodeType::ProcInsTag);
                     doc[t].closed = closed;
                     let el = lexndup(doc, ts, i);
                     doc[t].element = el;
                 } else {
                     txtend_to_lexsize(doc);
+                    nul_at_lexsize(doc);
                     t = new_token(doc, NodeType::ProcInsTag);
                 }
                 return finish_token(doc, t);
@@ -2585,6 +2599,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                 }
                 dec_lexsize(doc, 1);
                 txtend_to_lexsize(doc);
+                nul_at_lexsize(doc);
                 let t = new_token(doc, NodeType::AspTag);
                 return finish_token(doc, t);
             }
@@ -2600,6 +2615,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                 }
                 dec_lexsize(doc, 1);
                 txtend_to_lexsize(doc);
+                nul_at_lexsize(doc);
                 let t = new_token(doc, NodeType::JsteTag);
                 return finish_token(doc, t);
             }
@@ -2615,6 +2631,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                 }
                 dec_lexsize(doc, 1);
                 txtend_to_lexsize(doc);
+                nul_at_lexsize(doc);
                 let t = new_token(doc, NodeType::PhpTag);
                 return finish_token(doc, t);
             }
@@ -2713,6 +2730,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                 }
                 dec_lexsize(doc, lexdump);
                 txtend_to_lexsize(doc);
+                nul_at_lexsize(doc);
                 let t = new_token(doc, NodeType::SectionTag);
                 return finish_token(doc, t);
             }
@@ -2734,6 +2752,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
                 }
                 dec_lexsize(doc, 1);
                 txtend_to_lexsize(doc);
+                nul_at_lexsize(doc);
                 let t = new_token(doc, NodeType::CDATATag);
                 return finish_token(doc, t);
             }
@@ -2760,6 +2779,7 @@ fn get_token_from_stream(doc: &mut Doc, mode: GetTokenMode) -> Option<NodeId> {
             message::report(doc, None, None, MALFORMED_COMMENT_EOS, &[]);
         }
         txtend_to_lexsize(doc);
+        nul_at_lexsize(doc);
         let t = new_token(doc, NodeType::CommentTag);
         return finish_token(doc, t);
     }
@@ -3456,10 +3476,10 @@ fn parse_doc_type_decl(doc: &mut Doc) -> Option<NodeId> {
             DtState::QuotedString => {
                 if c == delim {
                     let ls = doc.lxr().lexsize();
-                    let value = lexndup(doc, start, ls.wrapping_sub(start).wrapping_sub(1))
-                        .unwrap_or_default();
+                    // an empty string is NULL (tmbstrndup with length 0)
+                    let value = lexndup(doc, start, ls.wrapping_sub(start).wrapping_sub(1));
                     let name: &[u8] = if hasfpi { b"PUBLIC" } else { b"SYSTEM" };
-                    let att = attrs::add_attribute(doc, node, name, &value);
+                    let att = attrs::add_attribute_opt(doc, node, name, value.as_deref());
                     doc[att].delim = delim;
                     hasfpi = false;
                     state = DtState::Intermediate;

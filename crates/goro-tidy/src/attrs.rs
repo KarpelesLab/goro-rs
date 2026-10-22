@@ -470,7 +470,8 @@ pub fn drop_attr_by_name(doc: &mut Doc, node: NodeId, name: &[u8]) {
     }
 }
 
-fn add_attribute_opt(doc: &mut Doc, node: NodeId, name: &[u8], value: Option<&[u8]>) -> AttId {
+/// AddAttribute() with a value that may be NULL
+pub fn add_attribute_opt(doc: &mut Doc, node: NodeId, name: &[u8], value: Option<&[u8]>) -> AttId {
     let av = lexer::new_attribute(doc);
     doc[av].delim = '"' as u32;
     doc[av].attribute = Some(cstr(name).to_vec());
