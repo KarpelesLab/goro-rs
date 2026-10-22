@@ -597,9 +597,10 @@ pub fn iter_method(vm: &mut Vm, it: &Obj, method: &[u8]) -> Option<Value> {
             Some(Value::Null)
         }
         "rewind" => {
+            // DOM iterators cannot rewind: InternalIterator::rewind() is
+            // only allowed before the iteration moved.
             if index != 0 {
-                let first = get_item(vm, &map, 0);
-                set(0, first);
+                throw_error(vm, b"Error", "Iterator does not support rewinding");
             }
             Some(Value::Null)
         }
