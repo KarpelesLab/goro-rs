@@ -184,6 +184,9 @@ pub struct Compiler {
     finally_targets: Vec<u32>,
     /// Current namespace (e.g. b"Foo\\Bar"), empty for global namespace
     current_namespace: Vec<u8>,
+    /// The property whose declaration (default, attributes) is being
+    /// compiled: what `__PROPERTY__` means in its constant expressions.
+    const_property_name: Vec<u8>,
     /// Use imports: maps lowercase short name (alias) -> fully qualified name (original case)
     use_map: HashMap<Vec<u8>, Vec<u8>>,
     /// Use imports for functions: maps lowercase short name -> fully qualified name
@@ -476,6 +479,7 @@ impl Compiler {
             current_parent_class: None,
             finally_targets: Vec::new(),
             current_namespace: Vec::new(),
+            const_property_name: Vec::new(),
             use_map: HashMap::new(),
             use_function_map: HashMap::new(),
             use_const_map: HashMap::new(),
@@ -806,7 +810,8 @@ impl Compiler {
     /// Resolve a magic constant or known constant name in class constant context.
     fn resolve_class_const_magic(&self, name_lower: &[u8], class_name: &[u8], line: u32) -> Value {
         match name_lower {
-            b"__method__" | b"__function__" | b"__property__" => {
+            b"__property__" => Value::String(PhpString::from_vec(self.const_property_name.clone())),
+            b"__method__" | b"__function__" => {
                 // In class constant context (not a method), __METHOD__ and __FUNCTION__ are ""
                 Value::String(PhpString::empty())
             }
@@ -1096,6 +1101,7 @@ impl Compiler {
                     }
                 }
                 let mut ac = Compiler::new();
+                ac.const_property_name = self.const_property_name.clone();
                 ac.current_namespace = self.current_namespace.clone();
                 ac.use_map = self.use_map.clone();
                 ac.use_function_map = self.use_function_map.clone();
@@ -1207,6 +1213,7 @@ impl Compiler {
         extends: Option<&[u8]>,
     ) -> CompileResult<Value> {
         let mut tc = Compiler::new();
+        tc.const_property_name = self.const_property_name.clone();
         tc.current_namespace = self.current_namespace.clone();
         tc.use_map = self.use_map.clone();
         tc.use_function_map = self.use_function_map.clone();
@@ -5676,6 +5683,10 @@ impl Compiler {
                 }
 
                 for member in body {
+                    self.const_property_name = match member {
+                        ClassMember::Property { name, .. } => name.clone(),
+                        _ => Vec::new(),
+                    };
                     match member {
                         ClassMember::Property {
                             name: prop_name,
@@ -9629,6 +9640,7 @@ impl Compiler {
                     }
                 }
 
+                self.const_property_name.clear();
                 // Restore outer class scope
                 self.current_class = saved_class;
                 self.current_parent_class = saved_parent;
@@ -13643,7 +13655,8 @@ impl Compiler {
                         {
                             &n[1..n.len() - 5]
                         } else {
-                            b""
+                            // (a property declaration's constant expression)
+                            &self.const_property_name
                         };
                         Value::String(PhpString::from_vec(prop.to_vec()))
                     }
