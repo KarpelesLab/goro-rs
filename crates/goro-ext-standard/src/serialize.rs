@@ -28,6 +28,71 @@ thread_local! {
     static SER_DATA: RefCell<Option<Rc<RefCell<SerHash>>>> = const { RefCell::new(None) };
     static UNSER_LEVEL: Cell<u32> = const { Cell::new(0) };
     static UNSER_DATA: RefCell<Option<Rc<RefCell<UnserData>>>> = const { RefCell::new(None) };
+    /// Serializer state set aside by serialize_scope_hook(true) while the
+    /// lock was held (restored by serialize_scope_hook(false)).
+    static SER_SCOPES: RefCell<Vec<Option<SavedSer>>> = const { RefCell::new(Vec::new()) };
+    /// Same for unserialize_scope_hook(), with the scope's var_hash.
+    static UNSER_SCOPES: RefCell<Vec<UnserScope>> = const { RefCell::new(Vec::new()) };
+}
+
+type SavedUnser = (u32, u32, Option<Rc<RefCell<UnserData>>>);
+type UnserScope = (Option<SavedUnser>, Rc<RefCell<UnserData>>);
+
+/// PHP_VAR_UNSERIALIZE_INIT / _DESTROY around the pieces internal code
+/// unserializes with one var_hash (ArrayObject::unserialize(), ...); see
+/// serialize_scope_hook().
+pub(crate) fn unserialize_scope_hook(vm: &mut Vm, enter: bool) {
+    if enter {
+        let saved = if locked() {
+            Some((
+                SERIALIZE_LOCK.with(|l| l.replace(0)),
+                UNSER_LEVEL.with(|l| l.replace(0)),
+                UNSER_DATA.with(|d| d.borrow_mut().take()),
+            ))
+        } else {
+            None
+        };
+        let d = unser_init(vm);
+        UNSER_SCOPES.with(|st| st.borrow_mut().push((saved, d)));
+    } else if let Some((saved, d)) = UNSER_SCOPES.with(|st| st.borrow_mut().pop()) {
+        unser_destroy(vm, &d);
+        if let Some((lock, level, data)) = saved {
+            SERIALIZE_LOCK.with(|l| l.set(lock));
+            UNSER_LEVEL.with(|l| l.set(level));
+            UNSER_DATA.with(|dd| *dd.borrow_mut() = data);
+        }
+    }
+}
+
+type SavedSer = (u32, u32, Option<Rc<RefCell<SerHash>>>);
+
+/// PHP_VAR_SERIALIZE_INIT / PHP_VAR_SERIALIZE_DESTROY for internal code
+/// that serializes several values with one var_hash
+/// (ArrayObject::serialize(), ...): serialize() calls made in between share
+/// it. Under the serialize lock (inside a magic method the serializer
+/// called) the scope gets a fresh var_hash of its own.
+pub fn serialize_scope_hook(enter: bool) {
+    if enter {
+        let saved = if locked() {
+            let s = (
+                SERIALIZE_LOCK.with(|l| l.replace(0)),
+                SER_LEVEL.with(|l| l.replace(0)),
+                SER_DATA.with(|d| d.borrow_mut().take()),
+            );
+            Some(s)
+        } else {
+            None
+        };
+        SER_SCOPES.with(|st| st.borrow_mut().push(saved));
+        let _ = ser_init();
+    } else {
+        ser_destroy();
+        if let Some(Some((lock, level, data))) = SER_SCOPES.with(|st| st.borrow_mut().pop()) {
+            SERIALIZE_LOCK.with(|l| l.set(lock));
+            SER_LEVEL.with(|l| l.set(level));
+            SER_DATA.with(|d| *d.borrow_mut() = data);
+        }
+    }
 }
 
 fn with_lock<R>(f: impl FnOnce() -> R) -> R {
@@ -1174,7 +1239,10 @@ impl<'a> Parser<'a> {
         // SplObjectStorage, ...) whose payload is being decoded.
         let func = match vm.call_stack.last() {
             Some(f) if f.0.ends_with("->unserialize") => f.0.replace("->", "::"),
-            _ => "unserialize".to_string(),
+            _ => match vm.current_builtin_name() {
+                Some(n) if n.starts_with("session_") => n,
+                _ => "unserialize".to_string(),
+            },
         };
         vm.emit_warning_at(&format!("{}(): {}", func, msg), self.line);
     }
@@ -2823,6 +2891,56 @@ pub(crate) fn unserialize_value_hook(vm: &mut Vm, data: &[u8], pos: &mut usize) 
         Value::Reference(r) => r.borrow().clone(),
         v => v,
     })
+}
+
+/// A php_unserialize_data_t for other extensions (ext/session):
+/// PHP_VAR_UNSERIALIZE_INIT shares the active var_hash when nested in an
+/// unserialize() call (outside magic methods), like php-src's.
+pub struct UnserializeScope {
+    d: Rc<RefCell<UnserData>>,
+}
+
+impl UnserializeScope {
+    /// PHP_VAR_UNSERIALIZE_INIT
+    pub fn begin(vm: &mut Vm) -> Self {
+        UnserializeScope { d: unser_init(vm) }
+    }
+
+    /// php_var_unserialize() of the value at `*pos` into a new
+    /// var_tmp_var(); Some(its index) on success. The warnings it emits
+    /// are named after the running builtin (session_decode(), ...).
+    pub fn value(&self, vm: &mut Vm, data: &[u8], pos: &mut usize) -> Option<usize> {
+        let tmp_idx = {
+            let mut dd = self.d.borrow_mut();
+            dd.tmps.push(Value::Null);
+            dd.tmps.len() - 1
+        };
+        let mut parser = Parser {
+            data,
+            d: self.d.clone(),
+            line: vm.current_line,
+        };
+        parser
+            .unserialize(vm, pos, &Slot::Tmp(tmp_idx))
+            .then_some(tmp_idx)
+    }
+
+    /// The value of var_tmp_var `idx` (a reference if a later `R:` made it
+    /// one).
+    pub fn tmp(&self, idx: usize) -> Value {
+        self.d
+            .borrow()
+            .tmps
+            .get(idx)
+            .cloned()
+            .unwrap_or(Value::Null)
+    }
+
+    /// PHP_VAR_UNSERIALIZE_DESTROY (runs the delayed __wakeup() /
+    /// __unserialize() calls on the outermost level).
+    pub fn end(self, vm: &mut Vm) {
+        unser_destroy(vm, &self.d);
+    }
 }
 
 /// php_lookup_class_name() of an __PHP_Incomplete_Class object.

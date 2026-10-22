@@ -947,6 +947,13 @@ pub struct Vm {
     pub(crate) exec_frame_len: usize,
     /// unserialize() one value at a byte position (set by ext/standard).
     pub unserialize_value_hook: Option<fn(&mut Vm, &[u8], &mut usize) -> Option<Value>>,
+    /// PHP_VAR_SERIALIZE_INIT (true) / _DESTROY (false) around the pieces an
+    /// internal Serializable::serialize() serializes with one var_hash
+    /// (set by ext/standard).
+    pub serialize_scope_hook: Option<fn(bool)>,
+    /// PHP_VAR_UNSERIALIZE_INIT / _DESTROY likewise, for the pieces of an
+    /// internal Serializable::unserialize() payload.
+    pub unserialize_scope_hook: Option<fn(&mut Vm, bool)>,
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
     /// Parameter types for built-in functions (for strict_types enforcement)
@@ -2151,6 +2158,8 @@ impl Vm {
             spl_internal_frames: Vec::new(),
             exec_frame_len: 0,
             unserialize_value_hook: None,
+            serialize_scope_hook: None,
+            unserialize_scope_hook: None,
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();
                 // Core extensions always available

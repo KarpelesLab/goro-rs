@@ -978,6 +978,25 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
         args: Option<&[Value]>,
     ) -> Option<Value> {
+        // Serializable::unserialize(): one var_hash for all the pieces.
+        if method == b"unserialize" {
+            if let Some(h) = self.unserialize_scope_hook {
+                h(self, true);
+                let r = self.spl_array_call_impl(class, method, obj, args);
+                h(self, false);
+                return r;
+            }
+        }
+        self.spl_array_call_impl(class, method, obj, args)
+    }
+
+    fn spl_array_call_impl(
+        &mut self,
+        class: &[u8],
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+        args: Option<&[Value]>,
+    ) -> Option<Value> {
         // RecursiveArrayIterator inherits ArrayIterator's methods (parent::
         // calls name the immediate parent).
         let class: &[u8] = if class == b"recursivearrayiterator"
@@ -1241,7 +1260,15 @@ impl Vm {
             b"serialize" => {
                 let flags = ao_flags(obj);
                 let mut out: Vec<u8> = b"x:".to_vec();
-                out.extend_from_slice(format!("i:{};", flags & CLONE_MASK).as_bytes());
+                // (one var_hash for all the pieces, the flags included)
+                let scope = self.serialize_scope_hook;
+                if let Some(h) = scope {
+                    h(true);
+                }
+                let fs = self
+                    .spl_call_builtin(b"serialize", &[Value::Long(flags & CLONE_MASK)])
+                    .unwrap_or(Value::Null);
+                out.extend_from_slice(fs.to_php_string().as_bytes());
                 if flags & IS_SELF == 0 {
                     let st = match prop(obj, b"__spl_array") {
                         v @ (Value::Array(_) | Value::Object(_)) => v,
@@ -1258,6 +1285,9 @@ impl Vm {
                 let s = self
                     .spl_call_builtin(b"serialize", &[props])
                     .unwrap_or(Value::Null);
+                if let Some(h) = scope {
+                    h(false);
+                }
                 out.extend_from_slice(s.to_php_string().as_bytes());
                 Value::String(PhpString::from_vec(out))
             }

@@ -310,7 +310,22 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
         Value::Object(obj) => {
             // var_dump()'s object dump, with the refcount added to its
             // header line ("object(C)#N (M) {").
-            let rc = Rc::strong_count(obj).saturating_sub(bias);
+            let mut rc = Rc::strong_count(obj).saturating_sub(bias);
+            // SplFixedArray's get_properties_for(DEBUG) table, built before
+            // the refcount is read, references the elements once more.
+            if class_extends(
+                vm,
+                &obj.borrow().class_name.to_ascii_lowercase(),
+                b"splfixedarray",
+            ) {
+                if let Value::Array(a) = obj.borrow().get_property(b"__spl_array") {
+                    rc += a
+                        .borrow()
+                        .values()
+                        .filter(|v| matches!(v, Value::Object(o) if Rc::ptr_eq(o, obj)))
+                        .count();
+                }
+            }
             let start = vm.active_output_buffer().len();
             ZVAL_BIAS.with(|b| b.set(1));
             var_dump_value_inner(vm, val, indent, seen);
@@ -331,6 +346,26 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
         }
         _ => var_dump_value_inner(vm, val, indent, seen),
     }
+}
+
+/// Whether class `class_lower` is `ancestor` or extends it.
+fn class_extends(vm: &Vm, class_lower: &[u8], ancestor: &[u8]) -> bool {
+    let mut c = class_lower.to_vec();
+    for _ in 0..64 {
+        if c == ancestor {
+            return true;
+        }
+        let next = vm
+            .classes
+            .get(&c)
+            .and_then(|ce| ce.parent.as_ref().map(|p| p.to_ascii_lowercase()))
+            .or_else(|| goro_core::vm::get_builtin_parent(&c).map(|p| p.to_ascii_lowercase()));
+        match next {
+            Some(n) => c = n,
+            None => return false,
+        }
+    }
+    false
 }
 
 #[allow(clippy::if_same_then_else)] // branches mirror php-src
@@ -2188,6 +2223,7 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                 )
             };
             // Properties as exposed for var_export (zend_get_properties_for).
+            let mut is_fixed_array = false;
             let is_array_object = {
                 let mut c = class_lower.clone();
                 let mut found = false;
@@ -2197,6 +2233,10 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                         b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
                     ) {
                         found = true;
+                        break;
+                    }
+                    if c == b"splfixedarray" {
+                        is_fixed_array = true;
                         break;
                     }
                     let next = vm
@@ -2219,6 +2259,24 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
             let mut native_int_keys: Vec<Vec<u8>> = Vec::new();
             let native_table = native_props(vm, obj, 1);
             let props: Vec<(Vec<u8>, Value)> = if let Some(arr) = native_table {
+                arr.iter()
+                    .map(|(k, v)| {
+                        let kb = match k {
+                            goro_core::array::ArrayKey::Int(n) => {
+                                let kb = n.to_string().into_bytes();
+                                native_int_keys.push(kb.clone());
+                                kb
+                            }
+                            goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                        };
+                        (kb, v.clone())
+                    })
+                    .collect()
+            } else if is_fixed_array {
+                // get_properties_for(VAR_EXPORT): the elements, then the
+                // properties (as for an array cast).
+                let arr = vm.object_to_array(obj);
+                let arr = arr.borrow();
                 arr.iter()
                     .map(|(k, v)| {
                         let kb = match k {

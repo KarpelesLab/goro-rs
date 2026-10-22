@@ -255,6 +255,24 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
         args: Option<&[Value]>,
     ) -> Option<Value> {
+        // Serializable::unserialize(): one var_hash for all the pieces.
+        if method == b"unserialize" {
+            if let Some(h) = self.unserialize_scope_hook {
+                h(self, true);
+                let r = self.spl_storage_call_impl(method, obj, args);
+                h(self, false);
+                return r;
+            }
+        }
+        self.spl_storage_call_impl(method, obj, args)
+    }
+
+    fn spl_storage_call_impl(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+        args: Option<&[Value]>,
+    ) -> Option<Value> {
         let needs_args = matches!(
             method,
             b"attach"
@@ -481,7 +499,15 @@ impl Vm {
             b"serialize" => {
                 let e = load(obj);
                 let mut out: Vec<u8> = b"x:".to_vec();
-                out.extend_from_slice(format!("i:{};", e.objs.len()).as_bytes());
+                // (one var_hash for all the pieces, the count included)
+                let scope = self.serialize_scope_hook;
+                if let Some(h) = scope {
+                    h(true);
+                }
+                let n = self
+                    .spl_call_builtin(b"serialize", &[Value::Long(e.objs.len() as i64)])
+                    .unwrap_or(Value::Null);
+                out.extend_from_slice(n.to_php_string().as_bytes());
                 for (o, inf) in e.objs.into_iter().zip(e.infs) {
                     let so = self
                         .spl_call_builtin(b"serialize", &[o])
@@ -499,6 +525,9 @@ impl Vm {
                 let sp = self
                     .spl_call_builtin(b"serialize", &[props])
                     .unwrap_or(Value::Null);
+                if let Some(h) = scope {
+                    h(false);
+                }
                 out.extend_from_slice(sp.to_php_string().as_bytes());
                 Value::String(PhpString::from_vec(out))
             }

@@ -961,8 +961,40 @@ impl Vm {
                     }
                 }
             };
+            // object_properties_load(): a property the class does not
+            // declare is a dynamic one.
+            if !obj.borrow().has_property(&name) && !self.spl_allows_dynamic_props(obj) {
+                let msg = format!(
+                    "Creation of dynamic property {}::${} is deprecated",
+                    crate::value::display_class_name(&obj.borrow().class_name),
+                    String::from_utf8_lossy(&name)
+                );
+                self.emit_deprecated(&msg);
+                if self.current_exception.is_some() {
+                    return;
+                }
+            }
             obj.borrow_mut().set_property(name, v.clone());
         }
+    }
+
+    /// Whether the object's class (or an ancestor) is
+    /// #[AllowDynamicProperties].
+    fn spl_allows_dynamic_props(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        let mut cur = Some(obj_class_lower(obj));
+        for _ in 0..64 {
+            let Some(c) = cur else { break };
+            match self.classes.get(&c) {
+                Some(ce) => {
+                    if ce.allow_dynamic_properties {
+                        return true;
+                    }
+                    cur = ce.parent.as_ref().map(|p| p.to_ascii_lowercase());
+                }
+                None => break,
+            }
+        }
+        false
     }
 }
 

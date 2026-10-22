@@ -241,6 +241,24 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
         args: Option<&[Value]>,
     ) -> Option<Value> {
+        // Serializable::unserialize(): one var_hash for all the pieces.
+        if method == b"unserialize" {
+            if let Some(h) = self.unserialize_scope_hook {
+                h(self, true);
+                let r = self.spl_dll_call_impl(method, obj, args);
+                h(self, false);
+                return r;
+            }
+        }
+        self.spl_dll_call_impl(method, obj, args)
+    }
+
+    fn spl_dll_call_impl(
+        &mut self,
+        method: &[u8],
+        obj: &Rc<RefCell<PhpObject>>,
+        args: Option<&[Value]>,
+    ) -> Option<Value> {
         let needs_args = matches!(
             method,
             b"push"
@@ -511,6 +529,11 @@ impl Vm {
             b"__debuginfo" => val_arr(self.dll_debug_info(obj)),
             b"serialize" => {
                 let mut out: Vec<u8> = Vec::new();
+                // (one var_hash for all the pieces, the flags included)
+                let scope = self.serialize_scope_hook;
+                if let Some(h) = scope {
+                    h(true);
+                }
                 let f = self
                     .spl_call_builtin(b"serialize", &[Value::Long(dll_flags(self, obj))])
                     .unwrap_or(Value::Null);
@@ -537,6 +560,9 @@ impl Vm {
                         .iter()
                         .position(|&x| x == id)
                         .and_then(|p| ids.get(p + 1).copied());
+                }
+                if let Some(h) = scope {
+                    h(false);
                 }
                 Value::String(PhpString::from_vec(out))
             }

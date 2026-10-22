@@ -167,6 +167,8 @@ pub fn register(vm: &mut Vm) {
     }
     vm.resource_shutdown_hooks.push(shutdown_filtered_streams);
     vm.unserialize_value_hook = Some(crate::serialize::unserialize_value_hook);
+    vm.serialize_scope_hook = Some(crate::serialize::serialize_scope_hook);
+    vm.unserialize_scope_hook = Some(crate::serialize::unserialize_scope_hook);
     // Built-in php_user_filter base class (user_filters.stub.php). Compiled
     // from its PHP declaration so methods carry real signatures for
     // inheritance checks and reflection.
