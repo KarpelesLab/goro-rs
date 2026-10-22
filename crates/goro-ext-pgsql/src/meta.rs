@@ -393,6 +393,10 @@ fn convert(
                 _ => Vec::new(),
             }
         };
+        // the error each type raises once PGSQL_CONV_CHECK_IGNORE() ran
+        let te: Option<String>;
+        let mut ve2: Option<String> = None;
+        let mut esc_notice: Option<String> = None;
         use DataType::*;
         match data_type {
             Bool => {
@@ -428,19 +432,10 @@ fn convert(
                     Value::Null => new_val = null_str(),
                     _ => err = 1,
                 }
-                if err != 0 {
-                    // (after the ValueError of an invalid string, which
-                    // becomes its previous exception)
-                    let m = format!(
-                        "{}(): Field \"{}\" must be of type string|null|int|bool, {} given",
-                        fname, fs, ty
-                    );
-                    let prev = vm.current_exception.take();
-                    throw(vm, b"TypeError", &m);
-                    if let (Some(prev), Some(Value::Object(e))) = (prev, &vm.current_exception) {
-                        e.borrow_mut().set_property(b"previous".to_vec(), prev);
-                    }
-                }
+                te = Some(format!(
+                    "{}(): Field \"{}\" must be of type string|null|int|bool, {} given",
+                    fname, fs, ty
+                ));
             }
             Oid | Int2 | Int4 | Int8 => {
                 match &val {
@@ -458,13 +453,10 @@ fn convert(
                     Value::Null => new_val = null_str(),
                     _ => err = 1,
                 }
-                if err != 0 {
-                    let m = format!(
-                        "{}(): Field \"{}\" must be of type int|null, {} given",
-                        fname, fs, ty
-                    );
-                    throw(vm, b"TypeError", &m);
-                }
+                te = Some(format!(
+                    "{}(): Field \"{}\" must be of type int|null, {} given",
+                    fname, fs, ty
+                ));
             }
             Numeric | Money | Float4 | Float8 => {
                 match &val {
@@ -486,17 +478,13 @@ fn convert(
                     Value::Null => new_val = null_str(),
                     _ => err = 1,
                 }
-                if err != 0 {
-                    // (the arguments are out of order in php-src)
-                    let m = format!(
-                        "{}(): Field \"{}\" must be of type {}|int|null, {} given",
-                        fname,
-                        if data_type == Money { "money" } else { "float" },
-                        fs,
-                        ty
-                    );
-                    throw(vm, b"TypeError", &m);
-                }
+                te = Some(format!(
+                    "{}(): Field \"{}\" must be of type {}|int|null, {} given",
+                    fname,
+                    if data_type == Money { "money" } else { "float" },
+                    fs,
+                    ty
+                ));
             }
             Text | Char | Varchar | Bit | Varbit | Line | Lseg | Point | Box | Path | Polygon
             | Circle | Unknown => {
@@ -523,23 +511,14 @@ fn convert(
                     Value::Null => new_val = null_str(),
                     _ => err = 1,
                 }
-                if err != 0 {
-                    if escape_err {
-                        notice(
-                            vm,
-                            &format!(
-                                "String value escaping failed for PostgreSQL '{}' ({})",
-                                ty, fs
-                            ),
-                        );
-                    } else {
-                        let m = format!(
-                            "{}(): Field \"{}\" must be of type string|null, {} given",
-                            fname, fs, ty
-                        );
-                        throw(vm, b"TypeError", &m);
-                    }
-                }
+                esc_notice = Some(format!(
+                    "String value escaping failed for PostgreSQL '{}' ({})",
+                    ty, fs
+                ));
+                te = Some(format!(
+                    "{}(): Field \"{}\" must be of type string|null, {} given",
+                    fname, fs, ty
+                ));
             }
             UnixTime | UnixTimeInterval => {
                 match &val {
@@ -557,15 +536,12 @@ fn convert(
                     Value::Null => new_val = null_str(),
                     _ => err = 1,
                 }
-                if err != 0 {
-                    let m = format!(
-                        "{}(): Field \"{}\" must be of type int|null, {} given",
-                        fname,
-                        fs,
-                        Vm::value_type_name(&val)
-                    );
-                    throw(vm, b"TypeError", &m);
-                }
+                te = Some(format!(
+                    "{}(): Field \"{}\" must be of type int|null, {} given",
+                    fname,
+                    fs,
+                    Vm::value_type_name(&val)
+                ));
             }
             Cidr | Inet => {
                 match &val {
@@ -583,23 +559,18 @@ fn convert(
                     Value::Null => new_val = null_str(),
                     _ => err = 1,
                 }
-                if err == 2 {
-                    let m = format!(
-                        "{}(): Field \"{}\" must be a valid IPv4 or IPv6 address string, \"{}\" given",
-                        fname,
-                        fs,
-                        lossy(&s_val(&val))
-                    );
-                    throw(vm, b"ValueError", &m);
-                } else if err != 0 {
-                    let m = format!(
-                        "{}(): Field \"{}\" must be of type string|null, given {}",
-                        fname,
-                        fs,
-                        Vm::value_type_name(&val)
-                    );
-                    throw(vm, b"TypeError", &m);
-                }
+                ve2 = Some(format!(
+                    "{}(): Field \"{}\" must be a valid IPv4 or IPv6 address string, \"{}\" given",
+                    fname,
+                    fs,
+                    lossy(&s_val(&val))
+                ));
+                te = Some(format!(
+                    "{}(): Field \"{}\" must be of type string|null, given {}",
+                    fname,
+                    fs,
+                    Vm::value_type_name(&val)
+                ));
             }
             TimeWithTimezone
             | Timestamp
@@ -632,13 +603,10 @@ fn convert(
                     Value::Null => new_val = null_str(),
                     _ => err = 1,
                 }
-                if err != 0 {
-                    let m = format!(
-                        "{}(): Field \"{}\" must be of type string|null, {} given",
-                        fname, fs, ty
-                    );
-                    throw(vm, b"TypeError", &m);
-                }
+                te = Some(format!(
+                    "{}(): Field \"{}\" must be of type string|null, {} given",
+                    fname, fs, ty
+                ));
             }
             Bytea => {
                 match &val {
@@ -655,16 +623,13 @@ fn convert(
                     Value::Null => new_val = null_str(),
                     _ => err = 1,
                 }
-                if err != 0 {
-                    let m = format!(
-                        "{}(): Field \"{}\" must be of type string|null, {} given",
-                        fname, fs, ty
-                    );
-                    throw(vm, b"TypeError", &m);
-                }
+                te = Some(format!(
+                    "{}(): Field \"{}\" must be of type string|null, {} given",
+                    fname, fs, ty
+                ));
             }
         }
-        // PGSQL_CONV_CHECK_IGNORE() (the exception, if any, stays)
+        // PGSQL_CONV_CHECK_IGNORE()
         let mut skip_field = false;
         if err == 0 {
             if let Value::String(s) = &new_val {
@@ -679,6 +644,19 @@ fn convert(
             }
         }
         if err != 0 {
+            if let (2, Some(m)) = (err, &ve2) {
+                throw(vm, b"ValueError", m);
+            } else if let (true, Some(m)) = (escape_err, &esc_notice) {
+                notice(vm, m);
+            } else if let Some(m) = te {
+                // a pending exception (the bool ValueError) becomes the
+                // previous one
+                let prev = vm.current_exception.take();
+                throw(vm, b"TypeError", &m);
+                if let (Some(prev), Some(Value::Object(e))) = (prev, &vm.current_exception) {
+                    e.borrow_mut().set_property(b"previous".to_vec(), prev);
+                }
+            }
             return None;
         }
         if !skip_field {
