@@ -1720,16 +1720,11 @@ impl<'a> Lexer<'a> {
                 content.split(|&b| b == b'\n').collect()
             };
             let first_line = closing_line.saturating_sub(lines.len() as u32);
+            // Found while scanning the body, before its newlines are counted.
             if closing_indent.iter().any(|&c| c != closing_indent[0]) {
-                // Raised while scanning the body (its first line), or the
-                // `<<<` line of an empty heredoc.
                 crate::push_lexer_error(
                     "Invalid indentation - tabs and spaces cannot be mixed".into(),
-                    if lines.is_empty() {
-                        closing_line.saturating_sub(1)
-                    } else {
-                        first_line
-                    },
+                    first_line,
                 );
             }
             for (i, line) in lines.iter().enumerate() {
