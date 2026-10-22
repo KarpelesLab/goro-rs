@@ -270,7 +270,17 @@ fn spellout(tag: &str, q: &Dq, df: &DecimalFormat) -> String {
     if q.neg && !q.is_zero() {
         let m1 = intl::spellout::spell_cardinal(tag, -1).unwrap_or_default();
         let p1 = intl::spellout::spell_cardinal(tag, 1).unwrap_or_default();
-        out.push_str(m1.strip_suffix(&p1).unwrap_or("minus "));
+        let pre = m1.strip_suffix(&p1).unwrap_or("minus ");
+        // (intl's rule sets lack some -x rules and fall back to English)
+        let pre = match (pre, lang.as_str()) {
+            ("minus ", "fr") => "moins ",
+            ("minus ", "es" | "pt") => "menos ",
+            ("minus ", "it") => "meno ",
+            ("minus ", "ca") => "menys ",
+            ("minus ", "nl") => "min ",
+            (p, _) => p,
+        };
+        out.push_str(pre);
     }
     out.push_str(&int_words);
     if q.lower() < 0 {

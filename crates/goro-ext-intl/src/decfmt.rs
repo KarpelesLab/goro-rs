@@ -1609,7 +1609,13 @@ impl DecimalFormat {
             num.push_str(&self.symbols[SYM_INFINITY]);
         } else {
             let top = q.upper().max(m.min_int - 1);
-            let int_top = if q.is_zero() { m.min_int - 1 } else { top };
+            // (significant digits show a digit for zero)
+            let zero_min = if matches!(prec, Prec::Sig(..)) {
+                m.min_int.max(1)
+            } else {
+                m.min_int
+            };
+            let int_top = if q.is_zero() { zero_min - 1 } else { top };
             let mut mag = int_top;
             while mag >= 0 {
                 num.push_str(self.digit_str(q.digit(mag)));
@@ -2278,9 +2284,14 @@ impl DecimalFormat {
         }
         let strict = self.props.parse_strict;
         let dec_first = dec_sym.chars().next();
+        let (comma, period) = if strict {
+            (STRICT_COMMA_SET, STRICT_PERIOD_SET)
+        } else {
+            (COMMA_SET, PERIOD_SET)
+        };
         let dec_set: &[char] = match dec_first {
-            Some(c) if !strict && COMMA_SET.contains(&c) => COMMA_SET,
-            Some(c) if !strict && PERIOD_SET.contains(&c) => PERIOD_SET,
+            Some(c) if comma.contains(&c) => comma,
+            Some(c) if period.contains(&c) => period,
             _ => &[],
         };
         let is_dec = |k: usize| -> Option<usize> {
@@ -2297,10 +2308,9 @@ impl DecimalFormat {
             if let Some(j) = match_str(text, k, grp_sym) {
                 return Some(j);
             }
-            if !strict && k < text.len() {
+            if k < text.len() {
                 let c = text[k];
-                if COMMA_SET.contains(&c) || PERIOD_SET.contains(&c) || OTHER_GROUPING.contains(&c)
-                {
+                if comma.contains(&c) || period.contains(&c) || OTHER_GROUPING.contains(&c) {
                     return Some(k + 1);
                 }
             }
@@ -2328,9 +2338,9 @@ impl DecimalFormat {
                 last_was_sep = false;
                 continue;
             }
-            if !seen_dec && !self.props.parse_int_only {
+            if !seen_dec {
                 if let Some(j) = is_dec(k) {
-                    if last_was_sep {
+                    if last_was_sep || self.props.parse_int_only {
                         break;
                     }
                     seen_dec = true;
@@ -2459,6 +2469,9 @@ impl DecimalFormat {
 /// unisets COMMA / PERIOD / OTHER_GROUPING_SEPARATORS
 const COMMA_SET: &[char] = &[',', '،', '٫', '、', '︐', '︑', '﹐', '﹑', '，', '､'];
 const PERIOD_SET: &[char] = &['.', '․', '。', '︒', '﹒', '．', '｡'];
+/// unisets STRICT_COMMA / STRICT_PERIOD
+const STRICT_COMMA_SET: &[char] = &[',', '٫', '︐', '﹐', '，'];
+const STRICT_PERIOD_SET: &[char] = &['.', '․', '﹒', '．', '｡'];
 const OTHER_GROUPING: &[char] = &[
     ' ', '\'', '\u{a0}', '\u{66c}', '\u{2000}', '\u{2001}', '\u{2002}', '\u{2003}', '\u{2004}',
     '\u{2005}', '\u{2006}', '\u{2007}', '\u{2008}', '\u{2009}', '\u{200a}', '\u{2018}', '\u{2019}',
