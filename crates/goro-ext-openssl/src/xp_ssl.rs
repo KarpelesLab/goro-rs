@@ -1030,18 +1030,39 @@ fn load_cafile(vm: &mut Vm, f: &str, cafile: &str) -> Option<Vec<Rc<Cert>>> {
         }
     }
     // php_openssl_load_stream_cafile(): local stream wrappers only
-    let path = if let Some(rest) = cafile.strip_prefix("file://") {
-        rest.to_string()
-    } else if cafile.contains("://") {
-        vm.emit_warning(&format!(
-            "{}(): remote cafile streams are disabled for security purposes",
-            f
-        ));
-        return None;
+    let data = if let Some(rest) = cafile.strip_prefix("file://") {
+        std::fs::read(rest).ok()
+    } else if let Some(pos) = cafile.find("://") {
+        let scheme = cafile[..pos].to_ascii_lowercase();
+        if matches!(scheme.as_str(), "http" | "https" | "ftp" | "ftps") {
+            // stream->wrapper->is_url
+            vm.emit_warning(&format!(
+                "{}(): remote cafile streams are disabled for security purposes",
+                f
+            ));
+            return None;
+        }
+        // another (non-url) wrapper, e.g. phar://: opened without
+        // REPORT_ERRORS
+        match vm.functions.get(b"file_get_contents".as_slice()).copied() {
+            Some(fgc) => {
+                let saved = vm.warning_capture.replace(Vec::new());
+                let r = fgc(
+                    vm,
+                    &[Value::String(PhpString::from_bytes(cafile.as_bytes()))],
+                );
+                vm.warning_capture = saved;
+                match r {
+                    Ok(Value::String(s)) => Some(s.as_bytes().to_vec()),
+                    _ => None,
+                }
+            }
+            None => None,
+        }
     } else {
-        cafile.to_string()
+        std::fs::read(cafile).ok()
     };
-    let Ok(data) = std::fs::read(&path) else {
+    let Some(data) = data else {
         vm.emit_warning(&format!(
             "{}(): failed loading cafile stream: `{}'",
             f, cafile
