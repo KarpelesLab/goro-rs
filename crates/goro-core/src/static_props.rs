@@ -1175,7 +1175,7 @@ impl Vm {
                 .next()
                 .unwrap_or(&name)
                 .to_vec();
-            if !self.constants.contains_key(&name) && !self.constants.contains_key(&short) {
+            if self.deferred_global_const(&name).is_none() {
                 if crate::stubs::find_constant(&short).is_some() {
                     continue;
                 }

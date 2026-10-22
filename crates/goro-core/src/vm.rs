@@ -16276,20 +16276,8 @@ impl Vm {
             }
             if s_bytes.starts_with(b"__deferred_global_const__::") {
                 let const_name = &s_bytes[b"__deferred_global_const__::".len()..];
-                // Look up in the global constants table
-                if let Some(v) = self.constants.get(const_name) {
-                    return v.clone();
-                }
-                // Try the unqualified name as fallback
-                if const_name.contains(&b'\\') {
-                    if let Some(last_sep) = const_name.iter().rposition(|&b| b == b'\\') {
-                        let global_name = &const_name[last_sep + 1..];
-                        if let Some(v) = self.constants.get(global_name) {
-                            return v.clone();
-                        }
-                    }
-                }
-                return Value::Null;
+                // The namespaced name, then the global one.
+                return self.deferred_global_const(const_name).cloned().unwrap_or(Value::Null);
             }
             if s_bytes.starts_with(b"__deferred_const__::") {
                 let rest = &s_bytes[b"__deferred_const__::".len()..];
@@ -16333,18 +16321,7 @@ impl Vm {
     ) -> Value {
         if s.starts_with(b"__deferred_global_const__::") {
             let const_name = &s[b"__deferred_global_const__::".len()..];
-            if let Some(v) = self.constants.get(const_name) {
-                return v.clone();
-            }
-            if const_name.contains(&b'\\') {
-                if let Some(last_sep) = const_name.iter().rposition(|&b| b == b'\\') {
-                    let global_name = &const_name[last_sep + 1..];
-                    if let Some(v) = self.constants.get(global_name) {
-                        return v.clone();
-                    }
-                }
-            }
-            return Value::Null;
+            return self.deferred_global_const(const_name).cloned().unwrap_or(Value::Null);
         }
         if s.starts_with(b"__deferred_const__::") {
             let rest = &s[b"__deferred_const__::".len()..];
@@ -16442,13 +16419,7 @@ impl Vm {
                     .map(|p| start + p)
                     .unwrap_or(s_bytes.len());
                 let const_name = &s_bytes[start..end];
-                let found = self.constants.contains_key(const_name)
-                    || (const_name.contains(&b'\\')
-                        && const_name
-                            .iter()
-                            .rposition(|&b| b == b'\\')
-                            .map(|sep| self.constants.contains_key(&const_name[sep + 1..]))
-                            .unwrap_or(false));
+                let found = self.deferred_global_const(const_name).is_some();
                 if !found {
                     return false;
                 }
@@ -38611,19 +38582,9 @@ impl Vm {
                                         [b"__deferred_global_const__::".len()..]
                                         .to_vec();
                                     let mut resolved = false;
-                                    if let Some(v) = self.constants.get(const_name.as_slice()) {
+                                    if let Some(v) = self.deferred_global_const(&const_name) {
                                         raw_val = v.clone();
                                         resolved = true;
-                                    } else if const_name.contains(&b'\\') {
-                                        if let Some(last_sep) =
-                                            const_name.iter().rposition(|&b| b == b'\\')
-                                        {
-                                            let global_name = &const_name[last_sep + 1..];
-                                            if let Some(v) = self.constants.get(global_name) {
-                                                raw_val = v.clone();
-                                                resolved = true;
-                                            }
-                                        }
                                     }
                                     if resolved && const_name.as_slice() == b"MT_RAND_PHP" {
                                         self.emit_deprecated_at(
@@ -56482,6 +56443,21 @@ impl Vm {
                 })
             }
         }
+    }
+
+    /// The value of a deferred global constant reference (a constant
+    /// expression's bare `NAME` / `Ns\NAME`): the namespaced constant
+    /// (stored with a lowercase namespace), then the global one.
+    pub(crate) fn deferred_global_const(&self, name: &[u8]) -> Option<&Value> {
+        if let Some(v) = self.constants.get(name) {
+            return Some(v);
+        }
+        let sep = name.iter().rposition(|&b| b == b'\\')?;
+        let mut key = name[..sep].to_ascii_lowercase();
+        key.extend_from_slice(&name[sep..]);
+        self.constants
+            .get(&key)
+            .or_else(|| self.constants.get(&name[sep + 1..]))
     }
 
     /// Look up a constant value
