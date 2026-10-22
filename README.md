@@ -58,7 +58,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/uri (uriparser port + lexbor WHATWG URL parser port) | 309 | 309 | 100% |
 | ext/posix / pcntl / calendar / ftp / gettext / shmop / sysv* | 254 | 254 | 100% |
 | ext/curl (libcurl emulation) / sockets | 252 | 253 | 99.6% |
-| ext/opcache (behavioural tests) | 300 | 303 | 99.0% |
+| ext/opcache (script cache, preloading; 59 of the fails expect optimizer opcode dumps) | 805 | 880 | 91.5% |
 | ext/zend_test (engine test hooks) | 106 | 145 | 73.1% |
 | ext/dba (cdb, cdb_make, inifile, flatfile) / readline | 53 | 53 | 100% |
 | ext/tidy (tidy-html5 5.8.0 port) | 50 | 50 | 100% |
@@ -103,12 +103,14 @@ Highlights beyond the core language:
   handlers), readline (GNU readline emulation, with the `php -a` interactive shell),
   uri (`Uri\Rfc3986\Uri` on a uriparser port, `Uri\WhatWg\Url` on a port of lexbor's WHATWG
   URL parser), tidy (a port of tidy-html5 5.8.0 matching libtidy's output and messages),
+  Zend OPcache (an in-memory script cache with the opcache_*() API, preloading and the file
+  cache's entries; no optimizer or JIT, the directives are reported as php-src does),
   zend_test.
 
 ### Not Yet Implemented
 - pdo_sqlite/…, ffi, ldap, sqlite3, odbc, snmp, enchant
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
-- Exact opcache optimizer behaviour
+- The opcache optimizer and JIT (`opcache.opt_debug_level` opcode dumps)
 
 ## Building
 
@@ -155,6 +157,7 @@ Workspace crates:
 - `goro-ext-readline` - ext/readline (a GNU readline emulation) and the CLI shell's completion
 - `goro-tidy` - a pure Rust port of tidy-html5 5.8.0 (libtidy)
 - `goro-ext-tidy` - ext/tidy on `goro-tidy`
+- `goro-ext-opcache` - Zend OPcache (INI, opcache_*() API, preloading), over goro-core's script cache
 - `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,sodium,xml,zlib}` - misc extensions
 - `goro-phpt` - PHPT test file runner
 
