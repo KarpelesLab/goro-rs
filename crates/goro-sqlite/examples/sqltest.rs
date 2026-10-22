@@ -13,6 +13,12 @@ use goro_sqlite::prepare::sqlite3_prepare_v2;
 use goro_sqlite::vdbeapi::*;
 use std::io::Read;
 
+/// Write raw bytes to stdout (no UTF-8 conversion, like the C twin).
+fn out(b: &[u8]) {
+    use std::io::Write;
+    std::io::stdout().write_all(b).unwrap();
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let path = args
@@ -47,7 +53,7 @@ fn main() {
         );
         if rc != SQLITE_OK {
             let msg = sqlite3_errmsg(&mut db).unwrap_or_default();
-            println!("Error: {} {}", rc, String::from_utf8_lossy(&msg));
+            out(&[format!("Error: {} ", rc).as_bytes(), &msg, b"\n"].concat());
             if tail == 0 {
                 break;
             }
@@ -82,11 +88,12 @@ fn main() {
                         }
                     }
                 }
-                println!("{}", String::from_utf8_lossy(&line));
+                line.push(b'\n');
+                out(&line);
             } else {
                 if rc != SQLITE_DONE {
                     let msg = sqlite3_errmsg(&mut db).unwrap_or_default();
-                    println!("Error: {} {}", rc, String::from_utf8_lossy(&msg));
+                    out(&[format!("Error: {} ", rc).as_bytes(), &msg, b"\n"].concat());
                 }
                 break;
             }
