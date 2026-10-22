@@ -468,4 +468,47 @@ impl Vm {
             }));
         }
     }
+
+    /// The reference bound to property slot `name` of `obj`, as a
+    /// by-reference iteration binds it (array_walk() on an object): the
+    /// slot becomes a reference typed by the property. None when there is
+    /// no such slot.
+    pub fn object_slot_ref(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        name: &[u8],
+    ) -> Option<Rc<RefCell<Value>>> {
+        let r = {
+            let mut ob = obj.borrow_mut();
+            let slot = ob.properties.iter_mut().find(|(k, _)| k == name)?;
+            match &slot.1 {
+                Value::Reference(r) => r.clone(),
+                v => {
+                    let r = Rc::new(RefCell::new(v.clone()));
+                    slot.1 = Value::Reference(r.clone());
+                    r
+                }
+            }
+        };
+        self.typed_ref_register_slot(obj, name, &r);
+        Some(r)
+    }
+
+    /// Undo object_slot_ref() once nothing but the slot holds the reference.
+    pub fn object_slot_unref(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        name: &[u8],
+        r: &Rc<RefCell<Value>>,
+    ) {
+        if Rc::strong_count(r) != 2 {
+            return;
+        }
+        let mut ob = obj.borrow_mut();
+        if let Some(slot) = ob.properties.iter_mut().find(|(k, _)| k == name) {
+            if matches!(&slot.1, Value::Reference(sr) if Rc::ptr_eq(sr, r)) {
+                slot.1 = r.borrow().clone();
+            }
+        }
+    }
 }

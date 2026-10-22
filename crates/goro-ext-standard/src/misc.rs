@@ -3382,7 +3382,12 @@ fn array_walk_object_entries(
 
     if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
         for (key, prop_name, val) in entries {
-            let val_ref = Rc::new(RefCell::new(val.clone()));
+            // The callback's by-reference parameter binds the property slot
+            // itself (typed properties type the reference).
+            let slot_ref = vm.object_slot_ref(obj, prop_name);
+            let val_ref = slot_ref
+                .clone()
+                .unwrap_or_else(|| Rc::new(RefCell::new(val.clone())));
             let mut fn_cvs = vec![Value::Undef; user_fn.cv_names.len()];
             let mut idx = 0;
             for cv in &captured {
@@ -3408,7 +3413,14 @@ fn array_walk_object_entries(
                     fn_cvs[idx] = extra.clone();
                 }
             }
-            vm.execute_fn(&user_fn, fn_cvs)?;
+            let r = vm.execute_fn(&user_fn, fn_cvs);
+            if let Some(sr) = &slot_ref {
+                drop(val_ref);
+                vm.object_slot_unref(obj, prop_name, sr);
+                r?;
+                continue;
+            }
+            r?;
             // Write modified value back to the object property.
             // Type coercion: if the property has a declared type and the
             // value is incompatible, throw a TypeError (matches PHP's

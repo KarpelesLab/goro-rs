@@ -7902,6 +7902,26 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     return Some(Value::Null);
                 }
                 let decl = decl.unwrap();
+                // A Stringable object assigned to a string property is
+                // converted first; __toString() may initialize the object.
+                if let Some(pt) = decl.property_type.as_ref() {
+                    let inner = match pt {
+                        crate::opcode::ParamType::Nullable(inner) => inner.as_ref(),
+                        other => other,
+                    };
+                    if matches!(inner, crate::opcode::ParamType::Simple(n) if n.eq_ignore_ascii_case(b"string"))
+                        && matches!(&value, Value::Object(o) if vm
+                            .classes
+                            .get(&o.borrow().class_name.to_ascii_lowercase())
+                            .is_some_and(|c| c.get_method(b"__tostring").is_some()))
+                    {
+                        let s = vm.value_to_string(&value);
+                        if vm.current_exception.is_some() {
+                            return Some(Value::Null);
+                        }
+                        value = Value::String(s);
+                    }
+                }
                 let prop_was_lazy = prop_is_lazy(&tobj, pn);
                 if prop_was_lazy {
                     set_prop_lazy_flag(&tobj, pn, false);
