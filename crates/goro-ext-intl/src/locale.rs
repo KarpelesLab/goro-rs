@@ -3,6 +3,9 @@
 #[path = "uloc.rs"]
 pub mod uloc;
 
+#[path = "localematcher.rs"]
+pub mod localematcher;
+
 use goro_core::array::{ArrayKey, PhpArray};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
@@ -426,7 +429,7 @@ fn get_keywords(vm: &mut Vm, c: &mut Call) -> Value {
         loc = default_locale(vm).into_bytes();
     }
     let names = match uloc::keyword_names(&loc) {
-        Ok(n) if !n.is_empty() => n,
+        Ok(Some(n)) => n,
         _ => return Value::Null,
     };
     let mut a = PhpArray::new();
@@ -853,57 +856,89 @@ fn lookup(vm: &mut Vm, c: &mut Call) -> Value {
     }
 }
 
-/// uloc_acceptLanguageFromHTTP() over ICU's installed locales.
-fn accept_language(header: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(header);
-    // LocalePriorityList: tags with their q weights, by decreasing weight
-    let mut list: Vec<(String, f64, usize)> = Vec::new();
-    for (i, item) in text.split(',').enumerate() {
-        let mut parts = item.split(';');
-        let tag = parts.next().unwrap_or("").trim().to_string();
-        if tag.is_empty() {
-            continue;
+/// uloc_acceptLanguageFromHTTP() over ICU's installed locales: the
+/// header's tags by decreasing q weight (LocalePriorityList), matched by
+/// LocaleMatcher.
+fn accept_language(header: &[u8]) -> Result<Option<String>, i32> {
+    let s = header;
+    let n = s.len();
+    let skip = |mut i: usize| {
+        while i < n && s[i] == b' ' {
+            i += 1;
         }
-        let mut q = 1.0;
-        for p in parts {
-            let p = p.trim();
-            if let Some(v) = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q=")) {
-                q = v.trim().parse::<f64>().unwrap_or(0.0);
-            }
-        }
-        if q <= 0.0 || tag == "*" {
-            continue;
-        }
-        list.push((tag, q, i));
-    }
-    list.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.2.cmp(&b.2)));
-    let avail = uloc::data::AVAILABLE;
-    let norm = |t: &str| -> String {
-        let id = uloc::for_language_tag(t.as_bytes()).0;
-        let id = if id.is_empty() { t.as_bytes().to_vec() } else { id };
-        uloc::get_name(&id).unwrap_or_default()
+        i
     };
-    let desired: Vec<String> = list.iter().map(|(t, _, _)| norm(t)).collect();
-    // exact matches
-    for d in &desired {
-        if let Some(a) = avail.iter().find(|a| a.eq_ignore_ascii_case(d)) {
-            return Some(a.to_string());
+    // LocalePriorityList
+    let mut list: Vec<(Vec<u8>, f64, usize)> = Vec::new();
+    let mut i = 0;
+    loop {
+        i = skip(i);
+        if i == n {
+            break;
+        }
+        let start = i;
+        while i < n && !matches!(s[i], b' ' | b',' | b';') {
+            i += 1;
+        }
+        let tag = &s[start..i];
+        let mut weight = 1.0;
+        i = skip(i);
+        if i < n && s[i] == b';' {
+            i = skip(i + 1);
+            if i < n && (s[i] == b'q' || s[i] == b'Q') {
+                i = skip(i + 1);
+            } else {
+                return Err(U_ILLEGAL_ARGUMENT_ERROR);
+            }
+            if i < n && s[i] == b'=' {
+                i = skip(i + 1);
+            } else {
+                return Err(U_ILLEGAL_ARGUMENT_ERROR);
+            }
+            // parseWeight(): 0 or 1, then decimals
+            if i < n && (s[i] == b'0' || s[i] == b'1') {
+                weight = (s[i] - b'0') as f64;
+                i += 1;
+                if i < n && s[i] == b'.' {
+                    i += 1;
+                    let mut dec = 1.0;
+                    while i < n && s[i].is_ascii_digit() {
+                        dec /= 10.0;
+                        weight += (s[i] - b'0') as f64 * dec;
+                        i += 1;
+                    }
+                }
+                if weight > 1.0 {
+                    return Err(U_ILLEGAL_ARGUMENT_ERROR);
+                }
+            } else {
+                return Err(U_ILLEGAL_ARGUMENT_ERROR);
+            }
+        }
+        if weight > 0.0 && tag != b"*" {
+            if let Ok(name) = uloc::get_name(tag) {
+                // a repeated locale takes the new weight and position
+                let name = name.into_bytes();
+                list.retain(|(t, _, _)| *t != name);
+                list.push((name, weight, i));
+            }
+        }
+        i = skip(i);
+        if i == n {
+            break;
+        } else if s[i] == b',' {
+            i += 1;
+        } else {
+            return Err(U_ILLEGAL_ARGUMENT_ERROR);
         }
     }
-    // the parents (truncation fallback)
-    for d in &desired {
-        let mut cur = d.clone();
-        while let Some(p) = cur.rfind('_') {
-            cur.truncate(p);
-            while cur.ends_with('_') {
-                cur.pop();
-            }
-            if let Some(a) = avail.iter().find(|a| a.eq_ignore_ascii_case(&cur)) {
-                return Some(a.to_string());
-            }
-        }
-    }
-    None
+    list.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.2.cmp(&b.2))
+    });
+    let desired: Vec<Vec<u8>> = list.into_iter().map(|(t, _, _)| t).collect();
+    Ok(localematcher::best_match(&desired).map(str::to_string))
 }
 
 /// locale_accept_from_http()
@@ -918,8 +953,12 @@ fn accept_from_http(vm: &mut Vm, c: &mut Call) -> Value {
         }
     }
     match accept_language(&header) {
-        Some(r) => s(r),
-        None => Value::False,
+        Ok(Some(r)) => s(r),
+        Ok(None) => Value::False,
+        Err(code) => {
+            error::set_global(vm, &c.name, code, "failed to find acceptable locale");
+            Value::False
+        }
     }
 }
 

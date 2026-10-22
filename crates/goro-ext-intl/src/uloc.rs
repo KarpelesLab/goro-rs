@@ -44,11 +44,22 @@ fn is_bcp47_ext(s: &[u8]) -> bool {
     s.len() >= 3 && s[0] == b'-' && matches!(s[1], b't' | b'T' | b'u' | b'U' | b'x' | b'X') && s[2] == b'-'
 }
 
-/// After an extension singleton ("-u-", "-x-", "-t-") directly followed by
-/// "va-posix", ICU's ID parser reports the POSIX variant.
-fn ext_is_va_posix(s: &[u8]) -> bool {
-    let r = &s[3..];
-    r.len() >= 8 && r[..8].eq_ignore_ascii_case(b"va-posix") && (r.len() == 8 || r[8] == b'-')
+/// The number of "va-posix" pairs in the BCP 47 extensions `s`
+/// ("-u-ca-gregory-va-posix..."), which ICU reads as (key, type) pairs of
+/// subtags after the first singleton, whatever the singletons between.
+fn va_posix_count(s: &[u8]) -> usize {
+    let end = s.iter().position(|&c| c == b'@').unwrap_or(s.len());
+    let subs: Vec<&[u8]> = s[..end].split(|&c| c == b'-').skip(1).collect();
+    // ICU looks at the subtags pairwise after the singleton.
+    (1..subs.len())
+        .step_by(2)
+        .filter(|&i| {
+            subs[i].eq_ignore_ascii_case(b"va")
+                && subs
+                    .get(i + 1)
+                    .is_some_and(|x| x.eq_ignore_ascii_case(b"posix"))
+        })
+        .count()
 }
 
 fn lower(s: &[u8]) -> Vec<u8> {
@@ -202,15 +213,33 @@ pub fn get_subtags(id: &[u8]) -> Result<Subtags, i32> {
         if !has_region && p + 1 < id.len() && is_sep(id[p + 1]) {
             p += 1;
         }
+        // _getVariant(): '_'-separated segments up to a terminator or an
+        // extension; a separator ending the ID belongs to the variant.
         let s = &id[p + 1..];
         let mut i = 0;
         let mut v = Vec::new();
-        while i < s.len() && !is_term(s[i]) {
-            if is_bcp47_ext(&s[i..]) {
+        let mut first = true;
+        loop {
+            let sub = &s[i..];
+            let next = sub
+                .iter()
+                .position(|&c| is_sep(c) || is_term(c));
+            let finished = next.is_none_or(|n| n + 1 == sub.len());
+            let limit = if finished { sub.len() } else { next.unwrap_or(0) };
+            if !first {
+                v.push(b'_');
+            }
+            first = false;
+            v.extend(sub[..limit].iter().map(|c| c.to_ascii_uppercase()));
+            if finished {
+                i += limit;
                 break;
             }
-            let c = s[i].to_ascii_uppercase();
-            v.push(if c == b'-' { b'_' } else { c });
+            let n = next.unwrap_or(0);
+            i += n;
+            if is_term(sub[n]) || is_bcp47_ext(&sub[n..]) {
+                break;
+            }
             i += 1;
         }
         if !v.is_empty() {
@@ -219,11 +248,16 @@ pub fn get_subtags(id: &[u8]) -> Result<Subtags, i32> {
             t.end = pos;
         }
     }
-    if pos < id.len() && is_bcp47_ext(rest(pos)) && ext_is_va_posix(rest(pos)) {
-        if !t.variant.is_empty() {
-            t.variant.push(b'_');
+    // A "va-posix" keyword of the BCP 47 extensions that follow reports
+    // the POSIX variant.
+    if pos < id.len() && is_bcp47_ext(rest(pos)) {
+        let sep = !t.variant.is_empty();
+        for _ in 0..va_posix_count(rest(pos)) {
+            if sep {
+                t.variant.push(b'_');
+            }
+            t.variant.extend_from_slice(b"POSIX");
         }
-        t.variant.extend_from_slice(b"POSIX");
     }
     Ok(t)
 }
@@ -401,7 +435,6 @@ fn canonicalize_impl(id: &[u8], options: u32) -> Result<Vec<u8>, i32> {
             field_count += 1;
             if st.region.is_empty() {
                 tag.push(b'_');
-                field_count += 1;
             }
             tag.push(b'_');
             tag.extend_from_slice(&st.variant);
@@ -492,16 +525,19 @@ fn keyword_source(id: &[u8]) -> Vec<u8> {
 }
 
 /// uloc_openKeywords(): the keyword names, sorted (empty when none).
-pub fn keyword_names(id: &[u8]) -> Result<Vec<String>, i32> {
+/// None (no enumeration) when the ID has no '@'.
+pub fn keyword_names(id: &[u8]) -> Result<Option<Vec<String>>, i32> {
     let src = keyword_source(id);
     let st = get_subtags(&src)?;
     let rest = &src[st.end..];
     match rest.iter().position(|&c| c == b'@') {
-        Some(p) => Ok(get_keywords(&rest[p + 1..], false)?
-            .into_iter()
-            .map(|(k, _)| s(&k))
-            .collect()),
-        None => Ok(Vec::new()),
+        Some(p) => Ok(Some(
+            get_keywords(&rest[p + 1..], false)?
+                .into_iter()
+                .map(|(k, _)| s(&k))
+                .collect(),
+        )),
+        None => Ok(None),
     }
 }
 
@@ -782,7 +818,12 @@ pub fn parse_tag(tag: &[u8]) -> (LanguageTag, usize) {
         if next & LANG != 0 && is_language_subtag(sub) {
             t.language = s(&lower(sub));
             last_good = end;
-            next = EXTL | SCRT | REGN | VART | EXTS | PRIV;
+            // extended language subtags only follow a 2-3 letter language
+            next = if sub.len() <= 3 {
+                EXTL | SCRT | REGN | VART | EXTS | PRIV
+            } else {
+                SCRT | REGN | VART | EXTS | PRIV
+            };
             continue;
         }
         if next & EXTL != 0 && is_extlang_subtag(sub) {
@@ -934,9 +975,6 @@ const TYPE_MAP: &[(&str, &str, &str)] = &[
     ("collation", "phonebk", "phonebook"),
     ("collation", "trad", "traditional"),
     ("measure", "uksystem", "imperial"),
-    ("timezone", "gmt", "Etc/GMT"),
-    ("timezone", "unk", "Etc/Unknown"),
-    ("timezone", "utc", "Etc/UTC"),
 ];
 
 const BOOL_KEYS: &[&str] = &[
@@ -958,6 +996,11 @@ pub fn to_legacy_type(legacy_key: &str, ty: &str) -> String {
             _ => {}
         }
     }
+    if legacy_key == "timezone" {
+        if let Ok(i) = data::TIME_ZONES.binary_search_by(|(b, _)| (*b).cmp(t.as_str())) {
+            return data::TIME_ZONES[i].1.to_string();
+        }
+    }
     TYPE_MAP
         .iter()
         .find(|(k, b, _)| *k == legacy_key && *b == t)
@@ -973,6 +1016,11 @@ pub fn to_bcp_type(legacy_key: &str, ty: &str) -> String {
             "yes" => return "true".into(),
             "no" => return "false".into(),
             _ => {}
+        }
+    }
+    if legacy_key == "timezone" {
+        if let Some((b, _)) = data::TIME_ZONES.iter().find(|(_, l)| l.eq_ignore_ascii_case(ty)) {
+            return b.to_string();
         }
     }
     TYPE_MAP
@@ -1389,7 +1437,7 @@ pub fn display_name(id: &[u8], display: &str) -> Result<String, i32> {
         display_country(id, display)?,
         display_variant(id, display)?,
     ];
-    for kw in keyword_names(id)? {
+    for kw in keyword_names(id)?.unwrap_or_default() {
         let k = display_keyword(&kw, display);
         let v = display_keyword_value(id, &kw, display)?;
         rest.push(if v.is_empty() {
