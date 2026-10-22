@@ -58383,6 +58383,7 @@ impl Vm {
         let fiber_id = obj_rc.borrow().object_id;
         self.fiber_bases.push((fiber_id, fiber_stack_base));
         let outer_exec = self.exec_frame_len;
+        self.fiber_swap_pending_calls(&mut fiber);
         self.fiber_custom_marks
             .push((self.custom_parked.len(), self.custom_active.clone()));
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
@@ -59188,10 +59189,7 @@ impl Vm {
         self.fiber_restore_builtin_frames(&mut fiber.saved_builtin_frames);
         self.fiber_restore_cv_frames(&mut fiber.saved_cv_frames);
         self.gc_frames.append(&mut fiber.saved_gc_frames);
-        let pbase = self.pending_calls.len();
-        self.pending_calls.append(&mut fiber.saved_pending_calls);
-        self.closure_pending_calls
-            .extend(fiber.saved_closure_pending.drain(..).map(|i| i + pbase));
+        self.fiber_swap_pending_calls(fiber);
         self.call_stack.append(&mut fiber.saved_call_stack);
         self.class_scope_stack
             .append(&mut fiber.saved_class_scope_stack);
@@ -59199,6 +59197,18 @@ impl Vm {
             .append(&mut fiber.saved_called_class_stack);
         self.property_hook_stack
             .append(&mut fiber.saved_property_hook_stack);
+    }
+
+    /// A fiber builds its calls' argument lists in a pending-call stack of
+    /// its own (its frames record depths in it, which must not depend on
+    /// how deep its resumer was): swapped in when it runs, out when control
+    /// leaves it (the resumer's then wait in `saved_pending_calls`).
+    fn fiber_swap_pending_calls(&mut self, fiber: &mut crate::fiber::PhpFiber) {
+        std::mem::swap(&mut self.pending_calls, &mut fiber.saved_pending_calls);
+        std::mem::swap(
+            &mut self.closure_pending_calls,
+            &mut fiber.saved_closure_pending,
+        );
     }
 
     /// Control left the fiber: keep its innermost running frame for its
@@ -59224,23 +59234,11 @@ impl Vm {
         bases: (usize, usize, usize, usize, usize, usize, usize),
         suspended: bool,
     ) {
-        let (a, b, c, d, e, g, h) = bases;
+        let (a, b, c, d, e, g, _) = bases;
+        // Argument lists the fiber was building stay with the fiber.
+        self.fiber_swap_pending_calls(fiber);
         if suspended {
             fiber.saved_gc_frames = self.gc_frames.split_off(g.min(self.gc_frames.len()));
-            // Argument lists the fiber was building stay with the fiber.
-            let h = h.min(self.pending_calls.len());
-            fiber.saved_pending_calls = self.pending_calls.split_off(h);
-            let cut = self
-                .closure_pending_calls
-                .iter()
-                .position(|&i| i >= h)
-                .unwrap_or(self.closure_pending_calls.len());
-            fiber.saved_closure_pending = self
-                .closure_pending_calls
-                .split_off(cut)
-                .into_iter()
-                .map(|i| i - h)
-                .collect();
             fiber.saved_builtin_frames = self.fiber_take_builtin_frames(e, a);
             fiber.saved_cv_frames = self.fiber_take_cv_frames(a);
             if self.call_stack.len() > a {
@@ -59257,8 +59255,8 @@ impl Vm {
             }
         } else {
             self.gc_frames.truncate(g);
-            self.pending_calls.truncate(h);
-            self.closure_pending_calls.retain(|&i| i < h);
+            fiber.saved_pending_calls.clear();
+            fiber.saved_closure_pending.clear();
             self.builtin_frames.truncate(e);
             self.fiber_drop_cv_frames(a);
             self.call_stack.truncate(a);
