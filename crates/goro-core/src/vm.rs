@@ -41466,7 +41466,22 @@ impl Vm {
                         let kind = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                         self.fetch_class_name_keyword(kind.to_php_string().as_bytes(), op.line)
                     } else {
-                        let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                        // (FETCH_CLASS_NAME reads an undefined variable with a warning)
+                        let val = self.read_operand_warn(
+                            &op.op1,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        );
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
                         match val.deref() {
                             Value::Object(obj) => {
                                 Value::String(PhpString::from_vec(obj.borrow().class_name.clone()))
