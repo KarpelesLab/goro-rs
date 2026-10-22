@@ -11,6 +11,6 @@ workspace = true
 goro-core = { path = "../goro-core" }
 goro-ext-standard = { path = "../goro-ext-standard" }
 goro-zlib = { path = "../goro-zlib" }
-compcol = { version = "0.7.3", default-features = false, features = ["alloc", "lzma", "xz", "zstd"] }
+compcol = { version = "=0.7.3", default-features = false, features = ["alloc", "lzma", "xz", "zstd"] }
 libc = "0.2"
 purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "cipher", "kdf", "rng"] }
