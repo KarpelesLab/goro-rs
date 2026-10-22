@@ -5294,6 +5294,7 @@ impl Compiler {
                             doc_comment: prop_doc_comment,
                             set_hook_type,
                             get_hook_by_ref,
+                            hook_attrs,
                         } => {
                             // Enums cannot include properties
                             if modifiers.is_enum {
@@ -6448,6 +6449,8 @@ impl Compiler {
                                     .bytes()
                                     .map(|b| b.to_ascii_lowercase())
                                     .collect();
+                                let get_attrs =
+                                    self.compile_attributes_target(&hook_attrs.get, "method");
                                 class.methods.insert(
                                     lower_hook_name,
                                     MethodDef {
@@ -6460,7 +6463,7 @@ impl Compiler {
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower.clone(),
                                         doc_comment: None,
-                                        attributes: Vec::new(),
+                                        attributes: get_attrs,
                                     },
                                 );
                             }
@@ -6515,6 +6518,13 @@ impl Compiler {
                                     ];
                                 }
                                 hook_compiler.op_array.param_count = 2; // $this + $value
+                                hook_compiler.op_array.param_attributes =
+                                    vec![self.compile_attributes_target(
+                                        &hook_attrs.set_param,
+                                        "parameter",
+                                    )];
+                                let set_attrs =
+                                    self.compile_attributes_target(&hook_attrs.set, "method");
                                 hook_compiler.op_array.required_param_count = 1; // $value is required
 
                                 for s in hook_body {
@@ -6548,7 +6558,7 @@ impl Compiler {
                                         visibility: ObjVisibility::Public,
                                         declaring_class: declaring_class_lower,
                                         doc_comment: None,
-                                        attributes: Vec::new(),
+                                        attributes: set_attrs,
                                     },
                                 );
                             }
@@ -7296,7 +7306,11 @@ impl Compiler {
                                                 };
                                             class.properties.push(PropertyDef {
                                                 name: param.name.clone(),
-                                                default: promoted_default,
+                                                default: if prom_is_virtual {
+                                                    Value::Undef
+                                                } else {
+                                                    promoted_default
+                                                },
                                                 is_static: false,
                                                 visibility: prop_vis,
                                                 set_visibility: obj_set_vis_cpp,
@@ -7375,6 +7389,10 @@ impl Compiler {
                                                     .bytes()
                                                     .map(|b| b.to_ascii_lowercase())
                                                     .collect();
+                                                let get_attrs = self.compile_attributes_target(
+                                                    &param.hook_attrs.get,
+                                                    "method",
+                                                );
                                                 class.methods.insert(
                                                     lower_hook_name,
                                                     MethodDef {
@@ -7390,7 +7408,7 @@ impl Compiler {
                                                         declaring_class: declaring_class_lower
                                                             .clone(),
                                                         doc_comment: None,
-                                                        attributes: Vec::new(),
+                                                        attributes: get_attrs,
                                                     },
                                                 );
                                             }
@@ -7438,6 +7456,15 @@ impl Compiler {
                                                     .op_array
                                                     .get_or_create_cv(set_param_name);
                                                 hook_compiler.op_array.param_count = 2;
+                                                hook_compiler.op_array.param_attributes =
+                                                    vec![self.compile_attributes_target(
+                                                        &param.hook_attrs.set_param,
+                                                        "parameter",
+                                                    )];
+                                                let set_attrs = self.compile_attributes_target(
+                                                    &param.hook_attrs.set,
+                                                    "method",
+                                                );
                                                 hook_compiler.op_array.required_param_count = 1;
                                                 for s in hook_body.iter() {
                                                     hook_compiler.compile_stmt(s)?;
@@ -7471,7 +7498,7 @@ impl Compiler {
                                                         declaring_class: declaring_class_lower
                                                             .clone(),
                                                         doc_comment: None,
-                                                        attributes: Vec::new(),
+                                                        attributes: set_attrs,
                                                     },
                                                 );
                                             }

@@ -365,6 +365,14 @@ pub struct Param {
     pub set_hook_type: Option<TypeHint>,
     /// `&get { ... }`: the get hook returns by reference.
     pub get_hook_by_ref: bool,
+    pub hook_attrs: HookAttrs,
+}
+/// Attributes of a property's hooks and of the set hook's parameter.
+#[derive(Debug, Clone, Default)]
+pub struct HookAttrs {
+    pub get: Vec<Attribute>,
+    pub set: Vec<Attribute>,
+    pub set_param: Vec<Attribute>,
 }
 #[derive(Debug, Clone)]
 pub enum TypeHint {
@@ -436,6 +444,7 @@ pub enum ClassMember {
         set_hook_type: Option<TypeHint>,
         /// `&get { ... }`: the get hook returns by reference.
         get_hook_by_ref: bool,
+        hook_attrs: HookAttrs,
     },
     Method {
         name: Vec<u8>,

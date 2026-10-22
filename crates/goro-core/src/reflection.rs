@@ -7274,7 +7274,12 @@ pub fn reflection_property_method(
             let (default_val, has_default, has_type) = match &prop_info {
                 Some(p) => {
                     let has = !matches!(p.default, Value::Undef);
-                    (p.default.clone(), has, p.property_type.is_some())
+                    // A virtual property has no default either.
+                    (
+                        p.default.clone(),
+                        has,
+                        p.property_type.is_some() || p.is_virtual,
+                    )
                 }
                 None => {
                     // Dynamic property: counts as no-default + typed (warns)

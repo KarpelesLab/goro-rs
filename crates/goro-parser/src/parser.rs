@@ -48,6 +48,7 @@ pub struct Parser {
     last_set_hook_type: Option<TypeHint>,
     /// Whether the get hook parsed by the last parse_property_hooks() was `&get`.
     last_get_hook_by_ref: bool,
+    last_hook_attrs: HookAttrs,
     /// A doc-comment captured at the start of an assignment statement that
     /// should be applied to a closure/arrow function on the right-hand side.
     /// Set in parse_statement() when we see `/** doc */ $x = function/fn/static
@@ -189,6 +190,7 @@ impl Parser {
             pending_extra_properties: Vec::new(),
             last_set_hook_type: None,
             last_get_hook_by_ref: false,
+            last_hook_attrs: HookAttrs::default(),
             pending_closure_doc: None,
             class_name_stack: Vec::new(),
             is_interface_stack: Vec::new(),
@@ -1974,6 +1976,7 @@ impl Parser {
                 set_hook_abstract: param_set_hook_abstract,
                 doc_comment: param_doc_comment,
                 set_hook_type: self.last_set_hook_type.take(),
+                hook_attrs: std::mem::take(&mut self.last_hook_attrs),
                 get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
             });
 
@@ -3042,6 +3045,7 @@ impl Parser {
                                 attributes: member_attributes.clone(),
                                 doc_comment: extra_doc,
                                 set_hook_type: None,
+                                hook_attrs: HookAttrs::default(),
                                 get_hook_by_ref: false,
                             });
                         } else {
@@ -3128,6 +3132,7 @@ impl Parser {
                     attributes: member_attributes.clone(),
                     doc_comment: member_doc_comment,
                     set_hook_type: self.last_set_hook_type.take(),
+                    hook_attrs: std::mem::take(&mut self.last_hook_attrs),
                     get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
                 })
             }
@@ -3198,6 +3203,7 @@ impl Parser {
                                 attributes: member_attributes.clone(),
                                 doc_comment: extra_doc,
                                 set_hook_type: None,
+                                hook_attrs: HookAttrs::default(),
                                 get_hook_by_ref: false,
                             });
                         } else {
@@ -3284,6 +3290,7 @@ impl Parser {
                     attributes: member_attributes,
                     doc_comment: member_doc_comment,
                     set_hook_type: self.last_set_hook_type.take(),
+                    hook_attrs: std::mem::take(&mut self.last_hook_attrs),
                     get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
                 })
             }
@@ -3311,6 +3318,7 @@ impl Parser {
         let mut set_hook_final = false;
         let mut get_hook_abstract = false;
         self.last_get_hook_by_ref = false;
+        self.last_hook_attrs = HookAttrs::default();
         let mut set_hook_abstract = false;
 
         while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
@@ -3413,6 +3421,7 @@ impl Parser {
                 if hook_is_final {
                     get_hook_final = true;
                 }
+                self.last_hook_attrs.get = std::mem::take(&mut hook_attrs);
                 self.advance(); // consume 'get'
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     let class_name = self
@@ -3463,6 +3472,7 @@ impl Parser {
                 if hook_is_final {
                     set_hook_final = true;
                 }
+                self.last_hook_attrs.set = std::mem::take(&mut hook_attrs);
                 self.advance(); // consume 'set'
                 // Optional parameter: set(Type $value) or set($value) or just set
                 let had_paren = matches!(self.peek(), TokenKind::OpenParen);
@@ -3470,7 +3480,8 @@ impl Parser {
                     // We need to handle: set($value), set(string $value), set(Type $value)
                     // Also accept attributes #[Attr] before the parameter.
                     while matches!(self.peek(), TokenKind::AttributeOpen) {
-                        let _ = self.parse_attributes()?;
+                        let a = self.parse_attributes()?;
+                        self.last_hook_attrs.set_param.extend(a);
                     }
                     // Detect by-ref / variadic before or after type hint.
                     let mut got_by_ref = matches!(self.peek(), TokenKind::Ampersand);

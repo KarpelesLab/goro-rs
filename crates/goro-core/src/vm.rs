@@ -687,6 +687,10 @@ pub struct Vm {
     /// to return by reference (for "Only variables should be assigned by
     /// reference" notices on `$x = &f()`).
     pub(crate) last_call_by_ref: bool,
+    /// Get hook result of a PropertyIsset immediately followed (through its
+    /// JmpZ) by the PropertyGet of the same property: the pair is one
+    /// FETCH_OBJ_IS, which runs the hook once. `(object id, value)`.
+    isset_get_cache: Option<(u64, Value)>,
     /// Set by ArrayGetIncDec on an ArrayAccess object whose offsetGet()
     /// returned by value: the matching ArraySetIncDec must not call
     /// offsetSet() (the increment only affected a temporary).
@@ -1001,6 +1005,7 @@ impl Vm {
             current_file: "Unknown.php".to_string(),
             last_return_line: 0,
             last_call_by_ref: false,
+            isset_get_cache: None,
             incdec_skip_set: false,
             current_line: 0,
             enum_case_cache: HashMap::new(),
@@ -4450,7 +4455,17 @@ impl Vm {
             .collect();
         if let Some(sep) = lower.windows(2).position(|w| w == b"::" || w == b"->") {
             let class = self.classes.get(&lower[..sep])?;
-            let m = class.get_method(&lower[sep + 2..])?;
+            let method = &lower[sep + 2..];
+            // Property hook frames are named `$prop::get` / `$prop::set`.
+            let hook_method = method.strip_prefix(b"$").and_then(|r| {
+                let (prop, kind) = r.split_at(r.len().checked_sub(5)?);
+                match kind {
+                    b"::get" => Some([b"__property_get_".as_slice(), prop].concat()),
+                    b"::set" => Some([b"__property_set_".as_slice(), prop].concat()),
+                    _ => None,
+                }
+            });
+            let m = class.get_method(hook_method.as_deref().unwrap_or(method))?;
             return from_op(&m.op_array);
         }
         if let Some(op) = self.user_functions.get(&lower) {
@@ -16063,7 +16078,9 @@ impl Vm {
             // exception (left by a builtin that called back into user code)
             // is dispatched by the general handlers, so it disables this.
             if typed_ref_watch.is_none() && self.current_exception.is_none() {
-                let fast = if matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertySet) {
+                let fast = if matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertySet)
+                    && self.isset_get_cache.is_none()
+                {
                     self.fast_prop_op(
                         op,
                         cvs.as_mut_slice(),
@@ -36408,6 +36425,17 @@ impl Vm {
                             match hook_res {
                                 Ok(v) => {
                                     let set = !matches!(v, Value::Null | Value::Undef);
+                                    let then_fetch = set
+                                        && matches!(op_array.ops.get(ip), Some(j)
+                                            if j.opcode == OpCode::JmpZ && j.op1 == op.result)
+                                        && matches!(op_array.ops.get(ip + 1), Some(g)
+                                            if g.opcode == OpCode::PropertyGet
+                                                && g.op1 == op.op1
+                                                && g.op2 == op.op2);
+                                    if then_fetch {
+                                        self.isset_get_cache =
+                                            Some((obj.borrow().object_id, v.clone()));
+                                    }
                                     self.write_operand(
                                         &op.result,
                                         if set { Value::True } else { Value::False },
@@ -44628,6 +44656,51 @@ impl Vm {
                                     continue;
                                 }
 
+                                // A hook overrides the parent property's operation
+                                // (inherit_property_hook / property_has_operation):
+                                // a backed property always reads, and writes unless
+                                // readonly; otherwise the parent needs that hook.
+                                let hook = if method_name.starts_with(b"__property_get_") {
+                                    Some((&method.name[b"__property_get_".len()..], false))
+                                } else if method_name.starts_with(b"__property_set_") {
+                                    Some((&method.name[b"__property_set_".len()..], true))
+                                } else {
+                                    None
+                                };
+                                if let Some((prop, is_set)) = hook {
+                                    let has_op = |c: &ClassEntry| {
+                                        c.properties.iter().any(|p| {
+                                            !p.is_static
+                                                && p.visibility != Visibility::Private
+                                                && p.name == prop
+                                                && ((!p.is_virtual && (!is_set || !p.is_readonly))
+                                                    || if is_set {
+                                                        p.has_set_hook
+                                                    } else {
+                                                        p.has_get_hook
+                                                    })
+                                        })
+                                    };
+                                    let found = parent_class.is_some_and(has_op)
+                                        || iface_names.iter().any(|i| {
+                                            self.classes
+                                                .get(&i.to_ascii_lowercase())
+                                                .is_some_and(has_op)
+                                        });
+                                    if !found {
+                                        return Err(VmError {
+                                            message: format!(
+                                                "{}::${}::{}() has #[\\Override] attribute, but no matching parent method exists",
+                                                crate::value::display_class_name(&class.name),
+                                                String::from_utf8_lossy(prop),
+                                                if is_set { "set" } else { "get" }
+                                            ),
+                                            line: op.line,
+                                        });
+                                    }
+                                    continue;
+                                }
+
                                 // Check if this method overrides something
                                 let mut found_parent = false;
 
@@ -45580,6 +45653,13 @@ impl Vm {
                 | OpCode::PropertyGetWObj
                 | OpCode::PropertyGetWObjRW
                 | OpCode::PropertyGetIs => match outlined(|| -> Result<Flow, VmError> {
+                    if let Some((oid, v)) = self.isset_get_cache.take() {
+                        let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                        if matches!(&obj_val, Value::Object(o) if o.borrow().object_id == oid) {
+                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                            return Ok(Flow::Next);
+                        }
+                    }
                     // FETCH_OBJ_IS (empty(), isset() containers): __isset() is
                     // consulted before __get().
                     let is_fetch_is = matches!(op.opcode, OpCode::PropertyGetIs);
@@ -46206,7 +46286,9 @@ impl Vm {
                             self.property_hook_stack.push(hook_key);
                             self.class_scope_stack.push(hook_declaring);
                             self.called_class_stack.push(class_name_orig.clone());
+                            self.push_hook_frame(&method, &fn_cvs);
                             let hook_result = self.execute_op_array(&method, fn_cvs);
+                            self.call_stack.pop();
                             self.called_class_stack.pop();
                             self.class_scope_stack.pop();
                             self.property_hook_stack.pop();
@@ -47586,7 +47668,9 @@ impl Vm {
                             self.property_hook_stack.push(set_hook_key);
                             self.class_scope_stack.push(hook_declaring);
                             self.called_class_stack.push(class_name_orig.clone());
+                            self.push_hook_frame(&method, &fn_cvs);
                             let hook_result = self.execute_op_array(&method, fn_cvs);
+                            self.call_stack.pop();
                             self.called_class_stack.pop();
                             self.class_scope_stack.pop();
                             self.property_hook_stack.pop();
@@ -51033,7 +51117,9 @@ impl Vm {
                             let hk = Self::prop_hook_key(hk, &Value::Object(this_obj.clone()));
                             self.property_hook_stack.push(hk);
                             self.class_scope_stack.push(decl);
+                            self.push_hook_frame(&op, &fn_cvs);
                             let r = self.execute_op_array(&op, fn_cvs);
+                            self.call_stack.pop();
                             self.class_scope_stack.pop();
                             self.property_hook_stack.pop();
                             return r;
@@ -51571,7 +51657,9 @@ impl Vm {
         self.property_hook_stack.push(hook_key);
         self.class_scope_stack.push(decl);
         self.called_class_stack.push(class_name_orig);
+        self.push_hook_frame(&method, &fn_cvs);
         let r = self.execute_op_array(&method, fn_cvs);
+        self.call_stack.pop();
         self.called_class_stack.pop();
         self.class_scope_stack.pop();
         self.property_hook_stack.pop();
@@ -51767,7 +51855,9 @@ impl Vm {
                 self.property_hook_stack.push(hook_key);
                 self.class_scope_stack.push(decl_lower.clone());
                 self.called_class_stack.push(class_name_orig.clone());
+                self.push_hook_frame(&method, &fn_cvs);
                 let r = self.execute_op_array(&method, fn_cvs);
+                self.call_stack.pop();
                 self.called_class_stack.pop();
                 self.class_scope_stack.pop();
                 self.property_hook_stack.pop();
@@ -51853,6 +51943,32 @@ impl Vm {
             }
             _ => false,
         }
+    }
+
+    /// Push the backtrace frame of a property hook about to run
+    /// (`Class->$prop::get()`, the class being the hook's scope, the
+    /// innermost `class_scope_stack` entry).
+    pub(crate) fn push_hook_frame(&mut self, hook: &OpArray, cvs: &[Value]) {
+        let decl = self.class_scope_stack.last().cloned().unwrap_or_default();
+        let class_name = self
+            .classes
+            .get(&decl.to_ascii_lowercase())
+            .map(|c| c.name.clone())
+            .unwrap_or(decl);
+        let name = format!(
+            "{}::{}",
+            crate::value::display_class_name(&class_name),
+            String::from_utf8_lossy(&hook.name)
+        );
+        let argc = (hook.param_count as usize).saturating_sub(1);
+        let args: Vec<Value> = cvs.iter().skip(1).take(argc).cloned().collect();
+        self.call_stack.push((
+            name,
+            self.current_file.clone(),
+            self.current_line,
+            args,
+            true,
+        ));
     }
 
     /// Tag a `property_hook_stack` key ("class::prop::get") with the object
@@ -51982,7 +52098,9 @@ impl Vm {
         self.property_hook_stack.push(hook_key);
         self.class_scope_stack.push(hook_declaring);
         self.called_class_stack.push(class_name_orig);
+        self.push_hook_frame(&method, &fn_cvs);
         let r = self.execute_op_array(&method, fn_cvs);
+        self.call_stack.pop();
         self.called_class_stack.pop();
         self.class_scope_stack.pop();
         self.property_hook_stack.pop();
