@@ -10180,6 +10180,7 @@ impl Compiler {
     /// Compile `expr` in a reference context (the operand of a by-ref
     /// return): variables, elements and properties yield a reference,
     /// calls keep a returned reference; anything else is a plain value.
+    #[inline(never)]
     fn compile_ref_fetch(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         let line = expr.span.line;
         match &expr.kind {
@@ -10814,6 +10815,7 @@ impl Compiler {
 
     /// `$x = &f()`: PHP raises "Only variables should be assigned by
     /// reference" when the callee does not return by reference.
+    #[inline(never)]
     fn emit_assign_ref_call_notice(&mut self, value: &Expr, line: u32) {
         if !matches!(
             value.kind,
@@ -10946,6 +10948,7 @@ impl Compiler {
 
     /// `&$array[index]` (`index == None` is `&$array[]`): fetch the container
     /// for writing and get (creating) the element's reference into a tmp.
+    #[inline(never)]
     fn compile_dim_ref(
         &mut self,
         array: &Expr,
@@ -11222,6 +11225,7 @@ impl Compiler {
     /// Compile the container of a dimension write fetched for `mode`
     /// (FETCH_*_W for assignments, FETCH_*_RW for compound assignments and
     /// increments, FETCH_*_UNSET for unset()).
+    #[inline(never)]
     fn compile_dim_write_base_mode(
         &mut self,
         array: &Expr,
@@ -11311,6 +11315,186 @@ impl Compiler {
             return Ok(OperandType::Tmp(t));
         }
         self.compile_expr(array)
+    }
+
+    /// `\true` / `\false` / `\null`: the special constants.
+    #[inline(never)]
+    fn fq_special_constant(&mut self, name: &[u8]) -> Option<OperandType> {
+        let v = match name.strip_prefix(b"\\")?.to_ascii_lowercase().as_slice() {
+            b"true" => Value::True,
+            b"false" => Value::False,
+            b"null" => Value::Null,
+            _ => return None,
+        };
+        Some(OperandType::Const(self.op_array.add_literal(v)))
+    }
+
+    /// ZEND_YIELD of a call result in a by-ref generator: a returned
+    /// reference is yielded, a value gets the notice. (Out of line: see
+    /// compile_append_incdec.)
+    #[inline(never)]
+    fn compile_yield_ref_call(&mut self, val_expr: &Expr, line: u32) -> CompileResult<OperandType> {
+        let v = self.compile_expr(val_expr)?;
+        self.mark_ref_call(&v);
+        let msg_idx = self
+            .op_array
+            .add_literal(Value::String(PhpString::from_bytes(
+                b"Only variable references should be yielded by reference",
+            )));
+        let cond_idx = self.op_array.add_literal(Value::Long(1));
+        self.op_array.emit(Op {
+            opcode: OpCode::EmitNotice,
+            op1: OperandType::Const(msg_idx),
+            op2: OperandType::Const(cond_idx),
+            result: OperandType::Unused,
+            line,
+        });
+        Ok(v)
+    }
+
+    /// The opcode of a plain (not short-circuiting) binary operator.
+    fn plain_binop_opcode(op: &BinaryOp) -> Option<OpCode> {
+        Some(match op {
+            BinaryOp::Add => OpCode::Add,
+            BinaryOp::Sub => OpCode::Sub,
+            BinaryOp::Mul => OpCode::Mul,
+            BinaryOp::Div => OpCode::Div,
+            BinaryOp::Mod => OpCode::Mod,
+            BinaryOp::Pow => OpCode::Pow,
+            BinaryOp::Concat => OpCode::Concat,
+            BinaryOp::BitwiseAnd => OpCode::BitwiseAnd,
+            BinaryOp::BitwiseOr => OpCode::BitwiseOr,
+            BinaryOp::BitwiseXor => OpCode::BitwiseXor,
+            BinaryOp::ShiftLeft => OpCode::ShiftLeft,
+            BinaryOp::ShiftRight => OpCode::ShiftRight,
+            BinaryOp::Equal => OpCode::Equal,
+            BinaryOp::Identical => OpCode::Identical,
+            BinaryOp::NotEqual => OpCode::NotEqual,
+            BinaryOp::NotIdentical => OpCode::NotIdentical,
+            BinaryOp::Less => OpCode::Less,
+            BinaryOp::Greater => OpCode::Greater,
+            BinaryOp::LessEqual => OpCode::LessEqual,
+            BinaryOp::GreaterEqual => OpCode::GreaterEqual,
+            BinaryOp::Spaceship => OpCode::Spaceship,
+            BinaryOp::LogicalXor => OpCode::BoolXor,
+            BinaryOp::BooleanAnd
+            | BinaryOp::BooleanOr
+            | BinaryOp::LogicalAnd
+            | BinaryOp::LogicalOr
+            | BinaryOp::Coalesce => return None,
+        })
+    }
+
+    /// A plain binary operator and the left-deep chain of plain operators
+    /// below it (`$a + 1 + 1 + ...`), compiled iteratively in the order the
+    /// recursive compilation has (left operand, right operand, operator):
+    /// deep expressions do not recurse through compile_expr.
+    #[inline(never)]
+    fn compile_binary_chain(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        let mut spine: Vec<&Expr> = vec![expr];
+        if self.memoize_mode == 0 {
+            loop {
+                let ExprKind::BinaryOp { left, .. } = &spine[spine.len() - 1].kind else {
+                    unreachable!()
+                };
+                match &left.kind {
+                    ExprKind::BinaryOp { op, .. } if Self::plain_binop_opcode(op).is_some() => {
+                        spine.push(left)
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let mut acc: Option<OperandType> = None;
+        for node in spine.into_iter().rev() {
+            let ExprKind::BinaryOp { op, left, right } = &node.kind else {
+                unreachable!()
+            };
+            // (compile_expr's entry for this node)
+            self.zend_lineno = node.span.line;
+            let l = match acc {
+                Some(l) => l,
+                None => self.compile_expr(left)?,
+            };
+            let r = self.compile_expr(right)?;
+            let opcode = Self::plain_binop_opcode(op).expect("plain binary operator");
+            let line = self.zend_lineno.max(node.span.line);
+            acc = Some(self.emit_binary_op(opcode, left, right, l, r, line));
+        }
+        Ok(acc.expect("binary operator"))
+    }
+
+    /// Emit binary operator `opcode` into a new temporary. (Out of line:
+    /// compile_expr recurses through the operands of deep expressions and
+    /// its frame must stay small.)
+    #[inline(never)]
+    fn emit_binary_op(
+        &mut self,
+        opcode: OpCode,
+        left: &Expr,
+        right: &Expr,
+        l: OperandType,
+        r: OperandType,
+        line: u32,
+    ) -> OperandType {
+        let tmp = self.op_array.alloc_temp();
+        let (l, r) = Self::commutative_operands(opcode, left, right, l, r);
+        self.op_array.emit(Op {
+            opcode,
+            op1: l,
+            op2: r,
+            result: OperandType::Tmp(tmp),
+            line,
+        });
+        OperandType::Tmp(tmp)
+    }
+
+    /// zend_vm_set_opcode_handler(): the operands of a commutative opcode
+    /// are swapped when op1's type sorts before op2's (CONST < TMP < VAR <
+    /// CV), which shows in its errors and warnings. Ranked by the operand
+    /// expressions: a constant array literal is a CONST although goro
+    /// builds it in a temporary. (Out of line: see compile_append_incdec.)
+    #[inline(never)]
+    fn commutative_operands(
+        opcode: OpCode,
+        left: &Expr,
+        right: &Expr,
+        l: OperandType,
+        r: OperandType,
+    ) -> (OperandType, OperandType) {
+        if !matches!(
+            opcode,
+            OpCode::Mul
+                | OpCode::BitwiseAnd
+                | OpCode::BitwiseOr
+                | OpCode::BitwiseXor
+                | OpCode::BoolXor
+        ) {
+            return (l, r);
+        }
+        let rank = |e: &Expr, o: &OperandType| {
+            if Self::eval_const_expr(e).is_some() {
+                1
+            } else if matches!(o, OperandType::Cv(_)) {
+                8
+            } else if matches!(
+                e.kind,
+                ExprKind::New { .. }
+                    | ExprKind::FunctionCall { .. }
+                    | ExprKind::MethodCall { .. }
+                    | ExprKind::StaticMethodCall { .. }
+                    | ExprKind::DynamicStaticMethodCall { .. }
+            ) {
+                4 // IS_VAR
+            } else {
+                2
+            }
+        };
+        if rank(left, &l) < rank(right, &r) {
+            (r, l)
+        } else {
+            (l, r)
+        }
     }
 
     /// `$a[]++` / `--$a[]`: FETCH_DIM_RW appends a null element, which is
@@ -11639,6 +11823,7 @@ impl Compiler {
     /// zend_compile_var_inner() in write context: the base of a dimension
     /// or property chain being written must itself be a variable or a call
     /// (`"abc"[0] = 1`, `[1][0]++`, `(new A)->x = 1` are compile errors).
+    #[inline(never)]
     fn check_writable_base(&self, target: &Expr) -> CompileResult<()> {
         let mut root = target;
         loop {
@@ -11679,6 +11864,16 @@ impl Compiler {
 
     /// zend_separate_if_call_and_write(): a call compiled to a VM builtin
     /// yields a TMP, which cannot be written through or referenced.
+    /// "The (unset) cast is no longer supported"
+    #[inline(never)]
+    fn unset_cast_error(line: u32) -> CompileError {
+        CompileError {
+            message: "The (unset) cast is no longer supported".into(),
+            line,
+        }
+    }
+
+    #[inline(never)]
     fn builtin_write_context_error(line: u32) -> CompileError {
         CompileError {
             message: "Cannot use result of built-in function in write context".into(),
@@ -11689,6 +11884,7 @@ impl Compiler {
     /// A call zend_try_compile_special_func() turns into an opcode (the
     /// commonly used subset): a global internal function, unqualified only
     /// outside a namespace, called with plain positional arguments.
+    #[inline(never)]
     fn is_special_builtin_call(&self, e: &Expr) -> bool {
         let ExprKind::FunctionCall { name, args } = &e.kind else {
             return false;
@@ -11717,17 +11913,13 @@ impl Compiler {
         }
     }
 
-    fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
-        self.zend_lineno = expr.span.line;
-        if self.memoize_mode != 0
-            && Self::is_memoizable(expr)
-            && expr as *const Expr as usize != self.memoize_root
-        {
-            return self.compile_memoized_expr(expr);
-        }
+    /// The writability checks of zend_compile_var_inner() on the targets
+    /// of an assignment / increment. (Out of line: see emit_binary_op.)
+    #[inline(never)]
+    fn check_write_targets(&self, expr: &Expr) -> CompileResult<()> {
         match &expr.kind {
             ExprKind::Assign { target, .. } | ExprKind::CompoundAssign { target, .. } => {
-                self.check_writable_base(target)?
+                self.check_writable_base(target)
             }
             ExprKind::AssignRef { target, value } => {
                 self.check_writable_base(target)?;
@@ -11735,6 +11927,7 @@ impl Compiler {
                 if self.is_special_builtin_call(value) {
                     return Err(Self::builtin_write_context_error(value.span.line));
                 }
+                Ok(())
             }
             ExprKind::UnaryOp {
                 op:
@@ -11744,9 +11937,20 @@ impl Compiler {
                     | UnaryOp::PostDecrement,
                 operand,
                 ..
-            } => self.check_writable_base(operand)?,
-            _ => {}
+            } => self.check_writable_base(operand),
+            _ => Ok(()),
         }
+    }
+
+    fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        self.zend_lineno = expr.span.line;
+        if self.memoize_mode != 0
+            && Self::is_memoizable(expr)
+            && expr as *const Expr as usize != self.memoize_root
+        {
+            return self.compile_memoized_expr(expr);
+        }
+        self.check_write_targets(expr)?;
         match &expr.kind {
             ExprKind::Int(n) => {
                 let idx = self.op_array.add_literal(Value::Long(*n));
@@ -12606,85 +12810,7 @@ impl Compiler {
                     _ => {}
                 }
 
-                let l = self.compile_expr(left)?;
-                let r = self.compile_expr(right)?;
-                let tmp = self.op_array.alloc_temp();
-                let opcode = match op {
-                    BinaryOp::Add => OpCode::Add,
-                    BinaryOp::Sub => OpCode::Sub,
-                    BinaryOp::Mul => OpCode::Mul,
-                    BinaryOp::Div => OpCode::Div,
-                    BinaryOp::Mod => OpCode::Mod,
-                    BinaryOp::Pow => OpCode::Pow,
-                    BinaryOp::Concat => OpCode::Concat,
-                    BinaryOp::BitwiseAnd => OpCode::BitwiseAnd,
-                    BinaryOp::BitwiseOr => OpCode::BitwiseOr,
-                    BinaryOp::BitwiseXor => OpCode::BitwiseXor,
-                    BinaryOp::ShiftLeft => OpCode::ShiftLeft,
-                    BinaryOp::ShiftRight => OpCode::ShiftRight,
-                    BinaryOp::Equal => OpCode::Equal,
-                    BinaryOp::Identical => OpCode::Identical,
-                    BinaryOp::NotEqual => OpCode::NotEqual,
-                    BinaryOp::NotIdentical => OpCode::NotIdentical,
-                    BinaryOp::Less => OpCode::Less,
-                    BinaryOp::Greater => OpCode::Greater,
-                    BinaryOp::LessEqual => OpCode::LessEqual,
-                    BinaryOp::GreaterEqual => OpCode::GreaterEqual,
-                    BinaryOp::Spaceship => OpCode::Spaceship,
-                    BinaryOp::LogicalXor => OpCode::BoolXor,
-                    BinaryOp::BooleanAnd
-                    | BinaryOp::BooleanOr
-                    | BinaryOp::LogicalAnd
-                    | BinaryOp::LogicalOr
-                    | BinaryOp::Coalesce => unreachable!(),
-                };
-                // zend_vm_set_opcode_handler(): the operands of a commutative
-                // opcode are swapped when op1's type sorts before op2's
-                // (CONST < TMP < CV), which shows in its errors and warnings.
-                let (l, r) = if matches!(
-                    opcode,
-                    OpCode::Mul
-                        | OpCode::BitwiseAnd
-                        | OpCode::BitwiseOr
-                        | OpCode::BitwiseXor
-                        | OpCode::BoolXor
-                ) {
-                    // (by the operand expressions: a constant array literal
-                    // is a CONST although goro builds it in a temporary)
-                    let rank = |e: &Expr, o: &OperandType| {
-                        if Self::eval_const_expr(e).is_some() {
-                            1
-                        } else if matches!(o, OperandType::Cv(_)) {
-                            8
-                        } else if matches!(
-                            e.kind,
-                            ExprKind::New { .. }
-                                | ExprKind::FunctionCall { .. }
-                                | ExprKind::MethodCall { .. }
-                                | ExprKind::StaticMethodCall { .. }
-                                | ExprKind::DynamicStaticMethodCall { .. }
-                        ) {
-                            4 // IS_VAR
-                        } else {
-                            2
-                        }
-                    };
-                    if rank(left, &l) < rank(right, &r) {
-                        (r, l)
-                    } else {
-                        (l, r)
-                    }
-                } else {
-                    (l, r)
-                };
-                self.op_array.emit(Op {
-                    opcode,
-                    op1: l,
-                    op2: r,
-                    result: OperandType::Tmp(tmp),
-                    line: self.zend_lineno.max(expr.span.line),
-                });
-                Ok(OperandType::Tmp(tmp))
+                self.compile_binary_chain(expr)
             }
 
             ExprKind::UnaryOp {
@@ -13286,10 +13412,7 @@ impl Compiler {
 
             ExprKind::Cast(cast_type, inner) => {
                 if matches!(cast_type, CastType::Unset) {
-                    return Err(CompileError {
-                        message: "The (unset) cast is no longer supported".into(),
-                        line: expr.span.line,
-                    });
+                    return Err(Self::unset_cast_error(expr.span.line));
                 }
                 if matches!(cast_type, CastType::Void) {
                     // (void) cast: evaluate inner expression for side effects, discard result
@@ -14052,16 +14175,8 @@ impl Compiler {
 
             ExprKind::Identifier(name) => {
                 // `\true` / `\false` / `\null` are the special constants.
-                if let Some(rest) = name.strip_prefix(b"\\") {
-                    let special = match rest.to_ascii_lowercase().as_slice() {
-                        b"true" => Some(Value::True),
-                        b"false" => Some(Value::False),
-                        b"null" => Some(Value::Null),
-                        _ => None,
-                    };
-                    if let Some(v) = special {
-                        return Ok(OperandType::Const(self.op_array.add_literal(v)));
-                    }
+                if let Some(op) = self.fq_special_constant(name) {
+                    return Ok(op);
                 }
                 // A bare identifier used as an expression could be a constant
                 // Check for well-known constants
@@ -16070,24 +16185,7 @@ impl Compiler {
                                 | ExprKind::StaticMethodCall { .. }
                         )
                     {
-                        // ZEND_YIELD of a call result: a returned reference is
-                        // yielded, a value gets the notice.
-                        let v = self.compile_expr(val_expr)?;
-                        self.mark_ref_call(&v);
-                        let msg_idx =
-                            self.op_array
-                                .add_literal(Value::String(PhpString::from_bytes(
-                                    b"Only variable references should be yielded by reference",
-                                )));
-                        let cond_idx = self.op_array.add_literal(Value::Long(1));
-                        self.op_array.emit(Op {
-                            opcode: OpCode::EmitNotice,
-                            op1: OperandType::Const(msg_idx),
-                            op2: OperandType::Const(cond_idx),
-                            result: OperandType::Unused,
-                            line: expr.span.line,
-                        });
-                        v
+                        self.compile_yield_ref_call(val_expr, expr.span.line)?
                     } else {
                         self.compile_expr(val_expr)?
                     }
