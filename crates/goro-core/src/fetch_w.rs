@@ -25,6 +25,10 @@ pub(crate) enum DimFetch {
     /// FETCH_DIM_W for the container of an object write (`$a[k]->p = v`):
     /// a missing element is created as null, not vivified to an array.
     Obj,
+    /// FETCH_DIM_RW for the container of an object read-modify-write
+    /// (`$a[k]->p += v`): a missing element is warned about, then created
+    /// as null.
+    ObjRw,
 }
 
 /// Where a string handed out by a write fetch lives. Strings are values, so
@@ -249,7 +253,9 @@ impl Vm {
                     None => self.throw_error_msg(b"Error", "[] operator not supported for strings"),
                     Some(k) => {
                         if self.check_string_offset_w(&k, mode, line) {
-                            let msg = if mode == DimFetch::Obj || self.str_wb_obj_ctx {
+                            let msg = if matches!(mode, DimFetch::Obj | DimFetch::ObjRw)
+                                || self.str_wb_obj_ctx
+                            {
                                 "Cannot use string offset as an object"
                             } else {
                                 "Cannot use string offset as an array"
@@ -817,9 +823,12 @@ impl Vm {
             arr.borrow_mut().set(k, Value::Array(rc.clone()));
             Value::Array(rc)
         };
-        if mode == DimFetch::Obj {
+        if matches!(mode, DimFetch::Obj | DimFetch::ObjRw) {
             return Some(match existing {
                 None | Some(Value::Undef) => {
+                    if mode == DimFetch::ObjRw {
+                        self.emit_undefined_key_warning(&k, line);
+                    }
                     arr.borrow_mut().set(k, Value::Null);
                     Value::Null
                 }
@@ -1011,7 +1020,7 @@ impl Vm {
         if is_ao && !self.ao_user_has(obj, b"offsetget") {
             let m = match mode {
                 DimFetch::W | DimFetch::Obj => b'w',
-                DimFetch::Rw => b'r',
+                DimFetch::Rw | DimFetch::ObjRw => b'r',
                 DimFetch::Unset => b'u',
             };
             let r = self.ao_fetch_dim_w(obj, key.as_ref(), m);

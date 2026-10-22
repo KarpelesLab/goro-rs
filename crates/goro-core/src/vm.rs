@@ -34677,6 +34677,23 @@ impl Vm {
                     if matches!(arr_val, Value::Undef | Value::Null) {
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     }
+                    // ASSIGN_DIM_OP on false: the variable becomes an array
+                    // (deprecated) before the element is read.
+                    if is_rw && matches!(arr_val.deref(), Value::False) {
+                        if let OperandType::Cv(i) = op.op1 {
+                            self.emit_deprecated_at(
+                                "Automatic conversion of false to array is deprecated",
+                                op.line,
+                            );
+                            let fresh = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                            match cvs.get_mut(i as usize) {
+                                Some(Value::Reference(r)) => *r.borrow_mut() = fresh.clone(),
+                                Some(slot) => *slot = fresh.clone(),
+                                None => {}
+                            }
+                            arr_val = fresh;
+                        }
+                    }
                     // The key's diagnostic may run an error handler that replaces
                     // the container: the read-modify-write is then abandoned
                     // (slow_index_convert_w()). A variable becoming an array is
@@ -43027,11 +43044,13 @@ impl Vm {
                 OpCode::ArrayGetW
                 | OpCode::ArrayGetWRW
                 | OpCode::ArrayGetWUnset
-                | OpCode::ArrayGetWObj => match outlined(|| -> Result<Flow, VmError> {
+                | OpCode::ArrayGetWObj
+                | OpCode::ArrayGetWObjRW => match outlined(|| -> Result<Flow, VmError> {
                     let mode = match op.opcode {
                         OpCode::ArrayGetW => crate::fetch_w::DimFetch::W,
                         OpCode::ArrayGetWRW => crate::fetch_w::DimFetch::Rw,
                         OpCode::ArrayGetWObj => crate::fetch_w::DimFetch::Obj,
+                        OpCode::ArrayGetWObjRW => crate::fetch_w::DimFetch::ObjRw,
                         _ => crate::fetch_w::DimFetch::Unset,
                     };
                     if let Value::Object(obj) = &self

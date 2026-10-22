@@ -445,6 +445,10 @@ pub enum OpCode {
     /// FETCH_DIM_W for the container of an object write (`$a[k]->p = v`):
     /// a missing element is created as null (no array vivification).
     ArrayGetWObj,
+    /// FETCH_DIM_RW for the container of an object read-modify-write
+    /// (`$a[k]->p += v`): a missing element is warned about, then created
+    /// as null.
+    ArrayGetWObjRW,
     /// FETCH_OBJ_W for the container of an object write (`$o->a->b = v`):
     /// a missing property is created as null; non-objects throw "Attempt
     /// to modify property".

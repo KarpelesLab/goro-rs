@@ -1735,7 +1735,9 @@ impl Compiler {
                         self.op_array
                             .child_functions
                             .iter()
-                            .find(|f| f.name.eq_ignore_ascii_case(&lower))
+                            // (a function declared further down is not
+                            // declared yet when the call is compiled)
+                            .find(|f| f.name.eq_ignore_ascii_case(&lower) && f.decl_line <= line)
                             .map(|f| {
                                 !f.by_ref_params.get(i).copied().unwrap_or(false)
                                     && f.variadic_param.is_none()
@@ -10955,19 +10957,19 @@ impl Compiler {
             } => {
                 let container = self.compile_dim_write_base_mode(
                     array,
-                    if mode == DimFetch::Unset {
-                        DimFetch::Unset
-                    } else {
-                        DimFetch::W
+                    match mode {
+                        DimFetch::Unset => DimFetch::Unset,
+                        DimFetch::Rw => DimFetch::Rw,
+                        _ => DimFetch::W,
                     },
                 )?;
                 let key = self.compile_expr(index)?;
                 let tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
-                    opcode: if mode == DimFetch::Unset {
-                        OpCode::ArrayGetWUnset
-                    } else {
-                        OpCode::ArrayGetWObj
+                    opcode: match mode {
+                        DimFetch::Unset => OpCode::ArrayGetWUnset,
+                        DimFetch::Rw => OpCode::ArrayGetWObjRW,
+                        _ => OpCode::ArrayGetWObj,
                     },
                     op1: container,
                     op2: key,
@@ -10989,7 +10991,7 @@ impl Compiler {
         match mode {
             DimFetch::Rw => 1,
             DimFetch::Unset => 2,
-            DimFetch::W | DimFetch::Obj => 0,
+            DimFetch::W | DimFetch::Obj | DimFetch::ObjRw => 0,
         }
     }
 
@@ -11307,7 +11309,7 @@ impl Compiler {
                     DimFetch::W => OpCode::PropertyGetW,
                     DimFetch::Rw => OpCode::PropertyGetWRW,
                     DimFetch::Unset => OpCode::PropertyGetWUnset,
-                    DimFetch::Obj => OpCode::PropertyGetWObj,
+                    DimFetch::Obj | DimFetch::ObjRw => OpCode::PropertyGetWObj,
                 },
                 op1: obj,
                 op2: name,
@@ -11334,6 +11336,7 @@ impl Compiler {
                     DimFetch::Rw => OpCode::ArrayGetWRW,
                     DimFetch::Unset => OpCode::ArrayGetWUnset,
                     DimFetch::Obj => OpCode::ArrayGetWObj,
+                    DimFetch::ObjRw => OpCode::ArrayGetWObjRW,
                 },
                 op1: container,
                 op2: key,
