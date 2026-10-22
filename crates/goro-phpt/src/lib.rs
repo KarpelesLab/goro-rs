@@ -2442,6 +2442,19 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
     let mut xfail = 0;
     let mut xpass = 0;
 
+    // run-tests.php gives the tests a TEMP environment variable
+    // (sys_get_temp_dir() when unset).
+    if std::env::var_os("TEMP").is_none_or(|t| t.is_empty()) {
+        let tmp = std::env::temp_dir();
+        let tmp = tmp.to_string_lossy();
+        let tmp = tmp
+            .strip_suffix('/')
+            .filter(|t| !t.is_empty())
+            .unwrap_or(&tmp);
+        unsafe {
+            std::env::set_var("TEMP", tmp);
+        }
+    }
     // Make sure subprocesses launched by tests (e.g. via proc_open from
     // php_cli_server.inc) use this goro binary rather than the system `php`.
     if std::env::var("TEST_PHP_EXECUTABLE").is_err() {
