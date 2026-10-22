@@ -32,6 +32,9 @@ pub struct Sock {
     pub blocking: Cell<bool>,
     /// the stream the socket was imported from / exported to
     pub zstream: Cell<Option<i64>>,
+    /// the reference to that stream the socket holds (php_socket->zstream):
+    /// the stream lives as long as the socket
+    pub zstream_ref: std::cell::RefCell<Option<goro_core::value::Value>>,
 }
 
 impl Sock {
@@ -42,6 +45,7 @@ impl Sock {
             error: Cell::new(0),
             blocking: Cell::new(true),
             zstream: Cell::new(None),
+            zstream_ref: std::cell::RefCell::new(None),
         }
     }
     pub fn is_invalid(&self) -> bool {

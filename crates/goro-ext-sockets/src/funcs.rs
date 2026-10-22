@@ -401,6 +401,8 @@ pub fn socket_close(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
         }
     }
     sock.zstream.set(None);
+    let held = sock.zstream_ref.borrow_mut().take();
+    drop(held);
     sock.fd.set(-1);
     Value::Null
 }
@@ -1315,6 +1317,7 @@ pub fn socket_import_stream(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
         return Value::False;
     }
     sock.zstream.set(Some(sid));
+    *sock.zstream_ref.borrow_mut() = Some(Value::resource(sid));
     obj
 }
 
@@ -1336,7 +1339,9 @@ pub fn socket_export_stream(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
     let sid = (hooks.stream_from_socket)(vm, sock.fd.get());
     goro_ext_standard::sockets_streams::ext_set_blocking(sid, sock.blocking.get());
     sock.zstream.set(Some(sid));
-    Value::resource(sid)
+    let v = Value::resource(sid);
+    *sock.zstream_ref.borrow_mut() = Some(v.clone());
+    v
 }
 
 const HINTS_KEYS_ERR: &str =
