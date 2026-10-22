@@ -1909,7 +1909,7 @@ impl GcHost for crate::vm::Vm {
             crate::value::display_class_name(&obj.borrow().class_name)
         );
         self.call_stack
-            .push((name, String::new(), 0, Vec::new(), true));
+            .push((name, crate::rcstr::RcStr::new(), 0, Vec::new(), true));
         self.gc_run_destructor(obj);
         self.call_stack.pop();
         if let Some(prev) = prev {

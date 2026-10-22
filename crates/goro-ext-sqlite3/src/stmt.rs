@@ -322,7 +322,7 @@ fn bind_params(vm: &mut Vm, s: &StmtData, d: &DbData) -> Result<(), ()> {
                 _ => {
                     // php-src formats this message with "%pd", which its
                     // spprintf() rejects with an E_CORE_ERROR bailout.
-                    let file = std::mem::replace(&mut vm.current_file, "Unknown".to_string());
+                    let file = std::mem::replace(&mut vm.current_file, "Unknown".into());
                     vm.emit_fatal_typed_at(
                         16,
                         "printf \"p\" modifier is no longer supported, use ZEND_LONG_FMT",

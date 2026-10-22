@@ -93,7 +93,7 @@ pub struct PhpGenerator {
     /// The arguments passed to the generator function (for func_get_args())
     pub args: Vec<Value>,
     /// The file the generator was called from (for backtrace)
-    pub call_file: String,
+    pub call_file: crate::rcstr::RcStr,
     /// The line the generator was called from (for backtrace)
     pub call_line: u32,
     /// Pending return value for deferred return (finally blocks)
@@ -263,7 +263,7 @@ impl PhpGenerator {
             called_class: None,
             class_scope: None,
             args: Vec::new(),
-            call_file: String::new(),
+            call_file: crate::rcstr::RcStr::new(),
             call_line: 0,
             pending_return: None,
             pending_finally_jump: None,
@@ -790,7 +790,7 @@ impl PhpGenerator {
         let (func_file, func_line) = if let Some((file, line)) = vm.generator_caller.clone() {
             (file, line)
         } else {
-            (String::new(), 0)
+            (crate::rcstr::RcStr::new(), 0)
         };
         self.frame_depth = vm.call_stack.len().saturating_sub(vm.fiber_call_base());
         vm.call_stack.push((
@@ -864,8 +864,8 @@ impl PhpGenerator {
     }
 
     /// File and line of the `yield from` this generator is suspended at.
-    fn yield_from_site(&self) -> (String, u32) {
-        let file = String::from_utf8_lossy(&self.op_array.filename).to_string();
+    fn yield_from_site(&self) -> (crate::rcstr::RcStr, u32) {
+        let file = self.op_array.file_name();
         let line = self
             .ip
             .checked_sub(1)
@@ -879,8 +879,8 @@ impl PhpGenerator {
     fn trace_frame(
         &self,
         vm: &Vm,
-        caller: &Option<(String, u32)>,
-    ) -> (String, String, u32, Vec<Value>, bool) {
+        caller: &Option<(crate::rcstr::RcStr, u32)>,
+    ) -> crate::vm::CallFrame {
         let (name, is_instance) = self.frame_name(vm);
         let (file, line) = caller.clone().unwrap_or_default();
         (name, file, line, self.args.clone(), is_instance)

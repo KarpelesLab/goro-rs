@@ -208,7 +208,7 @@ thread_local! {
     static PS: RefCell<Ps> = RefCell::new(Ps::default());
     /// Active internal function names (for php_error_docref prefixes),
     /// with the user file/line they were called from.
-    static FN_STACK: RefCell<Vec<(String, String, u32)>> = const { RefCell::new(Vec::new()) };
+    static FN_STACK: RefCell<Vec<(String, goro_core::rcstr::RcStr, u32)>> = const { RefCell::new(Vec::new()) };
     static PHASE: Cell<Phase> = const { Cell::new(Phase::Startup) };
     static MODIFIED: RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
 }
@@ -1348,8 +1348,13 @@ fn call_handler(vm: &mut Vm, func: &Option<Value>, args: &[Value]) -> R<Option<V
             .push((name, file, line, Vec::new(), is_method));
     }
     let (cname, is_method) = callable_frame_name(&func);
-    vm.call_stack
-        .push((cname, String::new(), 0, args.to_vec(), is_method));
+    vm.call_stack.push((
+        cname,
+        goro_core::rcstr::RcStr::new(),
+        0,
+        args.to_vec(),
+        is_method,
+    ));
     let r = vm.call_callback(&func, args);
     vm.call_stack.pop();
     if pushed_outer {
@@ -1813,7 +1818,7 @@ fn session_initialize(vm: &mut Vm) -> R<bool> {
         ps(|p| p.session_vars = Some(val.clone()));
     }
     session_decode_data(vm, &val)?;
-    let loc = FN_STACK.with(|s| s.borrow().last().map(|(_, f, l)| (f.clone(), *l)));
+    let loc = FN_STACK.with(|s| s.borrow().last().map(|(_, f, l)| (f.to_string(), *l)));
     ps(|p| p.started_at = loc);
     Ok(true)
 }
@@ -2245,7 +2250,7 @@ fn session_start_internal(vm: &mut Vm) -> R<bool> {
 // ---------------------------------------------------------------------------
 
 fn last_modified(vm: &Vm) {
-    let path = vm.current_file.clone();
+    let path = vm.current_file.to_string();
     let main_path = vm.get_global(b"_SERVER").and_then(|s| match s.deref() {
         Value::Array(a) => a
             .borrow()

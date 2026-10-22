@@ -289,7 +289,7 @@ impl Vm {
         let args = vec![
             Value::Long(ty),
             Value::String(PhpString::from_vec(raw_error_bytes(msg).into_owned())),
-            Value::String(PhpString::from_string(file)),
+            Value::String(PhpString::from_string(file.to_string())),
             Value::Long(line as i64),
         ];
         // Called from user code, the handler's frame is located at the

@@ -32,6 +32,7 @@ pub mod opcode;
 pub mod preload;
 pub mod proptable;
 pub mod random;
+pub mod rcstr;
 pub mod reflection;
 pub mod rfc1867;
 pub mod sapi_headers;

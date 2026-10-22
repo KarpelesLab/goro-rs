@@ -927,12 +927,8 @@ pub(crate) fn run_snippet_at(
             cvs[i] = val.clone();
         }
     }
-    let saved_file = file.map(|f| {
-        std::mem::replace(
-            &mut vm.current_file,
-            String::from_utf8_lossy(&f).to_string(),
-        )
-    });
+    let saved_file =
+        file.map(|f| std::mem::replace(&mut vm.current_file, String::from_utf8_lossy(&f).into()));
     let saved_line = std::mem::replace(&mut vm.current_line, line);
     vm.called_class_stack.push(Vec::new());
     vm.push_class_scope(Vec::new());
@@ -2923,7 +2919,7 @@ pub fn reflection_class_method(
                     Some(Value::String(PhpString::from_string(filename.clone())))
                 } else {
                     Some(Value::String(PhpString::from_string(
-                        vm.current_file.clone(),
+                        vm.current_file.to_string(),
                     )))
                 }
             } else {
@@ -5064,7 +5060,7 @@ pub fn reflection_method_method(
                     .get(fn_lower.as_slice())
                     .map(|op| String::from_utf8_lossy(&op.filename).to_string())
                     .filter(|f| !f.is_empty())
-                    .unwrap_or_else(|| vm.current_file.clone());
+                    .unwrap_or_else(|| vm.current_file.to_string());
                 return Some(Value::String(PhpString::from_string(fname)));
             }
             b"getstartline" => {
@@ -5312,7 +5308,7 @@ pub fn reflection_method_method(
             // Use the class's filename if available
             let filename = rcls(vm, &class_lower)
                 .and_then(|c| c.filename.clone())
-                .unwrap_or_else(|| vm.current_file.clone());
+                .unwrap_or_else(|| vm.current_file.to_string());
             Some(Value::String(PhpString::from_string(filename)))
         }
         b"getstartline" => {
@@ -5621,7 +5617,7 @@ pub fn reflection_method_method(
 
             if let Some(m) = method_def {
                 let filename = if m.op_array.filename.is_empty() {
-                    vm.current_file.clone()
+                    vm.current_file.to_string()
                 } else {
                     String::from_utf8_lossy(&m.op_array.filename).into_owned()
                 };
@@ -5864,7 +5860,7 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                             // Raised inside the callee, called from internal code.
                             vm.call_stack.push((
                                 format!("{}->{}", canonical, String::from_utf8_lossy(&m.name)),
-                                "[internal function]".to_string(),
+                                "[internal function]".into(),
                                 0,
                                 invoke_args.clone(),
                                 !m.is_static,
@@ -6071,7 +6067,7 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                         let line = m.op_array.decl_line;
                         vm.call_stack.push((
                             format!("{}->{}", canonical, method_disp),
-                            "[internal function]".to_string(),
+                            "[internal function]".into(),
                             0,
                             invoke_args.clone(),
                             !m.is_static,
@@ -6571,7 +6567,7 @@ pub fn reflection_function_method(
                     )))
                 } else {
                     Some(Value::String(PhpString::from_string(
-                        vm.current_file.clone(),
+                        vm.current_file.to_string(),
                     )))
                 }
             } else {
@@ -7067,7 +7063,7 @@ pub fn reflection_function_method(
                 display
             };
             let filename = if op.filename.is_empty() {
-                vm.current_file.clone()
+                vm.current_file.to_string()
             } else {
                 String::from_utf8_lossy(&op.filename).into_owned()
             };
@@ -9875,7 +9871,7 @@ fn reflection_running_generator(
         .map(|(_, n, _)| n.clone())
         .collect();
     match method {
-        b"getexecutingfile" => Value::String(PhpString::from_string(vm.current_file.clone())),
+        b"getexecutingfile" => Value::String(PhpString::from_string(vm.current_file.to_string())),
         b"getexecutingline" => Value::Long(vm.current_line as i64),
         b"getexecutinggenerator" => Value::Generator(g.clone()),
         b"getthis" => Value::Null,
@@ -9893,10 +9889,10 @@ fn reflection_running_generator(
         b"gettrace" => {
             // Innermost first; each frame is located where its caller (the
             // next outer generator) resumed it.
-            let mut frames: Vec<(String, String, u32, Vec<Value>, bool)> = Vec::new();
+            let mut frames: Vec<crate::vm::CallFrame> = Vec::new();
             for (i, name) in names.iter().enumerate() {
                 let (file, line) = if i == 0 {
-                    (String::new(), 0)
+                    (crate::rcstr::RcStr::new(), 0)
                 } else {
                     vm.call_stack
                         .iter()
@@ -9976,7 +9972,7 @@ pub fn reflection_generator_method(
                 }
             }
             Some(Value::String(PhpString::from_string(
-                vm.current_file.clone(),
+                vm.current_file.to_string(),
             )))
         }
         b"getexecutingline" => {
@@ -10086,7 +10082,7 @@ pub fn reflection_generator_method(
                 None => return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
             };
             let chain = generator_chain(&g);
-            let mut frames: Vec<(String, String, u32, Vec<Value>, bool)> = Vec::new();
+            let mut frames: Vec<crate::vm::CallFrame> = Vec::new();
             let mut objects: Vec<Option<Value>> = Vec::new();
             for (i, genr) in chain.iter().enumerate() {
                 let gb = genr.borrow();
@@ -10111,13 +10107,10 @@ pub fn reflection_generator_method(
                         .map(|n| n.as_slice() == b"this")
                         .unwrap_or(false);
                 let (file, line) = if i == 0 {
-                    (String::new(), 0)
+                    (crate::rcstr::RcStr::new(), 0)
                 } else {
                     let caller = chain[i - 1].borrow();
-                    (
-                        String::from_utf8_lossy(&caller.op_array.filename).to_string(),
-                        generator_exec_line(&caller),
-                    )
+                    (caller.op_array.file_name(), generator_exec_line(&caller))
                 };
                 let mut fargs = gb.args.clone();
                 if has_this {
@@ -10239,7 +10232,9 @@ pub fn reflection_fiber_method(
                     .and_then(|f| f.suspended_at.clone())
             };
             Some(match (method, pos) {
-                (b"getexecutingfile", Some((f, _))) => Value::String(PhpString::from_string(f)),
+                (b"getexecutingfile", Some((f, _))) => {
+                    Value::String(PhpString::from_string(f.to_string()))
+                }
                 (_, Some((_, l))) => Value::Long(l as i64),
                 _ => Value::Null,
             })
@@ -14624,7 +14619,7 @@ pub(crate) fn class_string(
         let fname = ce
             .filename
             .clone()
-            .unwrap_or_else(|| vm.current_file.clone());
+            .unwrap_or_else(|| vm.current_file.to_string());
         s.push_str(&format!(
             "{}  @@ {} {}-{}\n",
             indent, fname, ce.start_line, ce.end_line
@@ -14825,7 +14820,7 @@ fn method_section_string(
     indent: &str,
 ) -> String {
     let filename = if m.op_array.filename.is_empty() {
-        vm.current_file.clone()
+        vm.current_file.to_string()
     } else {
         String::from_utf8_lossy(&m.op_array.filename).into_owned()
     };

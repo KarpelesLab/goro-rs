@@ -1292,13 +1292,8 @@ pub fn call_method(
             .map(|f| f.0.eq_ignore_ascii_case(&frame))
             .unwrap_or(false);
         if !has {
-            vm.call_stack.push((
-                frame,
-                "[internal function]".to_string(),
-                0,
-                args.to_vec(),
-                true,
-            ));
+            vm.call_stack
+                .push((frame, "[internal function]".into(), 0, args.to_vec(), true));
             pushed = true;
         }
     }

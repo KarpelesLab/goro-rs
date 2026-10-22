@@ -463,7 +463,7 @@ impl Vm {
             if push {
                 // ("[internal function]" when internal code calls it)
                 let (file, fline) = if self.caller_is_internal() {
-                    (String::new(), 0)
+                    (crate::rcstr::RcStr::new(), 0)
                 } else {
                     (self.current_file.clone(), line)
                 };

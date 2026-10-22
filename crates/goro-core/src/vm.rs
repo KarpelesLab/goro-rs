@@ -8,6 +8,7 @@ use crate::fastpath::canonical_int_key;
 use crate::fiber::{FIBER_SUSPEND_SENTINEL, FiberState};
 use crate::object::{ClassEntry, PhpObject, Visibility};
 use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
+use crate::rcstr::RcStr;
 use crate::string::PhpString;
 use crate::value::Value;
 
@@ -463,7 +464,7 @@ impl Vm {
 pub type ClassMap = crate::fxhash::FxIndexMap<Vec<u8>, ClassEntry>;
 
 /// A `call_stack` entry: (function, file, line called from, args, is_instance_method).
-pub type CallFrame = (String, String, u32, Vec<Value>, bool);
+pub type CallFrame = (String, crate::rcstr::RcStr, u32, Vec<Value>, bool);
 
 /// VM runtime error
 #[derive(Debug, Clone)]
@@ -1068,7 +1069,7 @@ pub struct Vm {
     foreach_pool: Vec<Box<ForeachState>>,
     pub(crate) string_pool: Vec<String>,
     /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
-    pub call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
+    pub call_stack: Vec<CallFrame>,
     /// Stack of saved error_reporting levels (for @ operator)
     pub error_reporting_stack: Vec<i64>,
     /// Pending return value (for deferred return in finally blocks)
@@ -1128,7 +1129,7 @@ pub struct Vm {
     /// Named args being forwarded to a builtin function call (for call_user_func etc.)
     pub pending_named_args: Vec<(Vec<u8>, Value)>,
     /// Current executing file path
-    pub current_file: String,
+    pub current_file: crate::rcstr::RcStr,
     /// Line number of the last return statement (for return type error messages)
     last_return_line: u32,
     /// Whether the most recently completed user function call was declared
@@ -1181,7 +1182,7 @@ pub struct Vm {
     /// Optional caller context (file, line) used when entering a generator resume
     /// from user code (e.g., foreach iteration). When None, the generator's frame
     /// in stack traces is recorded as "[internal function]".
-    pub generator_caller: Option<(String, u32)>,
+    pub generator_caller: Option<(RcStr, u32)>,
     /// The currently executing Fiber object (for Fiber::getCurrent())
     pub current_fiber: Option<Value>,
     /// Stack of fiber objects for nested fibers
@@ -1597,7 +1598,7 @@ impl Vm {
             json_encoding_objects: std::collections::HashSet::new(),
             preg_last_error: 0,
             pending_named_args: Vec::new(),
-            current_file: "Unknown.php".to_string(),
+            current_file: "Unknown.php".into(),
             last_return_line: 0,
             last_call_by_ref: false,
             isset_get_cache: None,
@@ -4119,7 +4120,7 @@ impl Vm {
 
     /// Remember the last error for error_get_last().
     pub fn record_last_error(&mut self, ty: i64, msg: &str, line: u32) {
-        self.last_error = Some((ty, msg.to_string(), self.current_file.clone(), line));
+        self.last_error = Some((ty, msg.to_string(), self.current_file.to_string(), line));
     }
 
     /// Emit a PHP warning with line number
@@ -4534,7 +4535,7 @@ impl Vm {
     /// deprecation of the *error handler itself* reports the user file/line of
     /// the original error rather than "Unknown:0".
     pub fn emit_deprecation_for_callback_at(&mut self, callback: &Value, file: &str, line: u32) {
-        let saved_file = std::mem::replace(&mut self.current_file, file.to_string());
+        let saved_file = std::mem::replace(&mut self.current_file, file.into());
         let saved_line = std::mem::replace(&mut self.current_line, line);
         self.emit_deprecation_for_callback_inner(callback, line);
         self.current_file = saved_file;
@@ -4547,7 +4548,7 @@ impl Vm {
     /// as "Unknown" on line 0. Looks up the function/method by name and emits
     /// only if it carries a `#[\Deprecated]` attribute.
     pub fn emit_deprecation_for_callback(&mut self, callback: &Value) {
-        let saved_file = std::mem::replace(&mut self.current_file, "Unknown".to_string());
+        let saved_file = std::mem::replace(&mut self.current_file, "Unknown".into());
         let saved_line = std::mem::replace(&mut self.current_line, 0);
         self.emit_deprecation_for_callback_inner(callback, 0);
         self.current_file = saved_file;
@@ -5659,7 +5660,7 @@ impl Vm {
         err_obj.set_property(b"code".to_vec(), Value::Long(0));
         err_obj.set_property(
             b"file".to_vec(),
-            Value::String(PhpString::from_string(self.current_file.clone())),
+            Value::String(PhpString::from_string(self.current_file.to_string())),
         );
         err_obj.set_property(b"line".to_vec(), Value::Long(line as i64));
         // Capture stack trace
@@ -6097,8 +6098,7 @@ impl Vm {
         let sensitive = self.any_sensitive_params();
         // zend.exception_ignore_args: frames carry no "args"
         let ignore_args = self.exception_ignore_args();
-        let frame_list: Vec<(String, String, u32, Vec<Value>, bool)> =
-            self.call_stack.iter().rev().cloned().collect();
+        let frame_list: Vec<CallFrame> = self.call_stack.iter().rev().cloned().collect();
         let named_args = if ignore_args {
             Vec::new()
         } else {
@@ -6125,7 +6125,7 @@ impl Vm {
             if !is_internal {
                 frame.set(
                     ArrayKey::String(PhpString::from_bytes(b"file")),
-                    Value::String(PhpString::from_string(file.clone())),
+                    Value::String(PhpString::from_string(file.to_string())),
                 );
                 frame.set(
                     ArrayKey::String(PhpString::from_bytes(b"line")),
@@ -7937,7 +7937,7 @@ impl Vm {
                     );
                     self.sync_builtin_frames();
                     let (file, fline) = if self.in_builtin_frame() {
-                        (String::new(), 0)
+                        (RcStr::new(), 0)
                     } else {
                         (self.current_file.clone(), self.current_line)
                     };
@@ -8140,7 +8140,7 @@ impl Vm {
                         && matches!(call.args.first(), Some(Value::Object(_)));
                     let (file, fline) = match self.ucf_call_line {
                         Some(l) => (self.current_file.clone(), l),
-                        None => (String::new(), 0),
+                        None => (RcStr::new(), 0),
                     };
                     let passed: Vec<Value> =
                         call.args.iter().skip(lead).map(|v| v.deref()).collect();
@@ -8225,7 +8225,7 @@ impl Vm {
                     this_cv == 1 && lead > 0 && matches!(call.args.first(), Some(Value::Object(_)));
                 let (file, fline) = match ucf_line {
                     Some(l) => (self.current_file.clone(), l),
-                    None => (String::new(), 0),
+                    None => (RcStr::new(), 0),
                 };
                 self.call_stack
                     .push((frame_display, file, fline, Vec::new(), is_instance));
@@ -8316,7 +8316,7 @@ impl Vm {
             // callee is located at the call site instead of "[internal function]".
             let (file, line) = match self.ucf_call_line.take() {
                 Some(l) => (self.current_file.clone(), l),
-                None => (String::new(), 0),
+                None => (RcStr::new(), 0),
             };
             self.call_stack
                 .push((frame_display, file, line, frame_args, is_instance));
@@ -9945,7 +9945,7 @@ impl Vm {
         let had_exc = self.current_exception.is_some();
         self.call_stack.push((
             format!("{}->__destruct", String::from_utf8_lossy(&class_name_orig)),
-            String::new(),
+            RcStr::new(),
             0,
             Vec::new(),
             true,
@@ -16974,7 +16974,7 @@ impl Vm {
         if self.included_files_list.is_empty() && !self.current_file.is_empty() {
             let main = std::fs::canonicalize(&self.current_file)
                 .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| self.current_file.clone());
+                .unwrap_or_else(|_| self.current_file.to_string());
             self.included_files.insert(main.clone());
             self.included_files_list.push(main);
         }
@@ -17094,7 +17094,7 @@ impl Vm {
                     let own_frame = !matches!(handler, Value::Object(_));
                     if own_frame {
                         self.call_stack
-                            .push((handler_name, String::new(), 0, frame_args, false));
+                            .push((handler_name, RcStr::new(), 0, frame_args, false));
                     }
                     // zend_user_exception_handler(): the handler is pushed on the
                     // handler stack while it runs, and the top of the stack is
@@ -17242,7 +17242,7 @@ impl Vm {
     pub fn mark_output_started(&mut self) {
         if !self.headers_sent {
             if self.output_start.is_none() && !self.current_file.is_empty() {
-                self.output_start = Some((self.current_file.clone(), self.current_line));
+                self.output_start = Some((self.current_file.to_string(), self.current_line));
             }
             // sapi_send_headers(): sapi_run_header_callback()
             if let Some(cb) = self.header_callback.take() {
@@ -17590,7 +17590,7 @@ impl Vm {
                     crate::value::display_class_name(&class_name_orig)
                 );
                 self.call_stack
-                    .push((frame, String::new(), 0, Vec::new(), true));
+                    .push((frame, RcStr::new(), 0, Vec::new(), true));
                 self.called_class_stack.push(class_name_orig);
                 self.class_scope_stack.push(scope);
                 let fatal_before = self.fatal_emitted;
@@ -18486,15 +18486,13 @@ impl Vm {
 
     /// A call's backtrace frame is done with: keep its buffers.
     #[inline]
-    pub(crate) fn recycle_frame(&mut self, frame: (String, String, u32, Vec<Value>, bool)) {
-        let (mut name, mut file, _, mut args, _) = frame;
+    pub(crate) fn recycle_frame(&mut self, frame: CallFrame) {
+        let (mut name, _, _, mut args, _) = frame;
         clear_values(&mut args);
         self.recycle_values(args);
-        for s in [&mut name, &mut file] {
-            if s.capacity() != 0 && s.capacity() <= 1024 && self.string_pool.len() < 64 {
-                s.clear();
-                self.string_pool.push(std::mem::take(s));
-            }
+        if name.capacity() != 0 && name.capacity() <= 1024 && self.string_pool.len() < 64 {
+            name.clear();
+            self.string_pool.push(name);
         }
     }
 
@@ -19598,17 +19596,19 @@ impl Vm {
     /// executing file (zend_get_executed_filename()). Returns the caller's
     /// file to restore with [`Self::leave_op_array_file`], if it changed.
     #[inline]
-    pub(crate) fn enter_op_array_file(&mut self, op_array: &OpArray) -> Option<String> {
+    pub(crate) fn enter_op_array_file(&mut self, op_array: &OpArray) -> Option<RcStr> {
         let f = &op_array.filename;
         if f.is_empty() || f.as_slice() == self.current_file.as_bytes() {
             return None;
         }
-        let file = String::from_utf8_lossy(f).into_owned();
-        Some(std::mem::replace(&mut self.current_file, file))
+        Some(std::mem::replace(
+            &mut self.current_file,
+            op_array.file_name(),
+        ))
     }
 
     #[inline]
-    pub(crate) fn leave_op_array_file(&mut self, saved: Option<String>) {
+    pub(crate) fn leave_op_array_file(&mut self, saved: Option<RcStr>) {
         if let Some(f) = saved {
             self.current_file = f;
         }
@@ -26121,13 +26121,10 @@ impl Vm {
                         // them.
                         let line = op.line;
                         self.call_stack.extend(std::iter::once_with(move || {
-                            (display, String::new(), line, Vec::new(), has_this)
+                            (display, RcStr::new(), line, Vec::new(), has_this)
                         }));
                         if let Some(frame) = self.call_stack.last_mut() {
-                            if let Some(s) = self.string_pool.pop() {
-                                frame.1 = s;
-                            }
-                            frame.1.push_str(&self.current_file);
+                            frame.1 = self.current_file.clone();
                             if let Some(v) = self.value_pool.pop() {
                                 frame.3 = v;
                             }
@@ -41167,7 +41164,7 @@ impl Vm {
                     } else {
                         // Relative to the file of the executing function.
                         let exec_file = if op_array.filename.is_empty() {
-                            self.current_file.clone()
+                            self.current_file.to_string()
                         } else {
                             String::from_utf8_lossy(&op_array.filename).into_owned()
                         };
@@ -41265,7 +41262,7 @@ impl Vm {
                             };
                             match parsed {
                                 Ok(program) => {
-                                    self.current_file = abs_path.clone();
+                                    self.current_file = RcStr::from(&abs_path);
                                     let fresh = program.is_ok();
                                     let compiled = match program {
                                         Err(c) => {
@@ -41574,7 +41571,7 @@ impl Vm {
                                             let saved = std::mem::replace(
                                                 &mut self.current_file,
                                                 String::from_utf8_lossy(&compiler_file)
-                                                    .into_owned(),
+                                                    .into(),
                                             );
                                             for (deprecation, msg, wline) in lex_diags {
                                                 if deprecation {
@@ -41610,7 +41607,7 @@ impl Vm {
                                         // Set current file to eval's filename for correct error messages
                                         let saved_file = self.current_file.clone();
                                         self.current_file =
-                                            format!("{}({}) : eval()'d code", saved_file, op.line);
+                                            RcStr::from(format!("{}({}) : eval()'d code", saved_file, op.line));
                                         // The eval() frame of backtraces.
                                         let eval_depth = self.call_stack.len();
                                         self.call_stack.push((
@@ -48626,7 +48623,7 @@ impl Vm {
                                             );
                                             let saved_file = std::mem::replace(
                                                 &mut self.current_file,
-                                                "Unknown".to_string(),
+                                                "Unknown".into(),
                                             );
                                             let e = self.emit_fatal_at(&msg, 0);
                                             self.current_file = saved_file;
@@ -48691,7 +48688,7 @@ impl Vm {
                                     );
                                     let saved_file = std::mem::replace(
                                         &mut self.current_file,
-                                        "Unknown".to_string(),
+                                        "Unknown".into(),
                                     );
                                     let e = self.emit_fatal_at(&msg, 0);
                                     self.current_file = saved_file;
@@ -51521,7 +51518,7 @@ impl Vm {
 
                         // Set filename if not already set
                         if class.filename.is_none() {
-                            class.filename = Some(self.current_file.clone());
+                            class.filename = Some(self.current_file.to_string());
                         }
                         // Emit deprecation for implicitly nullable parameters in methods
                         // and for optional parameters before required parameters
@@ -52029,7 +52026,7 @@ impl Vm {
                         obj.set_property(b"code".to_vec(), Value::Long(0));
                         obj.set_property(
                             b"file".to_vec(),
-                            Value::String(PhpString::from_string(self.current_file.clone())),
+                            Value::String(PhpString::from_string(self.current_file.to_string())),
                         );
                         obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
                         obj.set_property(b"previous".to_vec(), Value::Null);
@@ -56872,7 +56869,7 @@ impl Vm {
             .to_string_lossy();
         let line = obj_borrow.get_property(b"line").to_long();
         let file_str = if file.is_empty() {
-            self.current_file.clone()
+            self.current_file.to_string()
         } else {
             file
         };
@@ -58434,7 +58431,7 @@ impl Vm {
                 // (raised inside the callback's frame)
                 vm.call_stack.push((
                     callback_frame_name,
-                    String::new(),
+                    RcStr::new(),
                     0,
                     args_owned.clone(),
                     false,

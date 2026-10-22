@@ -302,7 +302,7 @@ impl Vm {
                     let file_str = if has_file {
                         exc_file
                     } else {
-                        self.current_file.clone()
+                        self.current_file.to_string()
                     };
                     let line_num = if has_line && exc_line >= 0 {
                         exc_line as u32
@@ -328,7 +328,7 @@ impl Vm {
                                 .to_string_lossy();
                             let pl = prev_ref.get_property(b"line").to_long();
                             let pf_str = if pf.is_empty() || pf == "Unknown" {
-                                self.current_file.clone()
+                                self.current_file.to_string()
                             } else {
                                 pf
                             };

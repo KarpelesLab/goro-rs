@@ -961,7 +961,7 @@ pub fn run_in_scope(
     for o in op_array.ops.iter_mut() {
         o.line = line;
     }
-    op_array.filename = vm.current_file.clone().into_bytes();
+    op_array.filename = vm.current_file.as_bytes().to_vec();
     let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
     for (name, val) in vars {
         if let Some(i) = op_array

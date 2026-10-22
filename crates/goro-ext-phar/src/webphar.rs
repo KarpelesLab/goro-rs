@@ -211,7 +211,7 @@ fn run_file(vm: &mut Vm, name: &[u8]) {
     };
     let _ = goro_core::compiler::take_pending_compile_warnings();
     vm.sync_builtin_frames();
-    let saved_file = std::mem::replace(&mut vm.current_file, file);
+    let saved_file = std::mem::replace(&mut vm.current_file, file.into());
     let saved_line = vm.current_line;
     for (msg, line) in &warnings {
         vm.emit_warning_at(msg, *line);

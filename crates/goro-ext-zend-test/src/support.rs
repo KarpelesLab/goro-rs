@@ -242,7 +242,7 @@ pub(crate) fn compile_and_run(
     let _ = goro_core::compiler::take_pending_compile_warnings();
     // The builtin's frame is located in its caller's file.
     vm.sync_builtin_frames();
-    let saved_file = std::mem::replace(&mut vm.current_file, file.to_string());
+    let saved_file = std::mem::replace(&mut vm.current_file, file.into());
     let saved_line = vm.current_line;
     for (msg, line) in &warnings {
         vm.emit_warning_at(msg, *line);

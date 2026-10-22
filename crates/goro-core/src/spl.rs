@@ -301,8 +301,7 @@ impl Vm {
         frame.push_str(&method_disp);
         let mut frame2 = self.string_pool.pop().unwrap_or_default();
         frame2.push_str(&frame);
-        let mut file = self.string_pool.pop().unwrap_or_default();
-        file.push_str(&self.current_file);
+        let file = self.current_file.clone();
         let mut frame_args = self.take_values(0);
         frame_args.extend_from_slice(&call_args[1..]);
         self.call_stack.push((frame, file, line, frame_args, true));
@@ -594,7 +593,7 @@ impl Vm {
         };
         let mut compiler = crate::compiler::Compiler::new();
         compiler.source_file = abs_path.as_bytes().to_vec();
-        let old_file = std::mem::replace(&mut self.current_file, abs_path.to_string());
+        let old_file = std::mem::replace(&mut self.current_file, abs_path.into());
         let ok = match compiler.compile(&program) {
             Ok((op_array, classes, warnings)) => {
                 for (msg, wline) in &warnings {
@@ -628,7 +627,7 @@ impl Vm {
         // function (class_exists(), ...) at [internal function].
         let from_builtin = self.spl_caller_is_internal() || self.in_builtin_frame();
         let (site_file, site_line) = if from_builtin {
-            (String::new(), 0)
+            (crate::rcstr::RcStr::new(), 0)
         } else {
             (self.current_file.clone(), self.current_line)
         };
@@ -969,12 +968,10 @@ impl Vm {
         };
         match frame {
             Some(name) => {
-                let mut file = self.string_pool.pop().unwrap_or_default();
-                let line = if internal {
-                    0
+                let (file, line) = if internal {
+                    (crate::rcstr::RcStr::new(), 0)
                 } else {
-                    file.push_str(&self.current_file);
-                    self.current_line
+                    (self.current_file.clone(), self.current_line)
                 };
                 let mut frame_args = self.take_values(0);
                 frame_args.extend_from_slice(args);

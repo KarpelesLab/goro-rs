@@ -1125,7 +1125,7 @@ impl PhpRun {
         let name = std::fs::canonicalize(std::ffi::OsStr::from_bytes(cstr(path)))
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from_utf8_lossy(path).into_owned());
-        self.vm.current_file = name.clone();
+        self.vm.current_file = name.as_str().into();
         match engine::compile(&src, &name, true) {
             Ok(mut c) => {
                 engine::load(&mut self.vm, &mut c);

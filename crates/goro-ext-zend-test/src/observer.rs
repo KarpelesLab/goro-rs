@@ -209,7 +209,7 @@ fn describe(vm: &Vm, frame: &ObservedFrame) -> Func {
 
 fn user_func(vm: &Vm, op: &OpArray) -> Func {
     let file = if op.filename.is_empty() {
-        vm.current_file.clone()
+        vm.current_file.to_string()
     } else {
         String::from_utf8_lossy(&op.filename).into_owned()
     };
@@ -405,7 +405,7 @@ fn main_script(vm: &Vm) -> String {
     vm.constants
         .get(b"__zend_test_main_script".as_slice())
         .map(|v| v.to_php_string().to_string_lossy())
-        .unwrap_or_else(|| vm.current_file.clone())
+        .unwrap_or_else(|| vm.current_file.to_string())
 }
 
 fn end(vm: &mut Vm, frame: &ObservedFrame, retval: Option<&Value>) {

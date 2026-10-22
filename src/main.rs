@@ -822,7 +822,7 @@ fn run_request(
 
     let mut vm = engine::new_vm(ini, "cli");
     vm.cli_direct_output = true;
-    vm.current_file = main_name.clone();
+    vm.current_file = main_name.as_str().into();
     let info = cli_request_info(&php_self, &script_filename, &rest);
     engine::request_startup(&mut vm, &info, ini);
 
@@ -849,7 +849,7 @@ fn run_request(
             let code = exec_direct.unwrap_or_default();
             let mut src = b"<?php ".to_vec();
             src.extend_from_slice(code);
-            vm.current_file = "Command line code".to_string();
+            vm.current_file = "Command line code".into();
             run_main(&mut vm, &src, "Command line code")
         }
         Mode::ProcessStdin => process_stdin(
@@ -1055,7 +1055,7 @@ fn process_stdin(
             if let Some(c) = run_code.as_mut() {
                 result = run(vm, c);
             } else if let Some(c) = file_code.as_mut() {
-                vm.current_file = file_name.to_string();
+                vm.current_file = file_name.into();
                 result = vm.execute_chunk(&c.op_array).map(|_| ());
             }
             if result.is_err() || vm.exit_requested || vm.fatal_emitted {

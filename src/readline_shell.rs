@@ -42,7 +42,7 @@ enum EvalStatus {
 fn eval(vm: &mut Vm, code: &[u8], name: &str) -> EvalStatus {
     let mut src = b"<?php ".to_vec();
     src.extend_from_slice(code);
-    let prev_file = std::mem::replace(&mut vm.current_file, name.to_string());
+    let prev_file = std::mem::replace(&mut vm.current_file, name.into());
     let status = match engine::compile(&src, name, false) {
         Ok(mut c) => {
             engine::load(vm, &mut c);
@@ -107,7 +107,7 @@ fn report_exception(vm: &mut Vm, name: &str, err_line: u32) {
         Err(_) => String::new(),
     };
     vm.current_exception = None;
-    let prev_file = std::mem::replace(&mut vm.current_file, file);
+    let prev_file = std::mem::replace(&mut vm.current_file, file.into());
     vm.emit_warning_at(&format!("Uncaught {}\n  thrown", s), line);
     vm.current_file = prev_file;
 }

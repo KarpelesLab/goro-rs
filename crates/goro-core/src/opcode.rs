@@ -525,6 +525,9 @@ pub struct OpArray {
     pub param_attributes: Vec<Vec<crate::object::RuntimeAttribute>>,
     /// Source filename (for closures, error reporting)
     pub filename: Vec<u8>,
+    /// `filename` as the shared string the executing file and backtrace
+    /// frames hold (see [`OpArray::file_name`]), made on first use.
+    pub filename_rc: std::cell::OnceCell<crate::rcstr::RcStr>,
     /// For FCC closures: the original function/method name (e.g. "strrev", "Foo::bar")
     pub fcc_target_name: Option<Vec<u8>>,
     /// Display name shown to users (e.g. `{closure:/path/to/file.php:5}` or
@@ -586,6 +589,20 @@ pub(crate) struct SiteCaches {
 }
 
 impl OpArray {
+    /// `filename` (lossily decoded) as a shared string: entering the
+    /// function and its backtrace frames share one copy of it.
+    ///
+    /// (`filename` is set as the function is compiled, before this is
+    /// first called: a name changed later would not be seen.)
+    #[inline]
+    pub fn file_name(&self) -> crate::rcstr::RcStr {
+        let f = self
+            .filename_rc
+            .get_or_init(|| crate::rcstr::RcStr::from(String::from_utf8_lossy(&self.filename)));
+        debug_assert!(f.as_bytes() == self.filename.as_slice() || !f.is_ascii());
+        f.clone()
+    }
+
     pub fn new() -> Self {
         Self {
             ops: Vec::new(),
@@ -614,6 +631,7 @@ impl OpArray {
             fcc_target_name: None,
             param_attributes: Vec::new(),
             filename: Vec::new(),
+            filename_rc: std::cell::OnceCell::new(),
             display_name: Vec::new(),
             const_attribute_table: Vec::new(),
             local_classes: Vec::new(),

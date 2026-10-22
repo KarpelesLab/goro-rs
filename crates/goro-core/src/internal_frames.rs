@@ -119,16 +119,14 @@ impl Vm {
             // exceptions they throw: don't show it twice.
             // Likewise a builtin run as a fiber's callback right under the
             // fiber's own "[internal function]" entry for it.
-            let same = |e: &(String, String, u32, Vec<Value>, bool)| {
-                e.2 == line && e.0.eq_ignore_ascii_case(&name)
-            };
+            let same = |e: &crate::vm::CallFrame| e.2 == line && e.0.eq_ignore_ascii_case(&name);
             if self.call_stack.get(at).is_some_and(same)
                 || (line == 0 && at > 0 && self.call_stack.get(at - 1).is_some_and(same))
             {
                 continue;
             }
             let file = if line == 0 {
-                String::new()
+                crate::rcstr::RcStr::new()
             } else {
                 self.current_file.clone()
             };
@@ -141,7 +139,7 @@ impl Vm {
     /// The call_stack frame of the function whose code is running: included
     /// files run in their includer's frame; eval'd code (ZEND_CALL_CODE) has
     /// none, like the global scope.
-    pub fn current_function_frame(&self) -> Option<&(String, String, u32, Vec<Value>, bool)> {
+    pub fn current_function_frame(&self) -> Option<&crate::vm::CallFrame> {
         for f in self.call_stack.iter().rev() {
             match f.0.as_str() {
                 "include" | "include_once" | "require" | "require_once" => continue,
@@ -186,12 +184,10 @@ impl Vm {
             }
         }
         // (in the buffers of finished calls' frames)
-        let mut file = self.string_pool.pop().unwrap_or_default();
-        let line = if internal {
-            0
+        let (file, line) = if internal {
+            (crate::rcstr::RcStr::new(), 0)
         } else {
-            file.push_str(&self.current_file);
-            self.current_line
+            (self.current_file.clone(), self.current_line)
         };
         let mut frame_args = self.take_values(0);
         frame_args.extend(args.iter().map(|v| v.deref()));
@@ -916,7 +912,7 @@ impl Vm {
         };
 
         let (lo, hi) = range.unwrap_or((0, stack_len));
-        let frames: Vec<(String, String, u32, Vec<Value>, bool)> =
+        let frames: Vec<crate::vm::CallFrame> =
             vm.call_stack[lo..hi].iter().rev().cloned().collect();
         let key = |k: &[u8]| ArrayKey::String(PhpString::from_bytes(k));
         let string = |s: &str| Value::String(PhpString::from_string(s.to_string()));

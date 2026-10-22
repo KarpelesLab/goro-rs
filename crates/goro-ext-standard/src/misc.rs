@@ -1038,7 +1038,7 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
         return Ok(Value::False);
     }
-    let file = vm.current_file.clone();
+    let file = vm.current_file.to_string();
     vm.constant_files.insert(normalized.clone(), file);
     vm.user_constant_names
         .push((normalized.clone(), name_bytes.to_vec()));
@@ -5804,7 +5804,7 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             _ => cb,
         };
         let mut cargs = vec![
-            Value::String(PhpString::from_string(vm.current_file.clone())),
+            Value::String(PhpString::from_string(vm.current_file.to_string())),
             Value::Long(line as i64),
             Value::Null,
         ];
@@ -18175,7 +18175,7 @@ fn statpage(vm: &Vm) -> Option<std::fs::Metadata> {
             }
         }
     }
-    let path = path.unwrap_or_else(|| vm.current_file.clone());
+    let path = path.unwrap_or_else(|| vm.current_file.to_string());
     std::fs::metadata(path).ok()
 }
 
@@ -19601,7 +19601,7 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(Value::Array(Rc::new(RefCell::new({
             let mut a = PhpArray::new();
             a.push(Value::String(PhpString::from_string(
-                vm.current_file.clone(),
+                vm.current_file.to_string(),
             )));
             a
         }))))

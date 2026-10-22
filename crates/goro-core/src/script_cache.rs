@@ -617,7 +617,7 @@ impl crate::vm::Vm {
         };
         let mut compiler = crate::compiler::Compiler::new();
         compiler.source_file = path.as_bytes().to_vec();
-        let saved_file = std::mem::replace(&mut self.current_file, path.to_string());
+        let saved_file = std::mem::replace(&mut self.current_file, path.into());
         let r = match compiler.compile(&program) {
             Ok((mut op_array, classes, warnings)) => {
                 let implicit_ret = op_array

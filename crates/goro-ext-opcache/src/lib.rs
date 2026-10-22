@@ -918,7 +918,7 @@ fn startup(vm: &mut Vm) {
     }
     script_cache::CONFIG.with(|c| c.borrow_mut().enabled = !file_cache_only);
     // The main script is compiled through the cache.
-    let main = vm.current_file.clone();
+    let main = vm.current_file.to_string();
     if !main.is_empty() && !main.contains("://") && main != "Standard input code" {
         let path = std::fs::canonicalize(&main)
             .map(|p| p.to_string_lossy().into_owned())
@@ -1043,7 +1043,7 @@ fn validate_api_restriction(vm: &mut Vm) -> bool {
     }
     let script = std::fs::canonicalize(&vm.current_file)
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| vm.current_file.clone());
+        .unwrap_or_else(|_| vm.current_file.to_string());
     if !script.starts_with(&restrict) {
         vm.emit_warning(&format!(
             "{} API is restricted by \"restrict_api\" configuration directive",

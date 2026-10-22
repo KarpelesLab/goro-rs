@@ -26,7 +26,7 @@ use crate::vm::{Vm, VmError};
 /// context's own bottom frame).
 #[derive(Default)]
 pub struct FrameStacks {
-    call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
+    call_stack: Vec<crate::vm::CallFrame>,
     class_scope_stack: Vec<Vec<u8>>,
     called_class_stack: Vec<Vec<u8>>,
     property_hook_stack: Vec<Vec<u8>>,
@@ -40,7 +40,7 @@ pub struct FrameStacks {
     spl_internal_frames: Vec<(usize, String)>,
     exec_frame_len: usize,
     fiber_bases: Vec<(u64, usize)>,
-    current_file: String,
+    current_file: crate::rcstr::RcStr,
     current_line: u32,
 }
 

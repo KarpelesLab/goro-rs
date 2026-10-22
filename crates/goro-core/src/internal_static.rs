@@ -453,7 +453,7 @@ impl Vm {
         let ucf = self.ucf_call_line.take();
         let (file, fline) = match ucf {
             Some(l) => (self.current_file.clone(), l),
-            None => (String::new(), 0),
+            None => (crate::rcstr::RcStr::new(), 0),
         };
         let mut args: Vec<Value> = args.to_vec();
         let had_exc = self.current_exception.is_some();

@@ -1767,7 +1767,7 @@ fn execute_php_inner_impl(
 
     // Execute
     let mut vm = Vm::new();
-    vm.current_file = filename.to_string();
+    vm.current_file = filename.into();
     // Emit lexer deprecations first (e.g. `${var}` syntax), then compile warnings.
     for (deprecation, msg, wline) in
         goro_parser::order_lexer_diagnostics(&lexer_deprecations, &lexer_warnings)

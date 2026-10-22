@@ -213,7 +213,7 @@ impl Vm {
                 continue;
             };
             if let Some(msg) = self.function_redeclaration_error(name.as_bytes()) {
-                let saved = std::mem::replace(&mut self.current_file, path.to_string());
+                let saved = std::mem::replace(&mut self.current_file, path.into());
                 let e = self.emit_fatal_typed_at(crate::errdisplay::E_COMPILE_ERROR, &msg, op.line);
                 self.current_file = saved;
                 return Err(e);
@@ -262,7 +262,8 @@ impl Vm {
     /// Declares a class as DECLARE_CLASS would; on a fatal error the
     /// output it produced is discarded and the error message returned.
     fn preload_declare_class(&mut self, u: &Unlinked) -> Result<(), (String, u32)> {
-        let saved_file = std::mem::replace(&mut self.current_file, u.file.clone());
+        let saved_file =
+            std::mem::replace(&mut self.current_file, crate::rcstr::RcStr::from(&u.file));
         let out_len = self.active_output_buffer().len();
         let saved_fatal = self.fatal_emitted;
         let saved_recorded = self.recorded_errors.replace(Vec::new());
@@ -346,7 +347,8 @@ impl Vm {
                 continue;
             }
             let name = crate::value::display_class_name(&u.class.name);
-            let saved_file = std::mem::replace(&mut self.current_file, u.file.clone());
+            let saved_file =
+                std::mem::replace(&mut self.current_file, crate::rcstr::RcStr::from(&u.file));
             if !u.anon && self.preload_class_known(&u.class.name) {
                 self.raise_error(
                     crate::errdisplay::E_WARNING,
@@ -383,7 +385,7 @@ impl Vm {
         let fns_before: HashSet<Vec<u8>> = self.user_functions.keys().cloned().collect();
         let classes_before: HashSet<Vec<u8>> = self.classes.keys().cloned().collect();
         let constants_before = self.constants.clone();
-        let saved_file = std::mem::replace(&mut self.current_file, path.to_string());
+        let saved_file = std::mem::replace(&mut self.current_file, path.into());
         let saved_included = (
             self.included_files.clone(),
             self.included_files_list.clone(),
