@@ -8,14 +8,24 @@
 //! Errors and warnings that libgd reports through gd_error() are queued
 //! (see [`take_errors`]) for the caller to turn into PHP diagnostics.
 
+// C-port style: indexed loops and explicit counters mirror libgd's code.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::explicit_counter_loop,
+    clippy::manual_range_contains
+)]
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
+pub mod color_match;
+pub mod filter;
 pub mod fonts;
 pub mod gd;
 pub mod io;
 pub mod png;
 pub mod tables;
+pub mod topal;
 
 pub use io::{In, Out};
 

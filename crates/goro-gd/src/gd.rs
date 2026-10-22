@@ -2153,14 +2153,13 @@ pub fn copy(
                 tox += 1;
                 continue;
             }
-            let map_to;
-            if src.true_color {
-                map_to = dst.color_resolve_alpha(
+            let map_to = if src.true_color {
+                dst.color_resolve_alpha(
                     true_color_get_red(c),
                     true_color_get_green(c),
                     true_color_get_blue(c),
                     true_color_get_alpha(c),
-                );
+                )
             } else if color_map[c as usize] == -1 {
                 let ci = c as usize;
                 let nc = if same {
@@ -2169,10 +2168,10 @@ pub fn copy(
                     dst.color_resolve_alpha(src.red[ci], src.green[ci], src.blue[ci], src.alpha[ci])
                 };
                 color_map[ci] = nc;
-                map_to = nc;
+                nc
             } else {
-                map_to = color_map[c as usize];
-            }
+                color_map[c as usize]
+            };
             dst.set_pixel(tox, toy, map_to);
             tox += 1;
         }
