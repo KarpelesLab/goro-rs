@@ -2508,6 +2508,11 @@ fn sqlite3NewConnection(pVfs: Rc<Vfs>, flags: u32) -> Box<Sqlite3> {
         xWalCallback: None,
         walAutoCkpt: 0,
         pDbData: Vec::new(),
+        aModule: Hash::new(),
+        aVTrans: None,
+        nVTrans: 0,
+        pVtabCtx: Vec::new(),
+        pDisconnect: Vec::new(),
     })
 }
 

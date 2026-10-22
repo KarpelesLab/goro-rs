@@ -18,6 +18,9 @@ pub fn sqlite3RegisterJsonFunctions(pHash: &mut crate::callback::FuncDefHash) {
 }
 
 /// C: `Module * sqlite3JsonVtabRegister(sqlite3 *db, const char *zName)`
-pub fn sqlite3JsonVtabRegister(db: &mut Sqlite3, zName: Option<&[u8]>) -> () {
-    todo!("sqlite3JsonVtabRegister")
+///
+/// Rust: returns the registered module.  Interim: json_each/json_tree are
+/// not ported yet, so no module is registered.
+pub fn sqlite3JsonVtabRegister(db: &mut Sqlite3, zName: Option<&[u8]>) -> Option<ModuleRef> {
+    None
 }

@@ -114,12 +114,7 @@ fn isNaN64(x: u64) -> bool {
     (x & EXP754) == EXP754 && (x & MAN754) != 0
 }
 
-/// sqlite3VtabInSync(db): there is no virtual-table transaction tracking
-/// yet, so this is always false.
-#[inline]
-fn sqlite3VtabInSync(_db: &Sqlite3) -> bool {
-    false
-}
+use crate::vtab::sqlite3VtabInSync;
 
 /// sqlite3BtreeTxnState() on db.aDb[i].pBt (SQLITE_TXN_NONE for no btree).
 fn txnState(db: &mut Sqlite3, i: usize) -> i32 {
@@ -947,6 +942,10 @@ fn freeP4(db: Option<&mut Sqlite3>, p4type: i8, p4: P4) {
         if let (Some(db), P4::Tab(pTab)) = (db, &p4) {
             crate::build::sqlite3DeleteTable(db, pTab);
         }
+    } else if p4type == P4_VTAB {
+        if let (Some(db), P4::Vtab(pVTab)) = (db, &p4) {
+            crate::vtab::sqlite3VtabUnlock(db, pVTab);
+        }
     }
     drop(p4);
 }
@@ -1077,6 +1076,11 @@ pub fn sqlite3VdbeChangeP4(p: &mut Vdbe, addr: i32, p4: P4, n: i32) {
         pOp.p4type = P4_INT32;
     } else if !matches!(p4, P4::None) {
         debug_assert!(n < 0);
+        if n == P4_VTAB as i32 {
+            if let P4::Vtab(v) = &p4 {
+                crate::vtab::sqlite3VtabLock(v);
+            }
+        }
         pOp.p4 = p4;
         pOp.p4type = n as i8;
     }
@@ -1243,8 +1247,16 @@ pub fn sqlite3VdbeDisplayP4(pOp: &VdbeOp) -> Option<ZStr> {
             }
         }
         P4_VTAB => {
-            /* "vtab:%p": virtual tables are not ported yet */
-            x.extend_from_slice(b"vtab:0");
+            /* "vtab:%p": the address of the sqlite3_vtab */
+            let a = match &pOp.p4 {
+                P4::Vtab(v) => v
+                    .borrow()
+                    .pVtab
+                    .as_ref()
+                    .map_or(0, |t| Rc::as_ptr(t) as *const u8 as usize),
+                _ => 0,
+            };
+            x.extend(fmt(b"vtab:%p", &[PfArg::Int(a as i64)]));
         }
         P4_INTARRAY => {
             if let P4::Ai(ai) = &pOp.p4 {
@@ -1829,7 +1841,15 @@ fn freeCursorNN(db: &mut Sqlite3, pCx: &mut VdbeCursor) {
                 crate::btree::sqlite3BtreeCloseCursor(&c);
             }
         }
-        CURTYPE_VTAB => { /* Virtual tables are not ported yet (C: pVtab->nRef--; xClose) */ }
+        CURTYPE_VTAB => {
+            let pVCur = pCx.pVCur.take();
+            if let Some(t) = pCx.pVCurTab.take() {
+                t.borrow_mut().nCursor -= 1;
+            }
+            if let Some(mut c) = pVCur {
+                c.xCloseDb(db);
+            }
+        }
         _ => {}
     }
 }
@@ -4231,8 +4251,13 @@ pub fn sqlite3CursorRangeHintExprCheck(w: &mut Walker, pExpr: ExprId) -> i32 {
 /// C: `void sqlite3VtabImportErrmsg(Vdbe *p, sqlite3_vtab *pVtab)`
 ///
 /// Transfer error message text from an sqlite3_vtab.zErrMsg into a
-/// Vdbe.zErrMsg.  Virtual tables are not ported yet: no-op.
-pub fn sqlite3VtabImportErrmsg(db: &mut Sqlite3, p: &mut Vdbe, pVtab: ()) {}
+/// Vdbe.zErrMsg.
+pub fn sqlite3VtabImportErrmsg(db: &mut Sqlite3, p: &mut Vdbe, pVtab: &VtabRef) {
+    let z = pVtab.borrow_mut().zErrMsg().take();
+    if let Some(z) = z {
+        p.zErrMsg = Some(z);
+    }
+}
 
 /// C: `void sqlite3VdbePreUpdateHook( Vdbe *v, VdbeCursor *pCsr, int op, const char *zDb, Table *pTab, i64 iKey1, int iReg, int iBlobWrite )`
 /// SQLITE_ENABLE_PREUPDATE_HOOK is not compiled in: no-op.

@@ -293,8 +293,8 @@ pub fn sqlite3FinishCoding(db: &mut Sqlite3) {
             .cloned()
             .collect();
         for t in locks {
-            // C passes sqlite3GetVTable(db, pTab) as P4_VTAB.
-            sqlite3VdbeAddOp4(db.v(), OP_VBegin, 0, 0, 0, P4::Tab(t), P4_VTAB as i32);
+            let vtab = crate::vtab::sqlite3VtabP4(db, &t);
+            sqlite3VdbeAddOp4(db.v(), OP_VBegin, 0, 0, 0, vtab, P4_VTAB as i32);
         }
         db.pp().nVtabLock = 0;
 
@@ -593,9 +593,21 @@ pub fn sqlite3LocateTable(
         // If zName is the not the name of a table in the schema created using
         // CREATE, then check to see if it is the name of an virtual table that
         // can be an eponymous virtual table.
-        //
-        // Rust: eponymous virtual tables (pragma_*, json_each, ...) need the
-        // module registry, which is not available yet.
+        if (db.ppr().prepFlags as i32 & SQLITE_PREPARE_NO_VTAB) == 0 && db.init.busy == 0 {
+            let z = zName.unwrap_or(b"");
+            let mut pMod = db.aModule.find(z).cloned();
+            if pMod.is_none() && crate::util::sqlite3StrNICmp(Some(z), Some(b"pragma_"), 7) == 0 {
+                pMod = crate::pragma::sqlite3PragmaVtabRegister(db, Some(z));
+            }
+            if pMod.is_none() && crate::util::sqlite3StrNICmp(Some(z), Some(b"json"), 4) == 0 {
+                pMod = crate::json::sqlite3JsonVtabRegister(db, Some(z));
+            }
+            if let Some(pMod) = pMod {
+                if crate::vtab::sqlite3VtabEponymousTableInit(db, &pMod) != 0 {
+                    return pMod.borrow().pEpoTab.clone();
+                }
+            }
+        }
         if (flags & LOCATE_NOERR as u32) != 0 {
             return None;
         }
@@ -2771,26 +2783,34 @@ fn convertToWithoutRowidTable(db: &mut Sqlite3, pTab: &TableRef) {
 ///
 /// Return true if pTab is a virtual table and zName is a shadow table name
 /// for that virtual table.
-///
-/// Rust: virtual table modules (and their xShadowName methods) are not
-/// available yet, so no table is a shadow table.
 pub fn sqlite3IsShadowTableOf(db: &mut Sqlite3, pTab: &TableRef, zName: Option<&[u8]>) -> i32 {
-    let _ = db;
-    let t = pTab.borrow();
-    if !t.IsVirtual() {
+    let (nName, zMod) = {
+        let t = pTab.borrow();
+        if !t.IsVirtual() {
+            return 0;
+        }
+        let nName = t.zName.len();
+        let z = zName.unwrap_or(b"");
+        if !strneq(z, &t.zName, nName as i32) {
+            return 0;
+        }
+        if z.get(nName) != Some(&b'_') {
+            return 0;
+        }
+        (nName, t.u.vtab.azArg.first().cloned().unwrap_or_default())
+    };
+    let Some(pMod) = db.aModule.find(&zMod).cloned() else {
+        return 0;
+    };
+    let pModule = pMod.borrow().pModule.clone();
+    if pModule.iVersion() < 3 {
         return 0;
     }
-    let nName = t.zName.len();
+    if !pModule.has_xShadowName() {
+        return 0;
+    }
     let z = zName.unwrap_or(b"");
-    if !strneq(z, &t.zName, nName as i32) {
-        return 0;
-    }
-    if z.get(nName) != Some(&b'_') {
-        return 0;
-    }
-    // pMod = sqlite3HashFind(&db->aModule, pTab->u.vtab.azArg[0]): no module
-    // registry yet.
-    0
+    pModule.xShadowName(&z[nName + 1..]) as i32
 }
 
 /// C: `void sqlite3MarkAllShadowTablesOf(sqlite3 *db, Table *pTab)`
@@ -2799,11 +2819,47 @@ pub fn sqlite3IsShadowTableOf(db: &mut Sqlite3, pTab: &TableRef, zName: Option<&
 /// exists and has an xShadowName method, then loop over all other ordinary
 /// tables within the same schema looking for shadow tables of pTab, and mark
 /// any shadow tables seen using the TF_Shadow flag.
-///
-/// Rust: no module registry yet (no module has an xShadowName method).
 pub fn sqlite3MarkAllShadowTablesOf(db: &mut Sqlite3, pTab: &TableRef) {
-    let _ = db;
     debug_assert!(pTab.borrow().IsVirtual());
+    let (zMod, zName, pSchema) = {
+        let t = pTab.borrow();
+        (
+            t.u.vtab.azArg.first().cloned().unwrap_or_default(),
+            t.zName.clone(),
+            t.pSchema,
+        )
+    };
+    let Some(pMod) = db.aModule.find(&zMod).cloned() else {
+        return;
+    };
+    let pModule = pMod.borrow().pModule.clone();
+    if pModule.iVersion() < 3 {
+        return;
+    }
+    if !pModule.has_xShadowName() {
+        return;
+    }
+    let nName = zName.len();
+    let iDb = db.schema_index(pSchema);
+    if iDb < 0 {
+        return;
+    }
+    let tables = db.aDb[iDb as usize].pSchema.tblHash.values();
+    for pOther in tables.iter() {
+        let mut o = pOther.borrow_mut();
+        if !o.IsOrdinaryTable() {
+            continue;
+        }
+        if (o.tabFlags & TF_Shadow) != 0 {
+            continue;
+        }
+        if strneq(&o.zName, &zName, nName as i32)
+            && o.zName.get(nName) == Some(&b'_')
+            && pModule.xShadowName(&o.zName[nName + 1..])
+        {
+            o.tabFlags |= TF_Shadow;
+        }
+    }
 }
 
 /// C: `int sqlite3ShadowTableName(sqlite3 *db, const char *zName)`
@@ -3704,10 +3760,12 @@ pub fn sqlite3CodeDropTable(db: &mut Sqlite3, pTab: &TableRef, iDb: i32, isView:
 /// Return TRUE if shadow tables should be read-only in the current
 /// context.
 ///
-/// Rust: no virtual-table context (db->pVtabCtx) or vtab transactions exist
-/// yet, so those two conditions are always satisfied.
 pub fn sqlite3ReadOnlyShadowTables(db: &mut Sqlite3) -> i32 {
-    if (db.flags & SQLITE_Defensive) != 0 && db.nVdbeExec == 0 {
+    if (db.flags & SQLITE_Defensive) != 0
+        && db.pVtabCtx.is_empty()
+        && db.nVdbeExec == 0
+        && !crate::vtab::sqlite3VtabInSync(db)
+    {
         return 1;
     }
     0

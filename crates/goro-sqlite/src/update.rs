@@ -1300,8 +1300,7 @@ fn updateVirtualTable(
     pWhere: ExprId,
     onError: i32,
 ) {
-    // TODO(vtab): the P4 of OP_VUpdate must be the VTable (P4_VTAB).
-    crate::vtab::sqlite3GetVTable(db, pTab);
+    let pVTab = crate::vtab::sqlite3VtabP4(db, pTab);
     let mut pWInfo: Option<Box<crate::where_::WhereInfo>> = None;
     let nCol = pTab.borrow().nCol as i32;
     let nArg = 2 + nCol; /* Number of arguments to VUpdate */
@@ -1454,15 +1453,7 @@ fn updateVirtualTable(
         }
     }
     crate::vtab::sqlite3VtabMakeWritable(db, pTab);
-    sqlite3VdbeAddOp4(
-        db.v(),
-        OP_VUpdate,
-        0,
-        nArg,
-        regArg,
-        P4::None,
-        P4_VTAB as i32,
-    );
+    sqlite3VdbeAddOp4(db.v(), OP_VUpdate, 0, nArg, regArg, pVTab, P4_VTAB as i32);
     sqlite3VdbeChangeP5(
         db.v(),
         if onError == OE_Default as i32 {
