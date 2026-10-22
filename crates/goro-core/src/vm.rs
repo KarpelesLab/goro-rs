@@ -3828,6 +3828,33 @@ impl Vm {
         }
     }
 
+    /// The "A non-numeric value encountered" warnings of an arithmetic
+    /// operation: op1 is converted first, and an operand that cannot be
+    /// converted (the operation then throws) stops the conversions.
+    fn arith_operand_warnings(&mut self, a: &Value, b: &Value, line: u32) {
+        for v in [a, b] {
+            if Self::check_unsupported_operand_types(v, &Value::Long(0), "+").is_some() {
+                return;
+            }
+            self.check_leading_numeric_warning(v, line);
+        }
+    }
+
+    /// An integer operator failing on op2: op1 was converted first
+    /// (zendi_try_get_long), with its precision and non-numeric warnings.
+    fn int_op_error_warnings(&mut self, a: &Value, b: &Value, line: u32) {
+        let fails =
+            |v: &Value| Self::check_unsupported_operand_types(v, &Value::Long(0), "%").is_some();
+        if fails(a) || !fails(b) {
+            return;
+        }
+        let saved = self.current_line;
+        self.current_line = line;
+        let _ = self.op_to_long(a);
+        self.current_line = saved;
+        self.check_leading_numeric_warning(a, line);
+    }
+
     /// Release the temporaries an instruction consumed (its TMP operands).
     fn release_tmp_operands(op: &crate::opcode::Op, tmps: &mut [Value]) {
         for o in [&op.op1, &op.op2] {
@@ -19261,8 +19288,7 @@ impl Vm {
                             }
                         }
                     }
-                    self.check_leading_numeric_warning(&a, op.line);
-                    self.check_leading_numeric_warning(&b, op.line);
+                    self.arith_operand_warnings(&a, &b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "+") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -19346,8 +19372,7 @@ impl Vm {
                             }
                         }
                     }
-                    self.check_leading_numeric_warning(&a, op.line);
-                    self.check_leading_numeric_warning(&b, op.line);
+                    self.arith_operand_warnings(&a, &b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "-") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -19431,8 +19456,7 @@ impl Vm {
                             }
                         }
                     }
-                    self.check_leading_numeric_warning(&a, op.line);
-                    self.check_leading_numeric_warning(&b, op.line);
+                    self.arith_operand_warnings(&a, &b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "*") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -19516,6 +19540,7 @@ impl Vm {
                             }
                         }
                     }
+                    self.arith_operand_warnings(&a, &b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "/") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -19633,6 +19658,7 @@ impl Vm {
                         }
                     }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "%") {
+                        self.int_op_error_warnings(&a, &b, op.line);
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
                         self.release_threw_operands(op, &mut tmps, vec![a, b]);
@@ -19759,6 +19785,7 @@ impl Vm {
                             }
                         }
                     }
+                    self.arith_operand_warnings(&a, &b, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "**") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
@@ -20097,6 +20124,7 @@ impl Vm {
                         }
                     }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "&") {
+                        self.int_op_error_warnings(&a, &b, op.line);
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
                         self.release_threw_operands(op, &mut tmps, vec![a, b]);
@@ -20110,6 +20138,12 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                    }
+                    // (an int operation: leading-numeric strings warn)
+                    if !(matches!(a.deref(), Value::String(_))
+                        && matches!(b.deref(), Value::String(_)))
+                    {
+                        self.arith_operand_warnings(&a, &b, op.line);
                     }
                     let result = if matches!(a.deref(), Value::String(_))
                         && matches!(b.deref(), Value::String(_))
@@ -20197,6 +20231,7 @@ impl Vm {
                         }
                     }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "|") {
+                        self.int_op_error_warnings(&a, &b, op.line);
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
                         self.release_threw_operands(op, &mut tmps, vec![a, b]);
@@ -20210,6 +20245,12 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                    }
+                    // (an int operation: leading-numeric strings warn)
+                    if !(matches!(a.deref(), Value::String(_))
+                        && matches!(b.deref(), Value::String(_)))
+                    {
+                        self.arith_operand_warnings(&a, &b, op.line);
                     }
                     let result = if matches!(a.deref(), Value::String(_))
                         && matches!(b.deref(), Value::String(_))
@@ -20303,6 +20344,7 @@ impl Vm {
                         }
                     }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "^") {
+                        self.int_op_error_warnings(&a, &b, op.line);
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
                         self.release_threw_operands(op, &mut tmps, vec![a, b]);
@@ -20316,6 +20358,12 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                    }
+                    // (an int operation: leading-numeric strings warn)
+                    if !(matches!(a.deref(), Value::String(_))
+                        && matches!(b.deref(), Value::String(_)))
+                    {
+                        self.arith_operand_warnings(&a, &b, op.line);
                     }
                     let result = if matches!(a.deref(), Value::String(_))
                         && matches!(b.deref(), Value::String(_))
@@ -20505,6 +20553,7 @@ impl Vm {
                     }
                     // Check for unsupported operand types
                     if let Some(err) = Self::check_unsupported_operand_types(&a, &b, "<<") {
+                        self.int_op_error_warnings(&a, &b, op.line);
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
                         self.release_threw_operands(op, &mut tmps, vec![a, b]);
@@ -20625,6 +20674,7 @@ impl Vm {
                     }
                     // Check for unsupported operand types
                     if let Some(err) = Self::check_unsupported_operand_types(&a, &b, ">>") {
+                        self.int_op_error_warnings(&a, &b, op.line);
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
                         self.release_threw_operands(op, &mut tmps, vec![a, b]);
@@ -21638,6 +21688,7 @@ impl Vm {
                             }
                         }
                     }
+                    self.arith_operand_warnings(&cv_val, &rhs, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "+")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -21722,6 +21773,7 @@ impl Vm {
                             }
                         }
                     }
+                    self.arith_operand_warnings(&cv_val, &rhs, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "-")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -21806,6 +21858,7 @@ impl Vm {
                             }
                         }
                     }
+                    self.arith_operand_warnings(&cv_val, &rhs, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "*")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -21890,6 +21943,7 @@ impl Vm {
                             }
                         }
                     }
+                    self.arith_operand_warnings(&cv_val, &rhs, op.line);
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "/")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -21993,6 +22047,7 @@ impl Vm {
                     }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "%")
                     {
+                        self.int_op_error_warnings(&cv_val, &rhs, op.line);
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -22104,6 +22159,7 @@ impl Vm {
                             }
                         }
                     }
+                    self.arith_operand_warnings(&cv_val, &rhs, op.line);
                     if let Some(err_msg) =
                         Self::check_unsupported_operand_types(&cv_val, &rhs, "**")
                     {
@@ -22153,10 +22209,10 @@ impl Vm {
                     if matches!(&cv_val, Value::Array(_)) {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
-                    if matches!(&rhs, Value::Array(_)) {
-                        self.emit_warning_at("Array to string conversion", op.line);
-                    }
-                    let a_str = self.value_to_string(&cv_val);
+                    // (an object without __toString() throws)
+                    let a_str = self
+                        .value_to_string_checked(&cv_val)
+                        .unwrap_or_else(|_| PhpString::empty());
                     // A throwing __toString() leaves the variable untouched.
                     native_exc_check!(
                         self,
@@ -22165,7 +22221,13 @@ impl Vm {
                         ip,
                         op.line
                     );
-                    let b_str = self.value_to_string(&rhs);
+                    // (op2 is converted once op1 was)
+                    if matches!(&rhs, Value::Array(_)) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
+                    let b_str = self
+                        .value_to_string_checked(&rhs)
+                        .unwrap_or_else(|_| PhpString::empty());
                     native_exc_check!(
                         self,
                         exception_handlers,
@@ -22247,6 +22309,7 @@ impl Vm {
                     }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "&")
                     {
+                        self.int_op_error_warnings(&cv_val, &rhs, op.line);
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -22355,6 +22418,7 @@ impl Vm {
                     }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "|")
                     {
+                        self.int_op_error_warnings(&cv_val, &rhs, op.line);
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -22469,6 +22533,7 @@ impl Vm {
                     }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "^")
                     {
+                        self.int_op_error_warnings(&cv_val, &rhs, op.line);
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -22577,6 +22642,7 @@ impl Vm {
                         }
                     }
                     if let Some(err) = Self::check_unsupported_operand_types(&cv_val, &rhs, "<<") {
+                        self.int_op_error_warnings(&cv_val, &rhs, op.line);
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -22688,6 +22754,7 @@ impl Vm {
                         }
                     }
                     if let Some(err) = Self::check_unsupported_operand_types(&cv_val, &rhs, ">>") {
+                        self.int_op_error_warnings(&cv_val, &rhs, op.line);
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -57576,6 +57643,14 @@ fn check_inc_dec_type(val: &Value, is_increment: bool) -> Option<String> {
             };
             Some(format!("Cannot {} array", op))
         }
+        Value::Resource(_) => Some(format!(
+            "Cannot {} resource",
+            if is_increment {
+                "increment"
+            } else {
+                "decrement"
+            }
+        )),
         _ => None,
     }
 }

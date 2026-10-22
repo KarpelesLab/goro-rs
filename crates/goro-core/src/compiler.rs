@@ -12622,6 +12622,45 @@ impl Compiler {
                     | BinaryOp::LogicalOr
                     | BinaryOp::Coalesce => unreachable!(),
                 };
+                // zend_vm_set_opcode_handler(): the operands of a commutative
+                // opcode are swapped when op1's type sorts before op2's
+                // (CONST < TMP < CV), which shows in its errors and warnings.
+                let (l, r) = if matches!(
+                    opcode,
+                    OpCode::Mul
+                        | OpCode::BitwiseAnd
+                        | OpCode::BitwiseOr
+                        | OpCode::BitwiseXor
+                        | OpCode::BoolXor
+                ) {
+                    // (by the operand expressions: a constant array literal
+                    // is a CONST although goro builds it in a temporary)
+                    let rank = |e: &Expr, o: &OperandType| {
+                        if Self::eval_const_expr(e).is_some() {
+                            1
+                        } else if matches!(o, OperandType::Cv(_)) {
+                            8
+                        } else if matches!(
+                            e.kind,
+                            ExprKind::New { .. }
+                                | ExprKind::FunctionCall { .. }
+                                | ExprKind::MethodCall { .. }
+                                | ExprKind::StaticMethodCall { .. }
+                                | ExprKind::DynamicStaticMethodCall { .. }
+                        ) {
+                            4 // IS_VAR
+                        } else {
+                            2
+                        }
+                    };
+                    if rank(left, &l) < rank(right, &r) {
+                        (r, l)
+                    } else {
+                        (l, r)
+                    }
+                } else {
+                    (l, r)
+                };
                 self.op_array.emit(Op {
                     opcode,
                     op1: l,
