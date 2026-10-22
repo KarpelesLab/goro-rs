@@ -897,11 +897,16 @@ fn zend_object_init_with_constructor(vm: &mut Vm, args: &[Value]) -> R {
             ),
         );
     }
-    let mut ctor_args = PhpArray::new();
-    for a in args.iter().skip(1) {
-        ctor_args.push(a.deref());
+    let named = std::mem::take(&mut vm.pending_named_args);
+    let positional: Vec<Value> = args.iter().skip(1).map(|a| a.deref()).collect();
+    if let Some(r) = init_with_user_constructor(vm, cname.as_bytes(), &positional, &named) {
+        return r;
     }
-    for (k, v) in std::mem::take(&mut vm.pending_named_args) {
+    let mut ctor_args = PhpArray::new();
+    for a in positional {
+        ctor_args.push(a);
+    }
+    for (k, v) in named {
         ctor_args.set(ArrayKey::String(PhpString::from_vec(k)), v);
     }
     let r = crate::support::run_snippet(
@@ -913,6 +918,92 @@ fn zend_object_init_with_constructor(vm: &mut Vm, args: &[Value]) -> R {
         ],
     )?;
     Ok(r.unwrap_or(Value::Null))
+}
+
+/// object_init_with_constructor() for a class with a public user
+/// constructor: object_init_ex(), then the constructor called from internal
+/// code (zend_call_known_function()). None for other classes.
+fn init_with_user_constructor(
+    vm: &mut Vm,
+    class: &[u8],
+    positional: &[Value],
+    named: &[(Vec<u8>, Value)],
+) -> Option<R> {
+    use goro_core::object::Visibility;
+    let lower = class
+        .strip_prefix(b"\\")
+        .unwrap_or(class)
+        .to_ascii_lowercase();
+    let ce = vm.classes.get(&lower)?;
+    if ce.is_abstract || ce.is_interface || ce.is_trait || ce.is_enum {
+        return None;
+    }
+    let m = ce.get_method(b"__construct")?;
+    if m.op_array.internal_sig.is_some() || m.visibility != Visibility::Public {
+        return None;
+    }
+    let m = m.clone();
+    let has_dtor = ce.get_method(b"__destruct").is_some();
+    // object_init_ex()
+    let obj = vm.spl_instantiate(&lower);
+    vm.run_object_create_hook(&obj);
+    // Not destructed unless the constructor succeeds.
+    let listed = has_dtor;
+    if listed {
+        vm.track_destructible(Value::Object(obj.clone()));
+        obj.borrow_mut()
+            .set_property(b"__ctor_pending".to_vec(), Value::True);
+    }
+    // zend_missing_arg_error() for an internal caller
+    let op = &m.op_array;
+    let required = op.required_param_count as usize;
+    if named.is_empty() && positional.len() < required {
+        let implicit = usize::from(op.cv_names.first().map(|n| n.as_slice()) == Some(b"this"));
+        let total = (op.param_count as usize).saturating_sub(implicit);
+        let q = if op.variadic_param.is_some() || total > required {
+            "at least"
+        } else {
+            "exactly"
+        };
+        let decl = m.declaring_class.to_ascii_lowercase();
+        let cname = vm
+            .classes
+            .get(&decl)
+            .map(|c| String::from_utf8_lossy(&c.name).into_owned())
+            .unwrap_or_default();
+        let msg = format!(
+            "Too few arguments to function {}::__construct(), {} passed and {} {} expected",
+            cname,
+            positional.len(),
+            q,
+            required
+        );
+        return Some(throw(vm, b"ArgumentCountError", &msg));
+    }
+    vm.push_class_scope(m.declaring_class.to_ascii_lowercase());
+    vm.called_class_stack.push(obj.borrow().class_name.clone());
+    let line = vm.current_line;
+    let r = vm.execute_fn_with_named_args(
+        &m.op_array,
+        positional.to_vec(),
+        named.to_vec(),
+        Some(Value::Object(obj.clone())),
+    );
+    vm.current_line = line;
+    vm.called_class_stack.pop();
+    vm.pop_class_scope();
+    match r {
+        Ok(_) if vm.current_exception.is_none() => {
+            if listed {
+                obj.borrow_mut()
+                    .properties
+                    .retain(|(k, _)| k != b"__ctor_pending");
+            }
+            Some(Ok(Value::Object(obj)))
+        }
+        Err(e) if vm.current_exception.is_none() => Some(Err(e)),
+        _ => Some(Ok(Value::Null)),
+    }
 }
 
 // ---------------------------------------------------------------------------

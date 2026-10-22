@@ -7221,29 +7221,41 @@ impl Vm {
             if Rc::strong_count(&rc) != 2 {
                 continue;
             }
-            {
+            let ctor_failed = {
                 let ob = rc.borrow();
-                if !ob.dtor_listed.get()
-                    || matches!(ob.get_property(b"__ctor_pending"), Value::True)
-                    || matches!(ob.get_property(b"__destructed"), Value::True)
+                if !ob.dtor_listed.get() || matches!(ob.get_property(b"__destructed"), Value::True)
                 {
                     continue;
                 }
-            }
+                matches!(ob.get_property(b"__ctor_pending"), Value::True)
+            };
             // Search from both ends: long-lived objects sit at the front,
             // recently created ones at the back.
             let list = &self.destructible_objects;
             let (mut lo, mut hi) = (0usize, list.len());
+            let mut found = None;
             while lo < hi {
                 if matches!(&list[lo], Value::Object(o) if Rc::ptr_eq(o, &rc)) {
-                    return Some(lo);
+                    found = Some(lo);
+                    break;
                 }
                 hi -= 1;
                 if matches!(&list[hi], Value::Object(o) if Rc::ptr_eq(o, &rc)) {
-                    return Some(hi);
+                    found = Some(hi);
+                    break;
                 }
                 lo += 1;
             }
+            let Some(idx) = found else { continue };
+            if ctor_failed {
+                // Its construction failed: freed without a destructor
+                // (zend_object_store_ctor_failed()).
+                rc.borrow().dtor_listed.set(false);
+                drop(rc);
+                drop(self.destructible_objects.remove(idx));
+                continue;
+            }
+            return Some(idx);
         }
         None
     }
@@ -7265,18 +7277,28 @@ impl Vm {
             let len = self.destructible_objects.len();
             let mut i = len - len.min(64);
             while i < self.destructible_objects.len() {
+                // (Some(true): destruct it; Some(false): its construction
+                // failed, it is just freed)
                 let garbage = match &self.destructible_objects[i] {
                     Value::Object(rc) if Rc::strong_count(rc) == 1 => {
                         let ob = rc.borrow();
-                        !matches!(ob.get_property(b"__ctor_pending"), Value::True)
-                            && !matches!(ob.get_property(b"__destructed"), Value::True)
+                        if matches!(ob.get_property(b"__destructed"), Value::True) {
+                            None
+                        } else {
+                            Some(!matches!(ob.get_property(b"__ctor_pending"), Value::True))
+                        }
                     }
-                    _ => false,
+                    _ => None,
                 };
-                if garbage {
-                    batch.push(self.destructible_objects.remove(i));
-                } else {
-                    i += 1;
+                match garbage {
+                    Some(true) => batch.push(self.destructible_objects.remove(i)),
+                    Some(false) => {
+                        let v = self.destructible_objects.remove(i);
+                        if let Value::Object(o) = &v {
+                            o.borrow().dtor_listed.set(false);
+                        }
+                    }
+                    None => i += 1,
                 }
             }
             if batch.is_empty() {
@@ -29367,6 +29389,14 @@ impl Vm {
                             }
                             // Check for unknown named parameters on classes without __construct
                             if !call.named_args.is_empty() {
+                                // The construction failed: no destructor
+                                // (zend_object_store_ctor_failed()).
+                                if let Some(Value::Object(o)) = call.args.first() {
+                                    if o.borrow().dtor_listed.get() {
+                                        o.borrow_mut()
+                                            .set_property(b"__ctor_pending".to_vec(), Value::True);
+                                    }
+                                }
                                 let first_name =
                                     String::from_utf8_lossy(&call.named_args[0].0).into_owned();
                                 let err_msg =
