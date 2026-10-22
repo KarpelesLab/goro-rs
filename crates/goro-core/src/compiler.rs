@@ -1196,6 +1196,14 @@ impl Compiler {
                 target
             ));
         }
+        // "Deprecated" cannot target parameters or properties.
+        if bare.eq_ignore_ascii_case(b"Deprecated") && matches!(target, "parameter" | "property")
+        {
+            return Some(format!(
+                "Attribute \"Deprecated\" cannot target {} (allowed targets: class, function, method, class constant, constant)",
+                target
+            ));
+        }
         // "ReturnTypeWillChange" is only allowed on methods.
         if bare.eq_ignore_ascii_case(b"ReturnTypeWillChange")
             && !target.is_empty()
