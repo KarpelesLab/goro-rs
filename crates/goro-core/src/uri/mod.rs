@@ -1443,19 +1443,23 @@ fn call_method(
         b"__debuginfo" => return Value::Array(Rc::new(RefCell::new(debug_properties(&o)))),
         _ => {}
     }
-    let Some((parser, uri)) = uri_of(&o) else {
+    // (borrowed for the call: the handlers only read it, the withers
+    // modify a clone)
+    let st_rc = state_of(&o);
+    let st = st_rc.as_ref().map(|s| s.borrow());
+    let Some(uri) = st.as_ref().and_then(|s| s.uri.as_ref()) else {
         // An object that was never initialized (ZEND_ASSERT(uri != NULL))
         let msg = format!("{} object is not initialized", class_name_of(&o));
         throw(vm, b"Error", &msg);
         return Value::Null;
     };
-    let is_rfc = parser == Parser::Rfc3986;
+    let is_rfc = matches!(uri, ParsedUri::Rfc3986(_));
     match m.as_slice() {
         // Readers
-        b"getscheme" => read_helper(vm, &uri, Component::Scheme, ReadMode::NormalizedAscii),
-        b"getrawscheme" => read_helper(vm, &uri, Component::Scheme, ReadMode::Raw),
+        b"getscheme" => read_helper(vm, uri, Component::Scheme, ReadMode::NormalizedAscii),
+        b"getrawscheme" => read_helper(vm, uri, Component::Scheme, ReadMode::Raw),
         b"getuserinfo" | b"getrawuserinfo" => {
-            let ParsedUri::Rfc3986(r) = &uri else {
+            let ParsedUri::Rfc3986(r) = uri else {
                 return Value::Null;
             };
             if m == b"getuserinfo" {
@@ -1464,29 +1468,29 @@ fn call_method(
                 opt_s(r.uri.user_info.as_deref())
             }
         }
-        b"getusername" => read_helper(vm, &uri, Component::Username, ReadMode::NormalizedAscii),
-        b"getrawusername" => read_helper(vm, &uri, Component::Username, ReadMode::Raw),
-        b"getpassword" => read_helper(vm, &uri, Component::Password, ReadMode::NormalizedAscii),
-        b"getrawpassword" => read_helper(vm, &uri, Component::Password, ReadMode::Raw),
+        b"getusername" => read_helper(vm, uri, Component::Username, ReadMode::NormalizedAscii),
+        b"getrawusername" => read_helper(vm, uri, Component::Username, ReadMode::Raw),
+        b"getpassword" => read_helper(vm, uri, Component::Password, ReadMode::NormalizedAscii),
+        b"getrawpassword" => read_helper(vm, uri, Component::Password, ReadMode::Raw),
         b"gethost" | b"getasciihost" => {
-            read_helper(vm, &uri, Component::Host, ReadMode::NormalizedAscii)
+            read_helper(vm, uri, Component::Host, ReadMode::NormalizedAscii)
         }
-        b"getunicodehost" => read_helper(vm, &uri, Component::Host, ReadMode::NormalizedUnicode),
-        b"getrawhost" => read_helper(vm, &uri, Component::Host, ReadMode::Raw),
-        b"getport" => read_helper(vm, &uri, Component::Port, ReadMode::Raw),
-        b"getpath" => read_helper(vm, &uri, Component::Path, ReadMode::NormalizedAscii),
-        b"getrawpath" => read_helper(vm, &uri, Component::Path, ReadMode::Raw),
-        b"getquery" => read_helper(vm, &uri, Component::Query, ReadMode::NormalizedAscii),
-        b"getrawquery" => read_helper(vm, &uri, Component::Query, ReadMode::Raw),
+        b"getunicodehost" => read_helper(vm, uri, Component::Host, ReadMode::NormalizedUnicode),
+        b"getrawhost" => read_helper(vm, uri, Component::Host, ReadMode::Raw),
+        b"getport" => read_helper(vm, uri, Component::Port, ReadMode::Raw),
+        b"getpath" => read_helper(vm, uri, Component::Path, ReadMode::NormalizedAscii),
+        b"getrawpath" => read_helper(vm, uri, Component::Path, ReadMode::Raw),
+        b"getquery" => read_helper(vm, uri, Component::Query, ReadMode::NormalizedAscii),
+        b"getrawquery" => read_helper(vm, uri, Component::Query, ReadMode::Raw),
         b"getfragment" => {
             let mode = if is_rfc {
                 ReadMode::NormalizedAscii
             } else {
                 ReadMode::NormalizedUnicode
             };
-            read_helper(vm, &uri, Component::Fragment, mode)
+            read_helper(vm, uri, Component::Fragment, mode)
         }
-        b"getrawfragment" => read_helper(vm, &uri, Component::Fragment, ReadMode::Raw),
+        b"getrawfragment" => read_helper(vm, uri, Component::Fragment, ReadMode::Raw),
         // Writers
         b"withscheme" => {
             let v = if is_rfc {
@@ -1564,11 +1568,11 @@ fn call_method(
             {
                 return Value::Null;
             }
-            uri_equals(vm, &o, &uri, args)
+            uri_equals(vm, &o, uri, args)
         }
-        b"tostring" => s(&to_string(&uri, Recompose::NormalizedAscii, false)),
-        b"torawstring" | b"toasciistring" => s(&to_string(&uri, Recompose::RawAscii, false)),
-        b"tounicodestring" => s(&to_string(&uri, Recompose::RawUnicode, false)),
+        b"tostring" => s(&to_string(uri, Recompose::NormalizedAscii, false)),
+        b"torawstring" | b"toasciistring" => s(&to_string(uri, Recompose::RawAscii, false)),
+        b"tounicodestring" => s(&to_string(uri, Recompose::RawUnicode, false)),
         b"resolve" => {
             let uri_str = str_arg(args, 0);
             let errors_ref = if is_rfc { None } else { args.get(1) };
@@ -1584,7 +1588,7 @@ fn call_method(
             )
         }
         b"__serialize" => {
-            let uri_str = to_string(&uri, Recompose::RawAscii, false);
+            let uri_str = to_string(uri, Recompose::RawAscii, false);
             let mut first = PhpArray::new();
             first.set(key("uri"), s(&uri_str));
             let mut arr = PhpArray::new();
