@@ -23349,6 +23349,18 @@ impl Vm {
                             } else {
                                 None
                             };
+                        // PhpToken::tokenize() runs user code (error handlers,
+                        // property defaults): it has its own frame.
+                        let own_frame = func_name_lower.ends_with(b"::tokenize");
+                        if own_frame {
+                            self.call_stack.push((
+                                "PhpToken::tokenize".to_string(),
+                                self.current_file.clone(),
+                                op.line,
+                                call.args.clone(),
+                                false,
+                            ));
+                        }
                         let result = self.vm_static_builtin(
                             &target,
                             &call.args,
@@ -23357,6 +23369,9 @@ impl Vm {
                             op_array.strict_types,
                             op.line,
                         );
+                        if own_frame {
+                            self.call_stack.pop();
+                        }
                         if self.current_exception.is_some() {
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
