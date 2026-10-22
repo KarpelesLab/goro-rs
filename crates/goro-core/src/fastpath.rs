@@ -843,6 +843,11 @@ impl crate::vm::Vm {
     ) -> Fast {
         let append = op.opcode == OpCode::ArrayAppend;
         let write = append || op.opcode == OpCode::ArraySet;
+        // The write-back of `$a[$k] op= v` uses the key its fetch converted,
+        // or is abandoned (see Vm::dim_rw_key / dim_rw_abort).
+        if write && (self.dim_rw_key.is_some() || self.dim_rw_abort.is_some()) {
+            return Fast::No;
+        }
         let arr_of = |v: &Value| match v {
             Value::Array(a) => Some(a.clone()),
             Value::Reference(r) => match &*r.try_borrow().ok()? {

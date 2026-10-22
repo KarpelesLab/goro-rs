@@ -1066,11 +1066,11 @@ pub struct Vm {
     /// The converted key of `$a[$k] op= v` / `$a[$k]++` read by the RW
     /// fetch at (call depth, op index): the write-back two ops later uses
     /// it instead of reading (and warning about) `$k` again.
-    dim_rw_key: Option<(u32, usize, Value)>,
+    pub(crate) dim_rw_key: Option<(u32, usize, Value)>,
     /// `$a[$k] op= v` / `$a[$k]++` abandoned by its RW fetch (an error
     /// handler replaced the container while the key was reported): the
     /// write-back of that frame (call depth) is skipped.
-    dim_rw_abort: Option<u32>,
+    pub(crate) dim_rw_abort: Option<u32>,
     /// Current executing line number (updated during execution for warning/error reporting)
     pub current_line: u32,
     /// Cached enum case singleton objects: key = "classname_lower::CaseName"
@@ -35635,6 +35635,14 @@ impl Vm {
                     // then looked up in it (and reported undefined).
                     if is_rw && matches!(arr_val, Value::Null | Value::Undef) {
                         arr_val = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                        // (in the variable: an error handler sees it there)
+                        if let OperandType::Cv(i) = op.op1 {
+                            match cvs.get_mut(i as usize) {
+                                Some(Value::Reference(r)) => *r.borrow_mut() = arr_val.clone(),
+                                Some(slot) => *slot = arr_val.clone(),
+                                None => {}
+                            }
+                        }
                     }
                     {
                         // Real array with array/object key -> TypeError, before
@@ -35794,7 +35802,13 @@ impl Vm {
                                 _ => {}
                             }
                         }
-                        match arr.borrow().get(&key).cloned() {
+                        let found = arr.borrow().get(&key).cloned();
+                        // FETCH_DIM_RW reporting an undefined key: an error
+                        // handler replacing the container abandons the
+                        // read-modify-write (zend_undefined_offset_write()).
+                        let rw_root = (is_rw && matches!(op.op1, OperandType::Cv(_)) && found.is_none())
+                            .then(|| Self::dim_container_identity(&Self::read_operand_raw(&cvs, &op.op1)));
+                        let v = match found {
                             Some(v) => {
                                 // Plain read deref: PHP's R-fetch returns the
                                 // inner value of a referenced slot, not the
@@ -35814,11 +35828,21 @@ impl Vm {
                                 // Emit "Undefined array key" warning (FETCH_DIM_RW
                                 // warns too: zend_undefined_offset_write()).
                                 if Rc::ptr_eq(arr, &self.globals) {
-                                    // $GLOBALS['x'] is a FETCH of the global variable.
-                                    if !is_rw {
-                                        self.emit_warning_at(
-                                            &format!("Undefined global variable ${}", key),
-                                            op.line,
+                                    // $GLOBALS['x'] is a FETCH of the global variable
+                                    // (FETCH_RW warns too; an exception from the
+                                    // error handler abandons the assignment).
+                                    self.emit_warning_at(
+                                        &format!("Undefined global variable ${}", key),
+                                        op.line,
+                                    );
+                                    if is_rw && self.current_exception.is_some() {
+                                        self.error_handler_threw = false;
+                                        native_exc_check!(
+                                            self,
+                                            exception_handlers,
+                                            pending_calls_catch_depth,
+                                            ip,
+                                            op.line
                                         );
                                     }
                                 } else {
@@ -35842,7 +35866,28 @@ impl Vm {
                                 }
                                 Value::Null
                             }
+                        };
+                        if let Some(before) = rw_root {
+                            if let Some(fs) = fsym.as_mut() {
+                                if fs.bind.seen_gen != fs.tab.generation.get() {
+                                    self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                                }
+                            }
+                            if Self::dim_container_identity(&Self::read_operand_raw(&cvs, &op.op1))
+                                != before
+                            {
+                                self.dim_rw_abort = Some(self.call_depth);
+                                self.write_operand(
+                                    &op.result,
+                                    Value::Null,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                return Ok(Flow::Continue);
+                            }
                         }
+                        v
                     } else if let Value::String(s) = &arr_val {
                         // String offset access (supports negative indices).
                         // Mirrors zend_check_string_offset: numeric keys (and
