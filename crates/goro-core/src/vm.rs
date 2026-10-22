@@ -13997,6 +13997,30 @@ impl Vm {
                 }
             }
 
+            // An internal method: its zpp checks first (zend_call_function()
+            // calls it like any other caller).
+            let zpp_args;
+            let args = {
+                let mut a = args.to_vec();
+                let line = self.current_line;
+                if self
+                    .zpp_method_call(
+                        &class_lower,
+                        &method_lower,
+                        &mut a,
+                        0,
+                        &mut Vec::new(),
+                        Some(true),
+                        false,
+                        line,
+                    )
+                    .is_err()
+                {
+                    return None;
+                }
+                zpp_args = a;
+                zpp_args.as_slice()
+            };
             // Handle WeakMap method calls
             if class_lower == b"weakmap" {
                 let wm_id = obj.borrow().object_id;
