@@ -1122,12 +1122,23 @@ impl Tree {
                 s
             }
             NType::EntityRef => {
+                let mut s = String::new();
                 if let Some(ent) = n.children {
-                    let mut s = String::new();
                     self.collect_text(ent, &mut s);
+                }
+                if !s.is_empty() {
                     s
                 } else {
-                    String::new()
+                    // xmlGetDocEntity() finds the predefined entities too.
+                    match n.name.as_str() {
+                        "lt" => "<",
+                        "gt" => ">",
+                        "amp" => "&",
+                        "apos" => "'",
+                        "quot" => "\"",
+                        _ => "",
+                    }
+                    .to_string()
                 }
             }
             NType::Element

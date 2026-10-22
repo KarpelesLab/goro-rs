@@ -1432,6 +1432,13 @@ fn h_clone(vm: &mut Vm, src: &Obj, dst: &Obj) {
             let cloned = node::clone_node(n, doc, true);
             match cloned {
                 Some(c) => {
+                    // A namespace node's clone is a fake declaration node of
+                    // the same element (dom_object_namespace_node_clone_obj).
+                    tree::with(|t| {
+                        if t.nodes[n].t == NType::NamespaceDecl {
+                            t.nodes[c].parent = t.nodes[n].parent;
+                        }
+                    });
                     if tree::with(|t| t.is_doc(c)) {
                         let props = doc_props(Some(n));
                         set_doc_props(c, props);

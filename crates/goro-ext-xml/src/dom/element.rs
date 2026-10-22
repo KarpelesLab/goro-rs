@@ -696,8 +696,8 @@ fn m_get_attribute_node_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     let uri = a.opt_str(vm, 0, "namespace")?;
     let name = a.str(vm, 1, "localName")?;
     let n = need_node(vm, o)?;
-    let u = uri.as_deref().filter(|u| !u.is_empty());
-    let at = tree::with(|t| t.has_ns_prop(n, &name, u));
+    // (xmlHasNsProp(): "" is a namespace no attribute is in)
+    let at = tree::with(|t| t.has_ns_prop(n, &name, uri.as_deref()));
     match at {
         Some(at) => Ok(node_obj(vm, at)),
         None => {
