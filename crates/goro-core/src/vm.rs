@@ -31725,6 +31725,17 @@ impl Vm {
                                     &mut tmps,
                                     &static_cv_keys,
                                 );
+                                // FETCH_DIM_R frees its temporary container at
+                                // once (its object handle is free for the next
+                                // allocation).
+                                if let (OpCode::ArrayGet, OperandType::Tmp(t)) = (op.opcode, op.op1)
+                                {
+                                    if op.result != op.op1 {
+                                        if let Some(slot) = tmps.get_mut(t as usize) {
+                                            *slot = Value::Undef;
+                                        }
+                                    }
+                                }
                                 return Ok(Flow::Continue);
                             }
                         }
