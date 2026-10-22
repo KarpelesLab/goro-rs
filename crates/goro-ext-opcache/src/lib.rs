@@ -315,6 +315,7 @@ pub fn register(vm: &mut Vm) {
             Value::String(PhpString::from_bytes(default.as_bytes())),
         );
         if mode == Mode::System {
+            goro_core::reflection::register_ini_access(name, 4);
             vm.ini_set_hooks.insert(name.as_bytes().to_vec(), reject);
         } else {
             let hook: fn(&mut Vm, &[u8], &Value) -> bool = match kind {

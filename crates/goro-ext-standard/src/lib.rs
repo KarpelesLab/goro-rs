@@ -559,6 +559,7 @@ fn register_builtin_param_names(vm: &mut Vm) {
     params!(b"set_time_limit", b"seconds");
     params!(b"ini_set", b"option", b"value");
     params!(b"ini_get", b"option");
+    params!(b"ini_get_all", b"extension", b"details");
     params!(b"highlight_string", b"string", b"return");
     params!(b"highlight_file", b"filename", b"return");
     params!(b"show_source", b"filename", b"return");

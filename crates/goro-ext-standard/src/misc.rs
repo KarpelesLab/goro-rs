@@ -316,6 +316,7 @@ final class StreamBucket {
     vm.register_function(b"ini_set", ini_set);
     vm.register_function(b"ini_alter", ini_set);
     vm.register_function(b"ini_get", ini_get);
+    vm.register_function(b"ini_get_all", ini_get_all);
     vm.register_function(b"ini_restore", ini_restore);
     vm.register_function(b"set_time_limit", set_time_limit);
     vm.register_function(b"assert", php_assert);
@@ -5331,6 +5332,82 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Return old value or false if not previously set
     Ok(old.unwrap_or(Value::False))
 }
+/// ini_get_all(): the INI entries of an extension (or of all the loaded
+/// ones), sorted by name, with their global and local values and access
+/// level, or just the values.
+fn ini_get_all(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let details = args.get(1).is_none_or(|v| v.is_truthy());
+    let mut names: Vec<&'static str> = Vec::new();
+    match args.first() {
+        Some(v) if !matches!(v, Value::Null) => {
+            let ext = v.to_php_string().to_string_lossy();
+            let lower = ext.to_ascii_lowercase();
+            let loaded =
+                extension_loaded_fn(vm, &[Value::String(PhpString::from_string(lower.clone()))])?;
+            if !loaded.is_truthy() {
+                vm.emit_warning(&format!(
+                    "ini_get_all(): Extension \"{}\" cannot be found",
+                    ext
+                ));
+                return Ok(Value::False);
+            }
+            names.extend_from_slice(goro_core::reflection::extension_ini_entries(&lower));
+        }
+        _ => {
+            let mut mods: Vec<String> = MODULE_ORDER
+                .iter()
+                .map(|m| m.to_ascii_lowercase())
+                .collect();
+            mods.push("standard".into());
+            for m in mods {
+                let loaded =
+                    extension_loaded_fn(vm, &[Value::String(PhpString::from_string(m.clone()))])?;
+                if loaded.is_truthy() {
+                    for n in goro_core::reflection::extension_ini_entries(&m) {
+                        if !names.contains(n) {
+                            names.push(n);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    names.sort_unstable();
+    let mut out = PhpArray::new();
+    for name in names {
+        let local = vm
+            .constants
+            .get(name.as_bytes())
+            .map(|v| Value::String(v.to_php_string()))
+            .unwrap_or(Value::Null);
+        let key = ArrayKey::String(PhpString::from_bytes(name.as_bytes()));
+        if !details {
+            out.set(key, local);
+            continue;
+        }
+        let global = match vm.ini_originals.get(name.as_bytes()) {
+            Some(Some(v)) => Value::String(v.to_php_string()),
+            Some(None) => Value::Null,
+            None => local.clone(),
+        };
+        let mut e = PhpArray::new();
+        e.set(
+            ArrayKey::String(PhpString::from_bytes(b"global_value")),
+            global,
+        );
+        e.set(
+            ArrayKey::String(PhpString::from_bytes(b"local_value")),
+            local,
+        );
+        e.set(
+            ArrayKey::String(PhpString::from_bytes(b"access")),
+            Value::Long(goro_core::reflection::ini_access(name)),
+        );
+        out.set(key, Value::Array(Rc::new(RefCell::new(e))));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(out))))
+}
+
 fn ini_get(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     match vm.constants.get(name.as_bytes()) {

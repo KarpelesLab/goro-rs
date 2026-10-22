@@ -10423,6 +10423,28 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
     }
 }
 
+thread_local! {
+    /// The access level (ZEND_INI_USER/PERDIR/SYSTEM bits) of INI entries
+    /// that are not changeable everywhere, registered by their extension.
+    static INI_ACCESS: std::cell::RefCell<std::collections::HashMap<String, i64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Records the access level of an INI entry (ini_get_all()'s "access").
+pub fn register_ini_access(name: &str, access: i64) {
+    INI_ACCESS.with(|a| a.borrow_mut().insert(name.to_string(), access));
+}
+
+/// The access level of an INI entry (ZEND_INI_ALL unless registered).
+pub fn ini_access(name: &str) -> i64 {
+    INI_ACCESS.with(|a| a.borrow().get(name).copied().unwrap_or(7))
+}
+
+/// The INI entries a module registers (lowercase module name).
+pub fn extension_ini_entries(ext: &str) -> &'static [&'static str] {
+    get_extension_ini_entries(ext)
+}
+
 fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
     match ext {
         "bcmath" => &["bcmath.scale"],
