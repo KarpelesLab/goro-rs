@@ -720,7 +720,9 @@ pub fn round(num: &Num, precision: i64, mode: i64) -> (Num, usize) {
                 true
             } else {
                 match mode {
-                    ROUND_HALF_EVEN => !(rounded_len == 0 || num.v[rounded_len - 1].is_multiple_of(2)),
+                    ROUND_HALF_EVEN => {
+                        !(rounded_len == 0 || num.v[rounded_len - 1].is_multiple_of(2))
+                    }
                     ROUND_HALF_ODD => !(rounded_len != 0 && num.v[rounded_len - 1] % 2 == 1),
                     _ => false,
                 }
