@@ -86,14 +86,13 @@ fn parse_rdn(s: &[u8], start: usize) -> Option<(Rdn, usize)> {
             return None;
         }
         // attribute type
-        let attr: Vec<u8>;
-        if s[p].is_ascii_digit() {
+        let attr: Vec<u8> = if s[p].is_ascii_digit() {
             // numeric OID: digits and dots
             let st = p;
             while p < s.len() && (s[p].is_ascii_digit() || s[p] == b'.') {
                 p += 1;
             }
-            attr = s[st..p].to_vec();
+            s[st..p].to_vec()
         } else if is_alpha(s[p]) {
             let st = p;
             p += 1;
@@ -107,10 +106,10 @@ fn parse_rdn(s: &[u8], start: usize) -> Option<(Rdn, usize)> {
                     p += 1;
                 }
             }
-            attr = s[st..end].to_vec();
+            s[st..end].to_vec()
         } else {
             return None;
-        }
+        };
         if attr.is_empty() {
             return None;
         }

@@ -649,7 +649,7 @@ fn do_search(
     }
     // stable order by DN depth then insertion-ish (BTreeMap gives sorted DN);
     // present them in the order the tests expect (userA, userB, userC...).
-    matches.sort_by(|a, b| entry_order(a).cmp(&entry_order(b)));
+    matches.sort_by_key(|e| entry_order(e));
 
     // sort control
     let mut sorted_resp = false;

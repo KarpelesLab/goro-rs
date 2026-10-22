@@ -933,7 +933,7 @@ fn scope_of(f: &str) -> i32 {
 }
 
 fn is_numerically_indexed(a: &PhpArray) -> bool {
-    if a.len() == 0 {
+    if a.is_empty() {
         return true;
     }
     a.iter().all(|(k, _)| matches!(k, ArrayKey::Int(_)))
@@ -1450,7 +1450,7 @@ fn do_modify(vm: &mut Vm, f: &str, args: &[Value], mut oper: i32, ext: bool) -> 
         return Ok(Value::Null);
     };
     let entry = entry.borrow().clone();
-    if entry.len() == 0 {
+    if entry.is_empty() {
         zpp::value_error(vm, f, 3, "must not be empty");
         return Ok(Value::Null);
     }
@@ -1514,18 +1514,12 @@ fn do_modify(vm: &mut Vm, f: &str, args: &[Value], mut oper: i32, ext: bool) -> 
             }
             let mut out_vals = Vec::new();
             for (_vk, v) in list.iter() {
-                match get_ldap_value(vm, v) {
-                    Ok(b) => out_vals.push(b),
-                    Err(e) => return Err(e),
-                }
+                out_vals.push(get_ldap_value(vm, v)?);
             }
             mods.push((oper, attr.to_vec(), Some(out_vals)));
         } else {
             // single value
-            match get_ldap_value(vm, &vals) {
-                Ok(b) => mods.push((oper, attr.to_vec(), Some(vec![b]))),
-                Err(e) => return Err(e),
-            }
+            mods.push((oper, attr.to_vec(), Some(vec![get_ldap_value(vm, &vals)?])));
         }
     }
 
@@ -1685,7 +1679,7 @@ pub fn ldap_modify_batch(vm: &mut Vm, args: &[Value]) -> R {
     const REMOVE_ALL: i64 = 0x12;
     const REPLACE: i64 = 0x03;
 
-    if mods_v.len() == 0 {
+    if mods_v.is_empty() {
         zpp::value_error(vm, f, 3, "must not be empty");
         return Ok(Value::Null);
     }
@@ -1811,7 +1805,7 @@ pub fn ldap_modify_batch(vm: &mut Vm, args: &[Value]) -> R {
             return Ok(Value::Null);
         };
         let vals = vals.borrow();
-        if vals.len() == 0 {
+        if vals.is_empty() {
             zpp::value_error(
                 vm,
                 f,

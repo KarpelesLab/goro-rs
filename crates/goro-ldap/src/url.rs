@@ -297,7 +297,7 @@ pub fn parse_ext(url_in: &str, flags: u32) -> Result<LdapUrl, UrlErr> {
     if t.contains('?') {
         return Err(UrlErr::BadUrl);
     }
-    let exts: Vec<String> = t.split(',').map(|s| hex_unescape(s)).collect();
+    let exts: Vec<String> = t.split(',').map(hex_unescape).collect();
     if exts.is_empty() || (exts.len() == 1 && exts[0].is_empty()) {
         return Err(UrlErr::BadExts);
     }
