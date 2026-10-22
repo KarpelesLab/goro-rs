@@ -496,6 +496,7 @@ fn call_method(
         return Value::Null;
     }
     let f = Func::method(m.0, m.1, if m.3 { None } else { this_o.clone() });
+    vm.flush_cli_output();
     if let Some(d) = deprecation(&f.name) {
         vm.emit_deprecated(&format!("Method {}() is deprecated since {}", f.name, d));
         if vm.current_exception.is_some() {
@@ -567,6 +568,7 @@ fn construct_generic(vm: &mut Vm, args: &[Value], class: &str, imp: Impl) -> Res
         _ => return Ok(()),
     };
     objects::create_object(vm, &this);
+    vm.flush_cli_output();
     let f = Func::method(class, "__construct", Some(this));
     let line = vm.current_line;
     let file = vm.current_file.clone();
@@ -591,6 +593,9 @@ macro_rules! wrap {
             fn $name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let fname = &stringify!($name)[2..];
                 let f = Func::function(fname);
+                // (the CLI writes output unbuffered: it is out before the
+                // call blocks on the server)
+                vm.flush_cli_output();
                 if let Some(d) = deprecation(fname) {
                     vm.emit_deprecated(&format!("Function {}() is deprecated since {}", fname, d));
                     if vm.current_exception.is_some() {
