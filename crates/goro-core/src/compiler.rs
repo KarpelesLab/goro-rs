@@ -12817,6 +12817,12 @@ impl Compiler {
                     let null_idx = self.op_array.add_literal(Value::Null);
                     return Ok(OperandType::Const(null_idx));
                 }
+                if matches!(cast_type, CastType::Unset) {
+                    return Err(CompileError {
+                        message: "The (unset) cast is no longer supported".into(),
+                        line: expr.span.line,
+                    });
+                }
                 let val = self.compile_expr(inner)?;
                 let tmp = self.op_array.alloc_temp();
                 let opcode = match cast_type {

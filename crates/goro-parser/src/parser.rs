@@ -4584,6 +4584,15 @@ impl Parser {
                     kind: ExprKind::Cast(CastType::Object, Box::new(operand)),
                 })
             }
+            // zend_compile rejects it: "The (unset) cast is no longer supported".
+            TokenKind::UnsetCast => {
+                self.advance();
+                let operand = self.parse_pow()?;
+                Ok(Expr {
+                    span: span.merge(operand.span),
+                    kind: ExprKind::Cast(CastType::Unset, Box::new(operand)),
+                })
+            }
             TokenKind::RealCast => Err(ParseError {
                 message: "The (real) cast has been removed, use (float) instead".to_string(),
                 span,
@@ -5893,6 +5902,22 @@ impl Parser {
                 self.expect(&TokenKind::OpenParen)?;
                 let mut elements = Vec::new();
                 while !matches!(self.peek(), TokenKind::CloseParen | TokenKind::Eof) {
+                    // An empty element (`array(, 1)`): grammatical, rejected
+                    // by the compiler unless destructuring.
+                    if matches!(self.peek(), TokenKind::Comma) {
+                        let prev = self.tokens[self.pos.saturating_sub(1)].span;
+                        elements.push(ArrayElement {
+                            key: None,
+                            value: Expr {
+                                span: Span::new(prev.end, prev.end, prev.line),
+                                kind: ExprKind::Null,
+                            },
+                            unpack: false,
+                            by_ref: false,
+                        });
+                        self.advance();
+                        continue;
+                    }
                     let is_ref = self.eat(&TokenKind::Ampersand);
                     let first = self.parse_expression()?;
                     if self.eat(&TokenKind::DoubleArrow) {
