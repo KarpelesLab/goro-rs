@@ -33672,7 +33672,7 @@ impl Vm {
                                 {
                                     pending_calls_catch_depth = Some(*eh_pc_depth);
                                     ip = *catch_target as usize;
-                                    continue;
+                                    return Ok(Flow::Continue);
                                 }
                                 return Err(VmError {
                                     message: "Uncaught Error: class not found".into(),
