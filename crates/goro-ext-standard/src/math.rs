@@ -41,7 +41,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"array_sum", array_sum);
     vm.register_function(b"php_uname", php_uname);
     vm.register_function(b"phpversion", phpversion);
-    vm.register_function(b"extension_loaded", extension_loaded_fn);
     vm.register_function(b"version_compare", version_compare_fn);
     vm.register_function(b"php_sapi_name", php_sapi_name);
     vm.register_function(b"defined", defined);
@@ -1756,27 +1755,6 @@ fn intval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     Ok(Value::Long(c_strtol(&s, base)))
-}
-
-fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let name_lower = name.to_string_lossy().to_ascii_lowercase();
-    // Report our built-in extensions as loaded
-    let loaded = matches!(
-        name_lower.as_str(),
-        "standard"
-            | "core"
-            | "date"
-            | "pcre"
-            | "json"
-            | "ctype"
-            | "hash"
-            | "spl"
-            | "reflection"
-            | "mbstring"
-            | "tokenizer"
-    );
-    Ok(if loaded { Value::True } else { Value::False })
 }
 
 /// php_canonicalize_version(): separate digit runs from the rest with

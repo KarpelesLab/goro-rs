@@ -17689,17 +17689,121 @@ fn extension_loaded_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .to_ascii_lowercase();
     let loaded = matches!(
         ext.as_str(),
-        "standard" | "core" | "date" | "pcre" | "json" | "ctype" | "hash" | "spl"
+        "standard"
+            | "core"
+            | "date"
+            | "pcre"
+            | "json"
+            | "ctype"
+            | "hash"
+            | "spl"
+            | "random"
+            | "reflection"
+            | "uri"
+            | "lexbor"
     ) || vm.loaded_extensions.contains(ext.as_bytes());
     Ok(if loaded { Value::True } else { Value::False })
 }
 
-fn get_loaded_extensions_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+/// Module names as PHP spells them, in a php-src-like startup order
+/// (static modules first). Extensions goro registers but this list does not
+/// name are appended in sorted order.
+const MODULE_ORDER: &[&str] = &[
+    "Core",
+    "date",
+    "libxml",
+    "openssl",
+    "pcre",
+    "sqlite3",
+    "zlib",
+    "bcmath",
+    "bz2",
+    "calendar",
+    "ctype",
+    "curl",
+    "dom",
+    "hash",
+    "fileinfo",
+    "filter",
+    "ftp",
+    "gd",
+    "gettext",
+    "gmp",
+    "json",
+    "iconv",
+    "SPL",
+    "intl",
+    "session",
+    "lexbor",
+    "mbstring",
+    "standard",
+    "mysqlnd",
+    "pcntl",
+    "pgsql",
+    "exif",
+    "mysqli",
+    "PDO",
+    "pdo_mysql",
+    "pdo_pgsql",
+    "Phar",
+    "posix",
+    "random",
+    "Reflection",
+    "shmop",
+    "SimpleXML",
+    "soap",
+    "sockets",
+    "sodium",
+    "sysvmsg",
+    "sysvsem",
+    "sysvshm",
+    "tokenizer",
+    "uri",
+    "xml",
+    "xmlreader",
+    "xmlwriter",
+    "xsl",
+    "zip",
+    "zend_test",
+];
+
+fn get_loaded_extensions_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
-    for ext in &[
-        "Core", "standard", "date", "pcre", "json", "ctype", "hash", "SPL",
-    ] {
-        result.push(Value::String(PhpString::from_bytes(ext.as_bytes())));
+    // zend_extensions: true lists Zend extensions; goro has none.
+    if args.first().is_some_and(|v| v.is_truthy()) {
+        return Ok(Value::Array(Rc::new(RefCell::new(result))));
+    }
+    let always = [
+        "core",
+        "standard",
+        "date",
+        "pcre",
+        "json",
+        "ctype",
+        "hash",
+        "spl",
+        "random",
+        "reflection",
+        "uri",
+        "lexbor",
+    ];
+    let is_loaded = |lc: &str| always.contains(&lc) || vm.loaded_extensions.contains(lc.as_bytes());
+    let mut seen = std::collections::HashSet::new();
+    for name in MODULE_ORDER {
+        let lc = name.to_ascii_lowercase();
+        if is_loaded(&lc) {
+            seen.insert(lc);
+            result.push(Value::String(PhpString::from_bytes(name.as_bytes())));
+        }
+    }
+    let mut rest: Vec<&Vec<u8>> = vm
+        .loaded_extensions
+        .iter()
+        .filter(|e| !seen.contains(&String::from_utf8_lossy(e).into_owned()))
+        .collect();
+    rest.sort();
+    for e in rest {
+        result.push(Value::String(PhpString::from_bytes(e)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }

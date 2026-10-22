@@ -2271,8 +2271,22 @@ impl Vm {
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();
                 // Core extensions always available
-                s.insert(b"core".to_vec());
-                s.insert(b"standard".to_vec());
+                // Always-enabled modules of a PHP 8.5 build.
+                for e in [
+                    &b"core"[..],
+                    b"standard",
+                    b"date",
+                    b"pcre",
+                    b"json",
+                    b"hash",
+                    b"spl",
+                    b"random",
+                    b"reflection",
+                    b"uri",
+                    b"lexbor",
+                ] {
+                    s.insert(e.to_vec());
+                }
                 s
             },
             builtin_param_types: HashMap::new(),
