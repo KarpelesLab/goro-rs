@@ -1,0 +1,16 @@
+[package]
+name = "goro-ldap"
+version = "0.1.0"
+edition = "2024"
+description = "A pure-Rust LDAP client modelled on OpenLDAP's libldap/liblber, for goro-rs"
+license = "MIT"
+
+[lib]
+doctest = false
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2"
+purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "rng", "tls", "x509"] }

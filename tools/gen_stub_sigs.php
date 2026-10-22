@@ -73,6 +73,7 @@ $dirs = [
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',
     'ext/dom' => 'dom',
+    'ext/ldap' => 'ldap',
 ];
 
 // U_ICU_VERSION_MAJOR_NUM goro-ext-intl reports (its data: intl crate,
@@ -136,6 +137,11 @@ function parse_file(string $path, string $ext): void {
                 $cond = true;
                 if (preg_match('/^#\s*ifndef\s+PDO_USE_MYSQLND\b/', $dir)) $cond = false;
                 elseif (preg_match('/^#\s*if\s+U_ICU_VERSION_MAJOR_NUM\s*>=\s*(\d+)/', $dir, $m)) $cond = ICU_VERSION_MAJOR >= (int)$m[1];
+                // ext/ldap builds on OpenLDAP (not Oracle's SDK) and without
+                // STR_TRANSLATION, so those blocks are left out.
+                elseif (preg_match('/^#\s*ifdef\s+HAVE_ORALDAP\b/', $dir)) $cond = false;
+                elseif (preg_match('/^#\s*if\s+defined\(HAVE_ORALDAP\)/', $dir)) $cond = false;
+                elseif (preg_match('/^#\s*ifdef\s+STR_TRANSLATION\b/', $dir)) $cond = false;
                 $stack[] = [$keep, $cond];
                 $keep = $keep && $cond;
             } elseif (preg_match('/^#\s*else/', $dir) && $stack) {
