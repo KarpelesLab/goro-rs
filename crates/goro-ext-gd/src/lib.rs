@@ -34,8 +34,8 @@ pub type R = Result<Value, VmError>;
 
 /// The image format support compiled in.
 pub const HAVE_JPG: bool = true;
-pub const HAVE_WEBP: bool = false;
-pub const HAVE_AVIF: bool = false;
+pub const HAVE_WEBP: bool = true;
+pub const HAVE_AVIF: bool = true;
 pub const HAVE_XPM: bool = true;
 pub const HAVE_FREETYPE: bool = true;
 

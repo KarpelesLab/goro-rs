@@ -18,6 +18,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+pub mod avif;
 pub mod bmp;
 pub mod color_match;
 pub mod crop;
@@ -40,6 +41,7 @@ pub mod tga;
 pub mod topal;
 pub mod transform;
 pub mod wbmp;
+pub mod webp;
 pub mod xbm;
 pub mod xpm;
 
@@ -253,6 +255,10 @@ pub struct Image {
     pub res_y: u32,
     pub interpolation_id: i32,
     pub interpolation: Option<InterpolationFn>,
+    /// Nesting of special-color gdImageSetPixel() calls (styles naming
+    /// styles, gdAntiAliased as the antialias color): the C code recurses
+    /// without end there; this bounds it.
+    pub special_depth: u32,
 }
 
 /// gdFont

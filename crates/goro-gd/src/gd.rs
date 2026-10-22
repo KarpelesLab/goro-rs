@@ -45,6 +45,7 @@ impl Image {
             res_y: RESOLUTION,
             interpolation_id: interp::BILINEAR_FIXED,
             interpolation: None,
+            special_depth: 0,
         }
     }
 
@@ -339,42 +340,16 @@ impl Image {
     /// gdImageSetPixel()
     pub fn set_pixel(&mut self, x: i32, y: i32, color: i32) {
         match color {
-            STYLED => {
-                let Some(style) = &self.style else {
-                    return;
-                };
-                if style.is_empty() {
+            STYLED | STYLED_BRUSHED | ANTI_ALIASED => {
+                if self.special_depth > 64 {
                     return;
                 }
-                let p = style[self.style_pos as usize];
-                self.style_pos += 1;
-                if p != TRANSPARENT {
-                    self.set_pixel(x, y, p);
-                }
-                let len = self.style.as_ref().map_or(1, |s| s.len() as i32);
-                self.style_pos %= len;
-            }
-            STYLED_BRUSHED => {
-                let Some(style) = &self.style else {
-                    return;
-                };
-                if style.is_empty() {
-                    return;
-                }
-                let p = style[self.style_pos as usize];
-                self.style_pos += 1;
-                if p != TRANSPARENT && p != 0 {
-                    self.set_pixel(x, y, BRUSHED);
-                }
-                let len = self.style.as_ref().map_or(1, |s| s.len() as i32);
-                self.style_pos %= len;
+                self.special_depth += 1;
+                self.set_pixel_special(x, y, color);
+                self.special_depth -= 1;
             }
             BRUSHED => self.brush_apply(x, y),
             TILED => self.tile_apply(x, y),
-            ANTI_ALIASED => {
-                let c = self.aa_color;
-                self.set_pixel(x, y, c);
-            }
             _ => {
                 if self.bounds_safe(x, y) {
                     let (xu, yu) = (x as usize, y as usize);
@@ -392,6 +367,35 @@ impl Image {
                 }
             }
         }
+    }
+
+    /// The gdStyled / gdStyledBrushed / gdAntiAliased cases of
+    /// gdImageSetPixel()
+    fn set_pixel_special(&mut self, x: i32, y: i32, color: i32) {
+        if color == ANTI_ALIASED {
+            let c = self.aa_color;
+            self.set_pixel(x, y, c);
+            return;
+        }
+        let Some(style) = &self.style else {
+            return;
+        };
+        if style.is_empty() {
+            return;
+        }
+        let len = style.len() as i32;
+        // (a nested styled pixel can leave stylePos at the length: C then
+        // reads past the style array)
+        let p = style[self.style_pos.rem_euclid(len) as usize];
+        self.style_pos += 1;
+        if color == STYLED {
+            if p != TRANSPARENT {
+                self.set_pixel(x, y, p);
+            }
+        } else if p != TRANSPARENT && p != 0 {
+            self.set_pixel(x, y, BRUSHED);
+        }
+        self.style_pos %= len;
     }
 
     /// gdImageGetPixel()
@@ -801,7 +805,11 @@ impl Image {
     /// gdImageAALine()
     pub fn aa_line(&mut self, mut x1: i32, mut y1: i32, mut x2: i32, mut y2: i32, col: i32) {
         if !self.true_color {
-            self.line(x1, y1, x2, y2, col);
+            // (with gdAntiAliased as the AA color C recurses until the
+            // stack overflows)
+            if col != ANTI_ALIASED {
+                self.line(x1, y1, x2, y2, col);
+            }
             return;
         }
         if !clip_1d(&mut x1, &mut y1, &mut x2, &mut y2, self.cx1, self.cx2) {
@@ -1097,7 +1105,8 @@ impl Image {
         color: i32,
         style: i32,
     ) {
-        let mut pts = [Point::default(); 363];
+        // gdPoint pts[363] (with room for the two insertions C may write past it)
+        let mut pts = [Point::default(); 366];
         let (mut lx, mut ly) = (0, 0);
         let (mut fx, mut fy) = (0, 0);
         let (mut startx, mut starty, mut endx, mut endy) = (-1, -1, -1, -1);
@@ -1331,9 +1340,18 @@ impl Image {
             },
         }
         let mut stack = vec![Task::Span(x, y)];
+        // Each span of a terminating fill paints at least one pixel that is
+        // never a seed again; more spans than pixels means the C recursion
+        // would never end (e.g. seeds outside the clipping rectangle, where
+        // nothing can be painted) and overflow its stack.
+        let mut budget = (self.sx as i64) * (self.sy as i64) + 1;
         while let Some(t) = stack.pop() {
             match t {
                 Task::Span(x, y) => {
+                    budget -= 1;
+                    if budget < 0 {
+                        return;
+                    }
                     let mut left_limit = -1;
                     let mut i = x;
                     while i >= 0 {
@@ -1474,7 +1492,14 @@ impl Image {
         };
         push(&mut stack, y, x, x, 1);
         push(&mut stack, y + 1, x, x, -1);
+        // (special colors that do not change the pixel make the C loop spin
+        // forever; bound the work to what any real fill can need)
+        let mut budget = 64 * (self.sx as i64) * (self.sy as i64) + 1024;
         while let Some((sy_, xl, xr, sdy)) = stack.pop() {
+            budget -= 1;
+            if budget < 0 {
+                break;
+            }
             let dy = sdy;
             y = sy_ + dy;
             let x1 = xl;
@@ -1542,7 +1567,12 @@ impl Image {
         let idx = |x: i32, y: i32| -> usize { (y + x * wy2) as usize };
         push(&mut stack, y, x, x, 1);
         push(&mut stack, y + 1, x, x, -1);
+        let mut budget = 64 * (self.sx as i64) * (self.sy as i64) + 1024;
         while let Some((sy_, xl, xr, dy)) = stack.pop() {
+            budget -= 1;
+            if budget < 0 {
+                break;
+            }
             let y = sy_ + dy;
             let x1 = xl;
             let x2 = xr;

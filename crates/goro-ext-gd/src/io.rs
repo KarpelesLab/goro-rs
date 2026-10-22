@@ -60,7 +60,8 @@ fn decode(
         Kind::Bmp => bmp::create_from_bmp(data),
         Kind::Tga => tga::create_from_tga(data),
         Kind::Jpg => jpeg::create_from_jpeg(data, jpeg_ignore),
-        Kind::Webp | Kind::Avif => return None,
+        Kind::Webp => webp::create_from_webp(data),
+        Kind::Avif => avif::create_from_avif(data),
     })
 }
 
@@ -86,6 +87,10 @@ const FUNCTIONS: &[(&str, goro_core::vm::BuiltinFn)] = &[
     ("imagecreatefrompng", imagecreatefrompng),
     ("imagepng", imagepng),
     ("imagecreatefromgif", imagecreatefromgif),
+    ("imagecreatefromwebp", imagecreatefromwebp),
+    ("imagecreatefromavif", imagecreatefromavif),
+    ("imagewebp", imagewebp),
+    ("imageavif", imageavif),
     ("imagecreatefromjpeg", imagecreatefromjpeg),
     ("imagejpeg", imagejpeg),
     ("imagecreatefromxbm", imagecreatefromxbm),
@@ -207,6 +212,51 @@ fn imagejpeg(vm: &mut Vm, a: &[Value]) -> R {
         return Err(f.value_error(vm, 3, "must be at between -1 and 100"));
     }
     let data = goro_gd::jpeg::image_jpeg(&im.borrow(), quality as i32);
+    emit(vm, &f, sink, data)
+}
+
+fn imagecreatefromwebp(vm: &mut Vm, a: &[Value]) -> R {
+    create_from(vm, "imagecreatefromwebp", a, Kind::Webp)
+}
+
+fn imagecreatefromavif(vm: &mut Vm, a: &[Value]) -> R {
+    create_from(vm, "imagecreatefromavif", a, Kind::Avif)
+}
+
+fn imagewebp(vm: &mut Vm, a: &[Value]) -> R {
+    let (f, a) = args(vm, "imagewebp", "O|z!l", a)?;
+    let im = a[0].img();
+    let quality = a[2].long_or(-1);
+    let Some(sink) = output_context(vm, &f, &a[1], 2)? else {
+        return Ok(Value::False);
+    };
+    if quality < -1 {
+        sink.finish(vm);
+        return Err(f.value_error(vm, 3, "must be greater than or equal to -1"));
+    }
+    let data = goro_gd::webp::image_webp(&im.borrow(), quality as i32);
+    emit(vm, &f, sink, data)
+}
+
+fn imageavif(vm: &mut Vm, a: &[Value]) -> R {
+    let (f, a) = args(vm, "imageavif", "O|z!ll", a)?;
+    let im = a[0].img();
+    let quality = a[2].long_or(-1);
+    let mut speed = a[3].long_or(-1);
+    let Some(sink) = output_context(vm, &f, &a[1], 2)? else {
+        return Ok(Value::False);
+    };
+    if !(-1..=100).contains(&quality) {
+        sink.finish(vm);
+        return Err(f.value_error(vm, 3, "must be between -1 and 100"));
+    }
+    if !(-1..=10).contains(&speed) {
+        sink.finish(vm);
+        return Err(f.value_error(vm, 4, "must be between -1 and 10"));
+    } else if speed == -1 {
+        speed = 6;
+    }
+    let data = goro_gd::avif::image_avif(&im.borrow(), quality as i32, speed as i32);
     emit(vm, &f, sink, data)
 }
 
