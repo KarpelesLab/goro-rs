@@ -7680,7 +7680,7 @@ impl Vm {
 
         // Build a PendingCall to resolve named args
         let mut call = PendingCall {
-            name: PhpString::from_bytes(b""),
+            name: PhpString::empty(),
             args: if let Some(this) = this_val {
                 let mut a = vec![this];
                 a.extend(positional_args);

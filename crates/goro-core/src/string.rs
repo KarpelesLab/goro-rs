@@ -37,16 +37,21 @@ impl Drop for PhpStringInner {
 }
 
 impl PhpString {
+    /// The empty string (interned: one shared instance, like
+    /// ZSTR_EMPTY_ALLOC()).
     pub fn empty() -> Self {
-        Self {
-            inner: Rc::new(PhpStringInner {
-                data: Vec::new(),
-                hash: std::cell::Cell::new(None),
-                valid_utf8: std::cell::Cell::new(false),
-                interned: std::cell::Cell::new(false),
-                tracked_bytes: 0, // empty strings don't track
-            }),
+        thread_local! {
+            static EMPTY: PhpString = PhpString {
+                inner: Rc::new(PhpStringInner {
+                    data: Vec::new(),
+                    hash: std::cell::Cell::new(None),
+                    valid_utf8: std::cell::Cell::new(false),
+                    interned: std::cell::Cell::new(false),
+                    tracked_bytes: 0, // empty strings don't track
+                }),
+            };
         }
+        EMPTY.with(|e| e.clone())
     }
 
     pub fn from_bytes(data: &[u8]) -> Self {
