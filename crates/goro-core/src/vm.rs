@@ -46611,18 +46611,10 @@ impl Vm {
                             k.extend_from_slice(b"::get");
                             k
                         };
-                        // When inside ANY hook for this property, access backing store directly
-                        let hook_key_base = {
-                            let mut k = class_lower.clone();
-                            k.push(b':');
-                            k.push(b':');
-                            k.extend_from_slice(prop_name_bytes);
-                            k
-                        };
-                        let in_hook = self
-                            .property_hook_stack
-                            .iter()
-                            .any(|s| s.starts_with(&hook_key_base));
+                        // Inside this property's hook (on this object), accesses use
+                        // the backing store directly.
+                        let in_hook =
+                            Self::frame_is_prop_hook(op_array, cvs, prop_name_bytes, &obj_val);
 
                         // Check for write-only virtual property (has set hook but no get hook)
                         if !in_hook && !has_get_hook {
@@ -47931,18 +47923,10 @@ impl Vm {
                             k.extend_from_slice(b"::set");
                             k
                         };
-                        // When inside ANY hook for this property, access backing store directly
-                        let set_hook_key_base = {
-                            let mut k = class_lower.clone();
-                            k.push(b':');
-                            k.push(b':');
-                            k.extend_from_slice(prop_name_bytes_set);
-                            k
-                        };
-                        let in_set_hook = self
-                            .property_hook_stack
-                            .iter()
-                            .any(|s| s.starts_with(&set_hook_key_base));
+                        // Inside this property's hook (on this object), accesses use
+                        // the backing store directly.
+                        let in_set_hook =
+                            Self::frame_is_prop_hook(op_array, cvs, prop_name_bytes_set, &obj_val);
 
                         // Check for read-only virtual property (has get hook but no set hook)
                         if !in_set_hook && !has_set_hook {
@@ -52304,6 +52288,42 @@ impl Vm {
             }
         }
         class_lower.to_vec()
+    }
+
+    /// zend_should_call_hook() == false: the running frame (`op_array`, its
+    /// `cvs`) is a hook of property `prop` and `$this` is `obj`, so the
+    /// access uses the backing value. Only the hook's own frame counts: a
+    /// function it calls that accesses the property runs the hook again.
+    pub(crate) fn frame_is_prop_hook(
+        op_array: &OpArray,
+        cvs: &[Value],
+        prop: &[u8],
+        obj: &Value,
+    ) -> bool {
+        let name = op_array.name.as_slice();
+        let hook_prop = if let Some(rest) = name.strip_prefix(b"$") {
+            rest.strip_suffix(b"::get")
+                .or_else(|| rest.strip_suffix(b"::set"))
+        } else {
+            name.strip_prefix(b"__property_get_")
+                .or_else(|| name.strip_prefix(b"__property_set_"))
+        };
+        if hook_prop != Some(prop)
+            || op_array.cv_names.first().map(|n| n.as_slice()) != Some(b"this")
+        {
+            return false;
+        }
+        match (cvs.first().map(|v| v.deref()), obj.deref()) {
+            (Some(Value::Object(a)), Value::Object(b)) => {
+                // (or an initialized lazy proxy of it)
+                Rc::ptr_eq(&a, &b)
+                    || matches!(
+                        a.borrow().get_property(b"__lazy_real"),
+                        Value::Object(r) if Rc::ptr_eq(&r, &b)
+                    )
+            }
+            _ => false,
+        }
     }
 
     /// True if `class_lower` has a get hook for `pn` and we are not currently
