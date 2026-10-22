@@ -1474,6 +1474,9 @@ impl Parse {
 #[derive(Clone, Default)]
 pub struct AuthContext {
     pub zAuthContext: Option<ZStr>,
+    /// Index in db.parses of the Parse the context was pushed on (C
+    /// pParse); None when not pushed.
+    pub pParse: Option<usize>,
 }
 
 /// Used by sqlite3InitCallback().
