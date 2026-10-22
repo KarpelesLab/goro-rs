@@ -1119,3 +1119,25 @@ pub(crate) fn obj_class_lower(obj: &Rc<RefCell<PhpObject>>) -> Vec<u8> {
 pub(crate) fn val_arr(a: PhpArray) -> Value {
     Value::Array(Rc::new(RefCell::new(a)))
 }
+
+/// The array held in the hidden storage property `name`, for in-place
+/// updates: created empty when missing, and replaced by a copy first when
+/// anything else holds it (or it is not a plain array).
+pub(crate) fn storage_arr(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Rc<RefCell<PhpArray>> {
+    {
+        let ob = obj.borrow();
+        if let Some((_, Value::Array(a))) = ob.properties.iter().find(|(k, _)| k == name) {
+            if Rc::strong_count(a) == 1 {
+                return a.clone();
+            }
+        }
+    }
+    let copy = match obj.borrow().get_property(name) {
+        Value::Array(a) => a.borrow().clone(),
+        _ => PhpArray::new(),
+    };
+    let a = Rc::new(RefCell::new(copy));
+    obj.borrow_mut()
+        .set_property(name.to_vec(), Value::Array(a.clone()));
+    a
+}

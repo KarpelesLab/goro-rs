@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use crate::array::{ArrayKey, PhpArray};
 use crate::object::PhpObject;
-use crate::spl::{mangle_private, obj_class_lower, skey, val_arr};
+use crate::spl::{mangle_private, obj_class_lower, skey, storage_arr, val_arr};
 use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::Vm;
@@ -54,22 +54,6 @@ impl Vm {
                 .collect()
         } else {
             data.into_iter().map(|d| (d, Value::Null)).collect()
-        }
-    }
-
-    fn heap_store(obj: &Rc<RefCell<PhpObject>>, h: Vec<(Value, Value)>, pq: bool) {
-        let mut a = PhpArray::new();
-        let mut p = PhpArray::new();
-        for (d, pr) in h {
-            a.push(d);
-            if pq {
-                p.push(pr);
-            }
-        }
-        let mut ob = obj.borrow_mut();
-        ob.set_property(b"__spl_array".to_vec(), val_arr(a));
-        if pq {
-            ob.set_property(b"__spl_priorities".to_vec(), val_arr(p));
         }
     }
 
@@ -147,19 +131,129 @@ impl Vm {
         true
     }
 
+    /// The heap's storage arrays (values, and priorities for a priority
+    /// queue), unshared for in-place updates. The priorities are kept
+    /// exactly as long as the values.
+    fn heap_arrays(
+        obj: &Rc<RefCell<PhpObject>>,
+        pq: bool,
+    ) -> (Rc<RefCell<PhpArray>>, Option<Rc<RefCell<PhpArray>>>) {
+        let data = storage_arr(obj, b"__spl_array");
+        if !pq {
+            return (data, None);
+        }
+        let pri = storage_arr(obj, b"__spl_priorities");
+        let n = data.borrow().len();
+        let m = pri.borrow().len();
+        if m != n {
+            let mut pb = pri.borrow_mut();
+            if m > n {
+                for _ in n..m {
+                    pb.pop();
+                }
+            } else {
+                for _ in m..n {
+                    pb.push(Value::Null);
+                }
+            }
+        }
+        (data, Some(pri))
+    }
+
+    /// Element `i` of the heap as a (data, priority) pair.
+    fn heap_elem(
+        data: &Rc<RefCell<PhpArray>>,
+        pri: &Option<Rc<RefCell<PhpArray>>>,
+        i: usize,
+    ) -> (Value, Value) {
+        let d = data
+            .borrow()
+            .entry_at(i)
+            .map(|(_, v)| v.clone())
+            .unwrap_or(Value::Null);
+        let p = match pri {
+            Some(p) => p
+                .borrow()
+                .entry_at(i)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(Value::Null),
+            None => Value::Null,
+        };
+        (d, p)
+    }
+
+    /// Move element `from` to slot `to` (the source slot is left Null).
+    fn heap_move(
+        data: &Rc<RefCell<PhpArray>>,
+        pri: &Option<Rc<RefCell<PhpArray>>>,
+        from: usize,
+        to: usize,
+    ) {
+        for a in std::iter::once(data).chain(pri.iter()) {
+            let mut ab = a.borrow_mut();
+            let v = ab
+                .value_at_mut(from)
+                .map(std::mem::take)
+                .unwrap_or(Value::Null);
+            if let Some(slot) = ab.value_at_mut(to) {
+                *slot = v;
+            }
+        }
+    }
+
+    fn heap_put(
+        data: &Rc<RefCell<PhpArray>>,
+        pri: &Option<Rc<RefCell<PhpArray>>>,
+        at: usize,
+        elem: (Value, Value),
+    ) {
+        if let Some(slot) = data.borrow_mut().value_at_mut(at) {
+            *slot = elem.0;
+        }
+        if let Some(p) = pri {
+            if let Some(slot) = p.borrow_mut().value_at_mut(at) {
+                *slot = elem.1;
+            }
+        }
+    }
+
+    /// The top element as a (data, priority) pair.
+    fn heap_top(obj: &Rc<RefCell<PhpObject>>, pq: bool) -> Option<(Value, Value)> {
+        let ob = obj.borrow();
+        let d = match ob.get_property(b"__spl_array") {
+            Value::Array(a) => a.borrow().entry_at(0).map(|(_, v)| v.clone())?,
+            _ => return None,
+        };
+        let p = if pq {
+            match ob.get_property(b"__spl_priorities") {
+                Value::Array(a) => a
+                    .borrow()
+                    .entry_at(0)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or(Value::Null),
+                _ => Value::Null,
+            }
+        } else {
+            Value::Null
+        };
+        Some((d, p))
+    }
+
     fn heap_insert(&mut self, obj: &Rc<RefCell<PhpObject>>, kind: HeapKind, elem: (Value, Value)) {
         let pq = kind == HeapKind::PQueue;
-        let mut h = Self::heap_load(obj, pq);
+        let (data, pri) = Self::heap_arrays(obj, pq);
         let user_cmp = self.heap_user_compare(obj);
         let had_exc = self.current_exception.is_some();
         Self::heap_set_flag(obj, HEAP_LOCKED, true);
-        let mut pos = h.len();
-        h.push(elem.clone());
+        // Sift up. The storage is only updated once the slot is known (a
+        // user compare() sees the heap as it was before the insertion).
+        let mut pos = data.borrow().len();
+        let mut path: Vec<usize> = Vec::new();
         while pos > 0 {
             let parent = (pos - 1) / 2;
-            let pe = h[parent].clone();
+            let pe = Self::heap_elem(&data, &pri, parent);
             if self.heap_cmp(obj, kind, user_cmp, &pe, &elem) < 0 {
-                h[pos] = pe;
+                path.push(parent);
                 pos = parent;
             } else {
                 break;
@@ -169,8 +263,16 @@ impl Vm {
         if !had_exc && self.current_exception.is_some() {
             Self::heap_set_flag(obj, HEAP_CORRUPTED, true);
         }
-        h[pos] = elem;
-        Self::heap_store(obj, h, pq);
+        let mut cur = data.borrow().len();
+        data.borrow_mut().push(Value::Null);
+        if let Some(p) = &pri {
+            p.borrow_mut().push(Value::Null);
+        }
+        for p in path {
+            Self::heap_move(&data, &pri, p, cur);
+            cur = p;
+        }
+        Self::heap_put(&data, &pri, cur, elem);
     }
 
     /// Remove the top element; returns it as (data, priority), None if empty.
@@ -180,30 +282,33 @@ impl Vm {
         kind: HeapKind,
     ) -> Option<(Value, Value)> {
         let pq = kind == HeapKind::PQueue;
-        let mut h = Self::heap_load(obj, pq);
-        if h.is_empty() {
+        let (data, pri) = Self::heap_arrays(obj, pq);
+        let n = data.borrow().len();
+        if n == 0 {
             return None;
         }
         let user_cmp = self.heap_user_compare(obj);
         let had_exc = self.current_exception.is_some();
         Self::heap_set_flag(obj, HEAP_LOCKED, true);
-        let limit = (h.len() - 1) / 2;
-        let top = h[0].clone();
-        let count = h.len() - 1;
-        let bottom = h[count].clone();
+        let limit = (n - 1) / 2;
+        let top = Self::heap_elem(&data, &pri, 0);
+        let count = n - 1;
+        let bottom = Self::heap_elem(&data, &pri, count);
+        // Sift down (the storage is updated afterwards, see heap_insert).
         let mut parent = 0usize;
+        let mut path: Vec<usize> = Vec::new();
         while parent < limit {
             let mut child = parent * 2 + 1;
             if child != count {
-                let c1 = h[child + 1].clone();
-                let c0 = h[child].clone();
+                let c1 = Self::heap_elem(&data, &pri, child + 1);
+                let c0 = Self::heap_elem(&data, &pri, child);
                 if self.heap_cmp(obj, kind, user_cmp, &c1, &c0) > 0 {
                     child += 1;
                 }
             }
-            let ce = h[child].clone();
+            let ce = Self::heap_elem(&data, &pri, child);
             if self.heap_cmp(obj, kind, user_cmp, &bottom, &ce) < 0 {
-                h[parent] = ce;
+                path.push(child);
                 parent = child;
             } else {
                 break;
@@ -213,11 +318,19 @@ impl Vm {
         if !had_exc && self.current_exception.is_some() {
             Self::heap_set_flag(obj, HEAP_CORRUPTED, true);
         }
-        if parent != count {
-            h[parent] = bottom;
+        let mut cur = 0usize;
+        for c in path {
+            Self::heap_move(&data, &pri, c, cur);
+            cur = c;
         }
-        h.truncate(count);
-        Self::heap_store(obj, h, pq);
+        if cur != count {
+            Self::heap_put(&data, &pri, cur, bottom);
+        } else {
+            drop(bottom);
+        }
+        let last = data.borrow_mut().pop();
+        let last_p = pri.as_ref().and_then(|p| p.borrow_mut().pop());
+        drop((last, last_p));
         Some(top)
     }
 
@@ -308,23 +421,19 @@ impl Vm {
                 self.heap_delete_top(obj, kind);
                 Some(Value::Null)
             }
-            b"current" => {
-                let h = Self::heap_load(obj, pq);
-                match h.into_iter().next() {
-                    None => Some(Value::Null),
-                    Some(e) => Some(if pq {
-                        Self::pq_extract_value(e, Self::pq_extract_flags(obj))
-                    } else {
-                        e.0
-                    }),
-                }
-            }
+            b"current" => match Self::heap_top(obj, pq) {
+                None => Some(Value::Null),
+                Some(e) => Some(if pq {
+                    Self::pq_extract_value(e, Self::pq_extract_flags(obj))
+                } else {
+                    e.0
+                }),
+            },
             b"top" => {
                 if !self.heap_check(obj, false) {
                     return Some(Value::Null);
                 }
-                let h = Self::heap_load(obj, pq);
-                match h.into_iter().next() {
+                match Self::heap_top(obj, pq) {
                     None => self.spl_throw(b"RuntimeException", "Can't peek at an empty heap"),
                     Some(e) => Some(if pq {
                         Self::pq_extract_value(e, Self::pq_extract_flags(obj))
