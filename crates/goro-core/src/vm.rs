@@ -34565,6 +34565,8 @@ impl Vm {
                     self.warn_nan_coercion(&val, "object", op.line);
                     let obj = match val {
                         Value::Object(o) => Value::Object(o),
+                        // (a Generator is an object)
+                        g @ Value::Generator(_) => g,
                         Value::Array(arr) => {
                             let arr_borrow = arr.borrow();
                             let obj_id = self.alloc_object_id();

@@ -5277,6 +5277,14 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     }
+    // OnUpdateStrNotEmpty / OnUpdateStringUnempty refuse an empty value.
+    if matches!(
+        key.as_slice(),
+        b"arg_separator.input" | b"arg_separator.output" | b"include_path"
+    ) && value.to_php_string().as_bytes().is_empty()
+    {
+        return Ok(Value::False);
+    }
     ini_remember(vm, &key);
     // Extension-registered INI validators (e.g. date.timezone)
     if let Some(validate) = vm.ini_validators.get(&key).copied() {
