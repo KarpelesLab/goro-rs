@@ -25145,6 +25145,7 @@ impl Vm {
                             func(self, &call.args)
                         };
                         if own_frame {
+                            self.release_in_builtin_frame(&call.args);
                             self.pop_builtin_frame();
                         } else {
                             self.ucf_call_line = None;

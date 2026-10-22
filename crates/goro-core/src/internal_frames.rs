@@ -73,6 +73,16 @@ impl Vm {
         })
     }
 
+    /// Values a builtin released by writing to its by-reference arguments
+    /// are destroyed while its frame is still running (gh17442: the
+    /// destructor is called from [internal function], under the builtin).
+    #[inline]
+    pub(crate) fn release_in_builtin_frame(&mut self, args: &[Value]) {
+        if self.has_release_work() && args.iter().any(|a| matches!(a, Value::Reference(_))) {
+            self.run_pending_destructors_pub();
+        }
+    }
+
     /// End of the builtin call recorded by the last `push_builtin_frame`.
     #[inline]
     pub fn pop_builtin_frame(&mut self) {
@@ -368,6 +378,7 @@ impl Vm {
             f(self, &args)
         };
         if own_frame {
+            self.release_in_builtin_frame(&args);
             self.pop_builtin_frame();
         } else {
             self.ucf_call_line = None;
