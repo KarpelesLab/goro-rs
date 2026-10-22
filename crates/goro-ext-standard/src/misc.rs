@@ -507,10 +507,6 @@ final class StreamBucket {
     vm.register_function(b"phpcredits", crate::info::phpcredits);
     vm.register_function(b"get_cfg_var", get_cfg_var_fn);
     vm.register_function(b"php_ini_loaded_file", php_ini_loaded_file_fn);
-    vm.ini_validators.insert(
-        b"zend.exception_string_param_max_len".to_vec(),
-        on_update_exception_string_param_max_len,
-    );
     vm.register_function(b"php_ini_scanned_files", php_ini_scanned_files_fn);
     vm.register_function(b"getmypid", getmypid_fn);
     vm.register_function(b"getmyuid", getmyuid_fn);
@@ -15857,19 +15853,6 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
 }
 
 /// OnSetExceptionStringParamMaxLen: 0..=1000000.
-fn on_update_exception_string_param_max_len(vm: &mut Vm, value: &[u8], _startup: bool) -> bool {
-    match std::str::from_utf8(value)
-        .ok()
-        .and_then(|s| s.trim().parse::<i64>().ok())
-    {
-        Some(n) if (0..=1_000_000).contains(&n) => {
-            vm.exception_string_param_max_len = n as usize;
-            true
-        }
-        _ => false,
-    }
-}
-
 /// Record a startup configuration directive for get_cfg_var().
 pub fn register_cfg_var(key: &str, value: &str) {
     CFG_VARS.with(|c| c.borrow_mut().push((key.to_string(), value.to_string())));
