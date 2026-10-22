@@ -41889,7 +41889,13 @@ impl Vm {
                                     crate::gc::on_child_released(&old);
                                 }
                             } else {
-                                ob.properties.retain(|(name, _)| **name != *pkey);
+                                ob.properties.retain(|(name, v)| {
+                                    let keep = **name != *pkey;
+                                    if !keep {
+                                        crate::gc::on_child_released(v);
+                                    }
+                                    keep
+                                });
                             }
                             drop(ob);
                         } else {

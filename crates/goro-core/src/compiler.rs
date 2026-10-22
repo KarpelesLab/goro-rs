@@ -17437,34 +17437,20 @@ impl Compiler {
                         Ok(OperandType::Cv(target_cv))
                     }
                     (
-                        ExprKind::ArrayAccess {
-                            array,
-                            index: Some(index),
-                        },
+                        ExprKind::ArrayAccess { array, index },
                         ExprKind::PropertyAccess {
                             object,
                             property,
                             nullsafe: false,
                         },
-                    ) => {
-                        // $arr[k] = &$obj->prop
-                        let ref_tmp =
-                            self.compile_property_ref(object, property, expr.span.line)?;
-                        let arr = self.compile_dim_write_base(array)?;
-                        let idx = self.compile_expr(index)?;
-                        self.op_array.emit(Op {
-                            opcode: OpCode::ArraySetRef,
-                            op1: arr,
-                            op2: OperandType::Tmp(ref_tmp),
-                            result: idx,
-                            line: expr.span.line,
-                        });
-                        Ok(self.ref_assign_result(
-                            OperandType::Tmp(ref_tmp),
-                            result_discarded,
-                            expr.span.line,
-                        ))
-                    }
+                    ) => self.compile_dim_assign_prop_ref(
+                        array,
+                        index.as_deref(),
+                        object,
+                        property,
+                        result_discarded,
+                        expr.span.line,
+                    ),
                     (
                         ExprKind::PropertyAccess {
                             object,
@@ -17863,6 +17849,42 @@ impl Compiler {
 
     /// Compile first-class callable syntax: strlen(...), $obj->method(...), Foo::method(...)
     /// Creates a synthetic closure that wraps the call and forwards arguments via ...$args.
+    /// `$arr[k] = &$obj->prop` / `$arr[] = &$obj->prop`: the property
+    /// becomes a reference (MAKE_REF) before the dimension is fetched for
+    /// writing, so `$o->x[] = &$o->x` nests the reference in itself.
+    #[inline(never)]
+    fn compile_dim_assign_prop_ref(
+        &mut self,
+        array: &Expr,
+        index: Option<&Expr>,
+        object: &Expr,
+        property: &Expr,
+        result_discarded: bool,
+        line: u32,
+    ) -> CompileResult<OperandType> {
+        let ref_tmp = self.compile_property_ref(object, property, line)?;
+        let arr = self.compile_dim_write_base(array)?;
+        if let Some(index) = index {
+            let idx = self.compile_expr(index)?;
+            self.op_array.emit(Op {
+                opcode: OpCode::ArraySetRef,
+                op1: arr,
+                op2: OperandType::Tmp(ref_tmp),
+                result: idx,
+                line,
+            });
+        } else {
+            self.op_array.emit(Op {
+                opcode: OpCode::ArrayAppendRef,
+                op1: arr,
+                op2: OperandType::Tmp(ref_tmp),
+                result: OperandType::Unused,
+                line,
+            });
+        }
+        Ok(self.ref_assign_result(OperandType::Tmp(ref_tmp), result_discarded, line))
+    }
+
     fn compile_first_class_callable(
         &mut self,
         target: &CallableTarget,
