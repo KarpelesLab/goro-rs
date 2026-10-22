@@ -175,44 +175,48 @@ fn map(t: &mut Transform, p: &mut PCtx, nargs: usize) {
     p.push(XObj::NodeSet(ret));
 }
 
-/// The Saxon functions. saxon:expression() returns the expression string
-/// (there are no "external" XPath objects); saxon:eval() compiles it.
+/// exsltSaxonExpressionFunction: the compiled expression as an external
+/// object.
+fn saxon_expression(t: &mut Transform, p: &mut PCtx) {
+    let Some(s) = xpath::x_pop_string(t, p).filter(|_| p.error == 0) else {
+        xpath::xp_err(t, p, xpath::XPATH_INVALID_TYPE);
+        return;
+    };
+    match compile(t, &s) {
+        Some(c) => p.push(XObj::External(std::rc::Rc::new(c))),
+        None => xpath::xp_err(t, p, xpath::XPATH_EXPR_ERROR),
+    }
+}
+
+/// exsltSaxonEvalFunction
+fn saxon_eval(t: &mut Transform, p: &mut PCtx) {
+    let c = match p.top() {
+        Some(XObj::External(c)) => c.clone(),
+        _ => {
+            xpath::xp_err(t, p, xpath::XPATH_INVALID_TYPE);
+            return;
+        }
+    };
+    p.pop();
+    match eval_in_ctx(t, &c) {
+        Some(v) => p.push(v),
+        None => xpath::xp_err(t, p, xpath::XPATH_EXPR_ERROR),
+    }
+}
+
+/// The Saxon functions (libexslt/saxon.c).
 pub fn saxon_call(t: &mut Transform, p: &mut PCtx, name: &str, nargs: usize) -> bool {
     match name {
-        "expression" => {
+        "expression" | "eval" | "evaluate" => {
             if nargs != 1 {
                 xpath::x_arity_error(t, p);
                 return true;
             }
-            let Some(s) = xpath::x_pop_string(t, p) else {
-                xpath::xp_err(t, p, xpath::XPATH_INVALID_TYPE);
-                return true;
-            };
-            if compile(t, &s).is_none() {
-                xpath::xp_err(t, p, xpath::XPATH_EXPR_ERROR);
-                return true;
+            if name != "eval" {
+                saxon_expression(t, p);
             }
-            p.push(XObj::Str(s));
-        }
-        "eval" | "evaluate" => {
-            if nargs != 1 {
-                xpath::x_arity_error(t, p);
-                return true;
-            }
-            if name == "eval" && !matches!(p.top(), Some(XObj::Str(_))) {
-                xpath::xp_err(t, p, xpath::XPATH_INVALID_TYPE);
-                return true;
-            }
-            let Some(s) = xpath::x_pop_string(t, p) else {
-                return true;
-            };
-            let Some(c) = compile(t, &s) else {
-                xpath::xp_err(t, p, xpath::XPATH_EXPR_ERROR);
-                return true;
-            };
-            match eval_in_ctx(t, &c) {
-                Some(v) => p.push(v),
-                None => xpath::xp_err(t, p, xpath::XPATH_EXPR_ERROR),
+            if name != "expression" {
+                saxon_eval(t, p);
             }
         }
         "systemId" => {

@@ -3165,6 +3165,7 @@ impl<'v> Transform<'v> {
                 XObj::Num(n) => n == self.xp.pos as f64,
                 XObj::NodeSet(v) | XObj::Tree(v) => !v.is_empty(),
                 XObj::Str(s) => !s.is_empty(),
+                XObj::External(_) => false,
             },
             None => {
                 self.state = State::Stopped;
@@ -3389,7 +3390,25 @@ impl<'v> Transform<'v> {
 /// xsltDocDefaultLoader: load and parse a document through PHP streams.
 pub fn load_xml_document(vm: &mut Vm, uri: &str, options: i64) -> Option<NodeId> {
     let path = goro_ext_xml::io::strip_file_scheme(uri);
-    let data = goro_ext_xml::io::read_resource(vm, &path)?;
+    let Some(data) = goro_ext_xml::io::read_resource(vm, &path) else {
+        // xmlLoadExternalEntity's error
+        if !goro_ext_xml::io::last_failure_reported() {
+            let f = goro_ext_xml::dom::active_fn(vm);
+            // (the name as PHP's stream opener saw it: unescaped)
+            let shown = match goro_ext_xml::uri::parse_uri(uri) {
+                Some(u) if u.scheme.as_deref().is_none_or(|s| s.starts_with("file")) => {
+                    goro_ext_xml::io::uri_unescape(uri)
+                }
+                _ => uri.to_string(),
+            };
+            let msg = format!(
+                "I/O warning : failed to load \"{}\": No such file or directory",
+                shown
+            );
+            goro_ext_xml::libxml::issue_error(vm, &f, &msg);
+        }
+        return None;
+    };
     let out = goro_ext_xml::sax2::parse_doc_ex(&data, Some(uri), options, None);
     let f = goro_ext_xml::dom::active_fn(vm);
     goro_ext_xml::libxml::report(vm, &f, &out.errors, goro_ext_xml::libxml::Style::Ctx);

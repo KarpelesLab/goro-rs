@@ -111,9 +111,9 @@ impl<'v> Transform<'v> {
         let old_inst = self.inst;
         elem.borrow_mut().computing = true;
         let old_ctx_var = self.contextual_var.take();
-        let (select, tree, comp, name) = {
+        let (select, tree, comp) = {
             let e = elem.borrow();
-            (e.select.clone(), e.tree, e.comp.clone(), e.name.clone())
+            (e.select.clone(), e.tree, e.comp.clone())
         };
         let mut result = None;
         if let Some(sel) = select {
@@ -154,9 +154,10 @@ impl<'v> Transform<'v> {
                 self.xp.namespaces = saved.4;
                 if result.is_none() {
                     let inst = comp.as_ref().map(|c| c.inst);
+                    // elem->name is xsltComputingGlobalVarMarker meanwhile
                     self.error(
                         inst,
-                        &format!("Evaluating global variable {} failed\n", name),
+                        "Evaluating global variable  var/param being computed failed\n",
                     );
                     self.state = State::Stopped;
                 }

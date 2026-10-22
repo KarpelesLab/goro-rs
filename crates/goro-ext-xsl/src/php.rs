@@ -396,6 +396,21 @@ fn import_stylesheet(vm: &mut Vm, o: &Obj, a: &Args) -> R<Value> {
         if let Some(i) = t.doc_info_mut(nd) {
             i.url = url;
         }
+        // xmlStaticCopyNode() only keeps the line numbers of elements
+        let mut stack: Vec<NodeId> = t.nodes[nd].children.into_iter().collect();
+        while let Some(n) = stack.pop() {
+            if t.nodes[n].t != NType::Element {
+                t.nodes[n].line = 0;
+            }
+            if let Some(nx) = t.nodes[n].next {
+                stack.push(nx);
+            }
+            if t.nodes[n].t == NType::Element {
+                if let Some(c) = t.nodes[n].children {
+                    stack.push(c);
+                }
+            }
+        }
         nd
     });
     let Some(mut sheet) = Compiler::parse_stylesheet_doc(vm, newdoc) else {

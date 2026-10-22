@@ -41,6 +41,7 @@ pub fn call(t: &mut Transform, p: &mut PCtx, name: &str, nargs: usize) -> bool {
                 Some(XObj::Bool(_)) => "boolean",
                 Some(XObj::NodeSet(_)) => "node-set",
                 Some(XObj::Tree(_)) => "RTF",
+                Some(XObj::External(_)) => "external",
                 None => {
                     t.generic_error("object-type() invalid arg\n");
                     p.error = xpath::XPATH_INVALID_TYPE;

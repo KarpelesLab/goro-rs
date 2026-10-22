@@ -189,7 +189,7 @@ pub fn save_result_props(vm: &mut Vm, props: &OutProps, result: NodeId) -> Resul
                     let mut ctx =
                         SaveCtx::new(Some(dump_enc.as_deref().unwrap_or("UTF-8")), indent == 1);
                     ctx.level = 0;
-                    serialize::dump_node(t, &mut ctx, child);
+                    serialize::dump_node_output(t, &mut ctx, child);
                     out.push_str(&ctx.out);
                     let ct = t.nodes[child].t;
                     if indent != 0

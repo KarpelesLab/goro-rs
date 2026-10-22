@@ -73,19 +73,118 @@ fn compute_sort_result(
     Some(results)
 }
 
-/// A rough stand-in for strxfrm_l(): letters compare case-insensitively
-/// first (ties broken with lowercase first, as glibc locales do).
+/// The base letters and accent rank of a Latin character (a partial
+/// ISO 14651 decomposition).
+fn fold_char(c: char) -> (&'static str, u8) {
+    const TABLE: &[(char, &str, u8)] = &[
+        ('à', "a", 2),
+        ('á', "a", 1),
+        ('â', "a", 4),
+        ('ã', "a", 6),
+        ('ä', "a", 5),
+        ('å', "a", 7),
+        ('æ', "ae", 1),
+        ('ç', "c", 1),
+        ('è', "e", 2),
+        ('é', "e", 1),
+        ('ê', "e", 4),
+        ('ë', "e", 5),
+        ('ì', "i", 2),
+        ('í', "i", 1),
+        ('î', "i", 4),
+        ('ï', "i", 5),
+        ('ð', "d", 1),
+        ('ñ', "n", 6),
+        ('ò', "o", 2),
+        ('ó', "o", 1),
+        ('ô', "o", 4),
+        ('õ', "o", 6),
+        ('ö', "o", 5),
+        ('ø', "o", 8),
+        ('ù', "u", 2),
+        ('ú', "u", 1),
+        ('û', "u", 4),
+        ('ü', "u", 5),
+        ('ý', "y", 1),
+        ('ÿ', "y", 5),
+        ('þ', "th", 1),
+        ('ß', "ss", 1),
+        ('ā', "a", 3),
+        ('ă', "a", 9),
+        ('ą', "a", 10),
+        ('ć', "c", 2),
+        ('č', "c", 11),
+        ('ď', "d", 11),
+        ('đ', "d", 12),
+        ('ē', "e", 3),
+        ('ė', "e", 13),
+        ('ę', "e", 10),
+        ('ě', "e", 11),
+        ('ğ', "g", 9),
+        ('ī', "i", 3),
+        ('į', "i", 10),
+        ('ı', "i", 14),
+        ('ł', "l", 12),
+        ('ľ', "l", 11),
+        ('ĺ', "l", 1),
+        ('ń', "n", 1),
+        ('ň', "n", 11),
+        ('ō', "o", 3),
+        ('ő', "o", 15),
+        ('œ', "oe", 1),
+        ('ř', "r", 11),
+        ('ŕ', "r", 1),
+        ('ś', "s", 1),
+        ('š', "s", 11),
+        ('ş', "s", 16),
+        ('ť', "t", 11),
+        ('ţ', "t", 16),
+        ('ū', "u", 3),
+        ('ů', "u", 7),
+        ('ű', "u", 15),
+        ('ų', "u", 10),
+        ('ź', "z", 1),
+        ('ż', "z", 13),
+        ('ž', "z", 11),
+    ];
+    let lc = c.to_lowercase().next().unwrap_or(c);
+    for &(ch, base, rank) in TABLE {
+        if ch == lc {
+            return (base, rank);
+        }
+    }
+    ("", 0)
+}
+
+/// A stand-in for strxfrm_l() with a glibc (ISO 14651) locale: letters and
+/// digits compare first by base letter, then by accent, then by case
+/// (lowercase first); punctuation and spaces only break ties.
 fn collation_key(s: &str, _lang: &str) -> Vec<u8> {
-    let mut primary = Vec::new();
+    let mut primary = String::new();
+    let mut secondary = Vec::new();
     let mut tertiary = Vec::new();
     for c in s.chars() {
-        let lower: String = c.to_lowercase().collect();
-        primary.extend_from_slice(lower.as_bytes());
-        tertiary.push(if c.is_uppercase() { 1u8 } else { 0u8 });
+        if !c.is_alphanumeric() {
+            continue;
+        }
+        let (base, rank) = fold_char(c);
+        if base.is_empty() {
+            primary.extend(c.to_lowercase());
+            secondary.push(1u8);
+        } else {
+            primary.push_str(base);
+            secondary.extend(std::iter::repeat_n(rank + 1, base.len()));
+        }
+        tertiary.push(if c.is_uppercase() { 2u8 } else { 1u8 });
     }
-    primary.push(0);
-    primary.extend(tertiary);
-    primary
+    let mut key = primary.into_bytes();
+    key.push(0);
+    key.extend(secondary);
+    key.push(0);
+    key.extend(tertiary);
+    key.push(0);
+    key.extend_from_slice(s.as_bytes());
+    key
 }
 
 fn cmp_keys(a: &Key, b: &Key) -> i32 {

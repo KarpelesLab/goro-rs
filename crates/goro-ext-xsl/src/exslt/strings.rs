@@ -175,7 +175,8 @@ fn split(t: &mut Transform, p: &mut PCtx, nargs: usize) {
 pub fn uri_escape(s: &str, list: &[u8]) -> String {
     let mut out = String::new();
     for &c in s.as_bytes() {
-        if c.is_ascii_alphanumeric() || list.contains(&c) {
+        if c == b'@' || c.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&c) || list.contains(&c)
+        {
             out.push(c as char);
         } else {
             out.push_str(&format!("%{:02X}", c));

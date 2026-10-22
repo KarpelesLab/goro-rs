@@ -93,6 +93,8 @@ pub enum XObj {
     Num(f64),
     Str(String),
     Tree(Vec<NodeId>),
+    /// XPATH_USERS: an external object (saxon:expression() results)
+    External(Rc<CompExpr>),
 }
 
 impl XObj {
@@ -115,6 +117,7 @@ impl XObj {
             XObj::Num(_) => 3,
             XObj::Str(_) => 4,
             XObj::Tree(_) => 9,
+            XObj::External(_) => 8,
         }
     }
 }
@@ -1581,6 +1584,7 @@ pub fn cast_to_string(v: &XObj) -> String {
         XObj::Str(s) => s.clone(),
         XObj::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         XObj::Num(n) => number_to_string(*n),
+        XObj::External(_) => String::new(),
     }
 }
 
@@ -1597,6 +1601,7 @@ pub fn cast_to_number(v: &XObj) -> f64 {
             }
         }
         XObj::Num(n) => *n,
+        XObj::External(_) => f64::NAN,
     }
 }
 
@@ -1607,6 +1612,7 @@ pub fn cast_to_boolean(v: &XObj) -> bool {
         XObj::Str(s) => !s.is_empty(),
         XObj::Num(n) => !(n.is_nan() || *n == 0.0),
         XObj::Bool(b) => *b,
+        XObj::External(_) => false,
     }
 }
 
@@ -2204,6 +2210,7 @@ fn evaluate_predicate_result<H: Host + ?Sized>(h: &mut H, res: &XObj) -> bool {
         XObj::Num(n) => *n == h.xp().pos as f64,
         XObj::NodeSet(v) | XObj::Tree(v) => !v.is_empty(),
         XObj::Str(s) => !s.is_empty(),
+        XObj::External(_) => false,
     }
 }
 
@@ -3080,6 +3087,7 @@ fn eq_impl<H: Host + ?Sized>(h: &mut H, p: &mut PCtx, neq: bool) -> bool {
             }
             XObj::Num(f) => equal_node_set_float(&ns1, *f, neq),
             XObj::Str(s) => equal_node_set_string(&ns1, s, neq),
+            XObj::External(_) => false,
         };
     }
     let r = equal_values_common(&a1, &a2);
@@ -3197,6 +3205,7 @@ fn compare_node_set_value<H: Host + ?Sized>(
             p.push(XObj::Bool(b));
             compare_values(h, p, inf, strict)
         }
+        XObj::External(_) => false,
     }
 }
 

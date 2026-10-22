@@ -182,6 +182,16 @@ impl DecimalFormat {
     }
 }
 
+/// An attribute set being resolved (ATTRSET_RESOLVING), as nested
+/// lookups see it.
+fn placeholder(set: &AttrSet) -> AttrSet {
+    AttrSet {
+        state: 1,
+        attrs: set.attrs.clone(),
+        use_attr_sets: Vec::new(),
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct AttrSet {
     /// 0 unresolved, 1 resolving, 2 resolved
@@ -484,7 +494,9 @@ impl<'a> Compiler<'a> {
 
     /// xsltParseStylesheetUser
     fn parse_stylesheet_user(&mut self, s: usize, doc: NodeId) -> Result<(), ()> {
-        self.gather_namespaces(s, doc);
+        // xsltGatherNamespaces(style) runs before style->doc is set in
+        // libxslt 1.1.45: it never finds the root element, so style->nsHash
+        // stays NULL (ext/xsl fills it for modern DOM documents).
         self.sheet.styles[s].doc = doc;
         if self.parse_stylesheet_process(s, doc).is_none() {
             return Err(());
@@ -499,6 +511,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// xsltGatherNamespaces: warn about a prefix bound to several URIs.
+    #[allow(dead_code)]
     fn gather_namespaces(&mut self, s: usize, doc: NodeId) {
         let mut hash: HashMap<String, String> = HashMap::new();
         let nodes: Vec<(NodeId, Vec<(String, String)>)> = tw(|t| {
@@ -1694,6 +1707,10 @@ impl<'a> Compiler<'a> {
                 let key = (ncname.clone(), ns.clone());
                 if self.sheet.styles[c].attribute_sets.contains_key(&key) {
                     let mut other = self.sheet.styles[c].attribute_sets.remove(&key).unwrap();
+                    // the set stays visible (as being resolved) to nested lookups
+                    self.sheet.styles[c]
+                        .attribute_sets
+                        .insert(key.clone(), placeholder(&other));
                     self.resolve_attr_set(&mut other, top, c, &ncname, ns.as_deref(), depth + 1);
                     self.merge_attr_sets(set, &other);
                     self.sheet.styles[c].attribute_sets.insert(key, other);
@@ -1778,7 +1795,13 @@ impl<'a> Compiler<'a> {
                     Some(x) => x,
                     None => continue,
                 };
+                self.sheet.styles[c]
+                    .attribute_sets
+                    .insert(key.clone(), placeholder(&set));
                 self.resolve_attr_set(&mut set, top, c, &key.0, key.1.as_deref(), 1);
+                if c != top {
+                    self.sheet.styles[c].attribute_sets.remove(&key);
+                }
                 if c == top {
                     self.sheet.styles[c]
                         .attribute_sets
