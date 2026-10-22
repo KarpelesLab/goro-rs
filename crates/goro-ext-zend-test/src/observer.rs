@@ -170,6 +170,8 @@ struct Func {
     file: String,
     key: Option<String>,
     internal: bool,
+    /// A builtin (native) function: its frame is not on the call stack.
+    builtin: bool,
 }
 
 fn describe(vm: &Vm, frame: &ObservedFrame) -> Func {
@@ -179,6 +181,7 @@ fn describe(vm: &Vm, frame: &ObservedFrame) -> Func {
             file: String::new(),
             key: Some(name.to_ascii_lowercase()),
             internal: true,
+            builtin: true,
         },
         ObservedFrame::User(op) => user_func(vm, op),
     }
@@ -197,6 +200,7 @@ fn user_func(vm: &Vm, op: &OpArray) -> Func {
             file,
             key: None,
             internal: false,
+            builtin: false,
         };
     }
     let fname = if op.name.starts_with(b"{closure") || op.name.starts_with(b"__closure") {
@@ -226,6 +230,7 @@ fn user_func(vm: &Vm, op: &OpArray) -> Func {
         file,
         key: Some(key),
         internal: op.internal_sig.is_some(),
+        builtin: false,
     }
 }
 
@@ -318,7 +323,11 @@ fn fcall_init(vm: &mut Vm, f: &Func) -> bool {
 /// observer_show_init_backtrace(): the function being initialized and its
 /// callers, innermost first.
 fn init_backtrace(vm: &mut Vm, f: &Func, depth: usize) {
-    vm.sync_builtin_frames();
+    // (not the builtin being initialized: its frame is not shown twice
+    // when it prints a backtrace itself)
+    if !f.builtin {
+        vm.sync_builtin_frames();
+    }
     let pad = indent(depth);
     let inner = " ".repeat(2 * depth + 4);
     let mut out = format!("{}<!--\n", pad);
@@ -326,7 +335,7 @@ fn init_backtrace(vm: &mut Vm, f: &Func, depth: usize) {
         out.push_str(&format!("{}{}()\n", inner, n));
     }
     // The function's own frame is on the call stack already.
-    let skip = usize::from(f.name.is_some());
+    let skip = usize::from(f.name.is_some() && !f.builtin);
     for (name, _, _, _, _) in vm.call_stack.iter().rev().skip(skip) {
         let n = name.replace("->", "::");
         match n.as_str() {
