@@ -35843,6 +35843,15 @@ impl Vm {
                         if let OperandType::Tmp(t) = op.result {
                             let h = self.foreach_iterator_handle();
                             foreach_iter_handles.insert(t, h);
+                            // The iterator now owns a temporary generator
+                            // (FE_RESET frees op1).
+                            if let OperandType::Tmp(src) = op.op1 {
+                                if src != t {
+                                    if let Some(slot) = tmps.get_mut(src as usize) {
+                                        *slot = Value::Undef;
+                                    }
+                                }
+                            }
                         }
                     } else if let Value::Object(obj) = &arr_val {
                         let class_lower: Vec<u8> = obj
@@ -36138,6 +36147,15 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
+                            // The iterator now owns a temporary operand
+                            // (FE_RESET frees op1).
+                            if let (OperandType::Tmp(src), OperandType::Tmp(t)) = (op.op1, op.result) {
+                                if src != t {
+                                    if let Some(slot) = tmps.get_mut(src as usize) {
+                                        *slot = Value::Undef;
+                                    }
+                                }
+                            }
                         } else {
                             // Plain object: trigger lazy init and convert
                             // properties to an array for iteration.
