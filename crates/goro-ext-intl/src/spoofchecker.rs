@@ -184,7 +184,7 @@ impl Spoof {
     }
 }
 
-fn is_soft_dotted(c: char) -> bool {
+pub fn is_soft_dotted(c: char) -> bool {
     matches!(
         c as u32,
         0x69 | 0x6A

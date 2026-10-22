@@ -565,6 +565,10 @@ pub fn register(vm: &mut Vm) {
         names.push(k.as_bytes().to_vec());
     }
     vm.module_constants.push((NAME.to_vec(), names));
+    vm.internal_deprecated_constants.insert(
+        b"U_MULTIPLE_DECIMAL_SEPERATORS".to_vec(),
+        "Constant U_MULTIPLE_DECIMAL_SEPERATORS is deprecated since 8.3, use U_MULTIPLE_DECIMAL_SEPARATORS instead".to_string(),
+    );
     for (c, list) in consts::CLASSES {
         let l: Vec<(Vec<u8>, Value, Option<String>)> = list
             .iter()
