@@ -28,6 +28,10 @@ thread_local! {
     /// and cleared after, so the coroutine body can reach the VM
     /// without going through a Rust borrow (which would alias).
     static CURRENT_VM_PTR: Cell<*mut Vm> = const { Cell::new(std::ptr::null_mut()) };
+    /// The built-in class whose native constructor an internal class's
+    /// `__construct` call resolves to (only depends on the stubs).
+    static NEAREST_BUILTIN_CTOR: RefCell<crate::fxhash::FxHashMap<Vec<u8>, Vec<u8>>> =
+        RefCell::new(Default::default());
 }
 
 pub(crate) fn current_vm_ptr() -> *mut Vm {
@@ -25737,13 +25741,26 @@ impl Vm {
                                             ce.parent.is_none()
                                                 && ce.name.eq_ignore_ascii_case(&raw_class_lower)
                                         });
-                                    let class_lower: Vec<u8> = if is_root_class
+                                    // An internal class's ancestor only depends on the
+                                    // stubs: computed once.
+                                    let internal = !self.classes.contains_key(&raw_class_lower);
+                                    let cached = if internal {
+                                        NEAREST_BUILTIN_CTOR
+                                            .with(|c| c.borrow().get(&raw_class_lower).cloned())
+                                    } else {
+                                        None
+                                    };
+                                    let was_cached = cached.is_some();
+                                    let class_lower: Vec<u8> = if let Some(c) = cached {
+                                        c
+                                    } else if is_root_class
                                         || matches!(
                                             raw_class_lower.as_slice(),
                                             b"arrayobject"
                                                 | b"arrayiterator"
                                                 | b"recursivearrayiterator"
-                                        ) {
+                                        )
+                                    {
                                         raw_class_lower.clone()
                                     } else if self.class_extends(&raw_class_lower, b"arrayobject") {
                                         b"arrayobject".to_vec()
@@ -25806,6 +25823,14 @@ impl Vm {
                                     } else {
                                         raw_class_lower.clone()
                                     };
+                                    if internal && !was_cached {
+                                        NEAREST_BUILTIN_CTOR.with(|c| {
+                                            c.borrow_mut().insert(
+                                                raw_class_lower.clone(),
+                                                class_lower.clone(),
+                                            )
+                                        });
+                                    }
 
                                     // Extension-registered native constructor handlers (e.g. GMP),
                                     // also reached from user subclasses of the class.

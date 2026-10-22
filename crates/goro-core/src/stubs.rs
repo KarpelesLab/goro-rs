@@ -344,10 +344,35 @@ pub fn class_methods(name: &[u8]) -> Vec<(&'static StubClass, &'static StubFunc)
 
 /// Find a method of an internal class (including inherited ones).
 pub fn find_method(class: &[u8], method: &[u8]) -> Option<(&'static StubClass, &'static StubFunc)> {
-    let ml = lower_str(method);
-    class_methods(class)
-        .into_iter()
-        .find(|(_, m)| m.name.eq_ignore_ascii_case(&ml))
+    // The first match in class_methods()' order (the class, then its
+    // parent's chain and interfaces, depth first), without building the
+    // whole list.
+    fn search(
+        c: &'static StubClass,
+        method: &[u8],
+        depth: usize,
+    ) -> Option<(&'static StubClass, &'static StubFunc)> {
+        if depth > 32 {
+            return None;
+        }
+        if let Some(m) = c
+            .methods
+            .iter()
+            .find(|m| m.name.as_bytes().eq_ignore_ascii_case(method))
+        {
+            return Some((c, m));
+        }
+        if let Some(p) = c.parent.and_then(|p| find_class(p.as_bytes())) {
+            if let Some(r) = search(p, method, depth + 1) {
+                return Some(r);
+            }
+        }
+        c.interfaces
+            .iter()
+            .filter_map(|i| find_class(i.as_bytes()))
+            .find_map(|ic| search(ic, method, depth + 1))
+    }
+    search(find_class(class)?, method, 0)
 }
 
 /// All interfaces implemented by an internal class (transitively), in
