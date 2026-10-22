@@ -16,7 +16,7 @@ extensions run the official php-src test suite.
 | Total tests | 21582 (the generic PDO tests run once per driver) |
 | Pass | 18106 (83.9% of all, **96.7% of runnable**) |
 | Fail | 603 |
-| Skip | 2852 (mostly extensions not implemented yet: gd, ldap, ffi, sqlite3, dba, tidy, odbc, …; plus opcache-only and Windows-only tests) |
+| Skip | 2852 (mostly extensions not implemented yet: ldap, ffi, sqlite3, dba, tidy, odbc, …; plus opcache-only and Windows-only tests) |
 | Error | 10 |
 | XFail / XPass | 11 / 1 |
 
@@ -36,6 +36,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 847 | 850 | 99.6% |
 | ext/simplexml / xml / xmlreader / xmlwriter / libxml | 337 | 344 | 98.0% |
 | ext/soap | 574 | 576 | 99.7% |
+| ext/gd (bundled libgd port; PNG/GIF/JPEG/WebP/AVIF/BMP/TGA/XBM/XPM/WBMP/GD2, FreeType) | 308 | 308 | 100% |
 | ext/xsl (libxslt + libexslt port) | 76 | 76 | 100% |
 | ext/mbstring | 415 | 415 | 100% |
 | ext/intl (on the `intl` crate) | 413 | 427 | 96.7% |
@@ -95,10 +96,11 @@ Highlights beyond the core language:
   exif, fileinfo (libmagic 5.46 port with the bundled magic database), uri (RFC 3986 + WHATWG URL),
   intl (on the [intl](https://crates.io/crates/intl) crate), xsl (an XSLT 1.0 processor ported
   from libxslt 1.1.45 with all of EXSLT; it matches libxslt on its own test suite and the DocBook
-  stylesheets), zend_test.
+  stylesheets), gd (port of the bundled libgd with byte-identical PNG/GIF/JPEG output; FreeType
+  text on skrifa, WebP/AVIF on the OxideAV codecs), zend_test.
 
 ### Not Yet Implemented
-- pdo_sqlite/…, ffi, ldap, sqlite3, dba, tidy, odbc, snmp, enchant, readline (in progress: gd)
+- pdo_sqlite/…, ffi, ldap, sqlite3, dba, tidy, odbc, snmp, enchant, readline
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
 - Exact opcache optimizer behaviour
 
@@ -140,6 +142,7 @@ Workspace crates:
 - `goro-ext-pdo` - PDO (ext/pdo) and the MySQL and PostgreSQL drivers (ext/pdo_mysql, ext/pdo_pgsql)
 - `goro-ext-pgsql` - ext/pgsql over `libpq`, a pure-Rust port of PostgreSQL's client library
 - `goro-ext-soap` - SOAP client and server (ext/soap)
+- `goro-ext-gd` - GD image functions (ext/gd) on `goro-gd`, a pure Rust port of the bundled libgd
 - `goro-ext-xsl` - XSLTProcessor (ext/xsl): XSLT 1.0, XPath 1.0 and EXSLT, a port of libxslt/libexslt
 - `goro-ext-sysvipc` - shmop, sysvsem, sysvshm and sysvmsg
 - `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,sodium,xml,zlib}` - misc extensions
