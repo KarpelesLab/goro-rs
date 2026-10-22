@@ -193,6 +193,16 @@ impl Vm {
                 self.current_exception = Some(e);
                 return Err(());
             }
+            *r.borrow_mut() = value;
+            return Ok(());
+        }
+        // zval_ptr_safe_dtor(): the reference reads NULL while the old
+        // value's destructor runs.
+        let old = std::mem::replace(&mut *r.borrow_mut(), Value::Null);
+        let releases = matches!(old, Value::Object(_) | Value::Array(_));
+        drop(old);
+        if releases && self.has_release_work() {
+            self.run_pending_destructors_pub();
         }
         *r.borrow_mut() = value;
         Ok(())

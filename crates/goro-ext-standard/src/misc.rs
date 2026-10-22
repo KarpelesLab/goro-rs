@@ -13995,11 +13995,12 @@ fn setrawcookie_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn headers_sent_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let (file, line) = vm.output_start.clone().unwrap_or_default();
-    if let Some(Value::Reference(r)) = args.first() {
-        *r.borrow_mut() = Value::String(PhpString::from_string(file));
-    }
+    // (the line first, like php-src)
     if let Some(Value::Reference(r)) = args.get(1) {
-        *r.borrow_mut() = Value::Long(line as i64);
+        let _ = vm.try_assign_ref(r, Value::Long(line as i64));
+    }
+    if let Some(Value::Reference(r)) = args.first() {
+        let _ = vm.try_assign_ref(r, Value::String(PhpString::from_string(file)));
     }
     Ok(if vm.headers_sent {
         Value::True
