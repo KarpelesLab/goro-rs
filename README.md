@@ -53,7 +53,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/phar (phar, tar, zip formats) | 534 | 542 | 98.5% |
 | ext/zip (libzip port) / exif / fileinfo (libmagic port) | 264 | 265 | 99.6% |
 | ext/json | 88 | 88 | 100% |
-| ext/bcmath / filter / gmp | 377 | 380 | 99.2% |
+| ext/bcmath / filter / gmp (on puremp) | 379 | 380 | 99.7% |
 | ext/ctype / tokenizer | 102 | 102 | 100% |
 | ext/uri (uriparser port + lexbor WHATWG URL parser port) | 309 | 309 | 100% |
 | ext/posix / pcntl / calendar / ftp / gettext / shmop / sysv* | 254 | 254 | 100% |
@@ -89,7 +89,7 @@ Highlights beyond the core language:
   reflection, session, dom/simplexml/xml/xmlreader/xmlwriter (libxml2-style tree, lexbor
   HTML5 parser port), openssl (on [purecrypto](https://crates.io/crates/purecrypto)),
   mysqli (mysqlnd port), pgsql (libpq port: SCRAM/MD5 auth, TLS, COPY, async, large objects),
-  PDO with pdo_mysql (over the same mysqlnd) and pdo_pgsql (over the same libpq), gmp, sockets, curl, bz2, tokenizer,
+  PDO with pdo_mysql (over the same mysqlnd) and pdo_pgsql (over the same libpq), gmp (on [puremp](https://crates.io/crates/puremp), with GMP's exact Mersenne Twister streams), sockets, curl, bz2, tokenizer,
   bcmath (libbcmath port), filter, iconv (glibc iconv emulation), calendar, posix,
   pcntl (fork, signals with async dispatch), ftp (with FTPS), shmop/sysvsem/sysvshm/sysvmsg,
   gettext (libintl emulation reading .mo catalogs), sodium (libsodium API on purecrypto,
