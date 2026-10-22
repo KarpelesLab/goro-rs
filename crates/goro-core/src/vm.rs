@@ -20273,12 +20273,20 @@ impl Vm {
                     // via PhpObject::drop when Rc<...> hits zero. Pushing here
                     // as well caused duplicates in the free pool and silent
                     // object-id collisions (e.g. catch-reusing `$e`).
-                    self.write_operand(&op.op1, val.clone(), &mut cvs, &mut tmps, &static_cv_keys);
+                    // A temporary operand is moved into the variable (Zend's
+                    // ZEND_ASSIGN of a TMP: no copy, no possible root).
                     if let OperandType::Tmp(idx) = op.op2 {
                         if let Some(slot) = tmps.get_mut(idx as usize) {
                             *slot = Value::Undef;
                         }
                     }
+                    let keep = matches!(op.result, OperandType::Tmp(_));
+                    let stored_val = if keep {
+                        val.clone()
+                    } else {
+                        std::mem::replace(&mut val, Value::Undef)
+                    };
+                    self.write_operand(&op.op1, stored_val, &mut cvs, &mut tmps, &static_cv_keys);
                     if !foreach_iter_handles.is_empty() {
                         if let OperandType::Tmp(idx) = op.op1 {
                             // FE_FREE of an iterator tmp releases its handle.
@@ -57119,8 +57127,12 @@ impl Vm {
         match operand {
             OperandType::Cv(idx) => {
                 // PHP copy-on-write: when assigning an array to a CV,
-                // clone the inner PhpArray so each variable has its own copy.
-                let value = self.dup_array_value(value);
+                // clone the inner PhpArray so each variable has its own copy
+                // (a temporary only held here is moved).
+                let value = match &value {
+                    Value::Array(a) if Rc::strong_count(a) == 1 => value,
+                    _ => self.dup_array_value(value),
+                };
 
                 if let Some(slot) = cvs.get_mut(*idx as usize) {
                     // If the CV holds a reference, write through the reference
