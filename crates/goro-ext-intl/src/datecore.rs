@@ -2,15 +2,30 @@
 //! (calendar.rs, timezone.rs) and IntlDateFormatter, MessageFormatter
 //! (dateformat.rs, msgformat.rs): ICU's Calendar / TimeZone services.
 //!
-//! This is the contract between those modules. It is OWNED by the
-//! calendar/timezone implementation, which replaces the placeholder bodies
-//! (UTC-only proleptic Gregorian) with real ones; the signatures are kept
-//! (extend them additively) so that the formatters can rely on them.
+//! This is the contract between those modules. The engine lives in the
+//! submodules: [`zone`] (TimeZone: system zones over ext/date's timezonedb,
+//! custom zones, ICU metadata), [`cal`] (a port of ICU's Calendar /
+//! GregorianCalendar field engine and the other calendar systems) and
+//! [`names`] (TimeZone::getDisplayName()).
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use goro_core::array::PhpArray;
 use goro_core::value::Value;
 use goro_core::vm::Vm;
 
 use crate::Obj;
+use crate::error::{self, IntlError, U_ILLEGAL_ARGUMENT_ERROR};
+
+pub mod cal;
+pub(crate) mod data;
+pub mod islamic;
+pub mod names;
+pub mod zone;
+
+pub use cal::{CalType, Calendar, WeekData};
+pub use zone::Zone;
 
 /// ICU calendar field indices (UCalendarDateFields / IntlCalendar::FIELD_*).
 pub const ERA: usize = 0;
@@ -61,75 +76,106 @@ pub struct CalInfo {
 impl CalInfo {
     /// A gregorian calendar in `tz_id` for `locale` at `millis`.
     pub fn gregorian(millis: f64, tz_id: &str, locale: &str) -> CalInfo {
+        let w = week_data(locale);
         CalInfo {
             millis,
             tz_id: tz_id.to_string(),
             cal_type: "gregorian".to_string(),
             locale: locale.to_string(),
-            first_day_of_week: 1,
-            minimal_days_in_first_week: 1,
+            first_day_of_week: w.first_day,
+            minimal_days_in_first_week: w.min_days,
             lenient: true,
             gregorian_change: -12219292800000.0,
+        }
+    }
+
+    /// Calendar::createInstance(zone, locale) at `millis`: the calendar
+    /// type and week data of the locale.
+    pub fn for_locale(millis: f64, tz_id: &str, locale: &str) -> CalInfo {
+        let mut i = CalInfo::gregorian(millis, tz_id, locale);
+        i.cal_type = locale_cal_type(locale);
+        if i.cal_type == "iso8601" {
+            i.first_day_of_week = 2;
+            i.minimal_days_in_first_week = 4;
+        }
+        i
+    }
+
+    /// The ICU calendar these settings describe, its time set.
+    pub fn to_calendar(&self) -> Calendar {
+        let mut c = new_calendar_raw(
+            &self.cal_type,
+            zone::create_or_unknown(&self.tz_id),
+            &self.locale,
+        );
+        c.first_day = self.first_day_of_week;
+        c.min_days = self.minimal_days_in_first_week;
+        c.lenient = self.lenient;
+        if self.gregorian_change != c.cutover {
+            let _ = c.set_gregorian_change(self.gregorian_change);
+        }
+        let _ = c.set_time(self.millis);
+        c
+    }
+
+    /// The settings and instant of a calendar (pending fields resolved).
+    pub fn from_calendar(c: &mut Calendar) -> CalInfo {
+        let millis = c.get_time().unwrap_or(f64::NAN);
+        CalInfo {
+            millis,
+            tz_id: c.zone.id.clone(),
+            cal_type: c.type_name().to_string(),
+            locale: c.locale.clone(),
+            first_day_of_week: c.first_day,
+            minimal_days_in_first_week: c.min_days,
+            lenient: c.lenient,
+            gregorian_change: c.cutover,
         }
     }
 }
 
 /// The fields of `info` at its instant, indexed by the constants above.
 pub fn compute_fields(info: &CalInfo) -> [i32; FIELD_COUNT] {
-    let (raw, dst) = tz_offsets(&info.tz_id, info.millis);
-    let local = info.millis + (raw + dst) as f64;
-    let days = (local / 86_400_000.0).floor() as i64;
-    let ms_in_day = (local - days as f64 * 86_400_000.0) as i64;
-    let (y, m, d) = civil_from_days(days);
+    let mut c = info.to_calendar();
     let mut f = [0i32; FIELD_COUNT];
-    f[ERA] = if y > 0 { 1 } else { 0 };
-    f[YEAR] = if y > 0 { y as i32 } else { (1 - y) as i32 };
-    f[EXTENDED_YEAR] = y as i32;
-    f[MONTH] = (m - 1) as i32;
-    f[DATE] = d as i32;
-    let doy = days - days_from_civil(y, 1, 1) + 1;
-    f[DAY_OF_YEAR] = doy as i32;
-    f[DAY_OF_WEEK] = ((days + 4).rem_euclid(7) + 1) as i32;
-    f[DOW_LOCAL] = (f[DAY_OF_WEEK] - info.first_day_of_week).rem_euclid(7) + 1;
-    f[DAY_OF_WEEK_IN_MONTH] = ((d - 1) / 7 + 1) as i32;
-    f[HOUR_OF_DAY] = (ms_in_day / 3_600_000) as i32;
-    f[AM_PM] = if f[HOUR_OF_DAY] >= 12 { 1 } else { 0 };
-    f[HOUR] = f[HOUR_OF_DAY] % 12;
-    f[MINUTE] = ((ms_in_day / 60_000) % 60) as i32;
-    f[SECOND] = ((ms_in_day / 1000) % 60) as i32;
-    f[MILLISECOND] = (ms_in_day % 1000) as i32;
-    f[MILLISECONDS_IN_DAY] = ms_in_day as i32;
-    f[ZONE_OFFSET] = raw;
-    f[DST_OFFSET] = dst;
-    f[JULIAN_DAY] = (days + 2_440_588) as i32;
-    f[WEEK_OF_YEAR] = ((doy - 1) / 7 + 1) as i32;
-    f[YEAR_WOY] = y as i32;
-    f[WEEK_OF_MONTH] = ((d - 1) / 7 + 1) as i32;
+    if c.complete().is_ok() {
+        for (i, v) in f.iter_mut().enumerate() {
+            *v = c.raw_field(i);
+        }
+    }
     f
 }
 
-/// The instant of local fields (YEAR/EXTENDED_YEAR, MONTH, DATE, HOUR_OF_DAY,
+/// The instant of local fields (EXTENDED_YEAR, MONTH, DATE, HOUR_OF_DAY,
 /// MINUTE, SECOND, MILLISECOND) in `info`'s calendar and zone.
 pub fn fields_to_millis(info: &CalInfo, f: &[i32; FIELD_COUNT]) -> f64 {
-    let days = days_from_civil(f[EXTENDED_YEAR] as i64, f[MONTH] as i64 + 1, f[DATE] as i64);
-    let local = days as f64 * 86_400_000.0
-        + f[HOUR_OF_DAY] as f64 * 3_600_000.0
-        + f[MINUTE] as f64 * 60_000.0
-        + f[SECOND] as f64 * 1000.0
-        + f[MILLISECOND] as f64;
-    let (raw, dst) = tz_offsets(&info.tz_id, local);
-    local - (raw + dst) as f64
+    let mut c = info.to_calendar();
+    c.clear_all();
+    for i in [
+        EXTENDED_YEAR,
+        MONTH,
+        DATE,
+        HOUR_OF_DAY,
+        MINUTE,
+        SECOND,
+        MILLISECOND,
+    ] {
+        c.set(i, f[i]);
+    }
+    c.get_time().unwrap_or(f64::NAN)
 }
 
 /// The raw and DST offsets (ms) of zone `tz_id` at `millis` (UTC).
-pub fn tz_offsets(_tz_id: &str, _millis: f64) -> (i32, i32) {
-    (0, 0)
+pub fn tz_offsets(tz_id: &str, millis: f64) -> (i32, i32) {
+    zone::create_or_unknown(tz_id)
+        .offsets(millis)
+        .unwrap_or((0, 0))
 }
 
 /// ICU's canonical ID of a time zone ID ("GMT+1" -> "GMT+01:00", links
 /// resolved, case fixed), None when ICU does not know it.
 pub fn canonical_tz_id(id: &str) -> Option<String> {
-    Some(id.to_string())
+    zone::canonical_id(id).map(|(c, _)| c)
 }
 
 /// The default time zone ID (date.timezone / date_default_timezone_get()).
@@ -140,9 +186,24 @@ pub fn default_tz_id(vm: &Vm) -> String {
     }
 }
 
+/// get_timezone_info()->name: PHP's default time zone (date.timezone or
+/// date_default_timezone_set()).
+pub fn php_default_tz(vm: &mut Vm) -> String {
+    let had_exc = vm.current_exception.is_some();
+    let r = vm.call_callback(&crate::s("date_default_timezone_get"), &[]);
+    if !had_exc && vm.current_exception.is_some() {
+        vm.current_exception = None;
+    }
+    match r {
+        Ok(Value::String(s)) if !s.as_bytes().is_empty() => s.to_string_lossy(),
+        _ => default_tz_id(vm),
+    }
+}
+
 /// TimeZone::getDisplayName(): `style` is IntlTimeZone::DISPLAY_*.
-pub fn tz_display_name(tz_id: &str, _daylight: bool, _style: i64, _locale: &str) -> String {
-    tz_id.to_string()
+pub fn tz_display_name(tz_id: &str, daylight: bool, style: i64, locale: &str) -> String {
+    let z = zone::create_or_unknown(tz_id);
+    names::display_name(&z, daylight, style, locale)
 }
 
 /// timezone_process_timezone_argument(): the time zone ID a `$timezone`
@@ -152,45 +213,51 @@ pub fn tz_display_name(tz_id: &str, _daylight: bool, _style: i64, _locale: &str)
 /// function name.
 #[allow(clippy::result_unit_err)]
 pub fn tz_from_arg(vm: &mut Vm, v: &Value, func: &str) -> Result<String, ()> {
-    let _ = func;
-    match v {
-        Value::Null | Value::Undef => Ok(default_tz_id(vm)),
-        Value::String(s) => Ok(s.to_string_lossy()),
-        _ => Ok("UTC".to_string()),
-    }
+    zone_from_arg(vm, v, func, None).map(|z| z.id.clone())
 }
 
 /// A new IntlTimeZone object for `tz_id`.
 pub fn new_tz_object(vm: &mut Vm, tz_id: &str) -> Option<Obj> {
-    let _ = (vm, tz_id);
-    None
+    let z = zone::create_or_unknown(tz_id);
+    new_tz_object_zone(vm, z)
 }
 
 /// The time zone ID of an IntlTimeZone object.
 pub fn tz_object_id(o: &Obj) -> Option<String> {
-    let _ = o;
-    None
+    tz_object_zone(o).map(|z| z.id.clone())
 }
 
 /// A new IntlCalendar object (class from `info.cal_type`: IntlGregorianCalendar
 /// for gregorian) holding `info`.
 pub fn new_cal_object(vm: &mut Vm, info: &CalInfo) -> Option<Obj> {
-    let _ = (vm, info);
-    None
+    new_cal_object_from(vm, info.to_calendar())
 }
 
 /// The settings and instant of an IntlCalendar object (None if not an
 /// initialized IntlCalendar).
 pub fn cal_object_info(o: &Obj) -> Option<CalInfo> {
-    let _ = o;
-    None
+    let st = crate::obj::state::<CalState>(o)?;
+    let mut b = st.borrow_mut();
+    let c = b.cal.as_mut()?;
+    Some(CalInfo::from_calendar(c))
 }
 
 /// The default calendar type of a locale ("gregorian", or the
-/// @calendar=... keyword).
+/// @calendar=... keyword, or the region's preferred calendar).
 pub fn locale_cal_type(locale: &str) -> String {
-    match locale.split_once("@calendar=") {
-        Some((_, c)) => c.split(';').next().unwrap_or("gregorian").to_string(),
+    if let Some(k) = locale_keyword(locale, "calendar") {
+        let k = k.to_ascii_lowercase();
+        if let Some(t) = CalType::from_name(&k) {
+            return t.name().to_string();
+        }
+    }
+    let region = locale_region(locale);
+    let prefs = data::CAL_PREFS
+        .iter()
+        .find(|(r, _)| *r == region)
+        .or_else(|| data::CAL_PREFS.iter().find(|(r, _)| *r == "001"));
+    match prefs.and_then(|(_, p)| p.first()) {
+        Some(p) => p.to_string(),
         None => "gregorian".to_string(),
     }
 }
@@ -219,3 +286,510 @@ pub fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
+
+// ---------------------------------------------------------------------------
+// Object states
+
+/// The native state of an IntlTimeZone object (TimeZone_object).
+#[derive(Default)]
+pub struct TzState {
+    pub zone: Option<Rc<Zone>>,
+    pub err: IntlError,
+}
+
+/// The native state of an IntlCalendar object (Calendar_object).
+#[derive(Default)]
+pub struct CalState {
+    pub cal: Option<Calendar>,
+    pub err: IntlError,
+}
+
+/// The zone of an IntlTimeZone object (None: not constructed).
+pub fn tz_object_zone(o: &Obj) -> Option<Rc<Zone>> {
+    crate::obj::state::<TzState>(o)?.borrow().zone.clone()
+}
+
+/// timezone_object_construct(): a new IntlTimeZone object for `z`.
+pub fn new_tz_object_zone(vm: &mut Vm, z: Rc<Zone>) -> Option<Obj> {
+    let o = crate::obj::object_init_ex(vm, b"intltimezone")?;
+    if let Some(st) = crate::obj::state::<TzState>(&o) {
+        st.borrow_mut().zone = Some(z);
+    }
+    Some(o)
+}
+
+/// calendar_object_create(): a new IntlCalendar (IntlGregorianCalendar
+/// for the gregorian type) object holding `c`.
+pub fn new_cal_object_from(vm: &mut Vm, c: Calendar) -> Option<Obj> {
+    let class: &[u8] = if c.cal_type == CalType::Gregorian {
+        b"intlgregoriancalendar"
+    } else {
+        b"intlcalendar"
+    };
+    let o = new_object_no_ctor_check(vm, class)?;
+    if let Some(st) = crate::obj::state::<CalState>(&o) {
+        st.borrow_mut().cal = Some(c);
+    }
+    Some(o)
+}
+
+/// object_init_ex() of an abstract-less intl class (IntlCalendar is not
+/// abstract, its constructor is private).
+fn new_object_no_ctor_check(vm: &mut Vm, class: &[u8]) -> Option<Obj> {
+    crate::obj::object_init_ex(vm, class)
+}
+
+// ---------------------------------------------------------------------------
+// Locales
+
+/// The value of keyword `key` of an ICU locale ID ("@calendar=...;...").
+pub fn locale_keyword(locale: &str, key: &str) -> Option<String> {
+    let (_, kw) = locale.split_once('@')?;
+    for part in kw.split(';') {
+        if let Some((k, v)) = part.split_once('=') {
+            if k.trim().eq_ignore_ascii_case(key) {
+                return Some(v.trim().to_string());
+            }
+        }
+    }
+    // BCP 47 -u-ca-
+    None
+}
+
+/// The base name of a locale (keywords dropped, "-" -> "_").
+pub fn locale_base(locale: &str) -> String {
+    let base = locale.split('@').next().unwrap_or("");
+    let base = base.split(".").next().unwrap_or("");
+    let mut out = Vec::new();
+    for (i, p) in base.split(['_', '-']).enumerate() {
+        if p.is_empty() {
+            continue;
+        }
+        if i == 0 {
+            out.push(p.to_ascii_lowercase());
+        } else if p.len() == 4 && p.chars().all(|c| c.is_ascii_alphabetic()) {
+            let mut s = p.to_ascii_lowercase();
+            s[..1].make_ascii_uppercase();
+            out.push(s);
+        } else {
+            out.push(p.to_ascii_uppercase());
+        }
+    }
+    out.join("_")
+}
+
+/// The region of a locale for supplemental data: its region subtag, or
+/// the likely region of its language.
+pub fn locale_region(locale: &str) -> String {
+    if let Some(rg) = locale_keyword(locale, "rg") {
+        if rg.len() >= 2 {
+            return rg[..2].to_ascii_uppercase();
+        }
+    }
+    let base = locale_base(locale);
+    let parts: Vec<&str> = base.split('_').collect();
+    for p in parts.iter().skip(1) {
+        if p.len() == 2 && p.chars().all(|c| c.is_ascii_alphabetic())
+            || p.len() == 3 && p.chars().all(|c| c.is_ascii_digit())
+        {
+            return p.to_string();
+        }
+    }
+    let tag = base.replace('_', "-");
+    let tag = if tag.is_empty() {
+        "und".to_string()
+    } else {
+        tag
+    };
+    if let Ok(l) = intl::locale::Locale::parse(&tag) {
+        if let Some(r) = l.maximize().region {
+            return r;
+        }
+    }
+    "001".to_string()
+}
+
+/// The week data of a locale's region.
+pub fn week_data(locale: &str) -> WeekData {
+    let region = locale_region(locale);
+    let row = data::WEEK_DATA
+        .iter()
+        .find(|r| r.0 == region)
+        .or_else(|| data::WEEK_DATA.iter().find(|r| r.0 == "001"))
+        .copied()
+        .unwrap_or(("001", 1, 1, 7, 0, 1, 86_400_000));
+    let mut w = WeekData {
+        first_day: row.1 as i32,
+        min_days: row.2 as i32,
+        onset: row.3 as i32,
+        onset_ms: row.4,
+        cease: row.5 as i32,
+        cease_ms: row.6,
+    };
+    if let Some(fw) = locale_keyword(locale, "fw") {
+        let d = match fw.to_ascii_lowercase().as_str() {
+            "sun" => 1,
+            "mon" => 2,
+            "tue" => 3,
+            "wed" => 4,
+            "thu" => 5,
+            "fri" => 6,
+            "sat" => 7,
+            _ => 0,
+        };
+        if d != 0 {
+            w.first_day = d;
+        }
+    }
+    w
+}
+
+/// Calendar::getLocale(): (actual, valid) locales of a calendar created
+/// for `locale`.
+pub fn calendar_locales(locale: &str) -> (String, String) {
+    let base = locale_base(locale);
+    let lang = base.split('_').next().unwrap_or("").to_string();
+    let known = data::AVAILABLE_LOCALES.contains(&lang.as_str());
+    if lang.is_empty() || !known {
+        return ("en".to_string(), "en_US_POSIX".to_string());
+    }
+    let has_region = base.split('_').skip(1).any(|p| {
+        p.len() == 2 && p.chars().all(|c| c.is_ascii_alphabetic())
+            || p.len() == 3 && p.chars().all(|c| c.is_ascii_digit())
+    });
+    let valid = if has_region {
+        base.clone()
+    } else {
+        let r = locale_region(locale);
+        if r == "001" {
+            base.clone()
+        } else {
+            format!("{}_{}", base, r)
+        }
+    };
+    // ICU's calendar data mostly lives in the language bundle
+    let actual = lang;
+    (actual, valid)
+}
+
+/// A calendar of type `cal_type` (a CLDR calendar name) for `locale` in
+/// zone `z`, fields cleared, time not set.
+pub fn new_calendar_raw(cal_type: &str, z: Rc<Zone>, locale: &str) -> Calendar {
+    let t = CalType::from_name(cal_type).unwrap_or(CalType::Gregorian);
+    Calendar::new(t, z, locale, week_data(locale))
+}
+
+/// Calendar::createInstance(zone, locale): the locale's calendar, at now.
+pub fn create_calendar(z: Rc<Zone>, locale: &str) -> Calendar {
+    let mut c = new_calendar_raw(&locale_cal_type(locale), z, locale);
+    let _ = c.set_time(zone::now_millis());
+    c
+}
+
+// ---------------------------------------------------------------------------
+// ext/date interoperation (common_date.cpp)
+
+/// $o->method(...args): None when it threw.
+pub fn call_method(vm: &mut Vm, o: &Obj, name: &str, args: &[Value]) -> Option<Value> {
+    let mut a = PhpArray::new();
+    a.push(Value::Object(o.clone()));
+    a.push(crate::s(name));
+    let cb = crate::arr(a);
+    let r = vm.call_callback(&cb, args);
+    if vm.current_exception.is_some() {
+        return None;
+    }
+    r.ok()
+}
+
+/// Report an error to `err` (and the global error) or to the global error
+/// only.
+pub fn report(vm: &mut Vm, func: &str, err: Option<&mut IntlError>, code: i32, msg: &str) {
+    match err {
+        Some(e) => error::set_both(vm, func, e, code, msg),
+        None => error::set_global(vm, func, code, msg),
+    }
+}
+
+/// The time zone ID of a DateTimeZone name as timezone_convert_datetimezone()
+/// sees it: an offset type ("+hh:mm") becomes "GMT+hh:mm".
+fn dtz_name_to_icu_id(name: &str) -> Result<String, &'static str> {
+    let b = name.as_bytes();
+    if !b.is_empty() && (b[0] == b'+' || b[0] == b'-') {
+        let neg = b[0] == b'-';
+        let parts: Vec<i64> = name[1..]
+            .split(':')
+            .map(|p| p.parse::<i64>().unwrap_or(0))
+            .collect();
+        let secs = parts.first().copied().unwrap_or(0) * 3600
+            + parts.get(1).copied().unwrap_or(0) * 60
+            + parts.get(2).copied().unwrap_or(0);
+        let secs = if neg { -secs } else { secs };
+        let offset_mins = secs / 60;
+        let hours = offset_mins / 60;
+        let mut minutes = offset_mins - hours * 60;
+        if minutes < 0 {
+            minutes = -minutes;
+        }
+        if offset_mins <= -24 * 60 || offset_mins >= 24 * 60 {
+            return Err("object has an time zone offset that's too large");
+        }
+        return Ok(format!(
+            "GMT{}{:02}:{:02}",
+            if hours < 0 { '-' } else { '+' },
+            hours.abs(),
+            minutes
+        ));
+    }
+    Ok(name.to_string())
+}
+
+/// timezone_convert_datetimezone() of a DateTimeZone object.
+pub fn datetimezone_to_zone(
+    vm: &mut Vm,
+    dtz: &Obj,
+    func: &str,
+    err: Option<&mut IntlError>,
+) -> Result<Rc<Zone>, ()> {
+    let name = match call_method(vm, dtz, "getName", &[]) {
+        Some(Value::String(s)) => s.to_string_lossy(),
+        _ => return Err(()),
+    };
+    zone_from_dtz_name(vm, &name, func, err)
+}
+
+fn zone_from_dtz_name(
+    vm: &mut Vm,
+    name: &str,
+    func: &str,
+    err: Option<&mut IntlError>,
+) -> Result<Rc<Zone>, ()> {
+    let id = match dtz_name_to_icu_id(name) {
+        Ok(id) => id,
+        Err(m) => {
+            report(vm, func, err, U_ILLEGAL_ARGUMENT_ERROR, m);
+            return Err(());
+        }
+    };
+    match zone::create(&id) {
+        Some(z) => Ok(z),
+        None => {
+            let m = format!(
+                "time zone id '{}' extracted from ext/date DateTimeZone not recognized",
+                id
+            );
+            report(vm, func, err, U_ILLEGAL_ARGUMENT_ERROR, &m);
+            Err(())
+        }
+    }
+}
+
+fn throw_intl_exception(vm: &mut Vm, msg: &str) {
+    if vm.current_exception.is_some() {
+        return;
+    }
+    let e = vm.create_exception(b"IntlException", msg, vm.current_line);
+    vm.current_exception = Some(e);
+}
+
+/// timezone_process_timezone_argument()
+pub fn zone_from_arg(
+    vm: &mut Vm,
+    v: &Value,
+    func: &str,
+    err: Option<&mut IntlError>,
+) -> Result<Rc<Zone>, ()> {
+    let id = match v.deref() {
+        Value::Null | Value::Undef => php_default_tz(vm),
+        Value::Object(o) => {
+            if crate::zpp::obj_instanceof(vm, &o, "IntlTimeZone") {
+                return match tz_object_zone(&o) {
+                    Some(z) => Ok(z),
+                    None => {
+                        throw_intl_exception(
+                            vm,
+                            &format!(
+                                "{}(): passed IntlTimeZone is not properly constructed",
+                                func
+                            ),
+                        );
+                        Err(())
+                    }
+                };
+            }
+            if crate::zpp::obj_instanceof(vm, &o, "DateTimeZone") {
+                return datetimezone_to_zone(vm, &o, func, err);
+            }
+            match vm.zpp_coerce_scalar(
+                goro_core::arginfo::T_STRING,
+                &Value::Object(o.clone()),
+                false,
+                vm.current_line,
+            ) {
+                Ok(Some(s)) => s.to_php_string().to_string_lossy(),
+                _ => {
+                    if vm.current_exception.is_none() {
+                        let cn = goro_core::value::display_class_name(&o.borrow().class_name);
+                        crate::zpp::throw(
+                            vm,
+                            b"Error",
+                            &format!("Object of class {} could not be converted to string", cn),
+                        );
+                    }
+                    return Err(());
+                }
+            }
+        }
+        other => {
+            let s = other.to_php_string();
+            if !crate::common::utf8_valid(s.as_bytes()) {
+                throw_intl_exception(
+                    vm,
+                    &format!(
+                        "{}(): Time zone identifier given is not a valid UTF-8 string",
+                        func
+                    ),
+                );
+                return Err(());
+            }
+            s.to_string_lossy()
+        }
+    };
+    match zone::create(&id) {
+        Some(z) => Ok(z),
+        None => {
+            throw_intl_exception(vm, &format!("{}(): No such time zone: \"{}\"", func, id));
+            Err(())
+        }
+    }
+}
+
+/// timezone_convert_to_datetimezone(): a DateTimeZone object for `z`.
+/// Err(()) with an exception thrown / error set.
+pub fn zone_to_datetimezone(
+    vm: &mut Vm,
+    z: &Zone,
+    func: &str,
+    err: Option<&mut IntlError>,
+) -> Result<Value, ()> {
+    let _ = (func, &err);
+    let arg = if z.id.starts_with("GMT") {
+        let off = z.raw_offset() / 1000;
+        let a = off.abs();
+        let mut s = format!(
+            "{}{:02}:{:02}",
+            if off < 0 { '-' } else { '+' },
+            a / 3600,
+            a / 60 % 60
+        );
+        if a % 60 != 0 {
+            s.push_str(&format!(":{:02}", a % 60));
+        }
+        s
+    } else {
+        z.id.clone()
+    };
+    match construct_native(vm, b"datetimezone", &[crate::s(arg)]) {
+        Ok(o) => Ok(Value::Object(o)),
+        Err(()) => {
+            if let Some(prev) = vm.current_exception.take() {
+                let e = vm.create_exception(
+                    b"IntlException",
+                    "DateTimeZone constructor threw exception",
+                    vm.current_line,
+                );
+                if let Value::Object(eo) = &e {
+                    eo.borrow_mut().set_property(b"previous".to_vec(), prev);
+                }
+                vm.current_exception = Some(e);
+            }
+            Err(())
+        }
+    }
+}
+
+/// `new Class(...args)` of a native (ext/date) class.
+pub fn construct_native(vm: &mut Vm, class_lower: &[u8], args: &[Value]) -> Result<Obj, ()> {
+    let o = crate::obj::object_init_ex(vm, class_lower).ok_or(())?;
+    let Some(h) = vm.object_construct_handlers.get(class_lower).copied() else {
+        return Ok(o);
+    };
+    let mut a = Vec::with_capacity(args.len() + 1);
+    a.push(Value::Object(o.clone()));
+    a.extend_from_slice(args);
+    let line = vm.current_line;
+    if h(vm, &a, line).is_err() || vm.current_exception.is_some() {
+        return Err(());
+    }
+    Ok(o)
+}
+
+fn call_method_keep_exc(vm: &mut Vm, o: &Obj, name: &str, args: &[Value]) -> Option<Value> {
+    let mut a = PhpArray::new();
+    a.push(Value::Object(o.clone()));
+    a.push(crate::s(name));
+    vm.call_callback(&crate::arr(a), args).ok()
+}
+
+/// intl_datetime_decompose(): the instant (ms) and the time zone of a
+/// DateTimeInterface object. Err: (code, message) to report.
+pub fn datetime_decompose(
+    vm: &mut Vm,
+    o: &Obj,
+) -> Result<(f64, Option<Rc<Zone>>), Option<(i32, String)>> {
+    let ts = match call_method_keep_exc(vm, o, "getTimestamp", &[]) {
+        Some(Value::Long(n)) => n,
+        _ => return Err(None),
+    };
+    if vm.current_exception.is_some() {
+        return Err(None);
+    }
+    let us = match call_method(vm, o, "format", &[crate::s("u")]) {
+        Some(v) => v
+            .to_php_string()
+            .to_string_lossy()
+            .parse::<i64>()
+            .unwrap_or(0),
+        None => 0,
+    };
+    let millis = 1000.0 * ts as f64 + (us / 1000) as f64;
+    let tz = match call_method(vm, o, "getTimezone", &[]) {
+        Some(Value::Object(t)) => match call_method(vm, &t, "getName", &[]) {
+            Some(Value::String(s)) => s.to_string_lossy(),
+            _ => return Err(None),
+        },
+        _ => return Ok((millis, Some(zone::gmt()))),
+    };
+    let id = match dtz_name_to_icu_id(&tz) {
+        Ok(id) => id,
+        Err(_) => {
+            return Err(Some((
+                U_ILLEGAL_ARGUMENT_ERROR,
+                "could not convert DateTime's time zone".to_string(),
+            )));
+        }
+    };
+    match zone::create(&id) {
+        Some(z) => Ok((millis, Some(z))),
+        None => Err(Some((
+            U_ILLEGAL_ARGUMENT_ERROR,
+            "could not convert DateTime's time zone".to_string(),
+        ))),
+    }
+}
+
+/// The time zone of a DateTime object as intlcal_from_date_time() converts
+/// it (errors reported with `func`).
+pub fn datetime_zone(vm: &mut Vm, o: &Obj, func: &str) -> Result<Rc<Zone>, ()> {
+    let name = match call_method(vm, o, "getTimezone", &[]) {
+        Some(Value::Object(t)) => match call_method(vm, &t, "getName", &[]) {
+            Some(Value::String(s)) => s.to_string_lossy(),
+            _ => return Err(()),
+        },
+        _ => return Ok(zone::gmt()),
+    };
+    zone_from_dtz_name(vm, &name, func, None)
+}
+
+/// A cell holding a calendar state, for the formatters.
+pub type CalCell = Rc<RefCell<CalState>>;

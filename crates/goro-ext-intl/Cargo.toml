@@ -11,7 +11,9 @@ workspace = true
 goro-core = { path = "../goro-core" }
 goro-ext-date = { path = "../goro-ext-date" }
 # The ICU analog everything is built on (KarpelesLab/intlrs).
-intl = "=0.6.4"
+intl = { version = "=0.6.4", features = ["tz-names"] }
+# The IANA tzdb (what intl::timezone embeds), for zone transitions.
+timezone-data = "0.2"
 # ICU4X, for what intl lacks: collation tailorings combined with the
 # collator attributes, raw (one-level) decomposition mappings.
 icu_normalizer = "2.3"
