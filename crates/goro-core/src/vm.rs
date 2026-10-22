@@ -20791,6 +20791,45 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "&", &cv_val, &rhs) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(
+                                            &op.op1,
+                                            result,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        return Ok(Flow::Continue);
+                                    }
+                                    Some(Err(msg)) => {
+                                        let (class_bytes, clean_msg) =
+                                            self.throw_object_op_error(&msg);
+                                        if let Some((ct, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = ct as usize;
+                                            return Ok(Flow::Continue);
+                                        } else {
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Uncaught {}: {}",
+                                                    String::from_utf8_lossy(class_bytes),
+                                                    clean_msg
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "&")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -20860,6 +20899,45 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "|", &cv_val, &rhs) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(
+                                            &op.op1,
+                                            result,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        return Ok(Flow::Continue);
+                                    }
+                                    Some(Err(msg)) => {
+                                        let (class_bytes, clean_msg) =
+                                            self.throw_object_op_error(&msg);
+                                        if let Some((ct, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = ct as usize;
+                                            return Ok(Flow::Continue);
+                                        } else {
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Uncaught {}: {}",
+                                                    String::from_utf8_lossy(class_bytes),
+                                                    clean_msg
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "|")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -20935,6 +21013,45 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "^", &cv_val, &rhs) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(
+                                            &op.op1,
+                                            result,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        return Ok(Flow::Continue);
+                                    }
+                                    Some(Err(msg)) => {
+                                        let (class_bytes, clean_msg) =
+                                            self.throw_object_op_error(&msg);
+                                        if let Some((ct, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = ct as usize;
+                                            return Ok(Flow::Continue);
+                                        } else {
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Uncaught {}: {}",
+                                                    String::from_utf8_lossy(class_bytes),
+                                                    clean_msg
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "^")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -21005,6 +21122,45 @@ impl Vm {
                         op.line,
                     );
                     // Check for unsupported operand types
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "<<", &cv_val, &rhs) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(
+                                            &op.op1,
+                                            result,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        return Ok(Flow::Continue);
+                                    }
+                                    Some(Err(msg)) => {
+                                        let (class_bytes, clean_msg) =
+                                            self.throw_object_op_error(&msg);
+                                        if let Some((ct, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = ct as usize;
+                                            return Ok(Flow::Continue);
+                                        } else {
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Uncaught {}: {}",
+                                                    String::from_utf8_lossy(class_bytes),
+                                                    clean_msg
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err) = Self::check_unsupported_operand_types(&cv_val, &rhs, "<<") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
@@ -21077,6 +21233,45 @@ impl Vm {
                         op.line,
                     );
                     // Check for unsupported operand types
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, ">>", &cv_val, &rhs) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(
+                                            &op.op1,
+                                            result,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        return Ok(Flow::Continue);
+                                    }
+                                    Some(Err(msg)) => {
+                                        let (class_bytes, clean_msg) =
+                                            self.throw_object_op_error(&msg);
+                                        if let Some((ct, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = ct as usize;
+                                            return Ok(Flow::Continue);
+                                        } else {
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Uncaught {}: {}",
+                                                    String::from_utf8_lossy(class_bytes),
+                                                    clean_msg
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err) = Self::check_unsupported_operand_types(&cv_val, &rhs, ">>") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
