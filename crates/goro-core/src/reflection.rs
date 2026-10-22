@@ -13155,7 +13155,8 @@ fn get_function_extension(func_name: &str) -> Option<&'static str> {
         return Some("mbstring");
     }
 
-    None
+    // Otherwise, the extension its stub declares it in.
+    crate::stubs::find_function(func_name.as_bytes()).map(|f| f.ext)
 }
 
 // ---------------------------------------------------------------------------
