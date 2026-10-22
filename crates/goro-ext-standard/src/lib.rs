@@ -47,7 +47,7 @@ pub mod sockets_streams {
 pub mod native_streams {
     pub use crate::misc::userstream::{
         NativeOpened, NativeStream, NativeWrapperOps, StatBuf, clear_stat_cache_pub,
-        context_option, native_wrapper_active, read_whole_url, register_native_wrapper, stat_path,
+        context_option, include_open_url, native_wrapper_active, read_whole_url, register_native_wrapper, stat_path,
         wrapper_log_error,
     };
 }

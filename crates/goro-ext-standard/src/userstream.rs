@@ -4120,6 +4120,8 @@ fn h_file(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         Some(p) => p,
         None => return Ok(None),
     };
+    let use_path = int_arg(args, 1).unwrap_or(0) & 1 != 0;
+    let p = use_path_resolve(vm, p, use_path)?;
     if !needs_locate(&p) {
         return Ok(None);
     }
@@ -4189,10 +4191,11 @@ fn h_readfile(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         Some(p) => p,
         None => return Ok(None),
     };
+    let use_path = args.get(1).map(|v| v.deref().is_truthy()).unwrap_or(false);
+    let p = use_path_resolve(vm, p, use_path)?;
     if !needs_locate(&p) {
         return Ok(None);
     }
-    let use_path = args.get(1).map(|v| v.deref().is_truthy()).unwrap_or(false);
     let ctx = context_from_arg(vm, args.get(2), false)?;
     let options = if use_path { USE_PATH } else { 0 } | REPORT_ERRORS;
     let (fid, us) = match open_located(vm, &p, "rb", options, ctx)? {
@@ -4936,6 +4939,8 @@ fn h_stream_wrapper_register(vm: &mut Vm, args: &[Value]) -> Result<Option<Value
     }
     let canonical = match vm.classes.get(&cl) {
         Some(c) => c.name.clone(),
+        // (an internal class)
+        None if vm.is_known_builtin_class(&cl) => vm.builtin_canonical_name(&cl).into_bytes(),
         None => {
             let msg = format!(
                 "{}(): Argument #2 ($class) must be a valid class name, {} given",
@@ -5041,6 +5046,14 @@ fn h_stream_get_wrappers(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, V
             a.push(v.clone());
         }
     }
+    // Wrappers other extensions registered (phar://, zip://)
+    let mut native: Vec<Vec<u8>> = NATIVE_WRAPPERS.with(|w| w.borrow().keys().cloned().collect());
+    native.sort();
+    for name in native {
+        if !builtin_disabled(&name) {
+            a.push(Value::String(PhpString::from_vec(name)));
+        }
+    }
     Ok(Some(arr_val(a)))
 }
 
@@ -5117,6 +5130,33 @@ pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<V
         st.borrow_mut().pop();
     });
     res
+}
+
+/// zend_stream_open_function() of an include/require through a stream
+/// wrapper: the stream's own errors are reported, a failure is Ok(None)
+/// (without include's "Failed opening" diagnostic). For ext/phar's
+/// phar_compile_file(), which falls back to the original file.
+pub fn include_open_url(vm: &mut Vm, path: &str, kind: u8) -> Result<Option<Vec<u8>>, VmError> {
+    let name: &'static str = match kind {
+        1 => "include_once",
+        2 => "require",
+        3 => "require_once",
+        _ => "include",
+    };
+    FN_STACK.with(|st| st.borrow_mut().push(name));
+    vm.call_stack.push((
+        name.to_string(),
+        vm.current_file.clone(),
+        vm.current_line,
+        Vec::new(),
+        false,
+    ));
+    let r = include_open(vm, path.as_bytes());
+    vm.call_stack.pop();
+    FN_STACK.with(|st| {
+        st.borrow_mut().pop();
+    });
+    r
 }
 
 /// A php://filter/ URL.
