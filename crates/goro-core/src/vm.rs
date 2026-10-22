@@ -39592,7 +39592,19 @@ impl Vm {
                                     class_name_raw.to_string_lossy(),
                                     prop_name.to_string_lossy()
                                 );
-                                match self.eval_const_thunk(&tn, Some(&decl), &what) {
+                                // An inherited constant the declaring class has
+                                // evaluated already is that value (one zval).
+                                let evaluated = self
+                                    .classes
+                                    .get(&decl)
+                                    .and_then(|c| c.constants.get(prop_name.as_bytes()))
+                                    .filter(|v| !matches!(v, Value::String(s) if s.as_bytes().starts_with(b"__deferred_thunk__::")))
+                                    .cloned();
+                                let result = match evaluated {
+                                    Some(v) => Ok(v),
+                                    None => self.eval_const_thunk(&tn, Some(&decl), &what),
+                                };
+                                match result {
                                     Ok(v) => {
                                         for k in [&decl, &class_lower] {
                                             if let Some(c) = self.classes.get_mut(k) {
