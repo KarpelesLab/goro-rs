@@ -1633,6 +1633,20 @@ impl PhpGenerator {
 
                 OpCode::QmAssign => {
                     let v = self.read_operand(&op.op1, &op_array.literals);
+                    // the container of `f()[k] = v` (see the VM's handler)
+                    if let OperandType::Const(k) = op.op2 {
+                        if matches!(op_array.literals.get(k as usize), Some(Value::Long(2))) {
+                            let v = match v {
+                                Value::Array(a) if !vm.last_call_by_ref => {
+                                    let copy = a.borrow().clone();
+                                    Value::Array(std::rc::Rc::new(std::cell::RefCell::new(copy)))
+                                }
+                                other => other,
+                            };
+                            self.write_operand(&op.result, v);
+                            continue;
+                        }
+                    }
                     let v = if matches!(v, Value::Undef) {
                         Value::Null
                     } else {

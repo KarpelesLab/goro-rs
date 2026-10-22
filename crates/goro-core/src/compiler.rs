@@ -11294,6 +11294,22 @@ impl Compiler {
         if let ExprKind::DynamicVariable(inner) = &array.kind {
             return self.compile_dynvar_fetch(inner, Self::dynvar_mode(mode), array.span.line);
         }
+        if Self::is_call_expr(array) {
+            // `f()[k] = v`: a by-value result is a temporary of its own (the
+            // write separates it from the array it came from); a returned
+            // reference is written through.
+            let v = self.compile_expr(array)?;
+            let marker = self.op_array.add_literal(Value::Long(2));
+            let t = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::QmAssign,
+                op1: v,
+                op2: OperandType::Const(marker),
+                result: OperandType::Tmp(t),
+                line: array.span.line,
+            });
+            return Ok(OperandType::Tmp(t));
+        }
         self.compile_expr(array)
     }
 
@@ -14035,6 +14051,18 @@ impl Compiler {
             }
 
             ExprKind::Identifier(name) => {
+                // `\true` / `\false` / `\null` are the special constants.
+                if let Some(rest) = name.strip_prefix(b"\\") {
+                    let special = match rest.to_ascii_lowercase().as_slice() {
+                        b"true" => Some(Value::True),
+                        b"false" => Some(Value::False),
+                        b"null" => Some(Value::Null),
+                        _ => None,
+                    };
+                    if let Some(v) = special {
+                        return Ok(OperandType::Const(self.op_array.add_literal(v)));
+                    }
+                }
                 // A bare identifier used as an expression could be a constant
                 // Check for well-known constants
                 let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();

@@ -18720,7 +18720,21 @@ impl Vm {
                 OpCode::Nop => {}
 
                 OpCode::QmAssign => {
-                    if matches!(op.op2, OperandType::Const(_)) {
+                    if let OperandType::Const(k) = op.op2 {
+                        if matches!(op_array.literals.get(k as usize), Some(Value::Long(2))) {
+                            // The container of `f()[k] = v`: a by-value array
+                            // result is separated, a reference kept.
+                            let raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                            let v = match raw {
+                                Value::Array(a) if !self.last_call_by_ref => {
+                                    let copy = a.borrow().clone();
+                                    Value::Array(Rc::new(RefCell::new(copy)))
+                                }
+                                other => other,
+                            };
+                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue 'exec;
+                        }
                         // a key read for isset()/empty()/??
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     }
@@ -33169,7 +33183,17 @@ impl Vm {
                                             decl, mname
                                         )
                                     } else {
-                                        format!("Call to undefined method {}()", func_display)
+                                        // (the class as declared, not as written)
+                                        let cname = self
+                                            .classes
+                                            .get(cl.to_ascii_lowercase().as_bytes())
+                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .unwrap_or_else(|| func_display[..pos].to_string());
+                                        format!(
+                                            "Call to undefined method {}::{}()",
+                                            cname,
+                                            &func_display[pos + 2..]
+                                        )
                                     }
                                 } else {
                                     format!("Call to undefined function {}()", func_display)
