@@ -5043,6 +5043,9 @@ pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<V
     if is_data_url(p) {
         return Some(include_data_url(vm, path, kind));
     }
+    if is_php_filter(p) {
+        return Some(include_php_filter(vm, path, kind));
+    }
     if !needs_locate(p) {
         return None;
     }
@@ -5101,6 +5104,77 @@ pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<V
         st.borrow_mut().pop();
     });
     res
+}
+
+/// A php://filter/ URL.
+fn is_php_filter(p: &[u8]) -> bool {
+    p.len() >= 13 && p[..13].eq_ignore_ascii_case(b"php://filter/")
+}
+
+/// include/require of a php://filter/ URL: the resource read through its
+/// filters (php_stream_url_wrap_php()).
+fn include_php_filter(vm: &mut Vm, path: &str, kind: u8) -> Result<Vec<u8>, VmError> {
+    let name = match kind {
+        1 => "include_once",
+        2 => "require",
+        3 => "require_once",
+        _ => "include",
+    };
+    // The resource is opened with USE_PATH: a relative file is looked up
+    // through the include_path and the including script's directory.
+    let url = match path.find("/resource=") {
+        Some(i) => {
+            let res = &path[i + 10..];
+            if !res.is_empty() && !res.starts_with('/') && scheme_len(res.as_bytes()).is_none() {
+                let cur = vm.current_file.clone();
+                let resolved = vm.resolve_include_path_from(res, &cur);
+                format!("{}{}", &path[..i + 10], resolved)
+            } else {
+                path.to_string()
+            }
+        }
+        None => path.to_string(),
+    };
+    if let Some(read) = vm.functions.get(b"file_get_contents".as_slice()).copied() {
+        let saved = vm.warning_capture.replace(Vec::new());
+        let r = read(
+            vm,
+            &[Value::String(goro_core::string::PhpString::from_string(
+                url,
+            ))],
+        );
+        vm.warning_capture = saved;
+        match r {
+            Ok(Value::String(s)) => return Ok(s.as_bytes().to_vec()),
+            Err(e) => return Err(e),
+            Ok(_) if vm.current_exception.is_some() => return Err(exc_err(vm)),
+            Ok(_) => {}
+        }
+    }
+    vm.emit_warning(&format!(
+        "{}({}): Failed to open stream: operation failed",
+        name, path
+    ));
+    if vm.current_exception.is_some() {
+        return Err(exc_err(vm));
+    }
+    let inc = include_path_value(vm);
+    if kind >= 2 {
+        let msg = format!(
+            "Failed opening required '{}' (include_path='{}')",
+            path, inc
+        );
+        Err(throw(vm, b"Error", &msg))
+    } else {
+        vm.emit_warning(&format!(
+            "{}(): Failed opening '{}' for inclusion (include_path='{}')",
+            name, path, inc
+        ));
+        Err(VmError {
+            message: String::new(),
+            line: vm.current_line,
+        })
+    }
 }
 
 /// A data: (RFC 2397) URL: the wrapper accepts both `data:` and `data://`.
@@ -5245,7 +5319,7 @@ fn resolve_path_user(vm: &mut Vm, filename: &[u8]) -> Option<Result<Vec<u8>, VmE
 /// VM include resolver hook.
 pub(crate) fn include_resolve(vm: &mut Vm, path: &str) -> Option<Result<String, VmError>> {
     let p = path.as_bytes();
-    if is_data_url(p) {
+    if is_data_url(p) || is_php_filter(p) {
         return Some(Ok(path.to_string()));
     }
     if USER_WRAPPERS.with(|w| w.borrow().is_empty()) {
