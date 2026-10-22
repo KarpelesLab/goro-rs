@@ -5646,6 +5646,27 @@ impl Parser {
                             };
                             // Parse chained property/method/array access
                             loop {
+                                // "$obj?->prop": a nullsafe property fetch.
+                                if matches!(self.peek(), TokenKind::NullsafeArrow) {
+                                    if let TokenKind::Identifier(prop_name) =
+                                        self.peek_at(1).clone()
+                                    {
+                                        self.advance();
+                                        self.advance();
+                                        expr = Expr {
+                                            kind: ExprKind::PropertyAccess {
+                                                object: Box::new(expr),
+                                                property: Box::new(Expr {
+                                                    kind: ExprKind::Identifier(prop_name),
+                                                    span: var_span,
+                                                }),
+                                                nullsafe: true,
+                                            },
+                                            span: var_span,
+                                        };
+                                    }
+                                    break;
+                                }
                                 if matches!(self.peek(), TokenKind::Arrow) {
                                     self.advance(); // consume ->
                                     if let TokenKind::Identifier(prop_name) = self.peek().clone() {
@@ -6098,7 +6119,8 @@ impl Parser {
                                         span: s,
                                     };
                                 }
-                                TokenKind::Arrow => {
+                                TokenKind::Arrow | TokenKind::NullsafeArrow => {
+                                    let nullsafe = matches!(self.peek(), TokenKind::NullsafeArrow);
                                     self.advance();
                                     let prop = self.parse_primary()?;
                                     let s = expr.span;
@@ -6106,7 +6128,7 @@ impl Parser {
                                         kind: ExprKind::PropertyAccess {
                                             object: Box::new(expr),
                                             property: Box::new(prop),
-                                            nullsafe: false,
+                                            nullsafe,
                                         },
                                         span: s,
                                     };

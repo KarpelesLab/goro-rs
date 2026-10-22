@@ -46693,9 +46693,28 @@ impl Vm {
                 },
 
                 OpCode::NewObject => match outlined(|| -> Result<Flow, VmError> {
-                    let class_name_raw = self
-                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
+                    let class_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // ZEND_FETCH_CLASS of a dynamic class name.
+                    if !matches!(
+                        class_val.deref(),
+                        Value::String(_) | Value::Object(_) | Value::Generator(_)
+                    ) {
+                        let msg = "Class name must be a valid object or a string";
+                        let exc = self.create_exception(b"Error", msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
+                    }
+                    let class_name_raw = class_val.to_php_string();
 
                     // Resolve "static" and "self" for late static binding / new self()
                     let resolved_bytes =

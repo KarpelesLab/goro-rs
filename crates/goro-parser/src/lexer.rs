@@ -668,6 +668,27 @@ impl<'a> Lexer<'a> {
                             ));
                         }
                     }
+                    // "$obj?->name" (only before a label)
+                    else if self.peek() == Some(b'?')
+                        && self.peek_at(1) == Some(b'-')
+                        && self.peek_at(2) == Some(b'>')
+                        && self
+                            .peek_at(3)
+                            .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_' || c >= 0x80)
+                    {
+                        self.advance();
+                        self.advance();
+                        self.advance();
+                        self.pending.push(Token::new(
+                            TokenKind::NullsafeArrow,
+                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                        ));
+                        let prop_name = self.scan_identifier();
+                        self.pending.push(Token::new(
+                            TokenKind::Identifier(prop_name),
+                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                        ));
+                    }
                     // Check for [index] access (e.g., "$arr[0]", "$arr[$key]")
                     else if self.peek() == Some(b'[') {
                         self.advance(); // consume [
@@ -1884,6 +1905,31 @@ impl<'a> Lexer<'a> {
                                 Span::new(self.pos as u32, self.pos as u32, self.line),
                             ));
                         }
+                    }
+                    // "$obj?->name" (only before a label)
+                    else if i + 3 < len
+                        && &content[i..i + 3] == b"?->"
+                        && (content[i + 3].is_ascii_alphabetic()
+                            || content[i + 3] == b'_'
+                            || content[i + 3] >= 0x80)
+                    {
+                        i += 3;
+                        self.pending.push(Token::new(
+                            TokenKind::NullsafeArrow,
+                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                        ));
+                        let prop_start = i;
+                        while i < len
+                            && (content[i].is_ascii_alphanumeric()
+                                || content[i] == b'_'
+                                || content[i] >= 0x80)
+                        {
+                            i += 1;
+                        }
+                        self.pending.push(Token::new(
+                            TokenKind::Identifier(content[prop_start..i].to_vec()),
+                            Span::new(self.pos as u32, self.pos as u32, self.line),
+                        ));
                     }
                     // Check for [index] access
                     else if i < len && content[i] == b'[' {
