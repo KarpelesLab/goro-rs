@@ -6656,16 +6656,9 @@ impl Vm {
         let exc_before = self.current_exception.is_some();
         // The initializer appears in backtraces as called from the code that
         // triggered initialization.
-        let init_name = self.callable_display_name(&initializer);
-        self.call_stack.push((
-            init_name,
-            self.current_file.clone(),
-            self.current_line,
-            vec![this_val.clone()],
-            false,
-        ));
+        self.ucf_call_line = Some(self.current_line);
         let result = self.call_closure_value(&initializer, vec![this_val.clone()]);
-        self.call_stack.pop();
+        self.ucf_call_line = None;
         let threw = !exc_before && self.current_exception.is_some();
         self.lazy_init_in_progress.remove(&object_id);
         if state_bytes == b"ghost" {
@@ -38706,6 +38699,14 @@ impl Vm {
                     let prop_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    let obj_val = self.lazy_ref_fetch_target(obj_val, prop_name.as_bytes());
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                     // $obj->p naming a static property (zend_get_property_offset).
                     if let Value::Object(o) = &obj_val {
                         if let Err(e) = self.static_as_instance_check(
@@ -38966,6 +38967,14 @@ impl Vm {
                         o @ Value::Object(_) => self.value_to_string(&o),
                         v => v.to_php_string(),
                     };
+                    let obj_val = self.lazy_ref_fetch_target(obj_val, prop_name.as_bytes());
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                     // $obj->p naming a static property (zend_get_property_offset).
                     if let Value::Object(o) = &obj_val {
                         if let Err(e) = self.static_as_instance_check(
@@ -51969,6 +51978,26 @@ impl Vm {
             args,
             true,
         ));
+    }
+
+    /// The object a by-reference property fetch / reference assignment on
+    /// `obj_val` works on: a lazy object is initialized first
+    /// (zend_std_get_property_ptr_ptr), unless the property is skipped or a
+    /// get hook runs on the lazy object, and a proxy forwards to its
+    /// instance. A failed initialization leaves `current_exception` set.
+    pub(crate) fn lazy_ref_fetch_target(&mut self, obj_val: Value, pn: &[u8]) -> Value {
+        let Value::Object(o) = &obj_val else {
+            return obj_val;
+        };
+        let lazy = matches!(o.borrow().get_property(b"__lazy_state"), Value::String(_));
+        if !lazy || pn.starts_with(b"__lazy_") || is_prop_skipped(o, pn) {
+            return obj_val;
+        }
+        let cl = o.borrow().class_name.to_ascii_lowercase();
+        if !self.has_unguarded_get_hook(&cl, pn) {
+            self.maybe_run_lazy_init(o);
+        }
+        Value::Object(self.proxy_redirect(o))
     }
 
     /// Tag a `property_hook_stack` key ("class::prop::get") with the object
