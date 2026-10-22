@@ -84,6 +84,7 @@ impl Vm {
                     || class_lower == b"closure"
                     || class_lower == b"xmlparser"
                     || class_lower == b"xmlwriter"
+                    || class_lower == b"xsltprocessor"
                     || class_lower == b"deflatecontext"
                     || class_lower == b"inflatecontext"
                     || class_lower == b"socket"

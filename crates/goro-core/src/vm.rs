@@ -1032,6 +1032,11 @@ pub struct Vm {
     /// carry no argument values: their create_object strips them
     /// (ext/sodium's SodiumException).
     pub trace_without_args_classes: Vec<Vec<u8>>,
+    /// get_property_ptr_ptr hooks keyed by lowercase built-in class name
+    /// (subclasses included): Some(message) refuses a by-reference fetch of
+    /// the property with an Error.
+    pub ref_fetch_handlers:
+        crate::fxhash::FxHashMap<Vec<u8>, fn(&Rc<RefCell<PhpObject>>, &[u8]) -> Option<String>>,
     /// Extension-provided method handlers keyed by lowercase built-in class name.
     pub native_class_handlers: crate::fxhash::FxHashMap<Vec<u8>, NativeClassHandler>,
     /// Constants of natively implemented internal classes registered by
@@ -2267,6 +2272,7 @@ impl Vm {
             object_construct_handlers: Default::default(),
             object_create_handlers: Default::default(),
             trace_without_args_classes: Vec::new(),
+            ref_fetch_handlers: Default::default(),
             native_class_handlers: Default::default(),
             ext_class_constants: Default::default(),
             ini_validators: std::collections::HashMap::new(),
@@ -42893,6 +42899,19 @@ impl Vm {
                                 ));
                             }
                         }
+                        if !self.ref_fetch_handlers.is_empty() && deny.is_none() {
+                            let mut cur = class_lower.clone();
+                            for _ in 0..64 {
+                                if let Some(h) = self.ref_fetch_handlers.get(&cur).copied() {
+                                    ref_error = h(obj, prop_name.as_bytes());
+                                    break;
+                                }
+                                match self.classes.get(&cur).and_then(|c| c.parent.as_ref()) {
+                                    Some(p) => cur = p.to_ascii_lowercase(),
+                                    None => break,
+                                }
+                            }
+                        }
                         let hooks = if deny.is_none() {
                             self.prop_hooks_outside(&class_lower, prop_name.as_bytes())
                         } else {
@@ -42996,6 +43015,8 @@ impl Vm {
                                 ref_error = Some(msg);
                                 Value::Null
                             }
+                        } else if ref_error.is_some() {
+                            Value::Null
                         } else if obj.try_borrow_mut().is_ok() {
                             let pn: &[u8] = &pkey;
                             // Shadowed privates live in mangled slots this path
