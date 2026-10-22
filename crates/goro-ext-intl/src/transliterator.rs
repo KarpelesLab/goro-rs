@@ -40,6 +40,7 @@ enum K {
     ArmLatin,
     GeoLatin,
     KanaLatin,
+    HangulLatin,
     LatinKana(bool),
     KanaSwap(bool),
     Rules(Rc<RuleSet>),
@@ -225,6 +226,7 @@ fn lookup(sp: &Spec) -> Option<K> {
         ("armenian", "latin") => K::ArmLatin,
         ("georgian", "latin") => K::GeoLatin,
         ("katakana", "latin") | ("hiragana", "latin") => K::KanaLatin,
+        ("hangul", "latin") => K::HangulLatin,
         ("latin", "katakana") => K::LatinKana(false),
         ("latin", "hiragana") => K::LatinKana(true),
         ("hiragana", "katakana") => K::KanaSwap(true),
@@ -537,6 +539,7 @@ fn any_latin(t: &[char]) -> Vec<char> {
         Arm,
         Geo,
         Kana,
+        Hang,
     }
     let script_of = |c: char| match un::script(c) {
         un::Script::Greek => S::Greek,
@@ -544,6 +547,7 @@ fn any_latin(t: &[char]) -> Vec<char> {
         un::Script::Armenian => S::Arm,
         un::Script::Georgian => S::Geo,
         un::Script::Hiragana | un::Script::Katakana => S::Kana,
+        un::Script::Hangul => S::Hang,
         _ if c == 'ー' => S::Kana,
         un::Script::Common | un::Script::Inherited => S::Other,
         _ => S::Other,
@@ -569,6 +573,7 @@ fn any_latin(t: &[char]) -> Vec<char> {
             S::Arm => intl::translit::armenian_to_latin(&string_of(run)).chars().collect(),
             S::Geo => intl::translit::georgian_to_latin(&string_of(run)).chars().collect(),
             S::Kana => td::kana_latin(run),
+            S::Hang => td::hangul_latin(run),
             S::Other => run.to_vec(),
         };
         out.extend(r);
@@ -609,6 +614,7 @@ fn apply_k(k: &K, t: Vec<char>) -> Vec<char> {
             .chars()
             .collect(),
         K::KanaLatin => td::kana_latin(&t),
+        K::HangulLatin => td::hangul_latin(&t),
         K::LatinKana(h) => td::latin_kana(&t, *h),
         K::KanaSwap(to_kata) => td::kana_swap(&t, *to_kata),
         K::Chain(v) => v.iter().fold(t, |acc, e| apply(e, acc)),
@@ -897,6 +903,7 @@ const IDS: &[&str] = &[
     "Cyrillic-Latin",
     "Armenian-Latin",
     "Georgian-Latin",
+    "Hangul-Latin",
     "Katakana-Latin",
     "Hiragana-Latin",
     "Latin-Katakana",

@@ -484,3 +484,60 @@ pub fn kana_swap(input: &[char], to_kata: bool) -> Vec<char> {
         .map(|&c| if to_kata { kata(c) } else { hira(c) })
         .collect()
 }
+
+const H_INITIAL: [&str; 19] = [
+    "g", "kk", "n", "d", "tt", "l", "m", "b", "pp", "s", "ss", "", "j", "jj", "ch", "k", "t", "p",
+    "h",
+];
+const H_MEDIAL: [&str; 21] = [
+    "a", "ae", "ya", "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae", "oe", "yo", "u", "wo", "we",
+    "wi", "yu", "eu", "ui", "i",
+];
+const H_FINAL: [&str; 28] = [
+    "", "g", "kk", "gs", "n", "nj", "nh", "d", "l", "lg", "lm", "lb", "ls", "lt", "lp", "lh", "m",
+    "b", "bs", "s", "ss", "ng", "j", "ch", "k", "t", "p", "h",
+];
+
+/// The compatibility jamo (U+3131-U+3163) as Latin.
+fn compat_jamo(c: char) -> Option<&'static str> {
+    const J: [&str; 51] = [
+        "g", "kk", "gs", "n", "nj", "nh", "d", "tt", "l", "lg", "lm", "lb", "ls", "lt", "lp", "lh",
+        "m", "b", "pp", "bs", "s", "ss", "", "j", "jj", "ch", "k", "t", "p", "h", "a", "ae", "ya",
+        "yae", "eo", "e", "yeo", "ye", "o", "wa", "wae", "oe", "yo", "u", "wo", "we", "wi", "yu",
+        "eu", "ui", "i",
+    ];
+    let i = (c as u32).checked_sub(0x3131)? as usize;
+    J.get(i).copied()
+}
+
+/// Hangul-Latin (ICU's jamo transliteration, '-' before a vowel-initial
+/// syllable after a final consonant).
+pub fn hangul_latin(input: &[char]) -> Vec<char> {
+    let mut out: Vec<char> = Vec::with_capacity(input.len() * 3);
+    let mut prev_final = false;
+    for &c in input {
+        let cp = c as u32;
+        if (0xAC00..=0xD7A3).contains(&cp) {
+            let s = cp - 0xAC00;
+            let (l, v, t) = (
+                (s / 588) as usize,
+                (s % 588 / 28) as usize,
+                (s % 28) as usize,
+            );
+            if prev_final && l == 11 {
+                out.push('-');
+            }
+            out.extend(H_INITIAL[l].chars());
+            out.extend(H_MEDIAL[v].chars());
+            out.extend(H_FINAL[t].chars());
+            prev_final = t != 0;
+            continue;
+        }
+        prev_final = false;
+        match compat_jamo(c) {
+            Some(j) => out.extend(j.chars()),
+            None => out.push(c),
+        }
+    }
+    out
+}
