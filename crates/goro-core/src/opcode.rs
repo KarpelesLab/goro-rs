@@ -573,6 +573,9 @@ pub(crate) struct SiteCaches {
     pub(crate) prop_sites: crate::fxhash::FxHashMap<u32, (Vec<u8>, Option<Vec<u8>>, bool)>,
     /// What the INIT_METHOD_CALLs found (see Vm::init_method_call_fast).
     pub(crate) method_sites: crate::fxhash::FxHashMap<u32, crate::vm::MethodSite>,
+    /// What the forwarding calls (self::m(), ...) last resolved to (see
+    /// Vm::push_forward_call).
+    pub(crate) forward_sites: crate::fxhash::FxHashMap<u32, crate::vm::ForwardSite>,
 }
 
 impl OpArray {

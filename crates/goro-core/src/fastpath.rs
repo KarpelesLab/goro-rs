@@ -820,7 +820,7 @@ impl crate::vm::Vm {
             } else {
                 None
             };
-            self.push_forward_call(name, this.as_ref());
+            self.push_forward_call(op_array, ip, name, this.as_ref());
             true
         } else {
             false
