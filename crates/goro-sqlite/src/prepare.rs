@@ -126,6 +126,13 @@ pub fn sqlite3InitCallback(
         return 0; // Might happen if EMPTY_RESULT_CALLBACKS are on
     };
     debug_assert!(argv.len() >= 5);
+    // The C callback receives NUL-terminated strings (sqlite3_column_text):
+    // a value with an embedded NUL ends there.
+    let argv: Vec<Option<&[u8]>> = argv
+        .iter()
+        .map(|a| a.map(|z| &z[..z.iter().position(|&c| c == 0).unwrap_or(z.len())]))
+        .collect();
+    let argv = &argv[..];
     let arg = |i: usize| argv.get(i).copied().flatten();
     pData.nInitRow += 1;
     if db.mallocFailed != 0 {
