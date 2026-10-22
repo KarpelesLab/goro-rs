@@ -443,6 +443,15 @@ impl Compiler {
                     (b"pcntl_sigwaitinfo", 1) | (b"pcntl_sigtimedwait", 1) => true,
                     // ext/ftp: ftp_alloc($ftp, $size, &$response)
                     (b"ftp_alloc", 2) => true,
+                    // ext/sodium: the strings and states updated in place
+                    (b"sodium_memzero", 0)
+                    | (b"sodium_increment", 0)
+                    | (b"sodium_add", 0)
+                    | (b"sodium_crypto_generichash_update", 0)
+                    | (b"sodium_crypto_generichash_final", 0)
+                    | (b"sodium_crypto_secretstream_xchacha20poly1305_push", 0)
+                    | (b"sodium_crypto_secretstream_xchacha20poly1305_pull", 0)
+                    | (b"sodium_crypto_secretstream_xchacha20poly1305_rekey", 0) => true,
                     // ext/sysvmsg: msg_send(..., &$error_code),
                     // msg_receive($queue, $desired_message_type,
                     // &$received_message_type, $max_message_size, &$message,

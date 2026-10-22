@@ -415,6 +415,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_exif::register(&mut vm);
                 goro_ext_zip::register(&mut vm);
                 goro_ext_fileinfo::register(&mut vm);
+                goro_ext_sodium::register(&mut vm);
                 // Loadable on request (see run_test_inner).
                 vm.register_extension(goro_ext_zend_test::NAME);
                 vm.register_extension(b"simplexml");
@@ -528,8 +529,18 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
         e.split_whitespace()
             .any(|x| matches!(x, "mysqli" | "pdo" | "pdo_mysql"))
     });
+    // The argon2 interoperability tests of ext/sodium hash with up to
+    // 128 MiB / 8 passes a dozen times (purecrypto's portable Argon2 is about
+    // half as fast as libsodium's AVX2 one).
+    let uses_argon2 = test
+        .sections
+        .get("EXTENSIONS")
+        .is_some_and(|e| e.split_whitespace().any(|x| x == "sodium"))
+        && source.contains("argon2");
     let timeout_secs: u64 = if source.contains("php_cli_server_start") || uses_mysqli {
         30
+    } else if uses_argon2 {
+        15
     } else {
         5
     };
@@ -1690,6 +1701,7 @@ fn execute_php_inner_impl(
     goro_ext_exif::register(&mut vm);
     goro_ext_zip::register(&mut vm);
     goro_ext_fileinfo::register(&mut vm);
+    goro_ext_sodium::register(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }

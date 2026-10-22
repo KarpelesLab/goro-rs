@@ -1,0 +1,14 @@
+[package]
+name = "goro-ext-sodium"
+version = "0.1.0"
+edition = "2024"
+description = "PHP sodium extension (the libsodium API over purecrypto) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-parser = { path = "../goro-parser" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "cipher", "kdf", "ec", "rng", "mac", "ristretto255", "hazmat-edwards25519", "ed25519-table"] }

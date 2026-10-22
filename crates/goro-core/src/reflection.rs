@@ -10336,6 +10336,7 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         "zip" => &["ZipArchive"],
         "fileinfo" => &["finfo"],
         "filter" => &["Filter\\FilterException", "Filter\\FilterFailedException"],
+        "sodium" => &["SodiumException"],
         _ => &[],
     }
 }
