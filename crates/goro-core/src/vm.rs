@@ -15407,7 +15407,7 @@ impl Vm {
                                 if let Some((_, _, v)) = entries.iter().find(|(oid, weak, _)| {
                                     *oid == key_oid && weak.upgrade().is_some()
                                 }) {
-                                    return Some(v.clone());
+                                    return Some(v.deref());
                                 }
                             }
                             let class_display =
@@ -24951,18 +24951,17 @@ impl Vm {
                                     extra_args.first().cloned().unwrap_or(Value::Null);
                                 if let Value::Object(key_rc) = &key_obj {
                                     let key_oid = key_rc.borrow().object_id;
-                                    let result = if let Some(entries) =
-                                        self.weak_map_entries.get(&wm_id)
-                                    {
-                                        entries
-                                            .iter()
-                                            .find(|(oid, weak, _)| {
-                                                *oid == key_oid && weak.upgrade().is_some()
-                                            })
-                                            .map(|(_, _, v)| v.clone())
-                                    } else {
-                                        None
-                                    };
+                                    let result =
+                                        if let Some(entries) = self.weak_map_entries.get(&wm_id) {
+                                            entries
+                                                .iter()
+                                                .find(|(oid, weak, _)| {
+                                                    *oid == key_oid && weak.upgrade().is_some()
+                                                })
+                                                .map(|(_, _, v)| v.deref())
+                                        } else {
+                                            None
+                                        };
                                     if let Some(val) = result {
                                         self.write_operand(
                                             &op.result,
@@ -41357,6 +41356,32 @@ impl Vm {
                             line: op.line,
                         });
                     }
+                    // zend_weakmap_get_property_ptr_ptr(): `$map[$obj] = &$v`
+                    // binds the map's slot.
+                    let weakmap = match &arr_val {
+                        Value::Object(o)
+                            if o.borrow().class_name.eq_ignore_ascii_case(b"weakmap") =>
+                        {
+                            Some(o.borrow().object_id)
+                        }
+                        _ => None,
+                    };
+                    if let Some(wm_id) = weakmap {
+                        if let Value::Object(key_rc) = key_val.deref() {
+                            let key_oid = key_rc.borrow().object_id;
+                            key_rc.borrow().weak_key.set(true);
+                            let weak = Rc::downgrade(&key_rc);
+                            let entries = self.weak_map_entries.entry(wm_id).or_default();
+                            if let Some(entry) =
+                                entries.iter_mut().find(|(oid, _, _)| *oid == key_oid)
+                            {
+                                entry.2 = ref_val;
+                            } else {
+                                entries.push((key_oid, weak, ref_val));
+                            }
+                            return Ok(Flow::Next);
+                        }
+                    }
                     let ao_bound = match &arr_val {
                         Value::Object(o) => self.ao_assign_ref(o, Some(&key_val), &ref_val),
                         _ => None,
@@ -42037,6 +42062,24 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                    }
+                    // zend_std_get_property_ptr_ptr(): no dynamic property may
+                    // be created on these internal classes.
+                    if let Some(msg) = self.forbidden_dynamic_prop_w(&obj_val, prop_name.as_bytes())
+                    {
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
                     }
                     let mut ref_error: Option<String> = None;
                     let mut magic_type_error: Option<String> = None;
@@ -49309,6 +49352,27 @@ impl Vm {
                             });
                         }
                     }
+                    if is_w_fetch {
+                        // zend_std_get_property_ptr_ptr(): no dynamic property may
+                        // be created on these internal classes.
+                        if let Some(msg) =
+                            self.forbidden_dynamic_prop_w(&obj_val_raw, prop_name.as_bytes())
+                        {
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     // `$o->magic[...] = v` with `function &__get()`: write through
                     // the reference __get returns.
                     if let (OpCode::PropertyGetW, Value::Object(obj)) = (op.opcode, &obj_val_raw) {
@@ -53230,6 +53294,29 @@ impl Vm {
             );
         }
         f as i64
+    }
+
+    /// The "Cannot create dynamic property" error of a write fetch
+    /// (`$o->p[] = v`, `&$o->p`) on an internal class that forbids dynamic
+    /// properties, when `prop` is not set.
+    pub(crate) fn forbidden_dynamic_prop_w(&self, obj: &Value, prop: &[u8]) -> Option<String> {
+        let Value::Object(o) = obj else {
+            return None;
+        };
+        let ob = o.borrow();
+        let cl = ob.class_name.to_ascii_lowercase();
+        if !matches!(
+            cl.as_slice(),
+            b"closure" | b"weakreference" | b"weakmap" | b"sensitiveparametervalue"
+        ) || ob.has_property(prop)
+        {
+            return None;
+        }
+        Some(format!(
+            "Cannot create dynamic property {}::${}",
+            crate::value::display_class_name(&ob.class_name),
+            String::from_utf8_lossy(prop)
+        ))
     }
 
     /// Array key for isset()/unset() of a dimension: like a plain key, but a
