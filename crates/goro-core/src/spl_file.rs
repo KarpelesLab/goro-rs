@@ -307,7 +307,6 @@ impl Vm {
             return self.sfo_read_csv(obj, d, e, x, silent).is_some();
         }
         if self.sfo_user_get_current_line(obj) {
-            let had = Self::sfo_has_line(obj) || Self::sfo_has_zval(obj);
             Self::sfo_free_line(obj);
             let stream = match Self::sfo_stream(obj) {
                 Some(s) => s,
@@ -339,7 +338,8 @@ impl Vm {
                     return false;
                 }
             };
-            if had {
+            // (a line the method itself read, e.g. with fgetcsv())
+            if Self::sfo_has_line(obj) || Self::sfo_has_zval(obj) {
                 Self::sfo_add_line_num(obj, 1);
             }
             Self::sfo_free_line(obj);

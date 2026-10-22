@@ -34013,12 +34013,17 @@ impl Vm {
                                         class_lower
                                     };
                                     if let Value::Object(obj) = &this_val {
-                                        // Try dispatch_spl_method
-                                        let spl_result = self.dispatch_spl_method(
-                                            &class_lower,
-                                            &method_lower,
-                                            obj,
-                                        );
+                                        // Try dispatch_spl_method (no-argument
+                                        // methods; named arguments go below)
+                                        let spl_result = if call.named_args.is_empty() {
+                                            self.dispatch_spl_method(
+                                                &class_lower,
+                                                &method_lower,
+                                                obj,
+                                            )
+                                        } else {
+                                            None
+                                        };
                                         if let Some(result) = spl_result {
                                             self.write_operand(
                                                 &op.result,
@@ -34042,7 +34047,25 @@ impl Vm {
                                                 spl_args.push(arg.clone());
                                             }
                                             let had_exc = self.current_exception.is_some();
-                                            if let Some(result) = self.handle_spl_docall(
+                                            let named_failed = !call.named_args.is_empty()
+                                                && !self.spl_place_named_args(
+                                                    &class_lower,
+                                                    &method_lower,
+                                                    &mut spl_args,
+                                                    &call.named_args,
+                                                    op_array.strict_types,
+                                                    op.line,
+                                                );
+                                            if named_failed {
+                                                self.write_operand(
+                                                    &op.result,
+                                                    Value::Null,
+                                                    &mut cvs,
+                                                    &mut tmps,
+                                                    &static_cv_keys,
+                                                );
+                                                handled = true;
+                                            } else if let Some(result) = self.handle_spl_docall(
                                                 &class_lower,
                                                 &method_lower,
                                                 &spl_args,

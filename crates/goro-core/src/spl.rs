@@ -489,6 +489,40 @@ impl Vm {
         Some(r.unwrap_or(Value::Null))
     }
 
+    /// Named arguments of a static-syntax call (`parent::m(name: v)`) to the
+    /// built-in method `class_lower::method_lower` (`args[0]` is $this):
+    /// checked by the generic zpp layer when it knows the method, else
+    /// placed by the native handler's or the stub's parameter names. False
+    /// with the exception set on failure.
+    pub(crate) fn spl_place_named_args(
+        &mut self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        args: &mut Vec<Value>,
+        named: &[(Vec<u8>, Value)],
+        strict: bool,
+        line: u32,
+    ) -> bool {
+        let mut named = named.to_vec();
+        if self.zpp_spl_args(class_lower, method_lower, args, &mut named, strict, line) {
+            return false;
+        }
+        if named.is_empty() {
+            return true;
+        }
+        if self.native_class_handlers.contains_key(class_lower) {
+            if let Err(n) = self.merge_native_named_args(class_lower, method_lower, args, 1, &named)
+            {
+                let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(&n));
+                let exc = self.create_exception(b"Error", &msg, line);
+                self.current_exception = Some(exc);
+                return false;
+            }
+            return true;
+        }
+        self.spl_map_named_args(class_lower, method_lower, args, &named)
+    }
+
     /// Place named arguments of an SPL method call at their positions
     /// (`args[0]` is $this). Skipped optional parameters become Undef.
     /// Returns false with an Error set on unknown/duplicate names.
