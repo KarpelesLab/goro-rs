@@ -195,7 +195,7 @@ pub fn sqlite3VdbeMemTranslate(_db: &mut Sqlite3, pMem: &mut Mem, desiredEnc: u8
 }
 
 /// The body of sqlite3VdbeMemTranslate() (it does not need the connection).
-fn memTranslate(pMem: &mut Mem, desiredEnc: u8) -> i32 {
+pub(crate) fn memTranslate(pMem: &mut Mem, desiredEnc: u8) -> i32 {
     debug_assert!((pMem.flags & MEM_Str) != 0);
     debug_assert!(pMem.enc != desiredEnc);
     debug_assert!(pMem.enc != 0);

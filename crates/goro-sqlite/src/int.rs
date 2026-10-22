@@ -168,7 +168,9 @@ pub struct FuncDef {
 /// A collating sequence.
 pub struct CollSeq {
     pub zName: ZStr,
-    pub enc: u8,
+    /// Text encoding (a Cell: synthCollSeq() overwrites it, as C memcpy's
+    /// the whole CollSeq)
+    pub enc: std::cell::Cell<u8>,
     /// None means "no comparison function yet" (C `xCmp==0`).
     pub xCmp: RefCell<Option<XCmp>>,
     pub xDel: RefCell<Option<Rc<dyn Fn()>>>,

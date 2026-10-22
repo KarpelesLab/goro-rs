@@ -1061,12 +1061,34 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         // first time.
         OP_String8 | OP_String => {
             if opcode == OP_String8 {
-                let n = match &p4!() {
-                    P4::Z(z) => z.len() as i32,
+                let mut n = match &p4!() {
+                    P4::Z(z) => z.iter().position(|&c| c == 0).unwrap_or(z.len()) as i32,
                     _ => 0,
                 };
                 {
                     let o = &mut p.aOp[pc as usize];
+                    o.p1 = n;
+                }
+                if encoding != SQLITE_UTF8 {
+                    // Translate the string to the database encoding once and
+                    // store the result back in P4 (C P4_DYNAMIC).
+                    let z = match &p.aOp[pc as usize].p4 {
+                        P4::Z(z) => z[..n as usize].to_vec(),
+                        _ => Vec::new(),
+                    };
+                    let mut m = Mem::default();
+                    let rc = sqlite3VdbeMemSetStr(db, &mut m, Some(&z), -1, SQLITE_UTF8);
+                    if rc != 0 {
+                        out2Prerelease(&mut mem!(p2));
+                        return Err(Ex::TooBig);
+                    }
+                    if SQLITE_OK != sqlite3VdbeChangeEncoding(db, &mut m, encoding as i32) {
+                        return Err(Ex::NoMem);
+                    }
+                    n = m.n;
+                    let o = &mut p.aOp[pc as usize];
+                    o.p4type = P4_DYNAMIC;
+                    o.p4 = P4::Z(m.z[..n as usize].to_vec());
                     o.p1 = n;
                 }
                 if n > db.aLimit[SQLITE_LIMIT_LENGTH as usize] {

@@ -1196,7 +1196,7 @@ pub fn sqlite3VdbeDisplayP4(pOp: &VdbeOp) -> Option<ZStr> {
         P4_COLLSEQ => {
             if let P4::Coll(pColl) = &pOp.p4 {
                 const encnames: [&[u8]; 4] = [b"?", b"8", b"16LE", b"16BE"];
-                let e = encnames[(pColl.enc as usize) & 3];
+                let e = encnames[(pColl.enc.get() as usize) & 3];
                 x.extend(fmt(
                     b"%.18s-%s",
                     &[PfArg::Str(Some(&pColl.zName)), PfArg::Str(Some(e))],
@@ -3160,13 +3160,14 @@ fn compareStrings(z1: &[u8], enc1: u8, z2: &[u8], enc2: u8, pColl: &CollSeq) -> 
             None => binCmp(a, b),
         }
     };
-    if enc1 == pColl.enc || pColl.enc == 0 {
+    let collEnc = pColl.enc.get();
+    if enc1 == collEnc || collEnc == 0 {
         /* The strings are already in the correct encoding.  Call the
          ** comparison function directly */
         cmp(z1, z2)
     } else {
-        let v1 = translateText(z1, enc1, pColl.enc);
-        let v2 = translateText(z2, if enc2 == 0 { enc1 } else { enc2 }, pColl.enc);
+        let v1 = translateText(z1, enc1, collEnc);
+        let v2 = translateText(z2, if enc2 == 0 { enc1 } else { enc2 }, collEnc);
         cmp(&v1, &v2)
     }
 }
@@ -4327,7 +4328,7 @@ mod tests {
     fn coll(name: &[u8]) -> CollSeqRef {
         Rc::new(CollSeq {
             zName: name.to_vec(),
-            enc: SQLITE_UTF8,
+            enc: std::cell::Cell::new(SQLITE_UTF8),
             xCmp: RefCell::new(None),
             xDel: RefCell::new(None),
         })

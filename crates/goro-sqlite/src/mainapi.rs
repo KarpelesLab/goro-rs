@@ -2058,10 +2058,10 @@ fn createCollation(
             // then any copies made by synthCollSeq() need to be invalidated.
             // Also, collation destructor - CollSeq.xDel() - function may need
             // to be called.
-            if (pColl.enc & !SQLITE_UTF16_ALIGNED) == enc2 {
+            if (pColl.enc.get() & !SQLITE_UTF16_ALIGNED) == enc2 {
                 if let Some(aColl) = db.aCollSeq.find(zName).cloned() {
                     for p in aColl.iter() {
-                        if p.enc == pColl.enc {
+                        if p.enc.get() == pColl.enc.get() {
                             let xd = p.xDel.borrow_mut().take();
                             if let Some(x) = xd {
                                 x();

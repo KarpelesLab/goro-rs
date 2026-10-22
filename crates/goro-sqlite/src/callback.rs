@@ -90,9 +90,10 @@ fn synthCollSeq(db: &mut Sqlite3, pColl: &CollSeqRef) -> i32 {
         if let Some(p2) = pColl2 {
             let x = p2.xCmp.borrow().clone();
             if x.is_some() {
-                // Rust: only the comparison function is copied (C copies the
-                // whole CollSeq, including enc, but not the destructor).
+                // C copies the whole CollSeq (name, enc, xCmp) except the
+                // destructor.
                 *pColl.xCmp.borrow_mut() = x;
+                pColl.enc.set(p2.enc.get());
                 return SQLITE_OK;
             }
         }
@@ -143,7 +144,7 @@ fn findCollSeqEntry(db: &mut Sqlite3, zName: &[u8], create: i32) -> Option<[Coll
         let mk = |enc: u8| {
             Rc::new(CollSeq {
                 zName: zName.to_vec(),
-                enc,
+                enc: std::cell::Cell::new(enc),
                 xCmp: std::cell::RefCell::new(None),
                 xDel: std::cell::RefCell::new(None),
             })

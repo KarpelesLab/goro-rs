@@ -121,10 +121,9 @@ pub fn sqlite3VdbeMemValidStrRep(db: &mut Sqlite3, p: &mut Mem) -> i32 {
     1
 }
 
-/// Encoding change.  `db` is needed to translate between UTF-8 and UTF-16;
-/// without it (a Mem with no connection) only no-op changes succeed (as
-/// with SQLITE_OMIT_UTF16).
+/// Encoding change (the translation itself does not need the connection).
 fn changeEncoding(db: Option<&mut Sqlite3>, pMem: &mut Mem, desiredEnc: u8) -> i32 {
+    let _ = db;
     debug_assert!(
         desiredEnc == SQLITE_UTF8 || desiredEnc == SQLITE_UTF16LE || desiredEnc == SQLITE_UTF16BE
     );
@@ -135,12 +134,9 @@ fn changeEncoding(db: Option<&mut Sqlite3>, pMem: &mut Mem, desiredEnc: u8) -> i
     if pMem.enc == desiredEnc {
         return SQLITE_OK;
     }
-    match db {
-        /* MemTranslate() may return SQLITE_OK or SQLITE_NOMEM. If NOMEM is
-         ** returned, then the encoding of the value may not have changed. */
-        Some(db) => crate::utf::sqlite3VdbeMemTranslate(db, pMem, desiredEnc),
-        None => SQLITE_ERROR,
-    }
+    /* MemTranslate() may return SQLITE_OK or SQLITE_NOMEM. If NOMEM is
+     ** returned, then the encoding of the value may not have changed. */
+    crate::utf::memTranslate(pMem, desiredEnc)
 }
 
 /// C: `int sqlite3VdbeChangeEncoding(Mem *pMem, int desiredEnc)`
