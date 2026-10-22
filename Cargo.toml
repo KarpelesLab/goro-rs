@@ -48,6 +48,7 @@ members = [
     "crates/goro-ext-gd",
     "crates/goro-ext-dba",
     "crates/goro-ext-readline",
+    "crates/goro-tidy",
 ]
 resolver = "2"
 

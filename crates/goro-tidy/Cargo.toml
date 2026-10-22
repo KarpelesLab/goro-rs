@@ -1,0 +1,10 @@
+[package]
+name = "goro-tidy"
+version = "0.1.0"
+edition = "2024"
+description = "Pure Rust port of tidy-html5 5.8.0 (libtidy) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
