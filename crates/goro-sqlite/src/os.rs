@@ -140,7 +140,7 @@ pub fn sqlite3OsDelete(pVfs: &mut crate::os::Vfs, zPath: Option<&[u8]>, dirSync:
 
 /// C: `int sqlite3OsAccess( sqlite3_vfs *pVfs, const char *zPath, int flags, int *pResOut )`
 pub fn sqlite3OsAccess(
-    pVfs: &mut crate::os::Vfs,
+    pVfs: &crate::os::Vfs,
     zPath: Option<&[u8]>,
     flags: i32,
     pResOut: &mut i32,
@@ -179,7 +179,7 @@ pub fn sqlite3OsRandomness(pVfs: &mut crate::os::Vfs, nByte: i32, zBufOut: Optio
 }
 
 /// C: `int sqlite3OsSleep(sqlite3_vfs *pVfs, int nMicro)`
-pub fn sqlite3OsSleep(pVfs: &mut crate::os::Vfs, nMicro: i32) -> i32 {
+pub fn sqlite3OsSleep(pVfs: &crate::os::Vfs, nMicro: i32) -> i32 {
     todo!("sqlite3OsSleep")
 }
 
@@ -215,7 +215,7 @@ pub fn sqlite3OsInit() -> i32 {
 }
 
 /// C: `sqlite3_vfs * sqlite3_vfs_find(const char *zVfs)`
-pub fn sqlite3_vfs_find(zVfs: Option<&[u8]>) -> Option<Box<crate::os::Vfs>> {
+pub fn sqlite3_vfs_find(zVfs: Option<&[u8]>) -> Option<Rc<crate::os::Vfs>> {
     todo!("sqlite3_vfs_find")
 }
 

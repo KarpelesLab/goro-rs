@@ -44,6 +44,8 @@ pub fn sqlite3IsLikeFunction(
 }
 
 /// C: `void sqlite3RegisterBuiltinFunctions(void)`
-pub fn sqlite3RegisterBuiltinFunctions() {
+/// Rust: the built-in function table is passed explicitly (C global
+/// sqlite3BuiltinFunctions); see mainapi::sqlite3BuiltinFunctions().
+pub fn sqlite3RegisterBuiltinFunctions(pHash: &mut crate::callback::FuncDefHash) {
     todo!("sqlite3RegisterBuiltinFunctions")
 }

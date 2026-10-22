@@ -546,6 +546,26 @@ pub struct Sqlite3 {
     pub nDeferredCons: i64,
     pub nDeferredImmCons: i64,
     pub nSpill: u64,
+    /// sqlite3_trace() (legacy) callback: (sql text)
+    pub xTraceLegacy: Option<Rc<dyn Fn(&[u8])>>,
+    /// sqlite3_profile() callback: (sql text, nanoseconds)
+    pub xProfile: Option<Rc<dyn Fn(&[u8], u64)>>,
+    /// sqlite3_wal_hook() callback: (db, dbname, nFrame) -> rc
+    pub xWalCallback: Option<Rc<dyn Fn(&mut Sqlite3, &[u8], i32) -> i32>>,
+    /// Frame threshold of the default WAL hook installed by
+    /// sqlite3_wal_autocheckpoint() (C SQLITE_PTR_TO_INT(pWalArg) when
+    /// xWalCallback==sqlite3WalDefaultHook); 0 when xWalCallback is an
+    /// application hook or there is none.
+    pub walAutoCkpt: i32,
+    /// sqlite3_set_clientdata() list, most recent first (C pDbData).
+    pub pDbData: Vec<DbClientData>,
+}
+
+/// Client data attached to a connection (sqlite3_set_clientdata()).
+/// The C destructor is the Drop of `pData`.
+pub struct DbClientData {
+    pub zName: ZStr,
+    pub pData: Rc<dyn Any>,
 }
 
 impl Sqlite3 {
@@ -1453,6 +1473,9 @@ pub struct Parse {
     pub apVtabLock: Vec<TableRef>,
     pub pWith: WithId,
     pub pRename: Vec<RenameToken>,
+    /// Cleanups registered with sqlite3ParserAddCleanup(), run (most recent
+    /// first) by sqlite3ParseObjectReset().
+    pub pCleanup: Vec<Box<dyn FnOnce(&mut Sqlite3)>>,
 }
 
 impl Parse {
