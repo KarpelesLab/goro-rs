@@ -2818,7 +2818,7 @@ impl Vm {
 
     pub fn current_class_scope(&self) -> Option<Vec<u8>> {
         // (an empty entry: a function running outside any class)
-        if self.scope_top().is_some_and(|s| s.is_empty()) {
+        if self.class_scope_stack.last().is_some_and(|s| s.is_empty()) {
             return None;
         }
         let scope_lower = self.scope_top().cloned().or_else(|| {
