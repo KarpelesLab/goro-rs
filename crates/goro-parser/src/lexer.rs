@@ -710,20 +710,17 @@ impl<'a> Lexer<'a> {
                         ));
                         // Scan index: could be number, string, or variable
                         match self.peek() {
-                            Some(b'0'..=b'9') => {
-                                let num_kind = self.scan_number();
-                                self.pending.push(Token::new(
-                                    num_kind,
-                                    Span::new(self.pos as u32, self.pos as u32, self.line),
-                                ));
-                            }
-                            // "$a[-3]": a negative integer offset (T_NUM_STRING)
-                            Some(b'-') if self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) => {
-                                self.advance(); // consume -
-                                let num_kind = match self.scan_number() {
-                                    TokenKind::LongNumber(n) => TokenKind::LongNumber(-n),
-                                    other => other,
-                                };
+                            // "$a[3]" / "$a[-3]": T_NUM_STRING
+                            Some(b'0'..=b'9') | Some(b'-')
+                                if self.peek().is_some_and(|c| c.is_ascii_digit())
+                                    || self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) =>
+                            {
+                                let neg = self.peek() == Some(b'-');
+                                let start = self.pos + neg as usize;
+                                let (num_kind, end) = var_offset_number(self.source, start, neg);
+                                while self.pos < end {
+                                    self.advance();
+                                }
                                 self.pending.push(Token::new(
                                     num_kind,
                                     Span::new(self.pos as u32, self.pos as u32, self.line),
@@ -1990,16 +1987,10 @@ impl<'a> Lexer<'a> {
                                     if neg {
                                         i += 1;
                                     }
-                                    let num_start = i;
-                                    while i < len && content[i].is_ascii_digit() {
-                                        i += 1;
-                                    }
-                                    let s: String =
-                                        content[num_start..i].iter().map(|&b| b as char).collect();
-                                    let n = s.parse::<i64>().unwrap_or(0);
-                                    let n = if neg { -n } else { n };
+                                    let (num_kind, end) = var_offset_number(&content, i, neg);
+                                    i = end;
                                     self.pending.push(Token::new(
-                                        TokenKind::LongNumber(n),
+                                        num_kind,
                                         Span::new(self.pos as u32, self.pos as u32, self.line),
                                     ));
                                 }
@@ -2163,6 +2154,72 @@ impl<'a> Lexer<'a> {
 /// `{$...}` inside a string (T_CURLY_OPEN): `src[start]` is the `{`. The
 /// braced expression is lexed as PHP code; returns its tokens between
 /// InterpExprStart / InterpExprEnd, and the index after the closing `}`.
+/// A numeric `"$a[...]"` offset (ST_VAR_OFFSET's T_NUM_STRING) starting at
+/// `p` (after any `-`): an integer only when written canonically
+/// (`0|[1-9][0-9]*`) and in range, else the digits as a string;
+/// `encaps_var_offset: '-' T_NUM_STRING` negates it (zend_negate_num_string:
+/// `-0` and strings keep their spelling). Returns the token and end offset.
+fn var_offset_number(s: &[u8], p: usize, negative: bool) -> (TokenKind, usize) {
+    let at = |i: usize| s.get(i).copied().unwrap_or(0);
+    // [0-9]+("_"[0-9]+)* style runs
+    let run = |mut i: usize, ok: &dyn Fn(u8) -> bool| -> Option<usize> {
+        if !ok(at(i)) {
+            return None;
+        }
+        while ok(at(i)) || (at(i) == b'_' && ok(at(i + 1))) {
+            i += 1;
+        }
+        Some(i)
+    };
+    let dec = |c: u8| c.is_ascii_digit();
+    let mut end = run(p, &dec).unwrap_or(p);
+    for (pfx, ok) in [
+        (
+            b'x',
+            &(|c: u8| c.is_ascii_hexdigit()) as &dyn Fn(u8) -> bool,
+        ),
+        (b'b', &|c: u8| c == b'0' || c == b'1'),
+        (b'o', &|c: u8| (b'0'..=b'7').contains(&c)),
+    ] {
+        if at(p) == b'0' && at(p + 1).eq_ignore_ascii_case(&pfx) {
+            if let Some(e) = run(p + 2, ok) {
+                end = end.max(e);
+            }
+        }
+    }
+    let text = &s[p..end];
+    // [0]|([1-9][0-9]*)
+    let canonical_end = if at(p) == b'0' {
+        p + 1
+    } else {
+        let mut i = p;
+        while at(i).is_ascii_digit() {
+            i += 1;
+        }
+        i
+    };
+    let long = if canonical_end == end {
+        std::str::from_utf8(text)
+            .ok()
+            .and_then(|t| t.parse::<i64>().ok())
+    } else {
+        None
+    };
+    let kind = match long {
+        Some(0) if negative => TokenKind::ConstantString(b"-0".to_vec()),
+        Some(n) => TokenKind::LongNumber(if negative { -n } else { n }),
+        None => {
+            let mut v = Vec::with_capacity(text.len() + 1);
+            if negative {
+                v.push(b'-');
+            }
+            v.extend_from_slice(text);
+            TokenKind::ConstantString(v)
+        }
+    };
+    (kind, end)
+}
+
 fn is_label_start(c: u8) -> bool {
     c.is_ascii_alphabetic() || c == b'_' || c >= 0x80
 }
