@@ -25,6 +25,7 @@ members = [
     "crates/goro-ext-reflection",
     "crates/goro-pcre",
     "crates/goro-ext-zend-test",
+    "crates/goro-ext-bcmath",
 ]
 resolver = "2"
 
@@ -72,6 +73,7 @@ goro-ext-mbstring = { path = "crates/goro-ext-mbstring" }
 goro-ext-spl = { path = "crates/goro-ext-spl" }
 goro-ext-reflection = { path = "crates/goro-ext-reflection" }
 goro-ext-zend-test = { path = "crates/goro-ext-zend-test" }
+goro-ext-bcmath = { path = "crates/goro-ext-bcmath" }
 
 [features]
 default = ["ext-standard"]
