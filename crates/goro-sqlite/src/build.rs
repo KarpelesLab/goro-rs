@@ -1608,9 +1608,9 @@ pub fn sqlite3DeleteReturning(db: &mut Sqlite3) {
         Some(r) => r.zName.clone(),
         None => return,
     };
-    let pHash = &mut db.aDb[1].pSchema.borrow_mut().trigHash;
+    let pTrig = db.aDb[1].pSchema.borrow().trigHash.find(&zName).cloned();
     let isOurs = match (
-        pHash.find(&zName),
+        pTrig.as_ref(),
         db.parses.last().and_then(|p| p.u1.d.pReturning.as_ref()),
     ) {
         (Some(t), Some(r)) => Rc::ptr_eq(t, &r.retTrig),
