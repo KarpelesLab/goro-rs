@@ -2973,6 +2973,17 @@ impl Compiler {
         }
     }
 
+    /// A temporary object a method was called on (and the arguments passed)
+    /// is released once the call returns (Zend's ZEND_CALL_RELEASE_THIS),
+    /// not at the end of the statement: free the call's temporaries except
+    /// its result.
+    #[inline(never)]
+    fn emit_free_call_tmps(&mut self, start: u32, result: u32, line: u32) {
+        let end = self.op_array.temp_count;
+        self.emit_free_tmps((start, result), line);
+        self.emit_free_tmps((result + 1, end), line);
+    }
+
     fn compile_stmt(&mut self, stmt: &Statement) -> CompileResult<()> {
         let r = self.compile_stmt_inner(stmt);
         if !self.dynvar_pending.is_empty() {
@@ -17278,6 +17289,7 @@ impl Compiler {
                 };
                 let effective_nullsafe =
                     *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
+                let obj_tmp_start = self.op_array.temp_count;
                 let obj = self.compile_expr(object)?;
                 let tmp = self.op_array.alloc_temp();
 
@@ -17369,6 +17381,9 @@ impl Compiler {
                     });
                     let end = self.op_array.current_offset();
                     self.op_array.patch_jump(skip_null, end);
+                }
+                if matches!(obj, OperandType::Tmp(_)) {
+                    self.emit_free_call_tmps(obj_tmp_start, tmp, expr.span.line);
                 }
 
                 Ok(OperandType::Tmp(tmp))
