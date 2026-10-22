@@ -6131,7 +6131,9 @@ fn selectExpander(pWalker: &mut Walker, p: SelectId) -> i32 {
                     debug_assert!(db.item(pFrom).fg.isSubquery == 0);
                     if pTab.borrow().IsView() {
                         let pSchema = pTab.borrow().pSchema;
-                        if (db.flags & SQLITE_EnableView) == 0 && pSchema != db.aDb[1].pSchema.id {
+                        if (db.flags & SQLITE_EnableView) == 0
+                            && pSchema != db.aDb[1].pSchema.borrow().id
+                        {
                             let z = pTab.borrow().zName.clone();
                             errmsg!(db, b"access to view \"%s\" prohibited", &z);
                         }

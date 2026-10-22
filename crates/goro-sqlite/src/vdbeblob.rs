@@ -319,7 +319,7 @@ pub fn sqlite3_blob_open(
         {
             let (cookie, generation) = {
                 let s = &db.aDb[iDb as usize].pSchema;
-                (s.schema_cookie, s.iGeneration)
+                (s.borrow().schema_cookie, s.borrow().iGeneration)
             };
             let (tnum, nCol) = {
                 let t = pTab.borrow();

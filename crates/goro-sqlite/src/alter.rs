@@ -710,7 +710,7 @@ fn alter_begin_add_column(db: &mut Sqlite3, pSrc: SrcListId) {
     pNew.aCol = aCol;
     pNew.zName = zName;
     pNew.u.tab.pDfltList = Tree::from_id(pDfltList);
-    pNew.pSchema = db.aDb[iDb as usize].pSchema.id;
+    pNew.pSchema = db.aDb[iDb as usize].pSchema.borrow().id;
     pNew.u.tab.addColOffset = addColOffset;
     db.pp().pNewTable = Some(Rc::new(RefCell::new(pNew)));
 }

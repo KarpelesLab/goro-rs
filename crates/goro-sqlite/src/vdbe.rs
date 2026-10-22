@@ -2248,7 +2248,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             }
             if rc == SQLITE_OK
                 && p5 != 0
-                && (iMeta != p3 || db.aDb[p1 as usize].pSchema.iGeneration != p4_i!())
+                && (iMeta != p3 || db.aDb[p1 as usize].pSchema.borrow().iGeneration != p4_i!())
             {
                 // IMPLEMENTATION-OF: R-03189-51135 As each SQL statement
                 // runs, the schema version is checked to ensure that the
@@ -2258,7 +2258,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
                 // If the schema-cookie from the database file matches the
                 // cookie stored with the in-memory representation of the
                 // schema, do not reload the schema from the database file.
-                if db.aDb[p1 as usize].pSchema.schema_cookie != iMeta {
+                if db.aDb[p1 as usize].pSchema.borrow().schema_cookie != iMeta {
                     crate::build::sqlite3ResetOneSchema(db, p1);
                 }
                 p.expired = 1;
@@ -2292,13 +2292,13 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             if p2 == BTREE_SCHEMA_VERSION {
                 // When the schema cookie changes, record the new cookie
                 // internally
-                db.aDb[p1 as usize].pSchema.schema_cookie =
+                db.aDb[p1 as usize].pSchema.borrow_mut().schema_cookie =
                     (p3 as u32).wrapping_sub(p5 as u32) as i32;
                 db.mDbFlags |= DBFLAG_SchemaChange;
                 crate::fkey::sqlite3FkClearTriggerCache(db, p1);
             } else if p2 == BTREE_FILE_FORMAT {
                 // Record changes in the file format
-                db.aDb[p1 as usize].pSchema.file_format = p3 as u8;
+                db.aDb[p1 as usize].pSchema.borrow_mut().file_format = p3 as u8;
             }
             if p1 == 1 {
                 // Invalidate all prepared statements whenever the TEMP
@@ -5045,7 +5045,7 @@ fn op_open(
     let wrFlag;
     if opcode == OP_OpenWrite {
         wrFlag = BTREE_WRCSR | (p5 & OPFLAG_FORDELETE) as i32;
-        let ff = db.aDb[iDb as usize].pSchema.file_format;
+        let ff = db.aDb[iDb as usize].pSchema.borrow().file_format;
         if ff < p.minWriteFileFormat {
             p.minWriteFileFormat = ff;
         }

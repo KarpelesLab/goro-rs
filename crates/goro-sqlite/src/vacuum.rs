@@ -326,7 +326,7 @@ fn run_vacuum_body(
         }
     }
 
-    let cache_size = db.aDb[iDb as usize].pSchema.cache_size;
+    let cache_size = db.aDb[iDb as usize].pSchema.borrow().cache_size;
     sqlite3BtreeSetCacheSize(db, &pTemp, cache_size);
     let spill = sqlite3BtreeSetSpillSize(db, pMain, 0);
     sqlite3BtreeSetSpillSize(db, &pTemp, spill);

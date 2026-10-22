@@ -736,7 +736,7 @@ fn analyzeDatabase(db: &mut Sqlite3, iDb: i32) {
     openStatTable(db, iDb, iStatCur, None, None);
     let iMem = db.ppr().nMem + 1;
     let iTab = db.ppr().nTab;
-    let aTab: Vec<TableRef> = db.aDb[iDb as usize].pSchema.tblHash.values();
+    let aTab: Vec<TableRef> = db.aDb[iDb as usize].pSchema.borrow().tblHash.values();
     for pTab in aTab.iter() {
         analyzeOneTable(db, pTab, None, iStatCur, iMem, iTab);
     }
@@ -1004,10 +1004,10 @@ pub fn sqlite3AnalysisLoad(db: &mut Sqlite3, iDb: i32) -> i32 {
     debug_assert!(db.aDb[iDb as usize].pBt.is_some());
 
     // Clear any prior statistics
-    for pTab in db.aDb[iDb as usize].pSchema.tblHash.values() {
+    for pTab in db.aDb[iDb as usize].pSchema.borrow().tblHash.values() {
         pTab.borrow_mut().tabFlags &= !TF_HasStat1;
     }
-    for pIdx in db.aDb[iDb as usize].pSchema.idxHash.values() {
+    for pIdx in db.aDb[iDb as usize].pSchema.borrow().idxHash.values() {
         pIdx.borrow_mut().hasStat1 = 0;
     }
 
@@ -1035,7 +1035,7 @@ pub fn sqlite3AnalysisLoad(db: &mut Sqlite3, iDb: i32) -> i32 {
     }
 
     // Set appropriate defaults on all indexes not in the sqlite_stat1 table
-    for pIdx in db.aDb[iDb as usize].pSchema.idxHash.values() {
+    for pIdx in db.aDb[iDb as usize].pSchema.borrow().idxHash.values() {
         if pIdx.borrow().hasStat1 == 0 {
             sqlite3DefaultRowEst(&pIdx);
         }

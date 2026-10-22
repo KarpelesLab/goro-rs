@@ -359,7 +359,7 @@ pub fn sqlite3VdbeSorterInit(db: &mut Sqlite3, nField: i32, pCsr: &mut VdbeCurso
     let mut mxCache = db
         .aDb
         .first()
-        .map(|d| d.pSchema.cache_size as i64)
+        .map(|d| d.pSchema.borrow().cache_size as i64)
         .unwrap_or(0);
     if mxCache < 0 {
         mxCache *= -1024;

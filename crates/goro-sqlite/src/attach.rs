@@ -53,7 +53,7 @@ pub fn sqlite3DbIsNamed(db: &mut Sqlite3, iDb: i32, zName: Option<&[u8]>) -> i32
 /// pSchema (which is about to be detached or replaced): such triggers are
 /// re-pointed at their own (TEMP) schema.
 fn detachTempTriggers(db: &mut Sqlite3, pSchema: SchemaId) {
-    for pTrig in db.aDb[1].pSchema.trigHash.values() {
+    for pTrig in db.aDb[1].pSchema.borrow().trigHash.values() {
         let mut t = pTrig.borrow_mut();
         if t.pTabSchema == pSchema {
             t.pTabSchema = t.pSchema;
@@ -121,9 +121,11 @@ fn attachFunc(context: &mut Context, argv: &mut [Mem]) {
                 // Both the Btree and the new Schema were allocated successfully.
                 // Close the old db and update the aDb[] slot with the new memdb
                 // values.
-                let oldId = db.aDb[iNew].pSchema.id;
+                let oldId = db.aDb[iNew].pSchema.borrow().id;
                 detachTempTriggers(db, oldId);
-                crate::callback::sqlite3SchemaClear(db, iNew as i32);
+                if crate::btree::sqlite3BtreeConnectionCount(&pBt) <= 1 {
+                    crate::callback::sqlite3SchemaClear(db, iNew as i32);
+                }
                 crate::btree::sqlite3BtreeClose(db, &pBt);
                 db.aDb[iNew].pBt = Some(pNewBt);
                 db.aDb[iNew].pSchema = pNewSchema;
@@ -201,7 +203,7 @@ fn attachFunc(context: &mut Context, argv: &mut [Mem]) {
                 pBt,
                 safety_level: 0,
                 bSyncSet: 0,
-                pSchema: Schema::default(),
+                pSchema: Schema::null(),
             });
             iNew = db.aDb.len() - 1;
         }
@@ -213,7 +215,10 @@ fn attachFunc(context: &mut Context, argv: &mut [Mem]) {
         } else if rc == SQLITE_OK {
             let pBt = db.aDb[iNew].pBt.clone().expect("btree");
             db.aDb[iNew].pSchema = crate::callback::sqlite3SchemaGet(db, Some(&pBt));
-            let (ff, enc) = (db.aDb[iNew].pSchema.file_format, db.aDb[iNew].pSchema.enc);
+            let (ff, enc) = (
+                db.aDb[iNew].pSchema.borrow().file_format,
+                db.aDb[iNew].pSchema.borrow().enc,
+            );
             if ff != 0 && enc != db.ENC() {
                 zErrDyn = Some(mprintf!(
                     db,
@@ -253,7 +258,7 @@ fn attachFunc(context: &mut Context, argv: &mut [Mem]) {
                 debug_assert!(iDb >= 2);
                 if let Some(pBt) = db.aDb[iDb].pBt.take() {
                     crate::btree::sqlite3BtreeClose(db, &pBt);
-                    db.aDb[iDb].pSchema = Schema::default();
+                    db.aDb[iDb].pSchema = Schema::null();
                 }
                 crate::build::sqlite3ResetAllSchemasOfConnection(db);
                 db.aDb.truncate(iDb);
@@ -321,14 +326,17 @@ fn detachFunc(context: &mut Context, argv: &mut [Mem]) {
             break 'detach_error;
         }
 
-        let sid = db.aDb[i as usize].pSchema.id;
+        let sid = db.aDb[i as usize].pSchema.borrow().id;
         detachTempTriggers(db, sid);
         // C: sqlite3BtreeClose() frees the schema through its xFreeSchema
-        // callback (sqlite3SchemaClear()).
-        crate::callback::sqlite3SchemaClear(db, i);
+        // callback (sqlite3SchemaClear()) when no other connection shares
+        // the cache.
+        if crate::btree::sqlite3BtreeConnectionCount(&pBt) <= 1 {
+            crate::callback::sqlite3SchemaClear(db, i);
+        }
         crate::btree::sqlite3BtreeClose(db, &pBt);
         db.aDb[i as usize].pBt = None;
-        db.aDb[i as usize].pSchema = Schema::default();
+        db.aDb[i as usize].pSchema = Schema::null();
         crate::build::sqlite3CollapseDatabaseArray(db);
         return;
     }
@@ -558,7 +566,7 @@ pub fn sqlite3FixInit(
 ) {
     debug_assert!(db.nDb() > iDb);
     pFix.zDb = db.aDb[iDb as usize].zDbSName.clone().unwrap_or_default();
-    pFix.pSchema = db.aDb[iDb as usize].pSchema.id;
+    pFix.pSchema = db.aDb[iDb as usize].pSchema.borrow().id;
     pFix.zType = match zType {
         Some(b"view") => "view",
         Some(b"trigger") => "trigger",

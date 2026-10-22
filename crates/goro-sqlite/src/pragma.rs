@@ -1212,7 +1212,7 @@ pub fn sqlite3Pragma(
                     let size = crate::util::sqlite3AbsInt32(sqlite3Atoi(Some(zr)));
                     sqlite3BeginWriteOperation(db, 0, iDb);
                     sqlite3VdbeAddOp3(db.v(), OP_SetCookie, iDb, BTREE_DEFAULT_CACHE_SIZE, size);
-                    db.aDb[iDb as usize].pSchema.cache_size = size;
+                    db.aDb[iDb as usize].pSchema.borrow_mut().cache_size = size;
                     if let Some(pBt) = &pDbBt {
                         sqlite3BtreeSetCacheSize(db, pBt, size);
                     }
@@ -1528,12 +1528,12 @@ pub fn sqlite3Pragma(
         // of memory.
         PragTyp_CACHE_SIZE => match zRight {
             None => {
-                let n = db.aDb[iDb as usize].pSchema.cache_size;
+                let n = db.aDb[iDb as usize].pSchema.borrow().cache_size;
                 returnSingleInt(db.v(), n as i64);
             }
             Some(zr) => {
                 let size = sqlite3Atoi(Some(zr));
-                db.aDb[iDb as usize].pSchema.cache_size = size;
+                db.aDb[iDb as usize].pSchema.borrow_mut().cache_size = size;
                 if let Some(pBt) = &pDbBt {
                     sqlite3BtreeSetCacheSize(db, pBt, size);
                 }
@@ -1880,10 +1880,10 @@ pub fn sqlite3Pragma(
                 // and virtual tables.  Each time we initialize a Table.nCol value
                 // for a table, that can potentially disrupt the hash table, so
                 // restart the initialization scan.
-                let mut initNCol = db.aDb[ii].pSchema.tblHash.count();
+                let mut initNCol = db.aDb[ii].pSchema.borrow().tblHash.count();
                 while initNCol > 0 {
                     initNCol -= 1;
-                    let tabs = db.aDb[ii].pSchema.tblHash.values();
+                    let tabs = db.aDb[ii].pSchema.borrow().tblHash.values();
                     let mut hit = false;
                     for pTab in tabs.iter() {
                         let (nCol, zName) = {
@@ -1918,7 +1918,7 @@ pub fn sqlite3Pragma(
                     }
                 }
 
-                let tabs = db.aDb[ii].pSchema.tblHash.values();
+                let tabs = db.aDb[ii].pSchema.borrow().tblHash.values();
                 for pTab in tabs.iter() {
                     let t = pTab.borrow();
                     if let Some(zr) = zRight {
@@ -2176,7 +2176,7 @@ pub fn sqlite3Pragma(
                 p.nMem += 1;
                 p.nMem
             }; // Registers to hold a row from pTab
-            let tabs = db.aDb[iDb as usize].pSchema.tblHash.values();
+            let tabs = db.aDb[iDb as usize].pSchema.borrow().tblHash.values();
             let mut kIdx = 0usize;
             let mut k = !tabs.is_empty();
             while k {
@@ -2435,7 +2435,7 @@ pub fn sqlite3Pragma(
                         for &(zName, e) in encnames.iter() {
                             if 0 == sqlite3StrICmp(Some(zr), Some(zName)) {
                                 let enc = if e != 0 { e } else { SQLITE_UTF16NATIVE };
-                                db.aDb[0].pSchema.enc = enc; // SCHEMA_ENC(db) = enc
+                                db.aDb[0].pSchema.borrow_mut().enc = enc; // SCHEMA_ENC(db) = enc
                                 crate::callback::sqlite3SetTextEncoding(db, enc);
                                 found = true;
                                 break;
@@ -2853,7 +2853,7 @@ fn pragmaIntegrityCheck(
         //
         // Begin by finding the root pages numbers
         // for all tables and indices in the database.
-        let pTbls: Vec<TableRef> = db.aDb[i as usize].pSchema.tblHash.values();
+        let pTbls: Vec<TableRef> = db.aDb[i as usize].pSchema.borrow().tblHash.values();
         let mut cnt = 0usize;
         for pTab in pTbls.iter() {
             if tableSkipIntegrityCheck(pTab, pObjTab.as_ref()) {
@@ -3458,7 +3458,7 @@ fn pragmaOptimize(db: &mut Sqlite3, zRight: Option<&[u8]>, zDb: Option<&[u8]>, i
             continue;
         }
         sqlite3CodeVerifySchema(db, iDb);
-        let tabs = db.aDb[iDb as usize].pSchema.tblHash.values();
+        let tabs = db.aDb[iDb as usize].pSchema.borrow().tblHash.values();
         for pTab in tabs.iter() {
             let (ordinary, zName, nRowLogEst, tabFlags, idxs) = {
                 let t = pTab.borrow();

@@ -384,7 +384,7 @@ fn lookupName(
             while i < nDb {
                 debug_assert!(db.aDb[i as usize].zDbSName.is_some());
                 if sqlite3StrICmp(db.aDb[i as usize].zDbSName.as_deref(), zDb.as_deref()) == 0 {
-                    pSchema = Some(db.aDb[i as usize].pSchema.id);
+                    pSchema = Some(db.aDb[i as usize].pSchema.borrow().id);
                     break;
                 }
                 i += 1;
@@ -392,7 +392,7 @@ fn lookupName(
             if i == nDb && sqlite3StrICmp(Some(b"main"), zDb.as_deref()) == 0 {
                 /* This branch is taken when the main database has been renamed
                  ** using SQLITE_DBCONFIG_MAINDBNAME. */
-                pSchema = Some(db.aDb[0].pSchema.id);
+                pSchema = Some(db.aDb[0].pSchema.borrow().id);
                 zDb = db.aDb[0].zDbSName.clone();
             }
         }
@@ -2627,7 +2627,7 @@ pub fn sqlite3ResolveSelfReference(
         it.pSTab = Some(t.clone());
         it.iCursor = -1;
         sSrc.a.push(it);
-        if db.aDb.len() > 1 && tabSchema != db.aDb[1].pSchema.id {
+        if db.aDb.len() > 1 && tabSchema != db.aDb[1].pSchema.borrow().id {
             /* Cause EP_FromDDL to be set on TK_FUNCTION nodes of non-TEMP
              ** schema elements */
             type_ |= NC_FromDDL;

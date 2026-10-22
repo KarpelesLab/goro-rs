@@ -282,6 +282,8 @@ pub struct BtShared {
     pub nPreformatSize: i32,
     /// Rust: copy of db->flags, refreshed by sqlite3BtreeBeginTrans()
     pub dbFlags: u64,
+    /// Pointer to space allocated by sqlite3BtreeSchema()
+    pub pSchema: Option<SchemaP>,
 }
 
 /// An instance of the following structure is used to hold information
@@ -2507,6 +2509,7 @@ pub fn btreeOpen(
         pTmpSpace: Vec::new(),
         nPreformatSize: 0,
         dbFlags: db.flags,
+        pSchema: None,
     }));
     {
         let bh = db.busyHandler.clone();
@@ -2589,7 +2592,7 @@ pub fn btreeOpen(
      ** default value. Except, when opening on an existing shared pager-cache,
      ** do not change the pager-cache size.
      */
-    if sqlite3BtreeSchema(&p, 0, ()).is_none() {
+    if sqlite3BtreeSchema(&p, None).is_none() {
         sqlite3PagerSetCachesize(&mut pager.borrow_mut(), SQLITE_DEFAULT_CACHE_SIZE);
     }
     /* C: sqlite3OsFileControlHint(pFile, SQLITE_FCNTL_PDB, &pBt->db) only
@@ -2645,6 +2648,7 @@ pub fn btreeClose(db: Option<&mut Sqlite3>, p: &BtreeP, nVdbeRead: i32) -> i32 {
     let pager = pagerOf(&pBt);
     sqlite3PagerClose(db, &mut pager.borrow_mut());
     let mut bt = pBt.borrow_mut();
+    bt.pSchema = None;
     freeTempSpace(&mut bt);
     bt.pCursor.clear();
     bt.pPage1 = None;
@@ -11382,15 +11386,28 @@ pub fn sqlite3BtreeIsInBackup(db: &mut Sqlite3, p: &BtreeP) -> i32 {
 /// purposes (for example, to store a high-level schema associated with
 /// the shared-btree). The btree layer manages reference counting issues.
 ///
-/// Rust: without shared cache the Schema object is owned by the Db entry
-/// of the connection (Db::pSchema), so no blob is ever attached to the
-/// BtShared and this always returns None.
-pub fn sqlite3BtreeSchema(
-    p: &BtreeP,
-    nBytes: i32,
-    xFree: /*fnptr: void(*xFree)(void *)*/ (),
-) -> Option<Vec<u8>> {
-    None
+/// The first time this is called on a shared-btree, nBytes bytes of memory
+/// are allocated, zeroed, and returned to the caller. For each subsequent
+/// call the nBytes parameter is ignored and a pointer to the same blob
+/// of memory returned.
+///
+/// If the nBytes parameter is 0 and the blob of memory has not yet been
+/// allocated, a null pointer is returned. If the blob has already been
+/// allocated, it is returned as normal.
+///
+/// Rust: the blob is the Schema object.  `xNew` (C nBytes!=0) creates it
+/// when there is none yet; None is C nBytes==0.  xFree (sqlite3SchemaClear)
+/// is not kept: the callers clear the schema before closing the last
+/// Btree of the BtShared, and the object is freed with its last reference.
+pub fn sqlite3BtreeSchema(p: &BtreeP, xNew: Option<&dyn Fn() -> Schema>) -> Option<SchemaP> {
+    let pBt = p.borrow().pBt.clone();
+    let mut bt = pBt.borrow_mut();
+    if bt.pSchema.is_none() {
+        if let Some(f) = xNew {
+            bt.pSchema = Some(Rc::new(RefCell::new(f())));
+        }
+    }
+    bt.pSchema.clone()
 }
 
 /// C: `int sqlite3BtreeSchemaLocked(Btree *p)`
