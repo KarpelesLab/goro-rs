@@ -16,10 +16,7 @@
 //! * The xReiniter callback and the busy handler are invoked while the
 //!   pager is mutably borrowed: they must not call back into the pager
 //!   (the btree's pageReinit() only touches the page).
-//! * Memory-mapped I/O is not supported (SQLITE_MAX_MMAP_SIZE==0) and the
-//!   VFS has no shared memory, so WAL mode is never entered
-//!   (sqlite3PagerWalSupported() returns 0): the WAL code paths are kept
-//!   but only run when `pWal` is Some.
+//! * Memory-mapped I/O is not supported (SQLITE_MAX_MMAP_SIZE==0).
 //! * The sqlite3_backup objects that must be told about page changes are
 //!   registered (as Weak references) in the Vec returned by
 //!   sqlite3PagerBackupPtr(); sqlite3BackupUpdate()/sqlite3BackupRestart()
@@ -2974,16 +2971,16 @@ pub fn sqlite3PagerClose(db: Option<&mut Sqlite3>, pPager: &mut crate::pager::Pa
     pPager.exclusiveMode = 0;
     if let Some(mut w) = pPager.pWal.take() {
         let mut a: Vec<u8> = Vec::new();
-        if let Some(db) = db {
+        if let Some(db) = db.as_deref() {
             let bCkpt =
                 (db.flags & SQLITE_NoCkptOnClose) == 0 && SQLITE_OK == databaseIsUnmoved(pPager);
             if bCkpt {
                 a = pPager.pTmpSpace.clone();
             }
-            let walSyncFlags = pPager.walSyncFlags as i32;
-            let pageSize = pPager.pageSize as i32;
-            crate::wal::sqlite3WalClose(db, &mut w, walSyncFlags, pageSize, &mut a);
         }
+        let walSyncFlags = pPager.walSyncFlags as i32;
+        let pageSize = pPager.pageSize as i32;
+        crate::wal::sqlite3WalClose(db, &mut w, &mut pPager.fd, walSyncFlags, pageSize, &mut a);
     }
     pager_reset(pPager);
     if MEMDB(pPager) {
@@ -5954,15 +5951,22 @@ pub fn sqlite3PagerClearCache(pPager: &mut crate::pager::Pager) {
 ///
 /// Parameter eMode is one of SQLITE_CHECKPOINT_PASSIVE, FULL, RESTART
 /// or TRUNCATE.
+///
+/// Signature change: the pager is passed as its `PagerP`, as it must not be
+/// borrowed while the sqlite3_exec() below runs.
 pub fn sqlite3PagerCheckpoint(
     db: &mut Sqlite3,
-    pPager: &mut crate::pager::Pager,
+    pPagerP: &crate::pager::PagerP,
     eMode: i32,
     pnLog: &mut i32,
     pnCkpt: &mut i32,
 ) -> i32 {
     let mut rc = SQLITE_OK;
-    if pPager.pWal.is_none() && pPager.journalMode as i32 == PAGER_JOURNALMODE_WAL {
+    let bExec = {
+        let p = pPagerP.borrow();
+        p.pWal.is_none() && p.journalMode as i32 == PAGER_JOURNALMODE_WAL
+    };
+    if bExec {
         // This only happens when a database file is zero bytes in size
         // opened and then "PRAGMA journal_mode=WAL" is run and then
         // sqlite3_wal_checkpoint() is called.  In that case, the
@@ -5970,6 +5974,8 @@ pub fn sqlite3PagerCheckpoint(
         let mut zErr = None;
         crate::legacy::sqlite3_exec(db, Some(b"PRAGMA table_list"), None, &mut zErr);
     }
+    let mut pg = pPagerP.borrow_mut();
+    let pPager: &mut Pager = &mut pg;
     if pPager.pWal.is_some() {
         let xBusy = if eMode <= SQLITE_CHECKPOINT_PASSIVE {
             None
@@ -5982,6 +5988,7 @@ pub fn sqlite3PagerCheckpoint(
         rc = crate::wal::sqlite3WalCheckpoint(
             db,
             pPager.pWal.as_mut().unwrap(),
+            &mut pPager.fd,
             eMode,
             xBusy,
             walSyncFlags,
@@ -6005,13 +6012,12 @@ pub fn sqlite3PagerWalCallback(pPager: &mut crate::pager::Pager) -> i32 {
 /// C: `int sqlite3PagerWalSupported(Pager *pPager)`
 ///
 /// Return true if the underlying VFS for the given pager supports the
-/// primitives necessary for write-ahead logging.  The VFS of this port
-/// has no shared memory and the heap-memory WAL is not ported, so this
-/// always returns 0 (journal_mode=WAL falls back like with a VFS without
-/// xShmMap).
+/// primitives necessary for write-ahead logging.
 pub fn sqlite3PagerWalSupported(pPager: &mut crate::pager::Pager) -> i32 {
-    let _ = pPager;
-    0
+    if pPager.noLock != 0 {
+        return 0;
+    }
+    (pPager.exclusiveMode != 0 || crate::os::sqlite3OsHasShm(&pPager.fd)) as i32
 }
 
 /// Attempt to take an exclusive lock on the database file. If a PENDING
@@ -6143,7 +6149,14 @@ pub fn sqlite3PagerCloseWal(db: &mut Sqlite3, pPager: &mut crate::pager::Pager) 
             let pageSize = pPager.pageSize as i32;
             let mut tmp = pPager.pTmpSpace.clone();
             let mut w = pPager.pWal.take().unwrap();
-            rc = crate::wal::sqlite3WalClose(db, &mut w, walSyncFlags, pageSize, &mut tmp);
+            rc = crate::wal::sqlite3WalClose(
+                Some(db),
+                &mut w,
+                &mut pPager.fd,
+                walSyncFlags,
+                pageSize,
+                &mut tmp,
+            );
             pagerFixMaplimit(pPager);
             if rc != 0 && pPager.exclusiveMode == 0 {
                 pagerUnlockDb(pPager, SHARED_LOCK);

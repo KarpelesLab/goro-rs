@@ -11363,7 +11363,7 @@ pub fn sqlite3BtreeCheckpoint(
         SQLITE_LOCKED
     } else {
         let pager = pagerOf(&pBt);
-        let rc = sqlite3PagerCheckpoint(db, &mut pager.borrow_mut(), eMode, pnLog, pnCkpt);
+        let rc = sqlite3PagerCheckpoint(db, &pager, eMode, pnLog, pnCkpt);
         rc
     }
 }

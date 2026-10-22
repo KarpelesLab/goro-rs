@@ -628,10 +628,21 @@ pub fn sqlite3ResultIntReal(pCtx: &mut Context) {
 
 /// This function is called after a transaction has been committed.  It
 /// invokes callbacks registered with sqlite3_wal_hook() as required.
-/// (No WAL hook in this port yet.)
 fn doWalCallbacks(db: &mut Sqlite3) -> i32 {
-    let _ = db;
-    SQLITE_OK
+    let mut rc = SQLITE_OK;
+    for i in 0..db.aDb.len() {
+        if let Some(pBt) = db.aDb[i].pBt.clone() {
+            let pPager = crate::btree::sqlite3BtreePager(&pBt);
+            let nEntry = crate::pager::sqlite3PagerWalCallback(&mut pPager.borrow_mut());
+            if nEntry > 0 && rc == SQLITE_OK {
+                if let Some(x) = db.xWalCallback.clone() {
+                    let zDb = db.aDb[i].zDbSName.clone().unwrap_or_default();
+                    rc = x(db, &zDb, nEntry);
+                }
+            }
+        }
+    }
+    rc
 }
 
 /// Execute the statement p, either until a row of data is ready, the
