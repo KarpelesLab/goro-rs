@@ -77,6 +77,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     url_scanner::register(vm);
     locale::register(vm);
     misc::userstream::register(vm);
+    misc::userstream::install_ext_streams();
     netdb::register(vm);
     register_builtin_param_names(vm);
 }

@@ -5524,3 +5524,47 @@ pub(crate) fn register_bz2(vm: &mut Vm) {
     BZ2_ENABLED.with(|c| c.set(true));
     register_bz2_functions(vm);
 }
+
+// ---------------------------------------------------------------------------
+// Streams of other extensions (goro_core::ext_stream)
+// ---------------------------------------------------------------------------
+
+struct ExtAdapter(Rc<RefCell<dyn goro_core::ext_stream::ExtStream>>);
+
+impl NativeStream for ExtAdapter {
+    fn read(&mut self, vm: &mut Vm, count: usize, eof: &mut bool) -> Option<Vec<u8>> {
+        self.0.borrow_mut().read(vm, count, eof)
+    }
+    fn write(&mut self, vm: &mut Vm, buf: &[u8]) -> i64 {
+        self.0.borrow_mut().write(vm, buf)
+    }
+    fn close(&mut self, vm: &mut Vm) {
+        self.0.borrow_mut().close(vm)
+    }
+    fn flush(&mut self, vm: &mut Vm) -> i32 {
+        self.0.borrow_mut().flush(vm)
+    }
+    fn seek(&mut self, vm: &mut Vm, offset: i64, whence: i64) -> Option<i64> {
+        self.0.borrow_mut().seek(vm, offset, whence)
+    }
+    fn lock(&mut self, _vm: &mut Vm, _value: i64) -> i32 {
+        -1
+    }
+    fn label(&self) -> &'static str {
+        self.0.borrow().label()
+    }
+}
+
+fn alloc_ext_stream(
+    _vm: &mut Vm,
+    s: Rc<RefCell<dyn goro_core::ext_stream::ExtStream>>,
+    mode: &str,
+) -> i64 {
+    let native: Rc<RefCell<dyn NativeStream>> = Rc::new(RefCell::new(ExtAdapter(s)));
+    alloc_native_stream(native, mode, None, None, false).0
+}
+
+/// Serve goro_core::ext_stream::alloc()
+pub(crate) fn install_ext_streams() {
+    goro_core::ext_stream::ALLOC.with(|a| a.set(Some(alloc_ext_stream)));
+}

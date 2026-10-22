@@ -10,6 +10,7 @@ pub mod compiler;
 pub mod crypto;
 pub mod csv;
 pub mod errdisplay;
+pub mod ext_stream;
 pub mod fastpath;
 pub mod fetch_w;
 pub mod fiber;
