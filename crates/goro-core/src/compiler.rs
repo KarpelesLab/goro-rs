@@ -26,6 +26,100 @@ thread_local! {
     /// FC(declarables).ticks of the file being compiled (shared with the
     /// nested compilers of its functions, methods and closures).
     static TICKS: Cell<u32> = const { Cell::new(0) };
+    /// Attributes extensions mark internal (zend_mark_internal_attribute()),
+    /// by lowercase name: validated at compile time.
+    static EXT_INTERNAL_ATTRIBUTES: std::cell::RefCell<HashMap<Vec<u8>, InternalAttribute>>
+        = std::cell::RefCell::new(HashMap::new());
+}
+
+/// zend_internal_attribute: the targets (Attribute::TARGET_* flags, with
+/// IS_REPEATABLE) and the validator of an internal attribute.
+#[derive(Clone, Copy)]
+pub struct InternalAttribute {
+    pub flags: u32,
+    /// Called with the target (one TARGET_* flag): an error message fails
+    /// the compilation.
+    pub validator: Option<fn(u32) -> Option<String>>,
+}
+
+/// Attribute::TARGET_ALL
+pub const ATTRIBUTE_TARGET_ALL: u32 = 0x7f;
+/// Attribute::IS_REPEATABLE
+pub const ATTRIBUTE_IS_REPEATABLE: u32 = 0x80;
+
+/// zend_mark_internal_attribute() for an extension's attribute class.
+pub fn register_internal_attribute(name: &[u8], config: InternalAttribute) {
+    EXT_INTERNAL_ATTRIBUTES.with(|m| {
+        m.borrow_mut().insert(name.to_ascii_lowercase(), config);
+    });
+}
+
+/// Run `f` (compiling an extension's own declarations, which internal code
+/// would not validate) without the extensions' internal attributes.
+pub fn without_internal_attributes<R>(f: impl FnOnce() -> R) -> R {
+    let saved = EXT_INTERNAL_ATTRIBUTES.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    let r = f();
+    EXT_INTERNAL_ATTRIBUTES.with(|m| m.borrow_mut().extend(saved));
+    r
+}
+
+/// The config of internal attribute `name` (resolved, any case).
+fn internal_attribute(name: &[u8]) -> Option<InternalAttribute> {
+    let n = name
+        .strip_prefix(b"\\")
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    let builtin = match n.as_slice() {
+        b"attribute" | b"allowdynamicproperties" => Some(1),
+        b"returntypewillchange" => Some(4),
+        b"sensitiveparameter" => Some(32),
+        b"override" => Some(4 | 8),
+        b"deprecated" => Some(4 | 2 | 16 | 64 | 1),
+        b"nodiscard" => Some(4 | 2),
+        b"delayedtargetvalidation" => Some(ATTRIBUTE_TARGET_ALL),
+        _ => None,
+    };
+    if let Some(flags) = builtin {
+        return Some(InternalAttribute {
+            flags,
+            validator: None,
+        });
+    }
+    EXT_INTERNAL_ATTRIBUTES.with(|m| m.borrow().get(&n).copied())
+}
+
+/// The Attribute::TARGET_* flag of a compile target name.
+fn attribute_target_flag(target: &str) -> u32 {
+    match target {
+        "class" => 1,
+        "function" => 2,
+        "method" => 4,
+        "property" => 8,
+        "class constant" => 16,
+        "parameter" => 32,
+        "constant" => 64,
+        _ => 0,
+    }
+}
+
+/// zend_get_attribute_target_names()
+fn attribute_target_names(flags: u32) -> String {
+    let names = [
+        "class",
+        "function",
+        "method",
+        "property",
+        "class constant",
+        "parameter",
+        "constant",
+    ];
+    names
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| flags & (1 << i) != 0)
+        .map(|(_, n)| *n)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn push_compile_warning_tuple(w: (String, u32)) {
@@ -999,12 +1093,52 @@ impl Compiler {
                 target
             ));
         }
+        // Attributes extensions marked internal.
+        if let Some(cfg) =
+            EXT_INTERNAL_ATTRIBUTES.with(|m| m.borrow().get(&bare.to_ascii_lowercase()).copied())
+        {
+            let flag = attribute_target_flag(target);
+            if flag != 0 && cfg.flags & flag == 0 {
+                return Some(format!(
+                    "Attribute \"{}\" cannot target {} (allowed targets: {})",
+                    String::from_utf8_lossy(bare),
+                    target,
+                    attribute_target_names(cfg.flags)
+                ));
+            }
+        }
         // Note: We intentionally skip Override and Deprecated here, because:
         //   - Override target validation is part of runtime inheritance
         //     checks (we already pass those tests today).
         //   - Deprecated allows class (for traits), function, method, and
         //     constants; the runtime validates trait usage separately.
         None
+    }
+
+    /// The attributes of a promoted parameter compiled for `target` (the
+    /// parameter or the property): internal attributes that cannot target
+    /// it but can target the other one are left out (zend_compile_attributes()
+    /// with `promoted`).
+    fn promoted_attrs(
+        &self,
+        attrs: &[goro_parser::ast::Attribute],
+        target: u32,
+        promoted: u32,
+    ) -> Vec<goro_parser::ast::Attribute> {
+        attrs
+            .iter()
+            .filter(|a| {
+                let name = self.resolve_class_name(&a.name.join(&b'\\'));
+                match internal_attribute(&name) {
+                    Some(cfg) => {
+                        let t = cfg.flags & ATTRIBUTE_TARGET_ALL;
+                        t & target != 0 || t & promoted == 0
+                    }
+                    None => true,
+                }
+            })
+            .cloned()
+            .collect()
     }
 
     fn compile_attributes(
@@ -1130,7 +1264,15 @@ impl Compiler {
                     self.resolve_class_name(&f)
                 };
                 if !effective_target.is_empty() {
-                    if let Some(msg) = Self::validate_internal_attr(&name, effective_target) {
+                    if let Some(msg) = Self::validate_internal_attr(&name, effective_target)
+                        .or_else(|| {
+                            // The validator of an extension's internal attribute
+                            // (compile time only).
+                            let flag = attribute_target_flag(effective_target);
+                            let v = internal_attribute(&name)?.validator?;
+                            if flag != 0 { v(flag) } else { None }
+                        })
+                    {
                         self.deferred_fatal_errors.push(msg);
                     }
                 }
@@ -7811,10 +7953,11 @@ impl Compiler {
                                                     line: param.line,
                                                 });
                                             }
-                                            let pa = self.compile_attributes_target(
-                                                &param.attributes,
-                                                "parameter",
-                                            );
+                                            let prop_attrs =
+                                                self.promoted_attrs(&param.attributes, 8, 32);
+                                            // (validated with the parameter's)
+                                            let pa =
+                                                self.compile_attributes_target(&prop_attrs, "");
                                             // Promoted typed properties start as Undef (constructor sets the value)
                                             // Promoted untyped properties get Null as default
                                             let promoted_default = if promoted_prop_type.is_some() {
@@ -8235,7 +8378,21 @@ impl Compiler {
                                 method_compiler.op_array.param_attributes = params
                                     .iter()
                                     .map(|p| {
-                                        self.compile_attributes_target(&p.attributes, "parameter")
+                                        let promoted = p.visibility.is_some()
+                                            || p.set_visibility.is_some()
+                                            || p.readonly
+                                            || p.is_final
+                                            || p.get_hook.is_some()
+                                            || p.set_hook.is_some();
+                                        if promoted {
+                                            let a = self.promoted_attrs(&p.attributes, 32, 8);
+                                            self.compile_attributes_target(&a, "parameter")
+                                        } else {
+                                            self.compile_attributes_target(
+                                                &p.attributes,
+                                                "parameter",
+                                            )
+                                        }
                                     })
                                     .collect();
 

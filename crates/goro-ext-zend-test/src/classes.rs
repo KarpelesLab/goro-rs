@@ -17,7 +17,9 @@ use goro_core::vm::Vm;
 const PRELUDE: &[u8] = include_bytes!("prelude.php");
 
 pub(crate) fn register(vm: &mut Vm) {
-    let Some((op_array, classes)) = compile_prelude() else {
+    let Some((op_array, classes)) =
+        goro_core::compiler::without_internal_attributes(compile_prelude)
+    else {
         return;
     };
     let names: Vec<Vec<u8>> = classes
@@ -85,6 +87,37 @@ pub(crate) fn register(vm: &mut Vm) {
             .insert(alias.clone(), b"_zendtestclass".to_vec());
         vm.class_aliases.insert(b"_zendtestclass".to_vec(), alias);
     }
+}
+
+/// zend_mark_internal_attribute() of the extension's attributes (known
+/// to the compiler from module startup).
+pub(crate) fn mark_internal_attributes() {
+    use goro_core::compiler::{
+        ATTRIBUTE_IS_REPEATABLE, ATTRIBUTE_TARGET_ALL, InternalAttribute,
+        register_internal_attribute,
+    };
+    for (name, flags, validator) in [
+        (
+            "ZendTestAttribute",
+            ATTRIBUTE_TARGET_ALL,
+            Some(validate_zend_test_attribute as fn(u32) -> Option<String>),
+        ),
+        (
+            "ZendTestRepeatableAttribute",
+            ATTRIBUTE_TARGET_ALL | ATTRIBUTE_IS_REPEATABLE,
+            None,
+        ),
+        ("ZendTestParameterAttribute", 32, None),
+        ("ZendTestPropertyAttribute", 8, None),
+        ("ZendTestAttributeWithArguments", ATTRIBUTE_TARGET_ALL, None),
+    ] {
+        register_internal_attribute(name.as_bytes(), InternalAttribute { flags, validator });
+    }
+}
+
+/// zend_attribute_validate_zendtestattribute()
+fn validate_zend_test_attribute(target: u32) -> Option<String> {
+    (target != 1).then(|| "Only classes can be marked with #[ZendTestAttribute]".to_string())
 }
 
 fn compile_prelude() -> Option<(OpArray, Vec<ClassEntry>)> {

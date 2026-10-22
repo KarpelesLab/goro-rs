@@ -1681,7 +1681,10 @@ fn execute_php_inner_impl(
     // ...in source order.
     lexer_deprecations.sort_by_key(|(_, line)| *line);
 
-    // Compile
+    // Compile (with the extensions' compile-time state: MINIT)
+    if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
+        goro_ext_zend_test::minit();
+    }
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
     let (op_array, compiled_classes, compile_warnings) = match compiler.compile(&program) {

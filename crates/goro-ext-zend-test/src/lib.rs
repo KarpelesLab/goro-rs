@@ -40,6 +40,11 @@ pub fn requested<'a>(ini: impl IntoIterator<Item = (&'a str, &'a str)>) -> bool 
     })
 }
 
+/// MINIT, the part the compiler sees: run before compiling scripts.
+pub fn minit() {
+    classes::mark_internal_attributes();
+}
+
 /// MINIT + RINIT: register the functions, constants, INI entries and
 /// classes of the extension.
 pub fn register(vm: &mut Vm) {
@@ -47,6 +52,7 @@ pub fn register(vm: &mut Vm) {
         return;
     }
     vm.register_extension(NAME);
+    minit();
     functions::register(vm);
     ini::register(vm);
     mm::register(vm);
