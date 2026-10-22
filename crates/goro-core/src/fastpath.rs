@@ -1098,7 +1098,9 @@ impl crate::vm::Vm {
                 // (the value of a variable bound to a symbol table)
                 Some(Value::Reference(r)) if matches!(op.op2, OperandType::Cv(_)) => {
                     match r.try_borrow().as_deref() {
-                        Ok(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => Some(v.clone()),
+                        Ok(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => {
+                            Some(v.clone())
+                        }
                         _ => return Fast::No,
                     }
                 }

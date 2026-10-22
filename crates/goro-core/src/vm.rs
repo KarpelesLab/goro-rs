@@ -17733,9 +17733,11 @@ impl Vm {
         // A forwarding call resolved when it was set up (see
         // push_forward_call): what fast_forward_target() does then.
         let with_this = &call.target.forward_this;
-        if let (Some(fwd), Some(f), Some((sep, is_static))) =
-            (&call.target.forward, &call.target.user, call.target.method.map(|(p, s)| (p as usize, s)))
-        {
+        if let (Some(fwd), Some(f), Some((sep, is_static))) = (
+            &call.target.forward,
+            &call.target.user,
+            call.target.method.map(|(p, s)| (p as usize, s)),
+        ) {
             if call.target.fn_gen != self.user_functions.len() + 1 {
                 return self.fast_forward_target();
             }

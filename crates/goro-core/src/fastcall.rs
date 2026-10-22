@@ -152,7 +152,11 @@ impl Vm {
                     && ce.attributes.is_empty()
                     && !(ce.is_abstract || ce.is_interface || ce.is_enum || ce.is_trait) =>
             {
-                ce.new_template.borrow().as_ref().filter(|t| t.fits(ce)).cloned()
+                ce.new_template
+                    .borrow()
+                    .as_ref()
+                    .filter(|t| t.fits(ce))
+                    .cloned()
             }
             _ => return NewFast::No,
         };
