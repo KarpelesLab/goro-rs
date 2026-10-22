@@ -902,8 +902,11 @@ fn decodeIntArray(
 ///
 /// Entries for which argv[1]==NULL simply record the number of rows in
 /// the table.
+///
+/// Rust: an empty argv is the C `argv==0` of the empty-result callback
+/// (PRAGMA empty_result_callbacks=ON).
 fn analysisLoader(db: &mut Sqlite3, zDatabase: Option<&[u8]>, argv: &[Option<ZStr>]) -> i32 {
-    debug_assert!(argv.len() == 3);
+    debug_assert!(argv.is_empty() || argv.len() == 3);
 
     let (z0, z1, z2) = match (argv.first(), argv.get(1), argv.get(2)) {
         (Some(Some(a)), Some(b), Some(Some(c))) => (a, b, c),

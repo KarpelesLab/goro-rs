@@ -5327,10 +5327,15 @@ fn op_parseschema(
             // runs, so the rows are collected first and then passed to
             // sqlite3InitCallback() in order (stopping at the first row it
             // rejects, as sqlite3_exec() would).
-            let mut rows: Vec<Vec<Option<Vec<u8>>>> = Vec::new();
+            // (None stands for the C argv==0 of the empty-result callback.)
+            let mut rows: Vec<Option<Vec<Option<Vec<u8>>>>> = Vec::new();
             {
                 let mut cb = |argv: &[Option<&[u8]>], _cols: &[&[u8]]| -> i32 {
-                    rows.push(argv.iter().map(|a| a.map(|x| x.to_vec())).collect());
+                    if argv.is_empty() {
+                        rows.push(None);
+                    } else {
+                        rows.push(Some(argv.iter().map(|a| a.map(|x| x.to_vec())).collect()));
+                    }
                     0
                 };
                 let mut zErr: Option<ZStr> = None;
@@ -5338,8 +5343,11 @@ fn op_parseschema(
             }
             if rc == SQLITE_OK {
                 for row in &rows {
-                    let argv: Vec<Option<&[u8]>> = row.iter().map(|a| a.as_deref()).collect();
-                    if crate::prepare::sqlite3InitCallback(db, &mut initData, Some(&argv)) != 0 {
+                    let argv: Option<Vec<Option<&[u8]>>> = row
+                        .as_ref()
+                        .map(|r| r.iter().map(|a| a.as_deref()).collect());
+                    if crate::prepare::sqlite3InitCallback(db, &mut initData, argv.as_deref()) != 0
+                    {
                         rc = SQLITE_ABORT;
                         crate::util::sqlite3Error(db, SQLITE_ABORT);
                         break;
