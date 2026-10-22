@@ -13,23 +13,19 @@ use crate::datecore as dc;
 /// effect then: Europe/Minsk in 2012 is "Kaliningrad"), for
 /// IntlTimeZone::DISPLAY_* `style`.
 ///
-/// PLACEHOLDER over datecore::tz_display_name(): it must select the
-/// metazone by the instant (ICU's TimeZoneFormat does, getDisplayName()
-/// uses the current date).
 pub fn tz_display_name_at(tz_id: &str, millis: f64, daylight: bool, style: i64, locale: &str) -> String {
-    let _ = millis;
-    dc::tz_display_name(tz_id, daylight, style, locale)
+    dc::tz_display_name_at(tz_id, daylight, style, locale, millis)
 }
 
 /// The BCP 47 short ID of a zone ("America/New_York" -> "usnyc"), "unk"
 /// when there is none.
-///
-/// PLACEHOLDER: needs the CLDR bcp47 timezone table.
 pub fn tz_short_id(tz_id: &str) -> String {
-    match tz_id {
-        "UTC" | "Etc/UTC" | "Etc/GMT" | "GMT" => "utc".to_string(),
-        _ => "unk".to_string(),
+    let id = dc::canonical_tz_id(tz_id).unwrap_or_else(|| tz_id.to_string());
+    let b = crate::locale::uloc::to_bcp_type("timezone", &id);
+    if b.eq_ignore_ascii_case(&id) {
+        return "unk".to_string();
     }
+    b
 }
 
 /// The exemplar city of a zone ("America/New_York" -> "New York").
@@ -176,58 +172,8 @@ pub fn now_millis() -> f64 {
 }
 
 /// The week data of a locale (UCAL_FIRST_DAY_OF_WEEK, minimal days in the
-/// first week), from its region.
-///
-/// PLACEHOLDER for the calendar module's CLDR week data.
+/// first week).
 pub fn locale_week_data(locale: &str) -> (i32, i32) {
-    let base = locale.split('@').next().unwrap_or("");
-    let region = base
-        .split(['_', '-'])
-        .skip(1)
-        .find(|p| p.len() == 2 || p.len() == 3 && p.chars().all(|c| c.is_ascii_digit()))
-        .unwrap_or("");
-    let lang = base.split(['_', '-']).next().unwrap_or("");
-    let sunday = [
-        "US", "CA", "MX", "BR", "JP", "KR", "IL", "IN", "PH", "ZA", "AU", "HK", "TW", "SA", "PE",
-        "CO", "VE", "GT", "HN", "NI", "PA", "DO", "PR", "SV", "BZ", "BS", "JM", "TH", "KH", "LA",
-        "MM", "NP", "PK", "BD", "BT", "MO", "SG", "ID", "KE", "ET", "ZW", "MZ", "YE", "AS", "GU",
-        "UM", "VI", "MH", "WS", "DM", "AG", "TT", "PY", "AR",
-    ];
-    let min4 = [
-        "AD", "AN", "AT", "AX", "BE", "BG", "CH", "CZ", "DE", "DK", "EE", "ES", "FI", "FJ", "FO",
-        "FR", "GB", "GF", "GG", "GI", "GP", "GR", "HU", "IE", "IM", "IS", "IT", "JE", "LI", "LT",
-        "LU", "MC", "MQ", "NL", "NO", "PL", "RE", "RU", "SE", "SJ", "SK", "SM", "VA",
-    ];
-    let region = if region.is_empty() {
-        match lang {
-            "en" | "ja" | "ko" | "he" | "hi" | "zh" | "pt" | "th" | "id" => match lang {
-                "en" => "US",
-                "ja" => "JP",
-                "ko" => "KR",
-                "he" => "IL",
-                "hi" => "IN",
-                "zh" => "CN",
-                "pt" => "BR",
-                "th" => "TH",
-                _ => "ID",
-            },
-            "de" => "DE",
-            "fr" => "FR",
-            "es" => "ES",
-            "it" => "IT",
-            "nl" => "NL",
-            "ru" => "RU",
-            "pl" => "PL",
-            "sv" => "SE",
-            "da" => "DK",
-            "fi" => "FI",
-            "nb" | "no" | "nn" => "NO",
-            _ => "",
-        }
-    } else {
-        region
-    };
-    let first = if sunday.contains(&region) { 1 } else { 2 };
-    let min = if min4.contains(&region) { 4 } else { 1 };
-    (first, min)
+    let w = dc::week_data(locale);
+    (w.first_day, w.min_days)
 }
