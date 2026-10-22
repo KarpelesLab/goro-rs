@@ -108,6 +108,73 @@ fn ini_bool(vm: &Vm, key: &[u8]) -> bool {
 }
 
 /// htmlspecialchars(ENT_COMPAT) for error messages.
+/// Error messages travel as `String`s: bytes that are not UTF-8 (a
+/// message built from binary data, `throw new Exception("\xF2")`) are kept
+/// as the plane-16 private-use characters U+10FF00 + byte and written back
+/// as the raw bytes (php_error_cb() outputs messages as they are).
+pub fn raw_error_string(b: &[u8]) -> String {
+    let mut out = String::with_capacity(b.len());
+    let mut rest = b;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                out.push_str(s);
+                return out;
+            }
+            Err(e) => {
+                let (ok, bad) = rest.split_at(e.valid_up_to());
+                // (valid UTF-8 by construction)
+                out.push_str(std::str::from_utf8(ok).unwrap_or_default());
+                let n = e.error_len().unwrap_or(bad.len()).max(1);
+                for &c in &bad[..n] {
+                    out.push(char::from_u32(0x10FF00 + c as u32).unwrap_or('?'));
+                }
+                rest = &bad[n..];
+            }
+        }
+    }
+}
+
+/// The bytes of a message made by `raw_error_string`.
+pub fn raw_error_bytes(s: &str) -> std::borrow::Cow<'_, [u8]> {
+    if !s
+        .chars()
+        .any(|c| (0x10FF00..=0x10FFFF).contains(&(c as u32)))
+    {
+        return std::borrow::Cow::Borrowed(s.as_bytes());
+    }
+    let mut out = Vec::with_capacity(s.len());
+    for c in s.chars() {
+        let u = c as u32;
+        if (0x10FF00..=0x10FFFF).contains(&u) {
+            out.push((u - 0x10FF00) as u8);
+        } else {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// escape_html() of php_error_cb() for the html_errors charset: invalid
+/// UTF-8 is substituted (ENT_SUBSTITUTE) unless a single-byte charset is
+/// in use.
+fn escape_html_cs(s: &str, utf8: bool) -> String {
+    let e = escape_html(s);
+    if !utf8 {
+        return e;
+    }
+    e.chars()
+        .map(|c| {
+            if (0x10FF00..=0x10FFFF).contains(&(c as u32)) {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -494,8 +561,11 @@ impl Vm {
         let prepend = ini_str(self, b"error_prepend_string").unwrap_or_default();
         let append = ini_str(self, b"error_append_string").unwrap_or_default();
         let text = if ini_bool(self, b"html_errors") {
+            let utf8 = ini_str(self, b"default_charset").is_none_or(|c| {
+                c.is_empty() || c.eq_ignore_ascii_case("utf-8") || c.eq_ignore_ascii_case("utf8")
+            });
             let body = if kind == "Fatal error" || kind == "Parse error" {
-                escape_html(msg)
+                escape_html_cs(msg, utf8)
             } else if let Some((name, origin, rest)) = split_docref(msg) {
                 let root = ini_str(self, b"docref_root").unwrap_or_default();
                 if !root.is_empty() {
@@ -529,11 +599,13 @@ impl Vm {
                 prepend, kind, msg, file, line, trace, append
             )
         };
+        let raw = raw_error_bytes(&text);
         if mode == 2 {
             use std::io::Write;
-            let _ = std::io::stderr().write_all(text.trim_start_matches('\n').as_bytes());
+            let start = raw.iter().position(|&b| b != b'\n').unwrap_or(raw.len());
+            let _ = std::io::stderr().write_all(&raw[start..]);
         } else {
-            self.write_output(text.as_bytes());
+            self.write_output(&raw);
         }
     }
 }

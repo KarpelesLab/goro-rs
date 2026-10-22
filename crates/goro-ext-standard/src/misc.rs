@@ -17291,7 +17291,9 @@ fn error_get_last_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             );
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"message")),
-                Value::String(PhpString::from_string(msg)),
+                Value::String(PhpString::from_vec(
+                    goro_core::errdisplay::raw_error_bytes(&msg).into_owned(),
+                )),
             );
             arr.set(
                 ArrayKey::String(PhpString::from_bytes(b"file")),

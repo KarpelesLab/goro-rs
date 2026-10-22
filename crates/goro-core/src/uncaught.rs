@@ -259,7 +259,10 @@ impl Vm {
                     let msg = o.borrow().get_property(b"message");
                     if matches!(msg.deref(), Value::Object(_)) {
                         if let Ok(s) = self.value_to_string_checked(&msg.deref()) {
-                            msg_strings.push((Rc::as_ptr(o) as usize, s.to_string_lossy()));
+                            msg_strings.push((
+                                Rc::as_ptr(o) as usize,
+                                crate::errdisplay::raw_error_string(s.as_bytes()),
+                            ));
                         }
                         self.current_exception = None;
                     }
@@ -273,10 +276,12 @@ impl Vm {
                     .find(|(p, _)| *p == Rc::as_ptr(o) as usize)
                     .map(|(_, s)| s.clone())
                     .unwrap_or_else(|| {
-                        o.borrow()
-                            .get_property(b"message")
-                            .to_php_string()
-                            .to_string_lossy()
+                        crate::errdisplay::raw_error_string(
+                            o.borrow()
+                                .get_property(b"message")
+                                .to_php_string()
+                                .as_bytes(),
+                        )
                     })
             };
             if let Value::Object(obj) = &exc {
