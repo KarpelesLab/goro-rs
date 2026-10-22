@@ -1077,70 +1077,78 @@ fn encode_loop(vm: &mut Vm) -> Option<Vec<(Vec<u8>, Value)>> {
 
 /// php_session_encode
 fn session_encode_data(vm: &mut Vm) -> Option<Vec<u8>> {
+    use goro_ext_standard::serialize::{php_serialize, serialize_scope_hook};
     let cell_ok = session_vars_arr().is_some();
     if !cell_ok {
         err(vm, E_WARNING, "Cannot encode non-existent session");
         return None;
     }
     let ser = ps(|p| p.serializer).unwrap_or(Serializer::Php);
-    let mut st = var::SerializeState::new();
-    let mut buf = Vec::new();
-    match ser {
-        Serializer::PhpSerialize => {
-            let arr = session_vars_arr()?;
-            var::serialize(vm, &Value::Array(arr), &mut st, &mut buf);
-        }
-        Serializer::Php => {
-            for (key, v) in encode_loop(vm)? {
-                buf.extend_from_slice(&key);
-                if key.contains(&b'|') {
-                    err(
-                        vm,
-                        E_WARNING,
-                        &format!(
-                            "Failed to write session data. Data contains invalid key \"{}\"",
-                            lossy(cstr(&key))
-                        ),
-                    );
-                    return None;
-                }
-                buf.push(b'|');
-                var::serialize(vm, &v, &mut st, &mut buf);
-            }
-        }
-        Serializer::PhpBinary => {
-            for (key, v) in encode_loop(vm)? {
-                if key.len() > 127 {
-                    continue;
-                }
-                buf.push(key.len() as u8);
-                buf.extend_from_slice(&key);
-                var::serialize(vm, &v, &mut st, &mut buf);
-            }
-        }
-    }
-    if vm.current_exception.is_some() {
+    // PHP_VAR_SERIALIZE_INIT: every variable shares one var_hash (with
+    // serialize() calls made by Serializable::serialize() methods too).
+    serialize_scope_hook(true);
+    let buf = session_encode_vars(vm, ser);
+    serialize_scope_hook(false);
+    let buf = buf?;
+    if vm.current_exception.is_some() || buf.is_empty() {
         return None;
     }
-    if buf.is_empty() {
-        return None;
+    return Some(buf);
+
+    fn session_encode_vars(vm: &mut Vm, ser: Serializer) -> Option<Vec<u8>> {
+        let mut buf = Vec::new();
+        match ser {
+            Serializer::PhpSerialize => {
+                let arr = session_vars_arr()?;
+                buf.extend(php_serialize(vm, &Value::Array(arr))?);
+            }
+            Serializer::Php => {
+                for (key, v) in encode_loop(vm)? {
+                    buf.extend_from_slice(&key);
+                    if key.contains(&b'|') {
+                        err(
+                            vm,
+                            E_WARNING,
+                            &format!(
+                                "Failed to write session data. Data contains invalid key \"{}\"",
+                                lossy(cstr(&key))
+                            ),
+                        );
+                        return None;
+                    }
+                    buf.push(b'|');
+                    buf.extend(php_serialize(vm, &v)?);
+                }
+            }
+            Serializer::PhpBinary => {
+                for (key, v) in encode_loop(vm)? {
+                    if key.len() > 127 {
+                        continue;
+                    }
+                    buf.push(key.len() as u8);
+                    buf.extend_from_slice(&key);
+                    buf.extend(php_serialize(vm, &v)?);
+                }
+            }
+        }
+        Some(buf)
     }
-    Some(buf)
 }
 
 /// Decode `data` with the active serializer. Returns false on failure.
 fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
+    use goro_ext_standard::serialize::UnserializeScope;
     let ser = ps(|p| p.serializer).unwrap_or(Serializer::Php);
-    let mut st = var::UnserializeState::new();
-    match ser {
+    // A fatal error (in an autoloader) while decoding is a bailout.
+    let was_fatal = vm.fatal_emitted;
+    let st = UnserializeScope::begin(vm);
+    let ok = match ser {
         Serializer::PhpSerialize => {
             let mut pos = 0;
-            let ok = var::unserialize_into(vm, data, &mut pos, &mut st, 0);
-            st.finish(vm);
-            let v = if ok {
-                st.tops[0].clone().deref()
-            } else {
-                Value::Null
+            let r = st.value(vm, data, &mut pos);
+            let v = match r {
+                Some(i) => st.tmp(i).deref(),
+                None => Value::Null,
             };
             let v = match v {
                 Value::Array(_) => v,
@@ -1151,11 +1159,11 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
                 track_init(vm);
             }
             set_session_vars(vm, v);
-            ok || data.is_empty()
+            r.is_some() || data.is_empty()
         }
         Serializer::Php | Serializer::PhpBinary => {
             let mut pos = 0;
-            let mut names: Vec<Vec<u8>> = Vec::new();
+            let mut vars: Vec<(Vec<u8>, usize)> = Vec::new();
             let mut ok = true;
             while pos < data.len() {
                 let name;
@@ -1178,33 +1186,35 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
                     name = data[pos + 1..pos + 1 + namelen].to_vec();
                     pos += namelen + 1;
                 }
-                let idx = names.len();
-                names.push(name.clone());
-                if !var::unserialize_into(vm, data, &mut pos, &mut st, idx) {
-                    names.pop();
+                let Some(idx) = st.value(vm, data, &mut pos) else {
                     ok = false;
                     break;
-                }
+                };
+                vars.push((name.clone(), idx));
                 // php_set_session_var: replaces (and frees) the old value now.
                 if let Some(arr) = session_vars_arr_mut() {
-                    let v = st.tops.get(idx).cloned().unwrap_or(Value::Null);
+                    let v = st.tmp(idx);
                     arr.borrow_mut()
                         .set(ArrayKey::String(PhpString::from_vec(name)), v);
                 }
             }
             // php_session_normalize_vars: variables a later R: turned into references.
             if let Some(arr) = session_vars_arr_mut() {
-                for (i, n) in names.iter().enumerate() {
-                    if let Some(v @ Value::Reference(_)) = st.tops.get(i) {
+                for (n, idx) in &vars {
+                    if let v @ Value::Reference(_) = st.tmp(*idx) {
                         arr.borrow_mut()
-                            .set(ArrayKey::String(PhpString::from_vec(n.clone())), v.clone());
+                            .set(ArrayKey::String(PhpString::from_vec(n.clone())), v);
                     }
                 }
             }
-            st.finish(vm);
             ok
         }
+    };
+    st.end(vm);
+    if vm.fatal_emitted && !was_fatal {
+        var::BAILOUT.with(|b| b.set(true));
     }
+    ok
 }
 
 /// php_session_decode
