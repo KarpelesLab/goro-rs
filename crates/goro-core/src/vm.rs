@@ -8250,76 +8250,6 @@ impl Vm {
         }
     }
 
-    /// Check if two optional ParamTypes are structurally equal (for property type invariance)
-    /// Check that the set hook parameter type is compatible with the property type.
-    /// PHP requires the parameter to accept every value the property could hold
-    /// (contravariant: the parameter type may be wider than the property type).
-    /// Returns true if compatible.
-    fn set_param_type_compatible_runtime(vm: &Vm, prop: &ParamType, param: &ParamType) -> bool {
-        fn display(t: &ParamType) -> String {
-            match t {
-                ParamType::Simple(n) => String::from_utf8_lossy(n).to_ascii_lowercase(),
-                ParamType::Nullable(inner) => format!("?{}", display(inner)),
-                ParamType::Union(types) => {
-                    let mut parts: Vec<String> = types.iter().map(display).collect();
-                    parts.sort();
-                    parts.join("|")
-                }
-                ParamType::Intersection(types) => {
-                    let mut parts: Vec<String> = types.iter().map(display).collect();
-                    parts.sort();
-                    parts.join("&")
-                }
-            }
-        }
-        if display(prop) == display(param) {
-            return true;
-        }
-        // mixed accepts everything
-        if matches!(param, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"mixed")) {
-            return true;
-        }
-        // Walk through prop alternatives and ensure each is covered by param.
-        fn alternatives(t: &ParamType) -> Vec<&ParamType> {
-            match t {
-                ParamType::Union(parts) => parts.iter().collect(),
-                _ => vec![t],
-            }
-        }
-        let prop_alts = alternatives(prop);
-        let param_alts = alternatives(param);
-        // Helper: param-alt-covers-prop-alt
-        let covers = |pa: &ParamType, pp: &ParamType| -> bool {
-            // Exact match
-            if display(pa) == display(pp) {
-                return true;
-            }
-            // Both are simple class names: param must be the same or a supertype
-            if let (ParamType::Simple(pa_name), ParamType::Simple(pp_name)) = (pa, pp) {
-                // If param is a known scalar-builtin, doesn't match a class
-                let pa_lower: Vec<u8> = pa_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let pp_lower: Vec<u8> = pp_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                if pa_lower == pp_lower {
-                    return true;
-                }
-                // Check class hierarchy: pa must be an ancestor of pp
-                if vm.class_is_subclass_of(&pp_lower, &pa_lower) {
-                    return true;
-                }
-            }
-            false
-        };
-        'outer: for pa in &prop_alts {
-            for pp in &param_alts {
-                if covers(pp, pa) {
-                    continue 'outer;
-                }
-            }
-            return false;
-        }
-        true
-    }
-
     /// Check whether a class is a subclass of another class (including itself)
     /// or implements it as an interface, transitively.
     fn class_is_subclass_of(&self, sub_lower: &[u8], super_lower: &[u8]) -> bool {
@@ -24657,19 +24587,27 @@ impl Vm {
                                 // They'll be packed by the __call handler later
                                 // For now, leave them in named_args and handle in the __call packing code
                             } else {
-                                let implicit_args_count =
-                                    if user_fn.cv_names.first().map(|n| n.as_slice())
-                                        == Some(b"this")
-                                    {
-                                        1
-                                    } else {
-                                        0
-                                    };
-                                if let Err(err_msg) = call.resolve_named_args(
-                                    &user_fn.cv_names,
-                                    implicit_args_count,
-                                    user_fn.variadic_param,
-                                ) {
+                                let expects_this =
+                                    user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+                                // `parent::m(name: ...)` / `parent::$p::set(name: ...)`:
+                                // $this is injected later, so the named arguments
+                                // bind against the parameters after it.
+                                let this_injected_later = expects_this
+                                    && !matches!(call.args.first(), Some(Value::Object(_)));
+                                let resolved = if this_injected_later {
+                                    call.resolve_named_args(
+                                        &user_fn.cv_names[1..],
+                                        0,
+                                        user_fn.variadic_param.map(|v| v.saturating_sub(1)),
+                                    )
+                                } else {
+                                    call.resolve_named_args(
+                                        &user_fn.cv_names,
+                                        usize::from(expects_this),
+                                        user_fn.variadic_param,
+                                    )
+                                };
+                                if let Err(err_msg) = resolved {
                                     let exc_val =
                                         self.create_exception(b"Error", &err_msg, op.line);
                                     self.current_exception = Some(exc_val);
@@ -29240,7 +29178,29 @@ impl Vm {
                                             .collect();
                                         let prop_s = String::from_utf8_lossy(prop).to_string();
                                         let mut hook_err: Option<(&[u8], String)> = None;
-                                        if class_lower == b"parent" {
+                                        // The plain property's pseudo hooks take
+                                        // `set(mixed $value)` / `get()`.
+                                        let mut named_value: Option<Value> = None;
+                                        for (n, v) in &call.named_args {
+                                            if is_set
+                                                && n.as_slice() == b"value"
+                                                && call.args.is_empty()
+                                                && named_value.is_none()
+                                            {
+                                                named_value = Some(v.clone());
+                                            } else {
+                                                hook_err = Some((
+                                                    b"Error",
+                                                    format!(
+                                                        "Unknown named parameter ${}",
+                                                        String::from_utf8_lossy(n)
+                                                    ),
+                                                ));
+                                                break;
+                                            }
+                                        }
+                                        if hook_err.is_some() {
+                                        } else if class_lower == b"parent" {
                                             hook_err = Some((b"Error", "Cannot use \"parent\" when current class scope has no parent".to_string()));
                                         } else {
                                             match self.find_property_def(&class_lower, prop) {
@@ -29281,7 +29241,8 @@ impl Vm {
                                                         .unwrap_or_else(|| {
                                                             crate::value::display_class_name(&decl)
                                                         });
-                                                    let argc = call.args.len();
+                                                    let argc = call.args.len()
+                                                        + usize::from(named_value.is_some());
                                                     if vis == Visibility::Private {
                                                         hook_err = Some((
                                                             b"Error",
@@ -29353,6 +29314,7 @@ impl Vm {
                                                     .args
                                                     .first()
                                                     .cloned()
+                                                    .or(named_value)
                                                     .unwrap_or(Value::Null);
                                                 obj.borrow_mut()
                                                     .set_property(prop.to_vec(), new_val.clone());
@@ -43505,6 +43467,121 @@ impl Vm {
                             }
                         }
 
+                        // Interface properties implemented by this class
+                        // (do_inherit_property for interface properties):
+                        // set visibility and the abstract set hook's type.
+                        if !class.is_interface && !class.is_trait {
+                            let mut seen: Vec<Vec<u8>> = Vec::new();
+                            for iface_name in &iface_names {
+                                let il = iface_name.to_ascii_lowercase();
+                                if seen.contains(&il) {
+                                    continue;
+                                }
+                                seen.push(il.clone());
+                                let Some(iface) = self.classes.get(&il) else {
+                                    continue;
+                                };
+                                if !iface.is_interface {
+                                    continue;
+                                }
+                                let iface_display =
+                                    String::from_utf8_lossy(&iface.name).to_string();
+                                let iface_props: Vec<crate::object::PropertyDef> = iface
+                                    .properties
+                                    .iter()
+                                    .filter(|p| !p.is_static)
+                                    .cloned()
+                                    .collect();
+                                let iface_methods = iface.methods.clone();
+                                for ip in &iface_props {
+                                    let Some(cp) = class
+                                        .properties
+                                        .iter()
+                                        .find(|p| p.name == ip.name && !p.is_static)
+                                    else {
+                                        continue;
+                                    };
+                                    let level = |v: Visibility| match v {
+                                        Visibility::Public => 0,
+                                        Visibility::Protected => 1,
+                                        Visibility::Private => 2,
+                                    };
+                                    // readonly implies protected(set) on a public property.
+                                    let child_set = cp.set_visibility.or(
+                                        if cp.is_readonly && cp.visibility == Visibility::Public {
+                                            Some(Visibility::Protected)
+                                        } else {
+                                            None
+                                        },
+                                    );
+                                    let get_only_virtual = ip.is_virtual && !ip.has_set_hook;
+                                    if let Some(cs) = child_set {
+                                        let parent_set = ip.set_visibility.unwrap_or(ip.visibility);
+                                        if !get_only_virtual && level(cs) > level(parent_set) {
+                                            let shown = match ip.set_visibility {
+                                                Some(Visibility::Private) => "private(set)",
+                                                Some(Visibility::Protected) => "protected(set)",
+                                                _ => "omitted",
+                                            };
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Set access level of {}::${} must be {} (as in class {}){}",
+                                                    String::from_utf8_lossy(&class.name),
+                                                    String::from_utf8_lossy(&cp.name),
+                                                    shown,
+                                                    iface_display,
+                                                    if ip.set_visibility.is_some() {
+                                                        " or weaker"
+                                                    } else {
+                                                        ""
+                                                    }
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    if ip.has_set_hook && !cp.has_set_hook {
+                                        if let Some(child_type) = cp.property_type.clone() {
+                                            let mut m = b"__property_set_".to_vec();
+                                            m.extend(
+                                                ip.name.iter().map(|b| b.to_ascii_lowercase()),
+                                            );
+                                            let set_type = iface_methods
+                                                .get(&m)
+                                                .and_then(|md| {
+                                                    md.op_array
+                                                        .param_types
+                                                        .iter()
+                                                        .flatten()
+                                                        .next()
+                                                        .map(|pi| pi.param_type.clone())
+                                                })
+                                                .or_else(|| ip.property_type.clone());
+                                            if let Some(set_type) = set_type {
+                                                if let Some(ts) = self.variance_abstract_set_type(
+                                                    &class,
+                                                    &il,
+                                                    &set_type,
+                                                    &child_type,
+                                                ) {
+                                                    return Err(VmError {
+                                                        message: format!(
+                                                            "Set type of {}::${} must be supertype of {} (as in interface {})",
+                                                            String::from_utf8_lossy(&class.name),
+                                                            String::from_utf8_lossy(&cp.name),
+                                                            ts,
+                                                            iface_display
+                                                        ),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Check for unimplemented abstract methods (interface enforcement)
                         if !class.is_abstract && !class.is_interface && !class.is_trait {
                             let mut abstract_methods: Vec<String> = Vec::new();
@@ -44809,8 +44886,8 @@ impl Vm {
                                                 // checked just above; keeps the error path flat
                                                 let prop_type =
                                                     prop.property_type.as_ref().unwrap();
-                                                if !Self::set_param_type_compatible_runtime(
-                                                    self, prop_type, param_type,
+                                                if !self.variance_hook_param(
+                                                    &class, prop_type, param_type,
                                                 ) {
                                                     let cls_display =
                                                         String::from_utf8_lossy(&class.name);
@@ -45829,7 +45906,7 @@ impl Vm {
                                     let mut k = class_lower.clone();
                                     k.extend_from_slice(b"::");
                                     k.extend_from_slice(pn);
-                                    self.property_hook_stack.iter().any(|s| s.starts_with(&k))
+                                    self.in_prop_hook(&k, Some(oid))
                                 };
                                 if has_get_hook_here
                                     && !in_own_hook
@@ -46053,7 +46130,7 @@ impl Vm {
                             k.push(b':');
                             k.extend_from_slice(prop_name_bytes);
                             k.extend_from_slice(b"::get");
-                            k
+                            Self::prop_hook_key(k, &obj_val)
                         };
                         // Inside this property's hook (on this object), accesses use
                         // the backing store directly.
@@ -47365,7 +47442,7 @@ impl Vm {
                             k.push(b':');
                             k.extend_from_slice(prop_name_bytes_set);
                             k.extend_from_slice(b"::set");
-                            k
+                            Self::prop_hook_key(k, &obj_val)
                         };
                         // Inside this property's hook (on this object), accesses use
                         // the backing store directly.
@@ -50956,6 +51033,7 @@ impl Vm {
                             hk.extend_from_slice(b"::");
                             hk.extend_from_slice(&prop_name);
                             hk.extend_from_slice(if is_set { b"::set" } else { b"::get" });
+                            let hk = Self::prop_hook_key(hk, &Value::Object(this_obj.clone()));
                             self.property_hook_stack.push(hk);
                             self.class_scope_stack.push(decl);
                             let r = self.execute_op_array(&op, fn_cvs);
@@ -51492,6 +51570,7 @@ impl Vm {
         hook_key.extend_from_slice(b"::");
         hook_key.extend_from_slice(pn);
         hook_key.extend_from_slice(if kind == "set" { b"::set" } else { b"::get" });
+        let hook_key = Self::prop_hook_key(hook_key, &Value::Object(obj.clone()));
         self.property_hook_stack.push(hook_key);
         self.class_scope_stack.push(decl);
         self.called_class_stack.push(class_name_orig);
@@ -51687,6 +51766,7 @@ impl Vm {
                 hook_key.extend_from_slice(b"::");
                 hook_key.extend_from_slice(&d.name);
                 hook_key.extend_from_slice(b"::get");
+                let hook_key = Self::prop_hook_key(hook_key, &Value::Object(obj.clone()));
                 self.property_hook_stack.push(hook_key);
                 self.class_scope_stack.push(decl_lower.clone());
                 self.called_class_stack.push(class_name_orig.clone());
@@ -51778,6 +51858,28 @@ impl Vm {
         }
     }
 
+    /// Tag a `property_hook_stack` key ("class::prop::get") with the object
+    /// the hook runs on: only accesses on that object hit the backing store
+    /// (zend_should_call_hook compares `$this`).
+    pub(crate) fn prop_hook_key(mut key: Vec<u8>, this: &Value) -> Vec<u8> {
+        if let Value::Object(o) = this {
+            key.push(b'#');
+            key.extend_from_slice(o.borrow().object_id.to_string().as_bytes());
+        }
+        key
+    }
+
+    /// Whether a hook of the property `base` ("class::prop") is running,
+    /// on the object `oid` when given.
+    pub(crate) fn in_prop_hook(&self, base: &[u8], oid: Option<u64>) -> bool {
+        let tag = oid.map(|o| format!("#{}", o));
+        self.property_hook_stack.iter().any(|s| {
+            s.starts_with(base)
+                && s[base.len()..].starts_with(b"::")
+                && tag.as_ref().is_none_or(|t| s.ends_with(t.as_bytes()))
+        })
+    }
+
     /// True if `class_lower` has a get hook for `pn` and we are not currently
     /// executing a hook of that property (where accesses hit the backing store).
     fn has_unguarded_get_hook(&self, class_lower: &[u8], pn: &[u8]) -> bool {
@@ -51800,7 +51902,7 @@ impl Vm {
         let mut k = class_lower.to_vec();
         k.extend_from_slice(b"::");
         k.extend_from_slice(pn);
-        !self.property_hook_stack.iter().any(|s| s.starts_with(&k))
+        !self.in_prop_hook(&k, None)
     }
 
     /// isset() on a property with a get hook: if the property is accessible
@@ -51879,6 +51981,7 @@ impl Vm {
         hook_key.extend_from_slice(b"::");
         hook_key.extend_from_slice(pn);
         hook_key.extend_from_slice(b"::get");
+        let hook_key = Self::prop_hook_key(hook_key, &Value::Object(obj.clone()));
         self.property_hook_stack.push(hook_key);
         self.class_scope_stack.push(hook_declaring);
         self.called_class_stack.push(class_name_orig);

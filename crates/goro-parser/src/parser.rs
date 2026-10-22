@@ -4768,6 +4768,59 @@ impl Parser {
         }
     }
 
+    /// `X::$prop::get(...)` / `X::$prop::set(...)` after the property name:
+    /// lowered to `X::__property_{get,set}_<prop>(...)`. Returns `Err(class)`
+    /// (untouched) when the tokens don't form a hook call.
+    fn parse_prop_hook_call(&mut self, expr: Expr, name: &[u8]) -> ParseResult<Result<Expr, Expr>> {
+        if !matches!(self.peek(), TokenKind::DoubleColon) {
+            return Ok(Err(expr));
+        }
+        let lookahead = self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
+        let Some(TokenKind::Identifier(ref hook_name)) = lookahead else {
+            return Ok(Err(expr));
+        };
+        if !(hook_name.eq_ignore_ascii_case(b"get") || hook_name.eq_ignore_ascii_case(b"set"))
+            || !matches!(
+                self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                Some(TokenKind::OpenParen)
+            )
+        {
+            return Ok(Err(expr));
+        }
+        self.advance(); // ::
+        let is_set = hook_name.eq_ignore_ascii_case(b"set");
+        self.advance(); // get/set
+        self.advance(); // (
+        let args = self.parse_arguments()?;
+        let is_fcc = self.first_class_callable_flag;
+        let end_span = self.span();
+        self.expect(&TokenKind::CloseParen)?;
+        let mut synthetic_method = if is_set {
+            b"__property_set_".to_vec()
+        } else {
+            b"__property_get_".to_vec()
+        };
+        synthetic_method.extend_from_slice(name);
+        Ok(Ok(if is_fcc {
+            Expr {
+                span: expr.span.merge(end_span),
+                kind: ExprKind::FirstClassCallable(CallableTarget::StaticMethod {
+                    class: Box::new(expr),
+                    method: synthetic_method,
+                }),
+            }
+        } else {
+            Expr {
+                span: expr.span.merge(end_span),
+                kind: ExprKind::StaticMethodCall {
+                    class: Box::new(expr),
+                    method: synthetic_method,
+                    args,
+                },
+            }
+        }))
+    }
+
     /// simple_variable: `$v`, `${expr}`, `$$v`, or `$` before another
     /// simple variable (`$$$v`, `$${expr}`).
     fn parse_simple_variable(&mut self) -> ParseResult<Expr> {
@@ -5023,59 +5076,13 @@ impl Parser {
                         TokenKind::Variable(name) => {
                             self.advance();
                             // Property hook parent call: parent::$prop::get() / parent::$prop::set($v)
-                            // Rewrite to parent::__property_get_<prop>() / parent::__property_set_<prop>($v)
-                            if matches!(self.peek(), TokenKind::DoubleColon) {
-                                let lookahead =
-                                    self.tokens.get(self.pos + 1).map(|t| t.kind.clone());
-                                if let Some(TokenKind::Identifier(ref hook_name)) = lookahead {
-                                    if (hook_name.eq_ignore_ascii_case(b"get")
-                                        || hook_name.eq_ignore_ascii_case(b"set"))
-                                        && matches!(
-                                            self.tokens.get(self.pos + 2).map(|t| &t.kind),
-                                            Some(TokenKind::OpenParen)
-                                        )
-                                    {
-                                        self.advance(); // ::
-                                        let is_set = hook_name.eq_ignore_ascii_case(b"set");
-                                        self.advance(); // get/set
-                                        self.advance(); // (
-                                        let args = self.parse_arguments()?;
-                                        let is_fcc = self.first_class_callable_flag;
-                                        let end_span = self.span();
-                                        self.expect(&TokenKind::CloseParen)?;
-                                        let synthetic_method = if is_set {
-                                            let mut m = b"__property_set_".to_vec();
-                                            m.extend_from_slice(&name);
-                                            m
-                                        } else {
-                                            let mut m = b"__property_get_".to_vec();
-                                            m.extend_from_slice(&name);
-                                            m
-                                        };
-                                        expr = if is_fcc {
-                                            Expr {
-                                                span: expr.span.merge(end_span),
-                                                kind: ExprKind::FirstClassCallable(
-                                                    CallableTarget::StaticMethod {
-                                                        class: Box::new(expr),
-                                                        method: synthetic_method,
-                                                    },
-                                                ),
-                                            }
-                                        } else {
-                                            Expr {
-                                                span: expr.span.merge(end_span),
-                                                kind: ExprKind::StaticMethodCall {
-                                                    class: Box::new(expr),
-                                                    method: synthetic_method,
-                                                    args,
-                                                },
-                                            }
-                                        };
-                                        continue;
-                                    }
+                            expr = match self.parse_prop_hook_call(expr, &name)? {
+                                Ok(call) => {
+                                    expr = call;
+                                    continue;
                                 }
-                            }
+                                Err(class) => class,
+                            };
                             // Check if followed by ( for dynamic static method call: Foo::$method()
                             if matches!(self.peek(), TokenKind::OpenParen) {
                                 // Dynamic method call: resolve variable to get method name
@@ -5110,6 +5117,35 @@ impl Parser {
                         }
                         TokenKind::DollarOpenBrace => {
                             // Test::${expr} - static property named by expression
+                            // `parent::${0}::get()`: a literal name is a hook call
+                            // like `parent::$name::get()`.
+                            let literal = match self.tokens.get(self.pos + 1).map(|t| &t.kind) {
+                                Some(TokenKind::LongNumber(n)) => Some(n.to_string().into_bytes()),
+                                Some(TokenKind::ConstantString(s)) => Some(s.clone()),
+                                _ => None,
+                            };
+                            if let Some(lit) = literal.filter(|_| {
+                                matches!(
+                                    self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                                    Some(TokenKind::CloseBrace)
+                                ) && matches!(
+                                    self.tokens.get(self.pos + 3).map(|t| &t.kind),
+                                    Some(TokenKind::DoubleColon)
+                                )
+                            }) {
+                                let saved = self.pos;
+                                self.pos += 3;
+                                match self.parse_prop_hook_call(expr, &lit)? {
+                                    Ok(call) => {
+                                        expr = call;
+                                        continue;
+                                    }
+                                    Err(class) => {
+                                        expr = class;
+                                        self.pos = saved;
+                                    }
+                                }
+                            }
                             self.advance();
                             let name_expr = self.parse_expression()?;
                             self.expect(&TokenKind::CloseBrace)?;

@@ -1068,7 +1068,24 @@ pub(crate) fn function_declaration(
         .unwrap_or(class_display);
     s.push_str(&String::from_utf8_lossy(cut));
     s.push_str("::");
-    s.push_str(&String::from_utf8_lossy(&m.name));
+    // Property hooks display as `$prop::get` / `$prop::set`.
+    let lname = m.name.to_ascii_lowercase();
+    let hook = if lname.starts_with(b"__property_get_") {
+        Some((&m.name[b"__property_get_".len()..], "get"))
+    } else if lname.starts_with(b"__property_set_") {
+        Some((&m.name[b"__property_set_".len()..], "set"))
+    } else {
+        None
+    };
+    match hook {
+        Some((prop, kind)) => {
+            s.push('$');
+            s.push_str(&String::from_utf8_lossy(prop));
+            s.push_str("::");
+            s.push_str(kind);
+        }
+        None => s.push_str(&String::from_utf8_lossy(&m.name)),
+    }
     s.push('(');
     let a = FnArgs::of(m);
     for i in 0..a.num {
@@ -1108,6 +1125,9 @@ pub(crate) fn function_declaration(
     if let Some(rt) = &oa.return_type {
         s.push_str(": ");
         s.push_str(&type_to_string(&TypeView::from_param_type(rt), Some(scope)));
+    } else if matches!(hook, Some((_, "set"))) {
+        // A set hook's implicit return type.
+        s.push_str(": void");
     }
     s
 }
@@ -1218,6 +1238,62 @@ impl Vm {
 }
 
 impl Vm {
+    /// zend_verify_property_hook_variance: the set hook's `$value` type
+    /// must accept every value of the property type. Unresolved classes
+    /// are autoloaded (delayed variance obligation) and the check redone.
+    pub(crate) fn variance_hook_param(
+        &mut self,
+        cur: &ClassEntry,
+        prop_type: &ParamType,
+        param_type: &ParamType,
+    ) -> bool {
+        let cur_lc = LinkClass::from_entry(cur);
+        let prop_tv = TypeView::from_param_type(prop_type);
+        let param_tv = TypeView::from_param_type(param_type);
+        let mut attempt = 0;
+        loop {
+            let (status, unresolved) = {
+                let ctx = Ctx::new(self, &cur_lc);
+                let status = ctx.covariant(&cur_lc, &prop_tv, &cur_lc, &param_tv);
+                let unresolved: Vec<Vec<u8>> = ctx.unresolved.borrow().clone();
+                (status, unresolved)
+            };
+            if status == Status::Unresolved && attempt == 0 && !self.autoload_functions.is_empty() {
+                attempt += 1;
+                push_linking(cur);
+                for n in &unresolved {
+                    self.try_autoload_class(n);
+                }
+                pop_linking();
+                continue;
+            }
+            return status == Status::Success;
+        }
+    }
+
+    /// verify_property_type_compatibility() for an abstract (interface)
+    /// property with a set hook that the class implements with a plain
+    /// property: the hook's `$value` type must be a subtype of the class's
+    /// property type. Returns the hook type rendered in the interface's
+    /// scope on failure.
+    pub(crate) fn variance_abstract_set_type(
+        &mut self,
+        cur: &ClassEntry,
+        iface_lower: &[u8],
+        set_type: &ParamType,
+        child_type: &ParamType,
+    ) -> Option<String> {
+        let cur_lc = LinkClass::from_entry(cur);
+        let set_tv = TypeView::from_param_type(set_type);
+        let child_tv = TypeView::from_param_type(child_type);
+        let ctx = Ctx::new(self, &cur_lc);
+        let iface_lc = self.variance_scope_for(&ctx, iface_lower, iface_lower);
+        if ctx.covariant(&iface_lc, &set_tv, &cur_lc, &child_tv) == Status::Error {
+            return Some(type_to_string(&set_tv, Some(&iface_lc)));
+        }
+        None
+    }
+
     /// full_property_types_compatible: `variance` 0 = invariant, 1 = covariant,
     /// 2 = contravariant. Returns the status, the parent type rendered as
     /// PHP does in "Type of X::$p must be ..." errors, and the parent's class name.

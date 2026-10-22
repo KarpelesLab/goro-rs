@@ -359,11 +359,7 @@ impl Vm {
         let mut base = class_lower.to_vec();
         base.extend_from_slice(b"::");
         base.extend_from_slice(prop);
-        if self
-            .property_hook_stack
-            .iter()
-            .any(|k| k.starts_with(&base))
-        {
+        if self.in_prop_hook(&base, None) {
             return None;
         }
         Some((g, st))
@@ -380,6 +376,7 @@ impl Vm {
         key.extend_from_slice(b"::");
         key.extend_from_slice(prop);
         key.extend_from_slice(b"::get");
+        let key = Self::prop_hook_key(key, obj_val);
         let mut m = b"__property_get_".to_vec();
         m.extend_from_slice(prop);
         self.last_call_by_ref = false;
