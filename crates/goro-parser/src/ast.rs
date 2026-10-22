@@ -170,6 +170,8 @@ pub enum ExprKind {
         class: Box<Expr>,
         method: Vec<u8>,
         args: Vec<Argument>,
+        /// Line of the method name (the call's line, GH-8810); 0 = unknown.
+        method_line: u32,
     },
     DynamicStaticMethodCall {
         class: Box<Expr>,

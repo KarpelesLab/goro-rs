@@ -4981,6 +4981,7 @@ impl Parser {
                     class: Box::new(expr),
                     method: synthetic_method,
                     args,
+                    method_line: 0,
                 },
             }
         }))
@@ -5489,6 +5490,7 @@ impl Parser {
                                         class: Box::new(expr),
                                         method: name,
                                         args,
+                                        method_line: member_span.line,
                                     },
                                 }
                             };
@@ -5633,6 +5635,7 @@ impl Parser {
                                             class: Box::new(expr),
                                             method: name,
                                             args,
+                                            method_line: member_span.line,
                                         },
                                     }
                                 };
@@ -5681,6 +5684,7 @@ impl Parser {
                 }
                 TokenKind::OpenParen => {
                     // Function call (for variable functions: $func())
+                    let paren_line = self.span().line;
                     self.advance();
                     let args = self.parse_arguments()?;
                     let is_fcc = self.first_class_callable_flag;
@@ -5694,8 +5698,14 @@ impl Parser {
                             ))),
                         }
                     } else {
+                        // A call of a callable_expr is on the line of its
+                        // argument list (the parser's lookahead, GH-8810).
+                        let mut span = expr.span.merge(end_span);
+                        if !matches!(expr.kind, ExprKind::Identifier(_)) {
+                            span.line = paren_line;
+                        }
                         Expr {
-                            span: expr.span.merge(end_span),
+                            span,
                             kind: ExprKind::FunctionCall {
                                 name: Box::new(expr),
                                 args,

@@ -502,6 +502,7 @@ fn ex(s: &mut String, e: &Expr, prio: i32, indent: usize) {
             class,
             method,
             args,
+            ..
         } => {
             // parent::$prop::get() / parent::$prop::set() (lowered by the
             // parser to the hook methods).

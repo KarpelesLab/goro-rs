@@ -12246,6 +12246,7 @@ impl Compiler {
                     class: class.clone(),
                     method: method.clone(),
                     args: arg,
+                    method_line: 0,
                 }
             }
             ExprKind::FirstClassCallable(CallableTarget::Method {
@@ -17223,6 +17224,7 @@ impl Compiler {
                 class,
                 method,
                 args,
+                method_line,
             } => {
                 self.check_parent_hook_call(class, method, false, expr.span.line)?;
                 let discard_flag = if std::mem::take(&mut self.is_discarding_result) {
@@ -17284,7 +17286,7 @@ impl Compiler {
                         op1: discard_flag,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
-                        line: expr.span.line,
+                        line: if *method_line > 0 { *method_line } else { expr.span.line },
                     });
 
                     Some(jmp)
@@ -17391,7 +17393,7 @@ impl Compiler {
                         op1: discard_flag,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
-                        line: expr.span.line,
+                        line: if *method_line > 0 { *method_line } else { expr.span.line },
                     });
 
                     None
@@ -21412,6 +21414,7 @@ fn expr_to_source_string(expr: &Expr) -> String {
             class,
             method,
             args,
+            ..
         } => {
             let class_str = expr_to_source_string(class);
             let method_str = String::from_utf8_lossy(method).to_string();
