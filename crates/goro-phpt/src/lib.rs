@@ -889,7 +889,10 @@ fn is_loopback_arg(arg: &str) -> bool {
         || lower.contains("0.0.0.0")
         || lower.contains("unix://") // unix-domain sockets aren't network
         || lower.contains("udg://")
-    // unix-datagram sockets aren't network
+        // unix-datagram sockets aren't network
+        || lower.contains("{{ addr }}")
+        || lower.contains("php_cli_server_address")
+    // the test's own local server (ServerClientTestCase / php -S)
     {
         return true;
     }
@@ -916,6 +919,17 @@ fn is_loopback_arg(arg: &str) -> bool {
         // Dynamic — can't classify confidently. Safe.
         return true;
     }
+    // A dotted-numeric host that is no IPv4 address (e.g.
+    // "9999.9999.9999.9999") fails to resolve without any network.
+    let lit = arg.trim().trim_matches(['"', '\'']);
+    let rest = lit.split_once("://").map(|(_, r)| r).unwrap_or(lit);
+    let host = rest.split(':').next().unwrap_or("");
+    if !host.is_empty()
+        && host.bytes().all(|c| c.is_ascii_digit() || c == b'.')
+        && host.parse::<std::net::Ipv4Addr>().is_err()
+    {
+        return true;
+    }
     false
 }
 
@@ -935,6 +949,7 @@ fn url_is_remote(arg: &str) -> bool {
         || lower.contains("localhost")
         || lower.contains("[::1]")
         || lower.contains("php_cli_server_address")
+        || lower.contains("{{ addr }}")
     {
         return false;
     }
@@ -2757,6 +2772,13 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
             .unwrap_or(&tmp);
         unsafe {
             std::env::set_var("TEMP", tmp);
+        }
+    }
+    // run-tests.php runs offline unless --online is given: SKIP_ONLINE_TESTS
+    // defaults to "1" when the environment does not set it.
+    if std::env::var_os("SKIP_ONLINE_TESTS").is_none() {
+        unsafe {
+            std::env::set_var("SKIP_ONLINE_TESTS", "1");
         }
     }
     // Make sure subprocesses launched by tests (e.g. via proc_open from
