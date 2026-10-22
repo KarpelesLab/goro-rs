@@ -768,7 +768,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             DescType::Socket => xp_socket::stream_from_socket(vm, d.parentend),
             DescType::Std => continue,
         };
-        pipes_arr.set(ArrayKey::Int(d.index as i64), Value::resource(&fid));
+        pipes_arr.set(ArrayKey::Int(d.index as i64), Value::resource(fid));
         pipe_ids.push(fid);
     }
     if let Some(Value::Reference(r)) = args.get(2) {
@@ -787,7 +787,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         )
     });
     goro_core::value::register_resource(id, b"process");
-    Ok(Value::resource(&id))
+    Ok(Value::resource(id))
 }
 
 /// zend_fetch_resource(..., "process", le_proc_open)
@@ -854,7 +854,7 @@ fn proc_dtor(vm: &mut Vm, id: i64, wait: bool) -> i64 {
     });
     for fid in pipes {
         if has_file_handle(fid) {
-            let _ = fclose_fn(vm, &[Value::resource(&fid)]);
+            let _ = fclose_fn(vm, &[Value::resource(fid)]);
         }
     }
     let opts = if wait { 0 } else { libc::WNOHANG };

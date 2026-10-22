@@ -161,7 +161,7 @@ fn zip_open(vm: &mut Vm, args: &[Value]) -> R {
                     },
                 )
             });
-            Ok(Value::resource(&id))
+            Ok(Value::resource(id))
         }
         Err(e) => Ok(Value::Long(e.zip_err as i64)),
     }
@@ -215,7 +215,7 @@ fn zip_read(vm: &mut Vm, args: &[Value]) -> R {
                     },
                 )
             });
-            Ok(Value::resource(&eid))
+            Ok(Value::resource(eid))
         }
         None => Ok(Value::False),
     }

@@ -1122,7 +1122,7 @@ fn user_filter_filter(
     let has_stream_prop = prop_exists(&obj, b"stream");
     if has_stream_prop {
         let sv = if stream != 0 {
-            Value::resource(&stream)
+            Value::resource(stream)
         } else {
             Value::Null
         };
@@ -1143,8 +1143,8 @@ fn user_filter_filter(
         None => Value::Null,
     }));
     let args = vec![
-        Value::resource(&in_res),
-        Value::resource(&out_res),
+        Value::resource(in_res),
+        Value::resource(out_res),
         Value::Reference(consumed_rc.clone()),
         if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
             Value::True
@@ -1253,7 +1253,7 @@ fn bucket_object(vm: &mut Vm, b: &BucketRef) -> Value {
     vm.apply_class_property_defaults(&mut obj, b"streambucket");
     let data = b.borrow().buf.clone();
     let len = data.len() as i64;
-    obj.set_property(b"bucket".to_vec(), Value::resource(&rid));
+    obj.set_property(b"bucket".to_vec(), Value::resource(rid));
     obj.set_property(b"data".to_vec(), Value::String(PhpString::from_vec(data)));
     obj.set_property(b"datalen".to_vec(), Value::Long(len));
     obj.set_property(b"dataLength".to_vec(), Value::Long(len));

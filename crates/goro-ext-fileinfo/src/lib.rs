@@ -367,7 +367,7 @@ fn magic_stream(vm: &mut Vm, func: &str, ms: &mut MagicSet, id: i64) -> Option<V
     if ms.reset(true).is_err() {
         return None;
     }
-    let (mode, size) = match ext_io::call(vm, b"fstat", &[Value::resource(&id)]) {
+    let (mode, size) = match ext_io::call(vm, b"fstat", &[Value::resource(id)]) {
         Ok(Value::Array(a)) => {
             let a = a.borrow();
             let get = |k: &[u8]| match a.get(&goro_core::array::ArrayKey::String(
@@ -390,7 +390,7 @@ fn magic_stream(vm: &mut Vm, func: &str, ms: &mut MagicSet, id: i64) -> Option<V
         match ext_io::call(
             vm,
             b"fread",
-            &[Value::resource(&id), Value::Long(ms.bytes_max as i64)],
+            &[Value::resource(id), Value::Long(ms.bytes_max as i64)],
         ) {
             Ok(Value::String(s)) => s.as_bytes().to_vec(),
             _ => Vec::new(),
@@ -438,7 +438,7 @@ fn from_path(
     let mut fargs = vec![vstr(path), vstr(b"rb")];
     if let Some(c) = ctx {
         fargs.push(Value::False);
-        fargs.push(Value::resource(&c));
+        fargs.push(Value::resource(c));
     }
     let id = match as_caller(vm, func, |vm| ext_io::call_as(vm, func, b"fopen", &fargs)) {
         Ok(Value::Resource(id)) => id,

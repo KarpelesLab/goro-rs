@@ -443,7 +443,7 @@ pub(crate) fn h_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
             let ctx = default_context();
             Ok(Some(
                 match bz2open(vm, s.as_bytes(), &mode, REPORT_ERRORS, Some(ctx), false)? {
-                    Some((fid, _)) => Value::resource(&fid),
+                    Some((fid, _)) => Value::resource(fid),
                     None => Value::False,
                 },
             ))
@@ -481,7 +481,7 @@ pub(crate) fn h_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
             };
             // The stream keeps its own handle: closing ours leaves it open.
             let (nfid, _) = from_bzfile(BzFile::open(f, &mode), &mode, 0, None);
-            Ok(Some(Value::resource(&nfid)))
+            Ok(Some(Value::resource(nfid)))
         }
         other => Err(type_error(
             vm,
@@ -516,7 +516,7 @@ pub(crate) fn h_bzread(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
         None => Ok(Some(call_orig(
             vm,
             "fread",
-            &[Value::resource(&fid), Value::Long(len)],
+            &[Value::resource(fid), Value::Long(len)],
         )?)),
     }
 }

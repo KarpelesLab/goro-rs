@@ -8437,15 +8437,15 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         let get_args = if let Some(length) = length {
             vec![
-                Value::resource(&fid),
+                Value::resource(fid),
                 Value::Long(length),
                 Value::Long(offset),
             ]
         } else {
-            vec![Value::resource(&fid), Value::Long(-1), Value::Long(offset)]
+            vec![Value::resource(fid), Value::Long(-1), Value::Long(offset)]
         };
         let res = stream_get_contents_fn(vm, &get_args)?;
-        let _ = fclose_fn(vm, &[Value::resource(&fid)]);
+        let _ = fclose_fn(vm, &[Value::resource(fid)]);
         return Ok(res);
     }
     // php://filter routes through fopen so the filter chain is applied.
@@ -8474,12 +8474,12 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         let get_args = if let Some(length) = length {
             vec![
-                Value::resource(&fid),
+                Value::resource(fid),
                 Value::Long(length),
                 Value::Long(offset),
             ]
         } else {
-            vec![Value::resource(&fid), Value::Long(-1), Value::Long(offset)]
+            vec![Value::resource(fid), Value::Long(-1), Value::Long(offset)]
         };
         let res = call_registered(
             vm,
@@ -8487,7 +8487,7 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             stream_get_contents_fn,
             &get_args,
         )?;
-        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(&fid)]);
+        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(fid)]);
         return Ok(res);
     }
     // php://input - request body for HTTP requests served by the built-in CLI server.
@@ -11541,7 +11541,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if !matches!(headers, Value::Null) {
                 HTTP_WRAPPER_DATA.with(|w| w.borrow_mut().insert(fid, headers));
             }
-            return Ok(Value::resource(&fid));
+            return Ok(Value::resource(fid));
         }
         return Ok(Value::False);
     }
@@ -11614,13 +11614,13 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         if vm.current_exception.is_some() {
-            let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(&inner_fid)]);
+            let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(inner_fid)]);
             return Err(VmError {
                 message: String::new(),
                 line: vm.current_line,
             });
         }
-        return Ok(Value::resource(&inner_fid));
+        return Ok(Value::resource(inner_fid));
     }
 
     // data: URLs (php_stream_url_wrap_rfc2397).
@@ -11652,7 +11652,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 });
                 goro_core::value::register_resource(fid, b"stream");
-                return Ok(Value::resource(&fid));
+                return Ok(Value::resource(fid));
             }
             Err(e) => {
                 vm.emit_warning(&format!(
@@ -11704,7 +11704,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             });
             goro_core::value::register_resource(fid, b"stream");
-            return Ok(Value::resource(&fid));
+            return Ok(Value::resource(fid));
         }
         let special = match lower.as_str() {
             "stdout" => Some(SpecialStream::Stdout),
@@ -11732,7 +11732,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         goro_core::value::alloc_resource_id();
                     }
                     goro_core::value::register_resource(fid, b"stream");
-                    return Ok(Value::resource(&fid));
+                    return Ok(Value::resource(fid));
                 }
                 Err(_) => return Ok(Value::False),
             }
@@ -11805,7 +11805,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     });
                     goro_core::value::register_resource(fid, b"stream");
-                    return Ok(Value::resource(&fid));
+                    return Ok(Value::resource(fid));
                 }
                 _ => {
                     vm.emit_warning(&format!(
@@ -11936,7 +11936,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // to fopen() (e.g. relative paths stay relative, file:// prefix is kept).
             let fid = alloc_file_handle_uri(f, &mode, &original_uri);
             goro_core::value::register_resource(fid, b"stream");
-            Ok(Value::resource(&fid))
+            Ok(Value::resource(fid))
         }
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
@@ -15055,7 +15055,7 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match std::fs::read_dir(dir_path) {
             Ok(_) => {
                 let did = alloc_dir_handle(path_str.to_string());
-                Ok(Value::resource(&did))
+                Ok(Value::resource(did))
             }
             Err(e) => {
                 vm.emit_warning(&format!(
@@ -15834,8 +15834,8 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::Resource(n) => n.id(),
             _ => return Ok(Value::False),
         };
-        let data = stream_get_contents_fn(vm, &[Value::resource(&fid)])?;
-        let _ = fclose_fn(vm, &[Value::resource(&fid)]);
+        let data = stream_get_contents_fn(vm, &[Value::resource(fid)])?;
+        let _ = fclose_fn(vm, &[Value::resource(fid)]);
         if !vm.check_open_basedir("copy", &to_str) {
             return Ok(Value::False);
         }
@@ -16005,9 +16005,9 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm,
             b"stream_get_contents",
             stream_get_contents_fn,
-            &[Value::resource(&fid)],
+            &[Value::resource(fid)],
         );
-        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(&fid)]);
+        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(fid)]);
         match r? {
             Value::String(s) => Ok(s.as_bytes().to_vec()),
             _ => Ok(Vec::new()),
@@ -17155,7 +17155,7 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     let fid = alloc_file_handle(file, "w+b");
     goro_core::value::register_resource(fid, b"stream");
-    Ok(Value::resource(&fid))
+    Ok(Value::resource(fid))
 }
 
 fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -20207,7 +20207,7 @@ fn stream_context_create_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         c.borrow_mut().insert(fid, ctx);
     });
     goro_core::value::register_resource(fid, b"stream-context");
-    Ok(Value::resource(&fid))
+    Ok(Value::resource(fid))
 }
 
 /// PHP_FUNCTION(stream_context_set_options)
@@ -20552,11 +20552,11 @@ fn stream_context_get_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
                     }
                 }
             });
-            return Ok(Value::resource(&fid));
+            return Ok(Value::resource(fid));
         }
     }
     let fid = default_context();
-    Ok(Value::resource(&fid))
+    Ok(Value::resource(fid))
 }
 
 fn stream_context_set_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -21187,7 +21187,7 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             match fid {
                 Some(fid) => {
                     POPEN_CHILDREN.with(|p| p.borrow_mut().insert(fid, (child, drain)));
-                    Ok(Value::resource(&fid))
+                    Ok(Value::resource(fid))
                 }
                 None => Ok(Value::False),
             }

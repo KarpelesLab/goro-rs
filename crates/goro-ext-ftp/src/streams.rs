@@ -24,7 +24,7 @@ pub fn write(vm: &mut Vm, id: i64, data: &[u8]) -> usize {
     if data.is_empty() {
         return 0;
     }
-    match call(vm, b"fwrite", &[Value::resource(&id), s(data)]) {
+    match call(vm, b"fwrite", &[Value::resource(id), s(data)]) {
         Some(Value::Long(n)) if n >= 0 => n as usize,
         _ => 0,
     }
@@ -35,7 +35,7 @@ pub fn read(vm: &mut Vm, id: i64, max: usize) -> Option<Vec<u8>> {
     match call(
         vm,
         b"fread",
-        &[Value::resource(&id), Value::Long(max as i64)],
+        &[Value::resource(id), Value::Long(max as i64)],
     ) {
         Some(Value::String(v)) => Some(v.as_bytes().to_vec()),
         _ => None,
@@ -48,7 +48,7 @@ pub fn get_line(vm: &mut Vm, id: i64, maxlen: usize) -> Option<Vec<u8>> {
     match call(
         vm,
         b"fgets",
-        &[Value::resource(&id), Value::Long(maxlen as i64)],
+        &[Value::resource(id), Value::Long(maxlen as i64)],
     ) {
         Some(Value::String(v)) => Some(v.as_bytes().to_vec()),
         _ => None,
@@ -58,7 +58,7 @@ pub fn get_line(vm: &mut Vm, id: i64, maxlen: usize) -> Option<Vec<u8>> {
 /// php_stream_eof()
 pub fn eof(vm: &mut Vm, id: i64) -> bool {
     !matches!(
-        call(vm, b"feof", &[Value::resource(&id)]),
+        call(vm, b"feof", &[Value::resource(id)]),
         Some(Value::False)
     )
 }
@@ -69,7 +69,7 @@ pub fn seek(vm: &mut Vm, id: i64, offset: i64, whence: i64) {
         vm,
         b"fseek",
         &[
-            Value::resource(&id),
+            Value::resource(id),
             Value::Long(offset),
             Value::Long(whence),
         ],
@@ -78,7 +78,7 @@ pub fn seek(vm: &mut Vm, id: i64, offset: i64, whence: i64) {
 
 /// php_stream_tell()
 pub fn tell(vm: &mut Vm, id: i64) -> i64 {
-    match call(vm, b"ftell", &[Value::resource(&id)]) {
+    match call(vm, b"ftell", &[Value::resource(id)]) {
         Some(Value::Long(n)) => n,
         _ => -1,
     }
@@ -86,7 +86,7 @@ pub fn tell(vm: &mut Vm, id: i64) -> i64 {
 
 /// php_stream_close()
 pub fn close(vm: &mut Vm, id: i64) {
-    let _ = call(vm, b"fclose", &[Value::resource(&id)]);
+    let _ = call(vm, b"fclose", &[Value::resource(id)]);
 }
 
 /// php_stream_open_wrapper(path, mode, REPORT_ERRORS): None after the

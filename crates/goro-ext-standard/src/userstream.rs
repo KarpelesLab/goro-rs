@@ -998,7 +998,7 @@ fn create_object(
     let mut obj = PhpObject::new(canonical.clone(), id);
     vm.apply_class_property_defaults(&mut obj, &cl);
     let ctx_val = match context {
-        Some(id) => Value::resource(&id),
+        Some(id) => Value::resource(id),
         None => Value::Null,
     };
     // add_property_resource()/add_property_null() go through the regular
@@ -2840,7 +2840,7 @@ fn any_read(vm: &mut Vm, fid: i64, n: usize) -> Result<Option<Vec<u8>>, VmError>
     if let Some(us) = get_us(fid) {
         return stream_read(vm, fid, &us, n);
     }
-    match call_orig(vm, "fread", &[Value::resource(&fid), Value::Long(n as i64)])? {
+    match call_orig(vm, "fread", &[Value::resource(fid), Value::Long(n as i64)])? {
         Value::String(s) => Ok(Some(s.as_bytes().to_vec())),
         _ => Ok(None),
     }
@@ -2851,7 +2851,7 @@ fn any_write(vm: &mut Vm, fid: i64, data: &[u8]) -> Result<i64, VmError> {
     if let Some(us) = get_us(fid) {
         return stream_write(vm, fid, &us, data);
     }
-    match call_orig(vm, "fwrite", &[Value::resource(&fid), s(data)])? {
+    match call_orig(vm, "fwrite", &[Value::resource(fid), s(data)])? {
         Value::Long(n) => Ok(n),
         _ => Ok(-1),
     }
@@ -2861,7 +2861,7 @@ fn any_close(vm: &mut Vm, fid: i64) -> Result<(), VmError> {
     if let Some(us) = get_us(fid) {
         return stream_free(vm, fid, &us);
     }
-    call_orig(vm, "fclose", &[Value::resource(&fid)])?;
+    call_orig(vm, "fclose", &[Value::resource(fid)])?;
     Ok(())
 }
 
@@ -2873,7 +2873,7 @@ fn any_seek(vm: &mut Vm, fid: i64, offset: i64, whence: i64) -> Result<i32, VmEr
         vm,
         "fseek",
         &[
-            Value::resource(&fid),
+            Value::resource(fid),
             Value::Long(offset),
             Value::Long(whence),
         ],
@@ -3525,7 +3525,7 @@ fn h_stream_isatty(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError
         Some(inner) => Ok(Some(call_orig(
             vm,
             "stream_isatty",
-            &[Value::resource(&inner)],
+            &[Value::resource(inner)],
         )?)),
         None => Ok(Some(Value::False)),
     }
@@ -3725,12 +3725,12 @@ fn format_via_memory(
         Some(f) => f,
         None => return Ok(None),
     };
-    let mut a = vec![Value::resource(&mem)];
+    let mut a = vec![Value::resource(mem)];
     a.extend_from_slice(rest);
     let r = call_orig(vm, name, &a);
-    call_orig(vm, "rewind", &[Value::resource(&mem)])?;
-    let out = call_orig(vm, "stream_get_contents", &[Value::resource(&mem)])?;
-    call_orig(vm, "fclose", &[Value::resource(&mem)])?;
+    call_orig(vm, "rewind", &[Value::resource(mem)])?;
+    let out = call_orig(vm, "stream_get_contents", &[Value::resource(mem)])?;
+    call_orig(vm, "fclose", &[Value::resource(mem)])?;
     match r? {
         Value::False => Ok(None),
         _ => Ok(Some(out.to_php_string().as_bytes().to_vec())),
@@ -3874,7 +3874,7 @@ fn h_fopen(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let ctx = context_from_arg(vm, args.get(3), false)?;
     let options = if use_path { USE_PATH } else { 0 } | REPORT_ERRORS;
     match open_located(vm, &p, &mode, options, ctx)? {
-        Opened::Stream(fid, _) => Ok(Some(Value::resource(&fid))),
+        Opened::Stream(fid, _) => Ok(Some(Value::resource(fid))),
         Opened::Failed => Ok(Some(Value::False)),
         Opened::Builtin(np) => {
             if np == p {
@@ -3924,8 +3924,8 @@ fn h_file_get_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
             Some(x) => x,
             None => {
                 if let Some(f) = fid_of(&r) {
-                    let c = call_orig(vm, "stream_get_contents", &[Value::resource(&f)])?;
-                    call_orig(vm, "fclose", &[Value::resource(&f)])?;
+                    let c = call_orig(vm, "stream_get_contents", &[Value::resource(f)])?;
+                    call_orig(vm, "fclose", &[Value::resource(f)])?;
                     return Ok(Some(c));
                 }
                 return Ok(Some(Value::False));
@@ -4754,7 +4754,7 @@ fn do_opendir(
             Value::resource(fid),
         )))
     } else {
-        Ok(Some(Value::resource(&fid)))
+        Ok(Some(Value::resource(fid)))
     }
 }
 

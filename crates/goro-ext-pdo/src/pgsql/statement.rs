@@ -744,7 +744,7 @@ fn stmt_get_col_typed(vm: &mut Vm, stmt: &StmtRef, colno: usize, ty: Option<i64>
                     let obj = stmt.borrow().database_object_handle.clone();
                     if let Some(obj) = obj {
                         if let Some(id) = create_lob_stream(vm, &obj, loid, oid) {
-                            return Value::resource(&id);
+                            return Value::resource(id);
                         }
                     }
                 }

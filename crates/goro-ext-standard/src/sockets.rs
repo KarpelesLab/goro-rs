@@ -1523,7 +1523,7 @@ pub(crate) fn stream_socket_client(vm: &mut Vm, args: &[Value]) -> Result<Value,
     };
     if let Some(k) = &hashkey {
         if let Some(fid) = persistent_lookup(k) {
-            return Ok(Value::resource(&fid));
+            return Ok(Value::resource(fid));
         }
     }
     let op = if flags & (PHP_STREAM_CLIENT_CONNECT | PHP_STREAM_CLIENT_ASYNC_CONNECT) != 0 {
@@ -1538,7 +1538,7 @@ pub(crate) fn stream_socket_client(vm: &mut Vm, args: &[Value]) -> Result<Value,
             if let Some(k) = hashkey {
                 persistent_store(k, fid);
             }
-            Ok(Value::resource(&fid))
+            Ok(Value::resource(fid))
         }
         Err(e) => {
             let quoted = php_addslashes(&host);
@@ -1589,7 +1589,7 @@ pub(crate) fn stream_socket_server(vm: &mut Vm, args: &[Value]) -> Result<Value,
     set_ref(args.get(1), Value::Long(0));
     set_ref(args.get(2), str_val(""));
     match xport_create(vm, F, &host, XportOp::Server { flags }, None, ctx) {
-        Ok(fid) => Ok(Value::resource(&fid)),
+        Ok(fid) => Ok(Value::resource(fid)),
         Err(e) => {
             // The host is printed as a C string.
             let shown: Vec<u8> = host.iter().take_while(|&&c| c != 0).copied().collect();
@@ -1687,7 +1687,7 @@ pub(crate) fn stream_socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value,
     if let (Some(p), Some(r)) = (peer, args.get(2)) {
         set_ref(Some(r), Value::String(PhpString::from_vec(p)));
     }
-    Ok(Value::resource(&cfid))
+    Ok(Value::resource(cfid))
 }
 
 /// PHP_FUNCTION(stream_socket_get_name)
@@ -1738,8 +1738,8 @@ pub(crate) fn stream_socket_pair(vm: &mut Vm, args: &[Value]) -> Result<Value, V
     let a = stream_from_socket(vm, fds[0]);
     let b = stream_from_socket(vm, fds[1]);
     let mut arr = PhpArray::new();
-    arr.push(Value::resource(&a));
-    arr.push(Value::resource(&b));
+    arr.push(Value::resource(a));
+    arr.push(Value::resource(b));
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
@@ -2003,7 +2003,7 @@ pub(crate) fn fsockopen(vm: &mut Vm, args: &[Value], persistent: bool) -> Result
         if let Some(fid) = persistent_lookup(k) {
             set_ref(args.get(2), Value::Long(0));
             set_ref(args.get(3), str_val(""));
-            return Ok(Value::resource(&fid));
+            return Ok(Value::resource(fid));
         }
     }
     match xport_create(
@@ -2022,7 +2022,7 @@ pub(crate) fn fsockopen(vm: &mut Vm, args: &[Value], persistent: bool) -> Result
             if let Some(k) = hashkey {
                 persistent_store(k, fid);
             }
-            Ok(Value::resource(&fid))
+            Ok(Value::resource(fid))
         }
         Err(e) => {
             let shown: Vec<u8> = host.iter().take_while(|&&c| c != 0).copied().collect();
@@ -2442,7 +2442,7 @@ fn hook_stream_from_socket(vm: &mut Vm, fd: i32) -> i64 {
 
 fn hook_close_stream(vm: &mut Vm, id: i64) {
     if FILE_HANDLES.with(|h| h.borrow().contains_key(&id)) {
-        let _ = super::fclose_fn(vm, &[Value::resource(&id)]);
+        let _ = super::fclose_fn(vm, &[Value::resource(id)]);
     }
 }
 

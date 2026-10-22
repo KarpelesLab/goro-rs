@@ -896,7 +896,7 @@ impl Res<'_> {
                 out.push(obj);
             } else {
                 let sid = goro_ext_standard::sockets_streams::ext_stream_from_fd(fd, "rw");
-                out.push(Value::resource(&sid));
+                out.push(Value::resource(sid));
             }
         }
         new_arr(out)

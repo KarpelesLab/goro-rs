@@ -1340,7 +1340,7 @@ pub(crate) fn php_curl_setopt(
                         h.write.method = PHP_CURL_STDOUT;
                     }
                     Some(id) if writable_mode(id) => {
-                        h.write.stream = Some(Value::resource(&id));
+                        h.write.stream = Some(Value::resource(id));
                         h.write.method = PHP_CURL_FILE;
                     }
                     Some(_) => {
@@ -1358,7 +1358,7 @@ pub(crate) fn php_curl_setopt(
                         h.write_header.method = PHP_CURL_IGNORE;
                     }
                     Some(id) if writable_mode(id) => {
-                        h.write_header.stream = Some(Value::resource(&id));
+                        h.write_header.stream = Some(Value::resource(id));
                         h.write_header.method = PHP_CURL_FILE;
                     }
                     Some(_) => {
@@ -1375,7 +1375,7 @@ pub(crate) fn php_curl_setopt(
                 }
                 _ => match what {
                     None => h.std_err = None,
-                    Some(id) if writable_mode(id) => h.std_err = Some(Value::resource(&id)),
+                    Some(id) if writable_mode(id) => h.std_err = Some(Value::resource(id)),
                     Some(_) => {
                         drop(st);
                         zpp::plain_value_error(
