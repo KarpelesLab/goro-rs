@@ -2065,21 +2065,28 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
     if let Value::String(s) = callback {
         let func_name = s.as_bytes().to_vec();
         let func_lower: Vec<u8> = func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+        // zend_is_callable_check_func(): a function named with a leading
+        // `\` (not "\\Class::method", resolved below).
+        let fn_lower: &[u8] = if func_lower.windows(2).any(|w| w == b"::") {
+            &func_lower
+        } else {
+            func_lower.strip_prefix(b"\\").unwrap_or(&func_lower)
+        };
 
         // Try builtin first
-        if let Some(builtin) = vm.functions.get(&func_lower).copied() {
+        if let Some(builtin) = vm.functions.get(fn_lower).copied() {
             // For builtins, forward named args via pending_named_args
             if !named_args.is_empty() {
                 vm.pending_named_args = named_args;
                 return builtin(vm, &call_args);
             }
-            return vm.call_builtin_from_internal(builtin, &func_lower, &call_args);
+            return vm.call_builtin_from_internal(builtin, fn_lower, &call_args);
         }
 
         // Try user function (but not "Class::method" strings - those need proper LSB handling below)
         let looks_like_class_method = func_lower.windows(2).any(|w| w == b"::");
         if !looks_like_class_method {
-            if let Some(user_fn) = vm.user_functions.get(&func_lower).cloned() {
+            if let Some(user_fn) = vm.user_functions.get(fn_lower).cloned() {
                 let fallback = String::from_utf8_lossy(&func_name).into_owned();
                 let line = vm.current_line;
                 vm.check_user_function_deprecation(&user_fn, &fallback, line);

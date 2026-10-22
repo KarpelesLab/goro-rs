@@ -3197,8 +3197,13 @@ impl Vm {
                     });
                 }
                 let func_name = s.as_bytes().to_vec();
-                let func_lower: Vec<u8> =
-                    func_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                // zend_is_callable_check_func(): a leading `\` is dropped.
+                let func_lower: Vec<u8> = func_name
+                    .strip_prefix(b"\\")
+                    .unwrap_or(&func_name)
+                    .iter()
+                    .map(|b| b.to_ascii_lowercase())
+                    .collect();
                 if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
                     return self.execute_fn_with_named_args(&user_fn, args.to_vec(), vec![], None);
                 }
