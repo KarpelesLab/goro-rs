@@ -3441,7 +3441,9 @@ impl Compiler {
                 if call_src {
                     self.mark_ref_call(&arr);
                 }
-                let src_flag = if call_src {
+                // A nullsafe chain is fetched for reading: a copy is iterated.
+                let temp_src = call_src || (*by_ref && expr_is_in_nullsafe_chain(expr));
+                let src_flag = if temp_src {
                     OperandType::Const(self.op_array.add_literal(Value::Long(1)))
                 } else {
                     OperandType::Unused
