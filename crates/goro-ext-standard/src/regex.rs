@@ -560,6 +560,15 @@ fn pcre_match(
     pce.re.match_at(subject, start, options, md, mctx)
 }
 
+/// pcre2_match() of a compiled pattern on a whole subject (no captures
+/// kept), as other extensions use it (e.g. ext/filter): the pcre2_match()
+/// return code, negative when there is no match or on error.
+pub fn pcre_match_subject(vm: &Vm, pce: &Pce, subject: &[u8]) -> i32 {
+    let mctx = match_context(vm);
+    let mut md = MatchData::new(pce.capture_count as usize + 1);
+    pcre_match(pce, subject, 0, 0, &mut md, &mctx)
+}
+
 fn set_ref(arg: Option<&Value>, v: Value) {
     if let Some(Value::Reference(r)) = arg {
         *r.borrow_mut() = v;

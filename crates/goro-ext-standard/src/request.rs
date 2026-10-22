@@ -40,6 +40,80 @@ thread_local! {
     static UPLOADED_FILES: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
     /// SG(request_info) of the current request, for request_parse_body().
     static REQUEST: RefCell<Option<RequestInfo>> = const { RefCell::new(None) };
+    static INPUT_FILTER: std::cell::Cell<Option<InputFilter>> = const { std::cell::Cell::new(None) };
+    /// The raw (unfiltered) request variables the input filter saw, by
+    /// PARSE_* source (ext/filter's IF_G(get_array) ...).
+    static RAW_INPUT: RefCell<[Option<Rc<RefCell<PhpArray>>>; 6]> = const { RefCell::new([None, None, None, None, None, None]) };
+}
+
+/// Sources of request variables (main/php_variables.h PARSE_*).
+pub const PARSE_POST: u8 = 0;
+pub const PARSE_GET: u8 = 1;
+pub const PARSE_COOKIE: u8 = 2;
+pub const PARSE_STRING: u8 = 3;
+pub const PARSE_ENV: u8 = 4;
+pub const PARSE_SERVER: u8 = 5;
+
+/// sapi_module.input_filter (ext/filter's php_sapi_filter()): the value a
+/// non-empty request variable from source `arg` is registered with.
+pub type InputFilter = fn(&mut Vm, u8, &[u8]) -> Value;
+
+/// sapi_register_input_filter()
+pub fn set_input_filter(f: InputFilter) {
+    INPUT_FILTER.with(|c| c.set(Some(f)));
+}
+
+/// The raw request variables from source `arg` (PARSE_*), when the input
+/// filter received some.
+pub fn raw_input(arg: u8) -> Option<Rc<RefCell<PhpArray>>> {
+    RAW_INPUT.with(|r| r.borrow().get(arg as usize).cloned().flatten())
+}
+
+/// Register a request variable through the input filter: the raw value is
+/// kept (except for parse_str()), the filtered one registered in `track`.
+fn input_register(
+    ctx: &mut Ctx,
+    arg: u8,
+    name: &[u8],
+    val: Vec<u8>,
+    track: &Rc<RefCell<PhpArray>>,
+    is_cookie: bool,
+) {
+    let Some(f) = INPUT_FILTER.with(|c| c.get()) else {
+        register_variable(
+            ctx,
+            name,
+            Value::String(PhpString::from_vec(val)),
+            track,
+            is_cookie,
+        );
+        return;
+    };
+    let name = cstr(name);
+    // A duplicate cookie name keeps the first (more specific) cookie.
+    if arg == PARSE_COOKIE && track.borrow().contains_key(&sym_key(name)) {
+        return;
+    }
+    if arg != PARSE_STRING {
+        let raw = RAW_INPUT.with(|r| {
+            r.borrow_mut()[arg as usize]
+                .get_or_insert_with(new_arr)
+                .clone()
+        });
+        register_variable(
+            ctx,
+            name,
+            Value::String(PhpString::from_bytes(&val)),
+            &raw,
+            false,
+        );
+    }
+    let v = if val.is_empty() {
+        Value::String(PhpString::empty())
+    } else {
+        f(ctx.vm, arg, &val)
+    };
+    register_variable(ctx, name, v, track, is_cookie);
 }
 
 /// request_parse_body() $options (REQUEST_PARSE_BODY_OPTION_*).
@@ -459,6 +533,7 @@ fn emit_startup(vm: &mut Vm, level: &str, msg: &str) {
 /// php_default_treat_data for GET / COOKIE / STRING
 fn treat_data(
     ctx: &mut Ctx,
+    arg: u8,
     data: &[u8],
     is_cookie: bool,
     separators: &[u8],
@@ -507,13 +582,7 @@ fn treat_data(
         } else {
             url_decode(&name, true)
         };
-        register_variable(
-            ctx,
-            &name,
-            Value::String(PhpString::from_vec(value)),
-            arr,
-            is_cookie,
-        );
+        input_register(ctx, arg, &name, value, arr, is_cookie);
     }
 }
 
@@ -538,13 +607,7 @@ fn std_post_handler(ctx: &mut Ctx, body: &[u8], max_vars: i64, arr: &Rc<RefCell<
         } else {
             url_decode(v, true)
         };
-        register_variable(
-            ctx,
-            &key,
-            Value::String(PhpString::from_vec(val)),
-            arr,
-            false,
-        );
+        input_register(ctx, PARSE_POST, &key, val, arr, false);
         ptr = vsep + if vsep != body.len() { 1 } else { 0 };
         cnt += 1;
         if cnt > max_vars {
@@ -1065,13 +1128,7 @@ fn rfc1867_handler(
                         }
                     }
                     if !protected.contains(&normalize_protected_variable(&param)) {
-                        register_variable(
-                            ctx,
-                            &param,
-                            Value::String(PhpString::from_vec(value.clone())),
-                            post,
-                            false,
-                        );
+                        input_register(ctx, PARSE_POST, &param, value.clone(), post, false);
                     }
                 } else {
                     if count == cfg.max_input_vars + 1 {
@@ -1385,11 +1442,12 @@ pub fn parse_str_into(vm: &mut Vm, data: &[u8], arr: &Rc<RefCell<PhpArray>>) {
         parse_body: false,
         exception: None,
     };
-    treat_data(&mut ctx, data, false, &arg_sep, max_vars, arr);
+    treat_data(&mut ctx, PARSE_STRING, data, false, &arg_sep, max_vars, arr);
 }
 
 pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     REQUEST.with(|r| *r.borrow_mut() = Some(req.clone()));
+    RAW_INPUT.with(|r| *r.borrow_mut() = Default::default());
     crate::info::set_web_sapi(req.cgi);
     // php_request_startup(): SAPI_PHP_VERSION_HEADER (the CLI SAPI has
     // no headers).
@@ -1477,7 +1535,15 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
 
         // $_GET
         if has('G') {
-            treat_data(&mut ctx, &req.query_string, false, &arg_sep, max_vars, &get);
+            treat_data(
+                &mut ctx,
+                PARSE_GET,
+                &req.query_string,
+                false,
+                &arg_sep,
+                max_vars,
+                &get,
+            );
         }
         // $_POST
         if has('P') && is_post {
@@ -1526,7 +1592,7 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         // $_COOKIE
         if has('C') {
             if let Some(c) = &req.cookie_data {
-                treat_data(&mut ctx, c, true, b";", max_vars, &cookie);
+                treat_data(&mut ctx, PARSE_COOKIE, c, true, b";", max_vars, &cookie);
             }
         }
     }
@@ -1548,12 +1614,35 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
                 s.set(sym_key(k), sval(v));
             }
         } else if !req.cgi {
+            // sapi_cli_register_variables(): these go through the input
+            // filter (PARSE_SERVER).
             let php_self = req.php_self.as_ref().unwrap_or(&req.script_filename);
-            s.set(sym_key(b"PHP_SELF"), sval(php_self));
-            s.set(sym_key(b"SCRIPT_NAME"), sval(php_self));
-            s.set(sym_key(b"SCRIPT_FILENAME"), sval(&req.script_filename));
-            s.set(sym_key(b"PATH_TRANSLATED"), sval(&req.script_filename));
-            s.set(sym_key(b"DOCUMENT_ROOT"), sval(b""));
+            let filter = INPUT_FILTER.with(|c| c.get());
+            for (k, v) in [
+                (&b"PHP_SELF"[..], php_self.as_slice()),
+                (b"SCRIPT_NAME", php_self),
+                (b"SCRIPT_FILENAME", &req.script_filename),
+                (b"PATH_TRANSLATED", &req.script_filename),
+                (b"DOCUMENT_ROOT", b""),
+            ] {
+                let fv = match filter {
+                    Some(f) => {
+                        RAW_INPUT.with(|r| {
+                            r.borrow_mut()[PARSE_SERVER as usize]
+                                .get_or_insert_with(new_arr)
+                                .borrow_mut()
+                                .set(sym_key(k), sval(v))
+                        });
+                        if v.is_empty() {
+                            sval(b"")
+                        } else {
+                            f(vm, PARSE_SERVER, v)
+                        }
+                    }
+                    None => sval(v),
+                };
+                s.set(sym_key(k), fv);
+            }
         } else {
             // cgi.fix_pathinfo: PHP_SELF from SCRIPT_NAME / the script path
             let self_name = req
