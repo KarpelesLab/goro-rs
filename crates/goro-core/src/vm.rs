@@ -52020,9 +52020,28 @@ impl Vm {
                         }
                         _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
                     };
-                    let prop_name = self
-                        .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
+                    // zval_try_get_string() of the property name
+                    let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let prop_name = match name_val.deref() {
+                        o @ Value::Object(_) => match self.value_to_string_checked(&o) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                PhpString::empty()
+                            }
+                        },
+                        a @ Value::Array(_) => {
+                            self.emit_warning_at("Array to string conversion", op.line);
+                            a.to_php_string()
+                        }
+                        v => v.to_php_string(),
+                    };
                     // $obj->p naming a static property (zend_get_property_offset).
                     if let Value::Object(o) = &obj_val_raw {
                         if let Err(e) = self.static_as_instance_check(

@@ -12572,13 +12572,7 @@ impl Compiler {
         for level in levels.iter().rev() {
             match &level.kind {
                 ExprKind::PropertyAccess { property, .. } => {
-                    let name = match &property.kind {
-                        ExprKind::Identifier(n) => OperandType::Const(
-                            self.op_array
-                                .add_literal(Value::String(PhpString::from_vec(n.clone()))),
-                        ),
-                        _ => self.compile_expr(property)?,
-                    };
+                    let name = self.compile_prop_name(property)?;
                     fetches.push((OpCode::PropertyGet, name, level.span.line));
                 }
                 ExprKind::ArrayAccess {
@@ -12603,6 +12597,27 @@ impl Compiler {
             cur = OperandType::Tmp(tmp);
         }
         Ok(cur)
+    }
+
+    /// The name operand of a property read `$o->name` / `$o->{expr}`. A
+    /// constant array name is converted at compile time (with the "Array to
+    /// string conversion" warning, zend_compile_prop()).
+    #[inline(never)]
+    fn compile_prop_name(&mut self, property: &Expr) -> CompileResult<OperandType> {
+        match &property.kind {
+            ExprKind::Identifier(name) => Ok(OperandType::Const(
+                self.op_array
+                    .add_literal(Value::String(PhpString::from_vec(name.clone()))),
+            )),
+            ExprKind::Array(_) if Self::eval_const_expr(property).is_some() => {
+                push_compile_warning("Array to string conversion".to_string(), property.span.line);
+                Ok(OperandType::Const(self.op_array.add_literal(
+                    Value::String(PhpString::from_bytes(b"Array")),
+                )))
+            }
+            // Dynamic property name: $obj->$prop
+            _ => self.compile_expr(property),
+        }
     }
 
     /// The null check of `?->` on `obj`: its jump joins the chain's
@@ -17577,18 +17592,7 @@ impl Compiler {
                 } else {
                     None
                 };
-                let prop_operand = match &property.kind {
-                    ExprKind::Identifier(name) => {
-                        let name_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_vec(name.clone())));
-                        OperandType::Const(name_idx)
-                    }
-                    _ => {
-                        // Dynamic property name: $obj->$prop
-                        self.compile_expr(property)?
-                    }
-                };
+                let prop_operand = self.compile_prop_name(property)?;
 
                 let tmp = self.op_array.alloc_temp();
 
