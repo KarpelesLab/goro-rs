@@ -125,7 +125,9 @@ fn compile_prelude() -> Option<(OpArray, Vec<ClassEntry>)> {
     let tokens = lexer.tokenize();
     let _ = goro_parser::take_lexer_deprecations();
     let _ = goro_parser::take_lexer_warnings();
-    let mut parser = goro_parser::Parser::new(tokens).with_source(PRELUDE);
+    let mut parser = goro_parser::Parser::new(tokens)
+        .with_source(PRELUDE)
+        .trusted();
     let program = parser.parse().ok()?;
     let compiler = goro_core::compiler::Compiler::new();
     let (mut op_array, mut classes, _) = compiler.compile(&program).ok()?;

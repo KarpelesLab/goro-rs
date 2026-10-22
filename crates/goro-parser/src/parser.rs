@@ -55,6 +55,9 @@ pub struct Parser {
     /// The source text (when given with `with_source`): keywords used as
     /// identifiers keep their spelling (`A::Case`, `$o->Default`).
     source: Vec<u8>,
+    /// The source is known to be valid (see `trusted`): the grammar
+    /// recognizer does not check it.
+    trusted: bool,
     /// Pending extra properties from comma-separated property declarations
     pending_extra_properties: Vec<ClassMember>,
     /// Explicit parameter type of the last parsed `set(Type $v)` hook.
@@ -225,6 +228,7 @@ impl Parser {
             new_non_dereferenceable: false,
             pending_extra_constants: Vec::new(),
             source: Vec::new(),
+            trusted: false,
             pending_extra_properties: Vec::new(),
             last_set_hook_type: None,
             last_get_hook_by_ref: false,
@@ -511,7 +515,7 @@ impl Parser {
         }
         // php-src's own grammar decides what is a syntax error, and how it
         // is worded (see php_recognizer).
-        if !self.source.is_empty() {
+        if !self.source.is_empty() && !self.trusted {
             let shebang = self.source.starts_with(b"#!")
                 && self.tokens.first().is_some_and(|t| t.span.start > 0);
             let r = crate::php_recognizer::run(&self.source, crate::short_open_tag(), shebang);
@@ -7330,6 +7334,14 @@ impl Parser {
     /// Attach the source the tokens were lexed from (see `source`).
     pub fn with_source(mut self, source: &[u8]) -> Self {
         self.source = source.to_vec();
+        self
+    }
+
+    /// The source is the engine's own code, known to be valid (the PHP
+    /// parts of extensions, compiled at startup): it is not checked against
+    /// the grammar a second time.
+    pub fn trusted(mut self) -> Self {
+        self.trusted = true;
         self
     }
 

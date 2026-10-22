@@ -26,6 +26,14 @@ implicit_flush=1\n\
 output_buffering=0\n\
 max_execution_time=0\n\
 max_input_time=-1\n";
+/// HARDCODED_INI's entries.
+const HARDCODED_INI_PARSED: [(&str, &str); 5] = [
+    ("html_errors", "0"),
+    ("implicit_flush", "1"),
+    ("output_buffering", "0"),
+    ("max_execution_time", "0"),
+    ("max_input_time", "-1"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Mode {
@@ -340,12 +348,20 @@ fn cli_main(mut argv: Vec<Vec<u8>>) -> i32 {
         ("display_errors".to_string(), "1".to_string()),
     ];
     load_php_ini(ini_path_override.as_deref(), ini_ignore, &mut ini);
-    let mut entries: Vec<u8> = Vec::new();
-    if !server_mode {
-        entries.extend_from_slice(HARDCODED_INI.as_bytes());
+    if !server_mode && defines.is_empty() {
+        // (what parsing HARDCODED_INI gives, without the scratch engine
+        // that parsing needs)
+        for (k, v) in HARDCODED_INI_PARSED {
+            ini.push((k.to_string(), v.to_string()));
+        }
+    } else {
+        let mut entries: Vec<u8> = Vec::new();
+        if !server_mode {
+            entries.extend_from_slice(HARDCODED_INI.as_bytes());
+        }
+        entries.extend_from_slice(&defines);
+        engine::parse_ini_text(&entries, &mut ini);
     }
-    entries.extend_from_slice(&defines);
-    engine::parse_ini_text(&entries, &mut ini);
 
     if server_mode {
         return cli_server::do_cli_server(&argv, ini);
