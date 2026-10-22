@@ -1062,7 +1062,7 @@ fn find_matching_descendant(
     marker_node: NodeId,
 ) -> (Option<NodeId>, bool) {
     let matching = doc.tag_id(Some(node));
-    let mut passed = false;
+    let passed = false;
     let mut cur = parent;
     while let Some(n) = cur {
         if doc.tag_id(Some(n)) == matching {
@@ -1075,9 +1075,10 @@ fn find_matching_descendant(
                 return (Some(n), passed);
             }
         }
-        if n == marker_node {
-            passed = true;
-        }
+        // C's FindMatchingDescendant() never hands its flag to the
+        // callback (cb_data.passed_marker_node stays NULL), so the
+        // search never reports passing the marker.
+        let _ = marker_node;
         cur = doc[n].parent;
     }
     (None, passed)

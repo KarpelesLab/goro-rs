@@ -770,20 +770,36 @@ pub fn free_lexer(doc: &mut Doc) {
     }
 }
 
+/// Grow the (zero-filled) allocation of lexbuf to at least `n` bytes.
+fn lexbuf_reserve(lx: &mut Lexer, n: usize) {
+    if lx.lexbuf.len() < n {
+        lx.lexbuf.resize(n, 0);
+    }
+}
+
+/// AddByte(): the byte, then a NUL after it
 fn add_byte(doc: &mut Doc, ch: u8) {
-    doc.lx().lexbuf.push(ch);
+    let lx = doc.lx();
+    let ls = lx.lexsize as usize;
+    lexbuf_reserve(lx, ls + 2);
+    lx.lexbuf[ls] = ch;
+    lx.lexsize += 1;
+    lx.lexbuf[ls + 1] = 0;
 }
 
 fn change_char(doc: &mut Doc, c: u8) {
-    let lb = &mut doc.lx().lexbuf;
-    if let Some(l) = lb.last_mut() {
-        *l = c;
+    let lx = doc.lx();
+    if lx.lexsize > 0 {
+        let i = lx.lexsize as usize - 1;
+        lx.lexbuf[i] = c;
     }
 }
 
 /// `lexer->lexsize = n`
 fn set_lexsize(doc: &mut Doc, n: u32) {
-    doc.lx().lexbuf.resize(n as usize, 0);
+    let lx = doc.lx();
+    lx.lexsize = n;
+    lexbuf_reserve(lx, n as usize);
 }
 
 /// `lexer->lexsize -= n`
@@ -792,12 +808,9 @@ fn dec_lexsize(doc: &mut Doc, n: u32) {
     set_lexsize(doc, s.wrapping_sub(n));
 }
 
-/// `lexer->lexbuf[i] = '\0'` (a no-op at or past lexsize)
+/// `lexer->lexbuf[i] = '\0'`
 fn set_nul(doc: &mut Doc, i: u32) {
-    let lb = &mut doc.lx().lexbuf;
-    if (i as usize) < lb.len() {
-        lb[i as usize] = 0;
-    }
+    set_lexbyte(doc, i, 0);
 }
 
 fn lexbyte(doc: &Doc, i: u32) -> u8 {
@@ -805,10 +818,9 @@ fn lexbyte(doc: &Doc, i: u32) -> u8 {
 }
 
 fn set_lexbyte(doc: &mut Doc, i: u32, c: u8) {
-    let lb = &mut doc.lx().lexbuf;
-    if (i as usize) < lb.len() {
-        lb[i as usize] = c;
-    }
+    let lx = doc.lx();
+    lexbuf_reserve(lx, i as usize + 1);
+    lx.lexbuf[i as usize] = c;
 }
 
 /// The C string at `lexbuf + start`.
@@ -1940,10 +1952,18 @@ fn get_cdata(doc: &mut Doc, container: NodeId) -> Option<NodeId> {
                         && !tags::is_html5_mode(doc)
                     {
                         message::report(doc, None, None, BAD_CDATA_CONTENT, &[]);
+                        // shift lexbuf[start-1 .. lexsize] up by one
                         let at = (start as usize).saturating_sub(1);
-                        let lb = &mut doc.lx().lexbuf;
-                        let at = at.min(lb.len());
-                        lb.insert(at, b'\\');
+                        let lx = doc.lx();
+                        let ls = lx.lexsize as usize;
+                        lexbuf_reserve(lx, ls + 1);
+                        let mut i = ls;
+                        while i > at {
+                            lx.lexbuf[i] = lx.lexbuf[i - 1];
+                            i -= 1;
+                        }
+                        lx.lexbuf[at] = b'\\';
+                        lx.lexsize += 1;
                     }
                 }
                 state = CdataState::Intermediate;

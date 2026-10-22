@@ -32,9 +32,9 @@ fn has_parser(doc: &Doc, node: NodeId, f: ParserFn) -> bool {
         .is_some_and(|p| std::ptr::fn_addr_eq(p, f))
 }
 
-/// `snprintf(buf, size, ...)`: the result truncated to size - 1 bytes.
+/// `tmbsnprintf(buf, size, ...)`: vsnprintf(buf, size - 1) keeps size - 2 bytes.
 fn trunc(mut s: Vec<u8>, size: usize) -> Vec<u8> {
-    s.truncate(size - 1);
+    s.truncate(size - 2);
     s
 }
 

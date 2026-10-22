@@ -70,7 +70,7 @@ fn so(v: Option<&[u8]>) -> FArg {
 }
 
 /// vsnprintf() with the conversions tidy's strings use (%s %d %u %X %c,
-/// flags, width, precision), truncated to `max - 1` bytes.
+/// flags, width, precision), truncated to `max - 2` bytes (tmbvsnprintf() passes `count - 1` to vsnprintf()).
 fn format(fmt: &[u8], args: &[FArg], max: usize) -> Vec<u8> {
     let mut out = Vec::new();
     let mut ai = 0;
@@ -193,8 +193,8 @@ fn format(fmt: &[u8], args: &[FArg], max: usize) -> Vec<u8> {
         }
         out.extend_from_slice(&body);
     }
-    if out.len() > max - 1 {
-        out.truncate(max - 1);
+    if out.len() > max.saturating_sub(2) {
+        out.truncate(max.saturating_sub(2));
     }
     out
 }
@@ -419,8 +419,8 @@ fn tag_to_string(doc: &Doc, tag: Option<NodeId>) -> Vec<u8> {
 
 /// tmbsnprintf into a char[count] buffer
 fn trunc(mut v: Vec<u8>, count: usize) -> Vec<u8> {
-    if v.len() > count - 1 {
-        v.truncate(count - 1);
+    if v.len() > count - 2 {
+        v.truncate(count - 2);
     }
     v
 }

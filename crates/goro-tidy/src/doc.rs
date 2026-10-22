@@ -372,8 +372,11 @@ pub struct Lexer {
     pub parent: Option<NodeId>,
     pub seen_end_body: bool,
     pub seen_end_html: bool,
-    /// lexbuf; `lexsize` is `lexbuf.len()`
+    /// lexbuf: the allocated buffer (bytes past `lexsize` keep whatever
+    /// was written there, as in C)
     pub lexbuf: Vec<u8>,
+    /// lexsize: the used part of `lexbuf`
+    pub lexsize: u32,
     pub inode: Option<NodeId>,
     /// `IStack* insert`: index into `istack`
     pub insert: Option<usize>,
@@ -386,7 +389,7 @@ pub struct Lexer {
 
 impl Lexer {
     pub fn lexsize(&self) -> u32 {
-        self.lexbuf.len() as u32
+        self.lexsize
     }
 }
 
