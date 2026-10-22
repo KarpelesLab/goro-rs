@@ -1,0 +1,13 @@
+[package]
+name = "goro-ext-pdo"
+version = "0.1.0"
+edition = "2024"
+description = "PHP Data Objects (ext/pdo) and the MySQL driver (ext/pdo_mysql) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-parser = { path = "../goro-parser" }
+goro-ext-mysqli = { path = "../goro-ext-mysqli" }
