@@ -743,6 +743,8 @@ pub(crate) struct CachedCallTarget {
     builtin: Option<(BuiltinFn, Option<(&'static crate::arginfo::FuncInfo, u8)>)>,
     has_builtin: bool,
     method: Option<(u32, bool)>,
+    /// (of a method: see MethodCallInfo)
+    method_info: Option<Rc<MethodCallInfo>>,
     fn_gen: usize,
 }
 
@@ -19150,6 +19152,7 @@ impl Vm {
         t.builtin = c.builtin;
         t.has_builtin = c.has_builtin;
         t.method = c.method;
+        t.method_info = c.method_info.clone();
         t.fn_gen = fn_gen;
         true
     }
@@ -19168,7 +19171,12 @@ impl Vm {
         if Self::cached_call_target(op_array, ip, name, fn_gen, &mut t) {
             return t;
         }
-        let t = self.resolve_call_target(name);
+        let mut t = self.resolve_call_target(name);
+        // A static method call's frame name and scope (see MethodCallInfo).
+        if let (Some((sep, _)), Some(f)) = (t.method, &t.user) {
+            let name = PhpString::from_bytes_untracked(name);
+            t.method_info = Some(Rc::new(self.method_call_info(f, &name, sep as usize)));
+        }
         op_array
             .sites
             .borrow_mut()
@@ -19182,6 +19190,7 @@ impl Vm {
                     builtin: t.builtin,
                     has_builtin: t.has_builtin,
                     method: t.method,
+                    method_info: t.method_info.clone(),
                     fn_gen: t.fn_gen,
                 },
             );
@@ -26045,7 +26054,11 @@ impl Vm {
                             .target
                             .method_info
                             .take()
-                            .filter(|i| captures.is_none() && i.name.ptr_eq(&call.name));
+                            .filter(|i| {
+                                captures.is_none()
+                                    && (i.name.ptr_eq(&call.name)
+                                        || i.name.as_bytes() == call.name.as_bytes())
+                            });
                         // A closure's frame is qualified by its scope
                         // (Class::{closure:...}).
                         if let Some(info) = &method_info {
