@@ -11297,6 +11297,53 @@ impl Compiler {
         self.compile_expr(array)
     }
 
+    /// `$a[]++` / `--$a[]`: FETCH_DIM_RW appends a null element, which is
+    /// then incremented/decremented in place. (Out of line: compile_expr
+    /// recurses deeply and its frame must stay small.)
+    #[inline(never)]
+    fn compile_append_incdec(
+        &mut self,
+        array: &Expr,
+        op: &UnaryOp,
+        line: u32,
+    ) -> CompileResult<OperandType> {
+        let arr_op = self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::Rw)?;
+        let is_inc = matches!(op, UnaryOp::PostIncrement | UnaryOp::PreIncrement);
+        let new_val = if is_inc { Value::Long(1) } else { Value::Null };
+        let new_idx = self.op_array.add_literal(new_val);
+        self.op_array.emit(Op {
+            opcode: OpCode::ArrayAppend,
+            op1: arr_op,
+            op2: OperandType::Const(new_idx),
+            result: OperandType::Unused,
+            line,
+        });
+        let null_idx = self.op_array.add_literal(Value::Null);
+        let old_tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::Assign,
+            op1: OperandType::Tmp(old_tmp),
+            op2: OperandType::Const(null_idx),
+            result: OperandType::Unused,
+            line,
+        });
+        if !is_inc {
+            // "Decrement on type null has no effect"
+            let t = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode: OpCode::PostDecrement,
+                op1: OperandType::Tmp(old_tmp),
+                op2: OperandType::Unused,
+                result: OperandType::Tmp(t),
+                line,
+            });
+        }
+        Ok(match op {
+            UnaryOp::PreIncrement => OperandType::Const(new_idx),
+            _ => OperandType::Tmp(old_tmp),
+        })
+    }
+
     /// Emit `throw new \Error($msg)`.
     fn compile_throw_error(&mut self, msg: &[u8], line: u32) -> CompileResult<()> {
         let span = goro_parser::token::Span::new(0, 0, line);
@@ -12663,42 +12710,7 @@ impl Compiler {
                     // `$a[]++`: FETCH_DIM_RW appends a null element, which is then
                     // incremented/decremented in place.
                     if let ExprKind::ArrayAccess { array, index: None } = &operand.kind {
-                        let arr_op =
-                            self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::Rw)?;
-                        let is_inc = matches!(op, UnaryOp::PostIncrement | UnaryOp::PreIncrement);
-                        let new_val = if is_inc { Value::Long(1) } else { Value::Null };
-                        let new_idx = self.op_array.add_literal(new_val);
-                        self.op_array.emit(Op {
-                            opcode: OpCode::ArrayAppend,
-                            op1: arr_op,
-                            op2: OperandType::Const(new_idx),
-                            result: OperandType::Unused,
-                            line: expr.span.line,
-                        });
-                        let null_idx = self.op_array.add_literal(Value::Null);
-                        let old_tmp = self.op_array.alloc_temp();
-                        self.op_array.emit(Op {
-                            opcode: OpCode::Assign,
-                            op1: OperandType::Tmp(old_tmp),
-                            op2: OperandType::Const(null_idx),
-                            result: OperandType::Unused,
-                            line: expr.span.line,
-                        });
-                        if !is_inc {
-                            // "Decrement on type null has no effect"
-                            let t = self.op_array.alloc_temp();
-                            self.op_array.emit(Op {
-                                opcode: OpCode::PostDecrement,
-                                op1: OperandType::Tmp(old_tmp),
-                                op2: OperandType::Unused,
-                                result: OperandType::Tmp(t),
-                                line: expr.span.line,
-                            });
-                        }
-                        return Ok(match op {
-                            UnaryOp::PreIncrement => OperandType::Const(new_idx),
-                            _ => OperandType::Tmp(old_tmp),
-                        });
+                        return self.compile_append_incdec(array, op, expr.span.line);
                     }
                     if let ExprKind::ArrayAccess { array, index } = &operand.kind {
                         let arr_op =
