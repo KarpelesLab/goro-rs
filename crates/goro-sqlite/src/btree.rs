@@ -4927,10 +4927,11 @@ fn fetchPayload(pCur: &mut BtCursor, pAmt: &mut u32) -> Vec<u8> {
     // comments in OP_Column).  Copy some of the following page bytes too,
     // so that such overreads see the same data as in C.
     const OVERREAD_SLACK: usize = 32;
+    let s0 = p.min(g.aData.len());
     let e = (p + amt as usize + OVERREAD_SLACK)
         .min(g.aData.len())
-        .max(p);
-    g.aData[p.min(e)..e].to_vec()
+        .max(s0);
+    g.aData[s0..e].to_vec()
 }
 
 /// C: `const void * sqlite3BtreePayloadFetch(BtCursor *pCur, u32 *pAmt)`
