@@ -10342,6 +10342,14 @@ fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
     match ext {
         "bcmath" => &["bcmath.scale"],
         "filter" => &["filter.default", "filter.default_flags"],
+        "exif" => &[
+            "exif.encode_unicode",
+            "exif.decode_unicode_motorola",
+            "exif.decode_unicode_intel",
+            "exif.encode_jis",
+            "exif.decode_jis_motorola",
+            "exif.decode_jis_intel",
+        ],
         "iconv" => &[
             "iconv.input_encoding",
             "iconv.output_encoding",
@@ -12812,6 +12820,12 @@ pub fn reflection_attribute_method(
 
 /// Determine which extension a built-in function belongs to
 fn get_function_extension(func_name: &str) -> Option<&'static str> {
+    // Extensions whose functions are only known from their stubs.
+    if let Some(f) = crate::stubs::find_function(func_name.as_bytes()) {
+        if matches!(f.ext, "exif" | "zip" | "fileinfo") {
+            return Some(f.ext);
+        }
+    }
     // Standard library functions
     let standard = [
         "array_shift",

@@ -350,6 +350,8 @@ impl Compiler {
                     // getimagesize($filename, &$image_info)
                     (b"getimagesize", 1) => true,
                     (b"getimagesizefromstring", 1) => true,
+                    // exif_thumbnail($file, &$width, &$height, &$image_type)
+                    (b"exif_thumbnail", 1..=3) => true,
                     // is_callable($value, $syntax_only, &$callable_name)
                     (b"is_callable", 2) => true,
                     // xml_parse_into_struct($parser, $data, &$values, &$index)

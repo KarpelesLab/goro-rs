@@ -54,6 +54,7 @@ $dirs = [
     'ext/posix' => 'posix',
     'ext/calendar' => 'calendar',
     'ext/phar' => 'Phar',
+    'ext/exif' => 'exif',
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',
     'ext/dom' => 'dom',

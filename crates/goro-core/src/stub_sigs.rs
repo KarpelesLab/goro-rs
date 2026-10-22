@@ -4727,6 +4727,94 @@ pub static FUNCTIONS: &[StubFunc] = &[
         ext: "standard",
     },
     StubFunc {
+        name: "exif_imagetype",
+        flags: 0x0,
+        args: &[StubArg {
+            name: "filename",
+            ty: "string",
+            default: None,
+            flags: 0,
+        }],
+        ret: "int|false",
+        ext: "exif",
+    },
+    StubFunc {
+        name: "exif_read_data",
+        flags: 0x0,
+        args: &[
+            StubArg {
+                name: "file",
+                ty: "",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "required_sections",
+                ty: "?string",
+                default: Some("null"),
+                flags: 0,
+            },
+            StubArg {
+                name: "as_arrays",
+                ty: "bool",
+                default: Some("false"),
+                flags: 0,
+            },
+            StubArg {
+                name: "read_thumbnail",
+                ty: "bool",
+                default: Some("false"),
+                flags: 0,
+            },
+        ],
+        ret: "array|false",
+        ext: "exif",
+    },
+    StubFunc {
+        name: "exif_tagname",
+        flags: 0x0,
+        args: &[StubArg {
+            name: "index",
+            ty: "int",
+            default: None,
+            flags: 0,
+        }],
+        ret: "string|false",
+        ext: "exif",
+    },
+    StubFunc {
+        name: "exif_thumbnail",
+        flags: 0x0,
+        args: &[
+            StubArg {
+                name: "file",
+                ty: "",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "width",
+                ty: "",
+                default: Some("null"),
+                flags: 1,
+            },
+            StubArg {
+                name: "height",
+                ty: "",
+                default: Some("null"),
+                flags: 1,
+            },
+            StubArg {
+                name: "image_type",
+                ty: "",
+                default: Some("null"),
+                flags: 1,
+            },
+        ],
+        ret: "string|false",
+        ext: "exif",
+    },
+    StubFunc {
         name: "exit",
         flags: 0x0,
         args: &[StubArg {
@@ -32634,6 +32722,13 @@ pub static CONSTANTS: &[StubConst] = &[
         value: None,
         flags: 0x0,
         ext: "sockets",
+    },
+    StubConst {
+        name: "EXIF_USE_MBSTRING",
+        ty: "",
+        value: None,
+        flags: 0x0,
+        ext: "exif",
     },
     StubConst {
         name: "EXTR_IF_EXISTS",
