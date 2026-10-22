@@ -46,7 +46,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/sqlite3 / pdo_sqlite (goro-sqlite, a SQLite 3.54.1 port) | 174 | 175 | 99.4% |
 | ext/pdo_mysql / pdo_pgsql | 219 | 219 | 100% |
 | ext/pgsql (libpq port, embedded PostgreSQL fixture) | 96 | 96 | 100% |
-| ext/ldap (pure-Rust libldap port, in-process LDAP server fixture) | 131 | 140 | 93.6% |
+| ext/ldap (pure-Rust libldap port, in-process LDAP server fixture) | 131 | 131 | 100% |
 | ext/session | 256 | 256 | 100% |
 | ext/pcre (PCRE2 port) | 155 | 155 | 100% |
 | ext/hash / random / zlib / bz2 | 305 | 306 | 99.7% |
@@ -110,7 +110,7 @@ Highlights beyond the core language:
   zend_test.
 
 ### Not Yet Implemented
-- ffi, ldap, odbc, snmp, enchant
+- ffi, odbc, snmp, enchant (out of scope for now)
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
 - The opcache optimizer and JIT (`opcache.opt_debug_level` opcode dumps)
 
