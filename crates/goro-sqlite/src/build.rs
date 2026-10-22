@@ -108,7 +108,7 @@ pub fn sqlite3ColumnSetExpr(db: &mut Sqlite3, pTab: &TableRef, pCol: usize, pExp
 }
 
 /// C: `Expr * sqlite3ColumnExpr(Table *pTab, Column *pCol)`
-pub fn sqlite3ColumnExpr(pTab: &TableRef, pCol: usize) -> ExprId {
+pub fn sqlite3ColumnExpr(db: &mut Sqlite3, pTab: &TableRef, pCol: usize) -> ExprId {
     todo!("sqlite3ColumnExpr")
 }
 
@@ -172,7 +172,7 @@ pub fn sqlite3TwoPartName(
     db: &mut Sqlite3,
     pName1: &Token,
     pName2: &Token,
-    pUnqual: &mut Option<Box<Token>>,
+    pUnqual: &mut Token,
 ) -> i32 {
     todo!("sqlite3TwoPartName")
 }

@@ -157,7 +157,7 @@ pub fn sqlite3VdbeExplainPop(db: &mut Sqlite3) {
 }
 
 /// C: `void sqlite3VdbeAddParseSchemaOp(Vdbe *p, int iDb, char *zWhere, u16 p5)`
-pub fn sqlite3VdbeAddParseSchemaOp(p: &mut Vdbe, iDb: i32, zWhere: ZStr, p5: u16) {
+pub fn sqlite3VdbeAddParseSchemaOp(db: &mut Sqlite3, iDb: i32, zWhere: Option<ZStr>, p5: u16) {
     todo!("sqlite3VdbeAddParseSchemaOp")
 }
 

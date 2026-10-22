@@ -1343,8 +1343,16 @@ pub struct ParseU1 {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum RenameKey {
     Expr(ExprId),
+    /// The address of an expression's `y.pTab` field (C `&pExpr->y.pTab`).
+    ExprTab(ExprId),
     /// A Column's name token: (table pointer identity, column index).
     Col(usize, i32),
+    /// The zName of a FROM-clause item (C `pSrc->a[i].zName`).  When the
+    /// parser moves a name from one item to another it remaps the key.
+    SrcItemName(SrcItemId),
+    /// The zName of an Index (C `pIdx->zName`), identified by the address
+    /// of the index (`Rc::as_ptr(&idx) as usize`).
+    IndexName(usize),
     /// Any other node, identified by an opaque integer.
     Other(usize),
 }

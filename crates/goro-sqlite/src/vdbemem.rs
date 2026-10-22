@@ -265,7 +265,7 @@ pub fn sqlite3ValueFromExpr(
     pExpr: ExprId,
     enc: u8,
     affinity: u8,
-    ppVal: &mut [Mem],
+    ppVal: &mut Option<Box<Mem>>,
 ) -> i32 {
     todo!("sqlite3ValueFromExpr")
 }

@@ -19,6 +19,6 @@ pub fn sqlite3GetToken(z: &[u8], tokenType: &mut i32) -> i64 {
 }
 
 /// C: `int sqlite3RunParser(Parse *pParse, const char *zSql)`
-pub fn sqlite3RunParser(db: &mut Sqlite3, zSql: Option<&[u8]>) -> i32 {
+pub fn sqlite3RunParser(db: &mut Sqlite3, zSql: &Rc<[u8]>, start: usize) -> i32 {
     todo!("sqlite3RunParser")
 }

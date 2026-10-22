@@ -57,7 +57,7 @@ pub fn sqlite3ResolveSelectNames(db: &mut Sqlite3, p: SelectId, pOuterNC: NcId) 
 /// C: `int sqlite3ResolveSelfReference( Parse *pParse, Table *pTab, int type, Expr *pExpr, ExprList *pList )`
 pub fn sqlite3ResolveSelfReference(
     db: &mut Sqlite3,
-    pTab: &TableRef,
+    pTab: Option<&TableRef>,
     type_: i32,
     pExpr: ExprId,
     pList: ExprListId,

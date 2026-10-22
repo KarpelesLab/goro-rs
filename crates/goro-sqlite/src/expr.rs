@@ -463,7 +463,7 @@ pub fn sqlite3ExprCodeGeneratedColumn(db: &mut Sqlite3, pTab: &TableRef, pCol: u
 
 /// C: `void sqlite3ExprCodeGetColumnOfTable( Vdbe *v, Table *pTab, int iTabCur, int iCol, int regOut )`
 pub fn sqlite3ExprCodeGetColumnOfTable(
-    v: &mut Vdbe,
+    db: &mut Sqlite3,
     pTab: &TableRef,
     iTabCur: i32,
     iCol: i32,
