@@ -1309,6 +1309,19 @@ impl Compiler {
         Ok(Value::String(PhpString::from_vec(marker)))
     }
 
+    /// `'\foo'()`: a string literal callee is a function name, resolved at
+    /// compile time (zend_compile_function_name(): the leading `\` goes).
+    #[inline(never)]
+    fn compile_fq_string_call(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        let mut e = expr.clone();
+        if let ExprKind::FunctionCall { name, .. } = &mut e.kind {
+            if let ExprKind::String(s) = &mut name.kind {
+                s.remove(0);
+            }
+        }
+        self.compile_expr(&e)
+    }
+
     fn resolve_class_name(&self, name: &[u8]) -> Vec<u8> {
         // Special names are never resolved
         if name.eq_ignore_ascii_case(b"self")
@@ -13153,6 +13166,9 @@ impl Compiler {
                 Ok(OperandType::Tmp(tmp))
             }
 
+            ExprKind::FunctionCall { name, .. } if matches!(&name.kind, ExprKind::String(s) if s.first() == Some(&b'\\')) => {
+                self.compile_fq_string_call(expr)
+            }
             ExprKind::FunctionCall { name, args } => {
                 // Only this call's own result is discarded, not its arguments'.
                 let discard_result = std::mem::take(&mut self.is_discarding_result);

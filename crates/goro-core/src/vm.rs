@@ -33897,6 +33897,16 @@ impl Vm {
                         // The write-back of an abandoned `$a[$k] op= v`.
                         if self.dim_rw_abort.is_some_and(|d| d == self.call_depth) {
                             self.dim_rw_abort = None;
+                            // ASSIGN_DIM_OP's result is NULL.
+                            if matches!(op.op2, OperandType::Tmp(_)) {
+                                self.write_operand(
+                                    &op.op2,
+                                    Value::Null,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                            }
                             return Ok(Flow::Next);
                         }
                         let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -37437,8 +37447,10 @@ impl Vm {
                     };
                     let class_lower: Vec<u8> =
                         class_bytes.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    // (the class is only fetched for an object operand)
                     if matches!(class_lower.as_slice(), b"self" | b"parent" | b"static")
                         && self.current_class_scope().is_none()
+                        && matches!(val.deref(), Value::Object(_) | Value::Generator(_))
                     {
                         let msg = format!(
                             "Cannot access \"{}\" when no class scope is active",
