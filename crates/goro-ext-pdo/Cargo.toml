@@ -12,3 +12,4 @@ goro-core = { path = "../goro-core" }
 goro-parser = { path = "../goro-parser" }
 goro-ext-mysqli = { path = "../goro-ext-mysqli" }
 goro-ext-pgsql = { path = "../goro-ext-pgsql" }
+goro-sqlite = { path = "../goro-sqlite" }
