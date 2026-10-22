@@ -16928,6 +16928,71 @@ impl Vm {
         true
     }
 
+    /// INIT_FCALL `op` of a call through a Closure object (in a variable or
+    /// temporary) of a user closure: what the general handler does then,
+    /// the closure's captured values becoming the leading arguments. False:
+    /// nothing was done.
+    #[inline(never)]
+    fn init_closure_call_fast(
+        &mut self,
+        op: &crate::opcode::Op,
+        cvs: &[Value],
+        tmps: &[Value],
+    ) -> bool {
+        let v = match op.op1 {
+            OperandType::Cv(i) => cvs.get(i as usize),
+            OperandType::Tmp(t) => tmps.get(t as usize),
+            _ => None,
+        };
+        let o = match v {
+            Some(Value::Object(o)) => o,
+            _ => return false,
+        };
+        let (name, captures) = {
+            let ob = o.borrow();
+            let Some(inner) = ob.closure.as_deref() else {
+                return false;
+            };
+            let closure_name = |n: &PhpString| {
+                let b = n.as_bytes();
+                crate::closure::is_closure_fn_name(b) && !b.windows(2).any(|w| w == b"::")
+            };
+            match inner {
+                Value::String(n) if closure_name(n) => (n.clone(), None),
+                Value::Array(a) => {
+                    let ab = a.borrow();
+                    match ab.get_int(0) {
+                        Some(Value::String(n))
+                            if closure_name(n) && ab.position_of(&ArrayKey::Int(0)) == Some(0) =>
+                        {
+                            (n.clone(), Some(a.clone()))
+                        }
+                        _ => return false,
+                    }
+                }
+                _ => return false,
+            }
+        };
+        if !o.borrow().class_name.eq_ignore_ascii_case(b"closure") {
+            return false;
+        }
+        let at = self.pending_calls.len();
+        self.closure_call_objs.retain(|(i, _)| *i < at);
+        self.closure_call_objs.push((at, Rc::downgrade(o)));
+        let mut args = self.take_values(0);
+        if let Some(a) = captures {
+            args.extend(a.borrow().values().skip(1).cloned());
+        }
+        self.closure_pending_calls.push(at);
+        self.pending_calls.push(PendingCall {
+            name,
+            args,
+            named_args: Vec::new(),
+            target: CallTarget::NONE,
+        });
+        true
+    }
+
     /// Whether the call DO_FCALL `op` is about to make is a deferred SPL
     /// method call (`__splx::method`, see spl_deferred_call); not while an
     /// observer watches calls.
@@ -22940,6 +23005,10 @@ impl Vm {
                     })
                 }
                 OpCode::InitFCall => match outlined(|| -> Result<Flow, VmError> {
+                    // `$closure()` (see init_closure_call_fast)
+                    if self.init_closure_call_fast(op, &cvs, &tmps) {
+                        return Ok(Flow::Next);
+                    }
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // INIT_DYNAMIC_CALL on an undefined CV warns first.
                     if matches!(name_val, Value::Undef) {
