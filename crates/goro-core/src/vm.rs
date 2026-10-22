@@ -4733,6 +4733,15 @@ impl Vm {
         &f.3
     }
 
+    /// Display name of a method frame's class: the method's declaring class
+    /// (lowercase `declaring`), or `fallback` if unknown.
+    pub(crate) fn frame_class_display(&self, declaring: &[u8], fallback: &[u8]) -> String {
+        match self.classes.get(declaring) {
+            Some(c) => crate::value::display_class_name(&c.name),
+            None => crate::value::display_class_name(fallback),
+        }
+    }
+
     /// zend.exception_ignore_args (OnUpdateBool), as currently set.
     pub fn exception_ignore_args(&self) -> bool {
         self.constants
@@ -15078,14 +15087,20 @@ impl Vm {
                         break;
                     }
                     // [internal function] is encoded by file="" and line=0.
-                    self.call_stack
-                        .push((handler_name, String::new(), 0, frame_args, false));
+                    // (a Closure or invokable object gets its frame from the call)
+                    let own_frame = !matches!(handler, Value::Object(_));
+                    if own_frame {
+                        self.call_stack
+                            .push((handler_name, String::new(), 0, frame_args, false));
+                    }
                     // zend_user_exception_handler(): the handler is pushed on the
                     // handler stack while it runs, and the top of the stack is
                     // restored afterwards unless the handler set another one.
                     self.exception_handler_stack.push(Some(handler.clone()));
                     let handler_result = self.call_callback(&handler, std::slice::from_ref(&exc));
-                    self.call_stack.pop();
+                    if own_frame {
+                        self.call_stack.pop();
+                    }
                     let restore = |vm: &mut Vm| {
                         if vm.exception_handler.is_none() {
                             if let Some(top) = vm.exception_handler_stack.pop() {
@@ -38453,10 +38468,11 @@ impl Vm {
                                 let unset_guard_key =
                                     (unset_obj_id, prop_name.as_bytes().to_vec(), 3u8);
                                 self.magic_prop_guards.insert(unset_guard_key.clone());
+                                let class_disp =
+                                    self.frame_class_display(&magic_declaring, &class_name_orig);
                                 self.class_scope_stack.push(magic_declaring);
                                 self.called_class_stack.push(class_name_orig.clone());
                                 // Push a stack frame so the magic __unset call appears in exception traces.
-                                let class_disp = crate::value::display_class_name(&class_name_orig);
                                 let frame_name = format!("{}->__unset", class_disp);
                                 let frame_args = vec![Value::String(prop_name.clone())];
                                 self.call_stack.push((
@@ -46295,59 +46311,8 @@ impl Vm {
                         );
                         obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
                         obj.set_property(b"previous".to_vec(), Value::Null);
-                        // Build trace from call stack
-                        let mut trace_arr = PhpArray::new();
-                        for (func_name, file, line, args, is_instance) in
-                            self.call_stack.iter().rev()
-                        {
-                            let mut frame = PhpArray::new();
-                            frame.set(
-                                ArrayKey::String(PhpString::from_bytes(b"file")),
-                                Value::String(PhpString::from_string(file.clone())),
-                            );
-                            frame.set(
-                                ArrayKey::String(PhpString::from_bytes(b"line")),
-                                Value::Long(*line as i64),
-                            );
-                            frame.set(
-                                ArrayKey::String(PhpString::from_bytes(b"function")),
-                                Value::String(PhpString::from_string(func_name.clone())),
-                            );
-                            // Parse class::method for class/type
-                            if let Some(pos) = func_name.find("::") {
-                                frame.set(
-                                    ArrayKey::String(PhpString::from_bytes(b"class")),
-                                    Value::String(PhpString::from_string(
-                                        func_name[..pos].to_string(),
-                                    )),
-                                );
-                                let type_str = if *is_instance { b"->" as &[u8] } else { b"::" };
-                                frame.set(
-                                    ArrayKey::String(PhpString::from_bytes(b"type")),
-                                    Value::String(PhpString::from_bytes(type_str)),
-                                );
-                                frame.set(
-                                    ArrayKey::String(PhpString::from_bytes(b"function")),
-                                    Value::String(PhpString::from_string(
-                                        func_name[pos + 2..].to_string(),
-                                    )),
-                                );
-                            }
-                            // Include actual arguments in trace
-                            let mut args_arr = PhpArray::new();
-                            for arg in args {
-                                args_arr.push(arg.clone());
-                            }
-                            frame.set(
-                                ArrayKey::String(PhpString::from_bytes(b"args")),
-                                Value::Array(Rc::new(RefCell::new(args_arr))),
-                            );
-                            trace_arr.push(Value::Array(Rc::new(RefCell::new(frame))));
-                        }
-                        obj.set_property(
-                            b"trace".to_vec(),
-                            Value::Array(Rc::new(RefCell::new(trace_arr))),
-                        );
+                        let trace = self.build_exception_trace();
+                        obj.set_property(b"trace".to_vec(), trace);
                     }
 
                     // Initialize SPL class internal storage
@@ -47937,11 +47902,12 @@ impl Vm {
                                         fn_cvs[1] = Value::String(prop_name.clone());
                                     } // $name
                                     self.magic_prop_guards.insert(get_guard_key.clone());
+                                    // (the frame names the method's declaring class)
+                                    let class_disp = self
+                                        .frame_class_display(&magic_declaring, &class_name_orig);
                                     self.class_scope_stack.push(magic_declaring);
                                     self.called_class_stack.push(class_name_orig.clone());
                                     // Push stack frame for __get
-                                    let class_disp =
-                                        crate::value::display_class_name(&class_name_orig);
                                     let frame_name = format!("{}->__get", class_disp);
                                     let frame_args = vec![Value::String(prop_name.clone())];
                                     self.call_stack.push((
@@ -49310,10 +49276,11 @@ impl Vm {
                                     fn_cvs[2] = value.clone();
                                 }
                                 self.magic_prop_guards.insert(guard_key.clone());
+                                let class_disp =
+                                    self.frame_class_display(&magic_declaring, &class_name_orig);
                                 self.class_scope_stack.push(magic_declaring);
                                 self.called_class_stack.push(class_name_orig.clone());
                                 // Push a stack frame so __set appears in exception traces
-                                let class_disp = crate::value::display_class_name(&class_name_orig);
                                 let frame_name = format!("{}->__set", class_disp);
                                 let frame_args = vec![Value::String(prop_name.clone()), value];
                                 self.call_stack.push((
