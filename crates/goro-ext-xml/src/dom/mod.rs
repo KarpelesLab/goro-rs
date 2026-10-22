@@ -1707,6 +1707,19 @@ fn call_method(
     };
     if m == "__construct" && b.is_modern() && (modern::is_node_base(b) || b == Base::MTokenList) {
         // private (final) constructors: `new Dom\Element()` & co. are not allowed
+        // Dom\Node::__construct() itself, reached through reflection
+        if goro_core::reflection::invoke_bypasses_visibility() {
+            let cls = o.borrow().class_name.clone();
+            throw_error(
+                vm,
+                b"Error",
+                &format!(
+                    "Cannot directly construct {}, use document methods instead",
+                    String::from_utf8_lossy(&cls)
+                ),
+            );
+            return Value::Null;
+        }
         let declaring = if b == Base::MTokenList {
             "Dom\\TokenList"
         } else {
@@ -1967,6 +1980,10 @@ pub fn register(vm: &mut Vm) {
     ] {
         c(vm, n, v);
     }
+    vm.internal_deprecated_constants.insert(
+        b"DOM_PHP_ERR".to_vec(),
+        "Constant DOM_PHP_ERR is deprecated since 8.4, as it is no longer used".to_string(),
+    );
     vm.register_function_with_params(
         b"dom_import_simplexml",
         chardata::dom_import_simplexml,

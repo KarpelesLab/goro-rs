@@ -35262,12 +35262,6 @@ impl Vm {
                                             op.line,
                                         );
                                     }
-                                    if resolved && const_name.as_slice() == b"DOM_PHP_ERR" {
-                                        self.emit_deprecated_at(
-                                            "Constant DOM_PHP_ERR is deprecated since 8.4, as it is no longer used",
-                                            op.line,
-                                        );
-                                    }
                                     if !resolved {
                                         // Constant not found - throw Undefined constant error (PHP 8+)
                                         let const_display =
@@ -46327,7 +46321,12 @@ impl Vm {
                                 let pl: Vec<u8> =
                                     p.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if self.is_known_builtin_class(&pl) {
-                                    extends_builtin = true;
+                                    // (with the methods: DOMNode only has __sleep)
+                                    extends_builtin = crate::stubs::find_class(&pl).is_none()
+                                        || (crate::stubs::find_method(&pl, b"__serialize")
+                                            .is_some()
+                                            && crate::stubs::find_method(&pl, b"__unserialize")
+                                                .is_some());
                                     break;
                                 }
                                 match self.classes.get(&pl) {

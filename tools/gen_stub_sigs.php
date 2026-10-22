@@ -43,6 +43,7 @@ $dirs = [
     'ext/iconv' => 'iconv',
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',
+    'ext/dom' => 'dom',
 ];
 
 const F_PUBLIC = 1;
@@ -319,8 +320,10 @@ class Parser {
             } elseif (self::is($this->peek(), ';')) {
                 $this->next();
             }
-            if ($virtual) $mflags |= F_VIRTUAL;
             $tags = $this->docTags($this->doc);
+            // (@virtual: a property the extension implements natively)
+            foreach ($tags as $t) if ($t[0] === 'virtual') $virtual = true;
+            if ($virtual) $mflags |= F_VIRTUAL;
             $cls['props'][] = ['name' => substr($var[1], 1), 'type' => $type, 'default' => $default, 'flags' => $mflags];
             $this->reset();
         }

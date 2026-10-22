@@ -162,14 +162,27 @@ pub(crate) fn internal_class_known(vm: &Vm, lower: &[u8]) -> bool {
 /// Reflection's view of a class: the user class, or for an internal class a
 /// `ClassEntry` synthesized from php-src's stubs (see `crate::stubs`).
 pub(crate) fn rcls<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a crate::object::ClassEntry> {
+    // An extension class registered as a bare entry (its methods are
+    // implemented natively, e.g. ext/dom): the stub declares it.
+    let bare = |c: &crate::object::ClassEntry| {
+        c.filename.is_none()
+            && c.start_line == 0
+            && c.methods.is_empty()
+            && c.properties.is_empty()
+            && !c.is_enum
+    };
     if let Some(c) = vm.classes.get(lower) {
-        return Some(c);
+        if !bare(c) || crate::stubs::find_class(lower).is_none() {
+            return Some(c);
+        }
     }
     let owned;
     let l: &[u8] = if lower.iter().any(|b| b.is_ascii_uppercase()) {
         owned = lower.to_ascii_lowercase();
         if let Some(c) = vm.classes.get(&owned) {
-            return Some(c);
+            if !bare(c) || crate::stubs::find_class(&owned).is_none() {
+                return Some(c);
+            }
         }
         &owned
     } else {
@@ -2756,7 +2769,7 @@ pub fn reflection_class_method(
                 let props: Vec<_> = ce
                     .properties
                     .iter()
-                    .filter(|p| !p.is_static)
+                    .filter(|p| !p.is_static && !p.is_virtual)
                     .map(|p| (p.name.clone(), p.default.clone()))
                     .collect();
                 for (name, default) in props {
@@ -6151,7 +6164,11 @@ fn invoke_internal_method(
         arr.push(Value::String(PhpString::from_vec(m.name.clone())));
         Value::Array(Rc::new(RefCell::new(arr)))
     };
-    match vm.call_callback(&callable, args) {
+    // (ReflectionMethod::invoke() calls methods whatever their visibility)
+    let prev = INVOKE_BYPASS.with(|b| b.replace(true));
+    let r = vm.call_callback(&callable, args);
+    INVOKE_BYPASS.with(|b| b.set(prev));
+    match r {
         Ok(v) => v,
         Err(e) => {
             if vm.current_exception.is_none() {
@@ -6161,6 +6178,17 @@ fn invoke_internal_method(
             Value::Null
         }
     }
+}
+
+thread_local! {
+    static INVOKE_BYPASS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// An internal method is being run by ReflectionMethod::invoke(), which
+/// does not check its visibility (natively implemented private methods
+/// then run their body).
+pub fn invoke_bypasses_visibility() -> bool {
+    INVOKE_BYPASS.with(|b| b.get())
 }
 
 thread_local! {
