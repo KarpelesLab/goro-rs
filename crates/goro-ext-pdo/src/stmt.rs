@@ -923,10 +923,11 @@ pub fn do_fetch(
         if relative {
             vm.error_reporting &= !8192;
         }
-        let r = match cuf {
+        // (a by-ref function's reference is the row, zend_call_known_fcc())
+        let r = vm.call_keeping_ref(|vm| match cuf {
             Some(cuf) => cuf(vm, &cargs),
             None => vm.call_callback(&func, &cargs[1..]),
-        };
+        });
         if relative && vm.error_reporting == saved_er & !8192 {
             vm.error_reporting = saved_er;
         }

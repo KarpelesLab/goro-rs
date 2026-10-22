@@ -737,6 +737,10 @@ pub struct Vm {
     /// Call depth of a by-ref function whose result is fetched for writing
     /// (`$x = &f()`): that frame returns the reference itself.
     pub(crate) keep_ref_depth: Option<u32>,
+    /// The next callback run by internal code returns the reference a
+    /// by-ref function returns (zend_call_function()'s retval, which
+    /// array_map() or PDO::FETCH_FUNC store as is). See `call_keeping_ref`.
+    callback_keep_ref: bool,
     /// Where a string fetched for writing (`$a[k][0] = c`, `$o->s[0] = c`)
     /// lives: (result tmp, call depth, location), so that the string offset
     /// write is stored back (see fetch_w::StrWb).
@@ -1248,6 +1252,7 @@ impl Vm {
             bind_next_frame: false,
             bind_next_tab: None,
             keep_ref_depth: None,
+            callback_keep_ref: false,
             str_offset_wb: None,
             str_wb_pending: None,
             str_wb_obj_ctx: false,
@@ -7650,6 +7655,9 @@ impl Vm {
         let was_global = self.is_global_scope;
         self.is_global_scope = false;
         let scope_pushed = self.closure_frame_enter(op_array, &func_cvs);
+        if std::mem::take(&mut self.callback_keep_ref) {
+            self.keep_ref_depth = Some(self.call_depth + 1);
+        }
         let result = self.execute_op_array(op_array, func_cvs);
         self.closure_frame_leave(scope_pushed);
         self.is_global_scope = was_global;
@@ -7659,6 +7667,15 @@ impl Vm {
             }
         }
         result
+    }
+
+    /// Run `f` (which calls a callback) so that a by-ref callback's result
+    /// is the returned reference rather than its value.
+    pub fn call_keeping_ref<T>(&mut self, f: impl FnOnce(&mut Vm) -> T) -> T {
+        let saved = std::mem::replace(&mut self.callback_keep_ref, true);
+        let r = f(self);
+        self.callback_keep_ref = saved;
+        r
     }
 
     /// Register a class (from the compiler's compiled_classes list)

@@ -3259,7 +3259,8 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .collect();
         let mut result = PhpArray::new();
         for (k, v) in entries {
-            let r = call_user_func(vm, &[callback.clone(), v])?;
+            // (a by-ref callback's reference is stored as is)
+            let r = vm.call_keeping_ref(|vm| call_user_func(vm, &[callback.clone(), v]))?;
             if vm.current_exception.is_some() {
                 return Ok(Value::Null);
             }
@@ -3287,7 +3288,7 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             let mut cargs = vec![callback.clone()];
             cargs.extend(row);
-            let r = call_user_func(vm, &cargs)?;
+            let r = vm.call_keeping_ref(|vm| call_user_func(vm, &cargs))?;
             if vm.current_exception.is_some() {
                 return Ok(Value::Null);
             }
