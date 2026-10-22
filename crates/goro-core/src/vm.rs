@@ -6588,13 +6588,7 @@ impl Vm {
         tmps: &mut [Value],
         operands: Vec<Value>,
     ) {
-        for o in [op.op1, op.op2] {
-            if let OperandType::Tmp(t) = o {
-                if let Some(slot) = tmps.get_mut(t as usize) {
-                    *slot = Value::Undef;
-                }
-            }
-        }
+        Self::release_tmp_operands(op, tmps);
         drop(operands);
         if self.has_release_work() {
             self.run_pending_destructors();
