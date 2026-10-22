@@ -16699,6 +16699,10 @@ impl Vm {
         let mut exception_handlers: Vec<(u32, u32, u32, usize, usize)> = Vec::new();
         // Saved pending_calls depth to restore when entering a catch block
         let mut pending_calls_catch_depth: Option<usize> = None;
+        // error_reporting depth at each try's TryBegin, by catch target: a
+        // catch entered from a silenced region (@, isset()) ends the silence
+        // (ZEND_HANDLE_EXCEPTION's live ZEND_LIVE_SILENCE ranges).
+        let mut try_er_depths: Vec<(u32, usize)> = Vec::new();
         // $GLOBALS is the symbol table itself.
         let globals_cv: Option<u32> = if single_step.is_some() {
             None
@@ -34524,6 +34528,13 @@ impl Vm {
                         self.error_reporting_stack.len(),
                         self.pending_calls.len(),
                     ));
+                    if catch_target > 0 {
+                        let depth = self.error_reporting_stack.len();
+                        match try_er_depths.iter_mut().find(|(t, _)| *t == catch_target) {
+                            Some(e) => e.1 = depth,
+                            None => try_er_depths.push((catch_target, depth)),
+                        }
+                    }
                     Ok(Flow::Next)
                 })? {
                     Flow::Next => {}
@@ -34590,6 +34601,17 @@ impl Vm {
                     // Restore pending_calls depth saved when we jumped to this catch block
                     if let Some(depth) = pending_calls_catch_depth.take() {
                         self.pending_calls.truncate(depth);
+                    }
+                    // Leave the silenced regions the exception was thrown from.
+                    if let Some(&(_, depth)) =
+                        try_er_depths.iter().find(|(t, _)| *t as usize == ip - 1)
+                    {
+                        while self.error_reporting_stack.len() > depth {
+                            if let Some(saved) = self.error_reporting_stack.pop() {
+                                self.error_reporting =
+                                    crate::errdisplay::end_silence(self.error_reporting, saved);
+                            }
+                        }
                     }
                     // A fiber's graceful-exit unwind is never caught: skip the
                     // catch clauses and continue unwinding (finally blocks run).
@@ -40467,7 +40489,17 @@ impl Vm {
                         }
                         if let Value::Object(obj) = &arr_val.deref() {
                             if let Some(f) = native_handlers(obj).and_then(|h| h.has_dimension) {
-                                if let Some(b) = f(self, obj, &key_val.deref(), 0) {
+                                // The handler's diagnostics are not silenced by
+                                // isset()'s own suppression.
+                                let saved_er = self.error_reporting;
+                                if saved_er == crate::errdisplay::ER_SILENT {
+                                    if let Some(outer) = self.error_reporting_stack.last() {
+                                        self.error_reporting = *outer;
+                                    }
+                                }
+                                let r = f(self, obj, &key_val.deref(), 0);
+                                self.error_reporting = saved_er;
+                                if let Some(b) = r {
                                     native_exc_check!(
                                         self,
                                         exception_handlers,

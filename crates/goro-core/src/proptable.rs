@@ -265,6 +265,17 @@ impl Vm {
         let mut internal = None;
         for _ in 0..64 {
             match self.classes.get(&cur) {
+                // An extension class registered as a bare entry (DOMException):
+                // its stub declares its properties.
+                Some(c)
+                    if c.filename.is_none()
+                        && c.start_line == 0
+                        && c.properties.is_empty()
+                        && crate::stubs::find_class(&cur).is_some() =>
+                {
+                    internal = crate::stubs::find_class(&cur);
+                    break;
+                }
                 Some(c) => match &c.parent {
                     Some(p) => cur = lower(p),
                     None => break,
@@ -567,7 +578,12 @@ impl Vm {
                 break;
             };
             if c.filename.is_none() {
-                storage_order = true;
+                // (a throwable registered as a bare entry of a stub class has
+                // the stub's slots, like any exception)
+                storage_order = !(c.start_line == 0
+                    && c.properties.is_empty()
+                    && crate::stubs::find_class(&cur).is_some()
+                    && self.class_extends_any(&cur, &[b"exception", b"error"]));
                 break;
             }
             match &c.parent {
