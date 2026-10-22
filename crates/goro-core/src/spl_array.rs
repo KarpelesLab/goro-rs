@@ -673,55 +673,95 @@ impl Vm {
     /// Current (index, entry) of the iterator, resolving a stale index by key.
     fn ao_current(&self, obj: &Rc<RefCell<PhpObject>>) -> Option<(usize, ArrayKey, Value)> {
         let t = self.ao_table(obj);
-        let entries = self.table_entries(&t);
-        let mut idx = match prop(obj, b"__spl_pos") {
-            Value::Long(n) if n >= 0 => n as usize,
-            _ => 0,
+        let (mut idx, pos_key) = {
+            let ob = obj.borrow();
+            let idx = match ob.get_property(b"__spl_pos") {
+                Value::Long(n) if n >= 0 => n as usize,
+                _ => 0,
+            };
+            let key = match ob.get_property(b"__spl_pos_key") {
+                k @ (Value::Long(_) | Value::String(_)) => Some(Self::value_to_array_key(k)),
+                _ => None,
+            };
+            (idx, key)
         };
-        if let Value::Array(pk) = prop(obj, b"__spl_pos_key") {
-            if let Some(k) = pk.borrow().get(&ArrayKey::Int(0)).cloned() {
-                let key = Self::value_to_array_key(k);
-                if entries.get(idx).map(|(ek, _)| *ek != key).unwrap_or(true) {
-                    if let Some(i) = entries.iter().position(|(ek, _)| *ek == key) {
-                        idx = i;
+        match &t {
+            Table::Arr(a) => {
+                let ab = a.borrow();
+                if let Some(key) = pos_key {
+                    if ab.entry_at(idx).map(|(ek, _)| *ek != key).unwrap_or(true) {
+                        if let Some(i) = ab.position_of(&key) {
+                            idx = i;
+                        }
                     }
                 }
+                ab.entry_at(idx).map(|(k, v)| (idx, k.clone(), v.clone()))
+            }
+            Table::Obj(_) => {
+                let entries = self.table_entries(&t);
+                if let Some(key) = pos_key {
+                    if entries.get(idx).map(|(ek, _)| *ek != key).unwrap_or(true) {
+                        if let Some(i) = entries.iter().position(|(ek, _)| *ek == key) {
+                            idx = i;
+                        }
+                    }
+                }
+                entries.into_iter().nth(idx).map(|(k, v)| (idx, k, v))
             }
         }
-        entries.into_iter().nth(idx).map(|(k, v)| (idx, k, v))
     }
 
+    /// Store the iterator position: the index plus the key found there (so
+    /// the position survives insertions/removals); no key past the end.
     fn ao_set_pos(obj: &Rc<RefCell<PhpObject>>, idx: usize, key: Option<&ArrayKey>) {
-        set_prop(obj, b"__spl_pos", Value::Long(idx as i64));
-        let mut a = PhpArray::new();
-        if let Some(k) = key {
-            a.push(match k {
-                ArrayKey::Int(n) => Value::Long(*n),
-                ArrayKey::String(s) => Value::String(s.clone()),
-            });
+        let mut ob = obj.borrow_mut();
+        ob.set_property(b"__spl_pos".to_vec(), Value::Long(idx as i64));
+        ob.set_property(
+            b"__spl_pos_key".to_vec(),
+            match key {
+                Some(k) => Self::key_value(k),
+                None => Value::Null,
+            },
+        );
+    }
+
+    /// Number of entries of a table and the key at `idx`.
+    fn table_len_key_at(&self, t: &Table, idx: usize) -> (usize, Option<ArrayKey>) {
+        match t {
+            Table::Arr(a) => {
+                let ab = a.borrow();
+                (ab.len(), ab.entry_at(idx).map(|(k, _)| k.clone()))
+            }
+            Table::Obj(_) => {
+                let entries = self.table_entries(t);
+                let k = entries.get(idx).map(|(k, _)| k.clone());
+                (entries.len(), k)
+            }
         }
-        set_prop(obj, b"__spl_pos_key", val_arr(a));
     }
 
     pub(crate) fn ao_rewind(&self, obj: &Rc<RefCell<PhpObject>>) {
         let t = self.ao_table(obj);
-        let entries = self.table_entries(&t);
-        Self::ao_set_pos(obj, 0, entries.first().map(|(k, _)| k));
+        let (_, k) = self.table_len_key_at(&t, 0);
+        Self::ao_set_pos(obj, 0, k.as_ref());
     }
 
     pub(crate) fn ao_next(&self, obj: &Rc<RefCell<PhpObject>>) {
         let t = self.ao_table(obj);
-        let entries = self.table_entries(&t);
         // zend_hash_move_forward_ex() does not move an exhausted position,
         // so elements appended later become current.
         let next = match self.ao_current(obj) {
             Some((i, _, _)) => i + 1,
-            None => match prop(obj, b"__spl_pos") {
-                Value::Long(n) if n >= 0 => (n as usize).min(entries.len()),
-                _ => entries.len(),
-            },
+            None => {
+                let len = self.table_len_key_at(&t, 0).0;
+                match prop(obj, b"__spl_pos") {
+                    Value::Long(n) if n >= 0 => (n as usize).min(len),
+                    _ => len,
+                }
+            }
         };
-        Self::ao_set_pos(obj, next, entries.get(next).map(|(k, _)| k));
+        let (_, k) = self.table_len_key_at(&t, next);
+        Self::ao_set_pos(obj, next, k.as_ref());
     }
 
     pub(crate) fn ao_valid(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
@@ -823,7 +863,7 @@ impl Vm {
         let flags = (ao_flags(obj) & !IS_SELF & !USE_OTHER) | ar_flags;
         set_prop(obj, b"__spl_flags", Value::Long(flags));
         set_prop(obj, b"__spl_pos", Value::Long(0));
-        set_prop(obj, b"__spl_pos_key", val_arr(PhpArray::new()));
+        set_prop(obj, b"__spl_pos_key", Value::Null);
         true
     }
 
@@ -1518,9 +1558,9 @@ impl Vm {
                     None => 0,
                 };
                 let t = self.ao_table(obj);
-                let entries = self.table_entries(&t);
-                if pos >= 0 && (pos as usize) < entries.len() {
-                    Self::ao_set_pos(obj, pos as usize, entries.get(pos as usize).map(|(k, _)| k));
+                let (len, key) = self.table_len_key_at(&t, pos.max(0) as usize);
+                if pos >= 0 && (pos as usize) < len {
+                    Self::ao_set_pos(obj, pos as usize, key.as_ref());
                     Value::Null
                 } else {
                     let msg = format!("Seek position {} is out of range", pos);
