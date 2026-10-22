@@ -5818,6 +5818,35 @@ impl Vm {
         }
     }
 
+    /// The visibility error of unsetting property `name` of an instance of
+    /// `class_lower` from the current scope (a parent's private property is
+    /// not visible: it is not this property).
+    fn unset_visibility_error(
+        &self,
+        class_lower: &[u8],
+        class_name: &[u8],
+        name: &[u8],
+    ) -> Option<String> {
+        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let (vis, decl, _, _, _) =
+            self.find_property_def_for_scope(class_lower, name, scope.as_deref())?;
+        if vis == Visibility::Public {
+            return None;
+        }
+        if vis == Visibility::Private && decl.to_ascii_lowercase() != class_lower {
+            return None;
+        }
+        let caller = self.current_class_scope();
+        self.check_visibility(
+            vis,
+            &decl,
+            class_name,
+            &String::from_utf8_lossy(name),
+            true,
+            caller.as_deref(),
+        )
+    }
+
     pub(crate) fn named_arg_by_ref(&self, call_name: &[u8], name: &[u8]) -> bool {
         let lower = call_name.to_ascii_lowercase();
         let user = self.user_functions.get(&lower).cloned().or_else(|| {
@@ -42772,7 +42801,7 @@ impl Vm {
                         }
                         // The slot this scope's access refers to (privates by scope).
                         let pkey = self.prop_key_for(&obj_val, prop_name.as_bytes());
-                        let has_prop = obj.borrow().has_property(&pkey);
+                        let mut has_prop = obj.borrow().has_property(&pkey);
                         let class_name_orig_u = obj.borrow().class_name.clone();
                         let class_lower_u: Vec<u8> = class_name_orig_u
                             .iter()
@@ -42783,6 +42812,41 @@ impl Vm {
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect::<Vec<u8>>()
                         });
+                        // zend_std_unset_property(): a property the scope may not
+                        // access goes to __unset() (unless its guard is active),
+                        // else "Cannot access ... property".
+                        if let Some(msg) = self.unset_visibility_error(
+                            &class_lower_u,
+                            &class_name_orig_u,
+                            prop_name.as_bytes(),
+                        ) {
+                            let has_unset = self
+                                .classes
+                                .get(&class_lower_u)
+                                .is_some_and(|c| c.get_method(b"__unset").is_some());
+                            let guarded = self.magic_prop_guards.contains(&(
+                                obj.borrow().object_id,
+                                prop_name.as_bytes().to_vec(),
+                                3u8,
+                            ));
+                            if has_unset && !guarded {
+                                has_prop = false;
+                            } else {
+                                let exc = self.create_exception(b"Error", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         // Check readonly property unset protection
                         if let Some((_vis, _dc, prop_is_readonly, _pt, _sv)) = self
                             .find_property_def_for_scope(
