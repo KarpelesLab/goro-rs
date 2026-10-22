@@ -1585,8 +1585,54 @@ fn call_user_func_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                 return res;
             }
         }
+        if let Some(cb) = callable_with_this(cb, &r) {
+            let mut a = args.to_vec();
+            a[0] = cb;
+            return call_user_func(vm, &a);
+        }
     }
     call_user_func(vm, args)
+}
+
+/// `'A::m'` / `['A', 'm']` naming a non-static method, called from a
+/// method whose `$this` is an A: zend_is_callable_check_class() calls it
+/// on that `$this`.
+fn callable_with_this(cb: &Value, r: &goro_core::callable::CallableCheck) -> Option<Value> {
+    let obj = r.object.as_ref()?;
+    if r.trampoline.is_some() {
+        return None;
+    }
+    let method = match cb.deref() {
+        Value::String(s) => {
+            let b = s.as_bytes();
+            let p = b.windows(2).position(|w| w == b"::")?;
+            let class = b[..p].to_ascii_lowercase();
+            if matches!(class.as_slice(), b"parent" | b"self" | b"static") {
+                return None;
+            }
+            b.to_vec()
+        }
+        Value::Array(a) => {
+            let a = a.borrow();
+            match (
+                a.get(&ArrayKey::Int(0)).map(|v| v.deref()),
+                a.get(&ArrayKey::Int(1)).map(|v| v.deref()),
+            ) {
+                (Some(Value::String(c)), Some(Value::String(m)))
+                    if !m.as_bytes().windows(2).any(|w| w == b"::") =>
+                {
+                    [c.as_bytes(), b"::", m.as_bytes()].concat()
+                }
+                _ => return None,
+            }
+        }
+        _ => return None,
+    };
+    // (the method of that class, as `[$this, 'A::m']`)
+    let mut a = PhpArray::new();
+    a.push(obj.clone());
+    a.push(Value::String(PhpString::from_vec(method)));
+    Some(Value::Array(Rc::new(RefCell::new(a))))
 }
 
 fn call_user_func_array_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1611,6 +1657,11 @@ fn call_user_func_array_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
                     return res;
                 }
             }
+        }
+        if let Some(cb) = callable_with_this(cb, &r) {
+            let mut a = args.to_vec();
+            a[0] = cb;
+            return call_user_func_array(vm, &a);
         }
     }
     call_user_func_array(vm, args)
