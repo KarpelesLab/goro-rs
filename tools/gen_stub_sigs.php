@@ -38,6 +38,9 @@ $dirs = [
     'ext/sockets' => 'sockets',
     'ext/mysqli' => 'mysqli',
     'ext/uri' => 'uri',
+    'ext/bcmath' => 'bcmath',
+    'ext/filter' => 'filter',
+    'ext/iconv' => 'iconv',
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',
 ];
@@ -514,7 +517,7 @@ ksort($classes);
 // Extensions declaring their classes themselves (with a ClassEntry, from PHP
 // source) only use their stubs for arginfo: they are kept out of CLASSES,
 // which describes the classes the VM implements natively.
-const SELF_DECLARED_CLASS_EXTS = ['zend_test'];
+const SELF_DECLARED_CLASS_EXTS = ['zend_test', 'bcmath', 'filter'];
 function classes_rs(string $name, array $list, bool $methodExt): void {
     echo "pub static $name: &[StubClass] = &[\n";
     foreach ($list as $c) {
