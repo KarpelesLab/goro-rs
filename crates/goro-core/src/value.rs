@@ -956,12 +956,7 @@ impl Value {
                 None => Value::Long(0),
             },
             Value::Object(o) if native_cast(o, 3).is_some() => {
-                let s = native_cast(o, 3).unwrap().to_php_string();
-                match parse_numeric_str(s.as_bytes(), true) {
-                    Some((NumStr::Long(n), _)) => Value::Long(n),
-                    Some((NumStr::Double(f), _)) => Value::Double(f),
-                    None => Value::Long(0),
-                }
+                native_cast_number(o).unwrap_or(Value::Long(0))
             }
             Value::Array(_) | Value::Object(_) | Value::Generator(_) => {
                 Value::Long(if self.is_truthy() { 1 } else { 0 })
@@ -2453,6 +2448,17 @@ pub fn native_cast(o: &Rc<RefCell<crate::object::PhpObject>>, kind: u8) -> Optio
         b.native.as_ref().and_then(|n| n.handlers.cast)
     }?;
     f(o, kind)
+}
+
+/// cast_object(_IS_NUMBER) of an extension object: its string cast read as
+/// a number (None when it has no cast handler).
+pub fn native_cast_number(o: &Rc<RefCell<crate::object::PhpObject>>) -> Option<Value> {
+    let s = native_cast(o, 3)?.to_php_string();
+    Some(match parse_numeric_str(s.as_bytes(), true) {
+        Some((NumStr::Long(n), _)) => Value::Long(n),
+        Some((NumStr::Double(f), _)) => Value::Double(f),
+        None => Value::Long(0),
+    })
 }
 
 /// Comparison involving an extension object (zend compare handler plus the

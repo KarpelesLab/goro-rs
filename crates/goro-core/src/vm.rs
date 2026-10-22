@@ -4419,6 +4419,29 @@ impl Vm {
             }
         }
 
+        // An object without an operator handler (checked by the caller) takes
+        // part only through its cast_object handler: _IS_NUMBER for arithmetic
+        // (zendi_try_convert_scalar_to_number), IS_LONG for the integer
+        // operators (zendi_try_get_long). Without one: TypeError.
+        {
+            let int_op = matches!(op_symbol, "%" | "&" | "|" | "^" | "<<" | ">>");
+            let uncastable = |v: &Value| match v {
+                Value::Object(o) => {
+                    crate::value::native_cast(o, if int_op { 1 } else { 3 }).is_none()
+                }
+                Value::Generator(_) => true,
+                _ => false,
+            };
+            if uncastable(&a_deref) || uncastable(&b_deref) {
+                return Some(format!(
+                    "Unsupported operand types: {} {} {}",
+                    Self::zval_type_name(&a_deref),
+                    op_symbol,
+                    Self::zval_type_name(&b_deref)
+                ));
+            }
+        }
+
         // PHP 8: a string operand that is not even leading-numeric makes the
         // scalar-to-number conversion fail (zendi_try_convert_scalar_to_number /
         // zendi_try_get_long), which raises "Unsupported operand types".
@@ -6551,9 +6574,28 @@ impl Vm {
         }
     }
 
-    /// Run destructors for objects that are only held by the destructible_objects list.
-    /// In PHP, __destruct is called eagerly when the last user reference is dropped.
-    /// Since destructible_objects keeps an Rc, we check for strong_count == 1.
+    /// FREE_OP1 / FREE_OP2 of an operator that threw: its temporary operands
+    /// are released at once, their destructors running with the exception
+    /// set aside and chained to the one they throw (bug73337).
+    fn release_threw_operands(
+        &mut self,
+        op: &crate::opcode::Op,
+        tmps: &mut [Value],
+        operands: Vec<Value>,
+    ) {
+        for o in [op.op1, op.op2] {
+            if let OperandType::Tmp(t) = o {
+                if let Some(slot) = tmps.get_mut(t as usize) {
+                    *slot = Value::Undef;
+                }
+            }
+        }
+        drop(operands);
+        if self.has_release_work() {
+            self.run_pending_destructors();
+        }
+    }
+
     /// ZEND_THROW's operand check: why `v` cannot be thrown, if it cannot.
     pub(crate) fn throw_operand_error(&self, v: &Value) -> Option<&'static str> {
         let Value::Object(obj) = v else {
@@ -6606,6 +6648,9 @@ impl Vm {
         }
     }
 
+    /// Run destructors for objects that are only held by the destructible_objects list.
+    /// In PHP, __destruct is called eagerly when the last user reference is dropped.
+    /// Since destructible_objects keeps an Rc, we check for strong_count == 1.
     pub fn run_pending_destructors_pub(&mut self) {
         self.run_pending_destructors();
     }
@@ -17831,6 +17876,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "+") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -17915,6 +17961,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "-") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -17999,6 +18046,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "*") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -18081,6 +18129,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "/") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -18196,6 +18245,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "%") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -18322,6 +18372,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "**") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -18549,6 +18600,7 @@ impl Vm {
                         {
                             let exc = self.create_exception(b"TypeError", &err, op.line);
                             self.current_exception = Some(exc);
+                            self.release_threw_operands(op, &mut tmps, vec![a]);
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                 exception_handlers.last()
                             {
@@ -18648,6 +18700,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "&") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -18747,6 +18800,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "|") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -18852,6 +18906,7 @@ impl Vm {
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&a, &b, "^") {
                         let exc_val = self.throw_type_error(err_msg.clone());
                         self.current_exception = Some(exc_val);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -19053,6 +19108,7 @@ impl Vm {
                     if let Some(err) = Self::check_unsupported_operand_types(&a, &b, "<<") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
                             exception_handlers.last()
                         {
@@ -19172,6 +19228,7 @@ impl Vm {
                     if let Some(err) = Self::check_unsupported_operand_types(&a, &b, ">>") {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
+                        self.release_threw_operands(op, &mut tmps, vec![a, b]);
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
                             exception_handlers.last()
                         {
@@ -54729,6 +54786,8 @@ fn check_inc_dec_type(val: &Value, is_increment: bool) -> Option<String> {
         v => v.clone(),
     };
     match &val {
+        // cast_object(_IS_NUMBER) succeeds: the number is incremented.
+        Value::Object(obj) if crate::value::native_cast(obj, 3).is_some() => None,
         Value::Object(obj) => {
             let class_name = {
                 let o = obj.borrow();
@@ -54833,6 +54892,11 @@ fn emit_inc_dec_warnings(vm: &mut Vm, val: &Value, is_increment: bool, line: u32
 
 /// PHP increment: for strings, follows alphabetic increment rules
 fn php_increment(val: &Value) -> Value {
+    if let Value::Object(o) = val {
+        if let Some(n) = crate::value::native_cast_number(o) {
+            return php_increment(&n);
+        }
+    }
     match val {
         Value::Long(n) => match n.checked_add(1) {
             Some(r) => Value::Long(r),
@@ -54926,6 +54990,11 @@ fn php_increment(val: &Value) -> Value {
 
 /// PHP decrement: numeric strings are decremented, non-numeric stay the same
 fn php_decrement(val: &Value) -> Value {
+    if let Value::Object(o) = val {
+        if let Some(n) = crate::value::native_cast_number(o) {
+            return php_decrement(&n);
+        }
+    }
     match val {
         Value::Long(n) => match n.checked_sub(1) {
             Some(r) => Value::Long(r),
