@@ -2336,6 +2336,13 @@ fn array_shift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if arr_mut.is_empty() {
             return Ok(Value::Null);
         }
+        if let Some(first) = arr_mut.shift_packed() {
+            drop(arr_mut);
+            // RETVAL_COPY_DEREF(); the array's slot is released.
+            let v = first.deref();
+            goro_core::gc::on_child_released(&first);
+            return Ok(v);
+        }
         let entries: Vec<_> = arr_mut
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))

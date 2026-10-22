@@ -790,6 +790,26 @@ impl PhpArray {
         }
     }
 
+    /// array_shift() on a packed array, in place: the first element goes,
+    /// the rest move down and are renumbered, the internal pointer is
+    /// reset. None (array untouched) when the array is empty or not packed.
+    pub fn shift_packed(&mut self) -> Option<Value> {
+        if !self.packed || self.entries.is_empty() {
+            return None;
+        }
+        let v = self.entries.remove(0).1;
+        for (i, e) in self.entries.iter_mut().enumerate() {
+            e.0 = ArrayKey::Int(i as i64);
+        }
+        self.next_int_key = if self.entries.is_empty() {
+            i64::MIN
+        } else {
+            self.entries.len() as i64
+        };
+        self.pointer = 0;
+        Some(v)
+    }
+
     /// Insert a value at the beginning with key 0 (like array_unshift)
     pub fn unshift(&mut self, value: Value) {
         if !self.reserve_one() {
