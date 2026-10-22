@@ -5861,6 +5861,13 @@ impl Vm {
         )
     }
 
+    /// The pending exception was raised after exit() was requested: an
+    /// Error the engine threw itself (not a fatal error of the exit path).
+    fn exit_unwinding_error(&self) -> bool {
+        matches!(&self.current_exception, Some(Value::Object(o))
+            if o.borrow().class_name.eq_ignore_ascii_case(b"Error"))
+    }
+
     pub(crate) fn named_arg_by_ref(&self, call_name: &[u8], name: &[u8]) -> bool {
         let lower = call_name.to_ascii_lowercase();
         let user = self.user_functions.get(&lower).cloned().or_else(|| {
@@ -19105,6 +19112,13 @@ impl Vm {
         self.exec_frame_len = outer_exec;
         self.last_call_by_ref = op_array.returns_by_ref;
         if self.exit_requested {
+            // exit() unwinds every frame (an "unwind exit"): an error raised
+            // after it by the code that called exit (an autoloader run by a
+            // class lookup) is not reported.
+            if result.is_err() && self.exit_unwinding_error() {
+                self.current_exception = None;
+                return Ok(Value::Null);
+            }
             return result.map(|_| Value::Null);
         }
         // The common end of a call: a value (not a reference) returned
@@ -24358,9 +24372,13 @@ impl Vm {
                                 && !self.native_class_handlers.contains_key(&cl)
                             {
                                 let cls = cls.to_vec();
+                                let had_exc = self.current_exception.is_some();
                                 self.try_autoload_class(&cls);
+                                // An exception thrown by the autoloader fails the
+                                // lookup (zend_lookup_class), even when the class
+                                // was declared before it was thrown.
                                 if self.current_exception.is_some()
-                                    && !self.classes.contains_key(&cl)
+                                    && (!had_exc || !self.classes.contains_key(&cl))
                                 {
                                     if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                         exception_handlers.last()
