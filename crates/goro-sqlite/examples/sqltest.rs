@@ -22,8 +22,8 @@
 //!   next statement or `.rerun`;
 //! * `.rerun` (reset the last statement, bind, step again), `.reset`,
 //!   `.clear` (clear_bindings), `.info` (sql, expanded sql, flags,
-//!   parameters), `.err` (error codes and message), `.typed 0|1` (rows as
-//!   `T<bytes>:value`);
+//!   parameters), `.err` (error codes and message), `.typed 0|1|2` (rows
+//!   as `T<bytes>:value`; 2 also shows column_int64/column_double);
 //! * `.func NAME NARG [FLAGS]` (FLAGS: d deterministic, D directonly,
 //!   i innocuous, s subtype), `.agg NAME`, `.coll NAME`: register test
 //!   functions and a reverse-binary collation;
@@ -55,7 +55,7 @@ struct St {
     db2: Option<Box<Sqlite3>>,
     out: std::io::StdoutLock<'static>,
     binds: Vec<Bind>,
-    typed: bool,
+    typed: i32,
     changes: bool,
 }
 
@@ -74,8 +74,21 @@ fn print_row(db: &mut Sqlite3, id: StmtId, st: &mut St) {
         if i > 0 {
             line.push(b'|');
         }
-        let t = sqlite3_column_type(db, id, i);
-        if st.typed {
+        let mut t = sqlite3_column_type(db, id, i);
+        if st.typed >= 2 {
+            let iv = sqlite3_column_int64(db, id, i);
+            let dv = sqlite3_column_double(db, id, i);
+            let zd = goro_sqlite::printf::sqlite3_mprintf(
+                b"%!.17g",
+                &[goro_sqlite::printf::PfArg::Dbl(dv)],
+            );
+            let c = b"?irtbn"[t as usize] as char;
+            line.extend_from_slice(format!("{}<{},", c, iv).as_bytes());
+            line.extend_from_slice(&zd);
+            line.push(b'>');
+            t = sqlite3_column_type(db, id, i);
+        }
+        if st.typed > 0 {
             let c = b"?irtbn"[t as usize] as char;
             let nb = sqlite3_column_bytes(db, id, i);
             line.extend_from_slice(format!("{}{}:", c, nb).as_bytes());
@@ -415,7 +428,7 @@ fn meta_command(db: &mut Sqlite3, last: Option<StmtId>, zLine: &[u8], st: &mut S
             w(st, &e);
             w(st, b"\n");
         }
-        b".typed" if n >= 2 => st.typed = atoi(&az[1]) != 0,
+        b".typed" if n >= 2 => st.typed = atoi(&az[1]) as i32,
         b".func" if n >= 3 => {
             let mut fl = SQLITE_UTF8 as i32 | SQLITE_DETERMINISTIC as i32;
             if n >= 4 {
@@ -778,7 +791,7 @@ fn main() {
         out: std::io::stdout().lock(),
         binds: Vec::new(),
         db2: None,
-        typed: false,
+        typed: 0,
         changes: std::env::var_os("SQLTEST_CHANGES").is_some(),
     };
     let mut last: Option<StmtId> = None;
