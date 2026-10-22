@@ -4884,16 +4884,15 @@ impl Vm {
                 .map(|m| m.op_array.clone())
         });
         if let Some(op) = user {
+            // by_ref_params is indexed like the CVs ($this and closure
+            // captures first).
             let implicit = crate::internal_frames::implicit_args(&op);
             let param = op
                 .by_ref_params
                 .iter()
                 .enumerate()
-                .find(|(i, _)| {
-                    op.cv_names
-                        .get(implicit + i)
-                        .is_some_and(|n| n.as_slice() == name)
-                })
+                .skip(implicit)
+                .find(|(i, _)| op.cv_names.get(*i).is_some_and(|n| n.as_slice() == name))
                 .map(|(_, by_ref)| *by_ref);
             // (an extra named argument goes to the variadic parameter)
             return param.unwrap_or_else(|| {
@@ -21436,6 +21435,19 @@ impl Vm {
                                 cvs[i] = Value::Reference(r.clone());
                                 Value::Reference(r)
                             }
+                        } else if let OperandType::Tmp(t) = &op.op1 {
+                            // An element / property fetched by reference.
+                            match tmps.get(*t as usize) {
+                                Some(v @ Value::Reference(_)) => v.clone(),
+                                _ => self.read_operand_warn(
+                                    &op.op1,
+                                    &cvs,
+                                    &tmps,
+                                    &op_array.literals,
+                                    op_array,
+                                    op.line,
+                                ),
+                            }
                         } else {
                             self.read_operand_warn(
                                 &op.op1,
@@ -30169,6 +30181,15 @@ impl Vm {
                                                         crate::array::PhpArray::new();
                                                     for arg in &call.args {
                                                         args_arr.push(arg.clone());
+                                                    }
+                                                    // Named arguments keep their names.
+                                                    for (n, v) in &call.named_args {
+                                                        args_arr.set(
+                                                            crate::array::ArrayKey::String(
+                                                                PhpString::from_vec(n.clone()),
+                                                            ),
+                                                            v.clone(),
+                                                        );
                                                     }
                                                     fn_cvs[1] = Value::Array(Rc::new(
                                                         RefCell::new(args_arr),

@@ -967,6 +967,28 @@ impl Compiler {
                     .push(format!("Attribute \"{}\" must not be repeated", display));
             }
         }
+        // zend_compile_attributes(): argument list errors.
+        for a in attrs {
+            let mut seen_named: Vec<&[u8]> = Vec::new();
+            for arg in &a.args {
+                match &arg.name {
+                    Some(n) => {
+                        if seen_named.contains(&n.as_slice()) {
+                            self.deferred_fatal_errors.push(format!(
+                                "Duplicate named parameter ${}",
+                                String::from_utf8_lossy(n)
+                            ));
+                        }
+                        seen_named.push(n);
+                    }
+                    None if !seen_named.is_empty() && !arg.unpack => {
+                        self.deferred_fatal_errors
+                            .push("Cannot use positional argument after named argument".into());
+                    }
+                    None => {}
+                }
+            }
+        }
         attrs
             .iter()
             .map(|attr| {
