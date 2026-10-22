@@ -93,11 +93,16 @@ impl PgConn {
             b.extend_from_slice(&0i16.to_be_bytes());
         }
         b.extend_from_slice(&(params.len() as i16).to_be_bytes());
-        for p in params {
+        for (i, p) in params.iter().enumerate() {
             match p {
                 Some(v) => {
                     // text parameters stop at a NUL (strlen)
-                    let v: &[u8] = v;
+                    let mut v: &[u8] = v;
+                    if formats.get(i).copied().unwrap_or(0) == 0 {
+                        if let Some(n) = v.iter().position(|&c| c == 0) {
+                            v = &v[..n];
+                        }
+                    }
                     b.extend_from_slice(&(v.len() as i32).to_be_bytes());
                     b.extend_from_slice(v);
                 }
