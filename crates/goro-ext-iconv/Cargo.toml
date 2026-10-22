@@ -1,0 +1,13 @@
+[package]
+name = "goro-ext-iconv"
+version = "0.1.0"
+edition = "2024"
+description = "PHP iconv extension (glibc iconv emulation) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+goro-ext-mbstring = { path = "../goro-ext-mbstring" }
