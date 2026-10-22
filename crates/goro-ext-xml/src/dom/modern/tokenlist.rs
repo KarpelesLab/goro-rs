@@ -58,6 +58,8 @@ pub struct TokenIter {
     index: Cell<i64>,
     tag: u64,
     rewound: Cell<bool>,
+    /// The wrapped zend_object_iterator's handle
+    _handle: Obj,
 }
 
 fn element_node(tl: &TokenList) -> Option<NodeId> {
@@ -502,6 +504,7 @@ fn m_get_iterator(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         tl.tag.get()
     })
     .unwrap_or(0);
+    let handle = crate::dom::lists::iterator_handle(vm);
     let it = new_object(vm, b"InternalIterator");
     let st = TokenIter {
         list: o.clone(),
@@ -509,6 +512,7 @@ fn m_get_iterator(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         index: Cell::new(0),
         tag,
         rewound: Cell::new(false),
+        _handle: handle,
     };
     attach(&it, Kind::Modern(MKind::TokenIter(st)));
     Ok(Value::Object(it))

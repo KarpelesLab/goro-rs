@@ -9,6 +9,19 @@ pub struct IterState {
     pub map: Obj,
     pub index: i64,
     pub cur: Value,
+    /// The zend_object_iterator the InternalIterator wraps (it takes an
+    /// object handle of its own)
+    pub _handle: Obj,
+}
+
+/// zend_iterator_init(): an internal class's iterator is an object too, and
+/// takes the next object handle while it lives.
+pub fn iterator_handle(vm: &mut Vm) -> Obj {
+    let id = vm.alloc_object_id();
+    Rc::new(RefCell::new(goro_core::object::PhpObject::new(
+        b"\0iterator".to_vec(),
+        id,
+    )))
 }
 
 /// A list/map with its base objects resolved to their current nodes.
@@ -496,6 +509,7 @@ fn m_get_named_item_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 
 fn m_get_iterator(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     args(a).count(vm, 0, 0)?;
+    let handle = iterator_handle(vm);
     let first = get_item(vm, o, 0);
     let it = new_object(vm, b"InternalIterator");
     attach(
@@ -504,6 +518,7 @@ fn m_get_iterator(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
             map: o.clone(),
             index: 0,
             cur: first,
+            _handle: handle,
         })),
     );
     Ok(Value::Object(it))
