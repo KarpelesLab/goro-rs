@@ -2612,7 +2612,9 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut seen: Vec<Vec<u8>> = Vec::new();
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(2); // SORT_STRING = 2 default
         for (key, val) in arr.iter() {
-            let s = match val {
+            // Reference elements compare by their value.
+            let dv = val.deref();
+            let s = match &dv {
                 Value::Object(obj) => {
                     // For objects (including enums), use class name + identity-based key
                     let obj_ref = obj.borrow();
@@ -2632,10 +2634,10 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 _ => {
                     if flags == 1 {
                         // SORT_NUMERIC
-                        let n = val.to_double();
+                        let n = dv.to_double();
                         format!("{}", n).into_bytes()
                     } else {
-                        val.to_php_string().as_bytes().to_vec()
+                        dv.to_php_string().as_bytes().to_vec()
                     }
                 }
             };

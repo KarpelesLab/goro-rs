@@ -46795,6 +46795,21 @@ impl Vm {
                         }
                     }
 
+                    // Constant-expression defaults are evaluated on first use,
+                    // before the object is allocated (object_init_ex()).
+                    if self.update_class_constants(&name_lower).is_err() {
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: "Uncaught exception".into(),
+                            line: op.line,
+                        });
+                    }
                     // Recycle the old object ID from the result slot before allocating a new one
                     // This ensures that when the same temp is reused, the previous object's ID
                     // becomes available before we alloc a new one.
@@ -46883,20 +46898,6 @@ impl Vm {
                         _ => {}
                     }
 
-                    // Constant-expression defaults are evaluated on first use.
-                    if self.update_class_constants(&name_lower).is_err() {
-                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                            exception_handlers.last()
-                        {
-                            pending_calls_catch_depth = Some(*eh_pc_depth);
-                            ip = *catch_target as usize;
-                            return Ok(Flow::Continue);
-                        }
-                        return Err(VmError {
-                            message: "Uncaught exception".into(),
-                            line: op.line,
-                        });
-                    }
                     // Initialize properties from class definition
                     if let Some(class) = self.classes.get(&name_lower) {
                         // Detect names declared more than once across the hierarchy
