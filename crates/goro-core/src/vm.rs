@@ -47363,7 +47363,6 @@ impl Vm {
                                 // property already declared by the class or an earlier trait must
                                 // be compatible; inherited private ones are shadowed, other
                                 // inherited ones replaced.
-                                let trait_name_original = trait_def.name.clone();
                                 for prop in &trait_def.properties {
                                     let prev_trait = prop_from_trait.get(&prop.name).cloned();
                                     if own_prop_names.contains(&prop.name) || prev_trait.is_some() {
@@ -47480,14 +47479,6 @@ impl Vm {
                                     }
                                     let mut p = prop.clone();
                                     p.declaring_class = class_name_lower.clone();
-                                    // Patch __CLASS__ in property defaults
-                                    if let Value::String(s) = &p.default {
-                                        if s.as_bytes() == trait_name_original.as_slice() {
-                                            p.default = Value::String(PhpString::from_vec(
-                                                class.name.clone(),
-                                            ));
-                                        }
-                                    }
                                     match class
                                         .properties
                                         .iter()
@@ -47696,21 +47687,9 @@ impl Vm {
                                 // Copy trait static properties (class's own take precedence)
                                 for (prop_name, prop_val) in &trait_def.static_properties {
                                     if !class.static_properties.contains_key(prop_name) {
-                                        // Patch __CLASS__ in static property defaults
-                                        let patched_val = if let Value::String(s) = prop_val {
-                                            if s.as_bytes() == trait_name_original.as_slice() {
-                                                Value::String(PhpString::from_vec(
-                                                    class.name.clone(),
-                                                ))
-                                            } else {
-                                                prop_val.clone()
-                                            }
-                                        } else {
-                                            prop_val.clone()
-                                        };
                                         class
                                             .static_properties
-                                            .insert(prop_name.clone(), patched_val);
+                                            .insert(prop_name.clone(), prop_val.clone());
                                     }
                                 }
 

@@ -244,6 +244,9 @@ pub struct Compiler {
     in_free_function: bool,
     /// Whether we're compiling inside a trait (for self:: tracking)
     is_in_trait: bool,
+    /// Compiling the members of a trait: its constant-expression thunks
+    /// resolve `self` / `__CLASS__` in the scope of the using class.
+    in_trait_body: bool,
     /// Compile-time warnings (message, line)
     pub warnings: Vec<(String, u32)>,
     /// Whether the current expression's result will be discarded (for #[\NoDiscard])
@@ -533,6 +536,7 @@ impl Compiler {
             in_main_pass: false,
             in_free_function: false,
             is_in_trait: false,
+            in_trait_body: false,
             warnings: Vec::new(),
             is_discarding_result: false,
             in_const_expr: false,
@@ -1279,6 +1283,7 @@ impl Compiler {
         tc.op_array.set_param_default_repr(0, repr);
         tc.keep_relative_class_names = true;
         tc.in_const_expr = true;
+        tc.is_in_trait = self.in_trait_body;
         // A bare global constant is looked up directly (no AST evaluation,
         // so no "[constant expression]" frame and errors at the access
         // line): decl_line 0 marks it.
@@ -5737,6 +5742,8 @@ impl Compiler {
                 class.enum_backing_type = enum_backing_type.clone();
                 // Set current_class so self:: is resolved in class attributes and members
                 let saved_class = self.current_class.take();
+                let saved_in_trait_body =
+                    std::mem::replace(&mut self.in_trait_body, modifiers.is_trait);
                 let saved_parent = self.current_parent_class.take();
                 self.current_class = Some(qualified_name.clone());
                 if let Some(ext) = extends {
@@ -6055,6 +6062,16 @@ impl Compiler {
                             let default_val = if let Some(expr) = default {
                                 // Compile the default value expression (constants only)
                                 match &expr.kind {
+                                    _ if modifiers.is_trait
+                                        && trait_const_expr_uses_scope(expr) =>
+                                    {
+                                        self.compile_const_thunk(
+                                            expr,
+                                            &mut class.const_closures,
+                                            &qualified_name,
+                                            extends.as_deref(),
+                                        )?
+                                    }
                                     ExprKind::Int(n) => Value::Long(*n),
                                     ExprKind::Float(f) => Value::Double(*f),
                                     ExprKind::String(s) => {
@@ -8691,7 +8708,16 @@ impl Compiler {
                                     line: const_expr.span.line,
                                 });
                             }
-                            let val = if let Some(v) = Self::eval_const_expr(const_expr) {
+                            let val = if modifiers.is_trait
+                                && trait_const_expr_uses_scope(const_expr)
+                            {
+                                self.compile_const_thunk(
+                                    const_expr,
+                                    &mut class.const_closures,
+                                    &qualified_name,
+                                    extends.as_deref(),
+                                )?
+                            } else if let Some(v) = Self::eval_const_expr(const_expr) {
                                 v
                             } else {
                                 // Handle class constant references like self::B, ClassName::CONST
@@ -9742,6 +9768,7 @@ impl Compiler {
                 self.const_property_name.clear();
                 // Restore outer class scope
                 self.current_class = saved_class;
+                self.in_trait_body = saved_in_trait_body;
                 self.current_parent_class = saved_parent;
 
                 // Store the class and emit a DeclareClass opcode
@@ -10692,8 +10719,10 @@ impl Compiler {
                 line: class_line,
             });
         }
-        let runtime =
-            is_static || (is_parent && !known) || (is_self && self.current_class.is_none());
+        let runtime = is_static
+            || (is_parent && !known)
+            || (is_self
+                && (self.current_class.is_none() || (self.in_const_expr && self.is_in_trait)));
         if runtime {
             let mut kind = if self.in_const_expr && !is_static {
                 b"const:".to_vec()
@@ -14243,6 +14272,13 @@ impl Compiler {
                             self.op_array.name.clone()
                         };
                         Value::String(PhpString::from_vec(name))
+                    }
+                    b"__class__" if self.in_const_expr && self.is_in_trait => {
+                        return self.compile_class_name_const(
+                            b"self",
+                            expr.span.line,
+                            expr.span.line,
+                        );
                     }
                     b"__class__" => {
                         let class_val = if let Some(ref class_name) = self.current_class {
@@ -20450,20 +20486,44 @@ fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
 /// Convert an expression back to a PHP source string representation.
 /// Used by the compiler to inject the source string as assert()'s 2nd argument.
 #[allow(clippy::if_same_then_else)] // branches mirror php-src
+/// Whether a constant expression of a trait member depends on the class
+/// using the trait: `self::class` and `__CLASS__` name that class
+/// (ZEND_FETCH_CLASS_SELF / ZEND_AST_CLASS_NAME resolved at runtime).
+fn trait_const_expr_uses_scope(expr: &Expr) -> bool {
+    use goro_parser::ast::ExprKind as E;
+    let rec = trait_const_expr_uses_scope;
+    match &expr.kind {
+        E::Identifier(n) => n.eq_ignore_ascii_case(b"__CLASS__"),
+        E::ClassConstAccess { class, constant } => {
+            constant.eq_ignore_ascii_case(b"class")
+                && matches!(&class.kind, E::Identifier(n) if n.eq_ignore_ascii_case(b"self"))
+        }
+        E::BinaryOp { left, right, .. } => rec(left) || rec(right),
+        E::UnaryOp { operand, .. } => rec(operand),
+        E::Cast(_, inner) => rec(inner),
+        E::Ternary {
+            condition,
+            if_true,
+            if_false,
+        } => rec(condition) || if_true.as_deref().is_some_and(rec) || rec(if_false),
+        E::NullCoalesce { left, right } => rec(left) || rec(right),
+        E::ArrayAccess { array, index } => rec(array) || index.as_deref().is_some_and(rec),
+        E::Array(elements) => elements
+            .iter()
+            .any(|e| e.key.as_ref().is_some_and(rec) || rec(&e.value)),
+        E::PropertyAccess { object, .. } => rec(object),
+        E::New { args, .. } => args.iter().any(|a| rec(&a.value)),
+        _ => false,
+    }
+}
+
 fn expr_to_source_string(expr: &Expr) -> String {
     match &expr.kind {
         ExprKind::True => "true".to_string(),
         ExprKind::False => "false".to_string(),
         ExprKind::Null => "null".to_string(),
         ExprKind::Int(n) => n.to_string(),
-        ExprKind::Float(f) => {
-            // Format float like PHP does
-            if f.fract() == 0.0 && f.is_finite() {
-                format!("{}", f)
-            } else {
-                format!("{}", f)
-            }
-        }
+        ExprKind::Float(f) => format!("{}", f),
         ExprKind::String(s) => {
             // Escape the string content
             let escaped = String::from_utf8_lossy(s)

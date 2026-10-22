@@ -558,7 +558,19 @@ impl Vm {
             Some(v) => v.clone(),
         };
         if matches!(&deferred, Value::String(s) if s.as_bytes().starts_with(b"__deferred_")) {
-            let resolved = self.resolve_deferred_value(&deferred);
+            // A thunk runs in the scope of the class holding the slot (a
+            // trait's default: the class using it).
+            let resolved = match (
+                thunk_marker_name(&deferred),
+                self.classes.get_index(slot.owner),
+            ) {
+                (Some(t), Some((owner, _))) => {
+                    let (t, owner) = (t.to_vec(), owner.clone());
+                    self.eval_const_thunk(&t, Some(&owner), "")
+                        .unwrap_or(Value::Null)
+                }
+                _ => self.resolve_deferred_value(&deferred),
+            };
             if !matches!(&resolved, Value::String(s) if s.as_bytes().starts_with(b"__deferred_")) {
                 if let Some(cell) = self.sp_cell(&slot, name) {
                     match cell {
