@@ -28,7 +28,13 @@ pub fn sqlite3AuthReadCol(
 }
 
 /// C: `void sqlite3AuthRead( Parse *pParse, Expr *pExpr, Schema *pSchema, SrcList *pTabList )`
-pub fn sqlite3AuthRead(db: &mut Sqlite3, pExpr: ExprId, pSchema: &mut Schema, pTabList: SrcListId) {
+/// Rust: `pSchema` is the schema id (None = C NULL schema).
+pub fn sqlite3AuthRead(
+    db: &mut Sqlite3,
+    pExpr: ExprId,
+    pSchema: Option<SchemaId>,
+    pTabList: SrcListId,
+) {
     todo!("sqlite3AuthRead")
 }
 
