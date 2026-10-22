@@ -154,6 +154,8 @@ pub struct PhpGenerator {
     pub(crate) fe: crate::vm::ForeachState,
     /// The Closure whose body this generator runs (it keeps it alive).
     pub(crate) closure: Option<Value>,
+    /// The object handle (allocated by Vm::new_generator; 0 = none).
+    pub object_id: u64,
 }
 
 impl Drop for PhpGenerator {
@@ -170,6 +172,29 @@ impl Drop for PhpGenerator {
                 }
                 Err(_) => None,
             };
+        }
+        // free_obj releases the frame before the handle goes back to the
+        // free list (zend_objects_store_del).
+        if self.object_id != 0 {
+            drop(std::mem::take(&mut self.cvs));
+            drop(std::mem::take(&mut self.tmps));
+            drop(self.symtab.take());
+            drop(std::mem::take(&mut self.args));
+            drop(std::mem::replace(&mut self.current_value, Value::Null));
+            drop(std::mem::replace(&mut self.current_key, Value::Null));
+            drop(std::mem::replace(&mut self.send_value, Value::Null));
+            drop(std::mem::replace(&mut self.return_value, Value::Null));
+            drop(std::mem::replace(&mut self.last_value, Value::Null));
+            drop(std::mem::replace(&mut self.last_key, Value::Null));
+            drop(self.pending_return.take());
+            drop(self.pending_exception.take());
+            drop(self.current_ref.take());
+            drop(std::mem::take(&mut self.saved_calls));
+            drop(std::mem::take(&mut self.fe));
+            drop(std::mem::take(&mut self.fin));
+            drop(self.closure.take());
+            let id = self.object_id;
+            let _ = crate::object::FREED_OBJECT_IDS.try_with(|ids| ids.borrow_mut().push(id));
         }
     }
 }
@@ -263,6 +288,7 @@ impl PhpGenerator {
             last_key: Value::Null,
             fe: Default::default(),
             closure: None,
+            object_id: 0,
         }
     }
 
@@ -744,7 +770,7 @@ impl PhpGenerator {
         self.is_running = true;
         let fname = vm.generator_function_name_of(self);
         vm.running_generators
-            .push((self as *const PhpGenerator as usize, fname));
+            .push((self as *const PhpGenerator as usize, fname, self.object_id));
         let cv_frame = vm.register_cv_frame(&self.op_array);
         if cv_frame {
             vm.set_cv_frame_vars(&self.cvs);
@@ -2297,7 +2323,7 @@ impl PhpGenerator {
         self.is_running = true;
         let fname = vm.generator_function_name_of(self);
         vm.running_generators
-            .push((self as *const PhpGenerator as usize, fname));
+            .push((self as *const PhpGenerator as usize, fname, self.object_id));
         let cv_frame = vm.register_cv_frame(&self.op_array);
         if cv_frame {
             vm.set_cv_frame_vars(&self.cvs);
@@ -2404,9 +2430,24 @@ impl Vm {
                 self.running_generators
                     .iter()
                     .rev()
-                    .find(|(a, _)| *a == addr)
-                    .map(|(_, n)| n.clone())
+                    .find(|(a, _, _)| *a == addr)
+                    .map(|(_, n, _)| n.clone())
                     .unwrap_or_default()
+            }
+        }
+    }
+
+    /// The object handle of a generator (also while it runs).
+    pub fn generator_handle(&self, g: &GenRc) -> u64 {
+        match g.try_borrow() {
+            Ok(b) => b.object_id,
+            Err(_) => {
+                let addr = RefCell::as_ptr(g) as usize;
+                self.running_generators
+                    .iter()
+                    .rev()
+                    .find(|(a, _, _)| *a == addr)
+                    .map_or(0, |(_, _, id)| *id)
             }
         }
     }

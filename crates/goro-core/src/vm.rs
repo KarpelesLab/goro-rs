@@ -802,7 +802,7 @@ pub struct Vm {
     /// suspended runs its finally blocks (zend_generator_dtor_storage).
     pub(crate) finally_generators: Vec<Rc<RefCell<crate::generator::PhpGenerator>>>,
     /// Generators executing now (address, function name for var_dump()).
-    pub(crate) running_generators: Vec<(usize, String)>,
+    pub(crate) running_generators: Vec<(usize, String, u64)>,
     /// Closure objects being called: (pending_calls index of the call, the
     /// Closure) until the call's frame is pushed.
     pub(crate) closure_call_objs: Vec<(usize, std::rc::Weak<RefCell<PhpObject>>)>,
@@ -5126,6 +5126,18 @@ impl Vm {
         id
     }
 
+    /// A Generator object with its own handle (zend_generator_create).
+    #[inline(never)]
+    pub fn new_generator(
+        &mut self,
+        op_array: impl Into<Rc<OpArray>>,
+        cvs: Vec<Value>,
+    ) -> crate::generator::PhpGenerator {
+        let mut g = crate::generator::PhpGenerator::new(op_array, cvs);
+        g.object_id = self.alloc_object_id();
+        g
+    }
+
     /// Recycle an object ID if the Rc has only one strong reference left (about to be dropped)
     #[inline]
     pub fn maybe_recycle_object_id(&mut self, val: &Value) {
@@ -7774,7 +7786,7 @@ impl Vm {
 
         // If this is a generator function, create a Generator instead of executing
         if op_array.is_generator {
-            let generator = crate::generator::PhpGenerator::new(op_array.clone(), func_cvs);
+            let generator = self.new_generator(op_array.clone(), func_cvs);
             let gen_rc = Rc::new(RefCell::new(generator));
             crate::gc::track_generator(&gen_rc);
             self.watch_generator_finally(&gen_rc);
@@ -15885,11 +15897,11 @@ impl Vm {
                     }
                     // If this is a generator function, create a Generator object instead of executing
                     if method_op.is_generator {
-                        let mut generator =
-                            crate::generator::PhpGenerator::new(method_op.clone(), fn_cvs);
+                        let declaring = method.declaring_class.clone();
+                        let mut generator = self.new_generator(method_op.clone(), fn_cvs);
                         // Capture class context for get_class() / get_called_class() inside generator
                         generator.called_class = Some(class_lower.clone());
-                        generator.class_scope = Some(method.declaring_class.clone());
+                        generator.class_scope = Some(declaring);
                         // Store args for func_get_args() support
                         generator.args = args.to_vec();
                         let gen_rc = Rc::new(RefCell::new(generator));
@@ -28851,7 +28863,7 @@ impl Vm {
 
                             // Create a generator instead of executing
                             let mut generator =
-                                crate::generator::PhpGenerator::new(user_fn.clone(), func_cvs);
+                                self.new_generator(user_fn.clone(), func_cvs);
                             // A closure's generator keeps the Closure alive.
                             if crate::closure::is_closure_fn_name(&user_fn.name) {
                                 let depth = self.call_stack.len();
@@ -51448,7 +51460,7 @@ impl Vm {
                             // A get hook containing `yield` returns a Generator.
                             if method.is_generator {
                                 let mut generator =
-                                    crate::generator::PhpGenerator::new(method.clone(), fn_cvs);
+                                    self.new_generator(method.clone(), fn_cvs);
                                 generator.called_class = Some(class_lower.clone());
                                 generator.class_scope = Some(hook_declaring.clone());
                                 // The body runs as this property's hook (backing-store access).
@@ -56207,7 +56219,7 @@ impl Vm {
                     }
                 }
                 let skip = crate::internal_frames::implicit_args(&user_fn).min(call.args.len());
-                let mut generator = crate::generator::PhpGenerator::new(user_fn.clone(), func_cvs);
+                let mut generator = self.new_generator(user_fn.clone(), func_cvs);
                 generator.args = call.args[skip..].to_vec();
                 generator.call_file = self.current_file.clone();
                 generator.call_line = line;

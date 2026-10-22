@@ -1363,9 +1363,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
         Value::Generator(generator) => {
             let name_str = vm.generator_function_name(generator);
             let prop_count = 1; // function property
-            // Use a hash-based ID since generators don't have object_id
-            let gen_ptr = generator.as_ptr() as u64;
-            let gen_id = (gen_ptr >> 4) % 10000 + 1;
+            let gen_id = vm.generator_handle(generator);
             vm.write_output(
                 format!(
                     "{}object(Generator)#{} ({}) {{\n",

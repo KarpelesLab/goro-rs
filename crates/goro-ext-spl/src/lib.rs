@@ -171,7 +171,14 @@ fn spl_classes_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn spl_object_hash_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn spl_object_hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let gen_id = match args.first() {
+        Some(Value::Generator(g)) => Some(vm.generator_handle(g)),
+        _ => None,
+    };
+    if let Some(id) = gen_id {
+        return Ok(Value::String(PhpString::from_string(format!("{:032x}", id))));
+    }
     if let Some(Value::Object(obj)) = args.first() {
         let id = obj.borrow().object_id;
         Ok(Value::String(PhpString::from_string(format!(
@@ -186,7 +193,10 @@ fn spl_object_hash_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn spl_object_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn spl_object_id_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Generator(g)) = args.first() {
+        return Ok(Value::Long(vm.generator_handle(g) as i64));
+    }
     if let Some(Value::Object(obj)) = args.first() {
         Ok(Value::Long(obj.borrow().object_id as i64))
     } else {
