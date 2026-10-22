@@ -551,6 +551,9 @@ pub(crate) struct ForeachState {
     pub(crate) weakmap_iter_keys: crate::fxhash::FxHashMap<u32, Vec<Value>>,
     /// By-reference foreach iterators (the source array)
     pub(crate) ref_arrays: crate::fxhash::FxHashMap<u32, Rc<RefCell<PhpArray>>>,
+    /// By-reference foreach over a variable: its CV (FE_FETCH_RW reads the
+    /// variable again at each iteration).
+    pub(crate) ref_src: crate::fxhash::FxHashMap<u32, u32>,
 }
 
 impl ForeachState {
@@ -576,7 +579,8 @@ impl ForeachState {
             obj_cur,
             gen_keys,
             weakmap_iter_keys,
-            ref_arrays
+            ref_arrays,
+            ref_src
         );
     }
 }
@@ -19432,6 +19436,7 @@ impl Vm {
             gen_keys: foreach_gen_keys,
             weakmap_iter_keys,
             ref_arrays: foreach_ref_arrays,
+            ref_src: foreach_ref_src,
         } = fe;
         // Maps CV index -> static var key (for saving back on write)
         let static_cv_keys: crate::fxhash::FxHashMap<u32, Vec<u8>> = Default::default();
@@ -37991,6 +37996,14 @@ impl Vm {
                     } else {
                         foreach_ref_arrays.insert(iter_idx, arr_rc.clone());
                     }
+                    match &op.op1 {
+                        OperandType::Cv(idx) if !src_is_object => {
+                            foreach_ref_src.insert(iter_idx, *idx);
+                        }
+                        _ => {
+                            foreach_ref_src.remove(&iter_idx);
+                        }
+                    }
 
                     // Store as Value::Array for the iteration state
                     self.write_operand(
@@ -38196,6 +38209,32 @@ impl Vm {
                         }
                         return Ok(Flow::Continue);
                     }
+                    // FE_FETCH_RW reads the variable again: a value other than
+                    // an array or object assigned to it meanwhile ends the loop
+                    // with a warning. (An array assigned to it is not followed:
+                    // goro's in-place array operations may replace the array.)
+                    if let (Some(&src), true) = (
+                        foreach_ref_src.get(&iter_idx),
+                        foreach_ref_arrays.contains_key(&iter_idx),
+                    ) {
+                        match cvs.get(src as usize).map(|v| v.deref()) {
+                            Some(Value::Array(_) | Value::Object(_)) | None => {}
+                            Some(other) => {
+                                let msg = format!(
+                                    "foreach() argument must be of type array|object, {} given",
+                                    Vm::value_type_name(&other)
+                                );
+                                self.emit_warning_at(&msg, op.line);
+                                foreach_ref_arrays.remove(&iter_idx);
+                                foreach_ref_src.remove(&iter_idx);
+                                if let OperandType::JmpTarget(target) = op.op2 {
+                                    ip = target as usize;
+                                }
+                                return Ok(Flow::Continue);
+                            }
+                        }
+                    }
+                    let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
                     let done = if let Some(arr_rc) = foreach_ref_arrays.get(&iter_idx).cloned() {
                         let next_pos = {
                             let ab = arr_rc.borrow();
