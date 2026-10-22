@@ -5,7 +5,7 @@
 
 use crate::global::sqlite3UpperToLower;
 use crate::int::*;
-use crate::util::sqlite3StrICmp;
+// sqlite3StrICmp() folds ASCII case only, like eq_ignore_ascii_case().
 use std::rc::Rc;
 
 /// The hash table of built-in SQL functions (C `FuncDefHash`, the global
@@ -40,7 +40,7 @@ impl FuncDefHash {
     pub fn chain(&self, h: i32, zFunc: &[u8]) -> Option<&[FuncDefRef]> {
         for c in self.a[h as usize].iter() {
             debug_assert!((c[0].funcFlags & SQLITE_FUNC_BUILTIN) != 0);
-            if sqlite3StrICmp(Some(&c[0].zName), Some(zFunc)) == 0 {
+            if c[0].zName.eq_ignore_ascii_case(zFunc) {
                 return Some(&c[..]);
             }
         }
@@ -369,7 +369,7 @@ pub fn sqlite3InsertBuiltinFuncs(pHash: &mut FuncDefHash, aDef: &[FuncDef]) {
         let bucket = &mut pHash.a[h as usize];
         let mut found = false;
         for c in bucket.iter_mut() {
-            if sqlite3StrICmp(Some(&c[0].zName), Some(zName)) == 0 {
+            if c[0].zName.eq_ignore_ascii_case(zName) {
                 // aDef[i].pNext = pOther->pNext; pOther->pNext = &aDef[i];
                 c.insert(1, def.clone());
                 found = true;
@@ -564,5 +564,48 @@ pub fn sqlite3SchemaGet(db: &mut Sqlite3, pBt: Option<&BtreeP>) -> Schema {
         id: SchemaId(db.nextSchemaId),
         enc: SQLITE_UTF8,
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fd(name: &[u8], nArg: i16) -> FuncDef {
+        FuncDef {
+            nArg,
+            funcFlags: SQLITE_FUNC_BUILTIN | SQLITE_UTF8 as u32,
+            pUserData: FuncUserData::None,
+            xSFunc: None,
+            xFinalize: None,
+            xValue: None,
+            xInverse: None,
+            zName: name.to_vec(),
+            pDestructor: None,
+        }
+    }
+
+    #[test]
+    fn test_builtin_hash_order() {
+        let mut h = FuncDefHash::new();
+        sqlite3InsertBuiltinFuncs(&mut h, &[fd(b"abc", 1), fd(b"abc", 2), fd(b"abc", 3)]);
+        let hh = SQLITE_FUNC_HASH(b'a', 3);
+        assert_eq!(h.a[hh as usize].len(), 1);
+        let c = &h.a[hh as usize][0];
+        // the first one inserted is the head, the others follow it in
+        // reverse order of insertion (C inserts after the head)
+        assert_eq!(c.iter().map(|f| f.nArg).collect::<Vec<_>>(), vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn test_match_quality() {
+        let f = fd(b"x", 2);
+        assert_eq!(matchQuality(&f, 2, SQLITE_UTF8), 6);
+        assert_eq!(matchQuality(&f, 1, SQLITE_UTF8), 0);
+        let g = fd(b"x", -1);
+        assert_eq!(matchQuality(&g, 3, SQLITE_UTF8), 3);
+        let k = fd(b"x", -3);
+        assert_eq!(matchQuality(&k, 0, SQLITE_UTF8), 0);
+        assert_eq!(matchQuality(&k, 1, SQLITE_UTF16LE), 1);
     }
 }
