@@ -40178,6 +40178,21 @@ impl Vm {
                     let v = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // op2 set: a dimension fetch, refused on any object.
                     let is_dim = !matches!(op.op2, OperandType::Unused);
+                    // zend_ast_evaluate(): the property name is converted to
+                    // string before the object is checked.
+                    if !is_dim && !matches!(op.result, OperandType::Unused) {
+                        let name = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                        if matches!(name, Value::Object(_)) {
+                            let _ = self.value_to_string_checked(&name);
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
+                        }
+                    }
                     let non_enum = match &v {
                         Value::Object(o) => {
                             let cl = o.borrow().class_name.to_ascii_lowercase();

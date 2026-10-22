@@ -382,6 +382,12 @@ pub struct Compiler {
     /// (label, ids of the loops/switches enclosing the goto, line)
     goto_loop_paths: Vec<(Vec<u8>, Vec<u32>, u32)>,
     goto_finally_paths: Vec<(Vec<u8>, Vec<u32>, u32)>,
+    /// The jumps of the `?->` null checks of the chain being compiled,
+    /// which short-circuit the whole chain (zend_short_circuiting_commit()).
+    nullsafe_chain: Option<Vec<u32>>,
+    /// The expression compiled next is the base of a chain element
+    /// (`X` of `X->p`, `X[k]`, `X->m()`), not a chain of its own.
+    chain_base: bool,
     /// The regions with an active exception handler enclosing the code
     /// being compiled (innermost last): the offset of the TryBegin that
     /// pushes it, and whether it leads to a finally block.
@@ -663,6 +669,8 @@ impl Compiler {
             label_loop_paths: HashMap::new(),
             goto_loop_paths: Vec::new(),
             goto_finally_paths: Vec::new(),
+            nullsafe_chain: None,
+            chain_base: false,
             handler_regions: Vec::new(),
             label_handler_paths: HashMap::new(),
             goto_handler_paths: Vec::new(),
@@ -12419,6 +12427,86 @@ impl Compiler {
         }
     }
 
+    /// A chain of property fetches / method calls / dimension fetches with
+    /// a `?->`: a null object at a `?->` makes the whole chain null.
+    #[inline(never)]
+    fn compile_nullsafe_chain(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        let outer = self.nullsafe_chain.replace(Vec::new());
+        self.chain_base = true;
+        let r = self.compile_expr(expr);
+        let jumps = std::mem::replace(&mut self.nullsafe_chain, outer).unwrap_or_default();
+        let r = r?;
+        if jumps.is_empty() {
+            return Ok(r);
+        }
+        let line = expr.span.line;
+        let t = match r {
+            OperandType::Tmp(t) => t,
+            other => {
+                let t = self.op_array.alloc_temp();
+                self.op_array.emit(Op {
+                    opcode: OpCode::Assign,
+                    op1: OperandType::Tmp(t),
+                    op2: other,
+                    result: OperandType::Unused,
+                    line,
+                });
+                t
+            }
+        };
+        let skip = self.op_array.emit(Op {
+            opcode: OpCode::Jmp,
+            op1: OperandType::JmpTarget(0),
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line,
+        });
+        let null_at = self.op_array.current_offset();
+        for j in jumps {
+            self.op_array.patch_jump(j, null_at);
+        }
+        let null_idx = self.op_array.add_literal(Value::Null);
+        self.op_array.emit(Op {
+            opcode: OpCode::Assign,
+            op1: OperandType::Tmp(t),
+            op2: OperandType::Const(null_idx),
+            result: OperandType::Unused,
+            line,
+        });
+        let end = self.op_array.current_offset();
+        self.op_array.patch_jump(skip, end);
+        Ok(OperandType::Tmp(t))
+    }
+
+    /// The null check of `?->` on `obj`: its jump joins the chain's
+    /// short-circuit (None), or is returned to be handled locally.
+    #[inline(never)]
+    fn emit_nullsafe_check(&mut self, obj: OperandType, line: u32) -> Option<u32> {
+        let null_idx = self.op_array.add_literal(Value::Null);
+        let is_null_tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::Identical,
+            op1: obj,
+            op2: OperandType::Const(null_idx),
+            result: OperandType::Tmp(is_null_tmp),
+            line,
+        });
+        let jmp = self.op_array.emit(Op {
+            opcode: OpCode::JmpNz,
+            op1: OperandType::Tmp(is_null_tmp),
+            op2: OperandType::JmpTarget(0),
+            result: OperandType::Unused,
+            line,
+        });
+        match self.nullsafe_chain.as_mut() {
+            Some(list) => {
+                list.push(jmp);
+                None
+            }
+            None => Some(jmp),
+        }
+    }
+
     fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         // zend_check_stack_limit()
         if let Err(size) = crate::stack::enter_compile() {
@@ -12442,6 +12530,17 @@ impl Compiler {
 
     fn compile_expr_inner(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         self.zend_lineno = expr.span.line;
+        if !std::mem::take(&mut self.chain_base)
+            && matches!(
+                expr.kind,
+                ExprKind::PropertyAccess { .. }
+                    | ExprKind::MethodCall { .. }
+                    | ExprKind::ArrayAccess { .. }
+            )
+            && expr_is_in_nullsafe_chain(expr)
+        {
+            return self.compile_nullsafe_chain(expr);
+        }
         if self.memoize_mode != 0
             && Self::is_memoizable(expr)
             && expr as *const Expr as usize != self.memoize_root
@@ -14465,6 +14564,7 @@ impl Compiler {
             }
 
             ExprKind::ArrayAccess { array, index } => {
+                self.chain_base = true;
                 let arr = self.compile_expr(array)?;
                 if let Some(idx_expr) = index {
                     let idx = self.compile_expr(idx_expr)?;
@@ -17339,11 +17439,15 @@ impl Compiler {
                 property,
                 nullsafe,
             } => {
-                // Check if this is in a nullsafe chain (e.g., $obj?->foo->bar
-                // where ->bar should also short-circuit)
-                let effective_nullsafe =
-                    *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
+                self.chain_base = true;
                 let obj = self.compile_expr(object)?;
+                // Nullsafe: a null object short-circuits the chain (before
+                // the property name is evaluated)
+                let jmp_null = if *nullsafe {
+                    self.emit_nullsafe_check(obj, expr.span.line)
+                } else {
+                    None
+                };
                 let prop_operand = match &property.kind {
                     ExprKind::Identifier(name) => {
                         let name_idx = self
@@ -17359,35 +17463,13 @@ impl Compiler {
 
                 let tmp = self.op_array.alloc_temp();
 
-                // Nullsafe: check if object is null, skip if so
-                let jmp_null = if effective_nullsafe {
-                    let null_idx = self.op_array.add_literal(Value::Null);
-                    let is_null_tmp = self.op_array.alloc_temp();
-                    self.op_array.emit(Op {
-                        opcode: OpCode::Identical,
-                        op1: obj,
-                        op2: OperandType::Const(null_idx),
-                        result: OperandType::Tmp(is_null_tmp),
-                        line: expr.span.line,
-                    });
-                    let jmp = self.op_array.emit(Op {
-                        opcode: OpCode::JmpNz,
-                        op1: OperandType::Tmp(is_null_tmp),
-                        op2: OperandType::JmpTarget(0), // patched below
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
-                    Some(jmp)
-                } else {
-                    None
-                };
-
                 if self.in_const_expr {
+                    // (result: the property name, converted to string first)
                     self.op_array.emit(Op {
                         opcode: OpCode::ConstExprPropCheck,
                         op1: obj,
                         op2: OperandType::Unused,
-                        result: OperandType::Unused,
+                        result: prop_operand,
                         line: expr.span.line,
                     });
                 }
@@ -17453,31 +17535,14 @@ impl Compiler {
                 } else {
                     OperandType::Unused
                 };
-                let effective_nullsafe =
-                    *nullsafe || (!*nullsafe && expr_is_in_nullsafe_chain(object));
                 let obj_tmp_start = self.op_array.temp_count;
+                self.chain_base = true;
                 let obj = self.compile_expr(object)?;
                 let tmp = self.op_array.alloc_temp();
 
-                // Nullsafe: check if object is null, skip if so
-                let jmp_null = if effective_nullsafe {
-                    let null_idx = self.op_array.add_literal(Value::Null);
-                    let is_null_tmp = self.op_array.alloc_temp();
-                    self.op_array.emit(Op {
-                        opcode: OpCode::Identical,
-                        op1: obj,
-                        op2: OperandType::Const(null_idx),
-                        result: OperandType::Tmp(is_null_tmp),
-                        line: expr.span.line,
-                    });
-                    let jmp = self.op_array.emit(Op {
-                        opcode: OpCode::JmpNz,
-                        op1: OperandType::Tmp(is_null_tmp),
-                        op2: OperandType::JmpTarget(0),
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
-                    Some(jmp)
+                // Nullsafe: a null object short-circuits the chain
+                let jmp_null = if *nullsafe {
+                    self.emit_nullsafe_check(obj, expr.span.line)
                 } else {
                     None
                 };
