@@ -1017,6 +1017,9 @@ pub struct Vm {
     /// File each userland global constant was defined in (define() and
     /// `const`), keyed like `constants`.
     pub constant_files: HashMap<Vec<u8>, String>,
+    /// PG(open_basedir) once ini_set() tightened it: the entries resolved
+    /// (the INI value keeps the string as set).
+    pub open_basedir_resolved: Option<String>,
     /// User constants in definition order: (lookup key, name as defined).
     pub user_constant_names: Vec<(Vec<u8>, Vec<u8>)>,
     /// Methods (lowercase class, method) that call zend_forbid_dynamic_call().
@@ -1395,6 +1398,7 @@ impl Vm {
             autoload_functions: Vec::new(),
             gen_call_this: None,
             constant_files: HashMap::new(),
+            open_basedir_resolved: None,
             user_constant_names: Vec::new(),
             forbid_dynamic_call_methods: Vec::new(),
             shutdown_functions: Vec::new(),

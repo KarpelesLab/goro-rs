@@ -232,14 +232,21 @@ fn guarded(vm: &mut Vm, fname: &'static str, kind: Kind, args: &[Value]) -> Resu
                     .get(1)
                     .map(|v| v.to_php_string().to_string_lossy().to_string())
                     .unwrap_or_default();
-                let old = basedir::open_basedir_value(vm);
+                // ini_set() returns (and ini_get() then gives) the value as
+                // set; PG(open_basedir) gets its entries resolved.
+                let old = vm
+                    .constants
+                    .get(b"open_basedir".as_slice())
+                    .map(|v| v.to_php_string())
+                    .unwrap_or_else(|| PhpString::from_bytes(b""));
                 return match basedir::update_open_basedir(vm, &new_val) {
                     Some(v) => {
                         vm.constants.insert(
                             b"open_basedir".to_vec(),
-                            Value::String(PhpString::from_string(v)),
+                            Value::String(PhpString::from_string(new_val)),
                         );
-                        Ok(Value::String(PhpString::from_string(old)))
+                        vm.open_basedir_resolved = Some(v);
+                        Ok(Value::String(old))
                     }
                     None => Ok(Value::False),
                 };

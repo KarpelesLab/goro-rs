@@ -4,8 +4,12 @@ use crate::vm::Vm;
 
 pub const MAXPATHLEN: usize = 4096;
 
-/// The current open_basedir INI value ("" when unrestricted).
+/// PG(open_basedir) ("" when unrestricted): the INI value, or the resolved
+/// entries once ini_set() changed it (OnUpdateBaseDir).
 pub fn open_basedir_value(vm: &Vm) -> String {
+    if let Some(v) = &vm.open_basedir_resolved {
+        return v.clone();
+    }
     vm.constants
         .get(b"open_basedir".as_ref())
         .map(|v| v.to_php_string().to_string_lossy())
@@ -156,11 +160,8 @@ pub fn check_open_basedir_ex(vm: &mut Vm, func_name: &str, path: &str, warn: boo
 /// as restrictive as the current one. Returns the value to store.
 pub fn update_open_basedir(vm: &mut Vm, new_value: &str) -> Option<String> {
     let current = open_basedir_value(vm);
-    if current.is_empty() {
-        return Some(new_value.to_string());
-    }
     if new_value.is_empty() {
-        return None;
+        return current.is_empty().then(String::new);
     }
     let mut out: Vec<String> = Vec::new();
     for part in new_value.split(':') {

@@ -348,13 +348,10 @@ fn zend_get_map_ptr_last(_vm: &mut Vm, _args: &[Value]) -> R {
     Ok(Value::Long(0))
 }
 
+/// PG(open_basedir)
 fn get_open_basedir(vm: &mut Vm, _args: &[Value]) -> R {
-    Ok(match vm.constants.get(b"open_basedir".as_slice()) {
-        Some(v) if !matches!(v, Value::Null) && !v.to_php_string().as_bytes().is_empty() => {
-            Value::String(v.to_php_string())
-        }
-        _ => Value::Null,
-    })
+    let v = goro_core::basedir::open_basedir_value(vm);
+    Ok(if v.is_empty() { Value::Null } else { s(&v) })
 }
 
 fn zend_test_is_pcre_bundled(_vm: &mut Vm, _args: &[Value]) -> R {
