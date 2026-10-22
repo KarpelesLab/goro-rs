@@ -6016,6 +6016,22 @@ pub fn set_ext_loader(l: Option<ExtLoader>) -> Option<ExtLoader> {
     EXT_LOADER.with(|c| std::mem::replace(&mut *c.borrow_mut(), l))
 }
 
+thread_local! {
+    /// PG(open_basedir) of the load in progress (see `sync_open_basedir`).
+    static OPEN_BASEDIR: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Take the script's open_basedir for the loads of the parse that follows
+/// (the parser has no access to the VM).
+pub fn sync_open_basedir(vm: &goro_core::vm::Vm) {
+    let v = goro_core::basedir::open_basedir_value(vm);
+    OPEN_BASEDIR.with(|b| {
+        if *b.borrow() != v {
+            *b.borrow_mut() = v;
+        }
+    });
+}
+
 /// The default loader: local files (plain paths or file:// URLs).
 pub fn default_ext_load(url: &str) -> ExtLoadResult {
     // php_libxml_input_buffer_create_filename(): libxml_disable_entity_loader()
@@ -6030,6 +6046,16 @@ pub fn default_ext_load(url: &str) -> ExtLoadResult {
     } else {
         url.to_string()
     };
+    // the plain files wrapper (without REPORT_ERRORS) checks open_basedir
+    let allowed = OPEN_BASEDIR.with(|b| {
+        let b = b.borrow();
+        b.is_empty()
+            || b.split(':')
+                .any(|d| !d.is_empty() && goro_core::basedir::check_specific_open_basedir(d, &path))
+    });
+    if !allowed {
+        return Err(None);
+    }
     match std::fs::read(&path) {
         Ok(d) => Ok((d, None)),
         Err(_) => Err(None),

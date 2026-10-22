@@ -554,6 +554,7 @@ pub fn xml_load(vm: &mut Vm, a: &[Value], file: bool) -> R<Value> {
     if recover {
         vm.error_reporting |= 2;
     }
+    crate::parser::sync_open_basedir(vm);
     let out = crate::sax2::parse_doc(&data, url.as_deref(), options);
     crate::libxml::report(vm, &fname, &out.errors, crate::libxml::Style::Ctx);
     if recover {

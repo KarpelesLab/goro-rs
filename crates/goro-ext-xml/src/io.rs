@@ -57,8 +57,158 @@ pub fn last_failure_reported() -> bool {
     REPORTED.with(|r| r.get())
 }
 
+thread_local! {
+    /// The charset the transport (HTTP Content-Type) gave the resource the
+    /// last read_resource() read (see `take_transport_charset`).
+    static TRANSPORT_CHARSET: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The charset of the resource read last, from its transport headers
+/// (php_libxml_sniff_charset_from_stream()), when the parser knows it.
+pub fn take_transport_charset() -> Option<String> {
+    TRANSPORT_CHARSET.with(|c| c.borrow_mut().take())
+}
+
+/// The charset the response headers of the HTTP(S) URL `url` just read
+/// declare (php_libxml_sniff_charset_from_stream() on its wrapper data).
+pub fn transport_charset(vm: &Vm, url: &str) -> Option<Vec<u8>> {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("http://") || lower.starts_with("https://")) {
+        return None;
+    }
+    let headers: Vec<Vec<u8>> = match vm.get_global(b"http_response_header").map(|v| v.deref()) {
+        Some(Value::Array(a)) => a
+            .borrow()
+            .iter()
+            .filter_map(|(_, v)| match v.deref() {
+                Value::String(s) => Some(s.as_bytes().to_vec()),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    sniff_charset_from_headers(&headers)
+}
+
+/// php_libxml_sniff_charset_from_stream(): the charset parameter of the
+/// last Content-Type header (scanning back to the status line).
+pub fn sniff_charset_from_headers(headers: &[Vec<u8>]) -> Option<Vec<u8>> {
+    for h in headers.iter().rev() {
+        let colon = h.iter().position(|&c| c == b':');
+        let space = h.iter().position(|&c| c == b' ');
+        match (colon, space) {
+            (None, _) => return None,
+            (Some(c), Some(sp)) if sp < c => return None,
+            _ => {}
+        }
+        if h.len() >= 13 && h[..13].eq_ignore_ascii_case(b"content-type:") {
+            return sniff_charset_from_string(&h[13..]);
+        }
+    }
+    None
+}
+
+/// php_libxml_sniff_charset_from_string() (MIME type parsing, charset only)
+pub fn sniff_charset_from_string(s: &[u8]) -> Option<Vec<u8>> {
+    let ws = |c: u8| matches!(c, 0x0A | 0x0D | 0x09 | 0x20);
+    let token = |c: u8| {
+        c == 0x21
+            || (0x23..=0x27).contains(&c)
+            || matches!(c, 0x2A | 0x2B | 0x2D | 0x2E | 0x5E | 0x5F | 0x60 | 0x7C | 0x7E)
+            || c.is_ascii_alphanumeric()
+    };
+    let mut start = 0;
+    let mut end = s.len();
+    while start < end && ws(s[start]) {
+        start += 1;
+    }
+    while start < end && ws(s[end - 1]) {
+        end -= 1;
+    }
+    let collect = |pos: usize, f: &dyn Fn(u8) -> bool| {
+        let mut p = pos;
+        while p < end && f(s[p]) {
+            p += 1;
+        }
+        p - pos
+    };
+    let type_len = collect(start, &|c| c != b'/');
+    if type_len == 0 || !s[start..start + type_len].iter().all(|&c| token(c)) {
+        return None;
+    }
+    start += type_len;
+    if start >= end {
+        return None;
+    }
+    start += 1;
+    let sub_len = collect(start, &|c| c != b';');
+    if sub_len == 0 || !s[start..start + sub_len].iter().all(|&c| token(c)) {
+        return None;
+    }
+    start += sub_len;
+    while start < end {
+        start += 1;
+        start += collect(start, &ws);
+        let name_len = collect(start, &|c| c != b';' && c != b'=');
+        let name = &s[start..start + name_len];
+        start += name_len;
+        if start < end {
+            if s[start] == b';' {
+                continue;
+            }
+            start += 1;
+        } else {
+            break;
+        }
+        let value: Vec<u8> = if start < end && s[start] == b'"' {
+            // collect an HTTP quoted string (extract-value)
+            let mut v = Vec::new();
+            start += 1;
+            loop {
+                let n = collect(start, &|c| c != b'"' && c != b'\\');
+                v.extend_from_slice(&s[start..start + n]);
+                start += n;
+                if start >= end {
+                    break;
+                }
+                let q = s[start];
+                start += 1;
+                if q == b'\\' {
+                    if start >= end {
+                        v.push(b'\\');
+                        break;
+                    }
+                    v.push(s[start]);
+                    start += 1;
+                } else {
+                    break;
+                }
+            }
+            start += collect(start, &|c| c != b';');
+            v
+        } else {
+            let n = collect(start, &|c| c != b';');
+            let mut v = s[start..start + n].to_vec();
+            // (php-src advances by the parameter name's length here)
+            start += name_len;
+            while v.last().is_some_and(|&c| ws(c)) {
+                v.pop();
+            }
+            if v.is_empty() {
+                continue;
+            }
+            v
+        };
+        if name.eq_ignore_ascii_case(b"charset") && value.iter().all(|&c| c == 0x09 || (0x20..0x7F).contains(&c) || c > 0x7F) {
+            return Some(value);
+        }
+    }
+    None
+}
+
 pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
     REPORTED.with(|r| r.set(false));
+    TRANSPORT_CHARSET.with(|c| *c.borrow_mut() = None);
     if percent_nul(vm, filename) {
         return None;
     }
@@ -92,6 +242,10 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
         }
         let r = f(vm, &fargs);
         vm.error_reporting = silenced;
+        let cs = transport_charset(vm, filename)
+            .map(|c| String::from_utf8_lossy(&c).into_owned())
+            .filter(|c| crate::parser::decode_to_utf8(b"", c).is_some());
+        TRANSPORT_CHARSET.with(|c| *c.borrow_mut() = cs);
         return match r {
             Ok(Value::String(s)) => Some(s.as_bytes().to_vec()),
             _ => None,

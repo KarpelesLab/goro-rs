@@ -1069,10 +1069,25 @@ pub fn parse_doc_ex(
     options: i64,
     directory: Option<&str>,
 ) -> ParseOutcome {
+    parse_doc_enc(data, url, options, directory, None)
+}
+
+/// `parse_doc_ex` of an input whose encoding the transport gave (it
+/// overrides what the document declares).
+pub fn parse_doc_enc(
+    data: &[u8],
+    url: Option<&str>,
+    options: i64,
+    directory: Option<&str>,
+    encoding: Option<&str>,
+) -> ParseOutcome {
     let mut b = TreeBuilder::new(options);
     b.url = url.map(|s| s.to_string());
     let (wf, nswf, errors) = {
         let mut p = Parser::new(&mut b, data.to_vec(), url.map(|s| s.to_string()), options);
+        if let Some(e) = encoding {
+            p.switch_encoding(e);
+        }
         p.st.directory = directory.map(|s| s.to_string());
         let ok = p.parse_document();
         (ok, p.st.ns_well_formed, std::mem::take(&mut p.st.errors))

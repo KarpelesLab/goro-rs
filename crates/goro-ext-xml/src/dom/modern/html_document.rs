@@ -827,6 +827,12 @@ pub fn html_load(vm: &mut Vm, a: &[Value], file: bool) -> R<Value> {
     } else {
         (source, "Entity".to_string(), None)
     };
+    // (MIME sniff: the charset of the HTTP Content-Type)
+    let ov = ov.or_else(|| {
+        file.then(|| crate::io::transport_charset(vm, &input_name))
+            .flatten()
+            .and_then(|c| html5::encoding::by_name(&c))
+    });
     let (enc, bom) = match ov {
         Some(e) => (e, 0),
         None => html5::encoding::determine_encoding(&data),

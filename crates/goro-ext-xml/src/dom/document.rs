@@ -812,6 +812,7 @@ fn load_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
     let opts = effective_options(cur, options);
     let recover = opts & XML_PARSE_RECOVER != 0;
     let fname = a.f.clone();
+    let mut enc = None;
     let (data, url) = if file {
         if source.contains(&0) {
             throw_error(
@@ -830,7 +831,10 @@ fn load_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
             None => return Ok(Value::False),
         };
         match crate::io::read_resource(vm, &path) {
-            Some(d) => (d, Some(path)),
+            Some(d) => {
+                enc = crate::io::take_transport_charset();
+                (d, Some(path))
+            }
             None if crate::io::last_failure_reported() => return Ok(Value::False),
             None => {
                 let msg = format!(
@@ -857,7 +861,8 @@ fn load_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
         vm.error_reporting |= 2;
     }
     let dir = if url.is_none() { cwd_url() } else { None };
-    let out = crate::sax2::parse_doc_ex(&data, url.as_deref(), opts, dir.as_deref());
+    crate::parser::sync_open_basedir(vm);
+    let out = crate::sax2::parse_doc_enc(&data, url.as_deref(), opts, dir.as_deref(), enc.as_deref());
     crate::libxml::report(vm, &fname, &out.errors, crate::libxml::Style::Ctx);
     if recover {
         vm.error_reporting = saved_er;

@@ -2005,7 +2005,19 @@ fn read_memory(
     options: i64,
     url: Option<&str>,
 ) -> Option<NodeId> {
-    let out = sax2::parse_doc(data, url, options);
+    read_memory_enc(vm, fname, data, options, url, None)
+}
+
+fn read_memory_enc(
+    vm: &mut Vm,
+    fname: &str,
+    data: &[u8],
+    options: i64,
+    url: Option<&str>,
+    encoding: Option<&str>,
+) -> Option<NodeId> {
+    crate::parser::sync_open_basedir(vm);
+    let out = sax2::parse_doc_enc(data, url, options, None, encoding);
     libxml::report(vm, fname, &out.errors, libxml::Style::Generic);
     if out.well_formed || (options & XML_PARSE_RECOVER != 0 && out.doc.is_some()) {
         out.doc
@@ -2020,7 +2032,8 @@ fn read_file(vm: &mut Vm, fname: &str, filename: &str, options: i64) -> Option<N
     match data {
         Some(data) => {
             let url = crate::io::resource_url(filename);
-            read_memory(vm, fname, &data, options, Some(&url))
+            let enc = crate::io::take_transport_charset();
+            read_memory_enc(vm, fname, &data, options, Some(&url), enc.as_deref())
         }
         None if crate::io::last_failure_reported() => None,
         None => {
