@@ -24780,11 +24780,8 @@ impl Vm {
                         }
                         let mut func_cvs = self.take_values(user_fn.cv_names.len());
                         // Extra arguments are only reachable through func_get_args().
-                        for (slot, arg) in func_cvs
-                            .iter_mut()
-                            .zip(call.args.iter())
-                            .take(user_fn.param_count as usize)
-                        {
+                        let bound = arg_cv_bound(&user_fn, func_cvs.len());
+                        for (slot, arg) in func_cvs.iter_mut().zip(call.args.iter()).take(bound) {
                             *slot = arg.clone();
                         }
                         // By-value array parameters get their own copy so writes in
