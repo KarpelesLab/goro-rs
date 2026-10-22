@@ -27,6 +27,7 @@ pub fn register_extensions(vm: &mut Vm) {
     goro_ext_session::register(vm);
     goro_ext_mysqli::register(vm);
     goro_ext_pdo::register(vm);
+    goro_ext_pgsql::register(vm);
     goro_ext_sockets::register(vm);
     goro_ext_mbstring::register(vm);
     goro_ext_spl::register(vm);

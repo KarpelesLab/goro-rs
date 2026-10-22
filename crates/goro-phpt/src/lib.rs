@@ -399,6 +399,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_session::register(&mut vm);
                 goro_ext_mysqli::register(&mut vm);
                 goro_ext_pdo::register(&mut vm);
+                goro_ext_pgsql::register(&mut vm);
                 goro_ext_sockets::register(&mut vm);
                 goro_ext_mbstring::register(&mut vm);
                 goro_ext_spl::register(&mut vm);
@@ -1688,6 +1689,7 @@ fn execute_php_inner_impl(
     goro_ext_session::register(&mut vm);
     goro_ext_mysqli::register(&mut vm);
     goro_ext_pdo::register(&mut vm);
+    goro_ext_pgsql::register(&mut vm);
     goro_ext_sockets::register(&mut vm);
     goro_ext_mbstring::register(&mut vm);
     goro_ext_spl::register(&mut vm);

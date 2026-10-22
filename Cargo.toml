@@ -82,6 +82,7 @@ goro-ext-bz2 = { path = "crates/goro-ext-bz2" }
 goro-ext-curl = { path = "crates/goro-ext-curl" }
 goro-ext-mysqli = { path = "crates/goro-ext-mysqli" }
 goro-ext-pdo = { path = "crates/goro-ext-pdo" }
+goro-ext-pgsql = { path = "crates/goro-ext-pgsql" }
 goro-phpt = { path = "crates/goro-phpt" }
 goro-ext-xml = { path = "crates/goro-ext-xml" }
 goro-ext-session = { path = "crates/goro-ext-session" }
