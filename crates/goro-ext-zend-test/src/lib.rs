@@ -14,6 +14,7 @@ use goro_core::value::Value;
 use goro_core::vm::Vm;
 
 mod classes;
+mod fiber;
 mod functions;
 mod handlers;
 mod ini;
@@ -48,6 +49,7 @@ pub fn register(vm: &mut Vm) {
     ini::register(vm);
     register_constants(vm);
     classes::register(vm);
+    fiber::register(vm);
     handlers::register(vm);
     observer::register(vm);
 }

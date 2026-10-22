@@ -10,6 +10,7 @@ pub mod closure;
 pub mod compiler;
 pub mod crypto;
 pub mod csv;
+pub mod custom_fiber;
 pub mod errdisplay;
 pub mod ext_stream;
 pub mod fastpath;

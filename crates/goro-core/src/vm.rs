@@ -816,7 +816,7 @@ pub struct Vm {
     pub called_class_stack: Vec<Vec<u8>>,
     /// Stack of "defining class" names for visibility checks (lowercase)
     /// This tracks the class where the currently executing method was defined/declared.
-    class_scope_stack: Vec<Vec<u8>>,
+    pub(crate) class_scope_stack: Vec<Vec<u8>>,
     /// Names of all declared static properties, keyed by the class count it
     /// was built for (see static_props::static_as_instance_check).
     static_name_cache: (usize, std::collections::HashSet<Vec<u8>>, u64),
@@ -972,7 +972,17 @@ pub struct Vm {
     /// The currently executing Fiber object (for Fiber::getCurrent())
     pub current_fiber: Option<Value>,
     /// Stack of fiber objects for nested fibers
-    fiber_stack: Vec<Option<Value>>,
+    pub(crate) fiber_stack: Vec<Option<Value>>,
+    /// Custom fiber contexts (extension fibers, see custom_fiber.rs) by
+    /// object id, while not running.
+    pub(crate) custom_fibers: HashMap<u64, crate::custom_fiber::CustomFiber>,
+    /// The custom fiber context running, if any.
+    pub(crate) custom_active: Option<crate::custom_fiber::CustomActive>,
+    /// Frame stacks of the contexts that resumed the running custom fibers.
+    pub(crate) custom_parked: Vec<crate::custom_fiber::FrameStacks>,
+    /// For each running Fiber (innermost last): `custom_parked.len()` and
+    /// the custom fiber running when it was resumed.
+    pub(crate) fiber_custom_marks: Vec<(usize, Option<crate::custom_fiber::CustomActive>)>,
     /// Whether exit() or die() has been called (signals script termination)
     pub exit_requested: bool,
     /// Status passed to exit() (process exit code for the CLI).
@@ -1354,6 +1364,10 @@ impl Vm {
             generator_caller: None,
             current_fiber: None,
             fiber_stack: Vec::new(),
+            custom_fibers: HashMap::new(),
+            custom_active: None,
+            custom_parked: Vec::new(),
+            fiber_custom_marks: Vec::new(),
             exit_requested: false,
             exit_code: 0,
             last_error: None,
@@ -7240,6 +7254,9 @@ impl Vm {
                 .collect();
             if class_lower == b"fiber" {
                 self.fiber_destroy(obj_rc);
+                return;
+            }
+            if !self.custom_fibers.is_empty() && self.custom_fiber_released(obj_rc) {
                 return;
             }
             // zend_objects_destroy_object(): lazy objects (uninitialized
@@ -16833,6 +16850,9 @@ impl Vm {
                 self.fiber_destroy(obj_rc);
                 return;
             }
+            if !self.custom_fibers.is_empty() && self.custom_fiber_released(obj_rc) {
+                return;
+            }
             // zend_objects_destroy_object(): lazy objects (uninitialized
             // ghosts, and proxies even once initialized) are not destructed.
             if matches!(
@@ -25776,7 +25796,7 @@ impl Vm {
                         if crate::fiber::in_fiber() {
                             // (the Fiber::suspend() frame is the suspended
                             // fiber's top frame, for ReflectionFiber::getTrace())
-                            let resumed = crate::fiber::suspend_current(suspend_val);
+                            let resumed = self.fiber_suspend_switch(suspend_val);
                             self.call_stack.pop();
                             match resumed {
                                 Some(crate::fiber::FiberResume::Value(v)) => {
@@ -55776,7 +55796,7 @@ impl Vm {
                     call.args.clone(),
                     false,
                 ));
-                let resumed = crate::fiber::suspend_current(suspend_val.clone());
+                let resumed = self.fiber_suspend_switch(suspend_val.clone());
                 self.call_stack.pop();
                 match resumed {
                     Some(crate::fiber::FiberResume::Value(v)) => return Ok(v),
@@ -56563,7 +56583,10 @@ impl Vm {
         let fiber_id = obj_rc.borrow().object_id;
         self.fiber_bases.push((fiber_id, fiber_stack_base));
         let outer_exec = self.exec_frame_len;
+        self.fiber_custom_marks
+            .push((self.custom_parked.len(), self.custom_active.clone()));
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
+        self.fiber_custom_marks.pop();
         self.fiber_bases.pop();
         self.fiber_leave_exec_frame(&mut fiber, bases.0, outer_exec, result.is_ok());
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
@@ -57495,7 +57518,10 @@ impl Vm {
         if let Some(rel) = fiber.saved_exec_frame_len.take() {
             self.exec_frame_len = bases.0 + rel;
         }
+        self.fiber_custom_marks
+            .push((self.custom_parked.len(), self.custom_active.clone()));
         let result = fiber.resume(input);
+        self.fiber_custom_marks.pop();
         self.fiber_bases.pop();
         self.fiber_leave_exec_frame(&mut fiber, bases.0, outer_exec, result.is_ok());
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());

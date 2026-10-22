@@ -146,6 +146,22 @@ impl PhpFiber {
     where
         F: FnOnce(FiberResume) -> FiberOutcome + 'static,
     {
+        Self::new_inner(display_name, stack_size, body, true)
+    }
+
+    /// A fiber context that is not a `Fiber`: `Fiber::suspend()` inside it
+    /// still suspends the enclosing `Fiber` (see custom_fiber.rs).
+    pub(crate) fn new_custom<F>(display_name: String, stack_size: usize, body: F) -> Self
+    where
+        F: FnOnce(FiberResume) -> FiberOutcome + 'static,
+    {
+        Self::new_inner(display_name, stack_size, body, false)
+    }
+
+    fn new_inner<F>(display_name: String, stack_size: usize, body: F, is_fiber: bool) -> Self
+    where
+        F: FnOnce(FiberResume) -> FiberOutcome + 'static,
+    {
         let yielder_ptr: Rc<Cell<*const FiberYielder>> = Rc::new(Cell::new(std::ptr::null()));
         let yielder_ptr_for_body = yielder_ptr.clone();
         let stack = DefaultStack::new(FIBER_NATIVE_STACK.max(stack_size.min(64 << 20)))
@@ -170,6 +186,9 @@ impl PhpFiber {
                 // first invocation; subsequent resumes continue from inside
                 // yielder.suspend()).
                 yielder_ptr_for_body.set(yielder as *const FiberYielder);
+                if !is_fiber {
+                    return body(input);
+                }
                 // On the very first entry, the parent already arranged for
                 // CURRENT_YIELDER to point at this yielder (we'll do the same
                 // before every later resume), but make sure it's set in case
@@ -223,6 +242,11 @@ impl PhpFiber {
         self.yielder_ptr.get()
     }
 
+    /// The cell holding the yielder pointer (set once the fiber runs).
+    pub(crate) fn yielder_cell(&self) -> Rc<Cell<*const FiberYielder>> {
+        self.yielder_ptr.clone()
+    }
+
     /// Resume the fiber. Before driving the coroutine, the caller should
     /// have set CURRENT_YIELDER appropriately (via `set_current_yielder`)
     /// so that `Fiber::suspend()` calls in the body can reach it.
@@ -272,6 +296,24 @@ pub fn suspend_current(value: Value) -> Option<FiberResume> {
     let _back = RestoreStack(crate::stack::save());
     let r = yielder.suspend(FiberYield::Suspend(value));
     Some(r)
+}
+
+/// Suspend the coroutine whose yielder is `raw` (a custom fiber context
+/// running on this thread, from anywhere in its call chain).
+pub(crate) fn suspend_yielder(raw: *const FiberYielder, value: Value) -> Option<FiberResume> {
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: as in suspend_current(): `raw` is the yielder of a coroutine
+    // that is running (possibly below other contexts) on this thread.
+    let yielder: &FiberYielder = unsafe { &*raw };
+    let _back = RestoreStack(crate::stack::save());
+    Some(yielder.suspend(FiberYield::Suspend(value)))
+}
+
+/// The current fiber yielder pointer.
+pub(crate) fn current_yielder() -> *const FiberYielder {
+    CURRENT_YIELDER.with(|cell| *cell.borrow())
 }
 
 /// True if a fiber is currently running on this thread.
