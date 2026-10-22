@@ -767,6 +767,12 @@ pub struct Vm {
     pub last_error_trace: Option<Value>,
     /// BG(user_tick_functions): (callback, arguments, being called)
     pub tick_functions: Vec<(Value, Vec<Value>, bool)>,
+    /// zend_interrupt_function: run between instructions once
+    /// `value::VM_INTERRUPT` is set (pcntl's asynchronous signals).
+    pub interrupt_hook: Option<fn(&mut Vm)>,
+    /// An internal tick function (php_add_tick_function()), run before the
+    /// user ones.
+    pub tick_hook: Option<fn(&mut Vm)>,
     /// Indices into `pending_calls` of calls dispatched through a Closure
     /// object (closures bypass method visibility checks).
     pub closure_pending_calls: Vec<usize>,
@@ -1177,6 +1183,8 @@ impl Vm {
             ticks_count: 0,
             last_error_trace: None,
             tick_functions: Vec::new(),
+            interrupt_hook: None,
+            tick_hook: None,
             closure_pending_calls: Vec::new(),
             error_handler_threw: false,
             fatal_bailout: false,
@@ -17192,9 +17200,38 @@ impl Vm {
             if crate::value::memory_exhausted() != 0 {
                 return Err(self.memory_limit_fatal());
             }
-            // max_execution_time expired (zend_timeout()).
-            if crate::value::TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed) {
-                return Err(self.timeout_fatal());
+            // EG(vm_interrupt): max_execution_time expired (zend_timeout()),
+            // or a signal arrived (zend_interrupt_function).
+            if crate::value::VM_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed) {
+                use crate::value::{TIMED_OUT, VM_INTERRUPT};
+                use std::sync::atomic::Ordering::Relaxed;
+                if !TIMED_OUT.load(Relaxed) {
+                    VM_INTERRUPT.store(false, Relaxed);
+                }
+                // (the timeout handler sets TIMED_OUT before VM_INTERRUPT)
+                if TIMED_OUT.load(Relaxed) {
+                    VM_INTERRUPT.store(true, Relaxed);
+                    return Err(self.timeout_fatal());
+                }
+                if let Some(hook) = self.interrupt_hook {
+                    let had_exc = self.current_exception.is_some();
+                    hook(self);
+                    if !had_exc && self.current_exception.is_some() {
+                        if let Some((catch, finally, _, _, eh_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(eh_pc);
+                            if catch > 0 {
+                                ip = catch as usize;
+                            } else if finally > 0 {
+                                ip = finally as usize;
+                            }
+                            continue;
+                        }
+                        return Err(VmError {
+                            message: "Uncaught exception from interrupt".into(),
+                            line: self.current_line,
+                        });
+                    }
+                }
             }
             // A comparison of the previous op recursed into a container
             // already being compared (zend_hash_compare()).

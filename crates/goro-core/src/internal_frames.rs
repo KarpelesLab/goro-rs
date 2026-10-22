@@ -306,6 +306,7 @@ impl Vm {
             self.push_builtin_frame(lname, args, at);
             let r = self.call_builtin_observed(f, lname, args);
             self.pop_builtin_frame();
+            self.interrupt_after_internal_call();
             return r;
         };
         let line = self.current_line;
@@ -327,7 +328,22 @@ impl Vm {
         self.push_builtin_frame(lname, orig.as_deref().unwrap_or(&owned), at);
         let r = self.call_builtin_observed(f, lname, &owned);
         self.pop_builtin_frame();
+        self.interrupt_after_internal_call();
         r
+    }
+
+    /// zend_call_function() after an internal function returned: a pending
+    /// EG(vm_interrupt) runs zend_interrupt_function (a timeout is left to
+    /// the executor).
+    #[inline]
+    fn interrupt_after_internal_call(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        if crate::value::VM_INTERRUPT.load(Relaxed) && !crate::value::TIMED_OUT.load(Relaxed) {
+            if let Some(hook) = self.interrupt_hook {
+                crate::value::VM_INTERRUPT.store(false, Relaxed);
+                hook(self);
+            }
+        }
     }
 
     /// Run builtin `f` (lowercase name `lname`), with the observer's

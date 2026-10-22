@@ -110,6 +110,10 @@ impl Drop for CmpGuard {
 /// EG(timed_out): set from the SIGPROF handler when max_execution_time
 /// expires; the VM turns it into the "Maximum execution time" fatal.
 pub static TIMED_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// EG(vm_interrupt): set from signal handlers (after TIMED_OUT for a
+/// timeout); the VM checks it between instructions and then runs
+/// `Vm::interrupt_hook` (zend_interrupt_function).
+pub static VM_INTERRUPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// EG(timeout_seconds): the limit the pending timer was armed with.
 pub static TIMEOUT_SECONDS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 /// EG(hard_timeout): grace period after a timeout before the process dies.

@@ -346,6 +346,9 @@ impl Vm {
     /// run_user_tick_functions(): call each registered tick function (one
     /// already running is skipped).
     pub fn run_tick_functions(&mut self) {
+        if let Some(hook) = self.tick_hook {
+            hook(self);
+        }
         let mut i = 0;
         while i < self.tick_functions.len() {
             if self.current_exception.is_some() {

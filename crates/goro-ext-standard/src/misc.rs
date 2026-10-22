@@ -5315,6 +5315,7 @@ extern "C" fn execution_timeout_handler(_sig: libc::c_int) {
         }
     }
     TIMED_OUT.store(true, Ordering::Relaxed);
+    goro_core::value::VM_INTERRUPT.store(true, Ordering::Relaxed);
     let hard = HARD_TIMEOUT.load(Ordering::Relaxed);
     if hard > 0 {
         arm_prof_timer(hard);
@@ -9479,10 +9480,23 @@ fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Scripts rely on the full duration (e.g. outliving a server's
     // wait_timeout).
     _vm.flush_cli_output();
+    // php_sleep(): a signal ends the sleep early; the unslept seconds are
+    // returned.
+    let mut left = 0;
     if secs > 0 {
-        std::thread::sleep(std::time::Duration::from_secs(secs as u64));
+        let req = libc::timespec {
+            tv_sec: secs as libc::time_t,
+            tv_nsec: 0,
+        };
+        let mut rem = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::nanosleep(&req, &mut rem) } != 0 {
+            left = rem.tv_sec + if rem.tv_nsec >= 500_000_000 { 1 } else { 0 };
+        }
     }
-    Ok(Value::Long(0))
+    Ok(Value::Long(left))
 }
 fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let usecs = args.first().unwrap_or(&Value::Null).to_long();
@@ -9498,7 +9512,12 @@ fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if usecs > 0 {
         // Sleep the actual duration, capped at 2s (like sleep()).
         let actual = (usecs as u64).min(2_000_000);
-        std::thread::sleep(std::time::Duration::from_micros(actual));
+        // usleep(): a signal ends it early.
+        let req = libc::timespec {
+            tv_sec: (actual / 1_000_000) as libc::time_t,
+            tv_nsec: ((actual % 1_000_000) * 1000) as libc::c_long,
+        };
+        unsafe { libc::nanosleep(&req, std::ptr::null_mut()) };
     }
     Ok(Value::Null)
 }
@@ -21040,8 +21059,30 @@ fn time_nanosleep_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             "Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative",
         ));
     }
-    let duration = std::time::Duration::new(seconds as u64, nanoseconds as u32);
-    std::thread::sleep(duration);
+    let req = libc::timespec {
+        tv_sec: seconds as libc::time_t,
+        tv_nsec: nanoseconds as libc::c_long,
+    };
+    let mut rem = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    if unsafe { libc::nanosleep(&req, &mut rem) } != 0 {
+        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+            // Interrupted by a signal: what is left.
+            let mut a = PhpArray::new();
+            a.set(
+                ArrayKey::String(PhpString::from_bytes(b"seconds")),
+                Value::Long(rem.tv_sec),
+            );
+            a.set(
+                ArrayKey::String(PhpString::from_bytes(b"nanoseconds")),
+                Value::Long(rem.tv_nsec),
+            );
+            return Ok(Value::Array(Rc::new(RefCell::new(a))));
+        }
+        return Ok(Value::False);
+    }
     Ok(Value::True)
 }
 
