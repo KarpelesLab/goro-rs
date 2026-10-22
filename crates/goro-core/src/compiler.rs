@@ -3107,6 +3107,7 @@ impl Compiler {
                                 | ExprKind::FunctionCall { .. }
                                 | ExprKind::MethodCall { .. }
                                 | ExprKind::StaticMethodCall { .. }
+                                | ExprKind::DynamicStaticMethodCall { .. }
                         ),
                         None => true,
                     };
