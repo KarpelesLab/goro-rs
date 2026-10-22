@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+pub mod ldap_test;
 pub mod mysqli_test;
 pub mod pgsql_test;
 
@@ -815,6 +816,21 @@ pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
         && has_remote_curl_url(file_section)
     {
         return Some("Live HTTP server required for curl".into());
+    }
+
+    // 8. ext/ldap tests needing infrastructure the in-process fixture lacks:
+    //    a server on the privileged ldaps port 636, Cyrus SASL (DIGEST-MD5),
+    //    or ldap.conf TLS-protocol enforcement by a real slapd.
+    if filename.contains("/ext/ldap/tests/") {
+        if filename.contains("/ldaps_basic.") {
+            return Some("ldaps requires a server on privileged port 636".into());
+        }
+        if filename.contains("/ldap_sasl_bind_error.") {
+            return Some("SASL (DIGEST-MD5) not supported".into());
+        }
+        if filename.contains("/ldap_start_tls_rc_max_version.") {
+            return Some("requires slapd olcTLSProtocolMin / ldap.conf TLS enforcement".into());
+        }
     }
 
     let _ = test_name; // kept for future use
@@ -2889,6 +2905,18 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
         }
     }
 
+    // Start the in-process LDAP server fixture when ext/ldap tests are run.
+    if files
+        .iter()
+        .any(|f| ldap_test::is_ldap_test(&f.to_string_lossy()))
+    {
+        if ldap_test::ensure_started() {
+            eprintln!("[goro-phpt] in-process LDAP fixture ready");
+        } else {
+            eprintln!("[goro-phpt] no LDAP fixture available; ldap tests will be skipped");
+        }
+    }
+
     let mut seen: std::collections::HashMap<std::path::PathBuf, usize> =
         std::collections::HashMap::new();
     for path in &files {
@@ -2992,6 +3020,7 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
     // Stop the embedded database servers, if they were started.
     mysqli_test::shutdown();
     pgsql_test::shutdown();
+    ldap_test::shutdown();
     TestCounts {
         pass,
         fail,

@@ -182,12 +182,15 @@ pub fn parse_vlvresponse(val: &[u8]) -> Result<(i64, i64, i64, Option<Vec<u8>>),
 /// PartialAttribute ::= SEQUENCE { type OCTET, vals SET OF OCTET }
 #[allow(clippy::type_complexity)]
 pub fn parse_readentry(val: &[u8]) -> Result<(Vec<u8>, Vec<(Vec<u8>, Vec<Vec<u8>>)>), BerError> {
+    // SearchResultEntry value: SEQ { LDAPDN, PartialAttributeList SEQ OF
+    // SEQ { type, vals SET OF } }.
     let mut r = Reader::new(val);
     let mut s = r.seq()?;
     let dn = s.octets()?.to_vec();
     let mut attrs = Vec::new();
-    while !s.is_empty() {
-        let mut a = s.seq()?;
+    let mut al = s.seq()?;
+    while !al.is_empty() {
+        let mut a = al.seq()?;
         let name = a.octets()?.to_vec();
         let mut set = a.enter(crate::ber::TAG_SET)?;
         let mut vals = Vec::new();

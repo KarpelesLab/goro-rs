@@ -247,7 +247,7 @@ const FUNCTIONS: &[(&str, BuiltinFn)] = &[
     ("ldap_mod_add_ext", funcs::ldap_mod_add_ext),
     ("ldap_mod_replace", funcs::ldap_mod_replace),
     ("ldap_mod_replace_ext", funcs::ldap_mod_replace_ext),
-    ("ldap_modify", funcs::ldap_mod_replace),
+    ("ldap_modify", funcs::ldap_modify),
     ("ldap_mod_del", funcs::ldap_mod_del),
     ("ldap_mod_del_ext", funcs::ldap_mod_del_ext),
     ("ldap_errno", funcs::ldap_errno),

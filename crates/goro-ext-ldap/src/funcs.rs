@@ -1427,6 +1427,9 @@ pub fn ldap_mod_replace(vm: &mut Vm, args: &[Value]) -> R {
 pub fn ldap_mod_replace_ext(vm: &mut Vm, args: &[Value]) -> R {
     do_modify(vm, "ldap_mod_replace_ext", args, LDAP_MOD_REPLACE, true)
 }
+pub fn ldap_modify(vm: &mut Vm, args: &[Value]) -> R {
+    do_modify(vm, "ldap_modify", args, LDAP_MOD_REPLACE, false)
+}
 pub fn ldap_mod_del(vm: &mut Vm, args: &[Value]) -> R {
     do_modify(vm, "ldap_mod_del", args, LDAP_MOD_DELETE, false)
 }
@@ -2006,7 +2009,7 @@ fn do_exop(vm: &mut Vm, f: &str, args: &[Value], force_sync: bool) -> R {
 
 pub fn ldap_exop_passwd(vm: &mut Vm, args: &[Value]) -> R {
     let f = "ldap_exop_passwd";
-    let Some(a) = parse(vm, f, "C|ssz", args) else {
+    let Some(a) = parse(vm, f, "C|sssz", args) else {
         return Ok(Value::Null);
     };
     let Some(cd) = link(vm, &a[0]) else {
@@ -2024,6 +2027,11 @@ pub fn ldap_exop_passwd(vm: &mut Vm, args: &[Value]) -> R {
     });
     match res {
         Ok(m) => {
+            // Response controls are assigned even on an LDAP error result.
+            if let Some(z) = &ctrl_ref {
+                let a = ctl::controls_to_array(&m.ctrls, false);
+                crate::assign_ref(z, arr(a));
+            }
             if m.rescode != LDAP_SUCCESS {
                 warn(
                     vm,
@@ -2039,10 +2047,6 @@ pub fn ldap_exop_passwd(vm: &mut Vm, args: &[Value]) -> R {
                     ),
                 );
                 return Ok(Value::False);
-            }
-            if let Some(z) = &ctrl_ref {
-                let a = ctl::controls_to_array(&m.ctrls, false);
-                crate::assign_ref(z, arr(a));
             }
             // genpassword in the response value
             let genpw = parse_passwd_response(m.exop_data.as_deref());
