@@ -628,7 +628,10 @@ pub(crate) struct CallTarget {
     /// push_forward_call): the `Class::m` it resolved to, and whether
     /// `$this` leads the arguments. `user` is that method and `method`
     /// where "::" is in the name and whether it is static.
-    pub(crate) forward: Option<(PhpString, bool)>,
+    pub(crate) forward: Option<PhpString>,
+    /// (of `forward`: `$this` leads the arguments; apart, so that a
+    /// PendingCall stays within 128 bytes, copied inline)
+    pub(crate) forward_this: bool,
     /// `user_functions.len() + 1` when resolved (0: not resolved): a
     /// function declared since then (while the arguments were evaluated)
     /// makes the lookup run again.
@@ -665,6 +668,11 @@ pub(crate) struct CachedCallTarget {
     fn_gen: usize,
 }
 
+// A pending call is moved on every call (pushed, popped): larger than this,
+// the moves go through memcpy(), whose wide stores the fields' loads right
+// after cannot be forwarded from (a stall on every call).
+const _: () = assert!(std::mem::size_of::<PendingCall>() <= 128);
+
 impl CallTarget {
     pub(crate) const NONE: CallTarget = CallTarget {
         user: None,
@@ -675,6 +683,7 @@ impl CallTarget {
         no_ns_fallback: false,
         closure: false,
         forward: None,
+        forward_this: false,
         fn_gen: 0,
     };
 }
@@ -17406,7 +17415,8 @@ impl Vm {
         }
         // A forwarding call resolved when it was set up (see
         // push_forward_call): what fast_forward_target() does then.
-        if let (Some((fwd, with_this)), Some(f), Some((sep, is_static))) =
+        let with_this = &call.target.forward_this;
+        if let (Some(fwd), Some(f), Some((sep, is_static))) =
             (&call.target.forward, &call.target.user, call.target.method)
         {
             if call.target.fn_gen != self.user_functions.len() + 1 {
@@ -18075,7 +18085,9 @@ impl Vm {
     #[inline]
     pub(crate) fn take_values(&mut self, n: usize) -> Vec<Value> {
         let mut v = self.value_pool.pop().unwrap_or_default();
-        v.resize(n, Value::Undef);
+        // (resize_with(): each slot gets its tag stored directly; resize()
+        // copies a stack template, a wide load waiting on narrower stores)
+        v.resize_with(n, || Value::Undef);
         v
     }
 
@@ -18349,6 +18361,7 @@ impl Vm {
                 no_ns_fallback: false,
                 closure: false,
                 forward: None,
+                forward_this: false,
                 fn_gen: self.user_functions.len() + 1,
             };
         }
@@ -18381,6 +18394,7 @@ impl Vm {
             no_ns_fallback: false,
             closure: false,
             forward: None,
+            forward_this: false,
             fn_gen: self.user_functions.len() + 1,
         }
     }
@@ -18465,19 +18479,48 @@ impl Vm {
     /// target resolved.
     #[inline]
     pub(crate) fn push_plain_call(&mut self, op_array: &OpArray, ip: usize, name: PhpString) {
-        let mut target = self.plain_call_target(op_array, ip, name.as_bytes());
         // (INIT_FCALL's result operand flags a name without global fallback)
-        target.no_ns_fallback = op_array
+        let no_ns_fallback = op_array
             .ops
             .get(ip)
             .is_some_and(|op| !matches!(op.result, OperandType::Unused));
-        let args = self.take_values(0);
-        self.pending_calls.push(PendingCall {
-            name,
-            args,
-            named_args: Vec::new(),
-            target,
-        });
+        self.push_resolved_call(op_array, ip, name);
+        if let Some(call) = self.pending_calls.last_mut() {
+            call.target.no_ns_fallback = no_ns_fallback;
+        }
+    }
+
+    /// The pending call of the INIT_FCALL at `ip` of `op_array` by `name`,
+    /// with its target as plain_call_target() resolves it.
+    #[inline]
+    fn push_resolved_call(&mut self, op_array: &OpArray, ip: usize, name: PhpString) {
+        let fn_gen = self.user_functions.len() + 1;
+        // The call is built in place (extend() makes room before the value
+        // is made) and its arguments' buffer and target filled there: one
+        // built apart and moved in is copied by wide loads of its just
+        // stored narrow fields, which wait for them (a store-forwarding
+        // stall on every call).
+        self.pending_calls
+            .extend(std::iter::once_with(move || PendingCall {
+                name,
+                args: Vec::new(),
+                named_args: Vec::new(),
+                target: CallTarget::NONE,
+            }));
+        let Some(call) = self.pending_calls.last_mut() else {
+            return;
+        };
+        // (take_values(0))
+        if let Some(buf) = self.value_pool.pop() {
+            call.args = buf;
+        }
+        if !Self::cached_call_target(op_array, ip, call.name.as_bytes(), fn_gen, &mut call.target) {
+            let name = call.name.clone();
+            let target = self.plain_call_target(op_array, ip, name.as_bytes());
+            if let Some(call) = self.pending_calls.last_mut() {
+                call.target = target;
+            }
+        }
     }
 
     /// INIT_FCALL at `ip` of `op_array` of a static call `Class::method`
@@ -18494,19 +18537,16 @@ impl Vm {
         name: &PhpString,
         frame_this: bool,
     ) -> bool {
-        let target = self.plain_call_target(op_array, ip, name.as_bytes());
-        match target.method {
-            Some((_, is_static)) if is_static || !frame_this => {}
-            _ => return false,
+        self.push_resolved_call(op_array, ip, name.clone());
+        match self.pending_calls.last().and_then(|c| c.target.method) {
+            Some((_, is_static)) if is_static || !frame_this => true,
+            _ => {
+                if let Some(mut call) = self.pending_calls.pop() {
+                    self.recycle_args(&mut call);
+                }
+                false
+            }
         }
-        let args = self.take_values(0);
-        self.pending_calls.push(PendingCall {
-            name: name.clone(),
-            args,
-            named_args: Vec::new(),
-            target,
-        });
-        true
     }
 
     /// INIT_FCALL of a forwarding call (see forward_fcall_name): what the
@@ -18595,7 +18635,8 @@ impl Vm {
             Some((f, new_name, sep, is_static)) => CallTarget {
                 user: Some(f),
                 method: Some((sep, is_static)),
-                forward: Some((new_name, with_this)),
+                forward: Some(new_name),
+                forward_this: with_this,
                 fn_gen,
                 ..CallTarget::NONE
             },
@@ -18670,6 +18711,42 @@ impl Vm {
         true
     }
 
+    /// What the INIT_FCALL at `ip` of `op_array` remembers it resolved
+    /// `name` to (see plain_call_target), set in `t` (a CallTarget::NONE)
+    /// field by field. False, leaving `t` alone: nothing usable is cached.
+    #[inline]
+    fn cached_call_target(
+        op_array: &OpArray,
+        ip: usize,
+        name: &[u8],
+        fn_gen: usize,
+        t: &mut CallTarget,
+    ) -> bool {
+        let sites = op_array.sites.borrow();
+        let Some(c) = sites
+            .as_ref()
+            .and_then(|s| s.call_targets.get(&(ip as u32)))
+        else {
+            return false;
+        };
+        if c.fn_gen != fn_gen || c.name != name {
+            return false;
+        }
+        let user = match &c.user {
+            Some(w) => match w.upgrade() {
+                Some(f) => Some(f),
+                None => return false,
+            },
+            None => None,
+        };
+        t.user = user;
+        t.builtin = c.builtin;
+        t.has_builtin = c.has_builtin;
+        t.method = c.method;
+        t.fn_gen = fn_gen;
+        true
+    }
+
     /// resolve_call_target() for the INIT_FCALL at `ip` of `op_array`,
     /// remembered by the call site while no function is declared (and the
     /// user function it found is alive).
@@ -18680,31 +18757,9 @@ impl Vm {
         name: &[u8],
     ) -> CallTarget {
         let fn_gen = self.user_functions.len() + 1;
-        if let Some(c) = op_array
-            .sites
-            .borrow()
-            .as_ref()
-            .and_then(|s| s.call_targets.get(&(ip as u32)))
-        {
-            if c.fn_gen == fn_gen && c.name == name {
-                let user = match &c.user {
-                    Some(w) => w.upgrade(),
-                    None => None,
-                };
-                if user.is_some() == c.user.is_some() {
-                    return CallTarget {
-                        user,
-                        builtin: c.builtin,
-                        has_builtin: c.has_builtin,
-                        method: c.method,
-                        no_ctor: false,
-                        no_ns_fallback: false,
-                        closure: false,
-                        forward: None,
-                        fn_gen,
-                    };
-                }
-            }
+        let mut t = CallTarget::NONE;
+        if Self::cached_call_target(op_array, ip, name, fn_gen, &mut t) {
+            return t;
         }
         let t = self.resolve_call_target(name);
         op_array
@@ -18846,6 +18901,26 @@ impl Vm {
         self.last_call_by_ref = op_array.returns_by_ref;
         if self.exit_requested {
             return result.map(|_| Value::Null);
+        }
+        // The common end of a call: a value (not a reference) returned
+        // without a declared return type, with no destructor or exception
+        // around: what leave_op_array_frame() does then.
+        if op_array.return_type.is_none()
+            && self.current_exception.is_none()
+            && !self.has_release_work()
+            && matches!(result, Ok(ref v) if !matches!(v, Value::Reference(_)))
+        {
+            self.run_pending_destructors();
+            if self.current_exception.is_none() {
+                return result.map(|v| match v {
+                    Value::Undef => Value::Null,
+                    v => v,
+                });
+            }
+            return Err(VmError {
+                message: "Uncaught exception".into(),
+                line: self.current_line,
+            });
         }
         self.leave_op_array_frame(op_array, result, keep_ref)
     }
@@ -25501,23 +25576,36 @@ impl Vm {
                             }
                             None => method_sep.is_some_and(|(_, t)| t),
                         };
-                        let mut file = self.string_pool.pop().unwrap_or_default();
-                        file.push_str(&self.current_file);
-                        let mut trace_args = self.take_values(0);
                         // (a closure's captured values are not arguments)
                         let skip = match captures {
                             Some(n) if n > 0 => n,
                             _ => usize::from(has_this),
                         }
                         .min(call.args.len());
-                        trace_args.extend_from_slice(&call.args[skip..]);
                         let call_frame_depth = self.call_stack.len();
                         if captures.is_some() {
                             let known = call.target.closure;
                             self.note_closure_frame(&call.name, &display, known);
                         }
-                        self.call_stack
-                            .push((display, file, op.line, trace_args, has_this));
+                        // The frame is built in place, its file and arguments
+                        // filled there (in the buffers of finished calls'):
+                        // one built apart and moved in is copied by wide
+                        // loads of just stored narrow fields, which wait for
+                        // them.
+                        let line = op.line;
+                        self.call_stack.extend(std::iter::once_with(move || {
+                            (display, String::new(), line, Vec::new(), has_this)
+                        }));
+                        if let Some(frame) = self.call_stack.last_mut() {
+                            if let Some(s) = self.string_pool.pop() {
+                                frame.1 = s;
+                            }
+                            frame.1.push_str(&self.current_file);
+                            if let Some(v) = self.value_pool.pop() {
+                                frame.3 = v;
+                            }
+                            frame.3.extend_from_slice(&call.args[skip..]);
+                        }
                         // Check parameter types before executing
                         // (untyped parameters: nothing to check or coerce)
                         if user_fn.param_types.iter().any(|t| t.is_some()) {

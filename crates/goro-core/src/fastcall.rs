@@ -491,6 +491,7 @@ impl Vm {
                     no_ns_fallback: false,
                     closure: false,
                     forward: None,
+                    forward_this: false,
                     fn_gen: self.user_functions.len() + 1,
                 }
             };
