@@ -44,6 +44,8 @@ members = [
     "crates/goro-ext-soap",
     "crates/goro-ext-intl",
     "crates/goro-ext-xsl",
+    "crates/goro-gd",
+    "crates/goro-ext-gd",
 ]
 resolver = "2"
 

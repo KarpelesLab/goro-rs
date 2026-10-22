@@ -1,0 +1,13 @@
+[package]
+name = "goro-ext-gd"
+version = "0.1.0"
+edition = "2024"
+description = "PHP gd extension for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+goro-gd = { path = "../goro-gd" }

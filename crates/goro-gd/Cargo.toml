@@ -1,0 +1,11 @@
+[package]
+name = "goro-gd"
+version = "0.1.0"
+edition = "2024"
+description = "Pure Rust port of the libgd bundled with php-src (ext/gd/libgd) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-zlib = { path = "../goro-zlib" }
