@@ -40,6 +40,7 @@ members = [
     "crates/goro-ext-zip",
     "crates/goro-ext-fileinfo",
     "crates/goro-ext-sodium",
+    "crates/goro-ext-soap",
 ]
 resolver = "2"
 
@@ -90,6 +91,7 @@ goro-ext-reflection = { path = "crates/goro-ext-reflection" }
 goro-ext-zend-test = { path = "crates/goro-ext-zend-test" }
 goro-ext-bcmath = { path = "crates/goro-ext-bcmath" }
 goro-ext-filter = { path = "crates/goro-ext-filter" }
+goro-ext-soap = { path = "crates/goro-ext-soap" }
 goro-ext-iconv = { path = "crates/goro-ext-iconv" }
 goro-ext-gettext = { path = "crates/goro-ext-gettext" }
 goro-ext-sysvipc = { path = "crates/goro-ext-sysvipc" }

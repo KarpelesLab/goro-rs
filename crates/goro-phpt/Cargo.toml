@@ -33,6 +33,7 @@ goro-ext-reflection = { path = "../goro-ext-reflection" }
 goro-ext-zend-test = { path = "../goro-ext-zend-test" }
 goro-ext-bcmath = { path = "../goro-ext-bcmath" }
 goro-ext-filter = { path = "../goro-ext-filter" }
+goro-ext-soap = { path = "../goro-ext-soap" }
 goro-ext-iconv = { path = "../goro-ext-iconv" }
 goro-ext-gettext = { path = "../goro-ext-gettext" }
 goro-ext-sysvipc = { path = "../goro-ext-sysvipc" }

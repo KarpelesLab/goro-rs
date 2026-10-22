@@ -63,6 +63,11 @@ pub fn set_input_filter(f: InputFilter) {
     INPUT_FILTER.with(|c| c.set(Some(f)));
 }
 
+/// SG(request_info) of the current request (None outside a request).
+pub fn request_info() -> Option<RequestInfo> {
+    REQUEST.with(|r| r.borrow().clone())
+}
+
 /// The raw request variables from source `arg` (PARSE_*), when the input
 /// filter received some.
 pub fn raw_input(arg: u8) -> Option<Rc<RefCell<PhpArray>>> {

@@ -33,6 +33,7 @@ pub fn register_extensions(vm: &mut Vm) {
     goro_ext_reflection::register(vm);
     goro_ext_bcmath::register(vm);
     goro_ext_filter::register(vm);
+    goro_ext_soap::register(vm);
     goro_ext_iconv::register(vm);
     goro_ext_gettext::register(vm);
     goro_ext_sysvipc::register(vm);
