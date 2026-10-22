@@ -456,6 +456,21 @@ impl PhpGenerator {
         if let Some(r) = &self.current_ref {
             f(&Value::Reference(r.clone()));
         }
+        f(&self.last_value);
+        f(&self.last_key);
+        for (_, e) in &self.fin {
+            if let Some(e) = e {
+                f(e);
+            }
+        }
+        self.fe.for_each_value(f);
+        // A local symbol table holds the dynamic variables (the global
+        // one is not the frame's).
+        if let Some(fs) = &self.symtab {
+            if fs.owner && !fs.tab.global {
+                f(&Value::Array(fs.tab.arr.clone()));
+            }
+        }
     }
 
     /// Detach everything the frame owns (the generator is garbage).
@@ -479,6 +494,10 @@ impl PhpGenerator {
         if let Some(r) = self.current_ref.take() {
             out.push(Value::Reference(r));
         }
+        out.push(std::mem::replace(&mut self.last_value, Value::Null));
+        out.push(std::mem::replace(&mut self.last_key, Value::Null));
+        out.extend(std::mem::take(&mut self.fin).into_iter().filter_map(|(_, e)| e));
+        self.fe.take_values(&mut out);
         self.state = GeneratorState::Completed;
         out
     }
@@ -893,9 +912,11 @@ impl PhpGenerator {
     fn drive(&mut self, vm: &mut Vm, kick: Kick) -> Result<bool, VmError> {
         // While the delegate runs, a fiber suspended inside it owns what
         // this generator holds too.
+        let mark = vm.gc_frames.len();
         vm.gc_frames.push(crate::gc::GcFrame::for_generator(self));
         let r = self.drive_inner(vm, kick);
-        vm.gc_frames.pop();
+        // (with the pins drive_inner() left)
+        vm.gc_frames.truncate(mark);
         r
     }
 
@@ -929,8 +950,14 @@ impl PhpGenerator {
             let f = path[i].borrow().trace_frame(vm, &Some(site));
             vm.call_stack.push(f);
         }
+        // The generators the loop holds belong to a fiber suspended in it
+        // (unpinned by drive()).
+        let mut root_slot: Option<GenRc> = None;
+        vm.gc_pin(&path);
+        vm.gc_pin(&root_slot);
         let result = loop {
-            let Some(root) = path.last().cloned() else {
+            root_slot = path.last().cloned();
+            let Some(root) = root_slot.as_ref() else {
                 // We are the root again: continue our own body.
                 vm.call_stack.truncate(base_cs);
                 vm.generator_caller = outer_caller.clone();
@@ -2764,10 +2791,13 @@ impl Vm {
                 if completed(g) {
                     return Ok(Value::Null);
                 }
-                let root = self.generator_get_current(g);
-                if let Ok(mut rb) = root.try_borrow_mut() {
-                    rb.send_value = args.first().cloned().unwrap_or(Value::Null);
-                    rb.write_send_value();
+                {
+                    // (not held while it runs)
+                    let root = self.generator_get_current(g);
+                    if let Ok(mut rb) = root.try_borrow_mut() {
+                        rb.send_value = args.first().cloned().unwrap_or(Value::Null);
+                        rb.write_send_value();
+                    }
                 }
                 {
                     let mut gb = match g.try_borrow_mut() {

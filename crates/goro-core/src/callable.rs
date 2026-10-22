@@ -105,7 +105,7 @@ impl Vm {
 
     /// `$this` of the running user frame (zend_get_this_object).
     pub fn current_frame_this(&self) -> Option<Value> {
-        let f = self.gc_frames.last()?;
+        let f = self.gc_frames.iter().rev().find(|f| !f.is_pin())?;
         // SAFETY: the frames in gc_frames are running (each is popped
         // before its function returns).
         unsafe { f.this_object() }

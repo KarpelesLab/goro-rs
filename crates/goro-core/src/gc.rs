@@ -1061,9 +1061,10 @@ fn analyze<'a>(
                 Node::Gen(_) => "gen".into(),
             };
             eprintln!(
-                "gc node {} {} strong={} internal={} extra={} opaque={} live={} kids={:?}",
+                "gc node {} {} ptr={:#x} strong={} internal={} extra={} opaque={} live={} kids={:?}",
                 idx,
                 kind,
+                n.ptr(),
                 n.strong(),
                 g.internal[idx],
                 extra_refs.get(&n.ptr()).copied().unwrap_or(0),
@@ -1081,15 +1082,30 @@ fn analyze<'a>(
 /// for the duration of the call. While its fiber is suspended they belong to
 /// the Fiber object's graph, like Zend's zend_fiber_object_gc scanning the
 /// suspended execute_data chain.
-pub struct GcFrame {
-    cvs: *const Vec<Value>,
-    tmps: *const Vec<Value>,
-    /// The frame's symbol table (its dynamic variables), once it has one.
-    sym: *const Option<crate::symtab::FrameSymtab>,
-    /// The running generator whose frame this is (null for a call frame).
-    generator: *const PhpGenerator,
-    /// CV 0 is `$this`
-    has_this: bool,
+pub(crate) enum GcFrame {
+    /// A user function's frame.
+    Frame {
+        cvs: *const Vec<Value>,
+        tmps: *const Vec<Value>,
+        /// The frame's symbol table (its dynamic variables), once it has one.
+        sym: *const Option<crate::symtab::FrameSymtab>,
+        /// Iterator state of the frame's running foreach loops.
+        fe: *const crate::vm::ForeachState,
+        /// Exceptions pending in the frame's running finally blocks.
+        fin: *const Vec<(usize, Option<Value>)>,
+        /// The argument list its caller keeps while the call runs (see
+        /// Vm::gc_call_args), or null.
+        args: *const Vec<Value>,
+        /// CV 0 is `$this`
+        has_this: bool,
+    },
+    /// The frame of a running generator (a fiber suspended inside it owns
+    /// what the generator holds: zend_generator_frame_gc()).
+    Gen(*const PhpGenerator, bool),
+    /// Values native code holds on its own stack while the call it makes
+    /// runs, which Zend keeps in the call's frame (the closure of a fiber,
+    /// the Generator an internal method runs on).
+    Pin(*const dyn GcPin),
 }
 
 impl GcFrame {
@@ -1097,27 +1113,41 @@ impl GcFrame {
         cvs: &Vec<Value>,
         tmps: &Vec<Value>,
         sym: &Option<crate::symtab::FrameSymtab>,
+        fe: &crate::vm::ForeachState,
+        fin: &Vec<(usize, Option<Value>)>,
+        args: *const Vec<Value>,
         has_this: bool,
     ) -> Self {
-        GcFrame {
+        GcFrame::Frame {
             cvs,
             tmps,
             sym,
-            generator: std::ptr::null(),
+            fe,
+            fin,
+            args,
             has_this,
         }
     }
-    /// The frame of running generator `g` (a fiber suspended inside it
-    /// owns what the generator holds: zend_generator_frame_gc()).
+    /// The frame of running generator `g`.
     pub(crate) fn for_generator(g: &PhpGenerator) -> Self {
         let has_this = g.op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
-        let mut fr = GcFrame::new(&g.cvs, &g.tmps, &g.symtab, has_this);
-        fr.generator = g;
-        fr
+        GcFrame::Gen(g, has_this)
+    }
+    /// Values a native caller holds while its call runs (see the type).
+    pub(crate) fn pin<T: GcPin + 'static>(vals: &T) -> Self {
+        GcFrame::Pin(vals as &dyn GcPin as *const dyn GcPin)
+    }
+    /// A pin rather than a function's frame.
+    #[inline]
+    pub(crate) fn is_pin(&self) -> bool {
+        matches!(self, GcFrame::Pin(_))
     }
     /// The running generator of this frame (as `RefCell::as_ptr`), or 0.
     pub(crate) fn generator_ptr(&self) -> usize {
-        self.generator as usize
+        match self {
+            GcFrame::Gen(g, _) => *g as usize,
+            _ => 0,
+        }
     }
     /// `$this` of the frame (zend_get_this_object), if it has one.
     ///
@@ -1125,11 +1155,16 @@ impl GcFrame {
     /// The frame must still be running (it is unregistered before its
     /// function returns), so its CV vector is alive.
     pub(crate) unsafe fn this_object(&self) -> Option<Value> {
-        if !self.has_this {
-            return None;
-        }
         // SAFETY: see above.
-        let cvs = unsafe { &*self.cvs };
+        let cvs = match self {
+            GcFrame::Frame {
+                cvs,
+                has_this: true,
+                ..
+            } => unsafe { &**cvs },
+            GcFrame::Gen(g, true) => unsafe { &(**g).cvs },
+            _ => return None,
+        };
         match cvs.first().map(|v| v.deref()) {
             Some(v @ Value::Object(_)) => Some(v),
             _ => None,
@@ -1142,23 +1177,86 @@ impl GcFrame {
     /// fiber's stack, which is neither running nor freed until the fiber is
     /// resumed or destroyed (the frame is unregistered before it returns).
     pub(crate) unsafe fn for_each(&self, f: &mut dyn FnMut(&Value)) {
-        // SAFETY: see above.
-        let (cvs, tmps, sym) = unsafe { (&*self.cvs, &*self.tmps, &*self.sym) };
-        if self.generator.is_null() {
-            for v in cvs.iter().chain(tmps.iter()) {
-                f(v);
-            }
-        } else {
+        match self {
+            // SAFETY: see above (the pinned values outlive the pin).
+            GcFrame::Pin(p) => unsafe { (**p).gc_visit(f) },
             // SAFETY: the generator is running in the suspended fiber: its
             // state is idle until the fiber resumes.
-            unsafe { (*self.generator).for_each_gc_child(f) };
-        }
-        // A local symbol table holds the dynamic variables (the global
-        // one is not the frame's).
-        if let Some(fs) = sym {
-            if fs.owner && !fs.tab.global {
-                f(&Value::Array(fs.tab.arr.clone()));
+            GcFrame::Gen(g, _) => unsafe { (**g).for_each_gc_child(f) },
+            GcFrame::Frame {
+                cvs,
+                tmps,
+                sym,
+                fe,
+                fin,
+                args,
+                ..
+            } => {
+                // SAFETY: see above.
+                let (cvs, tmps, sym, fe, fin) = unsafe { (&**cvs, &**tmps, &**sym, &**fe, &**fin) };
+                for v in cvs.iter().chain(tmps.iter()) {
+                    f(v);
+                }
+                if !args.is_null() {
+                    // SAFETY: the caller keeps the list until the call returns.
+                    for v in unsafe { &**args } {
+                        f(v);
+                    }
+                }
+                fe.for_each_value(f);
+                for (_, e) in fin {
+                    if let Some(e) = e {
+                        f(e);
+                    }
+                }
+                // A local symbol table holds the dynamic variables (the
+                // global one is not the frame's).
+                if let Some(fs) = sym {
+                    if fs.owner && !fs.tab.global {
+                        f(&Value::Array(fs.tab.arr.clone()));
+                    }
+                }
             }
+        }
+    }
+}
+
+/// Something native code holds that a suspended fiber owns (see
+/// GcFrame::pin).
+pub(crate) trait GcPin {
+    fn gc_visit(&self, f: &mut dyn FnMut(&Value));
+}
+
+impl GcPin for Value {
+    fn gc_visit(&self, f: &mut dyn FnMut(&Value)) {
+        f(self)
+    }
+}
+
+impl GcPin for Rc<RefCell<PhpGenerator>> {
+    fn gc_visit(&self, f: &mut dyn FnMut(&Value)) {
+        f(&Value::Generator(self.clone()))
+    }
+}
+
+impl GcPin for Rc<RefCell<PhpObject>> {
+    fn gc_visit(&self, f: &mut dyn FnMut(&Value)) {
+        f(&Value::Object(self.clone()))
+    }
+}
+
+impl<T: GcPin> GcPin for Vec<T> {
+    fn gc_visit(&self, f: &mut dyn FnMut(&Value)) {
+        for v in self {
+            v.gc_visit(f);
+        }
+    }
+}
+
+impl<T: GcPin> GcPin for Option<T> {
+    fn gc_visit(&self, f: &mut dyn FnMut(&Value)) {
+        if let Some(v) = self {
+            v.gc_visit(f);
         }
     }
 }

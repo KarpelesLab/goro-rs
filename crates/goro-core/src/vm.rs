@@ -593,6 +593,46 @@ impl ForeachState {
             ref_src
         );
     }
+
+    /// Visit the values the running loops hold (for the cycle collector).
+    pub(crate) fn for_each_value(&self, f: &mut dyn FnMut(&Value)) {
+        for v in self.iter_handles.values() {
+            f(v);
+        }
+        for s in self.snap.values() {
+            for (_, v) in s {
+                f(v);
+            }
+        }
+        for v in self.gen_keys.values() {
+            f(v);
+        }
+        for ks in self.weakmap_iter_keys.values() {
+            for v in ks {
+                f(v);
+            }
+        }
+        for a in self.ref_arrays.values() {
+            f(&Value::Array(a.clone()));
+        }
+    }
+
+    /// Detach the values the loops hold (a garbage generator's frame).
+    pub(crate) fn take_values(&mut self, out: &mut Vec<Value>) {
+        out.extend(std::mem::take(&mut self.iter_handles).into_values());
+        for (_, s) in std::mem::take(&mut self.snap) {
+            out.extend(s.into_iter().map(|(_, v)| v));
+        }
+        out.extend(std::mem::take(&mut self.gen_keys).into_values());
+        for (_, ks) in std::mem::take(&mut self.weakmap_iter_keys) {
+            out.extend(ks);
+        }
+        out.extend(
+            std::mem::take(&mut self.ref_arrays)
+                .into_values()
+                .map(Value::Array),
+        );
+    }
 }
 
 /// A new, empty foreach state (built out of line: the state is large, and
@@ -1308,6 +1348,9 @@ pub struct Vm {
     pub(crate) frame_this: Vec<crate::internal_frames::FrameThis>,
     /// Locals of the running user functions (see gc::GcFrame).
     pub(crate) gc_frames: Vec<crate::gc::GcFrame>,
+    /// The argument list a caller keeps while the user function it is
+    /// calling runs: taken into that function's GcFrame (null otherwise).
+    pub(crate) gc_call_args: *const Vec<Value>,
     /// Deprecations of `callable` type checks (see callable.rs), raised by
     /// flush_callable_deprecations() after the check.
     pub(crate) pending_callable_deprecations: RefCell<Vec<String>>,
@@ -2550,6 +2593,7 @@ impl Vm {
             cv_frames: Vec::new(),
             frame_this: Vec::new(),
             gc_frames: Vec::new(),
+            gc_call_args: std::ptr::null(),
             pending_callable_deprecations: RefCell::new(Vec::new()),
             ucf_call_line: None,
             closure_invoke_call: false,
@@ -3645,10 +3689,21 @@ impl Vm {
     }
 
     pub fn call_callback(&mut self, callback: &Value, args: &[Value]) -> Result<Value, VmError> {
-        let callback = &callback.closure_callable();
-        if let Some(t) = self.internal_static_target(callback) {
+        let callback = callback.closure_callable();
+        if let Some(t) = self.internal_static_target(&callback) {
             return self.call_internal_static(t, args, Vec::new());
         }
+        // An array callable (or a closure's capture list): its elements.
+        // (The copy of the array is not held while the call runs.)
+        let callback = match callback {
+            Value::Array(arr) => {
+                let vals: Vec<Value> = arr.borrow().values().cloned().collect();
+                drop(arr);
+                return self.call_callback_array(vals, args);
+            }
+            v => v,
+        };
+        let callback = &callback;
         match callback {
             Value::String(s) => {
                 if let Some(msg) = Self::forbidden_dynamic_call(s.as_bytes()) {
@@ -3742,152 +3797,6 @@ impl Vm {
                 }
                 Ok(Value::Null)
             }
-            Value::Array(arr) => {
-                let arr_borrow = arr.borrow();
-                let vals: Vec<Value> = arr_borrow.values().cloned().collect();
-                drop(arr_borrow);
-                if vals.len() >= 2 {
-                    let method_name = vals[1].to_php_string();
-                    let method_lower: Vec<u8> = method_name
-                        .as_bytes()
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect();
-                    match &vals[0] {
-                        Value::Object(obj) => {
-                            let class_lower: Vec<u8> = obj
-                                .borrow()
-                                .class_name
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            if let Some(class) = self.classes.get(&class_lower).cloned() {
-                                if let Some(method) = class.methods.get(&method_lower) {
-                                    let op = method.op_array.clone();
-                                    // Run in the method's class scope (parent::, self::, private access).
-                                    let scope = if method.declaring_class.is_empty() {
-                                        class_lower.clone()
-                                    } else {
-                                        method.declaring_class.to_ascii_lowercase()
-                                    };
-                                    self.class_scope_stack.push(scope);
-                                    self.called_class_stack
-                                        .push(obj.borrow().class_name.clone());
-                                    let r = self.execute_fn_with_named_args(
-                                        &op,
-                                        args.to_vec(),
-                                        vec![],
-                                        Some(Value::Object(obj.clone())),
-                                    );
-                                    self.called_class_stack.pop();
-                                    self.class_scope_stack.pop();
-                                    return r;
-                                }
-                                // Trampoline through __call().
-                                if let Some(call) = class.methods.get(b"__call".as_slice()) {
-                                    let op = call.op_array.clone();
-                                    let mut arr = crate::array::PhpArray::new();
-                                    for a in args {
-                                        arr.push(a.deref());
-                                    }
-                                    let call_args = vec![
-                                        Value::String(method_name.clone()),
-                                        Value::Array(Rc::new(RefCell::new(arr))),
-                                    ];
-                                    self.class_scope_stack.push(class_lower.clone());
-                                    self.called_class_stack
-                                        .push(obj.borrow().class_name.clone());
-                                    let r = self.execute_fn_with_named_args(
-                                        &op,
-                                        call_args,
-                                        vec![],
-                                        Some(Value::Object(obj.clone())),
-                                    );
-                                    self.called_class_stack.pop();
-                                    self.class_scope_stack.pop();
-                                    return r;
-                                }
-                            }
-                            // Methods of extension-provided (native) classes.
-                            if let Some((native, h)) = self.find_native_class_handler(&class_lower)
-                            {
-                                if (h.has_method)(&native, &method_lower, false) {
-                                    let called = obj.borrow().class_name.clone();
-                                    let had_exc = self.current_exception.is_some();
-                                    let r = (h.call)(
-                                        self,
-                                        &native,
-                                        &method_lower,
-                                        &called,
-                                        Some(&vals[0]),
-                                        args,
-                                    );
-                                    if !had_exc && self.current_exception.is_some() {
-                                        return Err(VmError {
-                                            message: "Uncaught exception".into(),
-                                            line: self.current_line,
-                                        });
-                                    }
-                                    return Ok(r);
-                                }
-                            } else if let Some(r) =
-                                self.call_object_method(&vals[0], &method_lower, args)
-                            {
-                                // Builtin class method
-                                return Ok(r);
-                            }
-                        }
-                        Value::String(class_name) => {
-                            let class_lower: Vec<u8> = class_name
-                                .as_bytes()
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            if crate::closure::is_closure_fn_name(&class_lower)
-                                || class_lower.starts_with(b"__closure_fcc_")
-                                || (class_lower.windows(2).any(|w| w == b"::")
-                                    && matches!(vals.get(1), Some(Value::Object(_)))
-                                    && vals.len() == 2
-                                    && self.user_functions.contains_key(&class_lower))
-                            {
-                                if let Some(user_fn) =
-                                    self.user_functions.get(&class_lower).cloned()
-                                {
-                                    let mut combined = vals[1..].to_vec();
-                                    combined.extend_from_slice(args);
-                                    return self.execute_fn_with_named_args(
-                                        &user_fn,
-                                        combined,
-                                        vec![],
-                                        None,
-                                    );
-                                }
-                            }
-                            if let Some(class) = self.classes.get(&class_lower).cloned() {
-                                if let Some(method) = class.methods.get(&method_lower) {
-                                    let op = method.op_array.clone();
-                                    return self
-                                        .call_static_method_callback(&class, method, op, args);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                if !vals.is_empty() {
-                    let name = vals[0].to_php_string().as_bytes().to_vec();
-                    let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
-                        let mut combined = vals[1..].to_vec();
-                        combined.extend_from_slice(args);
-                        return self.execute_fn_with_named_args(&user_fn, combined, vec![], None);
-                    }
-                    if let Some(builtin) = self.functions.get(&func_lower).copied() {
-                        return self.call_builtin_from_internal(builtin, &func_lower, args);
-                    }
-                }
-                Ok(Value::Null)
-            }
             Value::Object(obj) => {
                 let class_lower: Vec<u8> = obj
                     .borrow()
@@ -3922,6 +3831,156 @@ impl Vm {
             }
             _ => Ok(Value::Null),
         }
+    }
+
+    /// call_callback() of an array callable (its elements).
+    fn call_callback_array(
+        &mut self,
+        mut vals: Vec<Value>,
+        args: &[Value],
+    ) -> Result<Value, VmError> {
+        if vals.len() >= 2 {
+            let method_name = vals[1].to_php_string();
+            let method_lower: Vec<u8> = method_name
+                .as_bytes()
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect();
+            match &vals[0] {
+                Value::Object(obj) => {
+                    let class_lower: Vec<u8> = obj
+                        .borrow()
+                        .class_name
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+                    if let Some(class) = self.classes.get(&class_lower).cloned() {
+                        if let Some(method) = class.methods.get(&method_lower) {
+                            let op = method.op_array.clone();
+                            // Run in the method's class scope (parent::, self::, private access).
+                            let scope = if method.declaring_class.is_empty() {
+                                class_lower.clone()
+                            } else {
+                                method.declaring_class.to_ascii_lowercase()
+                            };
+                            self.class_scope_stack.push(scope);
+                            self.called_class_stack
+                                .push(obj.borrow().class_name.clone());
+                            let r = self.execute_fn_with_named_args(
+                                &op,
+                                args.to_vec(),
+                                vec![],
+                                Some(Value::Object(obj.clone())),
+                            );
+                            self.called_class_stack.pop();
+                            self.class_scope_stack.pop();
+                            return r;
+                        }
+                        // Trampoline through __call().
+                        if let Some(call) = class.methods.get(b"__call".as_slice()) {
+                            let op = call.op_array.clone();
+                            let mut arr = crate::array::PhpArray::new();
+                            for a in args {
+                                arr.push(a.deref());
+                            }
+                            let call_args = vec![
+                                Value::String(method_name.clone()),
+                                Value::Array(Rc::new(RefCell::new(arr))),
+                            ];
+                            self.class_scope_stack.push(class_lower.clone());
+                            self.called_class_stack
+                                .push(obj.borrow().class_name.clone());
+                            let r = self.execute_fn_with_named_args(
+                                &op,
+                                call_args,
+                                vec![],
+                                Some(Value::Object(obj.clone())),
+                            );
+                            self.called_class_stack.pop();
+                            self.class_scope_stack.pop();
+                            return r;
+                        }
+                    }
+                    // Methods of extension-provided (native) classes.
+                    if let Some((native, h)) = self.find_native_class_handler(&class_lower)
+                    {
+                        if (h.has_method)(&native, &method_lower, false) {
+                            let called = obj.borrow().class_name.clone();
+                            let had_exc = self.current_exception.is_some();
+                            let r = (h.call)(
+                                self,
+                                &native,
+                                &method_lower,
+                                &called,
+                                Some(&vals[0]),
+                                args,
+                            );
+                            if !had_exc && self.current_exception.is_some() {
+                                return Err(VmError {
+                                    message: "Uncaught exception".into(),
+                                    line: self.current_line,
+                                });
+                            }
+                            return Ok(r);
+                        }
+                    } else if let Some(r) =
+                        self.call_object_method(&vals[0], &method_lower, args)
+                    {
+                        // Builtin class method
+                        return Ok(r);
+                    }
+                }
+                Value::String(class_name) => {
+                    let class_lower: Vec<u8> = class_name
+                        .as_bytes()
+                        .iter()
+                        .map(|b| b.to_ascii_lowercase())
+                        .collect();
+                    if crate::closure::is_closure_fn_name(&class_lower)
+                        || class_lower.starts_with(b"__closure_fcc_")
+                        || (class_lower.windows(2).any(|w| w == b"::")
+                            && matches!(vals.get(1), Some(Value::Object(_)))
+                            && vals.len() == 2
+                            && self.user_functions.contains_key(&class_lower))
+                    {
+                        if let Some(user_fn) =
+                            self.user_functions.get(&class_lower).cloned()
+                        {
+                            // (the captured values move to the call)
+                            let mut combined: Vec<Value> = vals.drain(1..).collect();
+                            combined.extend_from_slice(args);
+                            return self.execute_fn_with_named_args(
+                                &user_fn,
+                                combined,
+                                vec![],
+                                None,
+                            );
+                        }
+                    }
+                    if let Some(class) = self.classes.get(&class_lower).cloned() {
+                        if let Some(method) = class.methods.get(&method_lower) {
+                            let op = method.op_array.clone();
+                            return self
+                                .call_static_method_callback(&class, method, op, args);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !vals.is_empty() {
+            let name = vals[0].to_php_string().as_bytes().to_vec();
+            let func_lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                let mut combined: Vec<Value> = vals.drain(1..).collect();
+                combined.extend_from_slice(args);
+                return self.execute_fn_with_named_args(&user_fn, combined, vec![], None);
+            }
+            if let Some(builtin) = self.functions.get(&func_lower).copied() {
+                return self.call_builtin_from_internal(builtin, &func_lower, args);
+            }
+        }
+        Ok(Value::Null)
     }
 
     /// Try to autoload a class by calling registered autoload functions
@@ -7378,6 +7437,21 @@ impl Vm {
 
     /// Scope for a closure invoked imperatively (callbacks): its scope class
     /// and called class (the bound $this's class, else the scope).
+    /// Register values this native code holds while the call it makes runs
+    /// (see gc::GcFrame::pin): a fiber suspended inside that call owns them.
+    /// `vals` must stay in place until [`Self::gc_unpin`] with the mark.
+    #[inline]
+    pub(crate) fn gc_pin<T: crate::gc::GcPin + 'static>(&mut self, vals: &T) -> usize {
+        let mark = self.gc_frames.len();
+        self.gc_frames.push(crate::gc::GcFrame::pin(vals));
+        mark
+    }
+
+    #[inline]
+    pub(crate) fn gc_unpin(&mut self, mark: usize) {
+        self.gc_frames.truncate(mark);
+    }
+
     pub(crate) fn closure_frame_enter(&mut self, op_array: &OpArray, cvs: &[Value]) -> u8 {
         if !crate::closure::is_closure_fn_name(&op_array.name)
             && !op_array.name.starts_with(b"__closure_fcc_")
@@ -8236,7 +8310,10 @@ impl Vm {
         if std::mem::take(&mut self.callback_keep_ref) {
             self.keep_ref_depth = Some(self.call_depth + 1);
         }
+        // (a fiber suspended in the call owns the arguments it holds)
+        self.gc_call_args = &call.args;
         let result = self.execute_op_array(op_array, func_cvs);
+        self.gc_call_args = std::ptr::null();
         self.closure_frame_leave(scope_pushed);
         self.is_global_scope = was_global;
         if pushed {
@@ -19425,14 +19502,17 @@ impl Vm {
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
         // The frame's symbol table, if it gets one.
         let mut sym = None;
-        self.gc_frames
-            .push(crate::gc::GcFrame::new(&cvs, &tmps, &sym, has_this));
         // (boxed, from the states of finished frames: kept off the native
         // stack, and empty)
         let mut fe = match self.foreach_pool.pop() {
             Some(fe) => fe,
             None => new_foreach_state(),
         };
+        // (the argument list its caller keeps, see gc_call_args)
+        let args = std::mem::replace(&mut self.gc_call_args, std::ptr::null());
+        self.gc_frames.push(crate::gc::GcFrame::new(
+            &cvs, &tmps, &sym, &fe, &fin, args, has_this,
+        ));
         let r = self.execute_frame(
             op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin, &mut sym, &mut fe,
         );
@@ -26025,7 +26105,10 @@ impl Vm {
                             // `$x = &f()` & co.: keep the returned reference.
                             self.keep_ref_depth = Some(self.call_depth + 1);
                         }
+                        // (a fiber suspended in the call owns its arguments)
+                        self.gc_call_args = &call.args;
                         let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
+                        self.gc_call_args = std::ptr::null();
                         self.keep_ref_depth = None;
                         if self.pending_return.is_none() {
                             self.pending_return = saved_pending_return.take();
@@ -26991,14 +27074,18 @@ impl Vm {
                         let method = func_name_lower[8..].to_vec();
                         let r = match call.args.first() {
                             Some(Value::Generator(g)) => {
-                                let g = g.clone();
-                                self.generator_method(
-                                    &g,
+                                // The Generator is the call's $this (its
+                                // frame holds it: ZEND_CALL_RELEASE_THIS).
+                                let mark = self.gc_pin(&call.args[0]);
+                                let r = self.generator_method(
+                                    g,
                                     &call.args[0],
                                     &method,
                                     &call.args[1..],
                                     op.line,
-                                )
+                                );
+                                self.gc_unpin(mark);
+                                r
                             }
                             _ => Ok(Value::Null),
                         };
@@ -30142,7 +30229,10 @@ impl Vm {
                             // `$x = &f()` & co.: keep the returned reference.
                             self.keep_ref_depth = Some(self.call_depth + 1);
                         }
+                        // (a fiber suspended in the call owns its arguments)
+                        self.gc_call_args = &call.args;
                         let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
+                        self.gc_call_args = std::ptr::null();
                         self.keep_ref_depth = None;
                         // Restore deferred return state from the outer finally scope
                         if self.pending_return.is_none() {
@@ -58190,7 +58280,18 @@ impl Vm {
                 vm.call_stack.pop();
                 return crate::fiber::FiberOutcome::Threw(exc);
             }
-            match vm.call_callback(&callback, &args_owned) {
+            // The fiber holds its callable and the arguments it was started
+            // with (zend_fiber's fci).
+            let mark = vm.gc_pin(&callback);
+            vm.gc_pin(&args_owned);
+            let r = vm.call_callback(&callback, &args_owned);
+            vm.gc_unpin(mark);
+            match r {
+                // (an internal callback, gc_destructor_fiber, returns with
+                // the exception its destructors threw pending)
+                Ok(_) if vm.current_exception.is_some() => {
+                    crate::fiber::FiberOutcome::Threw(vm.current_exception.take().unwrap())
+                }
                 Ok(v) => crate::fiber::FiberOutcome::Returned(v),
                 Err(e) => {
                     if let Some(exc) = vm.current_exception.take() {
