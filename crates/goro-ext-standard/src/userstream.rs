@@ -116,6 +116,10 @@ pub trait NativeStream {
     }
     /// rewinddir(): ops->seek(0, SEEK_SET) of a directory stream.
     fn rewinddir(&mut self, _vm: &mut Vm) {}
+    /// Whether ops->seek is set (stream_get_meta_data()'s "seekable").
+    fn seekable(&self) -> bool {
+        true
+    }
 }
 
 /// php_stream_wrapper_ops of a builtin wrapper implemented by another
@@ -2389,14 +2393,28 @@ pub(crate) fn alloc_native_stream(
         }
     });
     {
+        let seekable = native.borrow().seekable();
         let mut b = us.borrow_mut();
         b.native = Some(native);
         b.wrapper_label = wrapper_label;
         if no_buffer {
             b.flags |= FLAG_NO_BUFFER;
         }
+        if !seekable {
+            b.flags |= FLAG_NO_SEEK;
+        }
     }
     (fid, us)
+}
+
+/// php_stream_alloc() of a stream of another crate (not opened through a
+/// wrapper, e.g. ZipArchive::getStream()): its resource id.
+pub fn ext_alloc_stream(
+    stream: Rc<RefCell<dyn NativeStream>>,
+    mode: &str,
+    uri: Option<&[u8]>,
+) -> i64 {
+    alloc_native_stream(stream, mode, uri, None, false).0
 }
 
 fn recursion_guard(path: &[u8]) -> bool {
@@ -2978,8 +2996,30 @@ fn copy_stream(
 
 type Handler = fn(&mut Vm, &[Value]) -> Result<Option<Value>, VmError>;
 
+thread_local! {
+    /// The function a builtin is run for when an extension calls it
+    /// (php_error_docref() names the active function).
+    static CALLER_OVERRIDE: RefCell<Option<&'static str>> = const { RefCell::new(None) };
+    static LEAKED_NAMES: RefCell<HashMap<String, &'static str>> = RefCell::new(HashMap::new());
+}
+
+/// Name the next intercepted builtin's diagnostics after `name`.
+pub fn set_caller_override(name: Option<&str>) {
+    let n = name.map(|n| {
+        LEAKED_NAMES.with(|m| {
+            *m.borrow_mut()
+                .entry(n.to_string())
+                .or_insert_with(|| Box::leak(n.to_string().into_boxed_str()))
+        })
+    });
+    CALLER_OVERRIDE.with(|c| *c.borrow_mut() = n);
+}
+
 fn run(vm: &mut Vm, name: &'static str, args: &[Value], h: Handler) -> Result<Value, VmError> {
-    FN_STACK.with(|s| s.borrow_mut().push(name));
+    let shown = CALLER_OVERRIDE
+        .with(|c| c.borrow_mut().take())
+        .unwrap_or(name);
+    FN_STACK.with(|s| s.borrow_mut().push(shown));
     let r = h(vm, args);
     FN_STACK.with(|s| {
         s.borrow_mut().pop();

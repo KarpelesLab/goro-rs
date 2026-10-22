@@ -677,7 +677,8 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                             vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes())
                         }
                         goro_core::array::ArrayKey::String(s) => vm.write_output(
-                            format!("{}  [\"{}\"]=>\n", prefix, s.to_string_lossy()).as_bytes(),
+                            format!("{}  [{}]=>\n", prefix, debug_prop_key(s.as_bytes(), false))
+                                .as_bytes(),
                         ),
                     }
                     var_dump_value(vm, value, indent + 2, seen);

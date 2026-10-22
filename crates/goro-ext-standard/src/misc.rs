@@ -6018,6 +6018,21 @@ fn array_column_fetch(vm: &mut Vm, data: &Value, name: &Value) -> Option<Value> 
     match data {
         Value::Object(o) => {
             let pname: Vec<u8> = name.to_php_string().as_bytes().to_vec();
+            // has_property(ZEND_PROPERTY_EXISTS) + read_property of objects
+            // with their own handlers
+            if let Some(h) = goro_core::vm::native_handlers(o) {
+                if let (Some(has), Some(read)) = (h.has_property, h.read_property) {
+                    match has(vm, o, &pname, 2) {
+                        Some(true) => {
+                            if let Some(v) = read(vm, o, &pname, 2) {
+                                return Some(v.deref());
+                            }
+                        }
+                        Some(false) => return None,
+                        None => {}
+                    }
+                }
+            }
             let class_lower = o.borrow().class_name.to_ascii_lowercase();
             let scope = vm.current_class_scope().map(|c| c.to_ascii_lowercase());
             let (accessible, declared) = match vm.get_class_def(&class_lower).and_then(|c| {
@@ -10250,6 +10265,17 @@ thread_local! {
 /// Context options: wrapper => option => value, in insertion order.
 pub(crate) type CtxOptions =
     goro_core::fxhash::FxIndexMap<Vec<u8>, goro_core::fxhash::FxIndexMap<Vec<u8>, Value>>;
+
+/// Option `wrapper`/`name` of the stream context resource `id`.
+pub(crate) fn stream_context_option(id: i64, wrapper: &[u8], name: &[u8]) -> Option<Value> {
+    STREAM_CONTEXTS.with(|c| {
+        c.borrow()
+            .get(&id)
+            .and_then(|ctx| ctx.options.get(wrapper))
+            .and_then(|o| o.get(name))
+            .cloned()
+    })
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct StreamContext {

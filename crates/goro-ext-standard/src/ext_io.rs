@@ -9,8 +9,29 @@ use goro_core::vm::{Vm, VmError};
 
 /// Call a registered builtin function by its (lowercase) name.
 pub fn call(vm: &mut Vm, name: &[u8], args: &[Value]) -> Result<Value, VmError> {
+    let caller = vm.current_builtin_name();
+    call_with(vm, caller.as_deref(), name, args)
+}
+
+/// `call()` for an extension function or method named `caller`, which
+/// the diagnostics of the called builtin name (like php_error_docref()).
+pub fn call_as(vm: &mut Vm, caller: &str, name: &[u8], args: &[Value]) -> Result<Value, VmError> {
+    call_with(vm, Some(caller), name, args)
+}
+
+fn call_with(
+    vm: &mut Vm,
+    caller: Option<&str>,
+    name: &[u8],
+    args: &[Value],
+) -> Result<Value, VmError> {
     match vm.functions.get(name).copied() {
-        Some(f) => f(vm, args),
+        Some(f) => {
+            crate::misc::userstream::set_caller_override(caller);
+            let r = f(vm, args);
+            crate::misc::userstream::set_caller_override(None);
+            r
+        }
         None => Ok(Value::False),
     }
 }
@@ -26,13 +47,26 @@ fn res_id(v: &Value) -> Option<i64> {
 /// the opened stream's resource id. Without `report`, the warnings of the
 /// open are swallowed.
 pub fn open(vm: &mut Vm, path: &[u8], mode: &str, report: bool) -> Result<Option<i64>, VmError> {
+    let caller = vm.current_builtin_name();
+    open_as(vm, caller.as_deref(), path, mode, report)
+}
+
+/// `open()` on behalf of the extension function or method `caller`.
+pub fn open_as(
+    vm: &mut Vm,
+    caller: Option<&str>,
+    path: &[u8],
+    mode: &str,
+    report: bool,
+) -> Result<Option<i64>, VmError> {
     let saved = if report {
         None
     } else {
         Some(vm.warning_capture.replace(Vec::new()))
     };
-    let r = call(
+    let r = call_with(
         vm,
+        caller,
         b"fopen",
         &[
             Value::String(PhpString::from_bytes(path)),
@@ -172,3 +206,14 @@ pub fn basename(path: &[u8]) -> Vec<u8> {
 
 /// The PHP-visible image type helpers of ext/standard/image.c.
 pub use crate::image::{image_type_from_bytes, image_type_to_mime_type};
+
+/// Streams and wrappers of other crates served by the stream layer.
+pub use crate::misc::userstream::{
+    NativeOpened, NativeStream, NativeWrapperOps, StatBuf, ext_alloc_stream,
+    register_native_wrapper,
+};
+
+/// The value of option `wrapper`/`name` of stream context `ctx`.
+pub fn context_option(ctx: Option<i64>, wrapper: &[u8], name: &[u8]) -> Option<Value> {
+    crate::misc::stream_context_option(ctx?, wrapper, name)
+}
