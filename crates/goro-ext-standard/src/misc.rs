@@ -1036,11 +1036,23 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let class_name = &name_str[..pos];
         let const_name = &name_str[pos + 2..];
         let class_name_stripped = class_name.strip_prefix('\\').unwrap_or(class_name);
-        let class_lower: Vec<u8> = class_name_stripped
+        let mut class_lower: Vec<u8> = class_name_stripped
             .as_bytes()
             .iter()
             .map(|b| b.to_ascii_lowercase())
             .collect();
+        // self/parent/static of the caller (zend_get_class_constant_ex);
+        // without a scope the lookup below reports the error.
+        let scope = vm.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let resolved = match class_lower.as_slice() {
+            b"self" => scope,
+            b"parent" => scope.and_then(|s| vm.classes.get(&s).and_then(|c| c.parent.clone())),
+            b"static" => vm.called_class_stack.last().cloned(),
+            _ => None,
+        };
+        if let Some(r) = resolved {
+            class_lower = r.to_ascii_lowercase();
+        }
         if !vm.classes.contains_key(&class_lower) && !vm.is_known_builtin_class(&class_lower) {
             vm.try_autoload_class(class_name_stripped.as_bytes());
             if vm.current_exception.is_some() {
@@ -2021,8 +2033,20 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                 } else {
                                     Some(Value::Object(obj.clone()))
                                 };
-                                return vm
-                                    .execute_fn_with_named_args(&op, call_args, named_args, this);
+                                // The method runs in its declaring class's scope,
+                                // with the object's class as the called class.
+                                let scope = if method.declaring_class.is_empty() {
+                                    class.name.to_ascii_lowercase()
+                                } else {
+                                    method.declaring_class.to_ascii_lowercase()
+                                };
+                                vm.called_class_stack.push(obj.borrow().class_name.clone());
+                                vm.push_class_scope(scope);
+                                let r =
+                                    vm.execute_fn_with_named_args(&op, call_args, named_args, this);
+                                vm.pop_class_scope();
+                                vm.called_class_stack.pop();
+                                return r;
                             }
                             // Method exists but not accessible - fall through to __call
                         }
@@ -2038,12 +2062,22 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                                 Value::String(PhpString::from_vec(method_name.as_bytes().to_vec())),
                                 Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
                             ];
-                            return vm.execute_fn_with_named_args(
+                            let scope = if call_method.declaring_class.is_empty() {
+                                class.name.to_ascii_lowercase()
+                            } else {
+                                call_method.declaring_class.to_ascii_lowercase()
+                            };
+                            vm.called_class_stack.push(obj.borrow().class_name.clone());
+                            vm.push_class_scope(scope);
+                            let r = vm.execute_fn_with_named_args(
                                 &op,
                                 magic_args,
                                 vec![],
                                 Some(Value::Object(obj.clone())),
                             );
+                            vm.pop_class_scope();
+                            vm.called_class_stack.pop();
+                            return r;
                         }
                     }
                     // Built-in class methods (SPL, ext-provided native classes).
@@ -9333,8 +9367,58 @@ fn register_shutdown_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
     }
     let extra_args: Vec<Value> = args[1..].to_vec();
+    let callback = resolve_stored_callable(vm, callback);
     vm.shutdown_functions.push((callback, extra_args));
     Ok(Value::Null)
+}
+
+/// A callable stored for later (zend_fcall_info_cache): `self`/`parent`/
+/// `static` are resolved now, and a non-static method named by class
+/// keeps the calling `$this`.
+fn resolve_stored_callable(vm: &mut Vm, callback: Value) -> Value {
+    let (class, method) = match callback.deref() {
+        Value::String(s) => {
+            let b = s.as_bytes();
+            match b.windows(2).position(|w| w == b"::") {
+                Some(p) => (b[..p].to_vec(), b[p + 2..].to_vec()),
+                None => return callback,
+            }
+        }
+        Value::Array(a) => {
+            let a = a.borrow();
+            let mut it = a.values();
+            match (it.next().map(|v| v.deref()), it.next().map(|v| v.deref())) {
+                (Some(Value::String(c)), Some(Value::String(m)))
+                    if !m.as_bytes().windows(2).any(|w| w == b"::") =>
+                {
+                    (c.as_bytes().to_vec(), m.as_bytes().to_vec())
+                }
+                _ => return callback,
+            }
+        }
+        _ => return callback,
+    };
+    let r = vm.is_callable_pure(&callback, 0);
+    if !r.ok || r.trampoline.is_some() {
+        return callback;
+    }
+    let mk = |a: Value, m: &[u8]| {
+        let mut arr = goro_core::array::PhpArray::new();
+        arr.push(a);
+        arr.push(Value::String(PhpString::from_vec(m.to_vec())));
+        Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr)))
+    };
+    if let Some(obj) = r.object {
+        return mk(obj, &method);
+    }
+    let kw = class.to_ascii_lowercase();
+    if matches!(kw.as_slice(), b"self" | b"parent" | b"static") {
+        if let Some(cl) = r.calling_scope {
+            let name = vm.classes.get(&cl).map(|c| c.name.clone()).unwrap_or(cl);
+            return mk(Value::String(PhpString::from_vec(name)), &method);
+        }
+    }
+    callback
 }
 fn interface_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     class_exists_impl(vm, args, |k| {
@@ -17667,11 +17751,30 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let const_name = &name_str[pos + 2..];
         // Strip leading backslash from class name
         let class_name_stripped = class_name.strip_prefix('\\').unwrap_or(class_name);
-        let class_lower: Vec<u8> = class_name_stripped
+        let mut class_lower: Vec<u8> = class_name_stripped
             .as_bytes()
             .iter()
             .map(|b| b.to_ascii_lowercase())
             .collect();
+        // zend_get_class_constant_ex(): self/parent/static of the caller
+        let scope = vm.current_class_scope().map(|s| s.to_ascii_lowercase());
+        match class_lower.as_slice() {
+            b"self" => match scope {
+                Some(s) => class_lower = s,
+                None => return Ok(Value::False),
+            },
+            b"parent" => {
+                match scope.and_then(|s| vm.classes.get(&s).and_then(|c| c.parent.clone())) {
+                    Some(p) => class_lower = p.to_ascii_lowercase(),
+                    None => return Ok(Value::False),
+                }
+            }
+            b"static" => match vm.called_class_stack.last() {
+                Some(c) => class_lower = c.to_ascii_lowercase(),
+                None => return Ok(Value::False),
+            },
+            _ => {}
+        }
         if let Some(class) = vm.classes.get(&class_lower) {
             // Trait constants cannot be accessed directly.
             if class.is_trait {

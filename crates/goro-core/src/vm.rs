@@ -3331,6 +3331,28 @@ impl Vm {
         }
     }
 
+    /// A `[C, 'm']` / `"C::m"` callback: the method runs in its declaring
+    /// class's scope with C as the called class (static::).
+    fn call_static_method_callback(
+        &mut self,
+        class: &crate::object::ClassEntry,
+        method: &crate::object::MethodDef,
+        op: Rc<OpArray>,
+        args: &[Value],
+    ) -> Result<Value, VmError> {
+        let scope = if method.declaring_class.is_empty() {
+            class.name.to_ascii_lowercase()
+        } else {
+            method.declaring_class.to_ascii_lowercase()
+        };
+        self.class_scope_stack.push(scope);
+        self.called_class_stack.push(class.name.clone());
+        let r = self.execute_fn_with_named_args(&op, args.to_vec(), vec![], None);
+        self.called_class_stack.pop();
+        self.class_scope_stack.pop();
+        r
+    }
+
     pub fn call_callback(&mut self, callback: &Value, args: &[Value]) -> Result<Value, VmError> {
         let callback = &callback.closure_callable();
         if let Some(t) = self.internal_static_target(callback) {
@@ -3396,8 +3418,20 @@ impl Vm {
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
-                if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
-                    return self.execute_fn_with_named_args(&user_fn, args.to_vec(), vec![], None);
+                // ("Class::method" below: it needs the class scope)
+                let is_static_method = func_lower
+                    .windows(2)
+                    .position(|w| w == b"::")
+                    .is_some_and(|p| self.classes.contains_key(&func_lower[..p]));
+                if !is_static_method {
+                    if let Some(user_fn) = self.user_functions.get(&func_lower).cloned() {
+                        return self.execute_fn_with_named_args(
+                            &user_fn,
+                            args.to_vec(),
+                            vec![],
+                            None,
+                        );
+                    }
                 }
                 if let Some(builtin) = self.functions.get(&func_lower).copied() {
                     return self.call_builtin_from_internal(builtin, &func_lower, args);
@@ -3410,12 +3444,7 @@ impl Vm {
                         if let Some(class) = self.classes.get(class_lower).cloned() {
                             if let Some(method) = class.methods.get(method_lower) {
                                 let op = method.op_array.clone();
-                                return self.execute_fn_with_named_args(
-                                    &op,
-                                    args.to_vec(),
-                                    vec![],
-                                    None,
-                                );
+                                return self.call_static_method_callback(&class, method, op, args);
                             }
                         }
                     }
@@ -3546,12 +3575,8 @@ impl Vm {
                             if let Some(class) = self.classes.get(&class_lower).cloned() {
                                 if let Some(method) = class.methods.get(&method_lower) {
                                     let op = method.op_array.clone();
-                                    return self.execute_fn_with_named_args(
-                                        &op,
-                                        args.to_vec(),
-                                        vec![],
-                                        None,
-                                    );
+                                    return self
+                                        .call_static_method_callback(&class, method, op, args);
                                 }
                             }
                         }
