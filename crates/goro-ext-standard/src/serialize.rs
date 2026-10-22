@@ -1683,6 +1683,12 @@ impl<'a> Parser<'a> {
                 Value::String(_) => Vm::value_to_array_key(key),
                 _ => break false,
             };
+            // A duplicate key: the value it replaces lives on until the
+            // var_hash is destroyed (var_push_dtor_value()).
+            let old = arr.borrow().get(&key).cloned();
+            if let Some(old) = old.filter(|v| !matches!(v, Value::Null)) {
+                self.d.borrow_mut().tmps.push(old);
+            }
             arr.borrow_mut().set(key.clone(), Value::Null);
             let slot = Slot::Arr(arr.clone(), key);
             if !self.unserialize(vm, p, &slot) {
