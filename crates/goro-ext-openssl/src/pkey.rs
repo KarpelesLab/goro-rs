@@ -1886,3 +1886,43 @@ fn dsa_verify(f: &Ffc, q: &Bn, y: &Bn, hash: &[u8], r: &Bn, s: &Bn) -> bool {
     );
     Bn::from_box(&mq.reduce(&v)) == *r
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rsa_crt_matches_full_ladder() {
+        for bits in [512usize, 777, 1024] {
+            let k = generate_rsa(bits).unwrap();
+            assert_eq!(k.n.bits(), bits);
+            let c = Bn::from_be(&[0x42u8; 40]);
+            let crt = k.private_op(&c).unwrap();
+            let nm = Modulus::new(&k.n).unwrap();
+            let full = nm.to_bytes(&nm.pow_secret(&c.to_box(), &k.d.as_ref().unwrap().to_box()));
+            assert_eq!(crt, full, "{bits}");
+            assert_eq!(k.public_op(&Bn::from_be(&crt)).unwrap(), c.pad(k.k()));
+            // Inconsistent CRT values fall back to the full ladder.
+            let mut bad = k.clone();
+            bad.iqmp = Some(Bn::from_u64(3));
+            assert_eq!(bad.private_op(&c).unwrap(), full);
+        }
+    }
+
+    #[test]
+    fn dsa_sign_verify() {
+        let (p, q, g) = generate_dsa_params(1024).unwrap();
+        let (x, y) = generate_ffc(&p, Some(&q), &g);
+        let f = Ffc {
+            p,
+            q: Some(q.clone()),
+            g,
+            pub_key: Some(y.clone()),
+            priv_key: Some(x.clone()),
+        };
+        let h = [9u8; 32];
+        let (r, s) = dsa_sign(&f, &q, &x, &h).unwrap();
+        assert!(dsa_verify(&f, &q, &y, &h, &r, &s));
+        assert!(!dsa_verify(&f, &q, &y, &[8u8; 32], &r, &s));
+    }
+}

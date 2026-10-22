@@ -485,3 +485,64 @@ fn hex_bytes(s: &str) -> Option<Vec<u8>> {
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The same group with its name stripped, so every operation takes the
+    /// generic constant-time engine instead of purecrypto's fixed curve.
+    fn generic(name: &str) -> (Group, Group) {
+        let g = Group::by_name(name).unwrap();
+        let mut e = g.clone();
+        e.name = None;
+        e.oid = None;
+        (g, e)
+    }
+
+    #[test]
+    fn engine_matches_purecrypto_curves() {
+        for name in ["prime256v1", "secp384r1", "secp521r1", "secp256k1", "SM2"] {
+            let (named, eng) = generic(name);
+            for _ in 0..4 {
+                let d = Bn::from_box(&named.random_scalar());
+                let pubk = named.pub_from_priv(&d);
+                assert_eq!(pubk, eng.pub_from_priv(&d), "{name}");
+                let peer = Bn::from_box(&named.random_scalar());
+                let q = named.pub_from_priv(&peer);
+                assert_eq!(named.ecdh(&d, &q), eng.ecdh(&d, &q), "{name}");
+                let hash = [0x5au8; 32];
+                let (r, s) = eng.ecdsa_sign(&d, &hash).unwrap();
+                assert!(named.ecdsa_verify(&pubk, &hash, &r, &s), "{name}");
+                let (r, s) = named.ecdsa_sign(&d, &hash).unwrap();
+                assert!(eng.ecdsa_verify(&pubk, &hash, &r, &s), "{name}");
+                assert!(!eng.ecdsa_verify(&pubk, &[0x5bu8; 32], &r, &s), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn edge_scalars() {
+        let (named, eng) = generic("prime256v1");
+        assert_eq!(eng.pub_from_priv(&Bn::from_u64(1)), eng.generator());
+        let nm1 = Bn::from_nat(&public::sub(&named.n.nat(), &Nat::one()));
+        assert_eq!(named.pub_from_priv(&nm1), eng.pub_from_priv(&nm1));
+        assert_eq!(eng.pub_from_priv(&named.n), Point::Inf);
+        assert_eq!(eng.pub_from_priv(&Bn::default()), Point::Inf);
+    }
+
+    #[test]
+    fn sm2_roundtrip_and_compressed_points() {
+        let g = Group::by_name("SM2").unwrap();
+        let d = Bn::from_box(&g.random_scalar());
+        let q = g.pub_from_priv(&d);
+        let (r, s) = g.sm2_sign(&d, &[7u8; 32]).unwrap();
+        assert!(g.sm2_verify(&q, &[7u8; 32], &r, &s));
+        assert!(!g.sm2_verify(&q, &[8u8; 32], &r, &s));
+        for name in ["secp112r1", "prime239v1", "brainpoolP256t1", "SM2"] {
+            let g = Group::by_name(name).unwrap();
+            let q = g.pub_from_priv(&Bn::from_box(&g.random_scalar()));
+            assert_eq!(g.decode(&g.encode(&q, true)), Some(q), "{name}");
+        }
+    }
+}
