@@ -119,7 +119,9 @@ pub fn sqlite3ResultSetOfSelect(db: &mut Sqlite3, pSelect: SelectId, aff: u8) ->
 }
 
 /// C: `Vdbe * sqlite3GetVdbe(Parse *pParse)`
-pub fn sqlite3GetVdbe(db: &mut Sqlite3) -> Option<Box<Vdbe>> {
+/// Rust: ensures db.pp().pVdbe exists (use db.v() to access it); returns
+/// false where C would return NULL.
+pub fn sqlite3GetVdbe(db: &mut Sqlite3) -> bool {
     todo!("sqlite3GetVdbe")
 }
 

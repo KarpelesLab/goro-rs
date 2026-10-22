@@ -9,7 +9,7 @@ use crate::int::*;
 use std::rc::Rc;
 
 /// C: `Vdbe * sqlite3VdbeCreate(Parse *pParse)`
-pub fn sqlite3VdbeCreate(db: &mut Sqlite3) -> Option<Box<Vdbe>> {
+pub fn sqlite3VdbeCreate(db: &mut Sqlite3) -> Box<Vdbe> {
     todo!("sqlite3VdbeCreate")
 }
 
@@ -29,7 +29,7 @@ pub fn sqlite3VdbeError(
 }
 
 /// C: `void sqlite3VdbeSetSql(Vdbe *p, const char *z, int n, u8 prepFlags)`
-pub fn sqlite3VdbeSetSql(db: &mut Sqlite3, p: &mut Vdbe, z: Option<&[u8]>, n: i32, prepFlags: u8) {
+pub fn sqlite3VdbeSetSql(p: &mut Vdbe, z: &[u8], prepFlags: u8) {
     todo!("sqlite3VdbeSetSql")
 }
 
@@ -49,42 +49,27 @@ pub fn sqlite3VdbeSwap(db: &mut Sqlite3, pA: &mut Vdbe, pB: &mut Vdbe) {
 }
 
 /// C: `int sqlite3VdbeAddOp0(Vdbe *p, int op)`
-pub fn sqlite3VdbeAddOp0(p: &mut Vdbe, op: i32) -> i32 {
+pub fn sqlite3VdbeAddOp0(p: &mut Vdbe, op: u8) -> i32 {
     todo!("sqlite3VdbeAddOp0")
 }
 
 /// C: `int sqlite3VdbeAddOp1(Vdbe *p, int op, int p1)`
-pub fn sqlite3VdbeAddOp1(p: &mut Vdbe, op: i32, p1: i32) -> i32 {
+pub fn sqlite3VdbeAddOp1(p: &mut Vdbe, op: u8, p1: i32) -> i32 {
     todo!("sqlite3VdbeAddOp1")
 }
 
 /// C: `int sqlite3VdbeAddOp2(Vdbe *p, int op, int p1, int p2)`
-pub fn sqlite3VdbeAddOp2(p: &mut Vdbe, op: i32, p1: i32, p2: i32) -> i32 {
+pub fn sqlite3VdbeAddOp2(p: &mut Vdbe, op: u8, p1: i32, p2: i32) -> i32 {
     todo!("sqlite3VdbeAddOp2")
 }
 
 /// C: `int sqlite3VdbeAddOp3(Vdbe *p, int op, int p1, int p2, int p3)`
-pub fn sqlite3VdbeAddOp3(
-    db: &mut Sqlite3,
-    p: &mut Vdbe,
-    op: i32,
-    p1: i32,
-    p2: i32,
-    p3: i32,
-) -> i32 {
+pub fn sqlite3VdbeAddOp3(p: &mut Vdbe, op: u8, p1: i32, p2: i32, p3: i32) -> i32 {
     todo!("sqlite3VdbeAddOp3")
 }
 
 /// C: `int sqlite3VdbeAddOp4Int( Vdbe *p, int op, int p1, int p2, int p3, int p4 )`
-pub fn sqlite3VdbeAddOp4Int(
-    db: &mut Sqlite3,
-    p: &mut Vdbe,
-    op: i32,
-    p1: i32,
-    p2: i32,
-    p3: i32,
-    p4: i32,
-) -> i32 {
+pub fn sqlite3VdbeAddOp4Int(p: &mut Vdbe, op: u8, p1: i32, p2: i32, p3: i32, p4: i32) -> i32 {
     todo!("sqlite3VdbeAddOp4Int")
 }
 
@@ -104,7 +89,7 @@ pub fn sqlite3VdbeGoto(p: &mut Vdbe, iDest: i32) -> i32 {
 }
 
 /// C: `int sqlite3VdbeLoadString(Vdbe *p, int iDest, const char *zStr)`
-pub fn sqlite3VdbeLoadString(p: &mut Vdbe, iDest: i32, zStr: Option<&[u8]>) -> i32 {
+pub fn sqlite3VdbeLoadString(p: &mut Vdbe, iDest: i32, zStr: &[u8]) -> i32 {
     todo!("sqlite3VdbeLoadString")
 }
 
@@ -112,20 +97,21 @@ pub fn sqlite3VdbeLoadString(p: &mut Vdbe, iDest: i32, zStr: Option<&[u8]>) -> i
 pub fn sqlite3VdbeMultiLoad(
     p: &mut Vdbe,
     iDest: i32,
-    zTypes: Option<&[u8]>,
+    zTypes: &[u8],
     args: &[crate::printf::PfArg],
 ) {
     todo!("sqlite3VdbeMultiLoad")
 }
 
 /// C: `int sqlite3VdbeAddOp4( Vdbe *p, int op, int p1, int p2, int p3, const char *zP4, int p4type )`
+/// `p4type` is the C P4_* code (P4_DYNAMIC/P4_STATIC for strings).
 pub fn sqlite3VdbeAddOp4(
     p: &mut Vdbe,
-    op: i32,
+    op: u8,
     p1: i32,
     p2: i32,
     p3: i32,
-    zP4: Option<&[u8]>,
+    p4: P4,
     p4type: i32,
 ) -> i32 {
     todo!("sqlite3VdbeAddOp4")
@@ -155,10 +141,11 @@ pub fn sqlite3ExplainBreakpoint(z1: Option<&[u8]>, z2: Option<&[u8]>) {
 }
 
 /// C: `int sqlite3VdbeExplain(Parse *pParse, u8 bPush, const char *zFmt, ...)`
+/// Returns the address of the OP_Explain (0 if none was added).
 pub fn sqlite3VdbeExplain(
     db: &mut Sqlite3,
     bPush: u8,
-    zFmt: Option<&[u8]>,
+    zFmt: &[u8],
     args: &[crate::printf::PfArg],
 ) -> i32 {
     todo!("sqlite3VdbeExplain")
@@ -170,13 +157,7 @@ pub fn sqlite3VdbeExplainPop(db: &mut Sqlite3) {
 }
 
 /// C: `void sqlite3VdbeAddParseSchemaOp(Vdbe *p, int iDb, char *zWhere, u16 p5)`
-pub fn sqlite3VdbeAddParseSchemaOp(
-    db: &mut Sqlite3,
-    p: &mut Vdbe,
-    iDb: i32,
-    zWhere: Option<&[u8]>,
-    p5: u16,
-) {
+pub fn sqlite3VdbeAddParseSchemaOp(p: &mut Vdbe, iDb: i32, zWhere: ZStr, p5: u16) {
     todo!("sqlite3VdbeAddParseSchemaOp")
 }
 
@@ -191,7 +172,7 @@ pub fn sqlite3VdbeMakeLabel(db: &mut Sqlite3) -> i32 {
 }
 
 /// C: `void sqlite3VdbeResolveLabel(Vdbe *v, int x)`
-pub fn sqlite3VdbeResolveLabel(db: &mut Sqlite3, v: &mut Vdbe, x: i32) {
+pub fn sqlite3VdbeResolveLabel(v: &mut Vdbe, x: i32) {
     todo!("sqlite3VdbeResolveLabel")
 }
 
@@ -206,7 +187,7 @@ pub fn sqlite3VdbeReusable(p: &mut Vdbe) {
 }
 
 /// C: `int sqlite3VdbeAssertMayAbort(Vdbe *v, int mayAbort)`
-pub fn sqlite3VdbeAssertMayAbort(db: &mut Sqlite3, v: &mut Vdbe, mayAbort: i32) -> i32 {
+pub fn sqlite3VdbeAssertMayAbort(v: &mut Vdbe, mayAbort: i32) -> i32 {
     todo!("sqlite3VdbeAssertMayAbort")
 }
 
@@ -302,7 +283,7 @@ pub fn sqlite3VdbeChangeP1(p: &mut Vdbe, addr: i32, val: i32) {
 }
 
 /// C: `void sqlite3VdbeChangeP2(Vdbe *p, int addr, int val)`
-pub fn sqlite3VdbeChangeP2(db: &mut Sqlite3, p: &mut Vdbe, addr: i32, val: i32) {
+pub fn sqlite3VdbeChangeP2(p: &mut Vdbe, addr: i32, val: i32) {
     todo!("sqlite3VdbeChangeP2")
 }
 
@@ -312,7 +293,7 @@ pub fn sqlite3VdbeChangeP3(p: &mut Vdbe, addr: i32, val: i32) {
 }
 
 /// C: `void sqlite3VdbeChangeP5(Vdbe *p, u16 p5)`
-pub fn sqlite3VdbeChangeP5(db: &mut Sqlite3, p: &mut Vdbe, p5: u16) {
+pub fn sqlite3VdbeChangeP5(p: &mut Vdbe, p5: u16) {
     todo!("sqlite3VdbeChangeP5")
 }
 
@@ -342,7 +323,7 @@ pub fn sqlite3VdbeHasSubProgram(pVdbe: &mut Vdbe) -> i32 {
 }
 
 /// C: `int sqlite3VdbeChangeToNoop(Vdbe *p, int addr)`
-pub fn sqlite3VdbeChangeToNoop(db: &mut Sqlite3, p: &mut Vdbe, addr: i32) -> i32 {
+pub fn sqlite3VdbeChangeToNoop(p: &mut Vdbe, addr: i32) -> i32 {
     todo!("sqlite3VdbeChangeToNoop")
 }
 
@@ -363,12 +344,14 @@ pub fn sqlite3VdbeReleaseRegisters(
 }
 
 /// C: `void sqlite3VdbeChangeP4(Vdbe *p, int addr, const char *zP4, int n)`
-pub fn sqlite3VdbeChangeP4(db: &mut Sqlite3, p: &mut Vdbe, addr: i32, zP4: Option<&[u8]>, n: i32) {
+/// Rust: `n` is the C P4 type when p4 is not a string; for strings pass
+/// P4::Z(bytes) and n = P4_DYNAMIC (or P4_STATIC).
+pub fn sqlite3VdbeChangeP4(p: &mut Vdbe, addr: i32, p4: P4, n: i32) {
     todo!("sqlite3VdbeChangeP4")
 }
 
 /// C: `void sqlite3VdbeAppendP4(Vdbe *p, void *pP4, int n)`
-pub fn sqlite3VdbeAppendP4(db: &mut Sqlite3, p: &mut Vdbe, pP4: &mut [u8], n: i32) {
+pub fn sqlite3VdbeAppendP4(p: &mut Vdbe, p4: P4, n: i32) {
     todo!("sqlite3VdbeAppendP4")
 }
 
@@ -378,12 +361,12 @@ pub fn sqlite3VdbeSetP4KeyInfo(db: &mut Sqlite3, pIdx: &IndexRef) {
 }
 
 /// C: `void sqlite3VdbeComment(Vdbe *p, const char *zFormat, ...)`
-pub fn sqlite3VdbeComment(p: &mut Vdbe, zFormat: Option<&[u8]>, args: &[crate::printf::PfArg]) {
+pub fn sqlite3VdbeComment(p: &mut Vdbe, zFormat: &[u8], args: &[crate::printf::PfArg]) {
     todo!("sqlite3VdbeComment")
 }
 
 /// C: `void sqlite3VdbeNoopComment(Vdbe *p, const char *zFormat, ...)`
-pub fn sqlite3VdbeNoopComment(p: &mut Vdbe, zFormat: Option<&[u8]>, args: &[crate::printf::PfArg]) {
+pub fn sqlite3VdbeNoopComment(p: &mut Vdbe, zFormat: &[u8], args: &[crate::printf::PfArg]) {
     todo!("sqlite3VdbeNoopComment")
 }
 
@@ -412,12 +395,12 @@ pub fn sqlite3VdbeDisplayComment(
 }
 
 /// C: `char * sqlite3VdbeDisplayP4(sqlite3 *db, Op *pOp)`
-pub fn sqlite3VdbeDisplayP4(db: &mut Sqlite3, pOp: &mut VdbeOp) -> Option<ZStr> {
+pub fn sqlite3VdbeDisplayP4(pOp: &VdbeOp) -> ZStr {
     todo!("sqlite3VdbeDisplayP4")
 }
 
 /// C: `void sqlite3VdbeUsesBtree(Vdbe *p, int i)`
-pub fn sqlite3VdbeUsesBtree(db: &mut Sqlite3, p: &mut Vdbe, i: i32) {
+pub fn sqlite3VdbeUsesBtree(p: &mut Vdbe, i: i32) {
     todo!("sqlite3VdbeUsesBtree")
 }
 
@@ -504,18 +487,13 @@ pub fn sqlite3VdbeFrameRestore(db: &mut Sqlite3, pFrame: &mut crate::vdbe::VdbeF
 }
 
 /// C: `void sqlite3VdbeSetNumCols(Vdbe *p, int nResColumn)`
-pub fn sqlite3VdbeSetNumCols(db: &mut Sqlite3, p: &mut Vdbe, nResColumn: i32) {
+pub fn sqlite3VdbeSetNumCols(p: &mut Vdbe, nResColumn: i32) {
     todo!("sqlite3VdbeSetNumCols")
 }
 
 /// C: `int sqlite3VdbeSetColName( Vdbe *p, int idx, int var, const char *zName, void (*xDel)(void*) )`
-pub fn sqlite3VdbeSetColName(
-    db: &mut Sqlite3,
-    p: &mut Vdbe,
-    idx: i32,
-    var: i32,
-    zName: Option<&[u8]>,
-) -> i32 {
+/// var is COLNAME_NAME, COLNAME_DECLTYPE, ...
+pub fn sqlite3VdbeSetColName(p: &mut Vdbe, idx: i32, var: i32, zName: &[u8]) -> i32 {
     todo!("sqlite3VdbeSetColName")
 }
 
