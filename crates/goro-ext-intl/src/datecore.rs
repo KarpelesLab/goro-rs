@@ -213,6 +213,19 @@ pub fn tz_display_name(tz_id: &str, daylight: bool, style: i64, locale: &str) ->
     names::display_name(&z, daylight, style, locale)
 }
 
+/// tz_display_name() as of the instant `millis` (the metazone and DST
+/// state of that date) rather than now.
+pub fn tz_display_name_at(
+    tz_id: &str,
+    daylight: bool,
+    style: i64,
+    locale: &str,
+    millis: f64,
+) -> String {
+    let z = zone::create_or_unknown(tz_id);
+    names::display_name_at(&z, daylight, style, locale, millis)
+}
+
 /// timezone_process_timezone_argument(): the time zone ID a `$timezone`
 /// argument designates (null: the default; IntlTimeZone; DateTimeZone; a
 /// string ID). Err(()) when the argument is invalid: the error has been

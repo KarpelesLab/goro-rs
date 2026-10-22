@@ -81,8 +81,27 @@ pub fn iso_basic(offset: i32) -> String {
     s
 }
 
+thread_local! {
+    static REF_TIME: std::cell::Cell<Option<f64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The instant names are chosen for: now, or the one display_name_at()
+/// was given.
+fn ref_now() -> f64 {
+    REF_TIME.with(|r| r.get()).unwrap_or_else(zone::now_millis)
+}
+
+/// The display name of `z` as of the instant `at` (UDate) rather than now
+/// (the metazone and DST state of that date, as a formatter needs).
+pub fn display_name_at(z: &Zone, daylight: bool, style: i64, locale: &str, at: f64) -> String {
+    let old = REF_TIME.with(|r| r.replace(Some(at)));
+    let n = display_name(z, daylight, style, locale);
+    REF_TIME.with(|r| r.set(old));
+    n
+}
+
 fn now_local(z: &Zone) -> DateTime {
-    let now = zone::now_millis();
+    let now = ref_now();
     let (r, d) = z.offsets_utc(now);
     let local = now + (r + d) as f64;
     let days = (local / 86_400_000.0).floor() as i64;
@@ -124,7 +143,7 @@ fn cldr_name(
         return None;
     }
     // intl's own fallback: the GMT format of the zone's offset
-    let now = zone::now_millis();
+    let now = ref_now();
     let (r, d) = z.offsets_utc(now);
     for off in [r + d, r, r + z.dst_savings()] {
         if name == long_gmt(lang, off) || name == short_gmt(lang, off) {
@@ -222,7 +241,7 @@ pub fn generic_location(z: &Zone, lang: &str) -> Option<String> {
 /// TimeZone::getDisplayName(daylight, style, locale)
 pub fn display_name(z: &Zone, daylight: bool, style: i64, locale: &str) -> String {
     let lang = lang_tag(locale);
-    let raw = z.raw_offset();
+    let raw = z.offsets_utc(ref_now()).0;
     match style {
         GENERIC_LOCATION | LONG_GENERIC | SHORT_GENERIC => {
             let name = match style {
@@ -233,7 +252,7 @@ pub fn display_name(z: &Zone, daylight: bool, style: i64, locale: &str) -> Strin
                     // (zones without a metazone, Etc/*, have no such name)
                     let etc = zone::system_index(&z.id)
                         .is_none_or(|i| zone::canonical_of(i).starts_with("Etc/"));
-                    let std = if etc || z.dst_near(zone::now_millis()) {
+                    let std = if etc || z.dst_near(ref_now()) {
                         None
                     } else {
                         let st = if long {
