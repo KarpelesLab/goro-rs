@@ -1,6 +1,7 @@
 //! X.509 certificate / CSR / SPKI PHP functions (openssl.c ports).
 
 use crate::asn1;
+use crate::bn::Bn;
 use crate::cert::{self, Cert, Csr, Ext};
 use crate::digest::Md;
 use crate::name::{self, Ava, Name};
@@ -14,7 +15,6 @@ use goro_core::object::PhpObject;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
-use num_bigint_dig::{BigInt, BigUint, Sign};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -492,12 +492,17 @@ fn print_pubkey(k: Option<PKey>, spki: &[u8], indent: usize) -> String {
                 r.n.bits(),
                 pad2
             ));
-            let mut nb = r.n.to_bytes_be();
+            let mut nb = r.n.to_vec();
             if nb.first().map(|b| b & 0x80 != 0).unwrap_or(false) {
                 nb.insert(0, 0);
             }
             s.push_str(&hex_block(&nb, indent + 8));
-            s.push_str(&format!("{}Exponent: {} (0x{:x})\n", pad2, r.e, r.e));
+            s.push_str(&format!(
+                "{}Exponent: {} (0x{})\n",
+                pad2,
+                r.e.to_dec(),
+                r.e.to_hex_lower()
+            ));
         }
         Some(PKey::Ec(e)) => {
             s.push_str(&format!(
@@ -543,15 +548,32 @@ fn print_exts(exts: &[Ext], indent: usize) -> String {
     s
 }
 
+/// Two's-complement big-endian INTEGER content as (negative, magnitude).
+fn signed_int(b: &[u8]) -> (bool, Bn) {
+    if b.first().is_some_and(|&c| c & 0x80 != 0) {
+        // magnitude = ~b + 1
+        let mut m: Vec<u8> = b.iter().map(|&c| !c).collect();
+        for c in m.iter_mut().rev() {
+            let (v, carry) = c.overflowing_add(1);
+            *c = v;
+            if !carry {
+                break;
+            }
+        }
+        (true, Bn::from_be(&m))
+    } else {
+        (false, Bn::from_be(b))
+    }
+}
+
 fn serial_text(serial: &[u8]) -> String {
-    let bi = BigInt::from_signed_bytes_be(serial);
     if serial.len() <= 8 {
-        let (sign, mag) = bi.to_bytes_be();
+        let (neg, mag) = signed_int(serial);
         let mut v: u64 = 0;
-        for b in mag {
+        for &b in mag.be() {
             v = (v << 8) | b as u64;
         }
-        if sign == Sign::Minus {
+        if neg {
             return format!("-{} (-0x{:x})", v, v);
         }
         return format!("{} (0x{:x})", v, v);
@@ -710,33 +732,28 @@ pub fn openssl_x509_free(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     Ok(Value::Null)
 }
 
-fn bn_hex(v: &BigInt) -> String {
-    let (sign, mag) = v.to_bytes_be();
-    let mut s: String = if v.sign() == Sign::NoSign {
+fn bn_hex(v: &(bool, Bn)) -> String {
+    let (neg, mag) = v;
+    let mut s: String = if mag.is_zero() {
         "0".to_string()
     } else {
-        mag.iter().map(|b| format!("{:02X}", b)).collect()
+        mag.be().iter().map(|b| format!("{:02X}", b)).collect()
     };
-    if sign == Sign::Minus {
+    if *neg && !mag.is_zero() {
         s.insert(0, '-');
     }
     s
 }
 
 /// i2s_ASN1_INTEGER()
-fn i2s_integer(v: &BigInt) -> String {
-    let bits = v.to_bytes_be().1.len() * 8
-        - v.to_bytes_be()
-            .1
-            .first()
-            .map(|b| b.leading_zeros() as usize)
-            .unwrap_or(8);
-    if bits < 128 {
-        v.to_string()
+fn i2s_integer(v: &(bool, Bn)) -> String {
+    let (neg, mag) = v;
+    let neg = *neg && !mag.is_zero();
+    if mag.bits() < 128 {
+        format!("{}{}", if neg { "-" } else { "" }, mag.to_dec())
     } else {
-        let (sign, mag) = v.to_bytes_be();
-        let hex: String = mag.iter().map(|b| format!("{:02X}", b)).collect();
-        if sign == Sign::Minus {
+        let hex: String = mag.be().iter().map(|b| format!("{:02X}", b)).collect();
+        if neg {
             format!("-0x{}", hex)
         } else {
             format!("0x{}", hex)
@@ -853,7 +870,7 @@ pub fn openssl_x509_parse(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
     c.issuer.add_to_array(&mut iss, short);
     r.set(key("issuer"), arr(iss));
     r.set(key("version"), Value::Long(c.version));
-    let serial = BigInt::from_signed_bytes_be(&c.serial);
+    let serial = signed_int(&c.serial);
     r.set(key("serialNumber"), sval(&i2s_integer(&serial)));
     r.set(key("serialNumberHex"), sval(&bn_hex(&serial)));
     r.set(key("validFrom"), zpp::bytes(c.not_before.1.clone()));
@@ -1863,8 +1880,7 @@ fn parse_hex_serial(s: &[u8]) -> Option<Vec<u8>> {
     for c in buf.chunks(2) {
         out.push(u8::from_str_radix(std::str::from_utf8(c).ok()?, 16).ok()?);
     }
-    let bi = BigUint::from_bytes_be(&out);
-    let mut b = bi.to_bytes_be();
+    let mut b = Bn::from_be(&out).to_vec();
     if b.is_empty() {
         b.push(0);
     }

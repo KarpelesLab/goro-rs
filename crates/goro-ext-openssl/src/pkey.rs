@@ -2,14 +2,14 @@
 //! their DER/PEM encodings, generation and the low-level operations.
 
 use crate::asn1::{self, Tlv};
+use crate::bn::{self, Bn, Modulus, public};
 use crate::cipher::{self, CipherSpec};
 use crate::digest::{self, Md};
 use crate::ec::{Group, Point};
 use crate::ecx::{self, EcxKind};
 use crate::err;
-use num_bigint_dig::{BigUint, RandBigInt};
-use num_integer::Integer;
-use num_traits::{One, Zero};
+use purecrypto::bignum::BoxedUint;
+use puremp::Nat;
 
 pub const OID_RSA: &str = "1.2.840.113549.1.1.1";
 pub const OID_RSA_PSS: &str = "1.2.840.113549.1.1.10";
@@ -22,30 +22,30 @@ pub const OID_PRIME_FIELD: &str = "1.2.840.10045.1.1";
 
 #[derive(Clone, Debug)]
 pub struct Rsa {
-    pub n: BigUint,
-    pub e: BigUint,
-    pub d: Option<BigUint>,
-    pub p: Option<BigUint>,
-    pub q: Option<BigUint>,
-    pub dmp1: Option<BigUint>,
-    pub dmq1: Option<BigUint>,
-    pub iqmp: Option<BigUint>,
+    pub n: Bn,
+    pub e: Bn,
+    pub d: Option<Bn>,
+    pub p: Option<Bn>,
+    pub q: Option<Bn>,
+    pub dmp1: Option<Bn>,
+    pub dmq1: Option<Bn>,
+    pub iqmp: Option<Bn>,
 }
 
 #[derive(Clone, Debug)]
 pub struct Ffc {
-    pub p: BigUint,
-    pub q: Option<BigUint>,
-    pub g: BigUint,
-    pub pub_key: Option<BigUint>,
-    pub priv_key: Option<BigUint>,
+    pub p: Bn,
+    pub q: Option<Bn>,
+    pub g: Bn,
+    pub pub_key: Option<Bn>,
+    pub priv_key: Option<Bn>,
 }
 
 #[derive(Clone, Debug)]
 pub struct EcKey {
     pub group: Group,
     pub pub_key: Option<Point>,
-    pub priv_key: Option<BigUint>,
+    pub priv_key: Option<Bn>,
     /// SM2 keys share the EC representation.
     pub sm2: bool,
 }
@@ -71,16 +71,23 @@ pub const KEYTYPE_DSA: i64 = 1;
 pub const KEYTYPE_DH: i64 = 2;
 pub const KEYTYPE_EC: i64 = 3;
 
-fn bn(b: &[u8]) -> BigUint {
-    BigUint::from_bytes_be(b)
+fn bn(b: &[u8]) -> Bn {
+    Bn::from_be(b)
 }
 
-fn bytes_len(n: &BigUint) -> usize {
-    n.bits().div_ceil(8)
+fn bytes_len(n: &Bn) -> usize {
+    n.byte_len()
 }
 
-pub fn pad_be(n: &BigUint, len: usize) -> Vec<u8> {
-    crate::ec::pad(n, len)
+pub fn pad_be(n: &Bn, len: usize) -> Vec<u8> {
+    n.pad(len)
+}
+
+/// FFC public value g^x mod p for a secret x (constant time); `None` when
+/// p has no Montgomery form (even), as BN_mod_exp_mont() fails there.
+fn ffc_pub(g: &Bn, x: &Bn, p: &Bn) -> Option<Bn> {
+    let m = Modulus::new(p)?;
+    Some(Bn::from_box(&m.pow_secret(&g.to_box(), &x.to_box())))
 }
 
 impl PKey {
@@ -194,8 +201,8 @@ impl PKey {
     }
 
     pub fn rsa_private_der(r: &Rsa) -> Vec<u8> {
-        let z = BigUint::zero();
-        let g = |v: &Option<BigUint>| asn1::uint(v.as_ref().unwrap_or(&z));
+        let z = Bn::default();
+        let g = |v: &Option<Bn>| asn1::uint(v.as_ref().unwrap_or(&z));
         asn1::seq(&[
             asn1::int_i64(0),
             asn1::uint(&r.n),
@@ -271,7 +278,7 @@ impl PKey {
 // Decoding
 // -------------------------------------------------------------------------
 
-fn parse_ffc_params(t: &Tlv) -> Option<(BigUint, Option<BigUint>, BigUint)> {
+fn parse_ffc_params(t: &Tlv) -> Option<(Bn, Option<Bn>, Bn)> {
     let c = t.children()?;
     match c.len() {
         2 => Some((c[0].uint(), None, c[1].uint())),
@@ -313,8 +320,8 @@ fn parse_ec_params(t: &Tlv) -> Option<Group> {
         p,
         a,
         b,
-        gx: BigUint::zero(),
-        gy: BigUint::zero(),
+        gx: Bn::default(),
+        gy: Bn::default(),
         n,
         h,
         seed,
@@ -490,12 +497,12 @@ pub fn parse_pkcs8(der: &[u8]) -> Option<PKey> {
         OID_DSA => {
             let (p, q, g) = parse_ffc_params(alg.get(1)?)?;
             let x = asn1::parse_one(inner)?.uint();
-            let y = crate::bn::modpow(&g, &x, &p);
+            let y = ffc_pub(&g, &x, &p);
             Some(PKey::Dsa(Ffc {
                 p,
                 q,
                 g,
-                pub_key: Some(y),
+                pub_key: y,
                 priv_key: Some(x),
             }))
         }
@@ -511,12 +518,12 @@ pub fn parse_pkcs8(der: &[u8]) -> Option<PKey> {
                 )
             };
             let x = asn1::parse_one(inner)?.uint();
-            let y = crate::bn::modpow(&g, &x, &p);
+            let y = ffc_pub(&g, &x, &p);
             Some(PKey::Dh(Ffc {
                 p,
                 q,
                 g,
-                pub_key: Some(y),
+                pub_key: y,
                 priv_key: Some(x),
             }))
         }
@@ -926,22 +933,24 @@ pub fn push_read_error(e: &ReadErr) {
 // Key generation
 // -------------------------------------------------------------------------
 
-fn rand_below(n: &BigUint) -> BigUint {
-    crate::ec::random_below(n)
-}
-
-pub fn mod_inv(a: &BigUint, m: &BigUint) -> Option<BigUint> {
-    use num_bigint_dig::ModInverse;
-    let r = a.clone().mod_inverse(m)?;
-    r.to_biguint()
-}
-
-/// Complete an RSA key from n, e, d, p, q (CRT values).
-fn rsa_with_crt(n: BigUint, e: BigUint, d: BigUint, p: BigUint, q: BigUint) -> Rsa {
-    let one = BigUint::one();
-    let dmp1 = &d % (&p - &one);
-    let dmq1 = &d % (&q - &one);
-    let iqmp = mod_inv(&q, &p).unwrap_or_default();
+/// Complete an RSA key from n, e, d, p, q: dP = d mod (p-1), dQ = d mod
+/// (q-1) (constant-time long division) and qInv = q^-1 mod p (constant-time
+/// binary xgcd).
+fn rsa_with_crt(n: Bn, e: Bn, d: Bn, p: Bn, q: Bn) -> Rsa {
+    let one = BoxedUint::from_u64(1);
+    let db = d.to_box();
+    let crt_exp = |pr: &Bn| {
+        if pr.bits() < 2 {
+            return Bn::default();
+        }
+        Bn::from_box(&db.reduce(&pr.to_box().sub(&one)))
+    };
+    let dmp1 = crt_exp(&p);
+    let dmq1 = crt_exp(&q);
+    let iqmp = Modulus::new(&p)
+        .and_then(|mp| mp.inv(&q.to_box()))
+        .map(|v| Bn::from_box(&v))
+        .unwrap_or_default();
     Rsa {
         n,
         e,
@@ -954,48 +963,76 @@ fn rsa_with_crt(n: BigUint, e: BigUint, d: BigUint, p: BigUint, q: BigUint) -> R
     }
 }
 
-pub fn generate_rsa(bits: usize) -> Option<Rsa> {
-    let e = BigUint::from(65537u32);
-    if bits.is_multiple_of(2) {
-        use purecrypto::bignum::BoxedUint;
-        use purecrypto::rsa::BoxedRsaPrivateKey;
-        let k = BoxedRsaPrivateKey::generate(
-            bits,
-            BoxedUint::from_u64(65537),
-            &mut purecrypto::rng::OsRng,
-            0,
-        );
-        let len = bits.div_ceil(8);
-        let conv = |b: &BoxedUint| BigUint::from_bytes_be(&b.to_be_bytes(len));
-        let n = conv(k.modulus());
-        let d = conv(k.private_exponent());
-        let (p, q) = k.primes()?;
-        let (p, q) = (conv(p), conv(q));
-        return Some(rsa_with_crt(n, e, d, p, q));
+/// A random `bits`-bit probable prime with the top two bits set, from
+/// purecrypto's constant-time prime generator (its runtime-sized variant
+/// is crate-private, so dispatch to the smallest of a few fixed limb widths
+/// that fits; a sparse set keeps the monomorphised code small).
+fn random_prime(bits: usize) -> Option<BoxedUint> {
+    macro_rules! dispatch {
+        ($($l:literal)*) => {
+            $(if bits <= $l * 64 {
+                let p = purecrypto::rsa::random_prime::<$l, _>(
+                    &mut purecrypto::rng::OsRng,
+                    bits,
+                    0,
+                );
+                return Some(BoxedUint::from_limbs(p.as_limbs().to_vec()));
+            })*
+        };
     }
-    // purecrypto only generates even-sized moduli: odd sizes use unbalanced
-    // primes from num-bigint-dig (as OpenSSL does).
-    use num_bigint_dig::RandPrime;
-    let mut rng = rand::thread_rng();
-    let one = BigUint::one();
+    if bits < 2 {
+        return None;
+    }
+    dispatch!(2 4 6 8 12 16 24 32 48 64);
+    None
+}
+
+pub fn generate_rsa(bits: usize) -> Option<Rsa> {
+    use purecrypto::bignum::inv_mod_ct_boxed;
+    use purecrypto::rsa::BoxedRsaPrivateKey;
+    let e = BoxedUint::from_u64(65537);
+    if bits.is_multiple_of(2) && bits >= 512 {
+        let k = BoxedRsaPrivateKey::generate(bits, e.clone(), &mut purecrypto::rng::OsRng, 0);
+        let n = Bn::from_box(k.modulus());
+        let d = Bn::from_box(k.private_exponent());
+        let (p, q) = k.primes()?;
+        let (p, q) = (Bn::from_box(p), Bn::from_box(q));
+        return Some(rsa_with_crt(n, Bn::from_u64(65537), d, p, q));
+    }
+    // purecrypto's key generator only makes even sizes >= 512 bits: odd and
+    // smaller sizes use unbalanced primes (as OpenSSL does) from its
+    // constant-time prime generator, d = e^-1 mod phi from the constant-time
+    // inverse.
+    if bits < 16 {
+        return None;
+    }
+    let one = BoxedUint::from_u64(1);
     loop {
-        let p = rng.gen_prime(bits.div_ceil(2));
-        let q = rng.gen_prime(bits / 2);
-        if p == q {
+        let p = random_prime(bits.div_ceil(2))?;
+        let q = random_prime(bits / 2)?;
+        if bool::from(purecrypto::ct::ConstantTimeEq::ct_eq(&p, &q)) {
             continue;
         }
-        let n = &p * &q;
+        let n = Bn::from_box(&p.mul(&q));
         if n.bits() != bits {
             continue;
         }
-        let phi = (&p - &one) * (&q - &one);
-        let Some(d) = mod_inv(&e, &phi) else { continue };
-        return Some(rsa_with_crt(n, e, d, p, q));
+        let phi = p.sub(&one).mul(&q.sub(&one));
+        let Some(d) = inv_mod_ct_boxed(&e, &phi).into_option() else {
+            continue;
+        };
+        return Some(rsa_with_crt(
+            n,
+            Bn::from_u64(65537),
+            Bn::from_box(&d),
+            Bn::from_box(&p),
+            Bn::from_box(&q),
+        ));
     }
 }
 
 pub fn generate_ec(group: Group) -> EcKey {
-    let d = group.random_scalar();
+    let d = Bn::from_box(&group.random_scalar());
     let q = group.pub_from_priv(&d);
     let sm2 = group.oid == Some(OID_SM2);
     EcKey {
@@ -1006,82 +1043,115 @@ pub fn generate_ec(group: Group) -> EcKey {
     }
 }
 
-/// FFC key generation from (p, q, g): DSA/DH.
-pub fn generate_ffc(p: &BigUint, q: Option<&BigUint>, g: &BigUint) -> (BigUint, BigUint) {
+/// FFC key generation from (p, q, g): DSA/DH. The private value is drawn
+/// from the OS CSPRNG and the public one computed in constant time.
+pub fn generate_ffc(p: &Bn, q: Option<&Bn>, g: &Bn) -> (Bn, Bn) {
     let x = match q {
-        Some(q) => rand_below(q),
-        None => {
-            // private value length = bits(p) - 1
-            let mut rng = rand::thread_rng();
-            let bits = p.bits().saturating_sub(1).max(1);
-            loop {
-                let x = rng.gen_biguint(bits);
-                if !x.is_zero() && &x < p {
-                    break x;
-                }
-            }
-        }
+        Some(q) => bn::random_below(q),
+        // private value length = bits(p) - 1
+        None => bn::random_bits_below(p.bits().saturating_sub(1).max(1), p),
     };
-    let y = crate::bn::modpow(g, &x, p);
+    let x = Bn::from_box(&x);
+    let y = ffc_pub(g, &x, p).unwrap_or_default();
     (x, y)
 }
 
-/// ossl_ffc_params_simple_validate(): basic p/q/g sanity checks.
-pub fn ffc_simple_validate(p: &BigUint, q: Option<&BigUint>, g: &BigUint) -> bool {
-    let one = BigUint::one();
+/// ossl_ffc_params_simple_validate(): basic p/q/g sanity checks (public).
+pub fn ffc_simple_validate(p: &Bn, q: Option<&Bn>, g: &Bn) -> bool {
+    let one = Bn::from_u64(1);
     if p.is_zero() || p.is_even() {
         return false;
     }
-    if g <= &one || g >= &(p - &one) {
+    let pm1 = Bn::from_nat(&public::sub(&p.nat(), &Nat::one()));
+    if g <= &one || g >= &pm1 {
         return false;
     }
     if let Some(q) = q {
         if q.is_zero() || q.is_even() || q >= p {
             return false;
         }
-        if crate::bn::modpow_public(g, q, p) != one {
+        if bn::modpow_public(g, q, p) != one {
             return false;
         }
     }
     true
 }
 
-fn is_probable_prime(n: &BigUint) -> bool {
-    num_bigint_dig::prime::probably_prime(n, 64)
+/// Random public `bits`-bit natural with the top bit (and optionally the
+/// low bit) set.
+fn random_nat(bits: usize, odd: bool) -> Nat {
+    use purecrypto::rng::RngCore;
+    let mut b = vec![0u8; bits.div_ceil(8)];
+    purecrypto::rng::OsRng.fill_bytes(&mut b);
+    let top = (bits - 1) % 8;
+    b[0] &= ((1u16 << (top + 1)) - 1) as u8;
+    b[0] |= 1 << top;
+    if odd {
+        *b.last_mut().unwrap() |= 1;
+    }
+    Bn::from_be(&b).nat()
 }
 
-/// DSA parameter generation (FIPS 186-4 style probable primes).
-pub fn generate_dsa_params(pbits: usize) -> Option<(BigUint, BigUint, BigUint)> {
+const SMALL_PRIMES: &[u64] = &[
+    3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61, 67, 71, 73, 79, 83, 89, 97,
+    101, 103, 107, 109, 113, 127, 131, 137, 139, 149, 151, 157, 163, 167, 173, 179, 181, 191, 193,
+    197, 199, 211, 223, 227, 229, 233, 239, 241, 251, 257, 263, 269, 271, 277, 281, 283, 293, 307,
+    311, 313, 317, 331, 337, 347, 349, 353, 359, 367, 373, 379, 383, 389, 397, 401, 409, 419, 421,
+    431, 433, 439, 443, 449, 457, 461, 463, 467, 479, 487, 491, 499, 503, 509, 521, 523, 541, 547,
+    557, 563, 569, 571, 577, 587, 593, 599, 601, 607, 613, 617, 619, 631, 641, 643, 647, 653, 659,
+    661, 673, 677, 683, 691, 701, 709, 719, 727, 733, 739, 743, 751, 757, 761, 769, 773, 787, 797,
+    809, 811, 821, 823, 827, 829, 839, 853, 857, 859, 863, 877, 881, 883, 887, 907, 911, 919, 929,
+    937, 941, 947, 953, 967, 971, 977, 983, 991, 997,
+];
+
+fn small_rem(n: &Nat, d: u64) -> u64 {
+    public::rem(n, &Nat::from_u64(d)).to_u64().unwrap_or(0)
+}
+
+/// Public probable-prime test (parameters, never key material).
+fn is_probable_prime(n: &Nat) -> bool {
+    public::is_probable_prime(n, 8)
+}
+
+/// DSA parameter generation (FIPS 186-4 style probable primes; public).
+pub fn generate_dsa_params(pbits: usize) -> Option<(Bn, Bn, Bn)> {
     let qbits = if pbits >= 2048 {
         224
     } else {
         224.min(pbits / 2).max(160)
     };
-    let mut rng = rand::thread_rng();
-    let one = BigUint::one();
+    if pbits < qbits + 2 {
+        return None;
+    }
+    let one = Nat::one();
     for _ in 0..10000 {
-        let mut q = rng.gen_biguint(qbits);
-        q |= (BigUint::one() << (qbits - 1)) | BigUint::one();
+        let q = random_nat(qbits, true);
         if !is_probable_prime(&q) {
             continue;
         }
+        let q2 = q.shl(1);
         for _ in 0..4096 {
-            let mut x = rng.gen_biguint(pbits);
-            x |= BigUint::one() << (pbits - 1);
-            let c = &x % (&q << 1usize);
-            let p = &x - &c + &one;
-            if p.bits() < pbits {
+            let x = random_nat(pbits, false);
+            let c = public::rem(&x, &q2);
+            let p = public::sub(&x, &c).add(&one);
+            if (p.bit_len() as usize) < pbits {
+                continue;
+            }
+            if SMALL_PRIMES
+                .iter()
+                .any(|&sp| small_rem(&p, sp) == 0 && p != Nat::from_u64(sp))
+            {
                 continue;
             }
             if is_probable_prime(&p) {
-                let e = (&p - &one) / &q;
-                let mut h = BigUint::from(2u32);
+                let e = public::div(&public::sub(&p, &one), &q);
+                let mut h = Nat::from_u64(2);
                 loop {
-                    let g = crate::bn::modpow_public(&h, &e, &p);
+                    let g = h.modpow(&e, &p);
                     if g > one {
-                        return Some((p, q, g));
+                        return Some((Bn::from_nat(&p), Bn::from_nat(&q), Bn::from_nat(&g)));
                     }
-                    h += &one;
+                    h = h.add(&one);
                 }
             }
         }
@@ -1089,30 +1159,35 @@ pub fn generate_dsa_params(pbits: usize) -> Option<(BigUint, BigUint, BigUint)> 
     None
 }
 
-/// DH safe-prime parameter generation with generator 2.
-pub fn generate_dh_params(pbits: usize) -> Option<(BigUint, BigUint)> {
+/// DH safe-prime parameter generation with generator 2 (public).
+pub fn generate_dh_params(pbits: usize) -> Option<(Bn, Bn)> {
     if pbits < 512 {
         return None;
     }
-    let mut rng = rand::thread_rng();
-    let one = BigUint::one();
-    let g = BigUint::from(2u32);
+    let one = Nat::one();
+    let two = Nat::from_u64(2);
     loop {
         // p = 2q + 1 with p = 23 mod 24 (so that 2 is a quadratic residue
         // generator of the q-order subgroup, as OpenSSL does).
-        let mut q = rng.gen_biguint(pbits - 1);
-        q |= (BigUint::one() << (pbits - 2)) | BigUint::one();
-        let p = (&q << 1usize) + &one;
-        if (&p % BigUint::from(24u32)) != BigUint::from(23u32) {
+        let q = random_nat(pbits - 1, true);
+        let p = q.shl(1).add(&one);
+        if small_rem(&p, 24) != 23 {
             continue;
         }
-        if !num_bigint_dig::prime::probably_prime(&q, 2)
-            || !num_bigint_dig::prime::probably_prime(&p, 2)
+        if SMALL_PRIMES
+            .iter()
+            .any(|&sp| small_rem(&q, sp) == 0 || small_rem(&p, sp) == 0)
+        {
+            continue;
+        }
+        // Cheap Fermat screens before the full tests.
+        if two.modpow(&public::sub(&q, &one), &q) != one
+            || two.modpow(&public::sub(&p, &one), &p) != one
         {
             continue;
         }
         if is_probable_prime(&q) && is_probable_prime(&p) {
-            return Some((p, g));
+            return Some((Bn::from_nat(&p), Bn::from_u64(2)));
         }
     }
 }
@@ -1147,32 +1222,70 @@ impl Rsa {
         bytes_len(&self.n)
     }
 
-    fn public_op(&self, m: &BigUint) -> Option<Vec<u8>> {
-        if self.n.is_even() {
+    /// m^e mod n. The exponent is public; purecrypto's `pow_public` keeps a
+    /// secret base (an encryption's padded plaintext) off any branch or
+    /// table index.
+    fn public_op(&self, m: &Bn) -> Option<Vec<u8>> {
+        let Some(nm) = Modulus::new(&self.n) else {
             err::push(err::LIB_BN, 108, "no inverse");
             return None;
-        }
-        if m >= &self.n {
+        };
+        let mb = m.to_box();
+        if !mb.lt(nm.modulus()) {
             rsa_err(132, "data too large for modulus");
             return None;
         }
         Some(pad_be(
-            &crate::bn::modpow_public(m, &self.e, &self.n),
+            &Bn::from_box(&nm.pow_public(&mb, &self.e.to_box())),
             self.k(),
         ))
     }
 
-    fn private_op(&self, c: &BigUint) -> Option<Vec<u8>> {
-        if self.n.is_even() {
+    /// c^d mod n in constant time. With the CRT components it runs two
+    /// half-width ladders (mod p and q), Garner recombination in Montgomery
+    /// form, and checks the result against the public exponent (falling
+    /// back to the full-width ladder for inconsistent components).
+    ///
+    /// purecrypto's `BoxedRsaPrivateKey` has a blinded CRT private
+    /// operation, but only behind its padding schemes (no raw RSA), so the
+    /// same constant-time primitives are used directly here.
+    fn private_op(&self, c: &Bn) -> Option<Vec<u8>> {
+        let Some(nm) = Modulus::new(&self.n) else {
             err::push(err::LIB_BN, 108, "no inverse");
             return None;
-        }
-        if c >= &self.n {
+        };
+        let cb = c.to_box();
+        if !cb.lt(nm.modulus()) {
             rsa_err(132, "data too large for modulus");
             return None;
         }
         let d = self.d.as_ref()?;
-        Some(pad_be(&crate::bn::modpow(c, d, &self.n), self.k()))
+        if let Some(m) = self.private_op_crt(&nm, &cb) {
+            return Some(nm.to_bytes(&m));
+        }
+        Some(nm.to_bytes(&nm.pow_secret(&cb, &d.to_box())))
+    }
+
+    fn private_op_crt(&self, nm: &Modulus, c: &BoxedUint) -> Option<BoxedUint> {
+        let (p, q) = (self.p.as_ref()?, self.q.as_ref()?);
+        let (dp, dq, qinv) = (
+            self.dmp1.as_ref()?,
+            self.dmq1.as_ref()?,
+            self.iqmp.as_ref()?,
+        );
+        if p.is_zero() || q.is_zero() || dp.is_zero() || dq.is_zero() || qinv.is_zero() {
+            return None;
+        }
+        let mp = Modulus::new(p)?;
+        let mq = Modulus::new(q)?;
+        let m1 = mp.pow_secret(c, &dp.to_box());
+        let m2 = mq.pow_secret(c, &dq.to_box());
+        // h = qInv (m1 - m2) mod p ; m = m2 + h q
+        let h = mp.mul(&qinv.to_box(), &mp.sub(&m1, &m2));
+        let m = nm.reduce(&m2.add(&h.mul(&q.to_box())));
+        // Fault / consistency check: m^e == c (public exponent).
+        let back = nm.pow_public(&m, &self.e.to_box());
+        if back == nm.reduce(c) { Some(m) } else { None }
     }
 
     fn rand_nonzero(len: usize) -> Vec<u8> {
@@ -1456,7 +1569,10 @@ impl Rsa {
         if s >= self.n {
             return false;
         }
-        let em_full = pad_be(&crate::bn::modpow_public(&s, &self.e, &self.n), k);
+        let Some(nm) = Modulus::new(&self.n) else {
+            return false;
+        };
+        let em_full = nm.to_bytes(&nm.pow_public(&s.to_box(), &self.e.to_box()));
         if pss {
             let hlen = md.size();
             let embits = self.n.bits() - 1;
@@ -1507,11 +1623,11 @@ impl Rsa {
 // Generic sign / verify / derive
 // -------------------------------------------------------------------------
 
-fn dsa_sig_der(r: &BigUint, s: &BigUint) -> Vec<u8> {
+fn dsa_sig_der(r: &Bn, s: &Bn) -> Vec<u8> {
     asn1::seq(&[asn1::uint(r), asn1::uint(s)])
 }
 
-fn parse_dsa_sig(sig: &[u8]) -> Option<(BigUint, BigUint)> {
+fn parse_dsa_sig(sig: &[u8]) -> Option<(Bn, Bn)> {
     let t = asn1::parse_one(sig)?;
     if t.tag != asn1::SEQUENCE {
         return None;
@@ -1551,24 +1667,9 @@ impl PKey {
                     (Some(q), Some(x)) => (q, x),
                     _ => return Err(SignErr::Failed),
                 };
-                let qbits = q.bits();
-                let mut z = bn(&hash);
-                if hash.len() * 8 > qbits {
-                    z >>= hash.len() * 8 - qbits;
-                }
-                loop {
-                    let k = rand_below(q);
-                    let r = crate::bn::modpow(&f.g, &k, &f.p) % q;
-                    if r.is_zero() {
-                        continue;
-                    }
-                    let kinv = mod_inv(&k, q).ok_or(SignErr::Failed)?;
-                    let s = (kinv * ((&z + x * &r) % q)) % q;
-                    if s.is_zero() {
-                        continue;
-                    }
-                    return Ok(dsa_sig_der(&r, &s));
-                }
+                dsa_sign(f, q, x, &hash)
+                    .map(|(r, s)| dsa_sig_der(&r, &s))
+                    .ok_or(SignErr::Failed)
             }
             PKey::Ec(e) if e.sm2 => {
                 // OpenSSL 3 SM2 without a distinguishing ID: e = H(M), no Z
@@ -1584,7 +1685,7 @@ impl PKey {
                 let d = e.priv_key.as_ref().ok_or(SignErr::Failed)?;
                 let md = md.unwrap_or(if e.sm2 { Md::Sm3 } else { Md::Sha256 });
                 let hash = md.digest(data);
-                let (r, s) = e.group.ecdsa_sign(d, &hash);
+                let (r, s) = e.group.ecdsa_sign(d, &hash).ok_or(SignErr::Failed)?;
                 Ok(dsa_sig_der(&r, &s))
             }
             PKey::Ecx(x) => {
@@ -1631,19 +1732,11 @@ impl PKey {
                 if r.is_zero() || s.is_zero() || &r >= q || &s >= q {
                     return 0;
                 }
-                let qbits = q.bits();
-                let mut z = bn(&hash);
-                if hash.len() * 8 > qbits {
-                    z >>= hash.len() * 8 - qbits;
+                if dsa_verify(f, q, y, &hash, &r, &s) {
+                    1
+                } else {
+                    0
                 }
-                let Some(w) = mod_inv(&s, q) else { return 0 };
-                let u1 = (&z * &w) % q;
-                let u2 = (&r * &w) % q;
-                let v = ((crate::bn::modpow_public(&f.g, &u1, &f.p)
-                    * crate::bn::modpow_public(y, &u2, &f.p))
-                    % &f.p)
-                    % q;
-                if v == r { 1 } else { 0 }
             }
             PKey::Ec(e) if e.sm2 => {
                 let md = md.unwrap_or(Md::Sm3);
@@ -1695,13 +1788,17 @@ impl PKey {
                     err::push(err::LIB_EVP, 101, "different parameters");
                     return None;
                 }
-                let one = BigUint::one();
-                if y <= &one || y >= &(&a.p - &one) {
+                let one = Bn::from_u64(1);
+                let pm1 = Bn::from_nat(&public::sub(&a.p.nat(), &one.nat()));
+                if y <= &one || y >= &pm1 {
                     err::push(err::LIB_DH, 102, "invalid public key");
                     return None;
                 }
-                let z = crate::bn::modpow(y, x, &a.p);
-                Some(pad_be(&z, bytes_len(&a.p)))
+                let Some(m) = Modulus::new(&a.p) else {
+                    err::push(err::LIB_BN, 102, "called a function you should not call");
+                    return None;
+                };
+                Some(m.to_bytes(&m.pow_secret(&y.to_box(), &x.to_box())))
             }
             (PKey::Ec(a), PKey::Ec(b)) => {
                 if a.group.p != b.group.p || a.group.n != b.group.n {
@@ -1722,11 +1819,70 @@ impl PKey {
     }
 }
 
-/// php_openssl_dh_pub_from_priv(): g^priv mod p
-pub fn dh_pub_from_priv(priv_key: &BigUint, g: &BigUint, p: &BigUint) -> BigUint {
-    crate::bn::modpow(g, priv_key, p)
+/// php_openssl_dh_pub_from_priv(): g^priv mod p (constant time in priv)
+pub fn dh_pub_from_priv(priv_key: &Bn, g: &Bn, p: &Bn) -> Option<Bn> {
+    ffc_pub(g, priv_key, p)
 }
 
-pub fn is_even(n: &BigUint) -> bool {
+pub fn is_even(n: &Bn) -> bool {
     n.is_even()
+}
+
+/// DSA signature over a digest. Mirrors purecrypto's
+/// `DsaPrivateKey::sign_prehash` (which only accepts FIPS 186-4 parameter
+/// sizes and derives RFC 6979 nonces from a compile-time digest type) on its
+/// constant-time primitives: `g^k mod p` by the fixed-window ladder over the
+/// public width of q, `k^-1 mod q` by the constant-time binary xgcd, and
+/// `k^-1 (z + x r) mod q` in Montgomery form.
+fn dsa_sign(f: &Ffc, q: &Bn, x: &Bn, hash: &[u8]) -> Option<(Bn, Bn)> {
+    let mp = Modulus::new(&f.p)?;
+    let mq = Modulus::new(q)?;
+    let qbits = q.bits();
+    let mut z = BoxedUint::from_be_bytes(hash);
+    if hash.len() * 8 > qbits {
+        z = z.shr_bits(hash.len() * 8 - qbits);
+    }
+    let z = mq.reduce(&z);
+    let x = mq.reduce(&x.to_box());
+    let g = f.g.to_box();
+    for _ in 0..64 {
+        let k = bn::random_below(q);
+        let r = mq.reduce(&mp.pow_secret_bits(&g, &k, qbits));
+        if r.is_zero() {
+            continue;
+        }
+        let kinv = mq.inv(&k)?;
+        let s = mq.mul(&kinv, &mq.add(&z, &mq.mul(&x, &r)));
+        if s.is_zero() {
+            continue;
+        }
+        return Some((Bn::from_box(&r), Bn::from_box(&s)));
+    }
+    None
+}
+
+/// DSA verification (public values only).
+fn dsa_verify(f: &Ffc, q: &Bn, y: &Bn, hash: &[u8], r: &Bn, s: &Bn) -> bool {
+    if r.is_zero() || s.is_zero() || r >= q || s >= q {
+        return false;
+    }
+    let (Some(mp), Some(mq)) = (Modulus::new(&f.p), Modulus::new(q)) else {
+        return false;
+    };
+    let qbits = q.bits();
+    let mut z = BoxedUint::from_be_bytes(hash);
+    if hash.len() * 8 > qbits {
+        z = z.shr_bits(hash.len() * 8 - qbits);
+    }
+    let Some(w) = public::inv(&s.nat(), &q.nat()) else {
+        return false;
+    };
+    let w = Bn::from_nat(&w).to_box();
+    let u1 = mq.mul(&z, &w);
+    let u2 = mq.mul(&r.to_box(), &w);
+    let v = mp.mul(
+        &mp.pow_public(&f.g.to_box(), &u1),
+        &mp.pow_public(&y.to_box(), &u2),
+    );
+    Bn::from_box(&mq.reduce(&v)) == *r
 }

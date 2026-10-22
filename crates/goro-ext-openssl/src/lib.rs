@@ -13,6 +13,7 @@ mod conf;
 mod digest;
 mod ec;
 mod ec_curves;
+mod ecw;
 mod ecx;
 mod err;
 mod name;

@@ -1,5 +1,6 @@
 //! PHP functions working on OpenSSLAsymmetricKey objects.
 
+use crate::bn::Bn;
 use crate::digest::Md;
 use crate::ec::{Group, Point};
 use crate::ecx::EcxKind;
@@ -11,8 +12,6 @@ use goro_core::object::PhpObject;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
-use num_bigint_dig::BigUint;
-use num_traits::Zero;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -233,9 +232,9 @@ pub fn from_zval(
 // openssl_pkey_new()
 // -------------------------------------------------------------------------
 
-fn arr_bn(a: &PhpArray, name: &str) -> Option<BigUint> {
+fn arr_bn(a: &PhpArray, name: &str) -> Option<Bn> {
     match a.get(&ArrayKey::String(PhpString::from_bytes(name.as_bytes()))) {
-        Some(Value::String(s)) => Some(BigUint::from_bytes_be(s.as_bytes())),
+        Some(Value::String(s)) => Some(Bn::from_be(s.as_bytes())),
         _ => None,
     }
 }
@@ -312,7 +311,7 @@ fn init_dh(a: &PhpArray) -> Option<(PKey, bool)> {
     }
     if let Some(x) = &priv_key {
         if pub_key.is_none() {
-            pub_key = Some(pkey::dh_pub_from_priv(x, &g, &p));
+            pub_key = pkey::dh_pub_from_priv(x, &g, &p);
         }
     }
     if pub_key.is_some() || priv_key.is_some() {
@@ -378,10 +377,10 @@ fn init_ec(vm: &mut Vm, a: &PhpArray) -> Option<(PKey, bool)> {
             p,
             a: ca,
             b,
-            gx: BigUint::zero(),
-            gy: BigUint::zero(),
+            gx: Bn::default(),
+            gy: Bn::default(),
             n: order,
-            h: BigUint::zero(),
+            h: Bn::default(),
             seed: None,
             name: None,
             oid: None,
@@ -436,7 +435,7 @@ fn init_ec(vm: &mut Vm, a: &PhpArray) -> Option<(PKey, bool)> {
     }
     // EVP_PKEY_check() || EVP_PKEY_public_check_quick()
     let valid = match (&d, &q) {
-        (Some(dv), Some(_)) => !dv.is_zero() && dv < &group.n,
+        (Some(dv), Some(_)) => !dv.is_zero() && dv.to_box().lt(&group.n.to_box()),
         (None, Some(pt)) => *pt != Point::Inf,
         _ => false,
     };
@@ -771,13 +770,9 @@ fn need_key_object(
     }
 }
 
-fn set_bn(arr: &mut PhpArray, name: &str, v: &Option<BigUint>) {
+fn set_bn(arr: &mut PhpArray, name: &str, v: &Option<Bn>) {
     if let Some(v) = v {
-        let b = if v.is_zero() {
-            Vec::new()
-        } else {
-            v.to_bytes_be()
-        };
+        let b = if v.is_zero() { Vec::new() } else { v.to_vec() };
         arr.set(
             ArrayKey::String(PhpString::from_bytes(name.as_bytes())),
             zpp::bytes(b),
@@ -1406,7 +1401,7 @@ pub fn openssl_dh_compute_key(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         p: d.p.clone(),
         q: d.q.clone(),
         g: d.g.clone(),
-        pub_key: Some(BigUint::from_bytes_be(pubs.as_bytes())),
+        pub_key: Some(Bn::from_be(pubs.as_bytes())),
         priv_key: None,
     });
     match key.derive(&peer) {

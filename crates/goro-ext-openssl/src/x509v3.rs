@@ -229,7 +229,7 @@ fn print_policies(value: &[u8]) -> Option<String> {
                                         let ns: Vec<String> = nums
                                             .children()?
                                             .iter()
-                                            .map(|n| n.uint().to_string())
+                                            .map(|n| n.uint().to_dec())
                                             .collect();
                                         out.push_str(&format!(
                                             "    Number{}: {}\n",
@@ -336,7 +336,7 @@ pub fn ext_print(e: &Ext) -> Option<Vec<u8>> {
                 if x.tag == asn1::BOOLEAN {
                     ca = x.content.first().copied().unwrap_or(0) != 0;
                 } else if x.tag == asn1::INTEGER {
-                    pathlen = Some(x.uint().to_string());
+                    pathlen = Some(x.uint().to_dec());
                 }
             }
             let mut s = format!("CA:{}", if ca { "TRUE" } else { "FALSE" });
@@ -429,7 +429,7 @@ pub fn ext_print(e: &Ext) -> Option<Vec<u8>> {
         }
         "2.5.29.54" => {
             let t = asn1::parse_one(v)?;
-            t.uint().to_string()
+            t.uint().to_dec()
         }
         "2.5.29.36" => {
             let t = asn1::parse_one(v)?;
@@ -438,11 +438,11 @@ pub fn ext_print(e: &Ext) -> Option<Vec<u8>> {
                 match f.context() {
                     Some(0) => parts.push(format!(
                         "Require Explicit Policy:{}",
-                        num_bigint_dig::BigUint::from_bytes_be(f.content)
+                        crate::bn::Bn::from_be(f.content).to_dec()
                     )),
                     Some(1) => parts.push(format!(
                         "Inhibit Policy Mapping:{}",
-                        num_bigint_dig::BigUint::from_bytes_be(f.content)
+                        crate::bn::Bn::from_be(f.content).to_dec()
                     )),
                     _ => {}
                 }

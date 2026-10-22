@@ -1,6 +1,6 @@
 //! Tiny DER reader/writer used by the key, certificate and PKCS code.
 
-use num_bigint_dig::BigUint;
+use crate::bn::Bn;
 
 pub const BOOLEAN: u8 = 0x01;
 pub const INTEGER: u8 = 0x02;
@@ -42,8 +42,8 @@ impl<'a> Tlv<'a> {
         parse_all(self.content)
     }
 
-    pub fn uint(&self) -> BigUint {
-        BigUint::from_bytes_be(self.content)
+    pub fn uint(&self) -> Bn {
+        Bn::from_be(self.content)
     }
 
     pub fn oid(&self) -> Option<String> {
@@ -259,8 +259,8 @@ pub fn uint_bytes(b: &[u8]) -> Vec<u8> {
     tlv(INTEGER, &c)
 }
 
-pub fn uint(n: &BigUint) -> Vec<u8> {
-    uint_bytes(&n.to_bytes_be())
+pub fn uint(n: &Bn) -> Vec<u8> {
+    uint_bytes(n.be())
 }
 
 pub fn int_i64(v: i64) -> Vec<u8> {

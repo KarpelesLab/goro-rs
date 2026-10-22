@@ -1,24 +1,31 @@
-//! Generic short-Weierstrass elliptic curve arithmetic over prime fields
-//! (y^2 = x^3 + ax + b mod p) using big integers, plus ECDSA/ECDH helpers.
+//! Prime-field elliptic curve groups (y^2 = x^3 + ax + b mod p), with
+//! ECDSA / SM2 / ECDH.
+//!
+//! Private-key operations run on purecrypto's constant-time code: its boxed
+//! ECDSA/ECDH keys for the curves it implements (`CurveId`), and otherwise
+//! the constant-time engine in [`crate::ecw`] (built on purecrypto's
+//! Montgomery arithmetic) with scalar arithmetic in [`crate::bn::Modulus`].
+//! Public-only work (point decoding and validation, cofactor guessing) uses
+//! puremp.
 
+use crate::bn::{self, Bn, Modulus, public};
 use crate::ec_curves::CURVES;
-use num_bigint_dig::BigUint;
-use num_integer::Integer;
-use num_traits::{One, Zero};
+use crate::ecw::{Curve, Proj};
 use purecrypto::bignum::BoxedUint;
 use purecrypto::ec::{
     BoxedEcdhPrivateKey, BoxedEcdsaPrivateKey, BoxedEcdsaPublicKey, BoxedEcdsaSignature, CurveId,
 };
+use puremp::Nat;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
-    pub p: BigUint,
-    pub a: BigUint,
-    pub b: BigUint,
-    pub gx: BigUint,
-    pub gy: BigUint,
-    pub n: BigUint,
-    pub h: BigUint,
+    pub p: Bn,
+    pub a: Bn,
+    pub b: Bn,
+    pub gx: Bn,
+    pub gy: Bn,
+    pub n: Bn,
+    pub h: Bn,
     pub seed: Option<Vec<u8>>,
     /// Short name of the matching built-in curve.
     pub name: Option<&'static str>,
@@ -30,11 +37,11 @@ pub struct Group {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Point {
     Inf,
-    Aff(BigUint, BigUint),
+    Aff(Bn, Bn),
 }
 
-fn hex(s: &str) -> BigUint {
-    BigUint::parse_bytes(s.as_bytes(), 16).unwrap_or_default()
+fn hex(s: &str) -> Bn {
+    Bn::from_hex(s)
 }
 
 /// Names returned by openssl_get_curve_names() (built-in prime curves).
@@ -61,7 +68,7 @@ impl Group {
             gx: hex(c.gx),
             gy: hex(c.gy),
             n: hex(c.n),
-            h: BigUint::from(c.h),
+            h: Bn::from_u64(c.h as u64),
             seed: if c.seed.is_empty() {
                 None
             } else {
@@ -115,9 +122,12 @@ impl Group {
         })
     }
 
-    fn pc_private(&self, d: &BigUint) -> Option<(CurveId, Vec<u8>)> {
+    fn pc_private(&self, d: &Bn) -> Option<(CurveId, Vec<u8>)> {
         let id = self.curve_id()?;
-        Some((id, pad(d, id.order_len())))
+        if d.byte_len() > id.order_len() {
+            return None;
+        }
+        Some((id, d.pad(id.order_len())))
     }
 
     fn pc_public(&self, q: &Point) -> Option<(CurveId, BoxedEcdsaPublicKey)> {
@@ -128,7 +138,7 @@ impl Group {
 
     /// Field element size in bytes.
     pub fn field_len(&self) -> usize {
-        self.p.bits().div_ceil(8)
+        self.p.byte_len()
     }
 
     pub fn order_bits(&self) -> usize {
@@ -139,151 +149,57 @@ impl Group {
         Point::Aff(self.gx.clone(), self.gy.clone())
     }
 
-    fn md(&self, x: &BigUint) -> BigUint {
-        x % &self.p
+    fn engine(&self) -> Option<Curve> {
+        Curve::new(&self.p, &self.a, &self.b)
     }
 
-    fn sub(&self, a: &BigUint, b: &BigUint) -> BigUint {
-        let a = a % &self.p;
-        let b = b % &self.p;
-        if a >= b { a - b } else { &self.p - (b - a) }
+    fn order(&self) -> Option<Modulus> {
+        Modulus::new(&self.n)
     }
 
-    fn inv(&self, a: &BigUint) -> BigUint {
-        // p is prime: a^(p-2)
-        let e = &self.p - BigUint::from(2u32);
-        a.modpow(&e, &self.p)
+    fn proj(&self, c: &Curve, pt: &Point) -> Proj {
+        match pt {
+            Point::Inf => c.identity(),
+            Point::Aff(x, y) => c.point(x, y),
+        }
+    }
+
+    fn from_proj(c: &Curve, p: &Proj) -> Point {
+        match c.affine(p) {
+            Some((x, y)) => Point::Aff(x, y),
+            None => Point::Inf,
+        }
+    }
+
+    /// `k * pt` in constant time in `k`. The scalar is reduced mod the
+    /// order (points live in the order-n subgroup), so the ladder runs over
+    /// the public width of n.
+    fn smul(&self, c: &Curve, k: &BoxedUint, pt: &Proj) -> Proj {
+        match self.order() {
+            Some(nm) => c.smul(&nm.reduce(k), self.n.bits(), pt),
+            None => c.smul(k, 64 * k.limbs().max(c.limbs()), pt),
+        }
+    }
+
+    /// x^3 + ax + b mod p (public values).
+    fn rhs(&self, x: &Nat) -> Nat {
+        let p = self.p.nat();
+        let x3 = x.mul(x).mul(x);
+        public::rem(&x3.add(&self.a.nat().mul(x)).add(&self.b.nat()), &p)
     }
 
     pub fn on_curve(&self, pt: &Point) -> bool {
         match pt {
             Point::Inf => true,
             Point::Aff(x, y) => {
-                if x >= &self.p || y >= &self.p {
+                if self.p.is_zero() || x >= &self.p || y >= &self.p {
                     return false;
                 }
-                let lhs = self.md(&(y * y));
-                let rhs = self.md(&(x * x * x + &self.a * x + &self.b));
-                lhs == rhs
+                let p = self.p.nat();
+                let y = y.nat();
+                public::rem(&y.mul(&y), &p) == self.rhs(&x.nat())
             }
         }
-    }
-
-    pub fn add(&self, p1: &Point, p2: &Point) -> Point {
-        match (p1, p2) {
-            (Point::Inf, q) | (q, Point::Inf) => q.clone(),
-            (Point::Aff(x1, y1), Point::Aff(x2, y2)) => {
-                if x1 == x2 {
-                    if self.md(&(y1 + y2)).is_zero() {
-                        return Point::Inf;
-                    }
-                    return self.double(p1);
-                }
-                let l = self.md(&(self.sub(y2, y1) * self.inv(&self.sub(x2, x1))));
-                let x3 = self.sub(&self.sub(&(&l * &l), x1), x2);
-                let y3 = self.sub(&(&l * self.sub(x1, &x3)), y1);
-                Point::Aff(x3, y3)
-            }
-        }
-    }
-
-    pub fn double(&self, p1: &Point) -> Point {
-        match p1 {
-            Point::Inf => Point::Inf,
-            Point::Aff(x, y) => {
-                if y.is_zero() {
-                    return Point::Inf;
-                }
-                let num = self.md(&(BigUint::from(3u32) * x * x + &self.a));
-                let l = self.md(&(num * self.inv(&self.md(&(BigUint::from(2u32) * y)))));
-                let x3 = self.sub(&(&l * &l), &self.md(&(BigUint::from(2u32) * x)));
-                let y3 = self.sub(&(&l * self.sub(x, &x3)), y);
-                Point::Aff(x3, y3)
-            }
-        }
-    }
-
-    /// Scalar multiplication using Jacobian coordinates.
-    pub fn mul(&self, k: &BigUint, pt: &Point) -> Point {
-        let (px, py) = match pt {
-            Point::Inf => return Point::Inf,
-            Point::Aff(x, y) => (x.clone(), y.clone()),
-        };
-        if k.is_zero() {
-            return Point::Inf;
-        }
-        // Jacobian (X, Y, Z) with Z=0 meaning infinity
-        let p = &self.p;
-        let one = BigUint::one();
-        let mut r: (BigUint, BigUint, BigUint) = (one.clone(), one.clone(), BigUint::zero());
-        for byte in k.to_bytes_be() {
-            for bit in (0..8).rev() {
-                r = self.jdouble(&r);
-                if (byte >> bit) & 1 == 1 {
-                    r = self.jadd_affine(&r, &px, &py);
-                }
-            }
-        }
-        if r.2.is_zero() {
-            return Point::Inf;
-        }
-        let zi = self.inv(&r.2);
-        let zi2 = (&zi * &zi) % p;
-        let zi3 = (&zi2 * &zi) % p;
-        Point::Aff((&r.0 * zi2) % p, (&r.1 * zi3) % p)
-    }
-
-    fn jdouble(&self, q: &(BigUint, BigUint, BigUint)) -> (BigUint, BigUint, BigUint) {
-        let p = &self.p;
-        let (x, y, z) = q;
-        if z.is_zero() || y.is_zero() {
-            return (BigUint::one(), BigUint::one(), BigUint::zero());
-        }
-        let yy = (y * y) % p;
-        let s = (BigUint::from(4u32) * x * &yy) % p;
-        let zz = (z * z) % p;
-        let m = (BigUint::from(3u32) * x * x + &self.a * ((&zz * &zz) % p)) % p;
-        let x3 = self.sub(&((&m * &m) % p), &((BigUint::from(2u32) * &s) % p));
-        let y3 = self.sub(
-            &((&m * self.sub(&s, &x3)) % p),
-            &((BigUint::from(8u32) * &yy * &yy) % p),
-        );
-        let z3 = (BigUint::from(2u32) * y * z) % p;
-        (x3, y3, z3)
-    }
-
-    fn jadd_affine(
-        &self,
-        q: &(BigUint, BigUint, BigUint),
-        x2: &BigUint,
-        y2: &BigUint,
-    ) -> (BigUint, BigUint, BigUint) {
-        let p = &self.p;
-        let (x1, y1, z1) = q;
-        if z1.is_zero() {
-            return (x2.clone(), y2.clone(), BigUint::one());
-        }
-        let z1z1 = (z1 * z1) % p;
-        let u2 = (x2 * &z1z1) % p;
-        let s2 = (y2 * z1 * &z1z1) % p;
-        let h = self.sub(&u2, x1);
-        let r = self.sub(&s2, y1);
-        if h.is_zero() {
-            if r.is_zero() {
-                return self.jdouble(q);
-            }
-            return (BigUint::one(), BigUint::one(), BigUint::zero());
-        }
-        let hh = (&h * &h) % p;
-        let hhh = (&hh * &h) % p;
-        let v = (x1 * &hh) % p;
-        let x3 = self.sub(
-            &self.sub(&((&r * &r) % p), &hhh),
-            &((BigUint::from(2u32) * &v) % p),
-        );
-        let y3 = self.sub(&((&r * self.sub(&v, &x3)) % p), &((y1 * &hhh) % p));
-        let z3 = (z1 * &h) % p;
-        (x3, y3, z3)
     }
 
     /// Point to octet string (SEC1).
@@ -295,11 +211,11 @@ impl Group {
                 let mut out = Vec::with_capacity(1 + 2 * fl);
                 if compressed {
                     out.push(if y.is_odd() { 3 } else { 2 });
-                    out.extend(pad(x, fl));
+                    out.extend(x.pad(fl));
                 } else {
                     out.push(4);
-                    out.extend(pad(x, fl));
-                    out.extend(pad(y, fl));
+                    out.extend(x.pad(fl));
+                    out.extend(y.pad(fl));
                 }
                 out
             }
@@ -309,28 +225,27 @@ impl Group {
     /// Octet string to point (EC_POINT_oct2point); validates the point.
     pub fn decode(&self, b: &[u8]) -> Option<Point> {
         let fl = self.field_len();
-        if b.is_empty() {
+        if b.is_empty() || self.p.is_zero() {
             return None;
         }
         let pt = match b[0] {
             0 if b.len() == 1 => return Some(Point::Inf),
-            4 | 6 | 7 if b.len() == 1 + 2 * fl => Point::Aff(
-                BigUint::from_bytes_be(&b[1..1 + fl]),
-                BigUint::from_bytes_be(&b[1 + fl..]),
-            ),
+            4 | 6 | 7 if b.len() == 1 + 2 * fl => {
+                Point::Aff(Bn::from_be(&b[1..1 + fl]), Bn::from_be(&b[1 + fl..]))
+            }
             2 | 3 if b.len() == 1 + fl => {
-                let x = BigUint::from_bytes_be(&b[1..]);
+                let x = Bn::from_be(&b[1..]);
                 if x >= self.p {
                     return None;
                 }
-                let rhs = self.md(&(&x * &x * &x + &self.a * &x + &self.b));
+                let rhs = self.rhs(&x.nat());
                 let y = self.sqrt(&rhs)?;
-                let y = if y.is_odd() == (b[0] == 3) {
+                let y = if y.bit(0) == (b[0] == 3) {
                     y
                 } else {
-                    &self.p - y
+                    public::sub(&self.p.nat(), &y)
                 };
-                Point::Aff(x, y)
+                Point::Aff(x, Bn::from_nat(&y))
             }
             _ => return None,
         };
@@ -340,59 +255,59 @@ impl Group {
         Some(pt)
     }
 
-    /// Modular square root (Tonelli-Shanks).
-    fn sqrt(&self, a: &BigUint) -> Option<BigUint> {
-        let p = &self.p;
+    /// Modular square root of a public value (Tonelli-Shanks).
+    fn sqrt(&self, a: &Nat) -> Option<Nat> {
+        let p = self.p.nat();
         if a.is_zero() {
-            return Some(BigUint::zero());
+            return Some(Nat::zero());
         }
-        let one = BigUint::one();
-        let pm1 = p - &one;
-        let legendre = a.modpow(&(&pm1 >> 1), p);
-        if legendre != one {
+        let one = Nat::one();
+        let pm1 = public::sub(&p, &one);
+        let half = pm1.shr(1);
+        if a.modpow(&half, &p) != one {
             return None;
         }
-        if (p % BigUint::from(4u32)) == BigUint::from(3u32) {
-            return Some(a.modpow(&((p + &one) >> 2), p));
+        if public::rem(&p, &Nat::from_u64(4)) == Nat::from_u64(3) {
+            return Some(a.modpow(&p.add(&one).shr(2), &p));
         }
-        let mut q = pm1.clone();
-        let mut s = 0u32;
-        while q.is_even() {
-            q >>= 1;
-            s += 1;
-        }
-        let mut z = BigUint::from(2u32);
-        while z.modpow(&(&pm1 >> 1), p) != pm1 {
-            z += &one;
+        let s = pm1.trailing_zeros();
+        let q = pm1.shr(s);
+        let mut z = Nat::from_u64(2);
+        while z.modpow(&half, &p) != pm1 {
+            z = z.add(&one);
+            if z >= p {
+                return None;
+            }
         }
         let mut m = s;
-        let mut c = z.modpow(&q, p);
-        let mut t = a.modpow(&q, p);
-        let mut r = a.modpow(&((&q + &one) >> 1), p);
+        let mut c = z.modpow(&q, &p);
+        let mut t = a.modpow(&q, &p);
+        let mut r = a.modpow(&q.add(&one).shr(1), &p);
         while t != one {
-            let mut i = 0u32;
+            let mut i = 0u64;
             let mut tt = t.clone();
             while tt != one {
-                tt = (&tt * &tt) % p;
+                tt = public::rem(&tt.mul(&tt), &p);
                 i += 1;
                 if i == m {
                     return None;
                 }
             }
-            let b = c.modpow(&(BigUint::one() << (m - i - 1) as usize), p);
+            let b = c.modpow(&one.shl(m - i - 1), &p);
             m = i;
-            c = (&b * &b) % p;
-            t = (&t * &c) % p;
-            r = (&r * &b) % p;
+            c = public::rem(&b.mul(&b), &p);
+            t = public::rem(&t.mul(&c), &p);
+            r = public::rem(&r.mul(&b), &p);
         }
         Some(r)
     }
 
-    pub fn random_scalar(&self) -> BigUint {
-        random_below(&self.n)
+    /// Fresh secret scalar in [1, n).
+    pub fn random_scalar(&self) -> BoxedUint {
+        bn::random_below(&self.n)
     }
 
-    pub fn pub_from_priv(&self, d: &BigUint) -> Point {
+    pub fn pub_from_priv(&self, d: &Bn) -> Point {
         if let Some((id, db)) = self.pc_private(d) {
             if let Ok(k) = BoxedEcdsaPrivateKey::from_bytes(id, &db) {
                 if let Some(p) = self.decode(&k.public_key().to_sec1()) {
@@ -400,130 +315,154 @@ impl Group {
                 }
             }
         }
-        self.mul(d, &self.generator())
+        let Some(c) = self.engine() else {
+            return Point::Inf;
+        };
+        let g = self.proj(&c, &self.generator());
+        Self::from_proj(&c, &self.smul(&c, &d.to_box(), &g))
     }
 
     /// Truncate a hash to the bit length of the order (ECDSA e value).
-    fn hash_to_int(&self, hash: &[u8]) -> BigUint {
+    fn hash_to_int(&self, hash: &[u8]) -> BoxedUint {
         let nbits = self.n.bits();
-        let mut e = BigUint::from_bytes_be(hash);
+        let e = BoxedUint::from_be_bytes(hash);
         let hbits = hash.len() * 8;
         if hbits > nbits {
-            e >>= hbits - nbits;
+            e.shr_bits(hbits - nbits)
+        } else {
+            e
         }
-        e
     }
 
     /// ECDSA sign, returning (r, s).
-    pub fn ecdsa_sign(&self, d: &BigUint, hash: &[u8]) -> (BigUint, BigUint) {
+    pub fn ecdsa_sign(&self, d: &Bn, hash: &[u8]) -> Option<(Bn, Bn)> {
         if let Some((id, db)) = self.pc_private(d) {
             if let Ok(k) = BoxedEcdsaPrivateKey::from_bytes(id, &db) {
                 if let Ok(sig) = k.sign_prehash::<purecrypto::hash::Sha256>(hash) {
-                    return (
-                        BigUint::from_bytes_be(&sig.r_bytes(id)),
-                        BigUint::from_bytes_be(&sig.s_bytes(id)),
-                    );
+                    return Some((Bn::from_be(&sig.r_bytes(id)), Bn::from_be(&sig.s_bytes(id))));
                 }
             }
         }
-        let e = self.hash_to_int(hash);
-        loop {
+        // Constant-time generic path: k*G on the ecw engine, k^-1 by the
+        // constant-time binary xgcd, s = k^-1 (e + r d) in Montgomery form.
+        let c = self.engine()?;
+        let nm = self.order()?;
+        let e = nm.reduce(&self.hash_to_int(hash));
+        let d = nm.reduce(&d.to_box());
+        if bool::from(d.ct_is_zero()) {
+            return None;
+        }
+        let g = self.proj(&c, &self.generator());
+        for _ in 0..64 {
             let k = self.random_scalar();
-            let r = match self.mul(&k, &self.generator()) {
-                Point::Aff(x, _) => x % &self.n,
-                Point::Inf => continue,
+            let Some((x, _)) = c.affine(&c.smul(&k, self.n.bits(), &g)) else {
+                continue;
             };
+            let r = nm.reduce(&x.to_box());
             if r.is_zero() {
                 continue;
             }
-            let kinv = k.modpow(&(&self.n - BigUint::from(2u32)), &self.n);
-            let s = (kinv * ((&e + &r * d) % &self.n)) % &self.n;
+            let kinv = nm.inv(&k)?;
+            let s = nm.mul(&kinv, &nm.add(&e, &nm.mul(&r, &d)));
             if s.is_zero() {
                 continue;
             }
-            return (r, s);
+            return Some((Bn::from_box(&r), Bn::from_box(&s)));
         }
+        None
     }
 
-    pub fn ecdsa_verify(&self, q: &Point, hash: &[u8], r: &BigUint, s: &BigUint) -> bool {
+    /// x coordinate of u1*G + u2*Q (public scalars).
+    fn double_mul_x(&self, u1: &BoxedUint, u2: &BoxedUint, q: &Point) -> Option<Bn> {
+        let c = self.engine()?;
+        let g = self.proj(&c, &self.generator());
+        let qp = self.proj(&c, q);
+        let bits = self.n.bits();
+        let sum = c.padd(&c.smul(u1, bits, &g), &c.smul(u2, bits, &qp));
+        c.affine(&sum).map(|(x, _)| x)
+    }
+
+    pub fn ecdsa_verify(&self, q: &Point, hash: &[u8], r: &Bn, s: &Bn) -> bool {
         if r.is_zero() || s.is_zero() || r >= &self.n || s >= &self.n {
             return false;
         }
         if let Some((_, k)) = self.pc_public(q) {
-            let sig = BoxedEcdsaSignature::from_components(
-                BoxedUint::from_be_bytes(&r.to_bytes_be()),
-                BoxedUint::from_be_bytes(&s.to_bytes_be()),
-            );
+            let sig = BoxedEcdsaSignature::from_components(r.to_box(), s.to_box());
             return k.verify_prehash(hash, &sig).is_ok();
         }
+        // Everything below is public.
+        let Some(nm) = self.order() else {
+            return false;
+        };
+        let Some(w) = public::inv(&s.nat(), &self.n.nat()) else {
+            return false;
+        };
+        let w = Bn::from_nat(&w).to_box();
         let e = self.hash_to_int(hash);
-        let w = s.modpow(&(&self.n - BigUint::from(2u32)), &self.n);
-        let u1 = (&e * &w) % &self.n;
-        let u2 = (r * &w) % &self.n;
-        let p1 = self.mul(&u1, &self.generator());
-        let p2 = self.mul(&u2, q);
-        match self.add(&p1, &p2) {
-            Point::Aff(x, _) => &(x % &self.n) == r,
-            Point::Inf => false,
+        let u1 = nm.mul(&e, &w);
+        let u2 = nm.mul(&r.to_box(), &w);
+        match self.double_mul_x(&u1, &u2, q) {
+            Some(x) => Bn::from_box(&nm.reduce(&x.to_box())) == *r,
+            None => false,
         }
     }
 
     /// SM2 signature over a digest (no Z prefix, as OpenSSL 3 without an ID).
-    pub fn sm2_sign(&self, d: &BigUint, hash: &[u8]) -> Option<(BigUint, BigUint)> {
-        let n = &self.n;
-        let e = BigUint::from_bytes_be(hash) % n;
-        let one = BigUint::one();
-        let inv = crate::pkey::mod_inv(&((d + &one) % n), n)?;
-        loop {
+    /// purecrypto's `Sm2PrivateKey` always hashes Z_A in, so this runs on the
+    /// constant-time generic path.
+    pub fn sm2_sign(&self, d: &Bn, hash: &[u8]) -> Option<(Bn, Bn)> {
+        let c = self.engine()?;
+        let nm = self.order()?;
+        let e = nm.reduce(&BoxedUint::from_be_bytes(hash));
+        let d = nm.reduce(&d.to_box());
+        let inv = nm.inv(&nm.add(&d, &BoxedUint::from_u64(1)))?;
+        let g = self.proj(&c, &self.generator());
+        for _ in 0..64 {
             let k = self.random_scalar();
-            let x1 = match self.mul(&k, &self.generator()) {
-                Point::Aff(x, _) => x,
-                Point::Inf => continue,
+            let Some((x1, _)) = c.affine(&c.smul(&k, self.n.bits(), &g)) else {
+                continue;
             };
-            let r = (&e + x1) % n;
-            if r.is_zero() || (&r + &k) == *n {
+            let r = nm.add(&e, &x1.to_box());
+            // r == 0 or r + k == n: public retry verdicts.
+            if r.is_zero() || bool::from(nm.add(&r, &k).ct_is_zero()) {
                 continue;
             }
-            let rd = (&r * d) % n;
-            let kr = if k >= rd {
-                &k - &rd
-            } else {
-                n - (&rd - &k) % n
-            };
-            let s = (&inv * kr) % n;
+            let s = nm.mul(&inv, &nm.sub(&k, &nm.mul(&r, &d)));
             if s.is_zero() {
                 continue;
             }
-            return Some((r, s));
+            return Some((Bn::from_box(&r), Bn::from_box(&s)));
         }
+        None
     }
 
-    pub fn sm2_verify(&self, q: &Point, hash: &[u8], r: &BigUint, s: &BigUint) -> bool {
-        let n = &self.n;
-        if r.is_zero() || s.is_zero() || r >= n || s >= n {
+    pub fn sm2_verify(&self, q: &Point, hash: &[u8], r: &Bn, s: &Bn) -> bool {
+        if r.is_zero() || s.is_zero() || r >= &self.n || s >= &self.n {
             return false;
         }
-        let e = BigUint::from_bytes_be(hash) % n;
-        let t = (r + s) % n;
+        let Some(nm) = self.order() else {
+            return false;
+        };
+        let e = nm.reduce(&BoxedUint::from_be_bytes(hash));
+        let t = nm.add(&r.to_box(), &s.to_box());
         if t.is_zero() {
             return false;
         }
-        match self.add(&self.mul(s, &self.generator()), &self.mul(&t, q)) {
-            Point::Aff(x1, _) => (e + x1) % n == *r,
-            Point::Inf => false,
+        match self.double_mul_x(&s.to_box(), &t, q) {
+            Some(x1) => Bn::from_box(&nm.add(&e, &x1.to_box())) == *r,
+            None => false,
         }
     }
 
     /// ECDH shared secret: x coordinate of d*Q, padded to the field size.
-    pub fn ecdh(&self, d: &BigUint, q: &Point) -> Option<Vec<u8>> {
+    pub fn ecdh(&self, d: &Bn, q: &Point) -> Option<Vec<u8>> {
         if let (Some((id, db)), Some((_, peer))) = (self.pc_private(d), self.pc_public(q)) {
             let k = BoxedEcdhPrivateKey::from_bytes(id, &db).ok()?;
             return k.diffie_hellman(&peer).ok();
         }
-        match self.mul(d, q) {
-            Point::Aff(x, _) => Some(pad(&x, self.field_len())),
-            Point::Inf => None,
-        }
+        let c = self.engine()?;
+        let qp = self.proj(&c, q);
+        c.affine_x_bytes(&self.smul(&c, &d.to_box(), &qp))
     }
 
     /// Guess the cofactor (ec_guess_cofactor): h = (p + 1 + n/2) / n.
@@ -531,44 +470,10 @@ impl Group {
         if self.n.is_zero() {
             return;
         }
-        self.h = (&self.p + BigUint::one() + (&self.n >> 1)) / &self.n;
+        let n = self.n.nat();
+        let v = self.p.nat().add(&Nat::one()).add(&n.shr(1));
+        self.h = Bn::from_nat(&public::div(&v, &n));
     }
-}
-
-/// Uniform value in [1, n) from the OS RNG (rejection sampling).
-pub fn random_below(n: &BigUint) -> BigUint {
-    use purecrypto::rng::RngCore;
-    let bits = n.bits();
-    let len = bits.div_ceil(8);
-    let mask = if bits.is_multiple_of(8) {
-        0xff
-    } else {
-        (1u8 << (bits % 8)) - 1
-    };
-    loop {
-        let mut b = vec![0u8; len];
-        purecrypto::rng::OsRng.fill_bytes(&mut b);
-        if let Some(f) = b.first_mut() {
-            *f &= mask;
-        }
-        let k = BigUint::from_bytes_be(&b);
-        if !k.is_zero() && &k < n {
-            return k;
-        }
-    }
-}
-
-pub fn pad(x: &BigUint, len: usize) -> Vec<u8> {
-    let b = x.to_bytes_be();
-    if b.len() >= len {
-        if b.len() > len && b.iter().take(b.len() - len).all(|&c| c == 0) {
-            return b[b.len() - len..].to_vec();
-        }
-        return b;
-    }
-    let mut out = vec![0u8; len - b.len()];
-    out.extend(b);
-    out
 }
 
 fn hex_bytes(s: &str) -> Option<Vec<u8>> {
