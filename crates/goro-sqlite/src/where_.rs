@@ -404,7 +404,8 @@ pub struct WhereInfo {
     pub a: Vec<WhereLevel>,
     /// Index expression lists / partial index WHERE clauses imported into
     /// the arena (cache, keyed by the Index object address).
-    pub idxTreeCache: Vec<(usize, ExprListId, ExprId)>,
+    /// (The Index is kept alive by the cache so that identities are stable.)
+    pub idxTreeCache: Vec<(IndexRef, ExprListId, ExprId)>,
 }
 
 /// The id of the top-level clause (C pWInfo->sWC).
@@ -449,12 +450,6 @@ impl WhereInfo {
     }
 }
 
-/// Address of an Index object (identity key).
-#[inline]
-pub(crate) fn idx_key(p: &IndexRef) -> usize {
-    Rc::as_ptr(p) as *const u8 as usize
-}
-
 /// C `pX==pY` for two `Index*` values.
 #[inline]
 pub(crate) fn idx_eq(a: &Option<IndexRef>, b: &Option<IndexRef>) -> bool {
@@ -468,9 +463,8 @@ pub(crate) fn idx_eq(a: &Option<IndexRef>, b: &Option<IndexRef>) -> bool {
 /// The ExprList of the index expressions of `pIdx` (C `pIdx->aColExpr`),
 /// as an id in db.arena (owned trees are imported once per WhereInfo).
 pub(crate) fn idx_col_exprs(db: &mut Sqlite3, wi: &mut WhereInfo, pIdx: &IndexRef) -> ExprListId {
-    let k = idx_key(pIdx);
     for e in wi.idxTreeCache.iter() {
-        if e.0 == k {
+        if Rc::ptr_eq(&e.0, pIdx) {
             return e.1;
         }
     }
@@ -480,7 +474,7 @@ pub(crate) fn idx_col_exprs(db: &mut Sqlite3, wi: &mut WhereInfo, pIdx: &IndexRe
     };
     let l = db.tree(&t1);
     let w = db.tree(&t2);
-    wi.idxTreeCache.push((k, l, w));
+    wi.idxTreeCache.push((pIdx.clone(), l, w));
     l
 }
 
@@ -488,9 +482,8 @@ pub(crate) fn idx_col_exprs(db: &mut Sqlite3, wi: &mut WhereInfo, pIdx: &IndexRe
 /// an id in db.arena.
 pub(crate) fn idx_part_where(db: &mut Sqlite3, wi: &mut WhereInfo, pIdx: &IndexRef) -> ExprId {
     idx_col_exprs(db, wi, pIdx);
-    let k = idx_key(pIdx);
     for e in wi.idxTreeCache.iter() {
-        if e.0 == k {
+        if Rc::ptr_eq(&e.0, pIdx) {
             return e.2;
         }
     }
@@ -6708,4 +6701,68 @@ pub fn sqlite3WhereEnd(db: &mut Sqlite3, pWInfo: &mut crate::where_::WhereInfo) 
     db.pp().nQueryLoop = wi.savedNQueryLoop as LogEst;
     whereInfoFree(db, wi);
     db.pp().withinRJSubrtn -= nRJ;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lp(iTab: u8, prereq: Bitmask, rRun: LogEst, nOut: LogEst) -> WhereLoop {
+        let mut p = WhereLoop::default();
+        whereLoopInit(&mut p);
+        p.iTab = iTab;
+        p.prereq = prereq;
+        p.rRun = rRun;
+        p.nOut = nOut;
+        p
+    }
+
+    #[test]
+    fn or_set_keeps_best() {
+        let mut s = WhereOrSet::default();
+        assert_eq!(whereOrInsert(&mut s, 0, 50, 20), 1);
+        // dominated (more prereqs, higher cost): discarded
+        assert_eq!(whereOrInsert(&mut s, 1, 60, 10), 0);
+        assert_eq!(s.n, 1);
+        // cheaper with same prereqs: overwrites, nOut keeps the minimum
+        assert_eq!(whereOrInsert(&mut s, 0, 40, 30), 1);
+        assert_eq!(s.n, 1);
+        assert_eq!((s.a[0].rRun, s.a[0].nOut), (40, 20));
+        // incomparable prereqs and costs: appended
+        assert_eq!(whereOrInsert(&mut s, 4, 20, 5), 1);
+        assert_eq!(s.n, 2);
+    }
+
+    #[test]
+    fn find_lesser() {
+        let loops = vec![lp(0, 0, 50, 40), lp(1, 1, 30, 20)];
+        // a better loop for table 0 replaces loop 0
+        assert_eq!(whereLoopFindLesser(&loops, 0, &lp(0, 0, 40, 30)), Some(0));
+        // a worse loop for table 0 is discarded
+        assert_eq!(whereLoopFindLesser(&loops, 0, &lp(0, 0, 60, 50)), None);
+        // a loop for another table is appended
+        assert_eq!(whereLoopFindLesser(&loops, 0, &lp(2, 0, 60, 50)), Some(2));
+        // more prerequisites but cheaper: appended (cannot replace)
+        assert_eq!(whereLoopFindLesser(&loops, 0, &lp(0, 2, 10, 10)), Some(2));
+    }
+
+    #[test]
+    fn cheaper_proper_subset() {
+        let t1 = TermId::new(0, 1);
+        let t2 = TermId::new(0, 2);
+        let mut x = lp(0, 0, 30, 20);
+        x.wsFlags = WHERE_INDEXED;
+        x.nLTerm = 1;
+        x.set_lterm(0, Some(t1));
+        let mut y = lp(0, 0, 30, 20);
+        y.wsFlags = WHERE_INDEXED;
+        y.nLTerm = 2;
+        y.set_lterm(0, Some(t1));
+        y.set_lterm(1, Some(t2));
+        assert_eq!(whereLoopCheaperProperSubset(&x, &y), 1);
+        assert_eq!(whereLoopCheaperProperSubset(&y, &x), 0);
+        let mut ys = y.clone();
+        whereLoopAdjustCost(&[x.clone()], &mut ys);
+        assert_eq!((ys.rRun, ys.nOut), (30, 19));
+    }
 }

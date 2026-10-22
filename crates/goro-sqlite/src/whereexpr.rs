@@ -2087,3 +2087,38 @@ pub fn sqlite3WhereLoopBloomable(pLoop: &crate::where_::WhereLoop) -> i32 {
         None => 0,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn operator_masks() {
+        assert!(allowedOp(TK_EQ) && allowedOp(TK_GE) && allowedOp(TK_IN) && allowedOp(TK_IS));
+        assert!(allowedOp(TK_ISNULL) && !allowedOp(TK_NE) && !allowedOp(TK_AND));
+        assert_eq!(operatorMask(TK_EQ), WO_EQ);
+        assert_eq!(operatorMask(TK_LT), WO_LT);
+        assert_eq!(operatorMask(TK_LE), WO_LE);
+        assert_eq!(operatorMask(TK_GT), WO_GT);
+        assert_eq!(operatorMask(TK_GE), WO_GE);
+        assert_eq!(operatorMask(TK_IN), WO_IN);
+        assert_eq!(operatorMask(TK_IS), WO_IS);
+        assert_eq!(operatorMask(TK_ISNULL), WO_ISNULL);
+    }
+
+    #[test]
+    fn utf8_reader() {
+        let z = "aé€😀\u{0}".as_bytes();
+        let mut p = 0;
+        assert_eq!(utf8_read(z, &mut p), 'a' as u32);
+        assert_eq!(utf8_read(z, &mut p), 'é' as u32);
+        assert_eq!(utf8_read(z, &mut p), '€' as u32);
+        assert_eq!(utf8_read(z, &mut p), '😀' as u32);
+        assert_eq!(p, z.len() - 1);
+        // overlong encoding and surrogate
+        let mut p = 0;
+        assert_eq!(utf8_read(&[0xc0, 0x80, 0], &mut p), 0xFFFD);
+        let mut p = 0;
+        assert_eq!(utf8_read(&[0xed, 0xa0, 0x80, 0], &mut p), 0xFFFD);
+    }
+}
