@@ -305,7 +305,8 @@ pub fn sqlite3PagerVfs(pPager: &mut crate::pager::Pager) -> Option<Box<crate::os
 }
 
 /// C: `sqlite3_file * sqlite3PagerFile(Pager *pPager)`
-pub fn sqlite3PagerFile(pPager: &mut crate::pager::Pager) -> Option<Box<crate::os::SqliteFile>> {
+/// Rust: `None` when the file is not open (C `pFile->pMethods==0`).
+pub fn sqlite3PagerFile(pPager: &mut crate::pager::Pager) -> Option<&mut crate::os::SqliteFile> {
     todo!("sqlite3PagerFile")
 }
 
@@ -372,7 +373,12 @@ pub fn sqlite3PagerJournalSizeLimit(pPager: &mut crate::pager::Pager, iLimit: i6
 }
 
 /// C: `sqlite3_backup ** sqlite3PagerBackupPtr(Pager *pPager)`
-pub fn sqlite3PagerBackupPtr(pPager: &mut crate::pager::Pager) -> () {
+/// Rust: the backups attached to this (source) pager, most recent first
+/// (C pPager->pBackup list).  The pager must call
+/// `crate::backup::sqlite3BackupUpdate(&list, pgno, data)` /
+/// `sqlite3BackupRestart(&list)` on a clone of the list, without holding
+/// a borrow of itself.
+pub fn sqlite3PagerBackupPtr(pPager: &mut crate::pager::Pager) -> &mut Vec<crate::backup::BackupP> {
     todo!("sqlite3PagerBackupPtr")
 }
 
