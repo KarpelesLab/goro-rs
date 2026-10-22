@@ -141,6 +141,7 @@ impl Vm {
     fn sos_key(&mut self, storage: &Rc<RefCell<PhpObject>>, o: &Value) -> Option<Value> {
         let oid = match o {
             Value::Object(x) => x.borrow().object_id as i64,
+            Value::Generator(g) => self.generator_handle(g) as i64,
             _ => return None,
         };
         if !self.sos_user_get_hash(storage) {
@@ -230,7 +231,7 @@ impl Vm {
 
     fn sos_obj_arg(&mut self, func: &str, v: Option<&Value>) -> Option<Value> {
         match v.map(|v| v.deref()) {
-            Some(o @ Value::Object(_)) => Some(o),
+            Some(o @ (Value::Object(_) | Value::Generator(_))) => Some(o),
             Some(other) => {
                 let msg = format!(
                     "{}(): Argument #1 ($object) must be of type object, {} given",
@@ -644,6 +645,26 @@ impl Vm {
         Some(r)
     }
 
+    /// A sub-iterator's Iterator method (a Generator's own, natively).
+    fn mit_sub_call(&mut self, it: &Value, method: &[u8]) -> Option<Value> {
+        if !matches!(it, Value::Generator(_)) {
+            return self.call_object_method(it, method, &[]);
+        }
+        Some(match method {
+            b"rewind" => {
+                self.it_rewind(it);
+                Value::Null
+            }
+            b"next" => {
+                self.it_next(it);
+                Value::Null
+            }
+            b"valid" => bv(self.it_valid(it)),
+            b"current" => self.it_current(it),
+            _ => self.it_key(it),
+        })
+    }
+
     /// MultipleIterator methods.
     pub(crate) fn spl_multiple_call(
         &mut self,
@@ -752,6 +773,7 @@ impl Vm {
                         self.class_implements_interface(&cl, b"iterator")
                             || crate::vm::is_builtin_subclass(&cl, b"iterator")
                     }
+                    Value::Generator(_) => true,
                     _ => false,
                 };
                 if !is_iter {
@@ -803,7 +825,7 @@ impl Vm {
                     if self.current_exception.is_some() {
                         break;
                     }
-                    self.call_object_method(&it, method, &[]);
+                    self.mit_sub_call(&it, method);
                 }
                 Value::Null
             }
@@ -818,7 +840,7 @@ impl Vm {
                         break;
                     }
                     let v = matches!(
-                        self.call_object_method(&it, b"valid", &[]),
+                        self.mit_sub_call(&it, b"valid"),
                         Some(Value::True)
                     );
                     if v != expect {
@@ -842,11 +864,11 @@ impl Vm {
                         break;
                     }
                     let valid = matches!(
-                        self.call_object_method(&it, b"valid", &[]),
+                        self.mit_sub_call(&it, b"valid"),
                         Some(Value::True)
                     );
                     let v = if valid {
-                        match self.call_object_method(&it, method, &[]) {
+                        match self.mit_sub_call(&it, method) {
                             Some(v) => v,
                             None => {
                                 if self.current_exception.is_none() {
