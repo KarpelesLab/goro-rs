@@ -6930,6 +6930,59 @@ impl Vm {
         } else {
             String::from_utf8_lossy(&op_array.name).to_string()
         };
+        // RECV of a callback invoked by an internal function: weak-mode
+        // checks and coercion (the caller is internal, so no "called in").
+        if !op_array.param_types.is_empty() {
+            let had_exc = self.current_exception.is_some();
+            if let Some(msg) = self.callback_recv_types(op_array, &mut call.args, lead, cv_shift) {
+                let line = if op_array.decl_line > 0 {
+                    op_array.decl_line
+                } else {
+                    self.current_line
+                };
+                // (raised by the callee's RECV, inside its frame, which shows
+                // the arguments as RECV left them)
+                let own = !matches!(self.call_stack.last(), Some((n, f, 0, _, _)) if (f.is_empty() || f == "[internal function]") && *n == frame_display);
+                if own {
+                    let is_instance = this_cv == 1
+                        && lead > 0
+                        && matches!(call.args.first(), Some(Value::Object(_)));
+                    let (file, fline) = match self.ucf_call_line {
+                        Some(l) => (self.current_file.clone(), l),
+                        None => (String::new(), 0),
+                    };
+                    let passed: Vec<Value> =
+                        call.args.iter().skip(lead).map(|v| v.deref()).collect();
+                    self.call_stack
+                        .push((frame_display.clone(), file, fline, passed, is_instance));
+                }
+                let exc_val = self.create_exception(b"TypeError", &msg, line);
+                if own {
+                    self.call_stack.pop();
+                }
+                if !op_array.filename.is_empty() {
+                    if let Value::Object(ref o) = exc_val {
+                        o.borrow_mut().set_property(
+                            b"file".to_vec(),
+                            Value::String(PhpString::from_vec(op_array.filename.clone())),
+                        );
+                    }
+                }
+                self.current_exception = Some(exc_val);
+                return Err(VmError {
+                    message: format!("Uncaught TypeError: {}", msg),
+                    line,
+                });
+            }
+            if !had_exc && self.current_exception.is_some() {
+                // An error handler threw on a conversion deprecation.
+                return Err(VmError {
+                    message: "Uncaught exception".into(),
+                    line: self.current_line,
+                });
+            }
+        }
+
         // Too few arguments for an internally invoked callback (PHP throws
         // ArgumentCountError without the "passed in ... on line" part).
         {
@@ -6985,59 +7038,6 @@ impl Vm {
                 return Err(VmError {
                     message: format!("Uncaught ArgumentCountError: {}", err_msg),
                     line,
-                });
-            }
-        }
-
-        // RECV of a callback invoked by an internal function: weak-mode
-        // checks and coercion (the caller is internal, so no "called in").
-        if !op_array.param_types.is_empty() {
-            let had_exc = self.current_exception.is_some();
-            if let Some(msg) = self.callback_recv_types(op_array, &mut call.args, lead, cv_shift) {
-                let line = if op_array.decl_line > 0 {
-                    op_array.decl_line
-                } else {
-                    self.current_line
-                };
-                // (raised by the callee's RECV, inside its frame, which shows
-                // the arguments as RECV left them)
-                let own = !matches!(self.call_stack.last(), Some((n, f, 0, _, _)) if (f.is_empty() || f == "[internal function]") && *n == frame_display);
-                if own {
-                    let is_instance = this_cv == 1
-                        && lead > 0
-                        && matches!(call.args.first(), Some(Value::Object(_)));
-                    let (file, fline) = match self.ucf_call_line {
-                        Some(l) => (self.current_file.clone(), l),
-                        None => (String::new(), 0),
-                    };
-                    let passed: Vec<Value> =
-                        call.args.iter().skip(lead).map(|v| v.deref()).collect();
-                    self.call_stack
-                        .push((frame_display.clone(), file, fline, passed, is_instance));
-                }
-                let exc_val = self.create_exception(b"TypeError", &msg, line);
-                if own {
-                    self.call_stack.pop();
-                }
-                if !op_array.filename.is_empty() {
-                    if let Value::Object(ref o) = exc_val {
-                        o.borrow_mut().set_property(
-                            b"file".to_vec(),
-                            Value::String(PhpString::from_vec(op_array.filename.clone())),
-                        );
-                    }
-                }
-                self.current_exception = Some(exc_val);
-                return Err(VmError {
-                    message: format!("Uncaught TypeError: {}", msg),
-                    line,
-                });
-            }
-            if !had_exc && self.current_exception.is_some() {
-                // An error handler threw on a conversion deprecation.
-                return Err(VmError {
-                    message: "Uncaught exception".into(),
-                    line: self.current_line,
                 });
             }
         }
@@ -35291,6 +35291,14 @@ impl Vm {
                                                 &check_builtin,
                                                 prop_name.as_bytes(),
                                             ) {
+                                                if let Some(msg) = self
+                                                    .ext_class_constant_deprecation(
+                                                        &check_builtin,
+                                                        prop_name.as_bytes(),
+                                                    )
+                                                {
+                                                    self.emit_deprecated_at(&msg, op.line);
+                                                }
                                                 raw_val_opt = Some(bv);
                                                 found = true;
                                                 break;
