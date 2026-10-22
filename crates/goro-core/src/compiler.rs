@@ -11866,7 +11866,7 @@ impl Compiler {
                             // Fetch current value
                             let old_tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
-                                opcode: OpCode::PropertyGet,
+                                opcode: OpCode::PropertyGetIncDec,
                                 op1: obj_op,
                                 op2: name_op,
                                 result: OperandType::Tmp(old_tmp),

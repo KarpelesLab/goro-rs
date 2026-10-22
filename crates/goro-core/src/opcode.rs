@@ -456,6 +456,10 @@ pub enum OpCode {
     /// PropertyGet for empty() / isset() (FETCH_OBJ_IS): an overloaded
     /// property is checked with __isset() before __get() is called.
     PropertyGetIs,
+    /// The read of `$obj->p++` / `--$obj->p` (PRE/POST_INC_OBJ): like
+    /// PropertyGet, but a non-object throws "Attempt to increment/decrement
+    /// property" first.
+    PropertyGetIncDec,
     /// Like PropertyGetW for the container of a compound assignment
     /// (`$o->p[k] op= v`, FETCH_OBJ_RW): an undefined property is warned about.
     PropertyGetWRW,

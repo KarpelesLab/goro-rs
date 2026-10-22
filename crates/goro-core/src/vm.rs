@@ -4192,6 +4192,40 @@ impl Vm {
     /// Returns Some(error_message) if the types are incompatible, None if OK.
     /// For "add" (`op_symbol` = "+"), array + array is allowed (union).
     /// For all other arithmetic ops, arrays are never valid operands.
+    /// Whether creating a dynamic property on an instance of `class_lower`
+    /// raises the PHP 8.2 deprecation (user classes without
+    /// #[AllowDynamicProperties] anywhere in their hierarchy, stdClass aside).
+    fn dynamic_property_deprecated(&self, class_lower: &[u8]) -> bool {
+        if !self.classes.contains_key(class_lower)
+            || class_lower == b"stdclass"
+            || is_builtin_subclass(class_lower, b"stdclass")
+        {
+            return false;
+        }
+        let mut cur = Some(class_lower.to_vec());
+        while let Some(c) = cur {
+            match self.classes.get(&c) {
+                Some(ce) => {
+                    if ce.allow_dynamic_properties {
+                        return false;
+                    }
+                    cur = ce.parent.as_ref().map(|p| p.to_ascii_lowercase());
+                }
+                None => break,
+            }
+        }
+        true
+    }
+
+    /// zend_zval_type_name(): like zend_zval_value_name() but `bool` for
+    /// true / false (zend_binop_error()).
+    pub(crate) fn zval_type_name(v: &Value) -> String {
+        match v.deref() {
+            Value::True | Value::False => "bool".to_string(),
+            other => Self::value_type_name(&other),
+        }
+    }
+
     fn check_unsupported_operand_types(a: &Value, b: &Value, op_symbol: &str) -> Option<String> {
         let a_deref = a.deref();
         let b_deref = b.deref();
@@ -4206,8 +4240,8 @@ impl Vm {
             if a_is_array || b_is_array {
                 return Some(format!(
                     "Unsupported operand types: {} + {}",
-                    Self::value_type_name(&a_deref),
-                    Self::value_type_name(&b_deref)
+                    Self::zval_type_name(&a_deref),
+                    Self::zval_type_name(&b_deref)
                 ));
             }
         } else {
@@ -4215,9 +4249,9 @@ impl Vm {
             if a_is_array || b_is_array {
                 return Some(format!(
                     "Unsupported operand types: {} {} {}",
-                    Self::value_type_name(&a_deref),
+                    Self::zval_type_name(&a_deref),
                     op_symbol,
-                    Self::value_type_name(&b_deref)
+                    Self::zval_type_name(&b_deref)
                 ));
             }
         }
@@ -4248,9 +4282,9 @@ impl Vm {
                 }
                 return Some(format!(
                     "Unsupported operand types: {} {} {}",
-                    Self::value_type_name(&a_deref),
+                    Self::zval_type_name(&a_deref),
                     op_symbol,
-                    Self::value_type_name(&b_deref)
+                    Self::zval_type_name(&b_deref)
                 ));
             }
         }
@@ -18545,6 +18579,8 @@ impl Vm {
                     } else {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
+                    // i_zend_is_true()
+                    self.warn_nan_coercion(&a, "bool", op.line);
                     self.write_operand(
                         &op.result,
                         if a.is_truthy() {
@@ -31947,6 +31983,11 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                    }
+                    // FETCH_DIM_RW of null vivifies an array first: the key is
+                    // then looked up in it (and reported undefined).
+                    if is_rw && matches!(arr_val, Value::Null | Value::Undef) {
+                        arr_val = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
                     }
                     {
                         // Real array with array/object key -> TypeError, before
@@ -46870,7 +46911,8 @@ impl Vm {
                 | OpCode::PropertyGetWUnset
                 | OpCode::PropertyGetWObj
                 | OpCode::PropertyGetWObjRW
-                | OpCode::PropertyGetIs => match outlined(|| -> Result<Flow, VmError> {
+                | OpCode::PropertyGetIs
+                | OpCode::PropertyGetIncDec => match outlined(|| -> Result<Flow, VmError> {
                     if let Some((oid, v)) = self.isset_get_cache.take() {
                         let obj_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                         if matches!(&obj_val, Value::Object(o) if o.borrow().object_id == oid) {
@@ -47069,7 +47111,7 @@ impl Vm {
                     // For non-object scalar LHS, PHP throws the same Error
                     // the matching PropertySet would (FETCH_OBJ_RW), so we
                     // short-circuit here before any warning would be emitted.
-                    if matches!(op.opcode, OpCode::PropertyGetRW)
+                    if matches!(op.opcode, OpCode::PropertyGetRW | OpCode::PropertyGetIncDec)
                         && matches!(
                             &obj_val_raw,
                             Value::Null
@@ -47084,9 +47126,14 @@ impl Vm {
                     {
                         let type_name = Self::value_type_name(&obj_val_raw);
                         let prop_str = prop_name.to_string_lossy();
+                        let what = if matches!(op.opcode, OpCode::PropertyGetIncDec) {
+                            "increment/decrement"
+                        } else {
+                            "assign"
+                        };
                         let msg = format!(
-                            "Attempt to assign property \"{}\" on {}",
-                            prop_str, type_name
+                            "Attempt to {} property \"{}\" on {}",
+                            what, prop_str, type_name
                         );
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
@@ -48257,6 +48304,36 @@ impl Vm {
                                             line: op.line,
                                         });
                                     }
+                                    // `$o->undef op= v` / `$o->undef++`: get_property_ptr_ptr()
+                                    // creates the dynamic slot (and deprecates it) before the
+                                    // "Undefined property" warning.
+                                    if matches!(
+                                        op.opcode,
+                                        OpCode::PropertyGetRW | OpCode::PropertyGetIncDec
+                                    ) && !obj.borrow().has_property(prop_name.as_bytes())
+                                        && !self.classes.get(&class_lower).is_some_and(|c| {
+                                            c.properties
+                                                .iter()
+                                                .any(|p| p.name == prop_name.as_bytes())
+                                        })
+                                    {
+                                        if self.dynamic_property_deprecated(&class_lower) {
+                                            let class_display =
+                                                crate::value::display_class_name(&class_name_orig);
+                                            self.emit_deprecated_at(
+                                                &format!(
+                                                    "Creation of dynamic property {}::${} is deprecated",
+                                                    class_display,
+                                                    prop_name.to_string_lossy()
+                                                ),
+                                                op.line,
+                                            );
+                                        }
+                                        obj.borrow_mut().set_property(
+                                            prop_name.as_bytes().to_vec(),
+                                            Value::Null,
+                                        );
+                                    }
                                     // PHP emits "Undefined property" for any read of an
                                     // undeclared property on any class (including stdClass,
                                     // Exception, ReflectionClass, and empty user classes).
@@ -48352,7 +48429,15 @@ impl Vm {
 
                 OpCode::PropertySet => match outlined(|| -> Result<Flow, VmError> {
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let mut value = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // ASSIGN_OBJ's OP_DATA is read for reading (warns if undefined).
+                    let mut value = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     value = self.dup_stored_array(&op.op2, value);
                     let prop_name = self
                         .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
