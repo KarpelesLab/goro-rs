@@ -16736,6 +16736,12 @@ impl Compiler {
             }
 
             ExprKind::Yield(value, key) => {
+                // The key is evaluated before the value (zend_compile_yield).
+                let key_operand = if let Some(key_expr) = key {
+                    self.compile_expr(key_expr)?
+                } else {
+                    OperandType::Unused
+                };
                 // For by-ref generators (function &gen()), yielding a non-reference
                 // expression (constant, operator result, by-value function call)
                 // emits a runtime Notice. We detect at compile time:
@@ -16810,13 +16816,6 @@ impl Compiler {
                     } else {
                         self.compile_expr(val_expr)?
                     }
-                } else {
-                    OperandType::Unused
-                };
-
-                // Compile the key (if any)
-                let key_operand = if let Some(key_expr) = key {
-                    self.compile_expr(key_expr)?
                 } else {
                     OperandType::Unused
                 };

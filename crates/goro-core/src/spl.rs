@@ -647,6 +647,12 @@ impl Vm {
                         .get(&called_lower)
                         .and_then(|c| c.get_method(&mlower))
                         .cloned();
+                    // (get_called_class() names the class as declared)
+                    let called_name = self
+                        .classes
+                        .get(&called_lower)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| called_lower.clone());
                     // Non-public methods are not callable from the internal
                     // scope: route through __call when available.
                     if let Some(m) = &mdef {
@@ -662,7 +668,7 @@ impl Vm {
                                     argv.push(a.clone());
                                 }
                                 let call_args = vec![Value::String(method.clone()), val_arr(argv)];
-                                self.called_class_stack.push(called_lower.clone());
+                                self.called_class_stack.push(called_name.clone());
                                 self.push_class_scope(call.declaring_class.clone());
                                 if let Err(e) = self.execute_fn_with_named_args(
                                     &call.op_array,
@@ -695,7 +701,7 @@ impl Vm {
                             args.clone(),
                             this.is_some(),
                         ));
-                        self.called_class_stack.push(called_lower.clone());
+                        self.called_class_stack.push(called_name.clone());
                         self.push_class_scope(m.declaring_class.clone());
                         if let Err(e) =
                             self.execute_fn_with_named_args(&m.op_array, args, vec![], this)

@@ -24304,6 +24304,34 @@ impl Vm {
                                     (_, m) if !matches!(m, Value::String(_)) => {
                                         Some((b"Error", "Method name must be a string".to_string()))
                                     }
+                                    // zend_init_dynamic_call_array(): a missing method
+                                    // of a user class without __call().
+                                    (Value::Object(o), Value::String(m)) => {
+                                        let (cl, cname) = {
+                                            let b = o.borrow();
+                                            (b.class_name.to_ascii_lowercase(), b.class_name.clone())
+                                        };
+                                        let ml = m.as_bytes().to_ascii_lowercase();
+                                        let missing = match self.classes.get(&cl) {
+                                            Some(c) => {
+                                                o.borrow().native.is_none()
+                                                    && c.get_method(&ml).is_none()
+                                                    && c.get_method(b"__call").is_none()
+                                                    && !(cl == b"closure" && ml == b"__invoke")
+                                            }
+                                            None => cl == b"stdclass",
+                                        };
+                                        missing.then(|| {
+                                            (
+                                                b"Error".as_slice(),
+                                                format!(
+                                                    "Call to undefined method {}::{}()",
+                                                    crate::value::display_class_name(&cname),
+                                                    String::from_utf8_lossy(m.as_bytes())
+                                                ),
+                                            )
+                                        })
+                                    }
                                     (Value::Object(_), _) => None,
                                     (Value::String(cn), Value::String(m)) => {
                                         let cl: Vec<u8> = cn
@@ -24393,6 +24421,15 @@ impl Vm {
                                                     ),
                                                 )),
                                             }
+                                        } else if cl == b"stdclass" {
+                                            // (stdClass has no methods)
+                                            Some((
+                                                b"Error",
+                                                format!(
+                                                    "Call to undefined method stdClass::{}()",
+                                                    String::from_utf8_lossy(m.as_bytes())
+                                                ),
+                                            ))
                                         } else {
                                             None
                                         }
@@ -53275,8 +53312,15 @@ impl Vm {
                         op.line,
                     );
                     value = self.dup_stored_array(&op.op2, value);
-                    let prop_name_val =
-                        self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                    // (an undefined variable naming the property warns)
+                    let prop_name_val = self.read_operand_warn(
+                        &op.result,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     // zval_try_get_tmp_string() of an array property name
                     if matches!(prop_name_val.deref(), Value::Array(_)) {
                         self.emit_warning_at("Array to string conversion", op.line);
@@ -55079,6 +55123,23 @@ impl Vm {
                                     self.pending_calls.push(PendingCall {
                                         name: PhpString::from_vec(wm_name),
                                         args: vec![obj_val.clone()],
+                                        named_args: Vec::new(),
+                                        target: CallTarget::NONE,
+                                    });
+                                    return Ok(Flow::Continue);
+                                }
+                                // WeakMap::getIterator(): an InternalIterator over
+                                // the live entries.
+                                b"getiterator" => {
+                                    let it = self.spl_instantiate(b"InternalIterator");
+                                    {
+                                        let mut b = it.borrow_mut();
+                                        b.set_property(b"__spl_wm_target".to_vec(), obj_val.clone());
+                                        b.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                                    }
+                                    self.pending_calls.push(PendingCall {
+                                        name: PhpString::from_bytes(b"__builtin_return"),
+                                        args: vec![Value::Object(it)],
                                         named_args: Vec::new(),
                                         target: CallTarget::NONE,
                                     });

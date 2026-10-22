@@ -448,6 +448,10 @@ impl Vm {
         method: &[u8],
         it: &Rc<RefCell<PhpObject>>,
     ) -> Option<Value> {
+        let wm = it.borrow().get_property(b"__spl_wm_target");
+        if let Value::Object(map) = wm {
+            return self.weakmap_iterator_call(method, it, &map);
+        }
         let target = match it.borrow().get_property(b"__spl_fa_target") {
             Value::Object(o) => o,
             _ => return None,
@@ -489,6 +493,50 @@ impl Vm {
             _ => return None,
         };
         Some(r)
+    }
+
+    /// The InternalIterator of WeakMap::getIterator(): the position among
+    /// the map's live entries.
+    fn weakmap_iterator_call(
+        &mut self,
+        method: &[u8],
+        it: &Rc<RefCell<PhpObject>>,
+        map: &Rc<RefCell<PhpObject>>,
+    ) -> Option<Value> {
+        let pos = match it.borrow().get_property(b"__spl_pos") {
+            Value::Long(n) => n.max(0) as usize,
+            _ => 0,
+        };
+        let map_id = map.borrow().object_id;
+        let entry = |vm: &Self| -> Option<(Value, Value)> {
+            vm.weak_map_entries.get(&map_id).and_then(|es| {
+                es.iter()
+                    .filter_map(|(_, w, v)| w.upgrade().map(|k| (Value::Object(k), v.clone())))
+                    .nth(pos)
+            })
+        };
+        Some(match method {
+            b"rewind" => {
+                it.borrow_mut()
+                    .set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                Value::Null
+            }
+            b"valid" => {
+                if entry(self).is_some() {
+                    Value::True
+                } else {
+                    Value::False
+                }
+            }
+            b"key" => entry(self).map(|(k, _)| k).unwrap_or(Value::Null),
+            b"current" => entry(self).map(|(_, v)| v).unwrap_or(Value::Null),
+            b"next" => {
+                it.borrow_mut()
+                    .set_property(b"__spl_pos".to_vec(), Value::Long(pos as i64 + 1));
+                Value::Null
+            }
+            _ => return None,
+        })
     }
 
     /// SplFixedArray::__construct(int $size = 0)
