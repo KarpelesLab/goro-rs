@@ -3906,8 +3906,7 @@ impl Vm {
                         }
                     }
                     // Methods of extension-provided (native) classes.
-                    if let Some((native, h)) = self.find_native_class_handler(&class_lower)
-                    {
+                    if let Some((native, h)) = self.find_native_class_handler(&class_lower) {
                         if (h.has_method)(&native, &method_lower, false) {
                             let called = obj.borrow().class_name.clone();
                             let had_exc = self.current_exception.is_some();
@@ -3927,9 +3926,7 @@ impl Vm {
                             }
                             return Ok(r);
                         }
-                    } else if let Some(r) =
-                        self.call_object_method(&vals[0], &method_lower, args)
-                    {
+                    } else if let Some(r) = self.call_object_method(&vals[0], &method_lower, args) {
                         // Builtin class method
                         return Ok(r);
                     }
@@ -3947,9 +3944,7 @@ impl Vm {
                             && vals.len() == 2
                             && self.user_functions.contains_key(&class_lower))
                     {
-                        if let Some(user_fn) =
-                            self.user_functions.get(&class_lower).cloned()
-                        {
+                        if let Some(user_fn) = self.user_functions.get(&class_lower).cloned() {
                             // (the captured values move to the call)
                             let mut combined: Vec<Value> = vals.drain(1..).collect();
                             combined.extend_from_slice(args);
@@ -3964,8 +3959,7 @@ impl Vm {
                     if let Some(class) = self.classes.get(&class_lower).cloned() {
                         if let Some(method) = class.methods.get(&method_lower) {
                             let op = method.op_array.clone();
-                            return self
-                                .call_static_method_callback(&class, method, op, args);
+                            return self.call_static_method_callback(&class, method, op, args);
                         }
                     }
                 }

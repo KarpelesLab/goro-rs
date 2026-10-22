@@ -476,7 +476,6 @@ pub fn gc_pending() -> bool {
     GC_PENDING.with(|p| p.get())
 }
 
-
 /// The zend.enable_gc setting (an INI boolean; on when unset).
 pub fn ini_enabled(v: Option<&Value>) -> bool {
     match v {
@@ -1083,6 +1082,7 @@ fn compact_slots(pos: &mut [Option<usize>]) {
 /// the live roots left their slots and gc_compact() moved the last entries
 /// into the free slots; then the other garbage, as gc_collect_white() adds
 /// it walking from each root; then (goro only) garbage found from no root.
+#[allow(clippy::needless_range_loop)] // several per-node tables
 fn buffer_order(an: &Analysis) -> Vec<usize> {
     let g = &an.graph;
     let len = g.nodes.len();

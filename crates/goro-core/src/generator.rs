@@ -512,7 +512,11 @@ impl PhpGenerator {
         }
         out.push(std::mem::replace(&mut self.last_value, Value::Null));
         out.push(std::mem::replace(&mut self.last_key, Value::Null));
-        out.extend(std::mem::take(&mut self.fin).into_iter().filter_map(|(_, e)| e));
+        out.extend(
+            std::mem::take(&mut self.fin)
+                .into_iter()
+                .filter_map(|(_, e)| e),
+        );
         self.fe.take_values(&mut out);
         self.state = GeneratorState::Completed;
         out
