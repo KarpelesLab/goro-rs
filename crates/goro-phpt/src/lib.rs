@@ -411,6 +411,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_pcntl::register(&mut vm);
                 goro_ext_posix::register(&mut vm);
                 goro_ext_calendar::register(&mut vm);
+                goro_ext_phar::register(&mut vm);
                 // Loadable on request (see run_test_inner).
                 vm.register_extension(goro_ext_zend_test::NAME);
                 vm.register_extension(b"simplexml");
@@ -491,9 +492,11 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
     //   --FILE_EXTERNAL--  : a single filename whose contents are the source
     //                        (typically just `foo.inc` next to the .phpt file)
     let inline_source = test.file_section();
-    let external_source: Option<String> = if inline_source.is_none() {
+    // (binary contents, e.g. phar archives, are kept as they are)
+    let external_source: Option<Vec<u8>> = if inline_source.is_none() {
         test.sections.get("FILE_EXTERNAL").and_then(|raw| {
-            let rel = raw.trim();
+            let rel = raw.replace("..", "");
+            let rel = rel.trim();
             if rel.is_empty() {
                 return None;
             }
@@ -501,12 +504,15 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 Some(dir) => dir.join(rel),
                 None => std::path::PathBuf::from(rel),
             };
-            std::fs::read_to_string(&path).ok()
+            std::fs::read(&path).ok()
         })
     } else {
         None
     };
-    let source: &str = match (inline_source, external_source.as_deref()) {
+    let external_lossy = external_source
+        .as_ref()
+        .map(|b| String::from_utf8_lossy(b).into_owned());
+    let source: &str = match (inline_source, external_lossy.as_deref()) {
         (Some(s), _) => s,
         (None, Some(s)) => s,
         (None, None) => return TestResult::Error("missing --FILE-- section".into()),
@@ -526,7 +532,10 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
     };
     let req = build_request(test, test_dir, filename);
     PHPT_REQUEST.with(|r| *r.borrow_mut() = Some(req));
-    let source_bytes = test.bytes(source);
+    let source_bytes = match &external_source {
+        Some(b) => b.clone(),
+        None => test.bytes(source),
+    };
     let output = execute_php_with_timeout_and_filename(
         &source_bytes,
         timeout_secs,
@@ -1481,6 +1490,9 @@ fn execute_php_inner_impl(
         })
         .unwrap_or(false);
     goro_parser::set_short_open_tag(short_tags);
+    // phar_compile_file(): tar/zip-based and compressed phars
+    let redirected = goro_ext_phar::main_script_source(filename, source, ini_settings);
+    let source: &[u8] = redirected.as_deref().unwrap_or(source);
     goro_ext_mbstring::zend_multibyte::install(&|k: &str| {
         ini_settings
             .iter()
@@ -1666,6 +1678,7 @@ fn execute_php_inner_impl(
     goro_ext_pcntl::register(&mut vm);
     goro_ext_posix::register(&mut vm);
     goro_ext_calendar::register(&mut vm);
+    goro_ext_phar::register(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }

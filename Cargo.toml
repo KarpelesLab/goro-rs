@@ -35,6 +35,7 @@ members = [
     "crates/goro-ext-pcntl",
     "crates/goro-ext-posix",
     "crates/goro-ext-calendar",
+    "crates/goro-ext-phar",
 ]
 resolver = "2"
 
@@ -92,6 +93,7 @@ goro-ext-ftp = { path = "crates/goro-ext-ftp" }
 goro-ext-pcntl = { path = "crates/goro-ext-pcntl" }
 goro-ext-posix = { path = "crates/goro-ext-posix" }
 goro-ext-calendar = { path = "crates/goro-ext-calendar" }
+goro-ext-phar = { path = "crates/goro-ext-phar" }
 
 [features]
 default = ["ext-standard"]

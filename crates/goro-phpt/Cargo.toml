@@ -40,6 +40,7 @@ goro-ext-ftp = { path = "../goro-ext-ftp" }
 goro-ext-pcntl = { path = "../goro-ext-pcntl" }
 goro-ext-posix = { path = "../goro-ext-posix" }
 goro-ext-calendar = { path = "../goro-ext-calendar" }
+goro-ext-phar = { path = "../goro-ext-phar" }
 libc = "0.2"
 tempfile = "3"
 regex = "1"

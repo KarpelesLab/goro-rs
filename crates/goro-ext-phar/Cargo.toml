@@ -1,0 +1,18 @@
+[package]
+name = "goro-ext-phar"
+version = "0.1.0"
+edition = "2024"
+description = "PHP phar extension (phar, tar and zip archives, phar:// wrapper) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-parser = { path = "../goro-parser" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+goro-zlib = { path = "../goro-zlib" }
+goro-ext-hash = { path = "../goro-ext-hash" }
+goro-ext-bz2 = { path = "../goro-ext-bz2" }
+indexmap = "2"
+libc = "0.2"

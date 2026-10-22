@@ -40,6 +40,7 @@ pub fn register_extensions(vm: &mut Vm) {
     goro_ext_pcntl::register(vm);
     goro_ext_posix::register(vm);
     goro_ext_calendar::register(vm);
+    goro_ext_phar::register(vm);
     vm.register_extension(b"simplexml");
     vm.register_extension(b"tokenizer");
     vm.register_extension(b"pcre");
@@ -221,6 +222,9 @@ pub fn compile(
     filename: &str,
     skip_shebang: bool,
 ) -> Result<Compiled, CompileError> {
+    // phar_compile_file(): tar/zip-based and compressed phars
+    let redirected = goro_ext_phar::main_script_source(filename, source, &[]);
+    let source: &[u8] = redirected.as_deref().unwrap_or(source);
     let script = goro_parser::multibyte::lex_script(source, skip_shebang);
     let tokens = script.tokens;
     let source = script.source.as_slice();
