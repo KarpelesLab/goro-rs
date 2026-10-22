@@ -11333,9 +11333,10 @@ impl Compiler {
                 });
                 Ok(OperandType::Tmp(tmp))
             }
-            // `$a[]->p = v`: the appended element is fetched for writing.
+            // `$a[]->p = v`: the appended element is fetched for an object
+            // write (it is null: the property write then fails).
             ExprKind::ArrayAccess { index: None, .. } => {
-                self.compile_dim_write_base_mode(object, DimFetch::W)
+                self.compile_dim_write_base_mode(object, DimFetch::Obj)
             }
             ExprKind::ArrayAccess {
                 array,
@@ -11710,7 +11711,13 @@ impl Compiler {
         } = &array.kind
         {
             // Nested dimension write: fetch the intermediate element for writing.
-            let container = self.compile_dim_write_base_mode(inner, mode)?;
+            // (the containers of an object write's element are arrays)
+            let inner_mode = match mode {
+                DimFetch::Obj => DimFetch::W,
+                DimFetch::ObjRw => DimFetch::Rw,
+                m => m,
+            };
+            let container = self.compile_dim_write_base_mode(inner, inner_mode)?;
             let key = match index {
                 Some(idx) => self.compile_expr(idx)?,
                 None => OperandType::Unused,

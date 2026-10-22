@@ -811,6 +811,15 @@ impl Vm {
         line: u32,
     ) -> Option<Value> {
         let Some(key_val) = key else {
+            // `$a[]->p = v`: the new element is null (the property write
+            // on it then fails).
+            if mode == DimFetch::Obj {
+                if let Err(msg) = arr.borrow_mut().try_push(Value::Null) {
+                    self.throw_error_msg(b"Error", msg);
+                    return None;
+                }
+                return Some(Value::Null);
+            }
             let rc = Rc::new(RefCell::new(PhpArray::new()));
             if let Err(msg) = arr.borrow_mut().try_push(Value::Array(rc.clone())) {
                 self.throw_error_msg(b"Error", msg);
