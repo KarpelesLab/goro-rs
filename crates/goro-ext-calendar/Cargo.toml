@@ -1,0 +1,12 @@
+[package]
+name = "goro-ext-calendar"
+version = "0.1.0"
+edition = "2024"
+description = "PHP calendar extension for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+libc = "0.2"
