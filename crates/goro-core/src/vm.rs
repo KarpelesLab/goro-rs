@@ -38166,6 +38166,10 @@ impl Vm {
                         if let Some(slot) = cvs.get_mut(idx as usize) {
                             *slot = cell;
                         }
+                        // (the symbol table drops its copy of the old value too)
+                        if let Some(fs) = fsym.as_mut() {
+                            self.symtab_fix_cv(idx as usize, &mut cvs, &op_array.cv_names, fs);
+                        }
                         if old_watch.is_some() {
                             crate::gc::dtor_watch_end(old_watch);
                             release_point!(outlined);
@@ -39982,6 +39986,9 @@ impl Vm {
                                 });
                             }
                         }
+                        // The replaced value is released by the assignment
+                        // (its destructor runs before the result is used).
+                        release_point!(outlined);
                         Ok(Flow::Next)
                     })? {
                         Flow::Next => {}
@@ -44682,6 +44689,9 @@ impl Vm {
                             line: op.line,
                         });
                     }
+                    // ZEND_ASSIGN_OBJ_REF releases the replaced value before
+                    // its result is used.
+                    release_point!(outlined);
                     Ok(Flow::Next)
                 })? {
                     Flow::Next => {}
@@ -54005,6 +54015,15 @@ impl Vm {
                                                 value = Value::String(s);
                                                 coerced_for_result = true;
                                             }
+                                            // A throwing __toString() aborts the
+                                            // assignment (zend_verify_weak_scalar_type_hint).
+                                            native_exc_check!(
+                                                self,
+                                                exception_handlers,
+                                                pending_calls_catch_depth,
+                                                ip,
+                                                op.line
+                                            );
                                         }
                                     }
                                     if !continue_to_ref_check
