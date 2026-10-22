@@ -570,9 +570,12 @@ fn destructorRefs(db: &Sqlite3, d: &Rc<FuncDestructor>) -> usize {
 /// it.  Multiple copies of a single function are created when
 /// create_function() is called with SQLITE_ANY as the encoding.
 ///
-/// Rust: p must still be in db.aFunc (C decrements nRef first).
+/// Rust: p must still be in db.aFunc (C decrements nRef first).  It can be
+/// a copy of a built-in: where C modifies a built-in FuncDef in place
+/// (sqlite3RegisterLikeFunctions() when sqlite3CreateFunc() failed), the
+/// port installs a modified copy in db.aFunc; built-ins have no destructor.
 fn functionDestroy(db: &mut Sqlite3, p: &FuncDef) {
-    debug_assert!((p.funcFlags & SQLITE_FUNC_BUILTIN) == 0);
+    debug_assert!((p.funcFlags & SQLITE_FUNC_BUILTIN) == 0 || p.pDestructor.is_none());
     if let Some(pDestructor) = &p.pDestructor {
         if destructorRefs(db, pDestructor) <= 1 {
             if let Some(x) = &pDestructor.xDestroy {

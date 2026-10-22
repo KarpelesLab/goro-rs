@@ -650,6 +650,16 @@ fn meta_command(db: &mut Sqlite3, last: Option<StmtId>, zLine: &[u8], st: &mut S
             let mut zErr = None;
             let mut lines: Vec<u8> = Vec::new();
             let mut cb = |vals: &[Option<&[u8]>], cols: &[&[u8]]| -> i32 {
+                if vals.is_empty() {
+                    // the empty-result callback (C argv==NULL)
+                    lines.extend_from_slice(b"empty-result");
+                    for c in cols {
+                        lines.push(b' ');
+                        lines.extend_from_slice(c);
+                    }
+                    lines.push(b'\n');
+                    return 0;
+                }
                 for (i, c) in cols.iter().enumerate() {
                     if i > 0 {
                         lines.push(b' ');
