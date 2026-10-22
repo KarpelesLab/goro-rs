@@ -25701,6 +25701,12 @@ impl Vm {
                     // Namespace fallback: if a namespaced function isn't found,
                     // try the global (unqualified) name. This handles calls like
                     // strlen() from within namespace Foo (compiled as Foo\strlen).
+                    // A dynamic call of a fully qualified string name.
+                    if func_name_lower.first() == Some(&b'\\') && !func_name_lower.contains(&b':')
+                    {
+                        func_name_lower.remove(0);
+                        call.name = PhpString::from_vec(call.name.as_bytes()[1..].to_vec());
+                    }
                     if func_name_lower.contains(&b'\\')
                         && !func_name_lower.contains(&b':')
                         && !call.target.no_ns_fallback
