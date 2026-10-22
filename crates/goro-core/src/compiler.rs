@@ -6175,6 +6175,15 @@ impl Compiler {
                                                 if resolved.eq_ignore_ascii_case(b"self") {
                                                     qualified_name.clone()
                                                 } else if resolved.eq_ignore_ascii_case(b"parent") {
+                                                    if extends.is_none()
+                                                        && !class.is_trait
+                                                        && constant.eq_ignore_ascii_case(b"class")
+                                                    {
+                                                        return Err(CompileError {
+                                                            message: "Cannot use \"parent\" when current class scope has no parent".into(),
+                                                            line: cc_class.span.line,
+                                                        });
+                                                    }
                                                     extends
                                                         .as_ref()
                                                         .map(|p| self.resolve_class_name(p))
@@ -8648,6 +8657,12 @@ impl Compiler {
                                                     } else if resolved
                                                         .eq_ignore_ascii_case(b"parent")
                                                     {
+                                                        if extends.is_none() && !class.is_trait {
+                                                            return Err(CompileError {
+                                                                message: "Cannot use \"parent\" when current class scope has no parent".into(),
+                                                                line: class_expr.span.line,
+                                                            });
+                                                        }
                                                         extends
                                                             .as_ref()
                                                             .map(|p| self.resolve_class_name(p))
@@ -10558,6 +10573,20 @@ impl Compiler {
     /// PHP's zend_ensure_valid_class_fetch_type: inside a free function the
     /// (empty) class scope is known at compile time, so self/parent/static
     /// are rejected.
+    /// zend_is_scope_known(): whether self/parent are fixed at compile time
+    /// (not in closures, which can be rebound, nor in file-level code, which
+    /// inherits the including scope, nor in traits).
+    fn is_scope_known(&self) -> bool {
+        let n = &self.op_array.name;
+        if n.starts_with(b"__closure_") || n.starts_with(b"__arrow_") {
+            return false;
+        }
+        if self.current_class.is_none() {
+            return self.in_free_function;
+        }
+        !self.is_in_trait
+    }
+
     fn check_class_ref_scope(&self, name: &[u8], line: u32) -> CompileResult<()> {
         if self.in_free_function && self.current_class.is_none() {
             for kw in ["self", "parent", "static"] {
@@ -15715,6 +15744,16 @@ impl Compiler {
                         }
                         // $expr::class - emit GetClassName opcode
                         if constant == b"class" {
+                            // A constant-folded operand (zend_compile_class_name).
+                            if let Some(v) = Self::eval_const_expr(class) {
+                                return Err(CompileError {
+                                    message: format!(
+                                        "Cannot use \"::class\" on {}",
+                                        crate::vm::Vm::value_type_name(&v)
+                                    ),
+                                    line: class.span.line,
+                                });
+                            }
                             let obj_operand = self.compile_expr(class)?;
                             let tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
@@ -15747,25 +15786,50 @@ impl Compiler {
 
                 // ClassName::class returns the class name as a string
                 if constant == b"class" {
-                    if class_name.eq_ignore_ascii_case(b"static") {
-                        // static::class must be resolved at runtime via StaticPropGet
-                        let class_idx = self
+                    let is_self = class_name.eq_ignore_ascii_case(b"self");
+                    let is_parent = class_name.eq_ignore_ascii_case(b"parent");
+                    let is_static = class_name.eq_ignore_ascii_case(b"static");
+                    // zend_try_compile_const_expr_resolve_class_name():
+                    // self/parent resolve at compile time only when the
+                    // scope is known; otherwise ZEND_FETCH_CLASS_NAME runs.
+                    let known = self.is_scope_known() && self.current_class.is_some();
+                    if is_parent && known && self.current_parent_class.is_none() {
+                        return Err(CompileError {
+                            message: "Cannot use \"parent\" when current class scope has no parent"
+                                .into(),
+                            line: class.span.line,
+                        });
+                    }
+                    let runtime = is_static
+                        || (is_parent && !known)
+                        || (is_self && self.current_class.is_none());
+                    if runtime {
+                        let mut kind = if self.in_const_expr && !is_static {
+                            b"const:".to_vec()
+                        } else {
+                            Vec::new()
+                        };
+                        kind.extend_from_slice(&class_name.to_ascii_lowercase());
+                        let kind_idx = self
                             .op_array
-                            .add_literal(Value::String(PhpString::from_bytes(b"static")));
-                        let const_name_idx = self
-                            .op_array
-                            .add_literal(Value::String(PhpString::from_bytes(b"class")));
+                            .add_literal(Value::String(PhpString::from_vec(kind)));
                         let tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
-                            opcode: OpCode::StaticPropGet,
-                            op1: OperandType::Const(class_idx),
-                            op2: OperandType::Const(const_name_idx),
+                            opcode: OpCode::GetClassName,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Const(kind_idx),
                             result: OperandType::Tmp(tmp),
                             line: expr.span.line,
                         });
                         return Ok(OperandType::Tmp(tmp));
                     }
-                    let is_self = class_name.eq_ignore_ascii_case(b"self");
+                    if is_parent {
+                        let parent = self.current_parent_class.clone().unwrap_or_default();
+                        let idx = self
+                            .op_array
+                            .add_literal(Value::String(PhpString::from_vec(parent)));
+                        return Ok(OperandType::Const(idx));
+                    }
                     let resolved = if is_self {
                         self.current_class.clone().unwrap_or_default()
                     } else {
@@ -18373,9 +18437,9 @@ impl Compiler {
                         if lower == b"self" || lower == b"static" {
                             qualified_name.to_vec()
                         } else if lower == b"parent" {
-                            extends
-                                .map(|p| compiler.resolve_class_name(p))
-                                .unwrap_or(resolved)
+                            // No parent: not evaluable here (the caller
+                            // reports the error).
+                            extends.map(|p| compiler.resolve_class_name(p))?
                         } else {
                             resolved
                         }
@@ -18425,9 +18489,9 @@ impl Compiler {
                         if lower == b"self" || lower == b"static" {
                             qualified_name.to_vec()
                         } else if lower == b"parent" {
-                            extends
-                                .map(|p| compiler.resolve_class_name(p))
-                                .unwrap_or(resolved)
+                            // No parent: not evaluable here (the caller
+                            // reports the error).
+                            extends.map(|p| compiler.resolve_class_name(p))?
                         } else {
                             resolved
                         }

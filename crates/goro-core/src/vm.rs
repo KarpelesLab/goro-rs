@@ -2493,6 +2493,63 @@ impl Vm {
         (m as u64) as i64
     }
 
+    /// ZEND_FETCH_CLASS_NAME with a self/parent/static fetch type (`kind`),
+    /// or the ZEND_AST_CLASS_NAME constant-expression evaluation when `kind`
+    /// carries a `const:` prefix. Errors are thrown into `current_exception`.
+    pub(crate) fn fetch_class_name_keyword(&mut self, kind: &[u8], line: u32) -> Value {
+        let (const_expr, kw) = match kind.strip_prefix(b"const:") {
+            Some(k) => (true, k),
+            None => (false, kind),
+        };
+        let scope = self
+            .class_scope_stack
+            .last()
+            .filter(|s| !s.is_empty())
+            .cloned();
+        let canonical = |vm: &Self, lower: &[u8]| -> Vec<u8> {
+            vm.classes
+                .get(lower)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| lower.to_vec())
+        };
+        let Some(scope) = scope else {
+            let msg = if const_expr {
+                "Cannot use \"self\" when no class scope is active".to_string()
+            } else {
+                format!(
+                    "Cannot use \"{}\" in the global scope",
+                    String::from_utf8_lossy(kw)
+                )
+            };
+            let exc = self.create_exception(b"Error", &msg, line);
+            self.current_exception = Some(exc);
+            return Value::Null;
+        };
+        let name = match kw {
+            b"parent" => {
+                let parent = self.classes.get(&scope).and_then(|c| c.parent.clone());
+                match parent {
+                    Some(p) => canonical(self, &p.to_ascii_lowercase()),
+                    None => {
+                        let exc = self.create_exception(
+                            b"Error",
+                            "Cannot use \"parent\" when current class scope has no parent",
+                            line,
+                        );
+                        self.current_exception = Some(exc);
+                        return Value::Null;
+                    }
+                }
+            }
+            b"static" => match self.called_class_stack.last() {
+                Some(c) => canonical(self, &c.to_ascii_lowercase()),
+                None => canonical(self, &scope),
+            },
+            _ => canonical(self, &scope),
+        };
+        Value::String(PhpString::from_vec(name))
+    }
+
     pub fn current_class_scope(&self) -> Option<Vec<u8>> {
         let scope_lower = self.class_scope_stack.last().cloned().or_else(|| {
             self.called_class_stack
@@ -8366,6 +8423,17 @@ impl Vm {
         // Clone and modify the OpArray
         let mut new_op = (*original_op).clone();
         new_op.name = new_closure_name.clone();
+        // zend_closure_bind: without $this the called scope is the new scope.
+        new_op.closure_called_class = if matches!(new_this, Value::Null) {
+            new_scope.as_ref().map(|sc| {
+                self.classes
+                    .get(sc)
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| sc.clone())
+            })
+        } else {
+            None
+        };
         new_op.scope_class = new_scope;
 
         // Determine the $this CV position in the new OpArray
@@ -39214,22 +39282,41 @@ impl Vm {
                     Flow::Continue => continue 'exec,
                     Flow::Return(v) => return Ok(v),
                 },
-                OpCode::GetClassName => {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let class_name = match &val {
-                        Value::Object(obj) => {
-                            Value::String(PhpString::from_vec(obj.borrow().class_name.clone()))
+                OpCode::GetClassName => match outlined(|| -> Result<Flow, VmError> {
+                    let val = if matches!(op.op1, OperandType::Unused) {
+                        let kind = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                        self.fetch_class_name_keyword(kind.to_php_string().as_bytes(), op.line)
+                    } else {
+                        let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                        match val.deref() {
+                            Value::Object(obj) => {
+                                Value::String(PhpString::from_vec(obj.borrow().class_name.clone()))
+                            }
+                            other => {
+                                let msg = format!(
+                                    "Cannot use \"::class\" on {}",
+                                    Self::value_type_name(&other)
+                                );
+                                let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                self.current_exception = Some(exc);
+                                Value::Null
+                            }
                         }
-                        _ => Value::String(PhpString::empty()),
                     };
-                    self.write_operand(
-                        &op.result,
-                        class_name,
-                        &mut cvs,
-                        &mut tmps,
-                        &static_cv_keys,
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
                     );
-                }
+                    self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
+                    Ok(Flow::Next)
+                })? {
+                    Flow::Next => {}
+                    Flow::Continue => continue 'exec,
+                    Flow::Return(v) => return Ok(v),
+                },
 
                 OpCode::PropertyIsset => match outlined(|| -> Result<Flow, VmError> {
                     // Check if object property is set (with __isset support)
