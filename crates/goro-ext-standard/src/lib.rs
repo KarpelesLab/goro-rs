@@ -40,6 +40,16 @@ pub mod sockets_streams {
     };
 }
 
+/// The stream layer for wrappers implemented by other extensions
+/// (ext/phar's phar://).
+pub mod native_streams {
+    pub use crate::misc::userstream::{
+        NativeOpened, NativeStream, NativeWrapperOps, StatBuf, clear_stat_cache_pub,
+        context_option, native_wrapper_active, read_whole_url, register_native_wrapper, stat_path,
+        wrapper_log_error,
+    };
+}
+
 use goro_core::vm::Vm;
 
 /// Register all standard extension functions

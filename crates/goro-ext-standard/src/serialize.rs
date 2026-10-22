@@ -1178,6 +1178,8 @@ struct Parser<'a> {
     data: &'a [u8],
     d: Rc<RefCell<UnserData>>,
     line: u32,
+    /// The function the warnings are reported for.
+    fname: &'a str,
 }
 
 /// parse_iv2(): returns (value, end position), warning on overflow.
@@ -1236,13 +1238,18 @@ impl<'a> Parser<'a> {
     fn warn(&self, vm: &mut Vm, msg: &str) {
         // php_error_docref() names the active function: unserialize(), or
         // the internal Serializable::unserialize() (ArrayObject,
-        // SplObjectStorage, ...) whose payload is being decoded.
-        let func = match vm.call_stack.last() {
-            Some(f) if f.0.ends_with("->unserialize") => f.0.replace("->", "::"),
-            _ => match vm.current_builtin_name() {
-                Some(n) if n.starts_with("session_") => n,
-                _ => "unserialize".to_string(),
-            },
+        // SplObjectStorage, ...) whose payload is being decoded, or the
+        // caller-supplied name (e.g. Phar::getMetadata()).
+        let func = if self.fname != "unserialize" {
+            self.fname.to_string()
+        } else {
+            match vm.call_stack.last() {
+                Some(f) if f.0.ends_with("->unserialize") => f.0.replace("->", "::"),
+                _ => match vm.current_builtin_name() {
+                    Some(n) if n.starts_with("session_") => n,
+                    _ => "unserialize".to_string(),
+                },
+            }
         };
         vm.emit_warning_at(&format!("{}(): {}", func, msg), self.line);
     }
@@ -2163,6 +2170,7 @@ impl<'a> Parser<'a> {
             data: payload,
             d: self.d.clone(),
             line: self.line,
+            fname: self.fname,
         };
         let mut p2 = 0usize;
         let num_idx = {
@@ -2784,6 +2792,7 @@ pub fn php_unserialize_with_options(
         data: buf,
         d: d.clone(),
         line,
+        fname: function_name,
     };
     let mut p = 0usize;
     let ok = parser.unserialize(vm, &mut p, &Slot::Tmp(tmp_idx));
@@ -2885,6 +2894,7 @@ pub(crate) fn unserialize_value_hook(vm: &mut Vm, data: &[u8], pos: &mut usize) 
         data,
         d: d.clone(),
         line,
+        fname: "unserialize",
     };
     let ok = parser.unserialize(vm, pos, &Slot::Tmp(tmp_idx));
     let result = if ok {
@@ -2925,6 +2935,7 @@ impl UnserializeScope {
             data,
             d: self.d.clone(),
             line: vm.current_line,
+            fname: "unserialize",
         };
         parser
             .unserialize(vm, pos, &Slot::Tmp(tmp_idx))

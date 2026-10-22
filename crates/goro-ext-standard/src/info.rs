@@ -40,6 +40,11 @@ pub fn set_web_sapi(web: bool) {
     WEB_SAPI.with(|w| w.set(web));
 }
 
+/// Whether the request is served by a web SAPI (cgi-fcgi) rather than the CLI.
+pub fn is_web_sapi() -> bool {
+    WEB_SAPI.with(|w| w.get())
+}
+
 struct Info {
     html: bool,
     out: Vec<u8>,

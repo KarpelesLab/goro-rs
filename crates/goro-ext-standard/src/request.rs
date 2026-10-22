@@ -1714,12 +1714,18 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
             }
         } else {
             // cgi.fix_pathinfo: PHP_SELF from SCRIPT_NAME / the script path
-            let self_name = req
+            let mut self_name = req
                 .env
                 .iter()
                 .find(|(k, _)| k == b"SCRIPT_NAME")
                 .map(|(_, v)| v.clone())
                 .unwrap_or_else(|| req.script_filename.clone());
+            // (sapi_cgi_register_variables(): SCRIPT_NAME + PATH_INFO)
+            if ini_bool(ini("cgi.fix_pathinfo"), true) {
+                if let Some((_, pi)) = req.env.iter().find(|(k, _)| k == b"PATH_INFO") {
+                    self_name.extend_from_slice(pi);
+                }
+            }
             s.set(sym_key(b"PHP_SELF"), sval(&self_name));
         }
         let now = std::time::SystemTime::now()

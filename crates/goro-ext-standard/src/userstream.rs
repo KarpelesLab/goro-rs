@@ -91,7 +91,7 @@ pub(crate) type Us = Rc<RefCell<UserStream>>;
 /// php_stream_ops of a stream implemented in Rust but served by this
 /// stream layer (buffering, line reading, positions...), e.g. the
 /// compress.zlib:// streams.
-pub(crate) trait NativeStream {
+pub trait NativeStream {
     /// ops->read(): None == -1. Sets `*eof` like stream->eof.
     fn read(&mut self, vm: &mut Vm, count: usize, eof: &mut bool) -> Option<Vec<u8>>;
     /// ops->write(): bytes written, < 0 on error.
@@ -106,6 +106,159 @@ pub(crate) trait NativeStream {
     fn lock(&mut self, vm: &mut Vm, value: i64) -> i32;
     /// ops->label
     fn label(&self) -> &'static str;
+    /// ops->stat(): None == -1.
+    fn stat(&mut self, _vm: &mut Vm) -> Option<StatBuf> {
+        None
+    }
+    /// ops->read() of a directory stream: the next entry name.
+    fn readdir(&mut self, _vm: &mut Vm) -> Option<Vec<u8>> {
+        None
+    }
+    /// rewinddir(): ops->seek(0, SEEK_SET) of a directory stream.
+    fn rewinddir(&mut self, _vm: &mut Vm) {}
+}
+
+/// php_stream_wrapper_ops of a builtin wrapper implemented by another
+/// extension (registered with `register_native_wrapper()`), whose streams
+/// are served by this layer through their `NativeStream` ops.
+pub trait NativeWrapperOps {
+    /// wops->label
+    fn label(&self) -> &'static str;
+    /// wops->stream_opener()
+    fn open(
+        &self,
+        vm: &mut Vm,
+        path: &[u8],
+        mode: &str,
+        options: i64,
+        context: Option<i64>,
+    ) -> Result<Option<NativeOpened>, VmError>;
+    /// wops->dir_opener()
+    fn opendir(
+        &self,
+        vm: &mut Vm,
+        path: &[u8],
+        options: i64,
+        context: Option<i64>,
+    ) -> Result<Option<Rc<RefCell<dyn NativeStream>>>, VmError>;
+    /// wops->url_stat(): None == -1.
+    fn url_stat(&self, vm: &mut Vm, url: &[u8], flags: i64) -> Result<Option<StatBuf>, VmError>;
+    fn unlink(
+        &self,
+        vm: &mut Vm,
+        url: &[u8],
+        options: i64,
+        context: Option<i64>,
+    ) -> Result<bool, VmError>;
+    fn rename(
+        &self,
+        vm: &mut Vm,
+        from: &[u8],
+        to: &[u8],
+        options: i64,
+        context: Option<i64>,
+    ) -> Result<bool, VmError>;
+    fn mkdir(
+        &self,
+        vm: &mut Vm,
+        url: &[u8],
+        mode: i64,
+        options: i64,
+        context: Option<i64>,
+    ) -> Result<bool, VmError>;
+    fn rmdir(
+        &self,
+        vm: &mut Vm,
+        url: &[u8],
+        options: i64,
+        context: Option<i64>,
+    ) -> Result<bool, VmError>;
+}
+
+/// A stream opened by a `NativeWrapperOps`.
+pub struct NativeOpened {
+    pub stream: Rc<RefCell<dyn NativeStream>>,
+    pub opened_path: Option<Vec<u8>>,
+}
+
+thread_local! {
+    static NATIVE_WRAPPERS: RefCell<HashMap<Vec<u8>, Rc<dyn NativeWrapperOps>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// php_register_url_stream_wrapper() for a wrapper implemented in Rust.
+/// `scheme` must be one of the builtin wrapper names.
+pub fn register_native_wrapper(scheme: &[u8], ops: Rc<dyn NativeWrapperOps>) {
+    NATIVE_WRAPPERS.with(|w| {
+        w.borrow_mut().insert(scheme.to_ascii_lowercase(), ops);
+    });
+}
+
+/// Whether `scheme` is currently served by its native wrapper (not
+/// unregistered nor replaced by a user wrapper).
+pub fn native_wrapper_active(scheme: &[u8]) -> bool {
+    let lower = scheme.to_ascii_lowercase();
+    user_wrapper(&lower).is_some_and(|u| u.ext.is_some())
+}
+
+/// php_stream_wrapper_log_error() for native wrappers.
+pub fn wrapper_log_error(vm: &mut Vm, options: i64, msg: String) {
+    log_error(vm, options, msg);
+}
+
+/// php_clear_stat_cache()
+pub fn clear_stat_cache_pub() {
+    clear_stat_cache();
+}
+
+/// php_stream_stat_path_ex() for any path.
+pub fn stat_path(vm: &mut Vm, path: &[u8], flags: i64) -> Result<Option<StatBuf>, VmError> {
+    stat_path_any(vm, path, flags)
+}
+
+/// An option of a stream context (`$options[wrapper][option]`).
+pub fn context_option(context: Option<i64>, wrapper: &[u8], option: &[u8]) -> Option<Value> {
+    let id = context?;
+    STREAM_CONTEXTS.with(|c| {
+        c.borrow()
+            .get(&id)
+            .and_then(|ctx| ctx.options.get(wrapper))
+            .and_then(|o| o.get(option))
+            .cloned()
+    })
+}
+
+/// php_stream_open_wrapper(path, "rb", options) + copy_to_mem + close:
+/// None when the stream cannot be opened.
+pub fn read_whole_url(
+    vm: &mut Vm,
+    path: &[u8],
+    report_errors: bool,
+) -> Result<Option<Vec<u8>>, VmError> {
+    let options = if report_errors { REPORT_ERRORS } else { 0 };
+    let saved = if report_errors {
+        None
+    } else {
+        Some(vm.warning_capture.replace(Vec::new()))
+    };
+    let r = (|| -> Result<Option<Vec<u8>>, VmError> {
+        let Some(fid) = any_open(vm, path, "rb", options, None)? else {
+            return Ok(None);
+        };
+        let mut out = Vec::new();
+        loop {
+            match any_read(vm, fid, 8192)? {
+                Some(d) if !d.is_empty() => out.extend_from_slice(&d),
+                _ => break,
+            }
+        }
+        any_close(vm, fid)?;
+        Ok(Some(out))
+    })();
+    if let Some(saved) = saved {
+        vm.warning_capture = saved;
+    }
+    r
 }
 
 fn native_of(us: &Us) -> Option<Rc<RefCell<dyn NativeStream>>> {
@@ -151,7 +304,8 @@ fn fid_of(v: &Value) -> Option<i64> {
 fn us_arg(args: &[Value], i: usize) -> Option<(i64, Us)> {
     let fid = fid_of(args.get(i)?)?;
     let us = get_us(fid)?;
-    if us.borrow().flags & FLAG_IS_DIR != 0 {
+    // (the directory streams of native wrappers have stream ops too)
+    if us.borrow().flags & FLAG_IS_DIR != 0 && us.borrow().native.is_none() {
         return None;
     }
     Some((fid, us))
@@ -512,6 +666,8 @@ pub(crate) struct UserWrapperRef {
     /// A builtin wrapper implemented in Rust (compress.zlib://,
     /// compress.bzip2://): its wops->label.
     pub native: Option<&'static str>,
+    /// A builtin wrapper implemented by another extension.
+    pub ext: Option<Rc<dyn NativeWrapperOps>>,
 }
 
 /// Result of locating the wrapper for a path.
@@ -533,10 +689,22 @@ fn user_wrapper(scheme_lower: &[u8]) -> Option<UserWrapperRef> {
             class_name: u.class_name.clone(),
             is_url: u.flags & 1 != 0,
             native: None,
+            ext: None,
         })
     });
     if user.is_some() {
         return user;
+    }
+    if let Some(ops) = NATIVE_WRAPPERS.with(|w| w.borrow().get(scheme_lower).cloned()) {
+        if !builtin_disabled(scheme_lower) {
+            return Some(UserWrapperRef {
+                scheme: scheme_lower.to_vec(),
+                class_name: Vec::new(),
+                is_url: false,
+                native: None,
+                ext: Some(ops),
+            });
+        }
     }
     // php_stream_gzip_wrapper and php_stream_bzip2_wrapper are served by
     // this layer too.
@@ -551,6 +719,7 @@ fn user_wrapper(scheme_lower: &[u8]) -> Option<UserWrapperRef> {
             class_name: Vec::new(),
             is_url: false,
             native: Some(label),
+            ext: None,
         });
     }
     None
@@ -917,7 +1086,7 @@ fn create_object(
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Default)]
-pub(crate) struct StatBuf {
+pub struct StatBuf {
     pub dev: i64,
     pub ino: i64,
     pub mode: i64,
@@ -1221,8 +1390,8 @@ fn op_seek(vm: &mut Vm, us: &Us, offset: i64, whence: i64) -> Result<(i32, Optio
 
 /// php_userstreamop_stat()
 fn op_stat(vm: &mut Vm, us: &Us) -> Result<Option<StatBuf>, VmError> {
-    if native_of(us).is_some() {
-        return Ok(None);
+    if let Some(n) = native_of(us) {
+        return Ok(n.borrow_mut().stat(vm));
     }
     let (obj, cname) = us_obj(us);
     match call_method(vm, &obj, b"stream_stat", vec![])? {
@@ -2260,6 +2429,13 @@ fn wrapper_open(
         };
         return Ok(r.map(|(fid, us)| (fid, us, None)));
     }
+    if let Some(ops) = &uw.ext {
+        let label = ops.label();
+        return Ok(ops.open(vm, path, mode, options, context)?.map(|o| {
+            let (fid, us) = alloc_native_stream(o.stream, mode, Some(path), Some(label), false);
+            (fid, us, o.opened_path)
+        }));
+    }
     if recursion_guard(path) {
         log_error(vm, options, "infinite recursion prevented".to_string());
         return Ok(None);
@@ -2337,6 +2513,14 @@ fn wrapper_opendir(
     if uw.native.is_some() {
         log_error(vm, options, "not implemented".to_string());
         return Ok(None);
+    }
+    if let Some(ops) = &uw.ext {
+        let label = ops.label();
+        return Ok(ops.opendir(vm, path, options, context)?.map(|n| {
+            let (fid, us) = alloc_native_stream(n, "r", Some(path), Some(label), true);
+            us.borrow_mut().flags |= FLAG_IS_DIR;
+            (fid, us)
+        }));
     }
     if recursion_guard(path) {
         log_error(vm, options, "infinite recursion prevented".to_string());
@@ -2420,6 +2604,9 @@ fn opendir_wrapper(
 
 /// php_userstreamop_readdir(): Ok(None) == no entry
 fn op_readdir(vm: &mut Vm, us: &Us) -> Result<Option<Vec<u8>>, VmError> {
+    if let Some(n) = native_of(us) {
+        return Ok(n.borrow_mut().readdir(vm));
+    }
     let (obj, cname) = us_obj(us);
     let v = match call_method(vm, &obj, b"dir_readdir", vec![])? {
         CallRes::NotImpl => {
@@ -2457,6 +2644,10 @@ fn op_readdir(vm: &mut Vm, us: &Us) -> Result<Option<Vec<u8>>, VmError> {
 
 /// php_userstreamop_rewinddir()
 fn op_rewinddir(vm: &mut Vm, us: &Us) -> Result<(), VmError> {
+    if let Some(n) = native_of(us) {
+        n.borrow_mut().rewinddir(vm);
+        return Ok(());
+    }
     let (obj, _) = us_obj(us);
     let _ = call_method(vm, &obj, b"dir_rewinddir", vec![])?;
     Ok(())
@@ -2471,6 +2662,9 @@ fn wrapper_url_stat(
 ) -> Result<Option<StatBuf>, VmError> {
     if uw.native.is_some() {
         return Ok(None);
+    }
+    if let Some(ops) = &uw.ext {
+        return ops.url_stat(vm, url, flags);
     }
     let obj = match create_object(vm, uw, None)? {
         Some(o) => o,
@@ -2508,6 +2702,22 @@ fn wrapper_bool_op(
     method: &str,
     args: Vec<Value>,
 ) -> Result<bool, VmError> {
+    if let Some(ops) = &uw.ext {
+        let st = |i: usize| -> Vec<u8> {
+            match args.get(i) {
+                Some(Value::String(s)) => s.as_bytes().to_vec(),
+                _ => Vec::new(),
+            }
+        };
+        let ln = |i: usize| -> i64 { args.get(i).map(|v| v.to_long()).unwrap_or(0) };
+        return match method {
+            "unlink" => ops.unlink(vm, &st(0), REPORT_ERRORS, context),
+            "rename" => ops.rename(vm, &st(0), &st(1), REPORT_ERRORS, context),
+            "mkdir" => ops.mkdir(vm, &st(0), ln(1), ln(2), context),
+            "rmdir" => ops.rmdir(vm, &st(0), ln(1), context),
+            _ => Ok(false),
+        };
+    }
     if let Some(label) = uw.native {
         // wops->unlink / rename / mkdir / rmdir are NULL
         match method {
@@ -3581,7 +3791,11 @@ macro_rules! path_or_orig {
 /// USE_PATH: resolve a relative name through include_path entries served
 /// by userspace wrappers.
 fn use_path_resolve(vm: &mut Vm, p: Vec<u8>, use_path: bool) -> Result<Vec<u8>, VmError> {
-    if !use_path || needs_locate(&p) || USER_WRAPPERS.with(|w| w.borrow().is_empty()) {
+    if !use_path
+        || needs_locate(&p)
+        || (USER_WRAPPERS.with(|w| w.borrow().is_empty())
+            && NATIVE_WRAPPERS.with(|w| w.borrow().is_empty()))
+    {
         return Ok(p);
     }
     match resolve_path_user(vm, &p) {
@@ -4117,7 +4331,7 @@ fn metadata(
     option: i64,
     value: Value,
 ) -> Result<Option<Value>, VmError> {
-    if uw.native.is_some() {
+    if uw.native.is_some() || uw.ext.is_some() {
         // wops->stream_metadata is NULL
         let times_given = matches!(&value, Value::Array(a) if !a.borrow().is_empty());
         if option == PHP_STREAM_META_TOUCH && !times_given {
