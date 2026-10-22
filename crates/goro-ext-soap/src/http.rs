@@ -6,6 +6,7 @@ use goro_core::vm::Vm;
 use crate::php::*;
 use crate::types::*;
 
+#[derive(Clone)]
 pub struct Url {
     pub scheme: Option<String>,
     pub host: Option<String>,
@@ -128,31 +129,14 @@ pub fn make_http_soap_request(
     } else {
         None
     };
-    let Some(uri) = uri.filter(|u| u.host.is_some()) else {
-        add_soap_fault(vm, this, "HTTP", "Unable to parse URL");
-        return Ok(None);
-    };
-    let use_ssl = match uri.scheme.as_deref() {
-        Some("https") => true,
-        Some("http") => false,
-        _ => {
-            add_soap_fault(
-                vm,
-                this,
-                "HTTP",
-                "Unknown protocol. Only http and https are allowed.",
-            );
-            return Ok(None);
-        }
-    };
     crate::http_client::request(
         vm,
         this,
         buf,
         uri,
-        use_ssl,
-        soapaction,
+        Some(soapaction),
         soap_version,
+        uri_parser_class,
         want_response,
     )
 }

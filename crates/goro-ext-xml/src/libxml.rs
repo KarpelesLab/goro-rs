@@ -130,6 +130,12 @@ pub fn streams_context() -> Option<Value> {
     STATE.with(|s| s.borrow().streams_context.clone())
 }
 
+/// php_libxml_switch_context(): replace the stream context, returning the
+/// previous one.
+pub fn switch_streams_context(ctx: Option<Value>) -> Option<Value> {
+    STATE.with(|s| std::mem::replace(&mut s.borrow_mut().streams_context, ctx))
+}
+
 pub fn entity_loader() -> Option<Value> {
     STATE.with(|s| s.borrow().entity_loader.clone())
 }

@@ -912,7 +912,7 @@ fn load_wsdl_body(vm: &mut Vm, uri: &str, ctx: &mut SdlCtx) -> SR<()> {
     Ok(())
 }
 
-fn ini_str(vm: &Vm, k: &str) -> String {
+pub fn ini_str(vm: &Vm, k: &str) -> String {
     vm.constants
         .get(k.as_bytes())
         .map(|v| v.to_php_string().to_string_lossy())
@@ -964,8 +964,18 @@ pub fn get_sdl(vm: &mut Vm, this: &Obj, uri: &str, cache_wsdl: i64) -> SR<SdlRef
     }
     let old_code = g(|g| g.error_code);
     g(|g| g.error_code = Some("WSDL"));
-    let _ = this;
+    // The context only matters to stream wrappers: local files are read
+    // without one (and no context resource is allocated for them).
+    let lower = uri.to_ascii_lowercase();
+    let remote = uri.contains("://") && !lower.starts_with("file://");
+    let orig_ctx = remote.then(|| {
+        let new_ctx = crate::http_client::wsdl_context(vm, this, &uri);
+        goro_ext_xml::libxml::switch_streams_context(Some(new_ctx))
+    });
     let r = load_wsdl(vm, &uri);
+    if let Some(orig) = orig_ctx {
+        goro_ext_xml::libxml::switch_streams_context(orig);
+    }
     g(|g| g.error_code = old_code);
     let sdl = r?;
     if cache_wsdl & WSDL_CACHE_MEMORY != 0 {
