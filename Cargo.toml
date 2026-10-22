@@ -52,6 +52,7 @@ members = [
     "crates/goro-ext-tidy",
     "crates/goro-ext-opcache",
     "crates/goro-sqlite",
+    "crates/goro-ext-sqlite3",
 ]
 resolver = "2"
 
@@ -118,6 +119,7 @@ goro-ext-zip = { path = "crates/goro-ext-zip" }
 goro-ext-fileinfo = { path = "crates/goro-ext-fileinfo" }
 goro-ext-sodium = { path = "crates/goro-ext-sodium" }
 goro-ext-intl = { path = "crates/goro-ext-intl" }
+goro-ext-sqlite3 = { path = "crates/goro-ext-sqlite3" }
 goro-ext-xsl = { path = "crates/goro-ext-xsl" }
 goro-ext-dba = { path = "crates/goro-ext-dba" }
 goro-ext-readline = { path = "crates/goro-ext-readline" }

@@ -108,15 +108,7 @@ impl PhptTest {
 
         let mut raw_sections = HashMap::new();
         for sec in [
-            "POST",
-            "POST_RAW",
-            "PUT",
-            "GET",
-            "COOKIE",
-            "ARGS",
-            "ENV",
-            "STDIN",
-            "EXPECTHEADERS",
+            "POST", "POST_RAW", "PUT", "GET", "COOKIE", "ARGS", "ENV", "STDIN",
         ] {
             if let Some(r) = Self::raw_section(content, sec) {
                 raw_sections.insert(sec.to_string(), r);
@@ -429,11 +421,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_fileinfo::register(&mut vm);
                 goro_ext_sodium::register(&mut vm);
                 goro_ext_intl::register(&mut vm);
-                goro_ext_gd::register(&mut vm);
-                goro_ext_dba::register(&mut vm);
-                goro_ext_readline::register(&mut vm);
-                goro_ext_tidy::register(&mut vm);
-                goro_ext_opcache::register(&mut vm);
+                goro_ext_sqlite3::register(&mut vm);
                 // Loadable on request (see run_test_inner).
                 vm.register_extension(goro_ext_zend_test::NAME);
                 vm.register_extension(b"simplexml");
@@ -444,13 +432,6 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
             let loaded = exts.as_ref().unwrap();
             for ext in extensions.lines() {
                 let ext = ext.trim().to_lowercase();
-                // get_loaded_extensions() names it "Zend OPcache"
-                // (run-tests.php maps it to "opcache").
-                let ext = if ext == "opcache" {
-                    "zend opcache".to_string()
-                } else {
-                    ext
-                };
                 if !ext.is_empty() && !loaded.contains(ext.as_bytes()) {
                     return Some(format!("Required extension {} not available", ext));
                 }
@@ -478,12 +459,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
             // ($orig_ini_settings), before merging the test's --INI--: e.g.
             // an unsupported default_charset must not print startup
             // warnings in front of the "skip" message.
-            // (with the --EXTENSIONS-- it loads)
-            let skipif_ini: Vec<(String, String)> = ini_settings
-                .iter()
-                .take_while(|(k, _)| k == "extension")
-                .cloned()
-                .collect();
+            let skipif_ini: Vec<(String, String)> = Vec::new();
             // Written next to the test as run-tests.php does, so that
             // include('skipif.inc') and __DIR__ resolve.
             let skip_filename = match filename.strip_suffix(".php") {
@@ -573,14 +549,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
         15
     } else {
         5
-    } + literal_sleep_secs(source);
-    // run-tests.php runs CLEAN with $orig_ini_settings: the extensions it
-    // loads, not the test's --INI--.
-    let clean_ini: Vec<(String, String)> = ini_settings
-        .iter()
-        .filter(|(k, _)| k == "extension")
-        .cloned()
-        .collect();
+    };
     let req = build_request(test, test_dir, filename);
     PHPT_REQUEST.with(|r| *r.borrow_mut() = Some(req));
     let source_bytes = match &external_source {
@@ -611,7 +580,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                         clean_trimmed.as_bytes(),
                         5,
                         test_dir,
-                        &clean_ini,
+                        &ini_settings,
                         &clean_filename,
                     );
                 }
@@ -637,7 +606,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 clean_trimmed.as_bytes(),
                 5,
                 test_dir,
-                &clean_ini,
+                &ini_settings,
                 &clean_filename,
             );
         }
@@ -729,21 +698,6 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
 ///
 /// Be conservative: better to skip too few than too many. Never skip a test
 /// that could actually pass.
-/// run-tests.php's $ini_overwrites for opcache.
-const RUN_TESTS_OPCACHE_INI: &[(&str, &str)] = &[
-    ("opcache.fast_shutdown", "0"),
-    ("opcache.file_update_protection", "0"),
-    ("opcache.revalidate_freq", "0"),
-    ("opcache.jit_hot_loop", "1"),
-    ("opcache.jit_hot_func", "1"),
-    ("opcache.jit_hot_return", "1"),
-    ("opcache.jit_hot_side_exit", "1"),
-    ("opcache.jit_max_root_traces", "100000"),
-    ("opcache.jit_max_side_traces", "100000"),
-    ("opcache.jit_max_exit_counters", "100000"),
-    ("opcache.protect_memory", "1"),
-];
-
 pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
     let file_section = test.file_section().unwrap_or("");
     let test_name = &test.name;
@@ -1007,12 +961,6 @@ fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
 /// Parse error reporting expressions like "E_ALL&~E_DEPRECATED"
 /// Supports operators: | (OR), ^ (XOR), & (AND), ~ (NOT), ! (logical NOT)
 fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
-    // A plain value ("2M", "0x10") is not an expression.
-    if !expr.contains(['|', '^', '&', '~', '!', '(', ')'])
-        && expr.trim_start().starts_with(|c: char| c.is_ascii_digit())
-    {
-        return None;
-    }
     // PHP error level constants
     fn resolve_constant(name: &str) -> Option<i64> {
         match name.trim() {
@@ -1032,11 +980,6 @@ fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
             "E_DEPRECATED" => Some(8192),
             "E_USER_DEPRECATED" => Some(16384),
             "E_ALL" => Some(30719), // E_ALL
-            // get_int_val(): atoi() of the operand ("0x7F" is 0)
-            n if n.starts_with(|c: char| c.is_ascii_digit()) => {
-                let digits: String = n.chars().take_while(|c| c.is_ascii_digit()).collect();
-                digits.parse::<i64>().ok()
-            }
             _ => name.trim().parse::<i64>().ok(),
         }
     }
@@ -1586,7 +1529,6 @@ fn execute_php_inner_impl(
     let lexer_warnings = goro_parser::take_lexer_warnings();
 
     // Parse
-    goro_core::stack::install_parser_stack_grower();
     let mut parser = Parser::new(tokens).with_source(source);
     let parsed = parser.parse();
     // Deprecations recorded by the lexer (e.g. `${var}` syntax) and the
@@ -1695,24 +1637,7 @@ fn execute_php_inner_impl(
     // ...in source order.
     lexer_deprecations.sort_by_key(|(_, line)| *line);
 
-    // The compiler checks the (emulated) C stack too.
-    {
-        let ini = |k: &str| {
-            ini_settings
-                .iter()
-                .rev()
-                .find(|(n, _)| n == k)
-                .map(|(_, v)| v.as_bytes())
-        };
-        goro_core::stack::configure_from_ini(
-            ini("zend.max_allowed_stack_size"),
-            ini("zend.reserved_stack_size"),
-        );
-    }
-    // Compile (with the extensions' compile-time state: MINIT)
-    if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
-        goro_ext_zend_test::minit();
-    }
+    // Compile
     let mut compiler = Compiler::new();
     compiler.source_file = filename.as_bytes().to_vec();
     let (op_array, compiled_classes, compile_warnings) = match compiler.compile(&program) {
@@ -1789,16 +1714,10 @@ fn execute_php_inner_impl(
     goro_ext_fileinfo::register(&mut vm);
     goro_ext_sodium::register(&mut vm);
     goro_ext_intl::register(&mut vm);
-    goro_ext_gd::register(&mut vm);
-    goro_ext_dba::register(&mut vm);
-    goro_ext_readline::register(&mut vm);
-    goro_ext_tidy::register(&mut vm);
+    goro_ext_sqlite3::register(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }
-    // Registered last: its startup (preloading) runs after the other
-    // extensions' (as accel_post_startup() does).
-    goro_ext_opcache::register(&mut vm);
     // Also register aliases that PHP tests may use
     vm.register_extension(b"simplexml");
     vm.register_extension(b"tokenizer");
@@ -1813,12 +1732,6 @@ fn execute_php_inner_impl(
         b"docref_ext".to_vec(),
         Value::String(PhpString::from_bytes(b".html")),
     );
-    for (k, v) in RUN_TESTS_OPCACHE_INI {
-        vm.constants.insert(
-            k.as_bytes().to_vec(),
-            Value::String(PhpString::from_bytes(v.as_bytes())),
-        );
-    }
     // Apply all INI settings (the INI section's values may be
     // error-level expressions, which the INI scanner resolves).
     let resolved: Vec<(String, String)> = ini_settings
@@ -1862,14 +1775,9 @@ fn execute_php_inner_impl(
         // stderr) when a child process is spawned or STDERR is written,
         // keeping the order run-tests.php sees.
         vm.cli_direct_output = !req.info.cgi;
-        // proc_open() leaves out the variables whose value is empty.
         for (k, v) in &req.env {
             unsafe {
-                if v.is_empty() {
-                    std::env::remove_var(k);
-                } else {
-                    std::env::set_var(k, v);
-                }
+                std::env::set_var(k, v);
             }
         }
         if let Some(stdin) = &req.stdin {
@@ -2074,27 +1982,18 @@ fn execute_php_inner_impl(
     SCRIPT_EXIT.store(exit_status, std::sync::atomic::Ordering::Relaxed);
     #[cfg(not(unix))]
     let _ = exit_status;
-    if let Err(e) = main_result {
-        // The VM displays uncaught exceptions / fatal errors itself
-        // (through the output layer, before shutdown functions).
-        if vm.current_exception.is_some() || !vm.fatal_emitted {
-            vm.report_uncaught(&e);
+    match main_result {
+        Ok(_) => Ok(vm.take_output()),
+        Err(e) => {
+            // The VM displays uncaught exceptions / fatal errors itself
+            // (through the output layer, before shutdown functions).
+            if vm.current_exception.is_some() || !vm.fatal_emitted {
+                vm.report_uncaught(&e);
+            }
+            vm.run_shutdown_destructors();
+            Ok(vm.take_output())
         }
-        vm.run_shutdown_destructors();
     }
-    let out = vm.take_output();
-    if vm.module_shutdown_hooks.is_empty() {
-        return Ok(out);
-    }
-    // MSHUTDOWN handlers run once the output is sent.
-    {
-        use std::io::Write;
-        let mut so = std::io::stdout();
-        let _ = so.write_all(&out);
-        let _ = so.flush();
-    }
-    vm.module_shutdown();
-    Ok(Vec::new())
 }
 
 /// The code that requires the auto_prepend_file / auto_append_file `key`.
@@ -3062,22 +2961,6 @@ fn shell_split(s: &str) -> Vec<String> {
     out
 }
 
-/// Seconds the script spends in literal `sleep(N)` calls: added to the
-/// time limit (run-tests.php allows 60 seconds).
-fn literal_sleep_secs(source: &str) -> u64 {
-    let mut total = 0u64;
-    let mut rest = source;
-    while let Some(p) = rest.find("sleep(") {
-        let after = &rest[p + 6..];
-        let n: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if after[n.len()..].starts_with(')') && !rest[..p].ends_with('u') {
-            total += n.parse::<u64>().unwrap_or(0).min(60);
-        }
-        rest = after;
-    }
-    total.min(60)
-}
-
 #[allow(clippy::field_reassign_with_default)] // fields filled in step by step
 fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> PhptRequest {
     let raw = |k: &str| test.raw_sections.get(k).map(|s| s.as_str());
@@ -3086,12 +2969,10 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         || ["GET", "POST", "POST_RAW", "PUT", "COOKIE"]
             .iter()
             .any(|k| not_empty(k))
-        // TestFile::isCGI(): !empty() of the section (a lone newline counts).
         || test
-            .raw_sections
+            .sections
             .get("EXPECTHEADERS")
-            .or_else(|| test.sections.get("EXPECTHEADERS"))
-            .is_some_and(|s| !s.is_empty() && s != "0");
+            .is_some_and(|s| !php_trim(s).is_empty());
     let mut env: Vec<(String, String)> = Vec::new();
     let set = |env: &mut Vec<(String, String)>, k: &str, v: String| {
         env.retain(|(a, _)| a != k);
@@ -3218,8 +3099,6 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
     for (k, v) in &env {
         full.push((k.clone().into_bytes(), v.clone().into_bytes()));
     }
-    // proc_open() leaves out the variables whose value is empty.
-    full.retain(|(_, v)| !v.is_empty());
     info.env = full;
     // The section is passed byte-exact, trailing newline included.
     let stdin = test
