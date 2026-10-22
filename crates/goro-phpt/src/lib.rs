@@ -1507,13 +1507,15 @@ fn execute_php_inner_impl(
     let tokens = script.tokens;
     let source = script.source.as_slice();
 
-    // Drain any deprecations recorded by the lexer (e.g. `${var}` syntax).
-    let mut lexer_deprecations = goro_parser::take_lexer_deprecations();
     let lexer_warnings = goro_parser::take_lexer_warnings();
 
     // Parse
     let mut parser = Parser::new(tokens).with_source(source);
-    let program = match parser.parse() {
+    let parsed = parser.parse();
+    // Deprecations recorded by the lexer (e.g. `${var}` syntax) and the
+    // parser, without those of code that is never compiled.
+    let mut lexer_deprecations = goro_parser::take_lexer_deprecations();
+    let program = match parsed {
         Ok(p) => p,
         Err(e) => {
             // PHP outputs parse errors to stdout
@@ -1613,8 +1615,7 @@ fn execute_php_inner_impl(
             return Ok(msg.into_bytes());
         }
     };
-    // ...and those of the parser, in source order.
-    lexer_deprecations.extend(goro_parser::take_lexer_deprecations());
+    // ...in source order.
     lexer_deprecations.sort_by_key(|(_, line)| *line);
 
     // Compile

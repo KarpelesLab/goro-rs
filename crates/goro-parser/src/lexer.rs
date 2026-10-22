@@ -40,6 +40,7 @@ pub struct Lexer<'a> {
 impl<'a> Lexer<'a> {
     pub fn new(source: &'a [u8]) -> Self {
         let _ = crate::take_lexer_error();
+        crate::clear_dead_ranges();
         Self {
             source,
             pos: 0,
@@ -773,7 +774,7 @@ impl<'a> Lexer<'a> {
                     result.clear();
                     let (toks, end, msg) =
                         lex_dollar_brace_interpolation(self.source, self.pos, self.line);
-                    crate::push_lexer_deprecated(msg.to_string(), self.line);
+                    crate::push_compile_deprecated_at(msg.to_string(), self.line, self.pos as u32);
                     self.pending.extend(toks);
                     while self.pos < end {
                         self.advance();
@@ -1148,20 +1149,25 @@ impl<'a> Lexer<'a> {
             // `cmd` is shell_exec("cmd") (deprecated in PHP 8.5).
             b'`' if !self.preserve_trivia => {
                 self.advance();
-                crate::push_lexer_deprecated(
+                crate::push_compile_deprecated_at(
                     "The backtick (`) operator is deprecated, use shell_exec() instead".to_string(),
                     start_line,
+                    start as u32,
                 );
                 self.dq_term = b'`';
                 let first = self.scan_double_quoted_string();
                 self.dq_term = b'"';
                 let rest = std::mem::take(&mut self.pending);
                 let span = Span::new(self.pos as u32, self.pos as u32, start_line);
+                self.pending.push(Token::new(
+                    TokenKind::Identifier(b"shell_exec".to_vec()),
+                    span,
+                ));
                 self.pending.push(Token::new(TokenKind::OpenParen, span));
                 self.pending.push(Token::new(first, span));
                 self.pending.extend(rest);
                 self.pending.push(Token::new(TokenKind::CloseParen, span));
-                TokenKind::Identifier(b"shell_exec".to_vec())
+                TokenKind::ShellExecMarker
             }
 
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | 0x80..=0xFF => {
@@ -2096,7 +2102,7 @@ impl<'a> Lexer<'a> {
                     ));
                     result.clear();
                     let (toks, end, msg) = lex_dollar_brace_interpolation(&content, i, self.line);
-                    crate::push_lexer_deprecated(msg.to_string(), self.line);
+                    crate::push_compile_deprecated_at(msg.to_string(), self.line, self.pos as u32);
                     self.pending.extend(toks);
                     i = end;
                 }

@@ -179,8 +179,10 @@ pub enum TokenKind {
     DoubleColon,        // ::
     Ellipsis,           // ...
     At,                 // @
-    AttributeOpen,      // #[
-    PipeGreater,        // |> (pipe operator, PHP 8.5)
+    /// Starts the `shell_exec(...)` call a backtick literal is lexed as.
+    ShellExecMarker,
+    AttributeOpen, // #[
+    PipeGreater,   // |> (pipe operator, PHP 8.5)
 
     // Delimiters
     OpenParen,    // (

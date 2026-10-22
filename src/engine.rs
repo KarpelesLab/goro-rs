@@ -231,12 +231,14 @@ pub fn compile(
     let script = goro_parser::multibyte::lex_script(source, skip_shebang);
     let tokens = script.tokens;
     let source = script.source.as_slice();
-    let mut lexer_deprecations = goro_parser::take_lexer_deprecations();
-    // Lexer and parser diagnostics, in source order.
-    lexer_deprecations.sort_by_key(|(_, line)| *line);
     let lexer_warnings = goro_parser::take_lexer_warnings();
     let mut parser = Parser::new(tokens).with_source(source);
-    let program = match parser.parse() {
+    let parsed = parser.parse();
+    // Lexer and parser diagnostics, in source order (taken after the parse,
+    // which marks the code that is never compiled).
+    let mut lexer_deprecations = goro_parser::take_lexer_deprecations();
+    lexer_deprecations.sort_by_key(|(_, line)| *line);
+    let program = match parsed {
         Ok(p) => p,
         Err(e) => {
             let msg = e.message.clone();

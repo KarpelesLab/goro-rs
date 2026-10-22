@@ -34,6 +34,8 @@ pub fn register_program(program: &Program) {
         }
     }
     walk(&program.statements);
+    // Anonymous classes of never-compiled code (only printed).
+    walk(&goro_parser::take_dead_anon_classes());
 }
 
 fn anon_class(name: &[u8]) -> Option<Rc<Statement>> {
@@ -135,7 +137,7 @@ fn export_var(s: &mut String, e: &Expr, indent: usize) {
             s.push_str(&lossy(n));
         }
         ExprKind::Variable(_) | ExprKind::DynamicVariable(_) => ex(s, e, 0, indent),
-        ExprKind::Identifier(n) => {
+        ExprKind::Identifier(n) | ExprKind::String(n) => {
             s.push('{');
             s.push_str(&lossy(n));
             s.push('}');
@@ -363,6 +365,20 @@ fn ex(s: &mut String, e: &Expr, prio: i32, indent: usize) {
             s.push('"');
             export_encaps(s, b'"', parts, indent);
             s.push('"');
+        }
+        // ZEND_AST_SHELL_EXEC.
+        ExprKind::ShellExec(call) => {
+            s.push('`');
+            if let ExprKind::FunctionCall { args, .. } = &call.kind {
+                match args.first().map(|a| &a.value.kind) {
+                    Some(ExprKind::String(b)) => export_qstr(s, b'`', b),
+                    Some(ExprKind::InterpolatedString(parts)) => {
+                        export_encaps(s, b'`', parts, indent)
+                    }
+                    _ => {}
+                }
+            }
+            s.push('`');
         }
         ExprKind::True => s.push_str("true"),
         ExprKind::False => s.push_str("false"),
@@ -754,7 +770,8 @@ fn ex(s: &mut String, e: &Expr, prio: i32, indent: usize) {
             };
             func_op(s, o, path, indent);
         }
-        ExprKind::Yield(key, value) => {
+        // The parser stores `yield key => value` as Yield(value, key).
+        ExprKind::Yield(value, key) => {
             if prio > 70 {
                 s.push('(');
             }
@@ -837,7 +854,13 @@ fn export_encaps(s: &mut String, quote: u8, parts: &[StringPart], indent: usize)
                     }
                     _ => false,
                 };
-                if matches!(e.kind, ExprKind::Variable(_)) && !next_needs_braces {
+                // A ZEND_AST_VAR whose name is a literal (`$a`, `${'x'}`).
+                let simple_var = match &e.kind {
+                    ExprKind::Variable(_) => true,
+                    ExprKind::DynamicVariable(inner) => matches!(inner.kind, ExprKind::String(_)),
+                    _ => false,
+                };
+                if simple_var && !next_needs_braces {
                     ex(s, e, 0, indent);
                 } else {
                     s.push('{');
@@ -998,7 +1021,38 @@ fn export_class_no_header(
     }
     s.push_str(" {\n");
     for m in body {
-        export_member(s, m, indent + 1);
+        // `public $a = 1, $b;` / `const X = 1, Y = 2;` stay one declaration.
+        match m {
+            ClassMember::ClassConstant {
+                name,
+                value,
+                group_continues: true,
+                ..
+            } if s.ends_with(";\n") => {
+                s.truncate(s.len() - 2);
+                s.push_str(", ");
+                s.push_str(&lossy(name));
+                s.push_str(" = ");
+                ex(s, value, 0, indent + 1);
+                s.push_str(";\n");
+            }
+            ClassMember::Property {
+                name,
+                default,
+                group_continues: true,
+                ..
+            } if s.ends_with(";\n") => {
+                s.truncate(s.len() - 2);
+                s.push_str(", $");
+                s.push_str(&lossy(name));
+                if let Some(d) = default {
+                    s.push_str(" = ");
+                    ex(s, d, 0, indent + 2);
+                }
+                s.push_str(";\n");
+            }
+            _ => export_member(s, m, indent + 1),
+        }
     }
     indent_to(s, indent);
     s.push('}');
@@ -1280,6 +1334,16 @@ fn export_stmt(s: &mut String, st: &Statement, indent: usize) {
                 indent_to(s, indent);
                 s.push_str("global $");
                 s.push_str(&lossy(n));
+                s.push_str(";\n");
+            }
+            return;
+        }
+        // `global $a, $$b;` is a statement list of ZEND_AST_GLOBALs.
+        StmtKind::GlobalDynamic(items) if items.len() > 1 => {
+            for e in items {
+                indent_to(s, indent);
+                s.push_str("global ");
+                ex(s, e, 0, indent);
                 s.push_str(";\n");
             }
             return;

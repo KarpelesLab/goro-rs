@@ -2940,6 +2940,7 @@ impl Parser {
                             attributes: member_attributes.clone(),
                             type_hint: const_type.clone(),
                             doc_comment: const_doc.clone(),
+                            group_continues: true,
                         });
                 }
 
@@ -2952,6 +2953,7 @@ impl Parser {
                     attributes: member_attributes,
                     type_hint: const_type,
                     doc_comment: const_doc,
+                    group_continues: false,
                 })
             }
             TokenKind::Variable(_) => {
@@ -3020,6 +3022,7 @@ impl Parser {
                                 set_hook_type: None,
                                 hook_attrs: HookAttrs::default(),
                                 get_hook_by_ref: false,
+                                group_continues: true,
                             });
                         } else {
                             return Err(ParseError {
@@ -3107,6 +3110,7 @@ impl Parser {
                     set_hook_type: self.last_set_hook_type.take(),
                     hook_attrs: std::mem::take(&mut self.last_hook_attrs),
                     get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
+                    group_continues: false,
                 })
             }
             _ => {
@@ -3181,6 +3185,7 @@ impl Parser {
                                 set_hook_type: None,
                                 hook_attrs: HookAttrs::default(),
                                 get_hook_by_ref: false,
+                                group_continues: true,
                             });
                         } else {
                             return Err(ParseError {
@@ -3268,6 +3273,7 @@ impl Parser {
                     set_hook_type: self.last_set_hook_type.take(),
                     hook_attrs: std::mem::take(&mut self.last_hook_attrs),
                     get_hook_by_ref: std::mem::take(&mut self.last_get_hook_by_ref),
+                    group_continues: false,
                 })
             }
         }
@@ -3785,7 +3791,7 @@ impl Parser {
         let mut left = self.parse_logical_xor_low()?;
         while matches!(self.peek(), TokenKind::Or) {
             self.advance();
-            let right = self.parse_logical_xor_low()?;
+            let right = self.parse_short_circuit_rhs(&left, true, Self::parse_logical_xor_low)?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -3821,7 +3827,7 @@ impl Parser {
         let mut left = self.parse_assignment()?;
         while matches!(self.peek(), TokenKind::And) {
             self.advance();
-            let right = self.parse_assignment()?;
+            let right = self.parse_short_circuit_rhs(&left, false, Self::parse_assignment)?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -4213,7 +4219,7 @@ impl Parser {
         let mut left = self.parse_logical_and()?;
         while matches!(self.peek(), TokenKind::BooleanOr) {
             self.advance();
-            let right = self.parse_logical_and()?;
+            let right = self.parse_short_circuit_rhs(&left, true, Self::parse_logical_and)?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -4226,11 +4232,60 @@ impl Parser {
         Ok(left)
     }
 
+    /// Whether `e` compiles to a constant that decides `&&` (`want` =
+    /// false) or `||` (`want` = true) on its own: literals, and such an
+    /// operator already decided by its left operand.
+    fn decides_short_circuit(e: &Expr, want: bool) -> bool {
+        let truthy = match &e.kind {
+            ExprKind::Int(n) => *n != 0,
+            ExprKind::Float(f) => *f != 0.0,
+            ExprKind::String(s) => !(s.is_empty() || s.as_slice() == b"0"),
+            ExprKind::True => true,
+            ExprKind::False | ExprKind::Null => false,
+            ExprKind::BinaryOp { op, left, .. } => {
+                let and = matches!(op, BinaryOp::BooleanAnd | BinaryOp::LogicalAnd);
+                let or = matches!(op, BinaryOp::BooleanOr | BinaryOp::LogicalOr);
+                if (and && Self::decides_short_circuit(left, false))
+                    || (or && Self::decides_short_circuit(left, true))
+                {
+                    or
+                } else {
+                    return false;
+                }
+            }
+            _ => return false,
+        };
+        truthy == want
+    }
+
+    /// Parse the right operand of `&&`/`||`/`and`/`or`; when `left` decides
+    /// the result the operand is never compiled (zend_compile_short_circuiting):
+    /// its compile-time diagnostics and anonymous classes are dropped.
+    fn parse_short_circuit_rhs(
+        &mut self,
+        left: &Expr,
+        is_or: bool,
+        parse: fn(&mut Self) -> ParseResult<Expr>,
+    ) -> ParseResult<Expr> {
+        let start_tok = self.pos;
+        let anon_before = self.anon_class_stmts.len();
+        let right = parse(self)?;
+        if Self::decides_short_circuit(left, is_or) && self.pos > start_tok {
+            let start = self.tokens[start_tok].span.start;
+            let end = self.tokens[self.pos - 1].span.end.max(start + 1);
+            crate::mark_dead_range(start, end);
+            for st in self.anon_class_stmts.drain(anon_before..) {
+                crate::push_dead_anon_class(st);
+            }
+        }
+        Ok(right)
+    }
+
     fn parse_logical_and(&mut self) -> ParseResult<Expr> {
         let mut left = self.parse_bitwise_or()?;
         while matches!(self.peek(), TokenKind::BooleanAnd) {
             self.advance();
-            let right = self.parse_bitwise_or()?;
+            let right = self.parse_short_circuit_rhs(&left, false, Self::parse_bitwise_or)?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
@@ -6280,6 +6335,15 @@ impl Parser {
                         class: Box::new(class),
                         args,
                     },
+                })
+            }
+            // `cmd` (lexed as `shell_exec(...)`): ZEND_AST_SHELL_EXEC.
+            TokenKind::ShellExecMarker => {
+                self.advance();
+                let call = self.parse_postfix()?;
+                Ok(Expr {
+                    span: span.merge(call.span),
+                    kind: ExprKind::ShellExec(Box::new(call)),
                 })
             }
             TokenKind::Isset => {

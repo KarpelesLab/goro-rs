@@ -5734,6 +5734,7 @@ impl Compiler {
                             set_hook_type,
                             get_hook_by_ref,
                             hook_attrs,
+                            ..
                         } => {
                             // Enums cannot include properties
                             if modifiers.is_enum {
@@ -8624,6 +8625,7 @@ impl Compiler {
                             attributes: const_attributes,
                             type_hint: const_type_hint,
                             doc_comment: const_doc_comment,
+                            ..
                         } => {
                             if let Some(msg) = Self::const_expr_error(const_expr, false) {
                                 return Err(CompileError {
@@ -13102,6 +13104,7 @@ impl Compiler {
             }
 
             ExprKind::Pipe { value, callable } => self.compile_pipe(expr, value, callable),
+            ExprKind::ShellExec(call) => self.compile_expr(call),
 
             ExprKind::NullCoalesce { left, right } => {
                 // $a ?? $b: if $a is not null, use $a, else use $b

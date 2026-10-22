@@ -18,7 +18,34 @@ thread_local! {
     /// Deprecation diagnostics emitted by the lexer/parser during the most recent
     /// pass. Drained by callers (the SAPI / compiler / phpt harness) after parse
     /// so they appear in the expected source order alongside other diagnostics.
-    static LEXER_DEPRECATIONS: RefCell<Vec<(String, u32)>> = const { RefCell::new(Vec::new()) };
+    static LEXER_DEPRECATIONS: RefCell<Vec<(String, u32, u32)>> = const { RefCell::new(Vec::new()) };
+    /// Byte ranges of code the compiler never compiles (the right operand
+    /// of `&&` / `||` decided by a literal left operand): compile-time
+    /// diagnostics recorded inside them are dropped.
+    static DEAD_RANGES: RefCell<Vec<(u32, u32)>> = const { RefCell::new(Vec::new()) };
+    /// Anonymous class declarations found in dead code: never declared, but
+    /// kept for printing (assert() messages).
+    static DEAD_ANON_CLASSES: RefCell<Vec<ast::Statement>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Forget the dead ranges of an earlier parse (a new source is lexed).
+pub fn clear_dead_ranges() {
+    DEAD_RANGES.with(|d| d.borrow_mut().clear());
+}
+
+/// Mark `start..end` (byte offsets) as never compiled.
+pub fn mark_dead_range(start: u32, end: u32) {
+    DEAD_RANGES.with(|d| d.borrow_mut().push((start, end)));
+}
+
+/// Record an anonymous class declared only in dead code.
+pub fn push_dead_anon_class(stmt: ast::Statement) {
+    DEAD_ANON_CLASSES.with(|d| d.borrow_mut().push(stmt));
+}
+
+/// Take the anonymous class declarations of dead code.
+pub fn take_dead_anon_classes() -> Vec<ast::Statement> {
+    DEAD_ANON_CLASSES.with(|d| std::mem::take(&mut *d.borrow_mut()))
 }
 
 thread_local! {
@@ -73,13 +100,25 @@ pub fn short_open_tag() -> bool {
 
 /// Record a deprecation diagnostic discovered by the lexer/parser.
 pub fn push_lexer_deprecated(msg: String, line: u32) {
-    LEXER_DEPRECATIONS.with(|d| d.borrow_mut().push((msg, line)));
+    LEXER_DEPRECATIONS.with(|d| d.borrow_mut().push((msg, line, u32::MAX)));
+}
+
+/// Record a deprecation that php-src raises while compiling the code at byte
+/// offset `pos` (dropped when that code is never compiled).
+pub fn push_compile_deprecated_at(msg: String, line: u32, pos: u32) {
+    LEXER_DEPRECATIONS.with(|d| d.borrow_mut().push((msg, line, pos)));
 }
 
 /// Drain any deprecation diagnostics collected since the last call. Should be
 /// invoked after each parse.
 pub fn take_lexer_deprecations() -> Vec<(String, u32)> {
-    LEXER_DEPRECATIONS.with(|d| std::mem::take(&mut *d.borrow_mut()))
+    let dead = DEAD_RANGES.with(|d| std::mem::take(&mut *d.borrow_mut()));
+    LEXER_DEPRECATIONS
+        .with(|d| std::mem::take(&mut *d.borrow_mut()))
+        .into_iter()
+        .filter(|(_, _, pos)| !dead.iter().any(|&(s, e)| *pos >= s && *pos < e))
+        .map(|(m, l, _)| (m, l))
+        .collect()
 }
 
 thread_local! {

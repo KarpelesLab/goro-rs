@@ -255,6 +255,8 @@ pub enum ExprKind {
     },
     ThrowExpr(Box<Expr>),
     Suppress(Box<Expr>),
+    /// `cmd`: the `shell_exec("cmd")` call it compiles to.
+    ShellExec(Box<Expr>),
     Identifier(Vec<u8>),
     FirstClassCallable(CallableTarget),
 }
@@ -454,6 +456,9 @@ pub enum ClassMember {
         /// `&get { ... }`: the get hook returns by reference.
         get_hook_by_ref: bool,
         hook_attrs: HookAttrs,
+        /// Declared after a comma in the previous member's declaration
+        /// (`public $a, $b;`).
+        group_continues: bool,
     },
     Method {
         name: Vec<u8>,
@@ -478,6 +483,8 @@ pub enum ClassMember {
         attributes: Vec<Attribute>,
         type_hint: Option<TypeHint>,
         doc_comment: Option<Vec<u8>>,
+        /// Declared after a comma in the previous constant's declaration.
+        group_continues: bool,
     },
     TraitUse {
         traits: Vec<Vec<u8>>,
