@@ -47,6 +47,9 @@ pub struct Parser {
     anon_counter: u32,
     /// Set to true by parse_arguments() when it detects first-class callable syntax (...)
     first_class_callable_flag: bool,
+    /// Set by parse_primary() for `new Foo` without an argument list
+    /// (new_non_dereferenceable): no member access may follow it.
+    new_non_dereferenceable: bool,
     /// Pending extra constants from comma-separated const declarations
     pending_extra_constants: Vec<ClassMember>,
     /// The source text (when given with `with_source`): keywords used as
@@ -190,6 +193,7 @@ impl Parser {
             anon_class_stmts: Vec::new(),
             anon_counter: 0,
             first_class_callable_flag: false,
+            new_non_dereferenceable: false,
             pending_extra_constants: Vec::new(),
             source: Vec::new(),
             pending_extra_properties: Vec::new(),
@@ -5086,8 +5090,95 @@ impl Parser {
         }
     }
 
+    /// The `new_variable` productions after its first part: `[expr]`,
+    /// `->name`, `?->name` and `::$var`.
+    fn parse_new_variable_tail(&mut self, mut expr: Expr) -> ParseResult<Expr> {
+        loop {
+            match self.peek() {
+                TokenKind::OpenBracket => {
+                    self.advance();
+                    let index = if matches!(self.peek(), TokenKind::CloseBracket) {
+                        None
+                    } else {
+                        Some(self.parse_expression()?)
+                    };
+                    self.expect(&TokenKind::CloseBracket)?;
+                    let s = expr.span;
+                    expr = Expr {
+                        kind: ExprKind::ArrayAccess {
+                            array: Box::new(expr),
+                            index: index.map(Box::new),
+                        },
+                        span: s,
+                    };
+                }
+                TokenKind::Arrow | TokenKind::NullsafeArrow => {
+                    let nullsafe = matches!(self.peek(), TokenKind::NullsafeArrow);
+                    self.advance();
+                    // After `->` any label is a T_STRING.
+                    let prop = if matches!(self.peek(), TokenKind::Identifier(_))
+                        || self.is_semi_reserved_keyword()
+                    {
+                        let name = match self.peek() {
+                            TokenKind::Identifier(n) => n.clone(),
+                            _ => self.keyword_to_identifier(),
+                        };
+                        let sp = self.span();
+                        self.advance();
+                        Expr {
+                            kind: ExprKind::Identifier(name),
+                            span: sp,
+                        }
+                    } else {
+                        self.parse_primary()?
+                    };
+                    let s = expr.span;
+                    expr = Expr {
+                        kind: ExprKind::PropertyAccess {
+                            object: Box::new(expr),
+                            property: Box::new(prop),
+                            nullsafe,
+                        },
+                        span: s,
+                    };
+                }
+                TokenKind::DoubleColon => {
+                    self.advance();
+                    let member = match self.peek().clone() {
+                        TokenKind::Variable(name) => {
+                            self.advance();
+                            name
+                        }
+                        _ => {
+                            return Err(ParseError {
+                                message: format!(
+                                    "syntax error, unexpected {}, expecting variable or \"$\"",
+                                    self.peek().to_php_unexpected()
+                                ),
+                                span: self.span(),
+                            });
+                        }
+                    };
+                    let s = expr.span;
+                    expr = Expr {
+                        kind: ExprKind::StaticPropertyAccess {
+                            class: Box::new(expr),
+                            property: member,
+                        },
+                        span: s,
+                    };
+                }
+                _ => break,
+            }
+        }
+        Ok(expr)
+    }
+
     fn parse_postfix(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_primary()?;
+        if std::mem::take(&mut self.new_non_dereferenceable) {
+            return Ok(expr);
+        }
 
         loop {
             match self.peek().clone() {
@@ -6050,95 +6141,12 @@ impl Parser {
                     }
                     TokenKind::Variable(name) => {
                         self.advance();
-                        let mut expr = Expr {
+                        let expr = Expr {
                             kind: ExprKind::Variable(name),
                             span: class_span,
                         };
-                        // Handle array access, property access, etc. after variable
-                        // e.g. new $arr[0](), new $obj->class()
-                        loop {
-                            match self.peek() {
-                                TokenKind::OpenBracket => {
-                                    self.advance();
-                                    let index = if matches!(self.peek(), TokenKind::CloseBracket) {
-                                        None
-                                    } else {
-                                        Some(self.parse_expression()?)
-                                    };
-                                    self.expect(&TokenKind::CloseBracket)?;
-                                    let s = expr.span;
-                                    expr = Expr {
-                                        kind: ExprKind::ArrayAccess {
-                                            array: Box::new(expr),
-                                            index: index.map(Box::new),
-                                        },
-                                        span: s,
-                                    };
-                                }
-                                TokenKind::Arrow | TokenKind::NullsafeArrow => {
-                                    let nullsafe = matches!(self.peek(), TokenKind::NullsafeArrow);
-                                    self.advance();
-                                    // After `->` any label is a T_STRING.
-                                    let prop = if matches!(self.peek(), TokenKind::Identifier(_))
-                                        || self.is_semi_reserved_keyword()
-                                    {
-                                        let name = match self.peek() {
-                                            TokenKind::Identifier(n) => n.clone(),
-                                            _ => self.keyword_to_identifier(),
-                                        };
-                                        let sp = self.span();
-                                        self.advance();
-                                        Expr {
-                                            kind: ExprKind::Identifier(name),
-                                            span: sp,
-                                        }
-                                    } else {
-                                        self.parse_primary()?
-                                    };
-                                    let s = expr.span;
-                                    expr = Expr {
-                                        kind: ExprKind::PropertyAccess {
-                                            object: Box::new(expr),
-                                            property: Box::new(prop),
-                                            nullsafe,
-                                        },
-                                        span: s,
-                                    };
-                                }
-                                TokenKind::DoubleColon => {
-                                    self.advance();
-                                    let member = match self.peek().clone() {
-                                        TokenKind::Identifier(name) => {
-                                            self.advance();
-                                            name
-                                        }
-                                        TokenKind::Variable(name) => {
-                                            self.advance();
-                                            let mut prop = b"$".to_vec();
-                                            prop.extend_from_slice(&name);
-                                            prop
-                                        }
-                                        _ => {
-                                            let p = self.parse_primary()?;
-                                            match p.kind {
-                                                ExprKind::Identifier(name) => name,
-                                                _ => b"unknown".to_vec(),
-                                            }
-                                        }
-                                    };
-                                    let s = expr.span;
-                                    expr = Expr {
-                                        kind: ExprKind::StaticPropertyAccess {
-                                            class: Box::new(expr),
-                                            property: member,
-                                        },
-                                        span: s,
-                                    };
-                                }
-                                _ => break,
-                            }
-                        }
-                        expr
+                        // new_variable: `new $arr[0]`, `new $obj->class`, ...
+                        self.parse_new_variable_tail(expr)?
                     }
                     TokenKind::Class => {
                         // Anonymous class: new class { ... }
@@ -6216,7 +6224,16 @@ impl Parser {
                     }
                     _ => self.parse_primary()?,
                 };
-                let args = if matches!(self.peek(), TokenKind::OpenParen) {
+                // class_name '::' simple_variable is a new_variable too.
+                let class = if matches!(class.kind, ExprKind::Identifier(_))
+                    && matches!(self.peek(), TokenKind::DoubleColon)
+                {
+                    self.parse_new_variable_tail(class)?
+                } else {
+                    class
+                };
+                let has_args = matches!(self.peek(), TokenKind::OpenParen);
+                let args = if has_args {
                     self.advance();
                     let args = self.parse_arguments()?;
                     if self.first_class_callable_flag {
@@ -6230,6 +6247,7 @@ impl Parser {
                 } else {
                     Vec::new()
                 };
+                self.new_non_dereferenceable = !has_args;
                 Ok(Expr {
                     span,
                     kind: ExprKind::New {
