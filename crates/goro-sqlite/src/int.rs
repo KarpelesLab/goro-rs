@@ -1736,6 +1736,10 @@ pub struct Context<'a> {
     /// function runs outside a statement.
     pub pAuxData: Option<&'a mut Vec<AuxData>>,
     pub iOp: i32,
+    /// (opcode, p5) of the instruction that invoked the function (C
+    /// pCtx->pVdbe->aOp[pCtx->iOp]); None when the function is not invoked
+    /// by a VDBE (C pVdbe==0).  Used by sqlite3NotPureFunc().
+    pub pOpInfo: Option<(u8, u16)>,
     pub isError: i32,
     pub enc: u8,
     pub skipFlag: u8,

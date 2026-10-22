@@ -29,85 +29,56 @@ use std::rc::Rc;
 const LEGACY_SCHEMA_TABLE: &[u8] = b"sqlite_master";
 
 /// When a sub-program is executed (OP_Program), an instance of this
-/// structure holds the state of the calling (parent) frame while the child
-/// program runs, as in C.
+/// structure stores the state of the calling (parent) frame.
 ///
-/// # Protocol (shared with vdbeaux.rs)
-///
-/// The four vectors `aOp`, `aMem`, `apCsr` and `aOnce` are *swapped* with
-/// the corresponding fields of the Vdbe ([`VdbeFrame::swap_state`]):
-///
-/// * **push** (OP_Program, vdbe.rs): the frame starts with the child's
-///   vectors (a fresh copy of `SubProgram::aOp`, `nChildMem` undefined
-///   registers, `nChildCsr` empty cursor slots, the OP_Once bitmap); after
-///   the swap the Vdbe runs the child and the frame holds the parent's
-///   vectors.  `nMem`/`nCursor` save the parent's Vdbe.nMem/nCursor, `pc`
-///   the address of the OP_Program, `lastRowid`/`nChange`/`nDbChange`/
-///   `pAuxData` the parent's values.  The frame is linked as
-///   `Vdbe::pFrame` (its `pParent` is the previous `Vdbe::pFrame`) and
-///   `Vdbe::nFrame` is incremented.
-/// * **pop** (sqlite3VdbeFrameRestore(db, v, frame), vdbeaux.rs): close the
-///   child cursors still open in `v.apCsr`, swap the vectors back (the
-///   parent state returns to `v`, the child state stays in the frame), set
-///   `v.nMem = nMem`, `v.nCursor = nCursor`, `db.lastRowid = lastRowid`,
-///   `v.nChange = nChange`, `db.nChange = nDbChange`, delete `v.pAuxData`
-///   and move `pAuxData` back into `v`; return `pc`.  The caller unlinks
-///   the frame (`v.pFrame = frame.pParent`, `v.nFrame -= 1`) before
-///   calling it.
-/// * When OP_Halt pops a frame, the (now inactive) frame is parked in the
-///   parent register `iRt` (`Mem::pAgg` holds the `VdbeFrame`, flags
-///   `MEM_Blob|MEM_Dyn`, the C VdbeFrameMemDel arrangement) so that the
-///   next invocation reuses it.  Releasing that register
-///   (sqlite3VdbeMemRelease) must drop `pAgg` for MEM_Dyn cells.
-/// * closeAllCursors() may restore the outermost frame directly (the C
-///   code does so); the intermediate frames are simply dropped.
+/// Rust port (defined by the vdbeaux.c port, mirroring C's VdbeFrame):
+/// * the frame stack is `Vdbe::pFrame`; each frame owns its parent frame
+///   through `pParent` (C pParent).
+/// * OP_Program moves the caller's arrays into the frame
+///   (`aOp`/`aMem`/`apCsr` = C aOp/aMem/apCsr of the *parent*) and installs
+///   the sub-program's in the Vdbe (`v.aOp = pProgram.aOp.clone()`, fresh
+///   `aMem` of nChildMem MEM_Undefined cells, `apCsr` of nChildCsr None).
+///   `aOnce` is the sub-program's OP_Once bitmask (as in C: pFrame->aOnce
+///   belongs to the child), zeroed on each invocation.
+/// * sqlite3VdbeFrameRestore() closes the child's cursors and moves the
+///   parent arrays back into the Vdbe; the child's registers/cursors end
+///   up in `aChildMem`/`apChildCsr`.  The caller then disposes of the frame
+///   with sqlite3VdbeFrameDelete().  Frames are not cached for reuse in
+///   register P3 as C does (nothing observable depends on that reuse: the
+///   child registers are always rewritten before use and aOnce is reset).
 #[derive(Default)]
 pub struct VdbeFrame {
     /// Parent of this frame, or None if the parent is the main program.
     pub pParent: Option<Box<VdbeFrame>>,
-    /// Program instructions (parent's while active, child's while parked).
+    /// Program instructions of the parent frame.
     pub aOp: Vec<VdbeOp>,
-    /// Registers (parent's while active, child's while parked).
+    /// Registers of the parent frame.
     pub aMem: Vec<Mem>,
-    /// Cursors (parent's while active, child's while parked).
+    /// Cursors of the parent frame.
     pub apCsr: Vec<Option<Box<VdbeCursor>>>,
-    /// OP_Once bitmap (parent's while active, child's while parked).
+    /// OP_Once bitmask of the child (sub-program) frame.
     pub aOnce: Vec<u8>,
     /// Copy of SubProgram.token.
     pub token: usize,
     /// Last insert rowid (sqlite3.lastRowid) of the parent.
     pub lastRowid: i64,
-    /// AuxData of the parent.
+    /// Auxdata allocations of the parent.
     pub pAuxData: Vec<AuxData>,
-    /// Number of entries in the parent's apCsr (Vdbe.nCursor).
     pub nCursor: i32,
-    /// Program counter in the parent (address of the OP_Program).
+    /// Program counter in the parent (calling) frame.
     pub pc: i32,
-    /// Size of the parent's aOp array.
     pub nOp: i32,
-    /// Vdbe.nMem of the parent.
     pub nMem: i32,
-    /// Number of memory cells for the child frame.
     pub nChildMem: i32,
-    /// Number of cursors for the child frame.
     pub nChildCsr: i32,
-    /// Statement changes of the parent (Vdbe.nChange).
+    /// Statement changes (Vdbe.nChange) of the parent.
     pub nChange: i64,
     /// Value of db->nChange.
     pub nDbChange: i64,
-    /// Register of the parent frame (OP_Program P3) that owns this frame.
-    pub iRt: i32,
-}
-
-impl VdbeFrame {
-    /// Exchange the program, registers, cursors and OP_Once bitmap of the
-    /// frame with those of `v` (see the protocol above).
-    pub fn swap_state(&mut self, v: &mut Vdbe) {
-        std::mem::swap(&mut self.aOp, &mut v.aOp);
-        std::mem::swap(&mut self.aMem, &mut v.aMem);
-        std::mem::swap(&mut self.apCsr, &mut v.apCsr);
-        std::mem::swap(&mut self.aOnce, &mut v.aOnce);
-    }
+    /// Rust: the child's registers once the frame has been restored.
+    pub aChildMem: Vec<Mem>,
+    /// Rust: the child's cursors once the frame has been restored.
+    pub apChildCsr: Vec<Option<Box<VdbeCursor>>>,
 }
 
 /// The outermost frame (the one whose saved state is the main program).
@@ -1895,15 +1866,15 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         // is encountered on each invocation of the byte-code program.  Jump
         // to P2 on the second and all subsequent encounters.
         OP_Once => {
-            if p.pFrame.is_some() {
+            if let Some(pFrame) = p.pFrame.as_deref_mut() {
                 let iAddr = pc as usize;
-                if p.aOnce.len() <= iAddr / 8 {
-                    p.aOnce.resize(iAddr / 8 + 1, 0);
+                if pFrame.aOnce.len() <= iAddr / 8 {
+                    pFrame.aOnce.resize(iAddr / 8 + 1, 0);
                 }
-                if (p.aOnce[iAddr / 8] & (1 << (iAddr & 7))) != 0 {
+                if (pFrame.aOnce[iAddr / 8] & (1 << (iAddr & 7))) != 0 {
                     jump_to_p2!();
                 }
-                p.aOnce[iAddr / 8] |= 1 << (iAddr & 7);
+                pFrame.aOnce[iAddr / 8] |= 1 << (iAddr & 7);
             } else if p.aOp[0].p1 == p1 {
                 jump_to_p2!();
             }
@@ -2017,7 +1988,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             } else {
                 let pC = csr!(p1);
                 if pC.deferredMoveto != 0 {
-                    chk!(sqlite3VdbeFinishMoveto(pC));
+                    chk!(sqlite3VdbeFinishMoveto(db, pC));
                 }
                 let cur = btcsr!(pC);
                 if sqlite3BtreeEof(&cur) != 0 {
@@ -3287,7 +3258,9 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
                     P4::Idx(i) => i.clone(),
                     _ => panic!("OP_IdxDelete without index"),
                 };
-                chk!(sqlite3VdbeFindIndexKey(&pCrsr, &pIdx, &mut r, &mut res, 0));
+                chk!(sqlite3VdbeFindIndexKey(
+                    db, &pCrsr, &pIdx, &mut r, &mut res, 0
+                ));
                 if res != 0 {
                     if crate::build::sqlite3WritableSchema(db) == 0 {
                         let rc = crate::mainapi::sqlite3ReportError(
@@ -3358,7 +3331,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         OP_FinishSeek => {
             let pC = csr!(p1);
             if pC.deferredMoveto != 0 {
-                chk!(sqlite3VdbeFinishMoveto(pC));
+                chk!(sqlite3VdbeFinishMoveto(db, pC));
             }
             Ok(Fl::Next)
         }
@@ -3612,7 +3585,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             r.pKeyInfo = csr!(p1).pKeyInfo.clone();
             let pCrsr = btcsr!(csr!(p1));
             let mut res = 0;
-            let rc = sqlite3VdbeFindIndexKey(&pCrsr, &pIdx, &mut r, &mut res, 1);
+            let rc = sqlite3VdbeFindIndexKey(db, &pCrsr, &pIdx, &mut r, &mut res, 1);
             if rc != 0 || res != 0 {
                 jump_to_p2!();
             }
@@ -4215,12 +4188,9 @@ fn op_halt(
             // specified as the p2 of the calling OP_Program.
             pcx = p.aOp[pcx as usize].p2 - 1;
         }
-        // Park the frame in the register of the parent that owns it, so
-        // that the next invocation of the same OP_Program reuses it.
-        let iRt = pFrame.iRt as usize;
-        if iRt < p.aMem.len() && (p.aMem[iRt].flags & MEM_Blob) != 0 && p.aMem[iRt].pAgg.is_none() {
-            p.aMem[iRt].pAgg = Some(pFrame);
-        }
+        // Rust: frames are not cached in register P3 of the OP_Program (see
+        // VdbeFrame); dispose of it now.
+        sqlite3VdbeFrameDelete(db, &mut pFrame);
         s.pc = pcx;
         return Ok(Fl::Next);
     }
@@ -4389,7 +4359,7 @@ fn op_column(
                         p2 = iMap - 1;
                         continue 'restart;
                     }
-                    chk_rc!(s, sqlite3VdbeFinishMoveto(pC));
+                    chk_rc!(s, sqlite3VdbeFinishMoveto(db, pC));
                 } else if sqlite3BtreeCursorHasMoved(&pCrsr) != 0 {
                     chk_rc!(s, sqlite3VdbeHandleMovedCursor(pC));
                     continue 'restart;
@@ -5393,7 +5363,7 @@ fn op_program(
     pc: i32,
     _p1: i32,
     _p2: i32,
-    p3: i32,
+    _p3: i32,
     p5: u16,
 ) -> Result<Fl, Ex> {
     let pProgram: Rc<SubProgram> = match &p.aOp[pc as usize].p4 {
@@ -5428,46 +5398,34 @@ fn op_program(
         abort_rc!(s, SQLITE_ERROR);
     }
 
-    // Register pRt is used to store the memory required to save the state
-    // of the current program, and the memory required at runtime to execute
-    // the trigger program.  If this trigger has been fired before, then pRt
-    // is already allocated.  Otherwise, it must be initialized.
-    let iRt = p3 as usize;
-    let reuse = matches!(&p.aMem[iRt].pAgg, Some(b) if b.is::<VdbeFrame>());
-    let mut pFrame: Box<VdbeFrame>;
-    if reuse {
-        let b = p.aMem[iRt].pAgg.take().unwrap();
-        pFrame = b.downcast::<VdbeFrame>().unwrap();
-        debug_assert!(
-            pProgram.nMem + pProgram.nCsr == pFrame.nChildMem
-                || (pProgram.nCsr == 0 && pProgram.nMem + 1 == pFrame.nChildMem)
-        );
-    } else {
-        // SubProgram.nMem is set to the number of memory cells used by the
-        // program stored in SubProgram.aOp.  As well as these, one memory
-        // cell is required for each cursor used by the program.  Set local
-        // variable nMem (and later, VdbeFrame.nChildMem) to this value.
-        let mut nMem = pProgram.nMem + pProgram.nCsr;
-        if pProgram.nCsr == 0 {
-            nMem += 1;
-        }
-        let pRt = &mut p.aMem[iRt];
-        sqlite3VdbeMemRelease(pRt);
-        pRt.flags = MEM_Blob | MEM_Dyn;
-        pRt.z.clear();
-        pRt.n = 0;
-        pFrame = Box::new(VdbeFrame {
-            aOp: pProgram.aOp.clone(),
-            aMem: (0..nMem.max(1)).map(|_| Mem::default()).collect(),
-            apCsr: (0..pProgram.nCsr).map(|_| None).collect(),
-            aOnce: vec![0u8; (pProgram.aOp.len() + 7) / 8],
-            nChildMem: nMem,
-            nChildCsr: pProgram.nCsr,
-            token: pProgram.token,
-            iRt: p3,
-            ..Default::default()
-        });
+    // SubProgram.nMem is set to the number of memory cells used by the
+    // program stored in SubProgram.aOp.  As well as these, one memory cell
+    // is required for each cursor used by the program.  Set local variable
+    // nMem (and later, VdbeFrame.nChildMem) to this value.
+    //
+    // Rust: C allocates the frame in register P3 (pRt) and reuses it on
+    // later invocations; here a fresh frame is built each time (see
+    // VdbeFrame) and register P3 is left alone.
+    let mut nMem = pProgram.nMem + pProgram.nCsr;
+    if pProgram.nCsr == 0 {
+        nMem += 1;
     }
+    let mut pFrame = Box::new(VdbeFrame {
+        nChildMem: nMem,
+        nChildCsr: pProgram.nCsr,
+        pc: pc,
+        nMem: p.nMem,
+        nCursor: p.nCursor,
+        nOp: p.aOp.len() as i32,
+        token: pProgram.token,
+        ..Default::default()
+    });
+    pFrame.aOp = std::mem::replace(&mut p.aOp, pProgram.aOp.clone());
+    pFrame.aMem = std::mem::replace(
+        &mut p.aMem,
+        (0..nMem.max(1)).map(|_| Mem::default()).collect(),
+    );
+    pFrame.apCsr = std::mem::replace(&mut p.apCsr, (0..pProgram.nCsr).map(|_| None).collect());
 
     p.nFrame += 1;
     pFrame.pParent = p.pFrame.take();
@@ -5476,17 +5434,9 @@ fn op_program(
     pFrame.nDbChange = db.nChange;
     pFrame.pAuxData = std::mem::take(&mut p.pAuxData);
     p.nChange = 0;
-    pFrame.pc = pc;
-    pFrame.nMem = p.nMem;
-    pFrame.nCursor = p.nCursor;
-    pFrame.iRt = p3;
-    pFrame.swap_state(p);
-    pFrame.nOp = pFrame.aOp.len() as i32;
     p.nMem = pFrame.nChildMem;
     p.nCursor = pFrame.nChildCsr;
-    let nOnce = (p.aOp.len() + 7) / 8;
-    p.aOnce.clear();
-    p.aOnce.resize(nOnce, 0);
+    pFrame.aOnce = vec![0u8; (pProgram.aOp.len() + 7) / 8];
     p.pFrame = Some(pFrame);
     s.pc = -1;
     Ok(Fl::Check)
@@ -5561,8 +5511,7 @@ fn op_aggstep(
                     zErr: None,
                     pColl,
                     pCurrentTime: Some(iCurrentTime),
-                    opcode: OP_AggStep1,
-                    p5,
+                    pOpInfo: Some((OP_AggStep1, p5)),
                 };
                 xFunc(&mut ctx, args);
                 isError = ctx.isError;
@@ -5587,8 +5536,7 @@ fn op_aggstep(
                     zErr: None,
                     pColl,
                     pCurrentTime: Some(iCurrentTime),
-                    opcode: OP_AggStep1,
-                    p5,
+                    pOpInfo: Some((OP_AggStep1, p5)),
                 };
                 xFunc(&mut ctx, &mut args);
                 isError = ctx.isError;
@@ -5675,8 +5623,7 @@ fn op_function(
             zErr: None,
             pColl,
             pCurrentTime: Some(iCurrentTime),
-            opcode,
-            p5,
+            pOpInfo: Some((opcode, p5)),
         };
         xSFunc(&mut ctx, args);
         isError = ctx.isError;
