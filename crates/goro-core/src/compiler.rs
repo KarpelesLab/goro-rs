@@ -424,6 +424,20 @@ impl Compiler {
                     (b"curl_multi_info_read", 1) => true,
                     // mysqli_poll(&$read, &$error, &$reject, $sec, $usec)
                     (b"mysqli_poll", 0..=2) => true,
+                    // ext/pcntl: the status, rusage and siginfo outputs
+                    (b"pcntl_waitpid", 1) | (b"pcntl_waitpid", 3) => true,
+                    (b"pcntl_waitid", 2) | (b"pcntl_waitid", 4) => true,
+                    (b"pcntl_wait", 0) | (b"pcntl_wait", 2) => true,
+                    (b"pcntl_sigprocmask", 2) => true,
+                    (b"pcntl_sigwaitinfo", 1) | (b"pcntl_sigtimedwait", 1) => true,
+                    // ext/ftp: ftp_alloc($ftp, $size, &$response)
+                    (b"ftp_alloc", 2) => true,
+                    // ext/sysvmsg: msg_send(..., &$error_code),
+                    // msg_receive($queue, $desired_message_type,
+                    // &$received_message_type, $max_message_size, &$message,
+                    // $unserialize, $flags, &$error_code)
+                    (b"msg_send", 5) => true,
+                    (b"msg_receive", 2) | (b"msg_receive", 4) | (b"msg_receive", 7) => true,
                     // mysqli_stmt_bind_param($stmt, $types, &$var1, &$var2, ...)
                     (b"mysqli_stmt_bind_param", p) if p >= 2 => true,
                     // mysqli_stmt_bind_result($stmt, &$var1, &$var2, ...)
