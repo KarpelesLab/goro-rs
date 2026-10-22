@@ -79,7 +79,8 @@ Highlights beyond the core language:
   hash, random, zlib (zlib port, byte-identical output), json, ctype, mbstring, spl,
   reflection, session, dom/simplexml/xml/xmlreader/xmlwriter (libxml2-style tree, lexbor
   HTML5 parser port), openssl (on [purecrypto](https://crates.io/crates/purecrypto)),
-  mysqli (mysqlnd port), PDO with pdo_mysql (over the same mysqlnd), gmp, sockets, curl, bz2, tokenizer.
+  mysqli (mysqlnd port), PDO with pdo_mysql (over the same mysqlnd), gmp, sockets, curl, bz2, tokenizer,
+  bcmath (libbcmath port), filter, iconv (glibc iconv emulation), zend_test.
 
 ### Not Yet Implemented
 - gd, pdo_sqlite/pdo_pgsql/…, ffi, ldap, pgsql, sqlite3, xsl, tidy, sodium (in progress: soap, phar, intl, zip, exif, fileinfo, posix, pcntl, calendar, ftp)
