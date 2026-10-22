@@ -5232,4 +5232,333 @@ mod tests {
         assert_eq!(jsonUnescapeOneChar(b"\\x4a", 4, &mut c), 4);
         assert_eq!(c, 0x4a);
     }
+    /// A json_each/json_tree argument value.
+    enum Arg {
+        Text(&'static str),
+        Jsonb(&'static str),
+        Null,
+    }
+
+    fn mem(db: &mut Sqlite3, a: &Arg) -> Mem {
+        let mut m = Mem::default();
+        match a {
+            Arg::Text(z) => {
+                crate::vdbemem::sqlite3VdbeMemSetStr(
+                    db,
+                    &mut m,
+                    Some(z.as_bytes()),
+                    z.len() as i64,
+                    SQLITE_UTF8,
+                );
+            }
+            Arg::Jsonb(z) => {
+                let p = parse(z).unwrap();
+                let b = p.aBlob[..p.nBlob as usize].to_vec();
+                crate::vdbemem::sqlite3VdbeMemSetStr(db, &mut m, Some(&b), b.len() as i64, 0);
+            }
+            Arg::Null => crate::vdbemem::sqlite3VdbeMemSetNull(&mut m),
+        }
+        m
+    }
+
+    /// Run one json_each/json_tree scan through the vtab traits and render
+    /// it like the sqltest runner (SELECT label, key, ..., json, root).
+    fn scan(
+        db: &mut Sqlite3,
+        out: &mut String,
+        label: &str,
+        module: &str,
+        json: Arg,
+        root: Option<Arg>,
+    ) {
+        let m = JsonEachModule;
+        let z0 = module.as_bytes();
+        let eMode: u8 = if at(z0, 4) == b'b' { 2 } else { 1 };
+        let mut vtab = JsonEachConnection {
+            eMode,
+            bRecursive: at(z0, 4 + eMode as usize) == b't',
+            zErrMsg: None,
+            pending: Rc::new(RefCell::new(None)),
+        };
+        assert!(!m.has_xCreate());
+        let mut info = IndexInfo::default();
+        let ncons = if root.is_some() { 2 } else { 1 };
+        for k in 0..ncons {
+            info.aConstraint.push(crate::vtab::IndexConstraint {
+                iColumn: JEACH_JSON + k,
+                op: SQLITE_INDEX_CONSTRAINT_EQ as u8,
+                usable: 1,
+                iTermOffset: 0,
+            });
+            info.aConstraintUsage.push(Default::default());
+        }
+        assert_eq!(vtab.xBestIndex(db, &mut info), SQLITE_OK);
+        let mut argv = vec![mem(db, &json)];
+        if let Some(r) = &root {
+            argv.push(mem(db, r));
+        }
+        let mut cur = vtab.xOpen(db).ok().unwrap();
+        let rc = cur.xFilter(db, info.idxNum, None, &mut argv);
+        if rc != SQLITE_OK {
+            let msg = vtab.zErrMsg().clone().unwrap_or_default();
+            out.push_str(&format!(
+                "Error: {} {}\n",
+                rc,
+                String::from_utf8_lossy(&msg)
+            ));
+            return;
+        }
+        let nullFunc: FuncDefRef = Rc::new(FuncDef {
+            nArg: 0,
+            funcFlags: SQLITE_RESULT_SUBTYPE,
+            pUserData: FuncUserData::None,
+            xSFunc: None,
+            xFinalize: None,
+            xValue: None,
+            xInverse: None,
+            zName: Vec::new(),
+            pDestructor: None,
+        });
+        while !cur.xEof() {
+            out.push_str(label);
+            for col in 0..10 {
+                let mut o = Mem::default();
+                crate::vdbemem::sqlite3VdbeMemSetNull(&mut o);
+                {
+                    let mut ctx = Context {
+                        db: &mut *db,
+                        pOut: &mut o,
+                        pFunc: nullFunc.clone(),
+                        pMem: None,
+                        pAuxData: None,
+                        iOp: 0,
+                        pOpInfo: None,
+                        isError: 0,
+                        enc: SQLITE_UTF8,
+                        skipFlag: 0,
+                        argc: 0,
+                        zErr: None,
+                        pColl: None,
+                        piCurrentTime: None,
+                    };
+                    assert_eq!(cur.xColumn(&mut ctx, col), SQLITE_OK);
+                    assert_eq!(ctx.isError, 0);
+                }
+                out.push('|');
+                match sqlite3_value_type(&mut o) {
+                    SQLITE_NULL => {}
+                    SQLITE_BLOB => {
+                        out.push_str("X'");
+                        for b in sqlite3_value_blob(&mut o).unwrap_or_default() {
+                            out.push_str(&format!("{:02X}", b));
+                        }
+                        out.push('\'');
+                    }
+                    _ => out.push_str(&String::from_utf8_lossy(
+                        sqlite3_value_text(&mut o).unwrap_or_default(),
+                    )),
+                }
+            }
+            out.push('\n');
+            assert_eq!(cur.xNext(db), SQLITE_OK);
+        }
+        cur.xClose();
+    }
+
+    /// Expected output: the C library running agents/json/t08_each.sql.
+    const EACH_EXPECTED: &str = r#"E1|a|1|integer|1|2||$.a|$|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+E1|b|[2,{"c":3}]|array||6||$.b|$|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+E1|d|x|text|x|16||$.d|$|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+T1||{"a":1,"b":[2,{"c":3}],"d":"x"}|object||0||$|$|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+T1|a|1|integer|1|2|0|$.a|$|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+T1|b|[2,{"c":3}]|array||6|0|$.b|$|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+T1|0|2|integer|2|9|6|$.b[0]|$.b|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+T1|1|{"c":3}|object||11|6|$.b[1]|$.b|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+T1|c|3|integer|3|12|11|$.b[1].c|$.b[1]|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+T1|d|x|text|x|16|0|$.d|$|{"a":1,"b":[2,{"c":3}],"d":"x"}|$
+E2|0|1|integer|1|1||$[0]|$|[1,[2,3],{"x":null}]|$
+E2|1|[2,3]|array||3||$[1]|$|[1,[2,3],{"x":null}]|$
+E2|2|{"x":null}|object||8||$[2]|$|[1,[2,3],{"x":null}]|$
+T2||[1,[2,3],{"x":null}]|array||0||$|$|[1,[2,3],{"x":null}]|$
+T2|0|1|integer|1|1|0|$[0]|$|[1,[2,3],{"x":null}]|$
+T2|1|[2,3]|array||3|0|$[1]|$|[1,[2,3],{"x":null}]|$
+T2|0|2|integer|2|4|3|$[1][0]|$[1]|[1,[2,3],{"x":null}]|$
+T2|1|3|integer|3|6|3|$[1][1]|$[1]|[1,[2,3],{"x":null}]|$
+T2|2|{"x":null}|object||8|0|$[2]|$|[1,[2,3],{"x":null}]|$
+T2|x||null||9|8|$[2].x|$[2]|[1,[2,3],{"x":null}]|$
+E3||5|integer|5|0||$|$|5|$
+T3||5|integer|5|0||$|$|5|$
+E4|0|2|integer|2|9||$.b[0]|$.b|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b
+E4|1|{"c":3}|object||11||$.b[1]|$.b|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b
+T4|b|[2,{"c":3}]|array||6||$.b|$|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b
+T4|0|2|integer|2|9|6|$.b[0]|$.b|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b
+T4|1|{"c":3}|object||11|6|$.b[1]|$.b|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b
+T4|c|3|integer|3|12|11|$.b[1].c|$.b[1]|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b
+E5|c|3|integer|3|12||$.b[1].c|$.b[1]|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b[1]
+T5|b[1]|{"c":3}|object||11||$.b[1]|$|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b[1]
+T5|c|3|integer|3|12|11|$.b[1].c|$.b[1]|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b[1]
+T5b|c|3|integer|3|12||$.b[1].c|$.b[1]|{"a":1,"b":[2,{"c":3}],"d":"x"}|$.b[1].c
+E7|a b|1|integer|1|2||$."a b"|$|{"a b":1, "": 2, "1x": 3, "A":4}|$
+E7||2|integer|2|8||$.""|$|{"a b":1, "": 2, "1x": 3, "A":4}|$
+E7|1x|3|integer|3|11||$."1x"|$|{"a b":1, "": 2, "1x": 3, "A":4}|$
+E7|A|4|integer|4|16||$.A|$|{"a b":1, "": 2, "1x": 3, "A":4}|$
+T7||{"a b":{"c d":[1]},"":[2],"x":{}}|object||0||$|$|{"a b":{"c d":[1]}, "": [2], "x":{}}|$
+T7|a b|{"c d":[1]}|object||2|0|$."a b"|$|{"a b":{"c d":[1]}, "": [2], "x":{}}|$
+T7|c d|[1]|array||7|2|$."a b"."c d"|$."a b"|{"a b":{"c d":[1]}, "": [2], "x":{}}|$
+T7|0|1|integer|1|12|7|$."a b"."c d"[0]|$."a b"."c d"|{"a b":{"c d":[1]}, "": [2], "x":{}}|$
+T7||[2]|array||14|0|$.""|$|{"a b":{"c d":[1]}, "": [2], "x":{}}|$
+T7|0|2|integer|2|16|14|$.""[0]|$.""|{"a b":{"c d":[1]}, "": [2], "x":{}}|$
+T7|x|{}|object||18|0|$.x|$|{"a b":{"c d":[1]}, "": [2], "x":{}}|$
+E8|a|X'4B13311332'|array||2||$.a|$|{"a":[1,2],"b":{"c":true}}|$
+E8|b|X'3C176301'|object||9||$.b|$|{"a":[1,2],"b":{"c":true}}|$
+T8||X'CC0D17614B1331133217623C176301'|object||0||$|$|{"a":[1,2],"b":{"c":true}}|$
+T8|a|X'4B13311332'|array||2|0|$.a|$|{"a":[1,2],"b":{"c":true}}|$
+T8|0|1|integer|1|5|2|$.a[0]|$.a|{"a":[1,2],"b":{"c":true}}|$
+T8|1|2|integer|2|7|2|$.a[1]|$.a|{"a":[1,2],"b":{"c":true}}|$
+T8|b|X'3C176301'|object||9|0|$.b|$|{"a":[1,2],"b":{"c":true}}|$
+T8|c|1|true|1|12|9|$.b.c|$.b|{"a":[1,2],"b":{"c":true}}|$
+E9|a|[1,2]|array||2||$.a|$|X'CC1117614B1331133217627C17634430783130'|$
+E9|b|{"c":16}|object||9||$.b|$|X'CC1117614B1331133217627C17634430783130'|$
+T9||[[[]],{}]|array||0||$|$|X'3B1B0B0C'|$
+T9|0|[[]]|array||1|0|$[0]|$|X'3B1B0B0C'|$
+T9|0|[]|array||2|1|$[0][0]|$[0]|X'3B1B0B0C'|$
+T9|1|{}|object||3|0|$[1]|$|X'3B1B0B0C'|$
+E10||2|integer|2|3||$[1]|$[1]|[1,2]|$[1]
+T10|a[#-1]|2|integer|2|6||$.a[#-1]|$|{"a":[1,2]}|$.a[#-1]
+Error: 1 malformed JSON
+Error: 1 bad JSON path: 'x'
+Error: 1 bad JSON path: '$['
+T17|b|{"c":[{"d":1}]}|object||5||$.a.b|$.a|{"a":{"b":{"c":[{"d":1}]}}}|$.a.b
+T17|c|[{"d":1}]|array||8|5|$.a.b.c|$.a.b|{"a":{"b":{"c":[{"d":1}]}}}|$.a.b
+T17|0|{"d":1}|object||11|8|$.a.b.c[0]|$.a.b.c|{"a":{"b":{"c":[{"d":1}]}}}|$.a.b
+T17|d|1|integer|1|12|11|$.a.b.c[0].d|$.a.b.c[0]|{"a":{"b":{"c":[{"d":1}]}}}|$.a.b
+E18|a|é
+|text|é
+|2||$.a|$|{"a":"é\n","b":1.5e3,"c":-0x1F,"d":.5}|$
+E18|b|1500.0|real|1500.0|9||$.b|$|{"a":"é\n","b":1.5e3,"c":-0x1F,"d":.5}|$
+E18|c|-31|integer|-31|17||$.c|$|{"a":"é\n","b":1.5e3,"c":-0x1F,"d":.5}|$
+E18|d|0.5|real|0.5|25||$.d|$|{"a":"é\n","b":1.5e3,"c":-0x1F,"d":.5}|$
+"#;
+
+    #[test]
+    fn json_each_tree() {
+        use Arg::*;
+        let mut pdb: Option<Box<Sqlite3>> = None;
+        crate::mainapi::sqlite3_open_v2(
+            Some(b":memory:"),
+            &mut pdb,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+            None,
+        );
+        let db = &mut **pdb.as_mut().unwrap();
+        let j1 = r#"{"a":1,"b":[2,{"c":3}],"d":"x"}"#;
+        let mut out = String::new();
+        let o = &mut out;
+        scan(db, o, "E1", "json_each", Text(j1), None);
+        scan(db, o, "T1", "json_tree", Text(j1), None);
+        scan(
+            db,
+            o,
+            "E2",
+            "json_each",
+            Text(r#"[1,[2,3],{"x":null}]"#),
+            None,
+        );
+        scan(
+            db,
+            o,
+            "T2",
+            "json_tree",
+            Text(r#"[1,[2,3],{"x":null}]"#),
+            None,
+        );
+        scan(db, o, "E3", "json_each", Text("5"), None);
+        scan(db, o, "T3", "json_tree", Text("5"), None);
+        scan(db, o, "E4", "json_each", Text(j1), Some(Text("$.b")));
+        scan(db, o, "T4", "json_tree", Text(j1), Some(Text("$.b")));
+        scan(db, o, "E5", "json_each", Text(j1), Some(Text("$.b[1]")));
+        scan(db, o, "T5", "json_tree", Text(j1), Some(Text("$.b[1]")));
+        scan(db, o, "T5b", "json_tree", Text(j1), Some(Text("$.b[1].c")));
+        scan(
+            db,
+            o,
+            "E6",
+            "json_each",
+            Text(r#"{"a":1}"#),
+            Some(Text("$.zz")),
+        );
+        scan(
+            db,
+            o,
+            "E7",
+            "json_each",
+            Text(r#"{"a b":1, "": 2, "1x": 3, "A":4}"#),
+            None,
+        );
+        scan(
+            db,
+            o,
+            "T7",
+            "json_tree",
+            Text(r#"{"a b":{"c d":[1]}, "": [2], "x":{}}"#),
+            None,
+        );
+        scan(
+            db,
+            o,
+            "E8",
+            "jsonb_each",
+            Text(r#"{"a":[1,2],"b":{"c":true}}"#),
+            None,
+        );
+        scan(
+            db,
+            o,
+            "T8",
+            "jsonb_tree",
+            Text(r#"{"a":[1,2],"b":{"c":true}}"#),
+            None,
+        );
+        scan(
+            db,
+            o,
+            "E9",
+            "json_each",
+            Jsonb(r#"{"a":[1,2],"b":{"c":0x10}}"#),
+            None,
+        );
+        scan(db, o, "T9", "json_tree", Jsonb("[[[]],{}]"), None);
+        scan(db, o, "E10", "json_each", Text("[1,2]"), Some(Text("$[1]")));
+        scan(
+            db,
+            o,
+            "T10",
+            "json_tree",
+            Text(r#"{"a":[1,2]}"#),
+            Some(Text("$.a[#-1]")),
+        );
+        scan(db, o, "E11", "json_each", Text("[]"), None);
+        scan(db, o, "E12", "json_each", Null, None);
+        scan(db, o, "E13", "json_each", Text("[1]"), Some(Null));
+        scan(db, o, "E14", "json_each", Text("bad"), None);
+        scan(db, o, "E15", "json_each", Text("[1]"), Some(Text("x")));
+        scan(db, o, "E16", "json_each", Text("[1]"), Some(Text("$[")));
+        scan(
+            db,
+            o,
+            "T17",
+            "json_tree",
+            Text(r#"{"a":{"b":{"c":[{"d":1}]}}}"#),
+            Some(Text("$.a.b")),
+        );
+        scan(
+            db,
+            o,
+            "E18",
+            "json_each",
+            Text(r#"{"a":"é\n","b":1.5e3,"c":-0x1F,"d":.5}"#),
+            None,
+        );
+        assert_eq!(out, EACH_EXPECTED);
+    }
 }
