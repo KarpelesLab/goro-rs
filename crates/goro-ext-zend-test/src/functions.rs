@@ -108,6 +108,11 @@ const FUNCTIONS: &[(&str, BuiltinFn, u8)] = &[
         ALL,
     ),
     ("zend_get_map_ptr_last", zend_get_map_ptr_last, ALL),
+    (
+        "zend_test_create_throwing_resource",
+        zend_test_create_throwing_resource,
+        ALL,
+    ),
     ("zend_test_cast_fread", zend_test_cast_fread, ALL),
     (
         "zend_test_zend_call_stack_get",
@@ -1014,6 +1019,62 @@ fn init_with_user_constructor(
         }
         Err(e) if vm.current_exception.is_none() => Some(Err(e)),
         _ => Some(Ok(Value::Null)),
+    }
+}
+
+thread_local! {
+    /// The live "throwing resource"s (zend_test_create_throwing_resource()).
+    static THROWING_RESOURCES: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// zend_test_create_throwing_resource(): a resource whose destructor
+/// throws. Resources are not refcounted here: it is destroyed with the
+/// resource list, at shutdown.
+fn zend_test_create_throwing_resource(vm: &mut Vm, args: &[Value]) -> R {
+    if !args.is_empty() {
+        let msg = format!(
+            "zend_test_create_throwing_resource() expects exactly 0 arguments, {} given",
+            args.len()
+        );
+        return throw(vm, b"ArgumentCountError", &msg);
+    }
+    let id = goro_core::value::alloc_resource_id();
+    goro_core::value::register_resource(id, b"throwing resource");
+    THROWING_RESOURCES.with(|r| {
+        let mut r = r.borrow_mut();
+        if r.is_empty() {
+            vm.resource_shutdown_hooks.push(destroy_throwing_resources);
+        }
+        r.push(id);
+    });
+    Ok(Value::Resource(id))
+}
+
+/// zend_close_rsrc_list(): le_throwing_resource_dtor() throws.
+fn destroy_throwing_resources(vm: &mut Vm) {
+    let ids = THROWING_RESOURCES.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    for id in ids.into_iter().rev() {
+        goro_core::value::close_resource(id);
+        let exc = vm.create_exception(b"Exception", "Throwing resource destructor called", 0);
+        // zend_throw_exception_internal() without a frame: the user
+        // exception handler gets it; an exception it throws (or one without
+        // a handler) is fatal.
+        if let Some(handler) = vm.exception_handler.take() {
+            let _ = vm.call_callback(&handler, std::slice::from_ref(&exc));
+            if vm.exception_handler.is_none() {
+                vm.exception_handler = Some(handler);
+            }
+        } else {
+            vm.current_exception = Some(exc);
+        }
+        if vm.current_exception.is_some() {
+            let line = vm.current_line;
+            vm.report_uncaught(&VmError {
+                message: "Uncaught exception".into(),
+                line,
+            });
+            return;
+        }
     }
 }
 
