@@ -784,6 +784,21 @@ fn startup_ini(vm: &mut Vm) {
     }
 }
 
+/// zend_system_id: an md5 over the PHP version and build, as 32 hex digits.
+fn system_id(vm: &Vm) -> String {
+    let version = vm
+        .constants
+        .get(b"PHP_VERSION".as_slice())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    let mut h: u128 = 0x6c62272e07bb014262b821756295c58d;
+    for b in format!("{}API{}goro", version, "20250925").bytes() {
+        h ^= b as u128;
+        h = h.wrapping_mul(0x0000000001000000000000000000013B);
+    }
+    format!("{:032x}", h)
+}
+
 /// zend_accel_error_noreturn(ACCEL_LOG_FATAL, ...): logged (whatever the
 /// verbosity), then the process exits.
 fn fatal(vm: &mut Vm, msg: &str) -> ! {
@@ -886,6 +901,10 @@ fn startup(vm: &mut Vm) {
         c.revalidate_freq = ini_long(vm, "opcache.revalidate_freq");
         c.file_update_protection = ini_long(vm, "opcache.file_update_protection");
         c.record_warnings = ini_bool(vm, "opcache.record_warnings");
+        c.revalidate_path = ini_bool(vm, "opcache.revalidate_path");
+        c.file_cache = file_cache.trim_end_matches('/').to_string();
+        c.file_cache_read_only = ini_bool(vm, "opcache.file_cache_read_only");
+        c.system_id = system_id(vm);
         c.max_file_size = ini_long(vm, "opcache.max_file_size");
     });
     script_cache::STATS.with(|s| s.borrow_mut().start_time = script_cache::now());
@@ -898,12 +917,13 @@ fn startup(vm: &mut Vm) {
     }
     script_cache::CONFIG.with(|c| c.borrow_mut().enabled = !file_cache_only);
     // The main script is compiled through the cache.
-    if !file_cache_only {
-        let main = vm.current_file.clone();
-        if !main.is_empty() && !main.contains("://") && main != "Standard input code" {
-            let path = std::fs::canonicalize(&main)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or(main);
+    let main = vm.current_file.clone();
+    if !main.is_empty() && !main.contains("://") && main != "Standard input code" {
+        let path = std::fs::canonicalize(&main)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or(main);
+        script_cache::file_cache_store(&path);
+        if !file_cache_only {
             script_cache::store_main(&path);
         }
     }
@@ -1080,6 +1100,10 @@ fn opcache_invalidate(vm: &mut Vm, args: &[Value]) -> R {
         Some(p) => (p, true),
         None => (name, false),
     };
+    // zend_file_cache_invalidate()
+    if let Some(bin) = script_cache::file_cache_bin_path(&key) {
+        let _ = std::fs::remove_file(bin);
+    }
     let cached = script_cache::invalidate(&key, force);
     Ok(b(found || cached))
 }
@@ -1114,10 +1138,8 @@ fn opcache_is_script_cached_in_file_cache(vm: &mut Vm, args: &[Value]) -> R {
     if ini_str(vm, "opcache.file_cache").is_empty() {
         return Ok(Value::False);
     }
-    // The file cache is not persisted to disk by goro: a script compiled
-    // in this process stands for the file it would have written.
     Ok(b(
-        resolve(vm, &name).is_some_and(|p| script_cache::is_cached(&p))
+        resolve(vm, &name).is_some_and(|p| script_cache::in_file_cache(&p))
     ))
 }
 

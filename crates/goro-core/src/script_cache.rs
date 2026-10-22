@@ -63,6 +63,15 @@ pub struct Config {
     pub error_log: String,
     /// The opcache.blacklist_filename entries.
     pub blacklist: Vec<String>,
+    /// opcache.revalidate_path: scripts are keyed by their real path (a
+    /// symlink swapped later points to another script).
+    pub revalidate_path: bool,
+    /// opcache.file_cache (empty: no file cache).
+    pub file_cache: String,
+    /// opcache.file_cache_read_only
+    pub file_cache_read_only: bool,
+    /// The opcache system id (the file cache's subdirectory).
+    pub system_id: String,
 }
 
 impl Default for Config {
@@ -77,6 +86,10 @@ impl Default for Config {
             log_verbosity: 1,
             error_log: String::new(),
             blacklist: Vec::new(),
+            revalidate_path: false,
+            file_cache: String::new(),
+            file_cache_read_only: false,
+            system_id: String::new(),
         }
     }
 }
@@ -201,6 +214,8 @@ pub fn lookup(path: &str) -> Option<Rc<Compiled>> {
     if !cfg.enabled {
         return None;
     }
+    let key = cache_key(path, &cfg);
+    let path = key.as_str();
     let hit = SCRIPTS.with(|s| {
         let mut s = s.borrow_mut();
         let script = s.get_mut(path)?;
@@ -294,12 +309,84 @@ pub fn is_blacklisted(path: &str) -> bool {
     })
 }
 
+/// The file cache entry of a script (zend_file_cache_get_bin_file_path()):
+/// `<file_cache>/<system id><full path>.bin`.
+pub fn file_cache_bin_path(path: &str) -> Option<String> {
+    CONFIG.with(|c| {
+        let c = c.borrow();
+        if c.file_cache.is_empty() || !path.starts_with('/') {
+            return None;
+        }
+        Some(format!("{}/{}{}.bin", c.file_cache, c.system_id, path))
+    })
+}
+
+/// zend_file_cache_script_store(): goro keeps no serialized opcodes, the
+/// entry records the script's timestamp and size (the script is compiled
+/// again when it is loaded).
+pub fn file_cache_store(path: &str) {
+    let read_only = CONFIG.with(|c| c.borrow().file_cache_read_only);
+    let Some(bin) = file_cache_bin_path(path) else {
+        return;
+    };
+    if read_only {
+        return;
+    }
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if let Some(dir) = std::path::Path::new(&bin).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let data = format!("OPCACHE\0{}\0{}\0", meta.mtime(), meta.len());
+    if let Err(e) = std::fs::write(&bin, data) {
+        log(
+            LOG_WARNING,
+            &format!("opcache cannot write to file '{}': {}\n", bin, e),
+        );
+    }
+}
+
+/// Whether the file cache holds an entry for `path` that is still valid.
+pub fn in_file_cache(path: &str) -> bool {
+    let Some(bin) = file_cache_bin_path(path) else {
+        return false;
+    };
+    let Ok(data) = std::fs::read(&bin) else {
+        return false;
+    };
+    let validate = CONFIG.with(|c| c.borrow().validate_timestamps);
+    if !validate {
+        return data.starts_with(b"OPCACHE\0");
+    }
+    use std::os::unix::fs::MetadataExt;
+    let Ok(meta) = std::fs::metadata(path) else {
+        return false;
+    };
+    data == format!("OPCACHE\0{}\0{}\0", meta.mtime(), meta.len()).into_bytes()
+}
+
+/// The key of an included file: the path as resolved by the include
+/// (without following symlinks), or its real path with
+/// opcache.revalidate_path.
+fn cache_key(path: &str, cfg: &Config) -> String {
+    if cfg.revalidate_path {
+        if let Ok(p) = std::fs::canonicalize(path) {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    path.to_string()
+}
+
 /// Records a freshly compiled script (a cache miss).
 pub fn store_compiled(path: &str, compiled: Compiled) {
     let cfg = CONFIG.with(|c| c.borrow().clone());
     if !cfg.enabled {
         return;
     }
+    let key = cache_key(path, &cfg);
+    let path = key.as_str();
     STATS.with(|s| s.borrow_mut().misses += 1);
     if is_blacklisted(path) {
         STATS.with(|s| s.borrow_mut().blacklist_misses += 1);
@@ -430,6 +517,7 @@ impl crate::vm::Vm {
             crate::preload::note_compiled(path, op_array, classes);
             return;
         }
+        file_cache_store(path);
         if !enabled() {
             return;
         }
