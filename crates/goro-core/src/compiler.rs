@@ -11472,8 +11472,54 @@ impl Compiler {
             ExprKind::DynamicVariable(inner) => {
                 self.compile_dynvar_fetch(inner, Self::dynvar_mode(mode), object.span.line)
             }
+            // FETCH_STATIC_PROP_UNSET: an uninitialized typed property is
+            // no error (the unset does nothing).
+            ExprKind::StaticPropertyAccess { .. } | ExprKind::DynamicStaticPropertyAccess { .. }
+                if mode == DimFetch::Unset =>
+            {
+                self.compile_static_prop_unset_container(object)
+            }
             _ => self.compile_expr(object),
         }
+    }
+
+    #[inline(never)]
+    fn compile_static_prop_unset_container(&mut self, e: &Expr) -> CompileResult<OperandType> {
+        let null_idx = self.op_array.add_literal(Value::Null);
+        let (class_op, name_op) = self.compile_static_prop_operands(e)?;
+        let tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::Assign,
+            op1: OperandType::Tmp(tmp),
+            op2: OperandType::Const(null_idx),
+            result: OperandType::Unused,
+            line: e.span.line,
+        });
+        let set_tmp = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::StaticPropIsset,
+            op1: class_op,
+            op2: name_op,
+            result: OperandType::Tmp(set_tmp),
+            line: e.span.line,
+        });
+        let jmp = self.op_array.emit(Op {
+            opcode: OpCode::JmpZ,
+            op1: OperandType::Tmp(set_tmp),
+            op2: OperandType::JmpTarget(0),
+            result: OperandType::Unused,
+            line: e.span.line,
+        });
+        self.op_array.emit(Op {
+            opcode: OpCode::StaticPropFetch,
+            op1: class_op,
+            op2: name_op,
+            result: OperandType::Tmp(tmp),
+            line: e.span.line,
+        });
+        let end = self.op_array.current_offset();
+        self.op_array.patch_jump(jmp, end);
+        Ok(OperandType::Tmp(tmp))
     }
 
     /// The VarVarFetch mode of a write fetch.
