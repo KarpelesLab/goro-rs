@@ -11455,6 +11455,14 @@ impl Compiler {
                         }
                     }
                 }
+                // zend_delayed_compile_var(): a dynamic static property name
+                // (`C::${f()} = g()`) is evaluated before the value.
+                let pre_static =
+                    if matches!(target.kind, ExprKind::DynamicStaticPropertyAccess { .. }) {
+                        Some(self.compile_static_prop_operands(target)?)
+                    } else {
+                        None
+                    };
                 let mut val = self.compile_expr(value)?;
                 // The value of `$o->p = $v` is the value assigned, even if a
                 // magic method / lazy initializer run by the store changes $v:
@@ -11621,7 +11629,10 @@ impl Compiler {
                             });
                             OperandType::Tmp(t)
                         };
-                        let (class_op, name_op) = self.compile_static_prop_operands(target)?;
+                        let (class_op, name_op) = match pre_static {
+                            Some(ops) => ops,
+                            None => self.compile_static_prop_operands(target)?,
+                        };
                         self.op_array.emit(Op {
                             opcode: OpCode::StaticPropSet,
                             op1: class_op,

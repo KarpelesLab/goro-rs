@@ -33045,7 +33045,60 @@ impl Vm {
                         {
                             // IteratorAggregate: call getIterator() and iterate the result
                             let had_exc = self.current_exception.is_some();
-                            let iter_obj = self.spl_call_method(&arr_val, b"getIterator", &[]);
+                            let mut iter_obj = self.spl_call_method(&arr_val, b"getIterator", &[]);
+                            // zend_user_it_get_new_iterator(): what getIterator()
+                            // returns must be traversable (an aggregate is asked in
+                            // turn).
+                            if !had_exc && self.current_exception.is_none() {
+                                let mut agg = obj.clone();
+                                loop {
+                                    let bad = match &iter_obj {
+                                        Some(Value::Generator(_)) => break,
+                                        Some(Value::Object(o)) => {
+                                            let cl = o.borrow().class_name.to_ascii_lowercase();
+                                            let is = |vm: &Self, i: &[u8]| {
+                                                vm.class_implements_interface(&cl, i)
+                                                    || vm.builtin_implements_interface(&cl, i)
+                                            };
+                                            if Rc::ptr_eq(o, &agg) {
+                                                true
+                                            } else if is(self, b"iterator") {
+                                                break;
+                                            } else if is(self, b"iteratoraggregate") {
+                                                agg = o.clone();
+                                                let inner = Value::Object(o.clone());
+                                                iter_obj = self.spl_call_method(
+                                                    &inner,
+                                                    b"getIterator",
+                                                    &[],
+                                                );
+                                                if self.current_exception.is_some() {
+                                                    break;
+                                                }
+                                                continue;
+                                            } else {
+                                                !is(self, b"traversable")
+                                            }
+                                        }
+                                        _ => true,
+                                    };
+                                    if bad {
+                                        let cname = crate::value::display_class_name(
+                                            &agg.borrow().class_name,
+                                        );
+                                        let exc = self.create_exception(
+                                            b"Exception",
+                                            &format!(
+                                                "Objects returned by {}::getIterator() must be traversable or implement interface Iterator",
+                                                cname
+                                            ),
+                                            op.line,
+                                        );
+                                        self.current_exception = Some(exc);
+                                    }
+                                    break;
+                                }
+                            }
                             // An exception from getIterator() (or the rewind of what
                             // it returns) leaves the foreach.
                             if !had_exc && self.current_exception.is_some() {
