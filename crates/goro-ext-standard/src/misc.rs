@@ -17335,7 +17335,8 @@ fn phpversion_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if !matches!(ext, Value::Null | Value::Undef) {
             let ext_name = ext.to_php_string().to_string_lossy().to_ascii_lowercase();
             match ext_name.as_str() {
-                "standard" | "core" | "date" | "pcre" | "json" | "ctype" | "hash" | "spl" => {
+                "standard" | "core" | "date" | "pcre" | "json" | "ctype" | "hash" | "spl"
+                | "tidy" => {
                     return Ok(Value::String(PhpString::from_bytes(b"8.5.4")));
                 }
                 _ => return Ok(Value::False),

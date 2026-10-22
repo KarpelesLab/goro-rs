@@ -16,7 +16,7 @@ extensions run the official php-src test suite.
 | Total tests | 21582 (the generic PDO tests run once per driver) |
 | Pass | 18106 (83.9% of all, **96.7% of runnable**) |
 | Fail | 603 |
-| Skip | 2852 (mostly extensions not implemented yet: ldap, ffi, sqlite3, tidy, odbc, …; plus opcache-only and Windows-only tests) |
+| Skip | 2852 (mostly extensions not implemented yet: ldap, ffi, sqlite3, odbc, …; plus opcache-only and Windows-only tests) |
 | Error | 10 |
 | XFail / XPass | 11 / 1 |
 
@@ -61,6 +61,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/opcache (behavioural tests) | 300 | 303 | 99.0% |
 | ext/zend_test (engine test hooks) | 106 | 145 | 73.1% |
 | ext/dba (cdb, cdb_make, inifile, flatfile) / readline | 53 | 53 | 100% |
+| ext/tidy (tidy-html5 5.8.0 port) | 50 | 50 | 100% |
 | sapi/cli (incl. `php -S` and `php -a`) | 100 | 101 | 99.0% |
 
 
@@ -101,10 +102,11 @@ Highlights beyond the core language:
   text on skrifa, WebP/AVIF on the OxideAV codecs), dba (cdb/cdb_make, inifile and flatfile
   handlers), readline (GNU readline emulation, with the `php -a` interactive shell),
   uri (`Uri\Rfc3986\Uri` on a uriparser port, `Uri\WhatWg\Url` on a port of lexbor's WHATWG
-  URL parser), zend_test.
+  URL parser), tidy (a port of tidy-html5 5.8.0 matching libtidy's output and messages),
+  zend_test.
 
 ### Not Yet Implemented
-- pdo_sqlite/…, ffi, ldap, sqlite3, tidy, odbc, snmp, enchant
+- pdo_sqlite/…, ffi, ldap, sqlite3, odbc, snmp, enchant
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
 - Exact opcache optimizer behaviour
 
@@ -151,6 +153,8 @@ Workspace crates:
 - `goro-ext-sysvipc` - shmop, sysvsem, sysvshm and sysvmsg
 - `goro-ext-dba` - ext/dba with the cdb, cdb_make, inifile and flatfile handlers
 - `goro-ext-readline` - ext/readline (a GNU readline emulation) and the CLI shell's completion
+- `goro-tidy` - a pure Rust port of tidy-html5 5.8.0 (libtidy)
+- `goro-ext-tidy` - ext/tidy on `goro-tidy`
 - `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,sodium,xml,zlib}` - misc extensions
 - `goro-phpt` - PHPT test file runner
 
