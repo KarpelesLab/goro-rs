@@ -67,6 +67,7 @@ $dirs = [
     'ext/dba' => 'dba',
     'ext/readline' => 'readline',
     'ext/tidy' => 'tidy',
+    'ext/opcache' => 'Zend OPcache',
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',
     'ext/dom' => 'dom',
