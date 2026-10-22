@@ -1246,6 +1246,19 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
     if args.get(1).map(|a| a.is_closure_obj()).unwrap_or(false) {
         let mut a = args.to_vec();
         a[1] = closure_legacy_arg(&args[1]);
+        // The __invoke() of a closure of a method reflects that method
+        // (zend_get_closure_invoke_method() proxies it).
+        if let (Value::String(f), Some(m)) = (a[1].clone(), args.get(2)) {
+            let fb = f.as_bytes();
+            if m.to_php_string().as_bytes().eq_ignore_ascii_case(b"__invoke")
+                && !fb.starts_with(b"__")
+            {
+                if let Some(p) = fb.windows(2).position(|w| w == b"::") {
+                    a[1] = Value::String(PhpString::from_vec(fb[..p].to_vec()));
+                    a[2] = Value::String(PhpString::from_vec(fb[p + 2..].to_vec()));
+                }
+            }
+        }
         return reflection_method_construct(vm, &a, line);
     }
     // zpp: object|string $objectOrMethod, ?string $method.
