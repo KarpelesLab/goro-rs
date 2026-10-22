@@ -579,6 +579,13 @@ impl ForeachState {
     }
 }
 
+/// A new, empty foreach state (built out of line: the state is large, and
+/// the frames that need one are those of every PHP call level).
+#[inline(never)]
+fn new_foreach_state() -> Box<ForeachState> {
+    Box::default()
+}
+
 /// Pending function call being assembled
 #[derive(Debug, Clone)]
 pub(crate) struct PendingCall {
@@ -17940,6 +17947,73 @@ impl Vm {
         Some((f, new_name, sep, is_static))
     }
 
+    /// recv_typed_params() for the fast DO_FCALL path (out of line, with
+    /// its buffer: off the native stack of every PHP call level).
+    #[inline(never)]
+    fn fast_recv_typed_params(
+        &mut self,
+        user_fn: &OpArray,
+        call: &mut PendingCall,
+        line: u32,
+        caller_strict: bool,
+    ) -> Result<(), RecvFail> {
+        let name = call.name.as_bytes();
+        let mut buf = [0u8; 128];
+        for (d, s) in buf.iter_mut().zip(name) {
+            *d = s.to_ascii_lowercase();
+        }
+        let n = name.len().min(buf.len());
+        self.recv_typed_params(user_fn, call, &buf[..n], line, caller_strict)
+    }
+
+    /// The fast DO_FCALL path's method call: late static binding (the
+    /// object's class, the class named by a static call, or for a
+    /// forwarding call the caller's `$this`'s / current called class) and
+    /// the scope (the class declaring the method). (Out of line: off the
+    /// native stack of every PHP call level.)
+    #[inline(never)]
+    fn push_fast_method_scopes(
+        &mut self,
+        call: &PendingCall,
+        sep: usize,
+        has_this: bool,
+        forwarding: bool,
+        caller_this: Option<&Rc<RefCell<PhpObject>>>,
+    ) {
+        // (in the buffers of finished calls' entries)
+        let mut called_class = self.bytes_pool.pop().unwrap_or_default();
+        match call.args.first() {
+            Some(Value::Object(obj)) if has_this => {
+                called_class.extend_from_slice(&obj.borrow().class_name)
+            }
+            _ if forwarding => match caller_this {
+                Some(obj) => called_class.extend_from_slice(&obj.borrow().class_name),
+                None => match self.called_class_stack.last() {
+                    Some(current) => called_class.extend_from_slice(current),
+                    None => called_class.extend_from_slice(&call.name.as_bytes()[..sep]),
+                },
+            },
+            _ => called_class.extend_from_slice(&call.name.as_bytes()[..sep]),
+        }
+        self.called_class_stack.push(called_class);
+        let name = call.name.as_bytes();
+        let mut buf = [0u8; 128];
+        for (d, s) in buf.iter_mut().zip(name) {
+            *d = s.to_ascii_lowercase();
+        }
+        let class_lower = &buf[..sep];
+        let mut defining_class = self.bytes_pool.pop().unwrap_or_default();
+        match self
+            .classes
+            .get(class_lower)
+            .and_then(|c| c.get_method(&buf[sep + 2..name.len()]))
+        {
+            Some(m) => defining_class.extend_from_slice(&m.declaring_class),
+            None => defining_class.extend_from_slice(class_lower),
+        }
+        self.class_scope_stack.push(defining_class);
+    }
+
     /// fast_fcall_target(): closure `f` takes the call as is; Some(number
     /// of captured values among the arguments).
     fn fast_closure_simple(f: &OpArray, call: &PendingCall) -> Option<usize> {
@@ -18753,6 +18827,19 @@ impl Vm {
         if self.exit_requested {
             return result.map(|_| Value::Null);
         }
+        self.leave_op_array_frame(op_array, result, keep_ref)
+    }
+
+    /// The end of execute_op_array_frame(): the locals' destructors, the
+    /// result's dereferencing and checks. (Out of line: the native stack
+    /// of every PHP call level does not carry what this needs.)
+    #[inline(never)]
+    fn leave_op_array_frame(
+        &mut self,
+        op_array: &OpArray,
+        result: Result<Value, VmError>,
+        keep_ref: bool,
+    ) -> Result<Value, VmError> {
         let exc_before_dtors = self.current_exception.is_some();
         // The function's locals are released as its frame is left
         // (zend_leave_helper): their destructors run in the caller's context,
@@ -19010,7 +19097,10 @@ impl Vm {
         let mut sym = None;
         // (boxed, from the states of finished frames: kept off the native
         // stack, and empty)
-        let mut fe = self.foreach_pool.pop().unwrap_or_default();
+        let mut fe = match self.foreach_pool.pop() {
+            Some(fe) => fe,
+            None => new_foreach_state(),
+        };
         let r = self.execute_frame(
             op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin, &mut sym, &mut fe,
         );
@@ -25411,16 +25501,9 @@ impl Vm {
                         // Check parameter types before executing
                         // (untyped parameters: nothing to check or coerce)
                         if user_fn.param_types.iter().any(|t| t.is_some()) {
-                            let name = call.name.as_bytes();
-                            let mut buf = [0u8; 128];
-                            for (d, s) in buf.iter_mut().zip(name) {
-                                *d = s.to_ascii_lowercase();
-                            }
-                            let func_name_lower = &buf[..name.len()];
-                            match self.recv_typed_params(
+                            match self.fast_recv_typed_params(
                                 &user_fn,
                                 &mut call,
-                                func_name_lower,
                                 op.line,
                                 op_array.strict_types,
                             ) {
@@ -25461,49 +25544,25 @@ impl Vm {
                         let was_global = self.is_global_scope;
                         self.is_global_scope = false;
                         if let Some((sep, _)) = method_sep {
-                            // Late static binding: the object's class (the class
-                            // named by a static call); the scope: the class
-                            // declaring the method.
-                            // (in the buffers of finished calls' entries)
-                            let mut called_class = self.bytes_pool.pop().unwrap_or_default();
-                            match call.args.first() {
-                                Some(Value::Object(obj)) if has_this => {
-                                    called_class.extend_from_slice(&obj.borrow().class_name)
-                                }
-                                // A forwarding call keeps the called class: the
-                                // caller's $this's, else the current one.
-                                _ if forwarding => match cvs.first() {
-                                    Some(Value::Object(obj))
-                                        if op_array.cv_names.first().map(|n| n.as_slice())
+                            // A forwarding call keeps the called class: the
+                            // caller's $this's, else the current one.
+                            let caller_this = match cvs.first() {
+                                Some(Value::Object(obj))
+                                    if forwarding
+                                        && op_array.cv_names.first().map(|n| n.as_slice())
                                             == Some(b"this") =>
-                                    {
-                                        called_class.extend_from_slice(&obj.borrow().class_name)
-                                    }
-                                    _ => match self.called_class_stack.last() {
-                                        Some(current) => called_class.extend_from_slice(current),
-                                        None => called_class
-                                            .extend_from_slice(&call.name.as_bytes()[..sep]),
-                                    },
-                                },
-                                _ => called_class.extend_from_slice(&call.name.as_bytes()[..sep]),
-                            }
-                            self.called_class_stack.push(called_class);
-                            let name = call.name.as_bytes();
-                            let mut buf = [0u8; 128];
-                            for (d, s) in buf.iter_mut().zip(name) {
-                                *d = s.to_ascii_lowercase();
-                            }
-                            let class_lower = &buf[..sep];
-                            let mut defining_class = self.bytes_pool.pop().unwrap_or_default();
-                            match self
-                                .classes
-                                .get(class_lower)
-                                .and_then(|c| c.get_method(&buf[sep + 2..name.len()]))
-                            {
-                                Some(m) => defining_class.extend_from_slice(&m.declaring_class),
-                                None => defining_class.extend_from_slice(class_lower),
-                            }
-                            self.class_scope_stack.push(defining_class);
+                                {
+                                    Some(obj)
+                                }
+                                _ => None,
+                            };
+                            self.push_fast_method_scopes(
+                                &call,
+                                sep,
+                                has_this,
+                                forwarding,
+                                caller_this,
+                            );
                         }
                         // A closure's scope, and its called class (its
                         // $this's class, else the class it was created with).
