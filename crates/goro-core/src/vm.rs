@@ -21550,7 +21550,22 @@ impl Vm {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
                     let a_str = self.value_to_string(&cv_val);
+                    // A throwing __toString() leaves the variable untouched.
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                     let b_str = self.value_to_string(&rhs);
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                     let mut result = a_str.as_bytes().to_vec();
                     result.extend_from_slice(b_str.as_bytes());
                     self.write_operand(
@@ -22939,6 +22954,14 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
+
                     let method_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let method_name = method_val.to_php_string();
 
@@ -23019,6 +23042,14 @@ impl Vm {
                         }
                     }
                     if !matches!(method_val, Value::String(_)) {
+                        self.check_undefined_cv(&op.op2, &cvs, op_array, op.line);
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
                         let err_msg = "Method name must be a string";
                         let exc = self.create_exception(b"Error", err_msg, op.line);
                         self.current_exception = Some(exc);
@@ -32257,10 +32288,9 @@ impl Vm {
                                     format!("Call to undefined function {}()", func_display)
                                 };
                                 // An exception thrown by the autoloader while looking
-                                // up the class propagates instead.
-                                if err_msg.starts_with("Class \"")
-                                    && self.current_exception.is_some()
-                                {
+                                // up the class propagates instead (even when the
+                                // autoloader declared the class before throwing).
+                                if self.current_exception.is_some() {
                                     if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                         exception_handlers.last()
                                     {
@@ -36735,8 +36765,12 @@ impl Vm {
                     }
 
                     if let Some(err_msg) = self.throw_operand_error(&exc_val) {
-                        let err_exc = self.create_exception(b"Error", err_msg, op.line);
-                        self.current_exception = Some(err_exc);
+                        // ZVAL_UNDEFINED_OP1(): its warning may throw instead.
+                        self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
+                        if self.current_exception.is_none() {
+                            let err_exc = self.create_exception(b"Error", err_msg, op.line);
+                            self.current_exception = Some(err_exc);
+                        }
                         if let Some((catch_target, finally_target, _, _, saved_pc)) =
                             exception_handlers.pop()
                         {
@@ -38396,7 +38430,20 @@ impl Vm {
 
                 OpCode::IncludeFile => match outlined(|| -> Result<Flow, VmError> {
                     let path_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let path_str = path_val.to_php_string().to_string_lossy();
+                    // An object path goes through __toString(), which may throw.
+                    let path_str = if let Value::Object(_) = &path_val {
+                        let s = self.value_to_string(&path_val).to_string_lossy();
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        s
+                    } else {
+                        path_val.to_php_string().to_string_lossy()
+                    };
 
                     // Get include kind from op2: 0=include, 1=include_once, 2=require, 3=require_once
                     let include_kind = match &op.op2 {
@@ -39269,6 +39316,14 @@ impl Vm {
                         &op_array.literals,
                         op_array,
                         op.line,
+                    );
+                    // A throwing error handler for "Undefined variable" aborts.
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
                     );
                     let cloned = self.clone_value(&val, op.line);
                     native_exc_check!(
@@ -42444,8 +42499,10 @@ impl Vm {
                         if let Some((true, _)) = hooks {
                             self.call_prop_get_hook(&obj_val, &class_lower, pn);
                         }
+                        // Unset or inaccessible from this scope: __get() serves it.
                         let overloaded = !hooked
-                            && !obj.borrow().has_property(pn)
+                            && (!obj.borrow().has_property(pn)
+                                || !self.prop_visible_from_scope(&class_lower, pn))
                             && self
                                 .classes
                                 .get(&class_lower)
@@ -48777,8 +48834,12 @@ impl Vm {
                         Value::String(_) | Value::Object(_) | Value::Generator(_)
                     ) {
                         let msg = "Class name must be a valid object or a string";
-                        let exc = self.create_exception(b"Error", msg, op.line);
-                        self.current_exception = Some(exc);
+                        // ZVAL_UNDEFINED_OP1(): its warning may throw instead.
+                        self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
+                        if self.current_exception.is_none() {
+                            let exc = self.create_exception(b"Error", msg, op.line);
+                            self.current_exception = Some(exc);
+                        }
                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
                             exception_handlers.last()
                         {
@@ -50868,7 +50929,18 @@ impl Vm {
                     if matches!(prop_name_val.deref(), Value::Array(_)) {
                         self.emit_warning_at("Array to string conversion", op.line);
                     }
-                    let prop_name = prop_name_val.to_php_string();
+                    let prop_name = match prop_name_val {
+                        // A dynamic name object is converted with __toString().
+                        o @ Value::Object(_) => self.value_to_string(&o),
+                        v => v.to_php_string(),
+                    };
+                    native_exc_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                     // $obj->p naming a static property (zend_get_property_offset).
                     if let Value::Object(o) = &obj_val_raw {
                         if let Err(e) = self.static_as_instance_check(
