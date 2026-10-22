@@ -41729,12 +41729,6 @@ impl Vm {
                                         .collect::<Vec<u8>>()
                                         == b"fiber"
                                 };
-                                // Recycle object ID if this is the last user reference
-                                // (strong_count == 2: one for this slot, one for destructible_objects)
-                                let sc = Rc::strong_count(obj_rc);
-                                if sc <= 2 {
-                                    self.free_object_ids.push(obj_rc.borrow().object_id);
-                                }
                                 if is_fiber {
                                     let fiber_id = obj_rc.borrow().object_id;
                                     let state =
@@ -44888,7 +44882,11 @@ impl Vm {
                             }
                             _ => None,
                         } {
-                            let r = self.ao_has_dimension(&o, &key_val);
+                            let r = if Self::is_empty_dim_probe(op_array, ip, &op) {
+                                self.ao_empty_probe(&o, &key_val)
+                            } else {
+                                self.ao_has_dimension(&o, &key_val)
+                            };
                             if self.current_exception.is_some() {
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()

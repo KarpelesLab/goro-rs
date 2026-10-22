@@ -598,6 +598,17 @@ impl Vm {
         self.ao_offset_exists(obj, offset, 0)
     }
 
+    /// First half of empty() (check_empty=1): whether the following fetch
+    /// must run. With a user offsetGet() and no offsetExists(), any stored
+    /// entry (even null) is read through offsetGet().
+    #[inline(never)]
+    pub(crate) fn ao_empty_probe(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value) -> bool {
+        if !self.ao_user_has(obj, b"offsetexists") && self.ao_user_has(obj, b"offsetget") {
+            return self.ao_offset_exists(obj, offset, 2);
+        }
+        self.ao_has_dimension(obj, offset)
+    }
+
     /// has_property(ZEND_PROPERTY_EXISTS) for property_exists(): Some(result)
     /// when ARRAY_AS_PROPS routes the name to the storage.
     pub fn spl_property_exists_hook(

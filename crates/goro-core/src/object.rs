@@ -317,6 +317,33 @@ impl GcFlag {
     }
 }
 
+/// spl_object_storage_dtor() releases each element's object, then its
+/// data, entry by entry; the storage keeps them in two parallel arrays
+/// (`__spl_objects` / `__spl_array`), which are released interleaved so
+/// freed handles reach the free list in PHP's order.
+#[inline(never)]
+fn release_object_storage(props: &mut [(Vec<u8>, crate::value::Value)]) {
+    use crate::value::Value;
+    let find = |props: &[(Vec<u8>, Value)], n: &[u8]| props.iter().position(|(k, _)| k == n);
+    let (Some(oi), Some(ii)) = (find(props, b"__spl_objects"), find(props, b"__spl_array")) else {
+        return;
+    };
+    let (Value::Array(objs), Value::Array(infs)) = (&props[oi].1, &props[ii].1) else {
+        return;
+    };
+    if std::rc::Rc::strong_count(objs) != 1 || std::rc::Rc::strong_count(infs) != 1 {
+        return;
+    }
+    let mut objs = std::mem::take(&mut *objs.borrow_mut());
+    let mut infs = std::mem::take(&mut *infs.borrow_mut());
+    let keys: Vec<_> = objs.keys().cloned().collect();
+    for k in &keys {
+        drop(objs.remove(k));
+        drop(infs.remove(k));
+    }
+    drop(infs);
+}
+
 impl Drop for PhpObject {
     fn drop(&mut self) {
         if self.gc_buffered.get() {
@@ -340,7 +367,9 @@ impl Drop for PhpObject {
         // Release what the object holds before its handle goes back to the
         // free list (zend_objects_store_del: free_obj, then the handle).
         drop(self.native.take());
-        drop(std::mem::take(&mut self.properties));
+        let mut props = std::mem::take(&mut self.properties);
+        release_object_storage(&mut props);
+        drop(props);
         drop(self.closure.take());
         // Don't recycle the sentinel zero id.
         if self.object_id != 0 && !weak_target {
