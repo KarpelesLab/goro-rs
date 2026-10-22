@@ -62,7 +62,7 @@ pub struct PhpArray {
     /// Hash index (slot -> entry position + 1, 0 = empty); empty when unused
     index: Vec<u32>,
     /// In the cycle collector's root buffer (Zend's GC_INFO); see gc.rs.
-    pub(crate) gc_buffered: std::cell::Cell<bool>,
+    pub(crate) gc_buffered: crate::object::GcSlot,
     /// memory_limit accounting: the nTableSize of the Zend HashTable this
     /// array stands for (0 = no data block allocated yet) and whether that
     /// block is packed. See `zend_size`.
@@ -207,7 +207,7 @@ impl Clone for PhpArray {
             packed: self.packed,
             mixed: self.mixed,
             index: Vec::new(),
-            gc_buffered: std::cell::Cell::new(false),
+            gc_buffered: crate::object::GcSlot::default(),
             zcap,
             zpacked,
             untracked: false,
@@ -232,7 +232,7 @@ impl PhpArray {
             packed: true,
             mixed: false,
             index: Vec::new(),
-            gc_buffered: std::cell::Cell::new(false),
+            gc_buffered: crate::object::GcSlot::default(),
             zcap: 0,
             zpacked: true,
             untracked: false,
@@ -249,7 +249,7 @@ impl PhpArray {
             packed: true,
             mixed: false,
             index: Vec::new(),
-            gc_buffered: std::cell::Cell::new(false),
+            gc_buffered: crate::object::GcSlot::default(),
             zcap: 0,
             zpacked: true,
             untracked: false,
@@ -1024,7 +1024,7 @@ impl Default for PhpArray {
 impl Drop for PhpArray {
     fn drop(&mut self) {
         if self.gc_buffered.get() {
-            crate::gc::root_freed();
+            crate::gc::root_freed(self.gc_buffered.slot());
         }
         // Release the accounted table.
         let bytes = self.zend_size();

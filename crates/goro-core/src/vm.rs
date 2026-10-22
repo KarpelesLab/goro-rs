@@ -33107,6 +33107,10 @@ impl Vm {
                                                     b"__fiber_state".to_vec(),
                                                     Value::Long(FiberState::Created as i64),
                                                 );
+                                                drop(obj_mut);
+                                                // The constructor call releases its $this
+                                                // (ZEND_CALL_RELEASE_THIS): a possible root.
+                                                crate::gc::possible_root(&call.args[0]);
                                             } else {
                                                 drop(obj_mut);
                                                 let msg = "Fiber::__construct() expects exactly 1 argument, 0 given".to_string();

@@ -211,7 +211,7 @@ pub struct PhpObject {
     /// `gc::note_dtor_candidate`).
     pub dtor_listed: GcFlag,
     /// In the cycle collector's root buffer (Zend's GC_INFO).
-    pub gc_buffered: GcFlag,
+    pub gc_buffered: GcSlot,
     /// Used as a WeakMap key (Zend's IS_OBJ_WEAKLY_REFERENCED): its entries
     /// are released when it dies.
     pub weak_key: GcFlag,
@@ -317,6 +317,31 @@ impl GcFlag {
     }
 }
 
+/// The cycle collector's root buffer slot of a value (Zend's GC_INFO
+/// address; 0 = not buffered). Not copied by `Clone`.
+#[derive(Debug, Default)]
+pub struct GcSlot(std::cell::Cell<u32>);
+impl Clone for GcSlot {
+    fn clone(&self) -> Self {
+        GcSlot::default()
+    }
+}
+impl GcSlot {
+    /// Buffered as a possible root.
+    #[inline]
+    pub fn get(&self) -> bool {
+        self.0.get() != 0
+    }
+    #[inline]
+    pub fn slot(&self) -> u32 {
+        self.0.get()
+    }
+    #[inline]
+    pub fn set_slot(&self, v: u32) {
+        self.0.set(v)
+    }
+}
+
 /// spl_object_storage_dtor() releases each element's object, then its
 /// data, entry by entry; the storage keeps them in two parallel arrays
 /// (`__spl_objects` / `__spl_array`), which are released interleaved so
@@ -347,7 +372,7 @@ fn release_object_storage(props: &mut [(Vec<u8>, crate::value::Value)]) {
 impl Drop for PhpObject {
     fn drop(&mut self) {
         if self.gc_buffered.get() {
-            crate::gc::root_freed();
+            crate::gc::root_freed(self.gc_buffered.slot());
         }
         // A WeakMap key or map: its entries are released (by the VM, see
         // gc::purge_weakmaps) before its handle is recycled.
@@ -389,7 +414,7 @@ impl PhpObject {
             object_id,
             gc_tracked: GcFlag::default(),
             dtor_listed: GcFlag::default(),
-            gc_buffered: GcFlag::default(),
+            gc_buffered: GcSlot::default(),
             weak_key: GcFlag::default(),
             closure: None,
             native: None,

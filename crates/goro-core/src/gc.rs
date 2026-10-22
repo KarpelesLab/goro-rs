@@ -65,13 +65,7 @@ enum WeakNode {
 }
 
 impl WeakNode {
-    fn alive(&self) -> bool {
-        match self {
-            WeakNode::Obj(w) => w.strong_count() > 0,
-            WeakNode::Arr(w) => w.strong_count() > 0,
-        }
-    }
-    /// Take the entry out of the buffer: clear the value's buffered flag.
+    /// Take the entry out of the buffer: clear the value's buffered slot.
     /// Returns the live node, if any.
     fn unbuffer(self) -> Option<Node> {
         let n = match self {
@@ -79,8 +73,8 @@ impl WeakNode {
                 let o = w.upgrade()?;
                 if let Ok(b) = o.try_borrow() {
                     if b.gc_buffered.get() {
-                        b.gc_buffered.set(false);
-                        root_freed();
+                        b.gc_buffered.set_slot(0);
+                        live_dec();
                     }
                 }
                 Node::Obj(o)
@@ -89,14 +83,31 @@ impl WeakNode {
                 let a = w.upgrade()?;
                 if let Ok(b) = a.try_borrow() {
                     if b.gc_buffered.get() {
-                        b.gc_buffered.set(false);
-                        root_freed();
+                        b.gc_buffered.set_slot(0);
+                        live_dec();
                     }
                 }
                 Node::Arr(a)
             }
         };
         Some(n)
+    }
+    /// The value moved to slot `slot` (it is still buffered).
+    fn move_to(&self, slot: u32) -> bool {
+        match self {
+            WeakNode::Obj(w) => w.upgrade().is_some_and(|o| {
+                o.try_borrow().is_ok_and(|b| {
+                    b.gc_buffered.set_slot(slot);
+                    true
+                })
+            }),
+            WeakNode::Arr(w) => w.upgrade().is_some_and(|a| {
+                a.try_borrow().is_ok_and(|b| {
+                    b.gc_buffered.set_slot(slot);
+                    true
+                })
+            }),
+        }
     }
 }
 
@@ -109,20 +120,33 @@ const BUF_DEFAULT: usize = 16 * 1024;
 const BUF_GROW_STEP: usize = 128 * 1024;
 const BUF_MAX: usize = 0x4000_0000;
 
-/// Root buffer. A value is buffered at most once (its `gc_buffered` flag,
-/// like Zend's GC_INFO), and a buffered value that is freed decrements the
-/// live count from its Drop (GC_REMOVE_FROM_BUFFER), so `live` is exact.
-/// The Weak entries of freed values are pruned lazily.
+/// Root buffer, laid out like Zend's: a value is buffered at most once, in
+/// a slot it records (its `gc_buffered` slot, Zend's GC_INFO address); a
+/// buffered value that is freed gives its slot back from its Drop
+/// (GC_REMOVE_FROM_BUFFER), and new roots take the most recently freed
+/// slot first (GC_FETCH_UNUSED), else the next one. The collector visits
+/// the roots in slot order, which decides the order destructors run in.
 struct RootBuf {
-    list: Vec<WeakNode>,
-    /// List length at which dead entries are pruned.
-    prune_at: usize,
+    /// Slot n is `slots[n - 1]` (Zend's slot 0 is reserved).
+    slots: Vec<Option<WeakNode>>,
+    /// Free slots below `slots.len()`, most recently freed last.
+    unused: Vec<u32>,
 }
 
 impl RootBuf {
-    fn prune(&mut self) {
-        self.list.retain(|n| n.alive());
-        self.prune_at = (self.list.len() * 2).max(4096);
+    /// Apply the slot releases that could not be done at once.
+    fn flush_freed(&mut self) {
+        let freed = FREED_SLOTS.with(|f| std::mem::take(&mut *f.borrow_mut()));
+        for s in freed {
+            self.release(s);
+        }
+    }
+    fn release(&mut self, slot: u32) {
+        if let Some(e) = self.slots.get_mut(slot as usize - 1) {
+            if e.take().is_some() {
+                self.unused.push(slot);
+            }
+        }
     }
 }
 
@@ -134,9 +158,11 @@ thread_local! {
     static PRUNE_AT: Cell<usize> = const { Cell::new(4096) };
     /// Possible roots (arrays / objects that lost a holder).
     static POSSIBLE_ROOTS: RefCell<RootBuf> = const { RefCell::new(RootBuf {
-        list: Vec::new(),
-        prune_at: 4096,
+        slots: Vec::new(),
+        unused: Vec::new(),
     }) };
+    /// Slots freed while the buffer was in use (see RootBuf::flush_freed).
+    static FREED_SLOTS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
     /// Number of buffered values still alive (Zend's num_roots).
     static LIVE_ROOTS: Cell<usize> = const { Cell::new(0) };
     /// Objects whose last reference went away while the collector was
@@ -161,7 +187,7 @@ thread_local! {
     /// The buffer is full but collecting is disabled (gc_disable()): stop
     /// raising GC_PENDING until something changes.
     static GC_SUPPRESSED: Cell<bool> = const { Cell::new(false) };
-    /// Number of roots buffered when the threshold was hit (those are the
+    /// Number of slots in use when the threshold was hit (those hold the
     /// roots Zend's synchronous collection would have processed).
     static GC_PENDING_ROOTS: Cell<usize> = const { Cell::new(0) };
     /// Accumulated times in nanoseconds: collector, destructors, freeing.
@@ -361,10 +387,19 @@ pub fn on_child_released(v: &Value) {
     }
 }
 
-/// A buffered value was freed (or left the buffer).
 #[inline]
-pub(crate) fn root_freed() {
+fn live_dec() {
     let _ = LIVE_ROOTS.try_with(|c| c.set(c.get().saturating_sub(1)));
+}
+
+/// A buffered value (in `slot`) was freed: its slot is free again.
+#[inline]
+pub(crate) fn root_freed(slot: u32) {
+    live_dec();
+    let _ = POSSIBLE_ROOTS.try_with(|r| match r.try_borrow_mut() {
+        Ok(mut r) => r.release(slot),
+        Err(_) => FREED_SLOTS.with(|f| f.borrow_mut().push(slot)),
+    });
 }
 
 #[inline]
@@ -381,13 +416,13 @@ fn buffer_object(o: &Rc<RefCell<PhpObject>>) {
         let Ok(b) = o.try_borrow() else {
             return;
         };
-        if add_root(WeakNode::Obj(Rc::downgrade(o))) {
-            b.gc_buffered.set(true);
+        if let Some(s) = add_root(WeakNode::Obj(Rc::downgrade(o))) {
+            b.gc_buffered.set_slot(s);
         }
         return;
     }
-    if add_root(WeakNode::Obj(Rc::downgrade(o))) {
-        b.gc_buffered.set(true);
+    if let Some(s) = add_root(WeakNode::Obj(Rc::downgrade(o))) {
+        b.gc_buffered.set_slot(s);
     }
 }
 
@@ -399,37 +434,40 @@ fn buffer_array(a: &Rc<RefCell<PhpArray>>) {
     if b.gc_buffered.get() {
         return;
     }
-    if add_root(WeakNode::Arr(Rc::downgrade(a))) {
-        b.gc_buffered.set(true);
+    if let Some(s) = add_root(WeakNode::Arr(Rc::downgrade(a))) {
+        b.gc_buffered.set_slot(s);
     }
 }
 
-/// Append a new root (gc_possible_root). Returns false if the buffer is
-/// unavailable (re-entrant use or thread teardown).
-fn add_root(n: WeakNode) -> bool {
+/// Buffer a new root (gc_possible_root). Returns its slot, or None if the
+/// buffer is unavailable (re-entrant use or thread teardown).
+fn add_root(n: WeakNode) -> Option<u32> {
     POSSIBLE_ROOTS
         .try_with(|r| {
             let Ok(mut r) = r.try_borrow_mut() else {
-                return false;
+                return None;
             };
-            let live = LIVE_ROOTS.with(|c| c.get());
-            if live + 1 >= GC_THRESHOLD.with(|t| t.get())
+            r.flush_freed();
+            LIVE_ROOTS.with(|c| c.set(c.get() + 1));
+            if let Some(s) = r.unused.pop() {
+                r.slots[s as usize - 1] = Some(n);
+                return Some(s);
+            }
+            // (slot 0 is reserved: the next slot is len + 1)
+            if r.slots.len() + 1 >= GC_THRESHOLD.with(|t| t.get())
                 && !GC_PENDING.with(|p| p.get())
                 && !GC_SUPPRESSED.with(|p| p.get())
             {
                 // gc_possible_root_when_full: Zend collects right here, over
                 // the roots buffered so far, then adds this one.
                 GC_PENDING.with(|p| p.set(true));
-                GC_PENDING_ROOTS.with(|p| p.set(live));
+                GC_PENDING_ROOTS.with(|p| p.set(r.slots.len()));
             }
-            LIVE_ROOTS.with(|c| c.set(live + 1));
-            r.list.push(n);
-            if r.list.len() >= r.prune_at {
-                r.prune();
-            }
-            true
+            r.slots.push(Some(n));
+            Some(r.slots.len() as u32)
         })
-        .unwrap_or(false)
+        .ok()
+        .flatten()
 }
 
 /// True when the possible-root buffer reached the collection threshold.
@@ -438,13 +476,6 @@ pub fn gc_pending() -> bool {
     GC_PENDING.with(|p| p.get())
 }
 
-fn prune_roots() {
-    POSSIBLE_ROOTS.with(|r| {
-        if let Ok(mut r) = r.try_borrow_mut() {
-            r.prune();
-        }
-    });
-}
 
 /// The zend.enable_gc setting (an INI boolean; on when unset).
 pub fn ini_enabled(v: Option<&Value>) -> bool {
@@ -515,21 +546,32 @@ pub fn auto_collect<H: GcHost>(host: &mut H, enabled: bool) {
     // after Zend's synchronous collection: keep them out of this run.
     let overflow: Vec<WeakNode> = POSSIBLE_ROOTS.with(|r| {
         let mut r = r.borrow_mut();
-        let mut live = 0;
-        let mut cut = r.list.len();
-        for (i, e) in r.list.iter().enumerate() {
-            if e.alive() {
-                if live == n {
-                    cut = i;
-                    break;
-                }
-                live += 1;
-            }
-        }
-        r.list.split_off(cut)
+        r.flush_freed();
+        let cut = n.min(r.slots.len());
+        let over = r.slots.split_off(cut);
+        r.unused.retain(|&s| (s as usize) <= cut);
+        over.into_iter().flatten().collect()
     });
     let count = collect_cycles(host, Some(usize::MAX));
-    POSSIBLE_ROOTS.with(|r| r.borrow_mut().list.extend(overflow));
+    // (added after the collection, in the slots that follow its own roots)
+    POSSIBLE_ROOTS.with(|r| {
+        let mut r = r.borrow_mut();
+        for e in overflow {
+            let slot = match r.unused.pop() {
+                Some(s) => s,
+                None => r.slots.len() as u32 + 1,
+            };
+            if e.move_to(slot) {
+                if (slot as usize) > r.slots.len() {
+                    r.slots.push(Some(e));
+                } else {
+                    r.slots[slot as usize - 1] = Some(e);
+                }
+            } else if (slot as usize) <= r.slots.len() {
+                r.unused.push(slot);
+            }
+        }
+    });
     adjust_threshold(count);
 }
 
@@ -956,6 +998,105 @@ impl<'a> Graph<'a> {
 struct Analysis<'a> {
     graph: Graph<'a>,
     garbage: Vec<bool>,
+    /// The node of each root buffer slot (None: a free slot).
+    root_slots: Vec<Option<usize>>,
+}
+
+/// gc_compact(): move the entries at the end of the buffer into the free
+/// slots before them (`pos[i]` is slot i + 1).
+fn compact_slots(pos: &mut [Option<usize>]) {
+    let num = pos.iter().filter(|p| p.is_some()).count();
+    if num == pos.len() || num == 0 {
+        return;
+    }
+    // (Zend's `end` is slot num_roots)
+    let end = num - 1;
+    let mut free = 0usize;
+    let mut scan = pos.len() - 1;
+    while free < scan {
+        while free < pos.len() && pos[free].is_some() {
+            free += 1;
+        }
+        while scan > 0 && pos[scan].is_none() {
+            scan -= 1;
+        }
+        if scan > free {
+            pos[free] = pos[scan].take();
+            free += 1;
+            scan -= 1;
+            if scan <= end {
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+/// The order the garbage of a run ends up in, in Zend's root buffer (the
+/// order destructors are called in): the garbage roots in slot order, once
+/// the live roots left their slots and gc_compact() moved the last entries
+/// into the free slots; then the other garbage, as gc_collect_white() adds
+/// it walking from each root; then (goro only) garbage found from no root.
+fn buffer_order(an: &Analysis) -> Vec<usize> {
+    let g = &an.graph;
+    let len = g.nodes.len();
+    let mut pos: Vec<Option<usize>> = an
+        .root_slots
+        .iter()
+        .map(|o| o.filter(|&i| an.garbage[i]))
+        .collect();
+    compact_slots(&mut pos);
+    let roots: Vec<usize> = pos.into_iter().flatten().collect();
+    let mut in_buf = vec![false; len];
+    let mut black = vec![false; len];
+    let mut out: Vec<usize> = Vec::with_capacity(len);
+    for &r in &roots {
+        if !in_buf[r] {
+            in_buf[r] = true;
+            out.push(r);
+        }
+    }
+    let counted = |i: usize| !matches!(g.nodes[i], Node::Ref(_));
+    let mut stack: Vec<usize> = Vec::new();
+    for &r in &roots {
+        if black[r] {
+            continue;
+        }
+        black[r] = true;
+        let mut cur = r;
+        loop {
+            if !in_buf[cur] && counted(cur) {
+                in_buf[cur] = true;
+                out.push(cur);
+            }
+            // The first white child is visited next, the others pushed.
+            let mut first = None;
+            for c in g.children[cur].iter().copied().chain(g.eph_values(cur)) {
+                if an.garbage[c] && !black[c] {
+                    black[c] = true;
+                    if first.is_none() {
+                        first = Some(c);
+                    } else {
+                        stack.push(c);
+                    }
+                }
+            }
+            match first.or_else(|| stack.pop()) {
+                Some(n) => cur = n,
+                None => break,
+            }
+        }
+    }
+    for i in 0..len {
+        if an.garbage[i] && !in_buf[i] && counted(i) {
+            out.push(i);
+        }
+    }
+    if std::env::var_os("GORO_GC_DEBUG").is_some() {
+        eprintln!("gc root slots {:?} -> order {:?}", an.root_slots, out);
+    }
+    out
 }
 
 #[allow(clippy::needless_range_loop)] // index loop mirrors the reference algorithm
@@ -1003,12 +1144,17 @@ fn analyze<'a>(
             g.add(Node::Gen(gr));
         }
     }
-    // Take every root out of the buffer.
-    let taken: Vec<WeakNode> = POSSIBLE_ROOTS.with(|r| std::mem::take(&mut r.borrow_mut().list));
+    // Take every root out of the buffer, in slot order (holes kept: they
+    // matter to gc_compact()).
+    let taken: Vec<Option<WeakNode>> = POSSIBLE_ROOTS.with(|r| {
+        let mut r = r.borrow_mut();
+        r.flush_freed();
+        r.unused.clear();
+        std::mem::take(&mut r.slots)
+    });
+    let mut root_slots: Vec<Option<usize>> = Vec::with_capacity(taken.len());
     for e in taken {
-        if let Some(n) = e.unbuffer() {
-            g.add(n);
-        }
+        root_slots.push(e.and_then(|e| e.unbuffer()).map(|n| g.add(n)));
     }
     let mut i = 0;
     while i < g.nodes.len() {
@@ -1075,7 +1221,11 @@ fn analyze<'a>(
         }
     }
     let garbage = live.iter().map(|l| !l).collect();
-    Analysis { graph: g, garbage }
+    Analysis {
+        graph: g,
+        garbage,
+        root_slots,
+    }
 }
 
 /// The locals (CVs and temporaries) of a running user function, registered
@@ -1281,6 +1431,10 @@ struct DtorCtx {
 thread_local! {
     static DTOR_CTX: RefCell<Option<DtorCtx>> = const { RefCell::new(None) };
     static DTOR_GEN: Cell<u64> = const { Cell::new(0) };
+    /// Bumped when a destructor suspends the destructor fiber running it:
+    /// that fiber is no longer GC_G(dtor_fiber), and stops calling
+    /// destructors once that one returns.
+    static DTOR_FIBER_GEN: Cell<u64> = const { Cell::new(0) };
 }
 
 /// Destructor-phase work is pending.
@@ -1318,8 +1472,10 @@ pub fn dtor_step<H: GcHost + ?Sized>(host: &mut H) -> bool {
             .unwrap_or(0)
     });
     let orphan = Rc::strong_count(&o) <= 1 + held;
+    let fiber_gen = DTOR_FIBER_GEN.with(|g| g.get());
     host.gc_call_destructor(&o);
-    let current = DTOR_CTX.with(|c| c.borrow().as_ref().is_some_and(|c| c.phase == phase));
+    let current = DTOR_CTX.with(|c| c.borrow().as_ref().is_some_and(|c| c.phase == phase))
+        && DTOR_FIBER_GEN.with(|g| g.get()) == fiber_gen;
     if !current {
         // Resumed after its collection finished (the destructor had
         // suspended its fiber): just a possible root now.
@@ -1465,13 +1621,11 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         // (A suspended generator's dtor_obj, zend_generator_dtor_storage,
         // runs its pending finally blocks: it is one too.)
         let mut dtor_idx: Vec<usize> = Vec::new();
-        for idx in 0..len {
-            if an.garbage[idx] {
-                match &an.graph.nodes[idx] {
-                    Node::Obj(o) if host.gc_needs_destructor(o) => dtor_idx.push(idx),
-                    Node::Gen(g) if generator_needs_close(g) => dtor_idx.push(idx),
-                    _ => {}
-                }
+        for idx in buffer_order(&an) {
+            match &an.graph.nodes[idx] {
+                Node::Obj(o) if host.gc_needs_destructor(o) => dtor_idx.push(idx),
+                Node::Gen(g) if generator_needs_close(g) => dtor_idx.push(idx),
+                _ => {}
             }
         }
         let mut free = an.garbage.clone();
@@ -1638,8 +1792,6 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         }
         did_rerun = true;
     }
-    // Freeing pushes the dying children as roots; drop the dead entries.
-    prune_roots();
     GC_PENDING.with(|p| p.set(false));
     GC_SUPPRESSED.with(|p| p.set(false));
     GC_COLLECTED.with(|c| c.set(c.get() + total));
@@ -1748,6 +1900,10 @@ impl GcHost for crate::vm::Vm {
             // released (and so destroyed) right away.
             let suspended = fiber.borrow().get_property(b"__fiber_state").to_long()
                 == crate::fiber::FiberState::Suspended as i64;
+            if suspended {
+                // (the remaining destructors run in a new fiber)
+                DTOR_FIBER_GEN.with(|g| g.set(g.get() + 1));
+            }
             // (the VM's lists of destructible objects do not own it)
             let listed = self
                 .destructible_objects
