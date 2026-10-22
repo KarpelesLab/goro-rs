@@ -1321,6 +1321,8 @@ pub struct Vm {
     /// The exception a `return` in a finally block discarded (see
     /// OpCode::Return), for the return type check.
     pub(crate) return_discarded_exc: Option<Value>,
+    /// exit() was called by an autoloader (see try_autoload_class).
+    pub(crate) exit_in_autoload: bool,
     /// INI on-modify handlers registered by extensions (key -> handler).
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
@@ -2553,6 +2555,7 @@ impl Vm {
             closure_invoke_call: false,
             pending_call_via_invoke: false,
             return_discarded_exc: None,
+            exit_in_autoload: false,
             ini_set_hooks: HashMap::new(),
             treat_data_hook: None,
             phpinfo_hooks: Vec::new(),
@@ -3923,6 +3926,17 @@ impl Vm {
 
     /// Try to autoload a class by calling registered autoload functions
     pub fn try_autoload_class(&mut self, class_name: &[u8]) -> bool {
+        let exiting = self.exit_requested;
+        let r = self.try_autoload_class_inner(class_name);
+        // exit() in the autoloader: the class lookup that ran it is not
+        // finished (php-src unwinds at once).
+        if self.exit_requested && !exiting {
+            self.exit_in_autoload = true;
+        }
+        r
+    }
+
+    fn try_autoload_class_inner(&mut self, class_name: &[u8]) -> bool {
         if !self.anon_pending.is_empty() {
             if let Some(found) = self.bind_pending_anon_class(class_name) {
                 return found;
@@ -19115,7 +19129,7 @@ impl Vm {
             // exit() unwinds every frame (an "unwind exit"): an error raised
             // after it by the code that called exit (an autoloader run by a
             // class lookup) is not reported.
-            if result.is_err() && self.exit_unwinding_error() {
+            if result.is_err() && self.exit_in_autoload && self.exit_unwinding_error() {
                 self.current_exception = None;
                 return Ok(Value::Null);
             }
