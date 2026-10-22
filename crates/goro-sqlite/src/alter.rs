@@ -34,7 +34,8 @@ pub fn sqlite3RenameTokenMap(db: &mut Sqlite3, pPtr: &[u8], pToken: &Token) -> O
 }
 
 /// C: `void sqlite3RenameTokenRemap(Parse *pParse, const void *pTo, const void *pFrom)`
-pub fn sqlite3RenameTokenRemap(db: &mut Sqlite3, pTo: &[u8], pFrom: &[u8]) {
+/// Rust: the C `void*` keys are `RenameKey`s; `pTo==None` is C NULL.
+pub fn sqlite3RenameTokenRemap(db: &mut Sqlite3, pTo: Option<RenameKey>, pFrom: RenameKey) {
     todo!("sqlite3RenameTokenRemap")
 }
 
