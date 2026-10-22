@@ -28723,6 +28723,13 @@ impl Vm {
                         }
                         let builtin_result = if own_frame {
                             self.call_builtin_observed(func, &func_name_lower, &call.args)
+                        } else if is_direct_ucf {
+                            // (the callee's frame holds the callable and the
+                            // arguments: a fiber suspended in it owns them)
+                            let mark = self.gc_pin(&call.args);
+                            let r = func(self, &call.args);
+                            self.gc_unpin(mark);
+                            r
                         } else {
                             func(self, &call.args)
                         };

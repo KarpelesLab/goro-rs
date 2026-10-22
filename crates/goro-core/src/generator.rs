@@ -482,6 +482,10 @@ impl PhpGenerator {
             if fs.owner && !fs.tab.global {
                 f(&Value::Array(fs.tab.arr.clone()));
             }
+            // (the table cells its CVs are bound to)
+            for c in fs.bind.cells.iter().flatten() {
+                f(&Value::Reference(c.clone()));
+            }
         }
     }
 
