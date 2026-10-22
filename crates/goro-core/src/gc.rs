@@ -597,8 +597,21 @@ thread_local! {
     static WEAK_DIRTY: Cell<bool> = const { Cell::new(false) };
     /// Object ids of WeakMaps that died.
     static DEAD_WEAKMAPS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
-    /// Handles of dead weak targets, recycled once their entries are gone.
-    static DEFERRED_IDS: RefCell<Vec<u64>> = const { RefCell::new(Vec::new()) };
+    /// Handles of dead weak targets, recycled once their entries are gone,
+    /// with the destructor depth they died at.
+    static DEFERRED_IDS: RefCell<Vec<(u64, u32)>> = const { RefCell::new(Vec::new()) };
+    /// Number of destructors running (see flush_weak_ids).
+    static DTOR_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// A destructor starts running (its own release points must not recycle
+/// the handle of the weak target whose release called it).
+pub fn dtor_enter() {
+    DTOR_DEPTH.with(|d| d.set(d.get() + 1));
+}
+
+pub fn dtor_leave() {
+    DTOR_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
 }
 
 /// Called from PhpObject's Drop for a WeakMap key (`is_map` false) or a
@@ -606,7 +619,8 @@ thread_local! {
 pub(crate) fn weak_target_freed(id: u64, is_map: bool) {
     let _ = WEAK_DIRTY.try_with(|d| d.set(true));
     if id != 0 {
-        let _ = DEFERRED_IDS.try_with(|m| m.borrow_mut().push(id));
+        let depth = DTOR_DEPTH.try_with(|d| d.get()).unwrap_or(0);
+        let _ = DEFERRED_IDS.try_with(|m| m.borrow_mut().push((id, depth)));
     }
     if is_map {
         let _ = DEAD_WEAKMAPS.try_with(|m| m.borrow_mut().push(id));
@@ -639,7 +653,18 @@ pub fn purge_weakmaps(vm: &mut crate::vm::Vm) {
             });
             !entries.is_empty()
         });
+        // Targets whose last reference was an entry released here are freed
+        // inside the release of the dead key or map, so their handles go
+        // back to the free list before its own (zend_objects_store_del).
+        let parents = DEFERRED_IDS.with(|m| m.borrow().len());
         drop(dropped);
+        DEFERRED_IDS.with(|m| {
+            let mut m = m.borrow_mut();
+            if m.len() > parents {
+                let children: Vec<(u64, u32)> = m.drain(parents..).collect();
+                m.splice(0..0, children);
+            }
+        });
     }
 }
 
@@ -650,7 +675,21 @@ pub fn flush_weak_ids() {
     if DEFERRED_IDS.with(|m| m.borrow().is_empty()) || weak_dirty() {
         return;
     }
-    let ids = DEFERRED_IDS.with(|m| std::mem::take(&mut *m.borrow_mut()));
+    // (not from inside the destructors a target's release called)
+    let depth = DTOR_DEPTH.with(|d| d.get());
+    let ids: Vec<u64> = DEFERRED_IDS.with(|m| {
+        let mut m = m.borrow_mut();
+        let mut out = Vec::new();
+        m.retain(|&(id, d)| {
+            if d >= depth {
+                out.push(id);
+                false
+            } else {
+                true
+            }
+        });
+        out
+    });
     crate::object::FREED_OBJECT_IDS.with(|f| f.borrow_mut().extend(ids));
 }
 

@@ -7933,7 +7933,9 @@ impl Vm {
                         decl.to_ascii_lowercase()
                     });
                     let fatal_before = self.fatal_emitted;
+                    crate::gc::dtor_enter();
                     let r = self.execute_fn(&destruct_op, fn_cvs);
+                    crate::gc::dtor_leave();
                     // A fatal error (displayed already) in the destructor ends
                     // the script: the releasing code does not continue
                     // (zend_bailout()).
