@@ -1451,6 +1451,25 @@ pub fn parse_str_into(vm: &mut Vm, data: &[u8], arr: &Rc<RefCell<PhpArray>>) {
     }
 }
 
+/// SAPI_POST_BLOCK_SIZE
+const SAPI_POST_BLOCK_SIZE: usize = 0x4000;
+
+/// Whether php_open_temporary_fd() can create a file in `dir`.
+fn temp_file_possible(dir: &str) -> bool {
+    let p = std::path::Path::new(dir).join(format!(".goro-post-{}", std::process::id()));
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&p)
+    {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&p);
+            true
+        }
+        Err(e) => e.kind() == std::io::ErrorKind::AlreadyExists,
+    }
+}
+
 pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     goro_core::sapi_headers::reset();
     REQUEST.with(|r| *r.borrow_mut() = Some(req.clone()));
@@ -1492,6 +1511,7 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     let cookie = new_arr();
     let files = new_arr();
     let mut input_body: Vec<u8> = Vec::new();
+    let body_discarded = std::cell::Cell::new(false);
 
     {
         let mut ctx = Ctx {
@@ -1526,6 +1546,28 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
                             ),
                         );
                         return false;
+                    }
+                    // sapi_read_standard_form_data(): the body is kept in a
+                    // php://temp stream of SAPI_POST_BLOCK_SIZE bytes, which
+                    // spills into a temporary file.
+                    if req.body.len() > SAPI_POST_BLOCK_SIZE {
+                        let dir = ini("upload_tmp_dir")
+                            .filter(|d| !d.is_empty())
+                            .unwrap_or_else(|| crate::misc::php_get_temporary_directory(ctx.vm));
+                        if !temp_file_possible(&dir) {
+                            emit_startup(
+                                ctx.vm,
+                                "Warning",
+                                "PHP Request Startup: Unable to create temporary file, Check permissions in temporary files directory.",
+                            );
+                            emit_startup(
+                                ctx.vm,
+                                "Warning",
+                                "PHP Request Startup: POST data can't be buffered; all data discarded",
+                            );
+                            body_discarded.set(true);
+                            return false;
+                        }
                     }
                     true
                 };
@@ -1607,7 +1649,7 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
                 _ => {}
             }
         }
-        if !consumed_all && input_body.is_empty() {
+        if !consumed_all && input_body.is_empty() && !body_discarded.get() {
             input_body = req.body.clone();
         }
         // $_COOKIE

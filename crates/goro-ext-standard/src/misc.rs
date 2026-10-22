@@ -5049,6 +5049,13 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .constants
         .get(&key)
         .map(|v| Value::String(v.to_php_string()));
+    // OnUpdateDefaultCharset / OnUpdateDefaultMimeTye: no header injection
+    if key == b"default_charset" || key == b"default_mimetype" {
+        let v = value.to_php_string();
+        if v.as_bytes().iter().any(|&c| matches!(c, 0 | b'\r' | b'\n')) {
+            return Ok(Value::False);
+        }
+    }
     ini_remember(vm, &key);
     // Extension-registered INI validators (e.g. date.timezone)
     if let Some(validate) = vm.ini_validators.get(&key).copied() {
