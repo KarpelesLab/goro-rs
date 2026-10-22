@@ -768,6 +768,8 @@ impl PhpGenerator {
         }
 
         self.is_running = true;
+        // The running frame's values (a fiber suspended inside it owns them).
+        vm.gc_frames.push(crate::gc::GcFrame::for_generator(self));
         let fname = vm.generator_function_name_of(self);
         vm.running_generators
             .push((self as *const PhpGenerator as usize, fname, self.object_id));
@@ -788,6 +790,7 @@ impl PhpGenerator {
             vm.cv_frames.pop();
         }
         self.is_running = false;
+        vm.gc_frames.pop();
         vm.running_generators.pop();
 
         // Pop the call_stack entry (with the frames of the calls an
@@ -884,7 +887,16 @@ impl PhpGenerator {
     /// root of the tree; when it finishes, continue its child with the
     /// return value (or the exception) until a value is yielded or `self`
     /// itself finishes.
-    fn drive(&mut self, vm: &mut Vm, mut kick: Kick) -> Result<bool, VmError> {
+    fn drive(&mut self, vm: &mut Vm, kick: Kick) -> Result<bool, VmError> {
+        // While the delegate runs, a fiber suspended inside it owns what
+        // this generator holds too.
+        vm.gc_frames.push(crate::gc::GcFrame::for_generator(self));
+        let r = self.drive_inner(vm, kick);
+        vm.gc_frames.pop();
+        r
+    }
+
+    fn drive_inner(&mut self, vm: &mut Vm, mut kick: Kick) -> Result<bool, VmError> {
         let self_ptr = self as *const PhpGenerator;
         // Path from our delegate down to the root.
         let mut path: Vec<GenRc> = Vec::new();
@@ -2321,6 +2333,8 @@ impl PhpGenerator {
         }
 
         self.is_running = true;
+        // The running frame's values (a fiber suspended inside it owns them).
+        vm.gc_frames.push(crate::gc::GcFrame::for_generator(self));
         let fname = vm.generator_function_name_of(self);
         vm.running_generators
             .push((self as *const PhpGenerator as usize, fname, self.object_id));
@@ -2341,6 +2355,7 @@ impl PhpGenerator {
             vm.cv_frames.pop();
         }
         self.is_running = false;
+        vm.gc_frames.pop();
         vm.running_generators.pop();
 
         vm.call_stack

@@ -19227,10 +19227,10 @@ impl Vm {
         let mut fin = Vec::new();
         let saved_file = self.enter_op_array_file(op_array);
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
-        self.gc_frames
-            .push(crate::gc::GcFrame::new(&cvs, &tmps, has_this));
         // The frame's symbol table, if it gets one.
         let mut sym = None;
+        self.gc_frames
+            .push(crate::gc::GcFrame::new(&cvs, &tmps, &sym, has_this));
         // (boxed, from the states of finished frames: kept off the native
         // stack, and empty)
         let mut fe = match self.foreach_pool.pop() {

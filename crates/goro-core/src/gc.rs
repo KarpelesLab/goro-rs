@@ -910,7 +910,9 @@ impl<'a> Graph<'a> {
                     });
                     true
                 }
-                _ => false,
+                // Running inside a suspended fiber: the fiber holds its
+                // values (see GcFrame::for_generator).
+                _ => self.view.suspended_generator(g.as_ptr() as usize),
             },
         };
         drop(node);
@@ -1082,17 +1084,40 @@ fn analyze<'a>(
 pub struct GcFrame {
     cvs: *const Vec<Value>,
     tmps: *const Vec<Value>,
+    /// The frame's symbol table (its dynamic variables), once it has one.
+    sym: *const Option<crate::symtab::FrameSymtab>,
+    /// The running generator whose frame this is (null for a call frame).
+    generator: *const PhpGenerator,
     /// CV 0 is `$this`
     has_this: bool,
 }
 
 impl GcFrame {
-    pub(crate) fn new(cvs: &Vec<Value>, tmps: &Vec<Value>, has_this: bool) -> Self {
+    pub(crate) fn new(
+        cvs: &Vec<Value>,
+        tmps: &Vec<Value>,
+        sym: &Option<crate::symtab::FrameSymtab>,
+        has_this: bool,
+    ) -> Self {
         GcFrame {
             cvs,
             tmps,
+            sym,
+            generator: std::ptr::null(),
             has_this,
         }
+    }
+    /// The frame of running generator `g` (a fiber suspended inside it
+    /// owns what the generator holds: zend_generator_frame_gc()).
+    pub(crate) fn for_generator(g: &PhpGenerator) -> Self {
+        let has_this = g.op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+        let mut fr = GcFrame::new(&g.cvs, &g.tmps, &g.symtab, has_this);
+        fr.generator = g;
+        fr
+    }
+    /// The running generator of this frame (as `RefCell::as_ptr`), or 0.
+    pub(crate) fn generator_ptr(&self) -> usize {
+        self.generator as usize
     }
     /// `$this` of the frame (zend_get_this_object), if it has one.
     ///
@@ -1118,9 +1143,22 @@ impl GcFrame {
     /// resumed or destroyed (the frame is unregistered before it returns).
     pub(crate) unsafe fn for_each(&self, f: &mut dyn FnMut(&Value)) {
         // SAFETY: see above.
-        let (cvs, tmps) = unsafe { (&*self.cvs, &*self.tmps) };
-        for v in cvs.iter().chain(tmps.iter()) {
-            f(v);
+        let (cvs, tmps, sym) = unsafe { (&*self.cvs, &*self.tmps, &*self.sym) };
+        if self.generator.is_null() {
+            for v in cvs.iter().chain(tmps.iter()) {
+                f(v);
+            }
+        } else {
+            // SAFETY: the generator is running in the suspended fiber: its
+            // state is idle until the fiber resumes.
+            unsafe { (*self.generator).for_each_gc_child(f) };
+        }
+        // A local symbol table holds the dynamic variables (the global
+        // one is not the frame's).
+        if let Some(fs) = sym {
+            if fs.owner && !fs.tab.global {
+                f(&Value::Array(fs.tab.arr.clone()));
+            }
         }
     }
 }
@@ -1222,6 +1260,11 @@ pub trait GcView {
     /// when enumerated, `Some(false)` if they cannot be (opaque), `None` if
     /// it has no suspended stack.
     fn fiber_scan(&self, oid: u64, f: &mut dyn FnMut(&Value)) -> Option<bool>;
+    /// Is the running generator `ptr` (RefCell::as_ptr) running inside a
+    /// suspended fiber (which then owns its values)?
+    fn suspended_generator(&self, _ptr: usize) -> bool {
+        false
+    }
 }
 
 impl<H: GcHost> GcView for H {
@@ -1230,6 +1273,9 @@ impl<H: GcHost> GcView for H {
     }
     fn fiber_scan(&self, oid: u64, f: &mut dyn FnMut(&Value)) -> Option<bool> {
         self.gc_fiber_scan(oid, f)
+    }
+    fn suspended_generator(&self, ptr: usize) -> bool {
+        self.gc_suspended_generator(ptr)
     }
 }
 
@@ -1265,6 +1311,10 @@ pub trait GcHost {
     /// See GcView::fiber_scan.
     fn gc_fiber_scan(&self, _oid: u64, _f: &mut dyn FnMut(&Value)) -> Option<bool> {
         None
+    }
+    /// See GcView::suspended_generator.
+    fn gc_suspended_generator(&self, _ptr: usize) -> bool {
+        false
     }
     /// WeakMap entries as (map object id, key object ptr, value clone).
     fn gc_ephemerons(&self) -> Vec<(u64, usize, Value)> {
@@ -1686,6 +1736,16 @@ impl GcHost for crate::vm::Vm {
             });
         }
         drop(dropped);
+    }
+    fn gc_suspended_generator(&self, ptr: usize) -> bool {
+        self.fiber_coroutines.values().any(|fiber| {
+            fiber.started()
+                && !fiber.done()
+                && fiber
+                    .saved_gc_frames
+                    .iter()
+                    .any(|fr| fr.generator_ptr() == ptr)
+        })
     }
     fn gc_fiber_scan(&self, oid: u64, f: &mut dyn FnMut(&Value)) -> Option<bool> {
         let fiber = self.fiber_coroutines.get(&oid)?;
