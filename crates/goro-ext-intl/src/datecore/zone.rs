@@ -398,11 +398,21 @@ fn rules_from_list(raw: Vec<(i64, i32, bool)>, final_save: Option<i32>) -> Rules
                 // being standard time.
                 let neg = sp.is_some_and(|v| v < 0) || sn.is_some_and(|v| v < 0);
                 negative[i] = neg;
-                periods.push(Period {
-                    start,
-                    raw: offms,
-                    dst: 0,
-                });
+                if !neg && (sp == Some(0) || sn == Some(0)) {
+                    // DST at the offset of the neighbouring standard time
+                    // (Argentina 1999): a standard offset one hour lower
+                    periods.push(Period {
+                        start,
+                        raw: offms - 3_600_000,
+                        dst: 3_600_000,
+                    });
+                } else {
+                    periods.push(Period {
+                        start,
+                        raw: offms,
+                        dst: 0,
+                    });
+                }
             }
         }
     }
@@ -414,8 +424,19 @@ fn rules_from_list(raw: Vec<(i64, i32, bool)>, final_save: Option<i32>) -> Rules
         let before = (0..j).rev().find(|&k| ded[k].2);
         let after = (j + 1..n).find(|&k| ded[k].2);
         if let (Some(x), Some(y)) = (before, after) {
-            if negative[x] && negative[y] {
-                let base = periods[x].raw.max(periods[y].raw);
+            // (or a DST period of the same total offset just before it:
+            // Morocco's switch to negative DST in 2018)
+            // (not Ireland's 1968-1971 standard time)
+            let continued = x + 1 == j
+                && !negative[x]
+                && ded[x].1 == ded[j].1
+                && ded[j + 1].0.saturating_sub(ded[j].0) < 366 * 86_400;
+            if (negative[x] || continued) && negative[y] {
+                let base = if continued {
+                    periods[y].raw
+                } else {
+                    periods[x].raw.max(periods[y].raw)
+                };
                 let t = ded[j].1 * 1000;
                 if t > base {
                     periods[j].raw = base;

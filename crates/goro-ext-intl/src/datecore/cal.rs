@@ -754,7 +754,8 @@ impl Calendar {
                 m += self.internal_get(HOUR_OF_DAY) as f64;
             } else {
                 m += self.internal_get(HOUR) as f64;
-                m += 12.0 * self.internal_get(AM_PM) as f64;
+                // even values are AM, odd ones PM (ICU-22296)
+                m += 12.0 * self.internal_get(AM_PM).rem_euclid(2) as f64;
             }
         }
         m *= 60.0;
@@ -979,7 +980,7 @@ impl Calendar {
         }
         let ext_newer = self.newer_field(EXTENDED_YEAR, YEAR) == EXTENDED_YEAR;
         match self.cal_type {
-            CalType::Japanese => {
+            CalType::Japanese | CalType::Roc | CalType::Chinese | CalType::Dangi => {
                 if ext_newer && self.newer_field(EXTENDED_YEAR, ERA) == EXTENDED_YEAR {
                     Ok(self.internal_get_def(EXTENDED_YEAR, 1970))
                 } else {
@@ -1005,24 +1006,33 @@ impl Calendar {
             }
             CalType::Japanese => {
                 let era = self.internal_get_def(ERA, current_japanese_era());
+                if !(0..=current_japanese_era()).contains(&era) {
+                    return Err(());
+                }
                 Ok(self.internal_get_def(YEAR, 1) + japanese_era_start_year(era) - 1)
             }
             CalType::Buddhist => Ok(self.internal_get_def(YEAR, 1970 + 543) - 543),
             CalType::Roc => {
                 let era = self.internal_get_def(ERA, 1);
                 let y = self.internal_get_def(YEAR, 1);
-                Ok(if era == 1 { y + 1911 } else { 1912 - y })
+                match era {
+                    1 => Ok(y + 1911),
+                    0 => Ok(1912 - y),
+                    _ => Err(()),
+                }
             }
             CalType::EthiopicAmeteAlem => Ok(self.internal_get_def(YEAR, 1 + 5500) - 5500),
             CalType::Coptic | CalType::Ethiopic => {
                 let era = self.internal_get_def(ERA, 1);
                 let y = self.internal_get_def(YEAR, 1);
-                if self.cal_type == CalType::Ethiopic && era == 0 {
-                    Ok(y - 5500)
-                } else if self.cal_type == CalType::Coptic && era == 0 {
-                    Ok(1 - y)
+                if self.cal_type == CalType::Ethiopic {
+                    Ok(if era == 1 { y } else { y - 5500 })
                 } else {
-                    Ok(y)
+                    match era {
+                        0 => Ok(1 - y),
+                        1 => Ok(y),
+                        _ => Err(()),
+                    }
                 }
             }
             CalType::Chinese | CalType::Dangi => {
