@@ -5951,15 +5951,22 @@ pub fn sqlite3PagerClearCache(pPager: &mut crate::pager::Pager) {
 ///
 /// Parameter eMode is one of SQLITE_CHECKPOINT_PASSIVE, FULL, RESTART
 /// or TRUNCATE.
+///
+/// Signature change: the pager is passed as its `PagerP`, as it must not be
+/// borrowed while the sqlite3_exec() below runs.
 pub fn sqlite3PagerCheckpoint(
     db: &mut Sqlite3,
-    pPager: &mut crate::pager::Pager,
+    pPagerP: &crate::pager::PagerP,
     eMode: i32,
     pnLog: &mut i32,
     pnCkpt: &mut i32,
 ) -> i32 {
     let mut rc = SQLITE_OK;
-    if pPager.pWal.is_none() && pPager.journalMode as i32 == PAGER_JOURNALMODE_WAL {
+    let bExec = {
+        let p = pPagerP.borrow();
+        p.pWal.is_none() && p.journalMode as i32 == PAGER_JOURNALMODE_WAL
+    };
+    if bExec {
         // This only happens when a database file is zero bytes in size
         // opened and then "PRAGMA journal_mode=WAL" is run and then
         // sqlite3_wal_checkpoint() is called.  In that case, the
@@ -5967,6 +5974,8 @@ pub fn sqlite3PagerCheckpoint(
         let mut zErr = None;
         crate::legacy::sqlite3_exec(db, Some(b"PRAGMA table_list"), None, &mut zErr);
     }
+    let mut pg = pPagerP.borrow_mut();
+    let pPager: &mut Pager = &mut pg;
     if pPager.pWal.is_some() {
         let xBusy = if eMode <= SQLITE_CHECKPOINT_PASSIVE {
             None
