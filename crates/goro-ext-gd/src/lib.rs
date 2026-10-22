@@ -393,10 +393,66 @@ pub fn register(vm: &mut Vm) {
     vm.constants
         .entry(b"gd.jpeg_ignore_warning".to_vec())
         .or_insert_with(|| Value::String(PhpString::from_bytes(b"1")));
+    vm.phpinfo_hooks.push(minfo);
     funcs::register(vm);
     io::register(vm);
     xform::register(vm);
     text::register(vm);
+}
+
+/// The FreeType version reported by phpinfo() (FREETYPE_MAJOR.MINOR.PATCH)
+const FREETYPE_VERSION: &str = "2.14.3";
+
+/// PHP_MINFO_FUNCTION(gd)
+fn minfo(vm: &mut Vm) -> String {
+    let mut s = String::from("\ngd\n\nGD Support => enabled\n");
+    s.push_str(&format!("GD Version => {}\n", PHP_GD_VERSION_STRING));
+    if HAVE_FREETYPE {
+        s.push_str("FreeType Support => enabled\nFreeType Linkage => with freetype\n");
+        s.push_str(&format!("FreeType Version => {}\n", FREETYPE_VERSION));
+    }
+    s.push_str("GIF Read Support => enabled\nGIF Create Support => enabled\n");
+    if HAVE_JPG {
+        s.push_str(&format!(
+            "JPEG Support => enabled\nlibJPEG Version => {}\n",
+            goro_gd::jpeg::version_string()
+        ));
+    }
+    s.push_str(&format!(
+        "PNG Support => enabled\nlibPNG Version => {}\n",
+        goro_gd::png::LIBPNG_VERSION
+    ));
+    s.push_str("WBMP Support => enabled\n");
+    if HAVE_XPM {
+        s.push_str("XPM Support => enabled\nlibXpm Version => 30411\n");
+    }
+    s.push_str("XBM Support => enabled\n");
+    if HAVE_WEBP {
+        s.push_str("WebP Support => enabled\n");
+    }
+    s.push_str("BMP Support => enabled\n");
+    if HAVE_AVIF {
+        s.push_str("AVIF Support => enabled\n");
+    }
+    s.push_str("TGA Read Support => enabled\n");
+    // DISPLAY_INI_ENTRIES() with zend_ini_boolean_displayer_cb
+    let v = vm
+        .constants
+        .get(&b"gd.jpeg_ignore_warning"[..])
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
+    let on = matches!(
+        v.to_ascii_lowercase().as_slice(),
+        b"1" | b"on" | b"yes" | b"true"
+    ) || std::str::from_utf8(&v)
+        .ok()
+        .and_then(|t| t.trim().parse::<i64>().ok())
+        .is_some_and(|n| n != 0);
+    let d = if on { "On" } else { "Off" };
+    s.push_str(&format!(
+        "\nDirective => Local Value => Master Value\ngd.jpeg_ignore_warning => {d} => {d}\n"
+    ));
+    s
 }
 
 /// Register a function with its stub's parameter names.
