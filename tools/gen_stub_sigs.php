@@ -44,6 +44,7 @@ $dirs = [
     'ext/bcmath' => 'bcmath',
     'ext/filter' => 'filter',
     'ext/iconv' => 'iconv',
+    'ext/pcntl' => 'pcntl',
     'ext/posix' => 'posix',
     'ext/calendar' => 'calendar',
     // Test-only extension; its symbols only exist while it is loaded.
@@ -539,7 +540,7 @@ ksort($classes);
 // Extensions declaring their classes themselves (with a ClassEntry, from PHP
 // source) only use their stubs for arginfo: they are kept out of CLASSES,
 // which describes the classes the VM implements natively.
-const SELF_DECLARED_CLASS_EXTS = ['zend_test', 'bcmath', 'filter'];
+const SELF_DECLARED_CLASS_EXTS = ['zend_test', 'bcmath', 'filter', 'pcntl'];
 function classes_rs(string $name, array $list, bool $methodExt): void {
     echo "pub static $name: &[StubClass] = &[\n";
     foreach ($list as $c) {

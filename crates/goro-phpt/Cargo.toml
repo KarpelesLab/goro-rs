@@ -34,6 +34,7 @@ goro-ext-zend-test = { path = "../goro-ext-zend-test" }
 goro-ext-bcmath = { path = "../goro-ext-bcmath" }
 goro-ext-filter = { path = "../goro-ext-filter" }
 goro-ext-iconv = { path = "../goro-ext-iconv" }
+goro-ext-pcntl = { path = "../goro-ext-pcntl" }
 goro-ext-posix = { path = "../goro-ext-posix" }
 goro-ext-calendar = { path = "../goro-ext-calendar" }
 libc = "0.2"
