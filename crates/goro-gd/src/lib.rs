@@ -18,19 +18,28 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+pub mod bmp;
 pub mod color_match;
 pub mod crop;
 pub mod filter;
 pub mod fonts;
 pub mod gd;
+pub mod gd2;
+pub mod gd_gd;
+pub mod gif_in;
+pub mod gif_out;
 pub mod interpolation;
 pub mod io;
 pub mod matrix;
 pub mod png;
 pub mod rotate;
 pub mod tables;
+pub mod tga;
 pub mod topal;
 pub mod transform;
+pub mod wbmp;
+pub mod xbm;
+pub mod xpm;
 
 pub use io::{In, Out};
 
