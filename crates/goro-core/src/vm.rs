@@ -54161,6 +54161,30 @@ impl Vm {
                             });
                             return Ok(Flow::Continue);
                         }
+                        // Throwable's own methods run here (observer).
+                        let observed_getter = if is_throwable
+                            && !has_user_method
+                            && self.observer.is_some()
+                            && matches!(
+                                method_name_lower.as_slice(),
+                                b"getmessage"
+                                    | b"getcode"
+                                    | b"getfile"
+                                    | b"getline"
+                                    | b"gettrace"
+                                    | b"gettraceasstring"
+                                    | b"__tostring"
+                                    | b"getprevious"
+                                    | b"getseverity"
+                            )
+                        {
+                            self.observed_internal_method_any(&class_name_lower, &method_name_lower)
+                        } else {
+                            None
+                        };
+                        if let Some(n) = &observed_getter {
+                            self.observe_internal_begin(n);
+                        }
                         let throwable_string = if is_throwable && !has_user_method {
                             match method_name_lower.as_slice() {
                                 b"gettraceasstring" => {
@@ -54300,6 +54324,9 @@ impl Vm {
                         } else {
                             None
                         };
+                        if let Some(n) = &observed_getter {
+                            self.observe_internal_end(n, builtin_result.as_ref());
+                        }
 
                         if let Some(result) = builtin_result {
                             // Run already (no arguments): the call checks the

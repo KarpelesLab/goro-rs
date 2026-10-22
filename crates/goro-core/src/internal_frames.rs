@@ -421,6 +421,11 @@ impl Vm {
         let Some(h) = self.observer else {
             return f(self, args);
         };
+        // Engine-internal helpers ("__"-prefixed: the native bodies of
+        // extensions' methods...) are not functions of their own.
+        if lname.starts_with(b"__") {
+            return f(self, args);
+        }
         let name = match crate::arginfo::lookup(lname) {
             Some(info) => info.name.to_string(),
             None => String::from_utf8_lossy(lname).into_owned(),
