@@ -388,8 +388,26 @@ pub fn decode_to_utf8(data: &[u8], enc: &str) -> Option<Vec<u8>> {
                 .collect();
             Some(s.into_bytes())
         }
-        _ => None,
+        _ => {
+            // The other single/multi-byte charsets (libxml2 goes through
+            // iconv for them).
+            let codec = other_codec(enc)?;
+            let (s, _) = codec.decode_without_bom_handling(data);
+            Some(s.into_owned().into_bytes())
+        }
     }
+}
+
+/// An encoding_rs codec for charsets not handled above.
+fn other_codec(enc: &str) -> Option<&'static encoding_rs::Encoding> {
+    let codec = encoding_rs::Encoding::for_label_no_replacement(enc.trim().as_bytes())?;
+    if codec == encoding_rs::UTF_16LE
+        || codec == encoding_rs::UTF_16BE
+        || codec == encoding_rs::UTF_8
+    {
+        return None;
+    }
+    Some(codec)
 }
 
 fn cp1251(b: u8) -> u32 {
@@ -496,7 +514,12 @@ pub fn encode_from_utf8(s: &str, enc: &str) -> Option<Vec<u8>> {
             }
             Some(out)
         }
-        _ => None,
+        _ => {
+            // Unmappable characters become decimal character references.
+            let codec = other_codec(enc)?;
+            let (b, _, _) = codec.encode(s);
+            Some(b.into_owned())
+        }
     }
 }
 

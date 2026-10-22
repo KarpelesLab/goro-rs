@@ -786,7 +786,15 @@ fn handle_request(
 ) -> SR<()> {
     let dr = deserialize_function_call(vm, sdl, doc_request, actor, soap_action);
     xml::free_doc(doc_request);
-    let (function, function_name, params, soap_version, headers) = dr?;
+    let (function, function_name, params, soap_version, headers) = match dr {
+        Ok(d) => d,
+        Err(_) if vm.current_exception.is_some() && !is_unwind_exit(vm) => {
+            output_discard(vm);
+            server_exception(vm, service, None, this);
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    };
     if vm.current_exception.is_some() {
         if !is_unwind_exit(vm) {
             output_discard(vm);
@@ -813,7 +821,14 @@ fn handle_request(
             soap_obj = session_object(vm, &ce)?;
         }
         if soap_obj.is_none() {
-            let o = new_object(vm, &ce);
+            let o = match new_object_ex(vm, &ce) {
+                Ok(o) => o,
+                Err(_) => {
+                    output_discard(vm);
+                    server_exception(vm, service, function.as_ref(), this);
+                    return Ok(());
+                }
+            };
             let has_ctor = vm
                 .classes
                 .get(&lower(&ce))

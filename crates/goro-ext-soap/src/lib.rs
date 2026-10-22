@@ -183,6 +183,10 @@ pub fn register(vm: &mut Vm) {
         );
     }
     register_classes(vm);
+    // clone_obj = NULL
+    for c in ["soapserver", "soap\\url", "soap\\sdl"] {
+        vm.uncloneable_classes.push(c.as_bytes().to_vec());
+    }
 }
 
 fn register_classes(vm: &mut Vm) {
@@ -537,7 +541,12 @@ fn soap_fault_to_string(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> SR
     let faultstring = prop(this, "faultstring");
     let file = prop(this, "file");
     let line = prop(this, "line");
-    let trace = call_method(vm, this, "getTraceAsString", &[])?;
+    // zend_call_method_with_0_params(..., "gettraceasstring") (final)
+    let trace = {
+        let t = this.borrow().get_property(b"trace");
+        let max_len = vm.exception_string_param_max_len;
+        vstr(vm.trace_to_string(&t, true, max_len))
+    };
     let fc = encoding::zval_get_string(vm, &faultcode)?;
     let fs = encoding::zval_get_string(vm, &faultstring)?;
     let fl = encoding::zval_get_string(vm, &file)?;

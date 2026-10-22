@@ -1138,6 +1138,9 @@ pub struct Vm {
     pub header_callback: Option<Value>,
     /// Constants registered by extensions with CONST_DEPRECATED: name -> message.
     pub internal_deprecated_constants: HashMap<Vec<u8>, String>,
+    /// Classes (lowercase) registered by extensions whose objects cannot
+    /// be cloned (clone_obj = NULL), subclasses included.
+    pub uncloneable_classes: Vec<Vec<u8>>,
     /// Declarations of builtins carrying what their stub declares besides
     /// arginfo (attributes, parameter attributes, an exposed doc comment),
     /// for Reflection: lowercase name -> declaration.
@@ -2301,6 +2304,7 @@ impl Vm {
             header_callback: None,
             rfc1867_callback: None,
             internal_deprecated_constants: HashMap::new(),
+            uncloneable_classes: Vec::new(),
             internal_function_decls: HashMap::new(),
             module_constants: Vec::new(),
             output_start: None,

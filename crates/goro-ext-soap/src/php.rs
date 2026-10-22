@@ -140,9 +140,35 @@ pub fn lookup_class(vm: &mut Vm, name: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// object_init_ex(): a new object of the class with its default properties
-/// (no constructor call).
-pub fn new_object(vm: &mut Vm, class: &[u8]) -> Obj {
+/// (no constructor call); Err with an Error thrown for classes that cannot
+/// be instantiated.
+pub fn new_object_ex(vm: &mut Vm, class: &[u8]) -> SR<Obj> {
     let l = lower(class);
+    if let Some(c) = vm.classes.get(&l) {
+        let kind = if c.is_interface {
+            Some("interface")
+        } else if c.is_trait {
+            Some("trait")
+        } else if c.is_enum {
+            Some("enum")
+        } else if c.is_abstract {
+            Some("abstract class")
+        } else {
+            None
+        };
+        if let Some(k) = kind {
+            let m = format!(
+                "Cannot instantiate {} {}",
+                k,
+                String::from_utf8_lossy(&c.name)
+            );
+            return Err(crate::zpp::throw(vm, b"Error", &m));
+        }
+    }
+    // Constant-expression defaults are evaluated on first use.
+    if !vm.update_class_constants_ok(&l) {
+        return Err(Bail);
+    }
     let name = vm
         .classes
         .get(&l)
@@ -150,7 +176,45 @@ pub fn new_object(vm: &mut Vm, class: &[u8]) -> Obj {
         .unwrap_or_else(|| class.to_vec());
     let id = vm.alloc_object_id();
     let mut o = PhpObject::new(name, id);
-    vm.apply_class_property_defaults(&mut o, &l);
+    // object_properties_init(): the declared properties in slot order,
+    // typed and readonly ones without a value uninitialized; a private
+    // property redeclared in the hierarchy is stored under its mangled name.
+    let props: Vec<(Vec<u8>, Value, bool)> = match vm.classes.get(&l) {
+        Some(ce) => {
+            let inst: Vec<&goro_core::object::PropertyDef> =
+                ce.properties.iter().filter(|p| !p.is_static).collect();
+            inst.iter()
+                .filter(|p| !p.is_virtual)
+                .map(|p| {
+                    let twice = inst.iter().filter(|q| q.name == p.name).nth(1).is_some();
+                    let key = if twice && p.visibility == goro_core::object::Visibility::Private {
+                        let decl = vm
+                            .classes
+                            .get(&lower(&p.declaring_class))
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| p.declaring_class.clone());
+                        let mut k = vec![0u8];
+                        k.extend_from_slice(&decl);
+                        k.push(0);
+                        k.extend_from_slice(&p.name);
+                        k
+                    } else {
+                        p.name.clone()
+                    };
+                    (key, p.default.clone(), p.is_readonly)
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    for (key, default, readonly) in props {
+        if readonly || matches!(default, Value::Undef) {
+            o.set_property(key, Value::Undef);
+        } else {
+            let v = vm.resolve_deferred_value(&default);
+            o.set_property(key, copy_value(&v));
+        }
+    }
     let o = Rc::new(RefCell::new(o));
     goro_core::gc::track_object(&o);
     if vm
@@ -160,7 +224,19 @@ pub fn new_object(vm: &mut Vm, class: &[u8]) -> Obj {
     {
         vm.track_destructible(Value::Object(o.clone()));
     }
-    o
+    vm.run_object_create_hook(&o);
+    Ok(o)
+}
+
+/// new_object_ex() of a class known to be instantiable.
+pub fn new_object(vm: &mut Vm, class: &[u8]) -> Obj {
+    match new_object_ex(vm, class) {
+        Ok(o) => o,
+        Err(_) => {
+            let id = vm.alloc_object_id();
+            Rc::new(RefCell::new(PhpObject::new(class.to_vec(), id)))
+        }
+    }
 }
 
 /// A property by its storage name (public properties, deref'd).
@@ -295,6 +371,11 @@ pub fn take_pending_fatal() -> Option<VmError> {
 
 /// call_user_function(): Err when it threw or bailed out.
 pub fn call_user(vm: &mut Vm, callable: &Value, args: &[Value]) -> SR<Value> {
+    // zend_call_function() does not run anything while an exception is
+    // pending (the return value stays UNDEF).
+    if vm.current_exception.is_some() {
+        return Ok(Value::Undef);
+    }
     match vm.call_callback(callable, args) {
         Ok(v) => {
             if vm.exit_requested {
@@ -510,15 +591,32 @@ pub fn new_soap_fault(vm: &mut Vm) -> Obj {
         Value::Object(o) => o,
         _ => unreachable!(),
     };
-    let mut defaults = PhpObject::new(Vec::new(), 0);
-    vm.apply_class_property_defaults(&mut defaults, b"soapfault");
+    // The declared properties in slot order: those set by the exception's
+    // creation keep their values, the others get their defaults.
+    let decl: Vec<(Vec<u8>, Value)> = vm
+        .classes
+        .get(b"soapfault".as_slice())
+        .map(|ce| {
+            ce.properties
+                .iter()
+                .filter(|p| !p.is_static && !p.is_virtual)
+                .map(|p| (p.name.clone(), p.default.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
     {
         let mut b = o.borrow_mut();
-        for (k, v) in defaults.properties.drain(..) {
-            if !b.properties.iter().any(|(kk, _)| *kk == k) {
-                b.properties.push((k, v));
+        let mut old = std::mem::take(&mut b.properties);
+        for (k, d) in decl {
+            match old.iter().position(|(kk, _)| *kk == k) {
+                Some(i) => {
+                    let e = old.remove(i);
+                    b.properties.push(e);
+                }
+                None => b.properties.push((k, d)),
             }
         }
+        b.properties.append(&mut old);
     }
     goro_core::gc::track_object(&o);
     o

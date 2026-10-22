@@ -595,9 +595,79 @@ pub fn unlink(n: Node) {
     t(|t| t.unlink(n))
 }
 
-/// xmlDocCopyNode(node, doc, 1)
+/// xmlDocCopyNode(node, doc, 1): namespaces the copied nodes use that are
+/// declared outside the copied subtree are declared again on its root
+/// (xmlStaticCopyNode()).
 pub fn copy_node(n: Node, doc: Option<Node>) -> Node {
-    t(|t| t.copy_node(n, doc, 1, None))
+    t(|t| {
+        let c = t.copy_node(n, doc, 1, None);
+        reconcile_copy(t, c);
+        c
+    })
+}
+
+fn reconcile_copy(t: &mut Tree, root: Node) {
+    let mut subtree = vec![root];
+    let mut i = 0;
+    while i < subtree.len() {
+        let n = subtree[i];
+        i += 1;
+        if t.nodes[n].t != NType::Element {
+            continue;
+        }
+        let mut c = t.nodes[n].children;
+        while let Some(x) = c {
+            subtree.push(x);
+            c = t.nodes[x].next;
+        }
+    }
+    let in_copy = |t: &Tree, ns: NsId| -> bool {
+        match t.nss[ns].owner {
+            Some(o) => {
+                let mut cur = Some(o);
+                // the owner must be the root or one of its descendants
+                while let Some(x) = cur {
+                    if x == root {
+                        return true;
+                    }
+                    cur = t.nodes[x].parent;
+                }
+                false
+            }
+            None => false,
+        }
+    };
+    let mut redeclared: Vec<(NsId, NsId)> = Vec::new();
+    for n in subtree {
+        if t.nodes[n].t != NType::Element {
+            continue;
+        }
+        let mut targets = vec![n];
+        let mut a = t.nodes[n].properties;
+        while let Some(x) = a {
+            targets.push(x);
+            a = t.nodes[x].next;
+        }
+        for x in targets {
+            let Some(ns) = t.nodes[x].ns else { continue };
+            if t.nss[ns].prefix.as_deref() == Some("xml") || in_copy(t, ns) {
+                continue;
+            }
+            let new = match redeclared.iter().find(|(o, _)| *o == ns) {
+                Some((_, nn)) => *nn,
+                None => {
+                    let (href, prefix) = (t.nss[ns].href.clone(), t.nss[ns].prefix.clone());
+                    let nn = match t.new_ns(Some(root), &href, prefix.as_deref()) {
+                        Some(nn) => nn,
+                        None => t.search_ns_ro(root, prefix.as_deref()).unwrap_or(ns),
+                    };
+                    redeclared.push((ns, nn));
+                    nn
+                }
+            };
+            t.nodes[x].ns = Some(new);
+        }
+    }
 }
 
 /// xmlDocDumpMemory(): the document as UTF-8 XML with its declaration.

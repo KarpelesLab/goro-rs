@@ -950,7 +950,11 @@ pub fn to_xml_user(
     let mut ret: Option<Node> = None;
     if let Some(cb) = type_.map().and_then(|m| m.to_xml.clone()) {
         let arg = data.map(|d| d.deref()).unwrap_or(Value::Null);
-        let rv = call_user(vm, &cb, &[arg])?;
+        let rv = match call_user(vm, &cb, &[arg]) {
+            Ok(v) => v,
+            Err(_) if vm.current_exception.is_some() && !vm.exit_requested => Value::Null,
+            Err(e) => return Err(e),
+        };
         if let Value::String(s) = rv.deref() {
             if let Some(doc) = xml::parse_memory(s.as_bytes()) {
                 if let Some(c) = xml::children(doc) {
@@ -979,8 +983,14 @@ pub fn to_zval_user(vm: &mut Vm, type_: &EncRef, node: Option<Node>) -> SR<Value
     let Some(node) = node else {
         return Ok(Value::Null);
     };
-    let s = xml::node_dump(node);
-    let r = call_user(vm, &cb, &[vstr(s)])?;
+    let copy = xml::copy_node(node, None);
+    let s = xml::node_dump(copy);
+    xml::free_doc(copy);
+    let r = match call_user(vm, &cb, &[vstr(s)]) {
+        Ok(v) => v,
+        Err(_) if vm.current_exception.is_some() && !vm.exit_requested => Value::Null,
+        Err(e) => return Err(e),
+    };
     if vm.current_exception.is_some() {
         return Ok(Value::Null);
     }
@@ -1178,6 +1188,16 @@ fn to_zval_hexbin(vm: &mut Vm, _t: &EncRef, data: Option<Node>) -> SR<Value> {
     Ok(vstr(out))
 }
 
+/// zend_value_error() without bailing out: a pending exception becomes the
+/// new one's previous.
+fn value_error_chained(vm: &mut Vm, msg: &str) {
+    let e = vm.create_exception(b"ValueError", msg, vm.current_line);
+    if let Some(prev) = vm.current_exception.take() {
+        Vm::exception_set_previous(&e, prev);
+    }
+    vm.current_exception = Some(e);
+}
+
 /// get_serialization_string_from_zval()
 fn serialization_string(vm: &mut Vm, data: &Value) -> SR<Vec<u8>> {
     let d = data.deref();
@@ -1190,11 +1210,8 @@ fn serialization_string(vm: &mut Vm, data: &Value) -> SR<Vec<u8>> {
             .map(|c| c.enum_backing_type.clone());
         if let Some(backing) = backing {
             if backing.is_none() {
-                return Err(crate::zpp::throw(
-                    vm,
-                    b"ValueError",
-                    "Non-backed enums have no default serialization",
-                ));
+                value_error_chained(vm, "Non-backed enums have no default serialization");
+                return Ok(Vec::new());
             }
             let v = prop(o, "value");
             return zval_get_string(vm, &v);
@@ -1231,18 +1248,12 @@ fn serialization_long(vm: &mut Vm, data: &Value) -> SR<i64> {
             match backing.as_deref() {
                 Some(b"int") => return Ok(prop(o, "value").to_long()),
                 None => {
-                    return Err(crate::zpp::throw(
-                        vm,
-                        b"ValueError",
-                        "Non-backed enums have no default serialization",
-                    ));
+                    value_error_chained(vm, "Non-backed enums have no default serialization");
+                    return Ok(0);
                 }
                 Some(_) => {
-                    return Err(crate::zpp::throw(
-                        vm,
-                        b"ValueError",
-                        "String-backed enum cannot be serialized as int",
-                    ));
+                    value_error_chained(vm, "String-backed enum cannot be serialized as int");
+                    return Ok(0);
                 }
             }
         }
@@ -2055,8 +2066,19 @@ fn simple_base(enc: Option<EncRef>) -> Option<EncRef> {
     enc
 }
 
-fn object_init(vm: &mut Vm, ce: &[u8]) -> Value {
-    Value::Object(new_object(vm, ce))
+/// object_init_ex(): None (with the Error pending) when the class cannot be
+/// instantiated; decoding then goes on with NULL.
+fn object_init(vm: &mut Vm, ce: &[u8]) -> Option<Value> {
+    if vm.current_exception.is_some() {
+        // zend_throw_error() while an exception is pending keeps the first
+        let saved = vm.current_exception.take();
+        let r = new_object_ex(vm, ce).ok().map(Value::Object);
+        if vm.current_exception.is_none() {
+            vm.current_exception = saved;
+        }
+        return r;
+    }
+    new_object_ex(vm, ce).ok().map(Value::Object)
 }
 
 fn to_zval_object_ex(
@@ -2102,7 +2124,10 @@ fn to_zval_object_ex(
                 if let Some(r) = soap_check_xml_ref(d) {
                     return Ok(r);
                 }
-                ret = object_init(vm, &ce);
+                ret = match object_init(vm, &ce) {
+                    Some(v) => v,
+                    None => return Ok(Value::Null),
+                };
                 let base = master_to_zval_int(vm, &enc, d)?;
                 set_zval_property(vm, &ret, "_", base);
             } else {
@@ -2112,7 +2137,10 @@ fn to_zval_object_ex(
                 if let Some(r) = soap_check_xml_ref(d) {
                     return Ok(r);
                 }
-                ret = object_init(vm, &ce);
+                ret = match object_init(vm, &ce) {
+                    Some(v) => v,
+                    None => return Ok(Value::Null),
+                };
                 soap_add_xml_ref(&ret, d);
             }
         } else if kind == XSD_TYPEKIND_EXTENSION && senc.is_some() && !senc_is_self {
@@ -2168,7 +2196,10 @@ fn to_zval_object_ex(
                 if let Some(r) = soap_check_xml_ref(d) {
                     return Ok(r);
                 }
-                ret = object_init(vm, &ce);
+                ret = match object_init(vm, &ce) {
+                    Some(v) => v,
+                    None => return Ok(Value::Null),
+                };
                 soap_add_xml_ref(&ret, d);
                 let base = master_to_zval_int(vm, &senc, d)?;
                 set_zval_property(vm, &ret, "_", base);
@@ -2181,7 +2212,10 @@ fn to_zval_object_ex(
             if let Some(r) = soap_check_xml_ref(d) {
                 return Ok(r);
             }
-            ret = object_init(vm, &ce);
+            ret = match object_init(vm, &ce) {
+                Some(v) => v,
+                None => return Ok(Value::Null),
+            };
             soap_add_xml_ref(&ret, d);
         }
         let d = data.unwrap();
@@ -2248,7 +2282,10 @@ fn to_zval_object_ex(
     if let Some(r) = soap_check_xml_ref(d) {
         return Ok(r);
     }
-    let ret = object_init(vm, &ce);
+    let ret = match object_init(vm, &ce) {
+        Some(v) => v,
+        None => return Ok(Value::Null),
+    };
     soap_add_xml_ref(&ret, d);
     let mut trav = xml::children(d);
     while let Some(tr) = trav {
@@ -3018,10 +3055,10 @@ fn single_element(st: &TypeRef) -> Option<TypeRef> {
 }
 
 /// Iterate an object implementing Traversable into an array.
-fn traversable_to_array(vm: &mut Vm, o: &Obj) -> SR<Value> {
+fn traversable_to_array(vm: &mut Vm, o: &Value) -> SR<Value> {
     let f = vm.functions.get(b"iterator_to_array".as_slice()).copied();
     match f {
-        Some(f) => match f(vm, &[Value::Object(o.clone()), Value::True]) {
+        Some(f) => match f(vm, &[o.clone(), Value::True]) {
             Ok(v) => {
                 if vm.current_exception.is_some() {
                     return Err(Bail);
@@ -3069,8 +3106,21 @@ fn to_xml_array(
     if let Some(Value::Object(o)) = &dv {
         if instance_of(vm, o, "Traversable") {
             let o = o.clone();
-            dv = Some(traversable_to_array(vm, &o)?);
+            dv = Some(traversable_to_array(vm, &Value::Object(o))?);
         }
+    } else if let Some(Value::Generator(gref)) = &dv {
+        if matches!(
+            gref.borrow().state,
+            goro_core::generator::GeneratorState::Completed
+        ) {
+            return Err(crate::zpp::throw(
+                vm,
+                b"Exception",
+                "Cannot traverse an already closed generator",
+            ));
+        }
+        let gv = Value::Generator(gref.clone());
+        dv = Some(traversable_to_array(vm, &gv)?);
     }
     let dv = dv.unwrap();
     if let Value::Array(arr) = &dv {

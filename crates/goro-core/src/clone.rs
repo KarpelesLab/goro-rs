@@ -97,6 +97,11 @@ impl Vm {
                     || class_lower == b"random\\engine\\secure"
                     || class_lower == b"random\\randomizer"
                     || obj_borrow.has_property(b"__enum_case")
+                    || (!self.uncloneable_classes.is_empty()
+                        && self
+                            .uncloneable_classes
+                            .iter()
+                            .any(|u| *u == class_lower || self.class_extends(&class_lower, u)))
                 {
                     let class_name = crate::value::display_class_name(&obj_borrow.class_name);
                     drop(obj_borrow);

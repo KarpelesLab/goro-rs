@@ -47,7 +47,7 @@ namespace {
 
         public function __construct(...$args) { \__soap_method('SoapFault::__construct', $this, $args); }
 
-        public function __toString(): string { return \__soap_method('SoapFault::__toString', $this, \func_get_args()); }
+        public function __toString(): string { return \__soap_method('SoapFault::__toString', $this, []); }
     }
 
     class SoapVar
@@ -129,7 +129,7 @@ namespace {
 
         public function __construct(...$args) { \__soap_method('SoapClient::__construct', $this, $args); }
 
-        public function __call($name, $args) { return \__soap_method('SoapClient::__call', $this, \func_get_args()); }
+        public function __call($name, $args) { return \__soap_method('SoapClient::__call', $this, [$name, $args]); }
 
         public function __soapCall($name = null, $args = null, $options = null, $inputHeaders = null, &$outputHeaders = null)
         {
