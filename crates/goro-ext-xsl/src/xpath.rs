@@ -9,7 +9,8 @@
 
 use goro_ext_xml::tree::{self, NType, NodeId, Tree, XML_XML_NAMESPACE};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+type HashSet<T> = std::collections::HashSet<T, goro_core::fxhash::FxBuildHasher>;
 use std::rc::Rc;
 
 // ---------------------------------------------------------------------------
@@ -1462,12 +1463,8 @@ pub fn merge(a: &mut Vec<NodeId>, b: &[NodeId]) {
         return;
     }
     if a.is_empty() {
-        let mut seen = HashSet::new();
-        for &n in b {
-            if seen.insert(n) {
-                a.push(n);
-            }
-        }
+        // no duplicate check against an empty first set
+        a.extend_from_slice(b);
         return;
     }
     let mut seen: HashSet<NodeId> = a.iter().copied().collect();
@@ -2789,7 +2786,7 @@ fn node_collect_and_test<H: Host + ?Sized>(
     let old_node = h.xp().node;
     let xdoc = h.xp().doc;
     let mut out_seq: Vec<NodeId> = Vec::new();
-    let mut out_set: HashSet<NodeId> = HashSet::new();
+    let mut out_set: HashSet<NodeId> = HashSet::default();
     let uri_ref = uri.as_deref();
     'ctx: for &ctx_node in obj.iter() {
         if p.error != XPATH_EXPRESSION_OK {

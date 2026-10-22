@@ -9,7 +9,8 @@ use crate::xpath::{self, CompExpr, PCtx, XObj, XpCtx};
 use goro_core::vm::Vm;
 use goro_ext_xml::tree::{NType, NodeId, NsId, Tree};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+type HashSet<T> = std::collections::HashSet<T, goro_core::fxhash::FxBuildHasher>;
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,7 +155,7 @@ impl<'v> Transform<'v> {
             key_init_level: 0,
             nb_keys,
             has_templ_key_patterns: false,
-            key_nodes: HashSet::new(),
+            key_nodes: HashSet::default(),
             ids: HashMap::new(),
             current_id: 0,
             out_type: OutType::Xml,
@@ -3215,7 +3216,8 @@ impl<'v> Transform<'v> {
 
     /// xsltTestCompMatch
     pub fn test_comp_match(&mut self, pi: usize, match_node: NodeId, check_mode: bool) -> i32 {
-        let comp = self.sheet.pats[pi].clone();
+        let sheet = self.sheet.clone();
+        let comp = &sheet.pats[pi];
         if check_mode {
             if comp.mode != self.mode || comp.mode_uri != self.mode_uri {
                 return 0;
@@ -3354,10 +3356,10 @@ impl<'v> Transform<'v> {
                     }
                     POp::Predicate => {
                         if comp.direct {
-                            break 'outer self.test_comp_match_direct(&comp, match_node);
+                            break 'outer self.test_comp_match_direct(comp, match_node);
                         }
                         let selstep = sel.map(|s| comp.steps[s].clone());
-                        if !self.test_predicate_match(&comp, n, step, selstep.as_ref()) {
+                        if !self.test_predicate_match(comp, n, step, selstep.as_ref()) {
                             rollback = true;
                             break;
                         }

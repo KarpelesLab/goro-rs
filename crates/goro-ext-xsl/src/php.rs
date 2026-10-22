@@ -812,20 +812,19 @@ fn transform_to_doc(vm: &mut Vm, o: &Obj, a: &Args) -> R<Value> {
     // "C!": the return class
     let ret_class: Option<Vec<u8>> = match a.raw(1) {
         None | Some(Value::Null) => None,
-        Some(v) => {
+        Some(_) => {
             let name = a.str(vm, 1, "returnClass")?;
             let name = name.strip_prefix('\\').unwrap_or(&name).to_string();
             let lower = name.to_ascii_lowercase().into_bytes();
-            if !vm.classes.contains_key(&lower) {
+            if vm.lookup_class(&lower).is_none() {
                 vm.try_autoload_class(name.as_bytes());
                 if vm.current_exception.is_some() {
                     return Err(());
                 }
             }
-            match vm.classes.get(&lower) {
-                Some(ce) => Some(ce.name.clone()),
+            match vm.lookup_class(&lower).map(|c| c.name.to_vec()) {
+                Some(n) => Some(n),
                 None => {
-                    let _ = v;
                     throw(
                         vm,
                         b"TypeError",

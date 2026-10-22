@@ -162,13 +162,10 @@ pub(crate) fn internal_class_known(vm: &Vm, lower: &[u8]) -> bool {
 /// Reflection's view of a class: the user class, or for an internal class a
 /// `ClassEntry` synthesized from php-src's stubs (see `crate::stubs`).
 /// An extension class registered as a bare entry (its methods are
-/// implemented natively, e.g. ext/dom's).
+/// implemented natively, e.g. ext/dom's; it may still declare the stub's
+/// properties, as XSLTProcessor does for its typed properties).
 fn bare_entry(c: &crate::object::ClassEntry) -> bool {
-    c.filename.is_none()
-        && c.start_line == 0
-        && c.methods.is_empty()
-        && c.properties.is_empty()
-        && !c.is_enum
+    c.filename.is_none() && c.start_line == 0 && c.methods.is_empty() && !c.is_enum
 }
 
 /// Reflection sees the class through its stub: an internal class, or one

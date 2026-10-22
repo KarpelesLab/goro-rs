@@ -2,7 +2,7 @@
 
 use crate::transform::Transform;
 use crate::xpath::{self, PCtx, XObj};
-use std::collections::HashSet;
+type HashSet<T> = std::collections::HashSet<T, goro_core::fxhash::FxBuildHasher>;
 
 pub fn exists(name: &str) -> bool {
     matches!(
@@ -21,7 +21,7 @@ pub fn call(t: &mut Transform, p: &mut PCtx, name: &str, nargs: usize) -> bool {
             Some(v) => v,
             None => return true,
         };
-        let mut seen = HashSet::new();
+        let mut seen = HashSet::default();
         let mut ret = Vec::new();
         for n in ns {
             let s = xpath::node_string_id(n);
