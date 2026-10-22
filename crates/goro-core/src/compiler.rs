@@ -439,6 +439,13 @@ impl Compiler {
         }
     }
 
+    /// Code that shares its caller's scope (eval()) sees the caller's
+    /// `$this` in a `$this` CV.
+    pub fn with_this_cv(mut self) -> Self {
+        self.op_array.get_or_create_cv(b"this");
+        self
+    }
+
     pub fn new() -> Self {
         Self {
             op_array: OpArray::new(),

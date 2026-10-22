@@ -1602,6 +1602,10 @@ fn execute_php_inner_impl(
         b"fatal_error_backtraces".to_vec(),
         Value::String(PhpString::from_bytes(b"0")),
     );
+    vm.constants.insert(
+        b"docref_ext".to_vec(),
+        Value::String(PhpString::from_bytes(b".html")),
+    );
     // Apply all INI settings (the INI section's values may be
     // error-level expressions, which the INI scanner resolves).
     let resolved: Vec<(String, String)> = ini_settings

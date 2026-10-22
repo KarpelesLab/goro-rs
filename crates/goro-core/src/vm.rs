@@ -17330,6 +17330,24 @@ impl Vm {
                             if let Some(e) = self.ob_pending_fatal.take() {
                                 return Err(e);
                             }
+                            // An output handler run by the write threw.
+                            if self.current_exception.is_some() {
+                                if let Some((catch, finally, _, _, eh_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(eh_pc);
+                                    if catch > 0 {
+                                        ip = catch as usize;
+                                    } else if finally > 0 {
+                                        ip = finally as usize;
+                                    }
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: self.uncaught_exception_message(),
+                                    line: op.line,
+                                });
+                            }
                         }
                         Err(e) => {
                             if let Some((_catch, _finally, _, _, _eh_pc)) =
@@ -17375,6 +17393,24 @@ impl Vm {
                             self.write_output(s.as_bytes());
                             if let Some(e) = self.ob_pending_fatal.take() {
                                 return Err(e);
+                            }
+                            // An output handler run by the write threw.
+                            if self.current_exception.is_some() {
+                                if let Some((catch, finally, _, _, eh_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(eh_pc);
+                                    if catch > 0 {
+                                        ip = catch as usize;
+                                    } else if finally > 0 {
+                                        ip = finally as usize;
+                                    }
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: self.uncaught_exception_message(),
+                                    line: op.line,
+                                });
                             }
                         }
                         Err(e) => {
@@ -37189,7 +37225,7 @@ impl Vm {
                         let mut parser = goro_parser::Parser::new(tokens).with_source(&source);
                         match parser.parse() {
                             Ok(program) => {
-                                let mut compiler = crate::compiler::Compiler::new();
+                                let mut compiler = crate::compiler::Compiler::new().with_this_cv();
                                 let eval_file =
                                     format!("{}({}) : eval()'d code", self.current_file, op.line);
                                 let compiler_file = eval_file.clone().into_bytes();
