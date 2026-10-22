@@ -150,6 +150,10 @@ pub struct Compiler {
     memoized_exprs: HashMap<usize, OperandType>,
     /// The synthetic isset / assign node being compiled in memoize mode.
     memoize_root: usize,
+    /// CG(zend_lineno): the line of the expression whose compilation started
+    /// last. An operator's opline gets it once its operands are compiled, so
+    /// a multi-line `$a +\n $b` reports the line of `$b`.
+    zend_lineno: u32,
     /// Reserved variable names (not expressible in PHP source) standing for
     /// already-computed operands while synthesized code is compiled (target
     /// keys evaluated before an assigned value).
@@ -419,6 +423,7 @@ impl Compiler {
             memoize_mode: 0,
             memoized_exprs: HashMap::new(),
             memoize_root: 0,
+            zend_lineno: 0,
             tmp_aliases: Vec::new(),
             dynvar_count: 0,
             dynvar_pending: Vec::new(),
@@ -10920,6 +10925,7 @@ impl Compiler {
     }
 
     fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        self.zend_lineno = expr.span.line;
         if self.memoize_mode != 0
             && Self::is_memoizable(expr)
             && expr as *const Expr as usize != self.memoize_root
@@ -11734,7 +11740,7 @@ impl Compiler {
                     op1: l,
                     op2: r,
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    line: self.zend_lineno.max(expr.span.line),
                 });
                 Ok(OperandType::Tmp(tmp))
             }
@@ -12915,7 +12921,8 @@ impl Compiler {
                         op1: arr,
                         op2: idx,
                         result: OperandType::Tmp(tmp),
-                        line: expr.span.line,
+                        // FETCH_DIM_R is emitted once the key is compiled.
+                        line: self.zend_lineno.max(expr.span.line),
                     });
                     Ok(OperandType::Tmp(tmp))
                 } else {

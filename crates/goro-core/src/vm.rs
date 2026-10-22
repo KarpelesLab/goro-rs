@@ -32122,6 +32122,12 @@ impl Vm {
                             if let Some(t) = illegal {
                                 let msg = format!("Cannot access offset of type {} on array", t);
                                 let exc = self.create_exception(b"TypeError", &msg, op.line);
+                                // An exception thrown meanwhile (by an error handler) becomes
+                                // the previous one (zend_throw_exception_internal()).
+                                if let Some(prev) = self.current_exception.take() {
+                                    self.error_handler_threw = false;
+                                    Self::exception_set_previous(&exc, prev);
+                                }
                                 self.current_exception = Some(exc);
                                 if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                     exception_handlers.last()
