@@ -8,8 +8,7 @@
 //! num-bigint, which computes the same exact integer products and
 //! truncated quotients.
 
-use num_bigint::BigUint;
-use num_traits::Zero;
+use puremp::{Int, Nat};
 
 /// A bc_num: `v` holds `len` integer digits followed by `scale` fraction
 /// digits (values 0-9).
@@ -414,20 +413,145 @@ pub fn sub(n1: &Num, n2: &Num, scale_min: usize) -> Num {
     }
 }
 
-fn to_big(digits: &[u8]) -> BigUint {
-    if digits.is_empty() {
-        return BigUint::zero();
+// Decimal digit-value <-> Nat conversions. puremp only converts through
+// ASCII strings, and its parser / printer lose to plain limb loops below a
+// few thousand digits (the common bcmath sizes), so both directions are
+// done here on u64 limbs; huge inputs still use puremp's sub-quadratic
+// parser and its division for the printer's divide-and-conquer split.
+
+const P19: u64 = 10_000_000_000_000_000_000;
+/// floor((2^128 - 1) / 10^19) - 2^64; 10^19 > 2^63 is already normalized.
+const P19_INV: u64 = ((u128::MAX / P19 as u128) - (1u128 << 64)) as u64;
+/// Digit count above which puremp's sub-quadratic parser wins.
+const PARSE_SCHOOLBOOK_DIGITS: usize = 30_000;
+/// Limb count at or below which the printer divides limb by limb.
+const PRINT_BASE_LIMBS: usize = 16;
+
+/// (u1:u0) / 10^19 for u1 < 10^19 (Möller-Granlund 2-by-1 division with a
+/// precomputed reciprocal), as (quotient, remainder).
+#[inline]
+fn div_p19(u1: u64, u0: u64) -> (u64, u64) {
+    let q = (P19_INV as u128) * (u1 as u128) + (((u1 as u128) << 64) | u0 as u128);
+    let mut q1 = ((q >> 64) as u64).wrapping_add(1);
+    let q0 = q as u64;
+    let mut r = u0.wrapping_sub(q1.wrapping_mul(P19));
+    if r > q0 {
+        q1 = q1.wrapping_sub(1);
+        r = r.wrapping_add(P19);
     }
-    BigUint::from_radix_be(digits, 10).unwrap_or_default()
+    if r >= P19 {
+        q1 += 1;
+        r -= P19;
+    }
+    (q1, r)
+}
+
+/// The value of a big-endian run of decimal digit values (0-9).
+fn to_big(digits: &[u8]) -> Nat {
+    let Some(start) = digits.iter().position(|&d| d != 0) else {
+        return Nat::zero();
+    };
+    let d = &digits[start..];
+    if d.len() > PARSE_SCHOOLBOOK_DIGITS {
+        let s: String = d.iter().map(|&x| (b'0' + x) as char).collect();
+        return s.parse().unwrap_or_default();
+    }
+    // Horner over 19-digit chunks on little-endian u64 limbs.
+    let chunk = |c: &[u8]| c.iter().fold(0u64, |acc, &x| acc * 10 + x as u64);
+    let first = d.len() % 19;
+    let mut limbs: Vec<u64> = Vec::with_capacity(d.len() / 19 + 1);
+    if first > 0 {
+        limbs.push(chunk(&d[..first]));
+    }
+    for c in d[first..].as_chunks::<19>().0 {
+        let mut carry = chunk(c) as u128;
+        for l in limbs.iter_mut() {
+            let t = *l as u128 * P19 as u128 + carry;
+            *l = t as u64;
+            carry = t >> 64;
+        }
+        if carry != 0 {
+            limbs.push(carry as u64);
+        }
+    }
+    Nat::from_limbs(&limbs)
+}
+
+/// Fills `out` with the decimal digits of `limbs`, zero-padded on the left
+/// (the value must fit in out.len() digits).
+fn digits_base_case(limbs: &[u64], out: &mut [u8]) {
+    let mut limbs = limbs.to_vec();
+    let mut pos = out.len();
+    while let Some(&top) = limbs.last() {
+        if top == 0 {
+            limbs.pop();
+            continue;
+        }
+        let mut rem = 0u64;
+        for l in limbs.iter_mut().rev() {
+            let (q, r) = div_p19(rem, *l);
+            *l = q;
+            rem = r;
+        }
+        for _ in 0..19 {
+            if pos == 0 {
+                break;
+            }
+            pos -= 1;
+            out[pos] = (rem % 10) as u8;
+            rem /= 10;
+        }
+    }
+    out[..pos].fill(0);
+}
+
+/// Divide-and-conquer digit split; `powers[k] = (10^d, d)` with
+/// d = 19 * 2^k.
+fn digits_rec(v: &Nat, powers: &[(Nat, usize)], out: &mut [u8]) {
+    if v.as_limbs().len() <= PRINT_BASE_LIMBS {
+        digits_base_case(v.as_limbs(), out);
+        return;
+    }
+    let Some(k) = powers.iter().rposition(|(_, d)| *d < out.len()) else {
+        digits_base_case(v.as_limbs(), out);
+        return;
+    };
+    let (p, d) = &powers[k];
+    let (q, r) = v.div_rem(p).unwrap_or_default();
+    let (hi, lo) = out.split_at_mut(out.len() - d);
+    digits_rec(&q, powers, hi);
+    digits_rec(&r, powers, lo);
+}
+
+/// The minimal big-endian decimal digit values of `b` ([0] for zero).
+fn big_digits(b: &Nat) -> Vec<u8> {
+    // bit_len * log10(2) + 1 digits always suffice.
+    let nd = (b.bit_len() as f64 * std::f64::consts::LOG10_2) as usize + 2;
+    let mut out = vec![0u8; nd];
+    if b.as_limbs().len() <= PRINT_BASE_LIMBS {
+        digits_base_case(b.as_limbs(), &mut out);
+    } else {
+        let mut powers = vec![(Nat::from_u64(P19), 19usize)];
+        while let Some((p, d)) = powers.last()
+            && d * 2 < nd
+        {
+            let next = (p.square(), d * 2);
+            powers.push(next);
+        }
+        digits_rec(b, &powers, &mut out);
+    }
+    let lead = out.iter().position(|&d| d != 0).unwrap_or(out.len() - 1);
+    out.drain(..lead);
+    out
 }
 
 /// The decimal digits of `b`, right-aligned in `width` digits.
-fn from_big(b: &BigUint, width: usize) -> Vec<u8> {
+fn from_big(b: &Nat, width: usize) -> Vec<u8> {
     let mut out = vec![0u8; width];
     if b.is_zero() {
         return out;
     }
-    let d = b.to_radix_be(10);
+    let d = big_digits(b);
     if d.len() >= width {
         out.copy_from_slice(&d[d.len() - width..]);
     } else {
@@ -443,7 +567,7 @@ pub fn multiply(n1: &Num, n2: &Num, scale: usize) -> Num {
     let full_scale = n1.scale + n2.scale;
     let prod_scale = full_scale.min(scale.max(n1.scale.max(n2.scale)));
     let prodlen = len1 + len2;
-    let p = to_big(&n1.v) * to_big(&n2.v);
+    let p = to_big(&n1.v).mul(&to_big(&n2.v));
     let mut v = from_big(&p, prodlen);
     let len = prodlen - full_scale;
     v.truncate(len + prod_scale);
@@ -545,7 +669,10 @@ pub fn divide(numerator: &Num, divisor: &Num, scale: usize) -> Option<Num> {
     }
     let mut ndig = nd[nlz..nlz + numerator_size.min(readable)].to_vec();
     ndig.resize(numerator_size, 0);
-    let q = to_big(&ndig) / to_big(&dd[..divisor_size]);
+    let q = to_big(&ndig)
+        .div_rem(&to_big(&dd[..divisor_size]))
+        .map(|(q, _)| q)
+        .unwrap_or_default();
     let mut n = Num {
         neg,
         len: qlen,
@@ -770,12 +897,8 @@ pub fn raise(base: &Num, exponent: i64, scale: usize) -> Result<Num, RaiseError>
     }
     let neg = base.neg && exp & 1 == 1;
     let b = to_big(&base.v);
-    let p = num_traits::pow::Pow::pow(&b, exp);
-    let digits = if p.is_zero() {
-        vec![0]
-    } else {
-        p.to_radix_be(10)
-    };
+    // Nat::pow takes a u32 exponent; Int::pow takes any u64.
+    let digits = big_digits(&Int::from(b).pow(exp).into_magnitude());
     let width = digits.len().max(power_scale + 1);
     let mut v = vec![0u8; width - digits.len()];
     v.extend_from_slice(&digits);
@@ -828,34 +951,17 @@ pub fn raisemod(base: &Num, expo: &Num, md: &Num, scale: usize) -> Result<Num, R
     if do_compare(md, &Num::one(), md.scale, false) == EQUAL {
         return Ok(Num::new(1, scale));
     }
-    // All operands are integers: the multiply / modulo steps of the C
-    // loop keep scale 0 and C's truncated remainder (the sign follows the
-    // dividend), which BigInt's `%` also gives.
-    use num_bigint::{BigInt, Sign};
-    let to_int = |n: &Num| -> BigInt {
-        BigInt::from_biguint(if n.neg { Sign::Minus } else { Sign::Plus }, to_big(&n.v))
-    };
-    let mut power = to_int(base);
-    let mut exponent = to_big(&expo.v);
-    let modulus = to_int(md);
-    let mut temp = BigInt::from(1);
-    let two = BigUint::from(2u32);
-    while !exponent.is_zero() {
-        let parity = &exponent % &two;
-        exponent /= &two;
-        if !parity.is_zero() {
-            temp = (&temp * &power) % &modulus;
-        }
-        power = (&power * &power) % &modulus;
-    }
-    let (sign, mag) = temp.into_parts();
-    let digits = if mag.is_zero() {
-        vec![0]
-    } else {
-        mag.to_radix_be(10)
-    };
+    // All operands are integers: the C square-and-multiply loop keeps
+    // scale 0 and C's truncated remainder (the sign follows the dividend).
+    // Only the first multiply can see a negative factor (the base itself,
+    // when the low exponent bit is set; every later factor is a square), so
+    // the loop equals |base|^expo mod |md|, negated for a negative base and
+    // an odd exponent.
+    let mag = to_big(&base.v).modpow(&to_big(&expo.v), &to_big(&md.v));
+    let odd = expo.v.last().is_some_and(|d| d % 2 == 1);
+    let digits = big_digits(&mag);
     Ok(Num {
-        neg: sign == Sign::Minus,
+        neg: base.neg && odd && !mag.is_zero(),
         len: digits.len(),
         scale: 0,
         v: digits,

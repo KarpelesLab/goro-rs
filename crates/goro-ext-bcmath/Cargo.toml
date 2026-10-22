@@ -10,5 +10,5 @@ workspace = true
 [dependencies]
 goro-core = { path = "../goro-core" }
 goro-parser = { path = "../goro-parser" }
-num-bigint = "0.4"
-num-traits = "0.2"
+# Only the integer layer (Nat), as in ext/gmp.
+puremp = { version = "0.3.0", default-features = false, features = ["std", "int"] }
