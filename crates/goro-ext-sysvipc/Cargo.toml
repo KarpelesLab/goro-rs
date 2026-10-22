@@ -1,0 +1,13 @@
+[package]
+name = "goro-ext-sysvipc"
+version = "0.1.0"
+edition = "2024"
+description = "PHP shmop, sysvsem, sysvshm and sysvmsg extensions for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+libc = "0.2"

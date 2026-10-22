@@ -10322,6 +10322,10 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         ],
         "bcmath" => &["BcMath\\Number"],
         "ftp" => &["FTP\\Connection"],
+        "shmop" => &["Shmop"],
+        "sysvsem" => &["SysvSemaphore"],
+        "sysvshm" => &["SysvSharedMemory"],
+        "sysvmsg" => &["SysvMessageQueue"],
         "filter" => &["Filter\\FilterException", "Filter\\FilterFailedException"],
         _ => &[],
     }
