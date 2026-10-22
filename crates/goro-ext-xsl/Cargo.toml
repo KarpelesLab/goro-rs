@@ -12,3 +12,4 @@ goro-core = { path = "../goro-core" }
 goro-parser = { path = "../goro-parser" }
 goro-ext-xml = { path = "../goro-ext-xml" }
 goro-ext-hash = { path = "../goro-ext-hash" }
+libc = "0.2"

@@ -453,44 +453,13 @@ fn gmtime(secs: i64) -> Option<BrokenTime> {
     })
 }
 
-#[cfg(all(unix, target_pointer_width = "64"))]
+#[cfg(unix)]
 fn localtime(secs: i64) -> Option<BrokenTime> {
-    use std::os::raw::{c_char, c_int, c_long};
-    #[repr(C)]
-    struct Tm {
-        tm_sec: c_int,
-        tm_min: c_int,
-        tm_hour: c_int,
-        tm_mday: c_int,
-        tm_mon: c_int,
-        tm_year: c_int,
-        tm_wday: c_int,
-        tm_yday: c_int,
-        tm_isdst: c_int,
-        tm_gmtoff: c_long,
-        tm_zone: *const c_char,
-        _pad: [u64; 4],
-    }
-    unsafe extern "C" {
-        fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
-    }
-    let mut tm = Tm {
-        tm_sec: 0,
-        tm_min: 0,
-        tm_hour: 0,
-        tm_mday: 0,
-        tm_mon: 0,
-        tm_year: 0,
-        tm_wday: 0,
-        tm_yday: 0,
-        tm_isdst: 0,
-        tm_gmtoff: 0,
-        tm_zone: std::ptr::null(),
-        _pad: [0; 4],
-    };
-    // SAFETY: localtime_r only writes the struct tm we pass in (our layout
-    // has trailing padding beyond the platform's struct tm).
-    let r = unsafe { localtime_r(&secs, &mut tm) };
+    let t: libc::time_t = secs as libc::time_t;
+    // SAFETY: an all-zero struct tm is valid; localtime_r() only writes it.
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    // SAFETY: both pointers are valid for the duration of the call.
+    let r = unsafe { libc::localtime_r(&t, &mut tm) };
     if r.is_null() {
         return None;
     }
@@ -505,7 +474,7 @@ fn localtime(secs: i64) -> Option<BrokenTime> {
 }
 
 /// Without a usable localtime_r() the local time zone is taken as UTC.
-#[cfg(not(all(unix, target_pointer_width = "64")))]
+#[cfg(not(unix))]
 fn localtime(secs: i64) -> Option<BrokenTime> {
     gmtime(secs)
 }
