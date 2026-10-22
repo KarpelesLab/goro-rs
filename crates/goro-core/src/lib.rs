@@ -1,3 +1,4 @@
+pub mod anon_class;
 pub mod arginfo;
 pub mod array;
 pub mod ast_export;
@@ -26,6 +27,7 @@ pub mod internal_frames;
 pub mod ob;
 pub mod object;
 pub mod opcode;
+pub mod preload;
 pub mod proptable;
 pub mod random;
 pub mod reflection;

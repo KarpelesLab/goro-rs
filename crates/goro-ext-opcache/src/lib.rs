@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use goro_core::array::{ArrayKey, PhpArray};
-use goro_core::script_cache::{self, CompileOnly};
+use goro_core::script_cache::{self, CompileOnly, LOG_DEBUG, LOG_FATAL, LOG_WARNING};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
@@ -234,6 +234,8 @@ pub fn ini_entry_names() -> Vec<&'static str> {
     INI.iter().map(|e| e.0).collect()
 }
 
+/// MAX_INTERNED_STRINGS_BUFFER_SIZE on 64-bit platforms.
+const MAX_INTERNED_STRINGS_BUFFER_SIZE: i64 = 32767;
 const ZEND_JIT_ON_HOT_TRACE: i64 = 5;
 const ZEND_JIT_ON_SCRIPT_LOAD: i64 = 0;
 const ZEND_JIT_LEVEL_OPT_FUNCS: i64 = 4;
@@ -640,6 +642,11 @@ fn on_jit_debug_runtime(vm: &mut Vm, name: &[u8], value: &Value) -> bool {
 
 /// The startup-stage on-update handlers of the entries set at startup.
 fn startup_ini(vm: &mut Vm) {
+    script_cache::CONFIG.with(|c| {
+        let mut c = c.borrow_mut();
+        c.log_verbosity = atoi(&ini_raw(vm, "opcache.log_verbosity_level"));
+        c.error_log = ini_str(vm, "opcache.error_log");
+    });
     for &(name, _, _, kind) in INI {
         let raw = ini_raw(vm, name);
         let ok = match kind {
@@ -651,8 +658,10 @@ fn startup_ini(vm: &mut Vm) {
             Kind::MemoryConsumption => {
                 let n = atoi(&raw);
                 if n < 8 {
-                    // zend_accel_error(ACCEL_LOG_WARNING, ...) goes to the
-                    // opcache log (stderr), not to the output.
+                    script_cache::log(
+                        LOG_WARNING,
+                        "opcache.memory_consumption is set below the required 8MB.\n",
+                    );
                     false
                 } else {
                     let bytes = if n > i64::MAX / (1024 * 1024) {
@@ -665,8 +674,27 @@ fn startup_ini(vm: &mut Vm) {
                 }
             }
             Kind::InternedStringsBuffer => {
-                let (n, _) = quantity(name, &raw);
-                if !(0..=4095).contains(&n) {
+                let (n, w) = quantity(name, &raw);
+                if let Some(w) = w {
+                    startup_warning(vm, &w);
+                }
+                if n < 0 {
+                    script_cache::log(
+                        LOG_WARNING,
+                        &format!(
+                            "opcache.interned_strings_buffer must be greater than or equal to 0, {} given.\n",
+                            n
+                        ),
+                    );
+                    false
+                } else if n > MAX_INTERNED_STRINGS_BUFFER_SIZE {
+                    script_cache::log(
+                        LOG_WARNING,
+                        &format!(
+                            "opcache.interned_strings_buffer must be less than or equal to {}, {} given.\n",
+                            MAX_INTERNED_STRINGS_BUFFER_SIZE, n
+                        ),
+                    );
                     false
                 } else {
                     with(|s| s.interned_strings_buffer = n);
@@ -675,7 +703,17 @@ fn startup_ini(vm: &mut Vm) {
             }
             Kind::MaxAcceleratedFiles => {
                 let n = atoi(&raw);
-                if !(200..=1_000_000).contains(&n) {
+                if n < 200 {
+                    script_cache::log(
+                        LOG_WARNING,
+                        "opcache.max_accelerated_files is set below the required minimum (200).\n",
+                    );
+                    false
+                } else if n > 1_000_000 {
+                    script_cache::log(
+                        LOG_WARNING,
+                        "opcache.max_accelerated_files is set above the limit (1000000).\n",
+                    );
                     false
                 } else {
                     with(|s| s.max_accelerated_files = n);
@@ -685,6 +723,10 @@ fn startup_ini(vm: &mut Vm) {
             Kind::MaxWastedPercentage => {
                 let n = atoi(&raw);
                 if n <= 0 || n > 50 {
+                    script_cache::log(
+                        LOG_WARNING,
+                        "opcache.max_wasted_percentage must be set between 1 and 50.\n",
+                    );
                     false
                 } else {
                     with(|s| s.max_wasted_percentage = n as f64 / 100.0);
@@ -742,6 +784,17 @@ fn startup_ini(vm: &mut Vm) {
     }
 }
 
+/// zend_accel_error_noreturn(ACCEL_LOG_FATAL, ...): logged (whatever the
+/// verbosity), then the process exits.
+fn fatal(vm: &mut Vm, msg: &str) -> ! {
+    script_cache::log(LOG_FATAL, msg);
+    let out = vm.take_output();
+    unsafe {
+        libc::write(1, out.as_ptr() as *const libc::c_void, out.len());
+        libc::_exit(254);
+    }
+}
+
 /// accel_startup() + accel_post_startup() + RINIT
 fn startup(vm: &mut Vm) {
     startup_ini(vm);
@@ -761,10 +814,25 @@ fn startup(vm: &mut Vm) {
     let file_cache_only = ini_bool(vm, "opcache.file_cache_only");
     let file_cache = ini_str(vm, "opcache.file_cache");
     if file_cache_only && file_cache.is_empty() {
-        // "opcache.file_cache_only is set without a proper setting of
-        // opcache.file_cache" (ACCEL_LOG_FATAL, to the log)
-        with(|s| s.startup_ok = false);
-        return;
+        fatal(
+            vm,
+            "opcache.file_cache_only is set without a proper setting of opcache.file_cache",
+        );
+    }
+    if !file_cache_only {
+        // zend_accel_init_shm(): the interned strings buffer is allocated
+        // from the shared memory segment.
+        let (interned, mem) = with(|s| (s.interned_strings_buffer, s.memory_consumption));
+        let want = interned * 1024 * 1024;
+        if interned > 0 && want >= mem {
+            fatal(
+                vm,
+                &format!(
+                    "Insufficient shared memory for interned strings buffer! (tried to allocate {} bytes)",
+                    want
+                ),
+            );
+        }
     }
     let jit_buffer = ini_long(vm, "opcache.jit_buffer_size");
     let replaced_execute_ex = ini_bool(vm, "zend_test.replace_zend_execute_ex")
@@ -808,11 +876,12 @@ fn startup(vm: &mut Vm) {
     let blacklist = ini_str(vm, "opcache.blacklist_filename");
     if !blacklist.is_empty() {
         let entries = load_blacklist(&blacklist);
+        script_cache::CONFIG.with(|c| c.borrow_mut().blacklist = entries.clone());
         with(|s| s.blacklist = entries);
     }
     script_cache::CONFIG.with(|c| {
         let mut c = c.borrow_mut();
-        c.enabled = !file_cache_only;
+        c.enabled = false;
         c.validate_timestamps = ini_bool(vm, "opcache.validate_timestamps");
         c.revalidate_freq = ini_long(vm, "opcache.revalidate_freq");
         c.file_update_protection = ini_long(vm, "opcache.file_update_protection");
@@ -821,9 +890,13 @@ fn startup(vm: &mut Vm) {
     });
     script_cache::STATS.with(|s| s.borrow_mut().start_time = script_cache::now());
     let preload = ini_str(vm, "opcache.preload");
-    if !preload.is_empty() {
-        preload::run(vm, &preload);
+    if !preload.is_empty() && !preload::run(vm, &preload, file_cache_only) {
+        // Preloading failed: PHP does not start (the request is not run).
+        vm.exit_requested = true;
+        vm.exit_code = 255;
+        return;
     }
+    script_cache::CONFIG.with(|c| c.borrow_mut().enabled = !file_cache_only);
     // The main script is compiled through the cache.
     if !file_cache_only {
         let main = vm.current_file.clone();
@@ -836,34 +909,72 @@ fn startup(vm: &mut Vm) {
     }
 }
 
-/// zend_accel_blacklist_load(): one pattern per line (';' starts a
-/// comment), relative to nothing; glob patterns are kept as written.
+/// zend_accel_blacklist_load(): the files matching the glob, one path per
+/// line (';' starts a comment, a quoted path is unquoted), relative paths
+/// being relative to the blacklist file's directory.
 fn load_blacklist(spec: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let files: Vec<String> = match glob_paths(spec) {
-        v if v.is_empty() => vec![spec.to_string()],
-        v => v,
-    };
+    let files = glob_paths(spec);
+    if files.is_empty() {
+        script_cache::log(
+            LOG_WARNING,
+            &format!("No blacklist file found matching: {}\n", spec),
+        );
+    }
     for f in files {
-        let Ok(data) = std::fs::read_to_string(&f) else {
+        let Ok(data) = std::fs::read(&f) else {
+            script_cache::log(LOG_WARNING, &format!("Cannot load blacklist file: {}\n", f));
             continue;
         };
-        for line in data.lines() {
-            let l = line.trim();
-            if l.is_empty() || l.starts_with(';') {
+        let dir = std::fs::canonicalize(&f)
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_string_lossy().into_owned()));
+        for line in data.split(|&c| c == b'\n') {
+            let mut l = line;
+            if l.last() == Some(&b'\r') {
+                l = &l[..l.len() - 1];
+            }
+            while l.first() == Some(&b'\r') {
+                l = &l[1..];
+            }
+            if l.len() >= 2 && l[0] == b'"' && l[l.len() - 1] == b'"' {
+                l = &l[1..l.len() - 1];
+            }
+            if l.is_empty() || l[0] == b';' {
                 continue;
             }
-            let path = if l.starts_with('/') {
-                std::fs::canonicalize(l)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .unwrap_or_else(|_| l.to_string())
-            } else {
-                l.to_string()
-            };
-            out.push(path);
+            let l = String::from_utf8_lossy(l).into_owned();
+            out.push(expand_filepath(&l, dir.as_deref()));
         }
     }
     out
+}
+
+/// expand_filepath_ex(): an absolute, normalized path (no symlinks
+/// resolved).
+fn expand_filepath(path: &str, relative_to: Option<&str>) -> String {
+    let base = if path.starts_with('/') {
+        String::new()
+    } else {
+        match relative_to {
+            Some(d) => d.to_string(),
+            None => std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        }
+    };
+    let full = format!("{}/{}", base, path);
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in full.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    format!("/{}", parts.join("/"))
 }
 
 fn glob_paths(pattern: &str) -> Vec<String> {
@@ -945,6 +1056,10 @@ fn opcache_reset(vm: &mut Vm, _args: &[Value]) -> R {
     if !with(|s| s.enabled && s.startup_ok && s.accelerator_enabled) {
         return Ok(Value::False);
     }
+    if script_cache::log_enabled(LOG_DEBUG) {
+        vm.flush_cli_output();
+        script_cache::log(LOG_DEBUG, "Restart Scheduled! Reason: user");
+    }
     script_cache::reset();
     Ok(Value::True)
 }
@@ -1001,9 +1116,9 @@ fn opcache_is_script_cached_in_file_cache(vm: &mut Vm, args: &[Value]) -> R {
     }
     // The file cache is not persisted to disk by goro: a script compiled
     // in this process stands for the file it would have written.
-    Ok(b(resolve(vm, &name).is_some_and(|p| {
-        script_cache::is_cached(&p) || preload::compiled_in_file_cache(&p)
-    })))
+    Ok(b(
+        resolve(vm, &name).is_some_and(|p| script_cache::is_cached(&p))
+    ))
 }
 
 fn opcache_jit_blacklist(_vm: &mut Vm, _args: &[Value]) -> R {
@@ -1035,9 +1150,6 @@ fn opcache_compile_file(vm: &mut Vm, args: &[Value]) -> R {
     let path = std::fs::canonicalize(&path)
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or(path);
-    if preload::active() {
-        return Ok(b(preload::compile_file(vm, &path, &name)));
-    }
     match vm.compile_file_only(&path) {
         CompileOnly::Compiled => Ok(Value::True),
         CompileOnly::OpenFailed(reason) => {
@@ -1056,6 +1168,14 @@ fn opcache_compile_file(vm: &mut Vm, args: &[Value]) -> R {
             message: String::new(),
             line: vm.current_line,
         }),
+        CompileOnly::CompileError if preload::active() => {
+            // During preloading, a failure fails the whole preloading.
+            vm.fatal_emitted = true;
+            Err(VmError {
+                message: String::new(),
+                line: vm.current_line,
+            })
+        }
         CompileOnly::CompileError => {
             vm.emit_warning(&format!("{} could not compile file {}", PRODUCT_NAME, name));
             Ok(Value::False)

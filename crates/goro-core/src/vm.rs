@@ -759,7 +759,7 @@ pub struct Vm {
     /// Stack of pending function calls (supports nested calls)
     pub(crate) pending_calls: Vec<PendingCall>,
     /// Static variable storage (keyed by "funcname::varname")
-    static_vars: HashMap<Vec<u8>, Value>,
+    pub(crate) static_vars: HashMap<Vec<u8>, Value>,
     /// The global symbol table (also the value of `$GLOBALS`, see symtab.rs)
     pub(crate) globals: Rc<RefCell<PhpArray>>,
     /// Class table (preserves insertion order)
@@ -1219,6 +1219,12 @@ pub struct Vm {
     /// directive. Used by SPL method dispatchers (ArrayObject::ksort, etc.) to
     /// throw the "Cannot call method X when function X is disabled" error.
     pub disabled_functions: std::collections::HashSet<Vec<u8>>,
+    /// Anonymous classes whose declaration was reached but which are only
+    /// bound when first used (ZEND_DECLARE_ANON_CLASS runs right before
+    /// the `new`), by lowercase name.
+    pub(crate) anon_pending: HashMap<Vec<u8>, ClassEntry>,
+    /// A deferred anonymous class is being bound.
+    pub(crate) declaring_anon: bool,
 }
 
 /// See `Vm::socket_stream_hooks`.
@@ -2369,6 +2375,8 @@ impl Vm {
             rw_dim_set: None,
             class_aliases: HashMap::new(),
             disabled_functions: std::collections::HashSet::new(),
+            anon_pending: HashMap::new(),
+            declaring_anon: false,
         };
         // Built-in enum: Random\IntervalBoundary
         let mut iv = ClassEntry::new(b"Random\\IntervalBoundary".to_vec());
@@ -3641,6 +3649,11 @@ impl Vm {
 
     /// Try to autoload a class by calling registered autoload functions
     pub fn try_autoload_class(&mut self, class_name: &[u8]) -> bool {
+        if !self.anon_pending.is_empty() {
+            if let Some(found) = self.bind_pending_anon_class(class_name) {
+                return found;
+            }
+        }
         if self.autoload_functions.is_empty() {
             return false;
         }
@@ -39615,6 +39628,12 @@ impl Vm {
                                                     l.op1 = OperandType::Const(one);
                                                 }
                                             }
+                                            if crate::preload::done() {
+                                                self.preload_strip_declares(
+                                                    &abs_path,
+                                                    &mut inc_op_array,
+                                                );
+                                            }
                                             if fresh && plain_file && !is_stream_path {
                                                 self.cache_compiled_script(
                                                     &abs_path,
@@ -44873,6 +44892,11 @@ impl Vm {
                         }
                     }
                     let is_early_attempt = decl_flag == 1;
+                    if let Some(class) = &class_opt {
+                        if self.defer_anon_class(class) {
+                            return Ok(Flow::Next);
+                        }
+                    }
                     if let Some(mut class) = class_opt {
                         // Check for using "_" as a class/interface/trait/enum name (deprecated since 8.4)
                         {

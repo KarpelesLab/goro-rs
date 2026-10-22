@@ -57,6 +57,12 @@ pub struct Config {
     pub file_update_protection: i64,
     pub record_warnings: bool,
     pub max_file_size: i64,
+    /// opcache.log_verbosity_level
+    pub log_verbosity: i64,
+    /// opcache.error_log (empty: stderr)
+    pub error_log: String,
+    /// The opcache.blacklist_filename entries.
+    pub blacklist: Vec<String>,
 }
 
 impl Default for Config {
@@ -68,6 +74,9 @@ impl Default for Config {
             file_update_protection: 2,
             record_warnings: false,
             max_file_size: 0,
+            log_verbosity: 1,
+            error_log: String::new(),
+            blacklist: Vec::new(),
         }
     }
 }
@@ -90,6 +99,64 @@ thread_local! {
     static SCRIPTS: RefCell<HashMap<String, Script>> = RefCell::new(HashMap::new());
     /// Insertion order of SCRIPTS (the hash table's iteration order).
     static ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+}
+
+pub const LOG_FATAL: i64 = 0;
+pub const LOG_ERROR: i64 = 1;
+pub const LOG_WARNING: i64 = 2;
+pub const LOG_INFO: i64 = 3;
+pub const LOG_DEBUG: i64 = 4;
+
+/// Whether a message of `level` is logged (opcache.log_verbosity_level).
+pub fn log_enabled(level: i64) -> bool {
+    CONFIG.with(|c| level <= c.borrow().log_verbosity)
+}
+
+/// zend_accel_error(): "<time> (<pid>): <Level> <message>" to the opcache
+/// log (stderr unless opcache.error_log names a file).
+pub fn log(level: i64, msg: &str) {
+    let (verbosity, error_log) = CONFIG.with(|c| {
+        let c = c.borrow();
+        (c.log_verbosity, c.error_log.clone())
+    });
+    if level > verbosity {
+        return;
+    }
+    let time = unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        let mut buf = [0 as libc::c_char; 64];
+        let p = libc::asctime_r(&tm, buf.as_mut_ptr());
+        if p.is_null() {
+            String::new()
+        } else {
+            let s = std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned();
+            s.trim_end_matches('\n').to_string()
+        }
+    };
+    let kind = match level {
+        LOG_FATAL => "Fatal Error ",
+        LOG_ERROR => "Error ",
+        LOG_WARNING => "Warning ",
+        LOG_INFO => "Message ",
+        _ => "Debug ",
+    };
+    let line = format!("{} ({}): {}{}\n", time, std::process::id(), kind, msg);
+    if !error_log.is_empty() && error_log != "stderr" {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&error_log)
+        {
+            let _ = f.write_all(line.as_bytes());
+            return;
+        }
+    }
+    unsafe {
+        libc::write(2, line.as_ptr() as *const libc::c_void, line.len());
+    }
 }
 
 pub fn enabled() -> bool {
@@ -187,6 +254,46 @@ fn insert(path: &str, compiled: Option<Rc<Compiled>>, timestamp: i64, size: i64)
     }
 }
 
+/// A blacklist entry matched against the start of a path
+/// (zend_accel_blacklist_update_regexp(): `?` is `[^/]`, `*` is `[^/]*`
+/// and `**` is `.*`, anchored at the start only).
+fn blacklist_match(pat: &[u8], path: &[u8]) -> bool {
+    match pat.first() {
+        None => true,
+        Some(b'?') => {
+            path.first().is_some_and(|&c| c != b'/') && blacklist_match(&pat[1..], &path[1..])
+        }
+        Some(b'*') => {
+            let (rest, any) = if pat.get(1) == Some(&b'*') {
+                (&pat[2..], true)
+            } else {
+                (&pat[1..], false)
+            };
+            let mut i = 0;
+            loop {
+                if blacklist_match(rest, &path[i..]) {
+                    return true;
+                }
+                if i >= path.len() || (!any && path[i] == b'/') {
+                    return false;
+                }
+                i += 1;
+            }
+        }
+        Some(&c) => path.first() == Some(&c) && blacklist_match(&pat[1..], &path[1..]),
+    }
+}
+
+/// zend_accel_blacklist_is_blacklisted()
+pub fn is_blacklisted(path: &str) -> bool {
+    CONFIG.with(|c| {
+        c.borrow()
+            .blacklist
+            .iter()
+            .any(|p| blacklist_match(p.as_bytes(), path.as_bytes()))
+    })
+}
+
 /// Records a freshly compiled script (a cache miss).
 pub fn store_compiled(path: &str, compiled: Compiled) {
     let cfg = CONFIG.with(|c| c.borrow().clone());
@@ -194,11 +301,16 @@ pub fn store_compiled(path: &str, compiled: Compiled) {
         return;
     }
     STATS.with(|s| s.borrow_mut().misses += 1);
+    if is_blacklisted(path) {
+        STATS.with(|s| s.borrow_mut().blacklist_misses += 1);
+        return;
+    }
     let Some(mtime) = cacheable(path, &cfg) else {
         return;
     };
     let size = estimate_size(&compiled.op_array);
     insert(path, Some(Rc::new(compiled)), mtime, size);
+    log(LOG_INFO, &format!("Cached script '{}'", path));
 }
 
 /// Records the main script (compiled by the SAPI).
@@ -208,11 +320,16 @@ pub fn store_main(path: &str) {
         return;
     }
     STATS.with(|s| s.borrow_mut().misses += 1);
+    if is_blacklisted(path) {
+        STATS.with(|s| s.borrow_mut().blacklist_misses += 1);
+        return;
+    }
     let Some(mtime) = cacheable(path, &cfg) else {
         return;
     };
     let size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0) * 8 + 1024;
     insert(path, None, mtime, size);
+    log(LOG_INFO, &format!("Cached script '{}'", path));
 }
 
 fn estimate_size(op: &OpArray) -> i64 {
@@ -309,8 +426,15 @@ impl crate::vm::Vm {
         lex_diags: &[(bool, String, u32)],
         warnings: &[(String, u32)],
     ) {
+        if crate::preload::active() {
+            crate::preload::note_compiled(path, op_array, classes);
+            return;
+        }
         if !enabled() {
             return;
+        }
+        if log_enabled(LOG_INFO) {
+            self.flush_cli_output();
         }
         let record = CONFIG.with(|c| c.borrow().record_warnings);
         let mut diags = Vec::new();
@@ -428,8 +552,15 @@ impl crate::vm::Vm {
                 for (msg, wline) in &warnings {
                     self.emit_compile_diagnostic(msg, *wline);
                 }
-                self.cache_compiled_script(path, &op_array, &classes, &lex_diags, &warnings);
-                CompileOnly::Compiled
+                if crate::preload::active() {
+                    match self.preload_compiled_only(path, &program, &op_array, &classes) {
+                        Ok(()) => CompileOnly::Compiled,
+                        Err(_) => CompileOnly::CompileError,
+                    }
+                } else {
+                    self.cache_compiled_script(path, &op_array, &classes, &lex_diags, &warnings);
+                    CompileOnly::Compiled
+                }
             }
             Err(e) => {
                 for (kind, msg, wline) in crate::compiler::take_pending_compile_warnings() {

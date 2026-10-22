@@ -53,7 +53,6 @@ pub fn register_extensions(vm: &mut Vm) {
     goro_ext_dba::register(vm);
     goro_ext_readline::register(vm);
     goro_ext_tidy::register(vm);
-    goro_ext_opcache::register(vm);
     vm.register_extension(b"simplexml");
     vm.register_extension(b"tokenizer");
     vm.register_extension(b"pcre");
@@ -125,6 +124,9 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
     if goro_ext_zend_test::requested(ini.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }
+    // Registered last: its startup (preloading) runs after the other
+    // extensions' (as accel_post_startup() does).
+    goro_ext_opcache::register(&mut vm);
     vm.constants.insert(
         b"PHP_SAPI".to_vec(),
         Value::String(PhpString::from_string(sapi.to_string())),

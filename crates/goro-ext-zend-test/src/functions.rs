@@ -116,7 +116,11 @@ const FUNCTIONS: &[(&str, BuiltinFn, u8)] = &[
     ("get_open_basedir", get_open_basedir, ALL),
     ("zend_test_is_pcre_bundled", zend_test_is_pcre_bundled, ALL),
     ("zend_test_is_zend_ptr", ret_false_checked_int, ALL),
-    ("zend_test_opcache_preloading", ret_false, ALL),
+    (
+        "zend_test_opcache_preloading",
+        zend_test_opcache_preloading,
+        ALL,
+    ),
     ("zend_test_gh19792", zend_test_gh19792, ALL),
     ("zend_test_gh18756", ret_null, ALL),
     (
@@ -229,8 +233,13 @@ fn ret_true(_vm: &mut Vm, _args: &[Value]) -> R {
     Ok(Value::True)
 }
 
-fn ret_false(_vm: &mut Vm, _args: &[Value]) -> R {
-    Ok(Value::False)
+/// zend_test_opcache_preloading(): whether the preload script is running.
+fn zend_test_opcache_preloading(_vm: &mut Vm, _args: &[Value]) -> R {
+    Ok(if goro_core::preload::active() {
+        Value::True
+    } else {
+        Value::False
+    })
 }
 
 fn ret_one(_vm: &mut Vm, _args: &[Value]) -> R {

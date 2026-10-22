@@ -987,6 +987,12 @@ fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
 /// Parse error reporting expressions like "E_ALL&~E_DEPRECATED"
 /// Supports operators: | (OR), ^ (XOR), & (AND), ~ (NOT), ! (logical NOT)
 fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
+    // A plain value ("2M", "0x10") is not an expression.
+    if !expr.contains(['|', '^', '&', '~', '!', '(', ')'])
+        && expr.trim_start().starts_with(|c: char| c.is_ascii_digit())
+    {
+        return None;
+    }
     // PHP error level constants
     fn resolve_constant(name: &str) -> Option<i64> {
         match name.trim() {
@@ -1006,6 +1012,11 @@ fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
             "E_DEPRECATED" => Some(8192),
             "E_USER_DEPRECATED" => Some(16384),
             "E_ALL" => Some(30719), // E_ALL
+            // get_int_val(): atoi() of the operand ("0x7F" is 0)
+            n if n.starts_with(|c: char| c.is_ascii_digit()) => {
+                let digits: String = n.chars().take_while(|c| c.is_ascii_digit()).collect();
+                digits.parse::<i64>().ok()
+            }
             _ => name.trim().parse::<i64>().ok(),
         }
     }
@@ -1744,10 +1755,12 @@ fn execute_php_inner_impl(
     goro_ext_dba::register(&mut vm);
     goro_ext_readline::register(&mut vm);
     goro_ext_tidy::register(&mut vm);
-    goro_ext_opcache::register(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }
+    // Registered last: its startup (preloading) runs after the other
+    // extensions' (as accel_post_startup() does).
+    goro_ext_opcache::register(&mut vm);
     // Also register aliases that PHP tests may use
     vm.register_extension(b"simplexml");
     vm.register_extension(b"tokenizer");
