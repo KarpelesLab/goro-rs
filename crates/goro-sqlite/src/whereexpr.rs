@@ -179,7 +179,7 @@ fn isLikeOrGlob(
     let mut pVal: Option<Box<Mem>> = None;
     let rc: i32;
 
-    if crate::func::sqlite3IsLikeFunction(db, pExpr, pnoCase, Some(&mut wc[..])) == 0 {
+    if crate::func::sqlite3IsLikeFunction(db, pExpr, pnoCase, &mut wc[..]) == 0 {
         return 0;
     }
     let pList = db.ex(pExpr).x.pList;
@@ -562,10 +562,10 @@ fn whereCombineDisjuncts(
     let pB = t.pExpr;
     let (al, ar) = (db.ex(pA).pLeft, db.ex(pA).pRight);
     let (bl, br) = (db.ex(pB).pLeft, db.ex(pB).pRight);
-    if exprCompareNP(db, al, bl, -1) != 0 {
+    if sqlite3ExprCompare(db, false, al, bl, -1) != 0 {
         return;
     }
-    if exprCompareNP(db, ar, br, -1) != 0 {
+    if sqlite3ExprCompare(db, false, ar, br, -1) != 0 {
         return;
     }
     if db.ex(pA).HasProperty(EP_Commuted) != db.ex(pB).HasProperty(EP_Commuted) {
@@ -877,7 +877,7 @@ fn exprAnalyzeOrTerm(
                 } else if ot.u.x.leftColumn != iColumn
                     || (iColumn == XN_EXPR as i32 && {
                         let l = db.ex(ot.pExpr).pLeft;
-                        sqlite3ExprCompare(db, l, pLeft, -1) != 0
+                        sqlite3ExprCompare(db, true, l, pLeft, -1) != 0
                     })
                 {
                     okToChngToIN = 0;
@@ -1092,7 +1092,7 @@ fn exprMightBeIndexed2(
                     continue;
                 }
                 let e = idx_col_expr(db, wi, pIdx, i);
-                if sqlite3ExprCompareSkip(db, pExpr, e, iCur) == 0 && exprIsConstantNP(db, e) == 0 {
+                if sqlite3ExprCompareSkip(db, pExpr, e, iCur) == 0 && sqlite3ExprIsConstant(db, false, e) == 0 {
                     aiCurCol[0] = iCur;
                     aiCurCol[1] = XN_EXPR as i32;
                     return 1;
@@ -1700,7 +1700,7 @@ fn whereAddLimitExpr(
     let pNew: ExprId;
     let mut iVal = 0;
 
-    if sqlite3ExprIsInteger(db, pExpr, &mut iVal, 0) != 0 && iVal >= 0 {
+    if sqlite3ExprIsInteger(db, pExpr, &mut iVal, true, 0) != 0 && iVal >= 0 {
         let pVal = sqlite3ExprInt32(db, iVal);
         if pVal.is_null() {
             return;

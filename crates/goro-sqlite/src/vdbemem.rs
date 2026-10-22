@@ -377,6 +377,7 @@ pub fn sqlite3VdbeMemFinalize(db: &mut Sqlite3, pMem: &mut Mem, pFunc: &FuncDefR
             skipFlag: 0,
             argc: 0,
             zErr: None,
+            pColl: None,
             piCurrentTime: None,
         };
         if let Some(xFinalize) = pFunc.xFinalize.clone() {
@@ -416,6 +417,7 @@ pub fn sqlite3VdbeMemAggValue(
         skipFlag: 0,
         argc: 0,
         zErr: None,
+        pColl: None,
         piCurrentTime: None,
     };
     if let Some(xValue) = pFunc.xValue.clone() {
@@ -779,7 +781,7 @@ pub fn sqlite3VdbeMemCast(db: &mut Sqlite3, pMem: &mut Mem, aff: u8, encoding: u
         SQLITE_AFF_BLOB => {
             /* Really a cast to BLOB */
             if (pMem.flags & MEM_Blob) == 0 {
-                crate::vdbe::sqlite3ValueApplyAffinity(pMem, SQLITE_AFF_TEXT, encoding);
+                crate::vdbe::sqlite3ValueApplyAffinity(db, pMem, SQLITE_AFF_TEXT, encoding);
                 if pMem.flags & MEM_Str != 0 {
                     pMem.MemSetTypeFlag(MEM_Blob);
                 }
@@ -800,7 +802,7 @@ pub fn sqlite3VdbeMemCast(db: &mut Sqlite3, pMem: &mut Mem, aff: u8, encoding: u
             debug_assert!(aff == SQLITE_AFF_TEXT);
             debug_assert!(MEM_Str == (MEM_Blob >> 3));
             pMem.flags |= (pMem.flags & MEM_Blob) >> 3;
-            crate::vdbe::sqlite3ValueApplyAffinity(pMem, SQLITE_AFF_TEXT, encoding);
+            crate::vdbe::sqlite3ValueApplyAffinity(db, pMem, SQLITE_AFF_TEXT, encoding);
             pMem.flags &= !(MEM_Int | MEM_Real | MEM_IntReal | MEM_Blob | MEM_Zero);
             if encoding != SQLITE_UTF8 {
                 pMem.n &= !1;
@@ -1494,6 +1496,7 @@ fn valueFromFunction(
                 skipFlag: 0,
                 argc: nVal as u16,
                 zErr: None,
+                pColl: None,
                 piCurrentTime: None,
             };
             if let Some(x) = pFunc.xSFunc.clone() {
@@ -1506,7 +1509,7 @@ fn valueFromFunction(
             let z = valueTextRef(Some(&mut *db), pv, SQLITE_UTF8).map(|s| s.to_vec());
             errmsg!(db, "%s", z.as_deref());
         } else {
-            crate::vdbe::sqlite3ValueApplyAffinity(pv, aff, SQLITE_UTF8);
+            crate::vdbe::sqlite3ValueApplyAffinity(db, pv, aff, SQLITE_UTF8);
             debug_assert!(rc == SQLITE_OK);
             rc = changeEncoding(Some(&mut *db), pv, enc);
             if rc == SQLITE_OK && sqlite3VdbeMemTooBig(db, pv) != 0 {
@@ -1562,13 +1565,12 @@ fn valueFromExpr(
             let e = db.ex(pExpr);
             (e.u.zToken.clone(), e.pLeft)
         };
-        let mut dummy = Column::default();
-        let aff = crate::build::sqlite3AffinityType(zTok.as_deref(), &mut dummy);
+        let aff = crate::build::sqlite3AffinityType(zTok.as_deref(), None);
         rc = valueFromExpr(db, pLeft, enc, aff, ppVal, pCtx);
         if let Some(v) = ppVal.as_deref_mut() {
             rc = ExpandBlob(v);
             sqlite3VdbeMemCast(db, v, aff, enc);
-            crate::vdbe::sqlite3ValueApplyAffinity(v, affinity, enc);
+            crate::vdbe::sqlite3ValueApplyAffinity(db, v, affinity, enc);
         }
         return rc;
     }
@@ -1625,10 +1627,10 @@ fn valueFromExpr(
                     /* This case is required by -9223372036854775808 and other
                      ** strings that look like integers but cannot be handled by
                      ** the sqlite3DecOrHexToI64() call above.  */
-                    crate::vdbe::sqlite3ValueApplyAffinity(v, SQLITE_AFF_NUMERIC, SQLITE_UTF8);
+                    crate::vdbe::sqlite3ValueApplyAffinity(db, v, SQLITE_AFF_NUMERIC, SQLITE_UTF8);
                 }
             } else {
-                crate::vdbe::sqlite3ValueApplyAffinity(v, affinity, SQLITE_UTF8);
+                crate::vdbe::sqlite3ValueApplyAffinity(db, v, affinity, SQLITE_UTF8);
             }
             debug_assert!((v.flags & MEM_IntReal) == 0);
             if v.flags & (MEM_Int | MEM_IntReal | MEM_Real) != 0 {
@@ -1654,7 +1656,7 @@ fn valueFromExpr(
             } else {
                 v.u.i = -v.u.i;
             }
-            crate::vdbe::sqlite3ValueApplyAffinity(v, affinity, enc);
+            crate::vdbe::sqlite3ValueApplyAffinity(db, v, affinity, enc);
         }
     } else if op == TK_NULL {
         pVal = valueNew(db, pCtx.as_deref_mut());
@@ -1686,7 +1688,7 @@ fn valueFromExpr(
         if let Some(v) = pVal.as_deref_mut() {
             v.flags = MEM_Int;
             v.u.i = (t == 4) as i64; /* pExpr->u.zToken[4]==0 */
-            crate::vdbe::sqlite3ValueApplyAffinity(v, affinity, enc);
+            crate::vdbe::sqlite3ValueApplyAffinity(db, v, affinity, enc);
         }
     }
 
@@ -1776,7 +1778,7 @@ fn stat4ValueFromExpr(
             }
             if let (Some(pv), Some(t)) = (pVal.as_deref_mut(), copy) {
                 *pv = t;
-                crate::vdbe::sqlite3ValueApplyAffinity(pv, affinity, enc);
+                crate::vdbe::sqlite3ValueApplyAffinity(db, pv, affinity, enc);
             }
         }
     } else {

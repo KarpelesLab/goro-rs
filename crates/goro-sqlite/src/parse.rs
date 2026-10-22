@@ -82,6 +82,13 @@ pub struct RefArg {
 }
 
 /// Generate a syntax error
+/// The SQL text being parsed (C: the buffer the zStart/zEnd pointers
+/// passed to sqlite3AddDefaultValue()/sqlite3AddCheckConstraint() point
+/// into); token offsets are relative to it.
+fn parseSql(db: &Sqlite3) -> Rc<[u8]> {
+    db.ppr().zSql.clone().unwrap_or_else(|| Rc::from(&b""[..]))
+}
+
 fn parserSyntaxError(db: &mut Sqlite3, p: &Token) {
     errmsg!(db, b"near \"%T\": syntax error", p);
 }
@@ -973,13 +980,16 @@ fn reduce_action(
         33 => {
             /* ccons ::= DEFAULT scantok term */
             let s = M!(-1).yy0();
-            sqlite3AddDefaultValue(db, M!(0).yy454(), s.off as usize, (s.off + s.n) as usize);
+            let zSql = parseSql(db);
+            sqlite3AddDefaultValue(db, M!(0).yy454(), &zSql, s.off as usize, (s.off + s.n) as usize);
         }
         34 => {
             /* ccons ::= DEFAULT LP expr RP */
+            let zSql = parseSql(db);
             sqlite3AddDefaultValue(
                 db,
                 M!(-1).yy454(),
+                &zSql,
                 M!(-2).yy0().off as usize + 1,
                 M!(0).yy0().off as usize,
             );
@@ -987,9 +997,11 @@ fn reduce_action(
         35 => {
             /* ccons ::= DEFAULT PLUS scantok term */
             let s = M!(-1).yy0();
+            let zSql = parseSql(db);
             sqlite3AddDefaultValue(
                 db,
                 M!(0).yy454(),
+                &zSql,
                 M!(-2).yy0().off as usize,
                 (s.off + s.n) as usize,
             );
@@ -998,7 +1010,8 @@ fn reduce_action(
             /* ccons ::= DEFAULT MINUS scantok term */
             let p = sqlite3PExpr(db, TK_UMINUS as i32, M!(0).yy454(), N);
             let s = M!(-1).yy0();
-            sqlite3AddDefaultValue(db, p, M!(-2).yy0().off as usize, (s.off + s.n) as usize);
+            let zSql = parseSql(db);
+            sqlite3AddDefaultValue(db, p, &zSql, M!(-2).yy0().off as usize, (s.off + s.n) as usize);
         }
         37 => {
             /* ccons ::= DEFAULT scantok ID|INDEXED */
@@ -1007,7 +1020,8 @@ fn reduce_action(
             if p.nn() {
                 sqlite3ExprIdToTrueFalse(db, p);
             }
-            sqlite3AddDefaultValue(db, p, t.off as usize, (t.off + t.n) as usize);
+            let zSql = parseSql(db);
+            sqlite3AddDefaultValue(db, p, &zSql, t.off as usize, (t.off + t.n) as usize);
         }
         38 => {
             /* ccons ::= NOT NULL onconf */
@@ -1035,9 +1049,11 @@ fn reduce_action(
         }
         41 => {
             /* ccons ::= CHECK LP expr RP */
+            let zSql = parseSql(db);
             sqlite3AddCheckConstraint(
                 db,
                 M!(-1).yy454(),
+                &zSql,
                 M!(-2).yy0().off as usize,
                 M!(0).yy0().off as usize,
             );
@@ -1187,9 +1203,11 @@ fn reduce_action(
         }
         70 => {
             /* tcons ::= CHECK LP expr RP onconf */
+            let zSql = parseSql(db);
             sqlite3AddCheckConstraint(
                 db,
                 M!(-2).yy454(),
+                &zSql,
                 M!(-3).yy0().off as usize,
                 M!(-1).yy0().off as usize,
             );
@@ -2313,7 +2331,7 @@ fn reduce_action(
                 let nExpr = db.el(pL).nExpr();
                 let mut e;
                 if nExpr == 1
-                    && sqlite3ExprIsConstant(db, pRHS) != 0
+                    && sqlite3ExprIsConstant(db, true, pRHS) != 0
                     && eop(db, pRHS) != TK_COLLATE
                     && eop(db, lhs) != TK_VECTOR
                 {
@@ -2455,7 +2473,7 @@ fn reduce_action(
                 if let Some(idx) = db.ppr().pNewIndex.clone() {
                     sqlite3RenameTokenMap(
                         db,
-                        RenameKey::IndexName(Rc::as_ptr(&idx) as *const u8 as usize),
+                        crate::alter::rename_key_index_name(&idx),
                         &tTab,
                     );
                 }

@@ -515,21 +515,6 @@ pub(crate) fn item_tab(db: &Sqlite3, it: SrcItemId) -> TableRef {
     db.item(it).pSTab.clone().expect("FROM item without table")
 }
 
-/// C `sqlite3ExprCompare(0, pA, pB, iTab)`: an expression comparison
-/// without a Parse context (bound parameter values are not considered).
-/// NOTE for the integrator: expr.rs only has the Parse-full variant; when
-/// it grows a "no Parse" variant this helper should call it.
-#[inline]
-pub(crate) fn exprCompareNP(db: &mut Sqlite3, pA: ExprId, pB: ExprId, iTab: i32) -> i32 {
-    sqlite3ExprCompare(db, pA, pB, iTab)
-}
-
-/// C `sqlite3ExprIsConstant(0, p)` (no Parse context).  See exprCompareNP.
-#[inline]
-pub(crate) fn exprIsConstantNP(db: &mut Sqlite3, p: ExprId) -> i32 {
-    sqlite3ExprIsConstant(db, p)
-}
-
 /// Run `f` with the Vdbe under construction taken out of the parse, for
 /// the functions that need both `db` and a `&mut Vdbe` (C code that
 /// passes pParse->pVdbe to a function that also uses v->db).
@@ -548,7 +533,7 @@ pub(crate) fn with_vdbe<R>(
 pub(crate) fn isBinary(p: &Option<CollSeqRef>) -> bool {
     match p {
         None => true,
-        Some(c) => crate::mainapi::sqlite3IsBinary(c) != 0,
+        Some(c) => crate::mainapi::sqlite3IsBinary(Some(c)) != 0,
     }
 }
 
@@ -2499,7 +2484,7 @@ fn whereLoopOutputAdjust(
                 {
                     let pRight = db.ex(pOpExpr).pRight;
                     let mut k2 = 0;
-                    if sqlite3ExprIsInteger(db, pRight, &mut k2, 1) != 0 && k2 >= -1 && k2 <= 1 {
+                    if sqlite3ExprIsInteger(db, pRight, &mut k2, true, 1) != 0 && k2 >= -1 && k2 <= 1 {
                         k2 = 10;
                     } else {
                         k2 = 20;
@@ -3208,7 +3193,7 @@ fn exprIsCoveredByIndex(
     for i in 0..aiColumn.len() {
         if aiColumn[i] == XN_EXPR {
             let e = db.el(aColExpr).a[i].pExpr;
-            if exprCompareNP(db, pExpr, e, iTabCur) == 0 {
+            if sqlite3ExprCompare(db, false, pExpr, e, iTabCur) == 0 {
                 return 1;
             }
         }
@@ -3433,7 +3418,7 @@ fn wherePartIdxExpr(
         if db.ex(pLeft).op != TK_COLUMN {
             return;
         }
-        if exprIsConstantNP(db, pRight) == 0 {
+        if sqlite3ExprIsConstant(db, false, pRight) == 0 {
             return;
         }
         let c = sqlite3ExprCompareCollSeq(db, pPart);
@@ -4568,7 +4553,7 @@ fn wherePathSatisfiesOrderBy(
                     }
                     let p = db.el(pOrderBy).a[i as usize].pExpr;
                     let mTerm = sqlite3WhereExprUsage(db, &mut wi.sMaskSet, p);
-                    if mTerm == 0 && exprIsConstantNP(db, p) == 0 {
+                    if mTerm == 0 && sqlite3ExprIsConstant(db, false, p) == 0 {
                         continue;
                     }
                     if (mTerm & !orderDistinctMask) == 0 {
@@ -5644,11 +5629,11 @@ fn whereAddIndexedExpr(
         if j == XN_EXPR {
             pExpr = idx_col_expr(db, wi, pIdx, i);
         } else if j >= 0 && (pTab.borrow().aCol[j as usize].colFlags & COLFLAG_VIRTUAL) != 0 {
-            pExpr = crate::build::sqlite3ColumnExpr(&pTab, j as usize);
+            pExpr = crate::build::sqlite3ColumnExpr(db, &pTab, j as usize);
         } else {
             continue;
         }
-        if exprIsConstantNP(db, pExpr) != 0 {
+        if sqlite3ExprIsConstant(db, false, pExpr) != 0 {
             continue;
         }
         let e = sqlite3ExprDup(db, pExpr, 0);

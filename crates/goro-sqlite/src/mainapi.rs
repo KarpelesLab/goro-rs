@@ -3143,17 +3143,16 @@ pub fn sqlite3_extended_result_codes(db: &mut Sqlite3, onoff: i32) -> i32 {
 ///
 /// Invoke the xFileControl method on a particular database.
 ///
-/// Rust: pArg is the argument buffer: for the integer opcodes it holds a
-/// native-endian int (4 bytes) or i64 (8 bytes, e.g. SQLITE_FCNTL_MMAP_SIZE)
-/// that is read and written in place.  SQLITE_FCNTL_FILE_POINTER,
-/// _VFS_POINTER and _JOURNAL_POINTER cannot return pointers and fail
-/// with SQLITE_NOTFOUND.
+/// Rust: pArg is the typed file-control argument (os::FcntlArg; C void*).
+/// SQLITE_FCNTL_FILE_POINTER, _VFS_POINTER and _JOURNAL_POINTER cannot
+/// return pointers and fail with SQLITE_NOTFOUND.
 pub fn sqlite3_file_control(
     db: &mut Sqlite3,
     zDbName: Option<&[u8]>,
     op: i32,
-    pArg: &mut [u8],
+    pArg: crate::os::FcntlArg,
 ) -> i32 {
+    use crate::os::FcntlArg;
     let mut rc = SQLITE_ERROR;
     let pBtree = sqlite3DbNameToBtree(db, zDbName);
     if let Some(pBtree) = pBtree {
@@ -3165,22 +3164,18 @@ pub fn sqlite3_file_control(
             rc = SQLITE_NOTFOUND;
         } else if op == SQLITE_FCNTL_DATA_VERSION {
             let v = crate::pager::sqlite3PagerDataVersion(&mut pPager.borrow_mut());
-            if pArg.len() >= 4 {
-                pArg[..4].copy_from_slice(&v.to_ne_bytes());
+            if let FcntlArg::Int(p) = pArg {
+                *p = v as i32;
             }
             rc = SQLITE_OK;
         } else if op == SQLITE_FCNTL_RESERVE_BYTES {
-            let iNew = if pArg.len() >= 4 {
-                i32::from_ne_bytes([pArg[0], pArg[1], pArg[2], pArg[3]])
-            } else {
-                -1
-            };
             let cur = sqlite3BtreeGetRequestedReserve(&pBtree);
-            if pArg.len() >= 4 {
-                pArg[..4].copy_from_slice(&cur.to_ne_bytes());
-            }
-            if iNew >= 0 && iNew <= 255 {
-                sqlite3BtreeSetPageSize(&pBtree, 0, iNew, 0);
+            if let FcntlArg::Int(p) = pArg {
+                let iNew = *p;
+                *p = cur;
+                if iNew >= 0 && iNew <= 255 {
+                    sqlite3BtreeSetPageSize(&pBtree, 0, iNew, 0);
+                }
             }
             rc = SQLITE_OK;
         } else if op == SQLITE_FCNTL_RESET_CACHE {
@@ -3188,11 +3183,11 @@ pub fn sqlite3_file_control(
             rc = SQLITE_OK;
         } else {
             let nSave = db.busyHandler.borrow().nBusy;
-            let fd = crate::pager::sqlite3PagerFile(&mut pPager.borrow_mut());
-            rc = match fd {
-                Some(mut fd) => crate::os::sqlite3OsFileControl(&mut fd, op, pArg),
-                None => SQLITE_NOTFOUND,
-            };
+            {
+                let mut pg = pPager.borrow_mut();
+                let fd = crate::pager::sqlite3PagerFile(&mut pg);
+                rc = crate::os::sqlite3OsFileControl(fd, op, pArg);
+            }
             db.busyHandler.borrow_mut().nBusy = nSave;
         }
     }

@@ -54,6 +54,7 @@ impl<'a> Context<'a> {
             skipFlag: 0,
             argc: 0,
             zErr: None,
+            pColl: None,
             piCurrentTime: None,
         }
     }
@@ -764,8 +765,10 @@ fn sqlite3Step(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
     rc & db.errMask
 }
 
-/// sqlite3_step() on a statement already taken out of its slot.
-pub fn vdbeStepStmt(db: &mut Sqlite3, v: &mut Vdbe) -> i32 {
+/// sqlite3_step() on statement `pStmt`, already taken out of its slot into
+/// `v`.  sqlite3Reprepare() needs the statement in its slot, so `v` is put
+/// back for the duration of that call.
+pub fn vdbeStepStmt(db: &mut Sqlite3, pStmt: StmtId, v: &mut Box<Vdbe>) -> i32 {
     let mut rc;
     let mut cnt = 0; /* Counter to prevent infinite loop of reprepares */
     loop {
@@ -779,7 +782,9 @@ pub fn vdbeStepStmt(db: &mut Sqlite3, v: &mut Vdbe) -> i32 {
             break;
         }
         let savedPc = v.pc;
-        rc = crate::prepare::sqlite3Reprepare(db, v);
+        db.stmt_put(pStmt, std::mem::take(v));
+        rc = crate::prepare::sqlite3Reprepare(db, pStmt);
+        *v = db.stmt_take(pStmt).expect("statement slot");
         if rc != SQLITE_OK {
             /* This case occurs after failing to recompile an sql statement.
              ** The error message from the SQL compiler has already been loaded
@@ -820,7 +825,7 @@ pub fn sqlite3_step(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
         Some(v) => v,
         None => return vdbeSafetyMisuse(),
     };
-    let rc = vdbeStepStmt(db, &mut v);
+    let rc = vdbeStepStmt(db, pStmt, &mut v);
     db.stmt_put(pStmt, v);
     rc
 }
@@ -1689,33 +1694,37 @@ pub fn sqlite3_stmt_isexplain(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
 ///
 /// Set the explain mode for a statement.
 pub fn sqlite3_stmt_explain(db: &mut Sqlite3, pStmt: StmtId, eMode: i32) -> i32 {
-    db.with_stmt(pStmt, |db, v| {
-        let rc;
-        if v.explain as i32 == eMode {
-            rc = SQLITE_OK;
-        } else if eMode < 0 || eMode > 2 {
-            rc = SQLITE_ERROR;
-        } else if (v.prepFlags as i32 & SQLITE_PREPARE_SAVESQL) == 0 {
-            rc = SQLITE_ERROR;
-        } else if v.eVdbeState != VDBE_READY_STATE {
-            rc = SQLITE_BUSY;
-        } else if v.nMem >= 10 && (eMode != 2 || v.haveEqpOps != 0) {
-            /* No reprepare necessary */
-            v.explain = eMode as u8;
-            rc = SQLITE_OK;
-        } else {
-            v.explain = eMode as u8;
-            rc = crate::prepare::sqlite3Reprepare(db, v);
-            v.haveEqpOps = (eMode == 2) as u8;
-        }
-        if v.explain != 0 {
-            v.nResColumn = (12 - 4 * v.explain as i32) as u16;
-        } else {
-            v.nResColumn = v.nResAlloc;
-        }
-        rc
-    })
-    .unwrap_or(SQLITE_MISUSE)
+    let Some(mut v) = db.stmt_take(pStmt) else {
+        return SQLITE_MISUSE;
+    };
+    let rc;
+    if v.explain as i32 == eMode {
+        rc = SQLITE_OK;
+    } else if eMode < 0 || eMode > 2 {
+        rc = SQLITE_ERROR;
+    } else if (v.prepFlags as i32 & SQLITE_PREPARE_SAVESQL) == 0 {
+        rc = SQLITE_ERROR;
+    } else if v.eVdbeState != VDBE_READY_STATE {
+        rc = SQLITE_BUSY;
+    } else if v.nMem >= 10 && (eMode != 2 || v.haveEqpOps != 0) {
+        /* No reprepare necessary */
+        v.explain = eMode as u8;
+        rc = SQLITE_OK;
+    } else {
+        v.explain = eMode as u8;
+        /* sqlite3Reprepare() needs the statement in its slot */
+        db.stmt_put(pStmt, v);
+        rc = crate::prepare::sqlite3Reprepare(db, pStmt);
+        v = db.stmt_take(pStmt).expect("statement slot");
+        v.haveEqpOps = (eMode == 2) as u8;
+    }
+    if v.explain != 0 {
+        v.nResColumn = (12 - 4 * v.explain as i32) as u16;
+    } else {
+        v.nResColumn = v.nResAlloc;
+    }
+    db.stmt_put(pStmt, v);
+    rc
 }
 
 /// C: `int sqlite3_stmt_busy(sqlite3_stmt *pStmt)`

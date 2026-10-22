@@ -128,37 +128,8 @@ fn collEq(a: &Option<CollSeqRef>, b: &Option<CollSeqRef>) -> bool {
 fn isBinary(p: &Option<CollSeqRef>) -> bool {
     match p {
         None => true,
-        Some(c) => crate::mainapi::sqlite3IsBinary(c) != 0,
+        Some(c) => crate::mainapi::sqlite3IsBinary(Some(c)) != 0,
     }
-}
-
-/// sqlite3ExprIsInteger(p, pValue, 0, 0): with a NULL pParse argument the
-/// C function only accepts integer literals (optionally with unary +/-),
-/// never bound parameters.  The Rust skeleton of sqlite3ExprIsInteger()
-/// has no way to express pParse==NULL, so that case is handled here.
-fn exprIsIntegerNoParse(db: &Sqlite3, mut p: ExprId, pValue: &mut i32) -> i32 {
-    let mut iSign = 1;
-    loop {
-        if p.is_null() {
-            return 0;
-        }
-        let e = db.ex(p);
-        if e.UseUValue() {
-            *pValue = e.u.iValue.wrapping_mul(iSign);
-            return 1;
-        }
-        if e.op == TK_UPLUS {
-            p = e.pLeft;
-            continue;
-        }
-        if e.op == TK_UMINUS {
-            iSign = -iSign;
-            p = e.pLeft;
-            continue;
-        }
-        break;
-    }
-    0
 }
 
 /// Create a new transient Table object (sqlite3DbMallocZero(sizeof(Table))).
@@ -325,9 +296,14 @@ fn findRightmost(db: &Sqlite3, mut p: SelectId) -> SelectId {
 ** If an illegal or unsupported join type is seen, then still return
 ** a join type, but put an error in the pParse structure.
 **
-** Rust: a NULL token (C pB==0 / pC==0) is a Token whose `z` is None.
+** Rust: pB and pC are None for C NULL.
 */
-pub fn sqlite3JoinType(db: &mut Sqlite3, pA: &Token, pB: &Token, pC: &Token) -> i32 {
+pub fn sqlite3JoinType(
+    db: &mut Sqlite3,
+    pA: &Token,
+    pB: Option<&Token>,
+    pC: Option<&Token>,
+) -> i32 {
     let mut jointype: i32 = 0;
     /*                          0123456789 123456789 123456789 123 */
     const zKeyText: &[u8] = b"naturaleftouterightfullinnercross";
@@ -340,11 +316,11 @@ pub fn sqlite3JoinType(db: &mut Sqlite3, pA: &Token, pB: &Token, pC: &Token) -> 
         /* (5) inner   */ (23, 5, JT_INNER),
         /* (6) cross   */ (28, 5, JT_INNER | JT_CROSS),
     ];
-    let apAll: [&Token; 3] = [pA, pB, pC];
+    let apAll: [Option<&Token>; 3] = [Some(pA), pB, pC];
     for p in apAll.iter() {
-        if p.is_null() {
+        let Some(p) = *p else {
             break;
-        }
+        };
         let mut j = 0;
         while j < aKeyword.len() {
             let (i, nChar, code) = aKeyword[j];
@@ -370,9 +346,11 @@ pub fn sqlite3JoinType(db: &mut Sqlite3, pA: &Token, pB: &Token, pC: &Token) -> 
         || (jointype & JT_ERROR as i32) != 0
         || (jointype & (JT_OUTER | JT_LEFT | JT_RIGHT) as i32) == JT_OUTER as i32
     {
-        let zSp1: &[u8] = if pB.is_null() { b"" } else { b" " };
-        let zSp2: &[u8] = if pC.is_null() { b"" } else { b" " };
-        errmsg!(db, b"unknown join type: %T%s%T%s%T", pA, zSp1, pB, zSp2, pC);
+        let zSp1: &[u8] = if pB.is_none() { b"" } else { b" " };
+        let zSp2: &[u8] = if pC.is_none() { b"" } else { b" " };
+        let tB = pB.cloned().unwrap_or_default();
+        let tC = pC.cloned().unwrap_or_default();
+        errmsg!(db, b"unknown join type: %T%s%T%s%T", pA, zSp1, &tB, zSp2, &tC);
         jointype = JT_INNER as i32;
     }
     jointype
@@ -1942,7 +1920,7 @@ fn columnTypeImpl(db: &mut Sqlite3, pNC0: &NcChain, pExpr: ExprId) -> ColumnType
                     zType = crate::util::sqlite3ColumnType(&mut c, None);
                 }
                 zOrigTab = Some(t.zName.clone());
-                let iDb = schemaToIndex(db, t.pSchema);
+                let iDb = crate::prepare::sqlite3SchemaToIndex(db, t.pSchema);
                 if iDb >= 0 {
                     zOrigDb = db.aDb[iDb as usize].zDbSName.clone();
                 }
@@ -2293,7 +2271,7 @@ pub fn sqlite3SubqueryColumnTypes(
         let mut zType: Option<ZStr> = columnTypeImpl(db, &sNC, p).0;
         let mismatch = match &zType {
             None => true,
-            Some(z) => pCol.affinity != sqlite3AffinityType(Some(z), &mut Column::default()),
+            Some(z) => pCol.affinity != sqlite3AffinityType(Some(z), None),
         };
         if mismatch {
             if pCol.affinity == SQLITE_AFF_NUMERIC || pCol.affinity == SQLITE_AFF_FLEXNUM {
@@ -2459,7 +2437,7 @@ fn computeLimitRegisters(db: &mut Sqlite3, p: SelectId, iBreak: i32) {
         db.selm(p).iLimit = iLimit;
         sqlite3GetVdbe(db);
         let mut n = 0;
-        if sqlite3ExprIsInteger(db, pLeft, &mut n, 0) != 0 {
+        if sqlite3ExprIsInteger(db, pLeft, &mut n, true, 0) != 0 {
             sqlite3VdbeAddOp2(db.v(), OP_Integer, n, iLimit);
             if n == 0 {
                 sqlite3VdbeGoto(db.v(), iBreak);
@@ -2858,21 +2836,27 @@ fn hasAnchor(db: &Sqlite3, mut p: SelectId) -> bool {
 ** false negatives for testing purposes, disable the SQLITE_UnionLimit
 ** optimization.
 */
-fn unionWithLimitOne(db: &Sqlite3, p: SelectId) -> bool {
-    let s = db.sel(p);
-    if s.op != TK_UNION {
+fn unionWithLimitOne(db: &mut Sqlite3, p: SelectId) -> bool {
+    let (op, pLimit) = {
+        let s = db.sel(p);
+        (s.op, s.pLimit)
+    };
+    if op != TK_UNION {
         return false;
     }
-    if s.pLimit.is_null() {
+    if pLimit.is_null() {
         return false;
     }
-    let l = db.ex(s.pLimit);
-    if l.pRight.nn() {
+    let (lRight, lLeft) = {
+        let l = db.ex(pLimit);
+        (l.pRight, l.pLeft)
+    };
+    if lRight.nn() {
         return false; /* No OFFSET */
     }
     let mut v = 0;
-    debug_assert!(l.pLeft.nn());
-    if exprIsIntegerNoParse(db, l.pLeft, &mut v) == 0 {
+    debug_assert!(lLeft.nn());
+    if sqlite3ExprIsInteger(db, lLeft, &mut v, false, 0) == 0 {
         return false;
     }
     if v != 1 {
@@ -3035,7 +3019,7 @@ fn multiSelect(db: &mut Sqlite3, p: SelectId, pDest: &mut SelectDest) -> i32 {
             let pLimit = db.sel(p).pLimit;
             if pLimit.nn() {
                 let pl = db.ex(pLimit).pLeft;
-                if sqlite3ExprIsInteger(db, pl, &mut nLimit, 0) != 0
+                if sqlite3ExprIsInteger(db, pl, &mut nLimit, true, 0) != 0
                     && nLimit > 0
                     && db.sel(p).nSelectRow > crate::util::sqlite3LogEst(nLimit as u64)
                 {
@@ -3555,7 +3539,7 @@ fn multiSelectByMerge(db: &mut Sqlite3, p: SelectId, pDest: &mut SelectDest) -> 
     db.selm(pPrior).iLimit = regLimitA;
     explainQP(db, 1, b"LEFT", &[]);
     sqlite3Select(db, pPrior, &mut destA);
-    sqlite3VdbeEndCoroutine(db.v(), regAddrA);
+    sqlite3VdbeEndCoroutine(db, regAddrA);
     sqlite3VdbeJumpHere(db.v(), addr1);
 
     /* Generate a coroutine to evaluate the SELECT statement on
@@ -3579,7 +3563,7 @@ fn multiSelectByMerge(db: &mut Sqlite3, p: SelectId, pDest: &mut SelectDest) -> 
         s.iLimit = savedLimit;
         s.iOffset = savedOffset;
     }
-    sqlite3VdbeEndCoroutine(db.v(), regAddrB);
+    sqlite3VdbeEndCoroutine(db, regAddrB);
 
     /* Generate a subroutine that outputs the current row of the A
      ** select as the next output row of the compound select.
@@ -4846,10 +4830,10 @@ fn findConstInWhere(db: &mut Sqlite3, pConst: &mut WhereConst, pExpr: ExprId) {
     }
     debug_assert!(pRight.nn());
     debug_assert!(pLeft.nn());
-    if db.ex(pRight).op == TK_COLUMN && sqlite3ExprIsConstant(db, pLeft) != 0 {
+    if db.ex(pRight).op == TK_COLUMN && sqlite3ExprIsConstant(db, true, pLeft) != 0 {
         constInsert(db, pConst, pRight, pLeft, pExpr);
     }
-    if db.ex(pLeft).op == TK_COLUMN && sqlite3ExprIsConstant(db, pRight) != 0 {
+    if db.ex(pLeft).op == TK_COLUMN && sqlite3ExprIsConstant(db, true, pRight) != 0 {
         constInsert(db, pConst, pLeft, pRight, pExpr);
     }
 }
@@ -5584,16 +5568,8 @@ fn convertCompoundSelectToSubquery(w: &mut Walker, p: SelectId) -> i32 {
 
     let pNew = db.arena.new_select(Select::default());
     let dummy = Token::default();
-    let mut onUsing = OnOrUsing::default();
-    let pNewSrc = sqlite3SrcListAppendFromTerm(
-        db,
-        SrcListId::NULL,
-        &Token::default(),
-        &Token::default(),
-        &dummy,
-        pNew,
-        &mut onUsing,
-    );
+    let pNewSrc =
+        sqlite3SrcListAppendFromTerm(db, SrcListId::NULL, None, None, &dummy, pNew, None);
     debug_assert!(pNewSrc.nn() || db.ppr().nErr != 0);
     if db.ppr().nErr != 0 {
         sqlite3SrcListDelete(db, pNewSrc);
@@ -6029,52 +6005,6 @@ fn inAnyUsingClause(db: &mut Sqlite3, zName: &[u8], pBase: SrcItemId, mut N: i32
     false
 }
 
-/// sqlite3MatchEName(pItem, 0, zTab, 0, 0): check that an ENAME_TAB
-/// result-set entry of the form "DATABASE.TABLE.COLUMN" belongs to table
-/// zTab.  (The skeleton of resolve.rs's sqlite3MatchEName() takes a
-/// placeholder argument for the ExprList_item, so this case is ported
-/// locally.)
-fn matchENameTab(pItem: &ExprListItem, zTab: &[u8]) -> i32 {
-    let eEName = pItem.fg.eEName;
-    if eEName != ENAME_TAB {
-        /* (ENAME_ROWID requires a non-NULL pbRowid) */
-        return 0;
-    }
-    let zSpan = pItem.zEName.as_deref().unwrap_or(b"");
-    let mut n = 0;
-    while n < zSpan.len() && zSpan[n] != 0 && zSpan[n] != b'.' {
-        n += 1;
-    }
-    let zSpan = if n < zSpan.len() {
-        &zSpan[n + 1..]
-    } else {
-        &zSpan[n..]
-    };
-    let mut n = 0;
-    while n < zSpan.len() && zSpan[n] != 0 && zSpan[n] != b'.' {
-        n += 1;
-    }
-    if crate::util::sqlite3_strnicmp(Some(zSpan), Some(zTab), n as i32) != 0
-        || zTab.get(n).copied().unwrap_or(0) != 0
-    {
-        return 0;
-    }
-    1
-}
-
-/// sqlite3RenameTokenRemap(pParse, pTo, pFrom) for expression nodes: the
-/// skeleton of alter.rs takes placeholder arguments, so the (tiny) body is
-/// ported here.  Assumes Parse::pRename is in insertion order (most recent
-/// last), so it is searched from the end like the C list is from its head.
-fn renameTokenRemapExpr(db: &mut Sqlite3, pTo: ExprId, pFrom: ExprId) {
-    for t in db.pp().pRename.iter_mut().rev() {
-        if t.p == RenameKey::Expr(pFrom) {
-            t.p = RenameKey::Expr(pTo);
-            break;
-        }
-    }
-}
-
 /*
 ** This routine is a Walker callback for "expanding" a SELECT statement.
 ** "Expanding" means to do the following:
@@ -6337,7 +6267,7 @@ fn selectExpander(pWalker: &mut Walker, p: SelectId) -> i32 {
                             }
                         }
                         pNestedFrom = ExprListId::NULL;
-                        let iDb = schemaToIndex(db, pTab.borrow().pSchema);
+                        let iDb = crate::prepare::sqlite3SchemaToIndex(db, pTab.borrow().pSchema);
                         zSchemaName = if iDb >= 0 {
                             db.aDb[iDb as usize].zDbSName.clone()
                         } else {
@@ -6400,7 +6330,13 @@ fn selectExpander(pWalker: &mut Walker, p: SelectId) -> i32 {
 
                             if let Some(t) = &zTName {
                                 if pNestedFrom.nn()
-                                    && matchENameTab(&db.el(pNestedFrom).a[j as usize], t) == 0
+                                    && crate::resolve::sqlite3MatchEName(
+                                        &db.el(pNestedFrom).a[j as usize],
+                                        None,
+                                        Some(t),
+                                        None,
+                                        &mut 0,
+                                    ) == 0
                                 {
                                     continue;
                                 }
@@ -6446,7 +6382,7 @@ fn selectExpander(pWalker: &mut Walker, p: SelectId) -> i32 {
                             let mut pLeft = sqlite3Expr(db, TK_ID as i32, Some(&zTabName));
                             let mut pe = sqlite3PExpr(db, TK_DOT as i32, pLeft, pRight);
                             if inRename && pELeft.nn() {
-                                renameTokenRemapExpr(db, pLeft, pELeft);
+                                crate::alter::sqlite3RenameTokenRemap(db, Some(RenameKey::Expr(pLeft)), RenameKey::Expr(pELeft));
                             }
                             if let Some(zs) = &zSchemaName {
                                 pLeft = sqlite3Expr(db, TK_ID as i32, Some(zs));
@@ -6646,17 +6582,6 @@ pub fn sqlite3SelectPrep(db: &mut Sqlite3, p: SelectId, pOuterNC: NcId) {
         return;
     }
     sqlite3SelectAddTypeInfo(db, p);
-}
-
-/// sqlite3SchemaToIndex() on a SchemaId.  Transient tables (subqueries,
-/// CTEs) have the default SchemaId, which plays the role of the C NULL
-/// schema pointer (C returns -32768 for it).
-fn schemaToIndex(db: &Sqlite3, id: SchemaId) -> i32 {
-    if id == SchemaId::default() {
-        -32768
-    } else {
-        db.schema_index(id)
-    }
 }
 
 /*
@@ -8375,7 +8300,7 @@ pub fn sqlite3Select(db: &mut Sqlite3, p: SelectId, pDest: &mut SelectDest) -> i
                     let it = db.item(pItem);
                     if it.fg.fixedSchema != 0 {
                         let sid = it.u4.pSchema.unwrap_or_default();
-                        let iDb = schemaToIndex(db, sid);
+                        let iDb = crate::prepare::sqlite3SchemaToIndex(db, sid);
                         if iDb >= 0 {
                             db.aDb[iDb as usize].zDbSName.clone()
                         } else {
@@ -8467,7 +8392,7 @@ pub fn sqlite3Select(db: &mut Sqlite3, p: SelectId, pDest: &mut SelectDest) -> i
                 itemTab(db, pItem).borrow_mut().nRowLogEst = nsr;
                 db.itemm(pItem).fg.viaCoroutine = 1;
                 subqm(db, pItem).regResult = dest.iSdst;
-                sqlite3VdbeEndCoroutine(db.v(), regReturn);
+                sqlite3VdbeEndCoroutine(db, regReturn);
                 sqlite3VdbeJumpHere(db.v(), addrTop - 1);
                 sqlite3ClearTempRegCache(db);
             } else if db.item(pItem).fg.isCte != 0
@@ -9237,7 +9162,7 @@ pub fn sqlite3Select(db: &mut Sqlite3, p: SelectId, pDest: &mut SelectDest) -> i
                      ** is better to execute the op on an index, as indexes are almost
                      ** always spread across less pages than their corresponding tables.
                      */
-                    let iDb = schemaToIndex(db, pTab.borrow().pSchema);
+                    let iDb = crate::prepare::sqlite3SchemaToIndex(db, pTab.borrow().pSchema);
                     let iCsr = db.ppr().nTab; /* Cursor to scan b-tree */
                     db.pp().nTab += 1;
                     let mut pKeyInfo: Option<KeyInfoRef> = None; /* Keyinfo for scanned index */

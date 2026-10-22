@@ -181,16 +181,13 @@ pub fn sqlite3BeginTrigger(
                 pName = pName1.clone();
             } else {
                 /* Figure out the db that the trigger will be created in */
-                let mut pUnqual: Option<Box<Token>> = None;
+                let mut pUnqual = Token::default();
                 let i = sqlite3TwoPartName(db, pName1, pName2, &mut pUnqual);
                 if i < 0 {
                     break 'cleanup;
                 }
                 iDb = i;
-                pName = match pUnqual {
-                    Some(t) => *t,
-                    None => pName1.clone(),
-                };
+                pName = pUnqual;
             }
             let mut iDb = iDb;
             if pTableName.is_null() || db.mallocFailed != 0 {
@@ -366,8 +363,8 @@ pub fn sqlite3BeginTrigger(
                 },
                 ..Default::default()
             };
-            if db.ppr().IN_RENAME_OBJECT() {
-                crate::alter::sqlite3RenameTokenRemap(db, &trig.table, &zTable);
+            let inRename = db.ppr().IN_RENAME_OBJECT();
+            if inRename {
                 trig.pWhen = Tree::from_id(pWhen);
                 pWhen = ExprId::NULL;
             } else {
@@ -377,7 +374,17 @@ pub fn sqlite3BeginTrigger(
             trig.pColumns = Tree::from_id(pColumns);
             pColumns = IdListId::NULL;
             debug_assert!(db.ppr().pNewTrigger.is_none());
-            db.pp().pNewTrigger = Some(Rc::new(RefCell::new(trig)));
+            let pTrigger = Rc::new(RefCell::new(trig));
+            if inRename {
+                /* C: sqlite3RenameTokenRemap(pParse, pTrigger->table,
+                 ** pTableName->a[0].zName) */
+                crate::alter::sqlite3RenameTokenRemap(
+                    db,
+                    Some(crate::alter::rename_key_trigger_table(&pTrigger)),
+                    crate::alter::rename_key_srcitem_name(SrcItemId(pTableName, 0)),
+                );
+            }
+            db.pp().pNewTrigger = Some(pTrigger);
         }
         if orphan {
             // trigger_orphan_error:
@@ -501,7 +508,7 @@ pub fn sqlite3FinishTrigger(db: &mut Sqlite3, pStepList: TriggerStepId, pAll: &T
             );
             sqlite3ChangeCookie(db, iDb);
             let zWhere = mprintf!(db, "type='trigger' AND name='%q'", &zName);
-            sqlite3VdbeAddParseSchemaOp(db.v(), iDb, zWhere, 0);
+            sqlite3VdbeAddParseSchemaOp(db, iDb, Some(zWhere), 0);
         }
 
         if db.init.busy != 0 {
@@ -549,13 +556,19 @@ pub fn sqlite3FinishTrigger(db: &mut Sqlite3, pStepList: TriggerStepId, pAll: &T
 /// whitespace characters into ordinary space characters.
 ///
 /// Rust: `zStart` and `zEnd` stand for the C pointers into the SQL text:
-/// each is the SQL text from that position to the end of the statement
-/// (so the span is `zStart[..zStart.len()-zEnd.len()]`).  This is
-/// sqlite3DbSpanDup() (leading and trailing white space trimmed).
-fn triggerSpanDup(zStart: Option<&[u8]>, zEnd: Option<&[u8]>) -> Option<ZStr> {
-    let s = zStart?;
-    let n = s.len().saturating_sub(zEnd.map_or(0, |e| e.len()));
-    let mut z = &s[..n];
+/// they are offsets into the SQL text being parsed (db.ppr().zSql).  This
+/// is sqlite3DbSpanDup() (leading and trailing white space trimmed).
+fn triggerSpanDup(db: &Sqlite3, zStart: usize, zEnd: usize) -> Option<ZStr> {
+    let zSql = db.ppr().zSql.clone()?;
+    Some(spanDupText(&zSql, zStart, zEnd))
+}
+
+/// The text work of triggerSpanDup(): s[zStart..zEnd], trimmed, with every
+/// white-space character converted to a space.
+fn spanDupText(s: &[u8], zStart: usize, zEnd: usize) -> ZStr {
+    let iEnd = zEnd.min(s.len());
+    let iStart = zStart.min(iEnd);
+    let mut z = &s[iStart..iEnd];
     while let Some(&c) = z.first() {
         if sqlite3Isspace(c) {
             z = &z[1..];
@@ -574,11 +587,9 @@ fn triggerSpanDup(zStart: Option<&[u8]>, zEnd: Option<&[u8]>) -> Option<ZStr> {
     if let Some(p) = z.iter().position(|&c| c == 0) {
         z = &z[..p];
     }
-    Some(
-        z.iter()
-            .map(|&c| if sqlite3Isspace(c) { b' ' } else { c })
-            .collect(),
-    )
+    z.iter()
+        .map(|&c| if sqlite3Isspace(c) { b' ' } else { c })
+        .collect()
 }
 
 /// C: `TriggerStep * sqlite3TriggerSelectStep( sqlite3 *db, Select *pSelect, const char *zStart, const char *zEnd )`
@@ -594,11 +605,12 @@ pub fn sqlite3TriggerSelectStep(
     zStart: usize,
     zEnd: usize,
 ) -> TriggerStepId {
+    let zSpan = triggerSpanDup(db, zStart, zEnd);
     db.arena.new_tstep(TriggerStep {
         op: TK_SELECT,
         pSelect,
         orconf: OE_Default,
-        zSpan: triggerSpanDup(zStart, zEnd),
+        zSpan,
         ..Default::default()
     })
 }
@@ -611,8 +623,8 @@ fn triggerStepAllocate(
     db: &mut Sqlite3,
     op: u8,
     pTabList: SrcListId,
-    zStart: Option<&[u8]>,
-    zEnd: Option<&[u8]>,
+    zStart: usize,
+    zEnd: usize,
 ) -> TriggerStepId {
     let mut pTriggerStep = TriggerStepId::NULL;
 
@@ -631,16 +643,19 @@ fn triggerStepAllocate(
             );
         } else {
             let pSrc = sqlite3SrcListDup(db, pTabList, EXPRDUP_REDUCE);
+            let zSpan = triggerSpanDup(db, zStart, zEnd);
             pTriggerStep = db.arena.new_tstep(TriggerStep {
                 pSrc,
                 op,
-                zSpan: triggerSpanDup(zStart, zEnd),
+                zSpan,
                 ..Default::default()
             });
             if pSrc.nn() && db.ppr().IN_RENAME_OBJECT() {
-                let a = db.src(pSrc).a[0].zName.clone().unwrap_or_default();
-                let b = db.src(pTabList).a[0].zName.clone().unwrap_or_default();
-                crate::alter::sqlite3RenameTokenRemap(db, &a, &b);
+                crate::alter::sqlite3RenameTokenRemap(
+                    db,
+                    Some(crate::alter::rename_key_srcitem_name(SrcItemId(pSrc, 0))),
+                    crate::alter::rename_key_srcitem_name(SrcItemId(pTabList, 0)),
+                );
             }
         }
     }
@@ -755,11 +770,11 @@ pub fn sqlite3TriggerUpdateStep(
             pFromDup = sqlite3SrcListAppendFromTerm(
                 db,
                 SrcListId::NULL,
-                &Token::default(),
-                &Token::default(),
+                None,
+                None,
                 &tas,
                 pSub,
-                &mut OnOrUsing::default(),
+                None,
             );
         }
         let src = db.arena.tstep(pTriggerStep).pSrc;
@@ -1827,12 +1842,7 @@ mod tests {
     #[test]
     fn span_dup_trims_and_flattens_whitespace() {
         let sql: &[u8] = b"  INSERT INTO t\n\tVALUES(1);  END";
-        let start = &sql[0..];
-        let end = &sql[26..]; /* ";  END": the span stops before ';' */
-        assert_eq!(
-            triggerSpanDup(Some(start), Some(end)).unwrap(),
-            b"INSERT INTO t  VALUES(1)".to_vec()
-        );
-        assert!(triggerSpanDup(None, Some(end)).is_none());
+        /* the span stops before ';' (offset 26) */
+        assert_eq!(spanDupText(sql, 0, 26), b"INSERT INTO t  VALUES(1)".to_vec());
     }
 }

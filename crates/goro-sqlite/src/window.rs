@@ -734,12 +734,10 @@ pub fn sqlite3WindowFunctionDefs() -> Vec<FuncDef> {
 */
 /// C: `void sqlite3WindowFunctions(void)`
 ///
-/// Rust: the skeleton's sqlite3InsertBuiltinFuncs() takes one FuncDef at a
-/// time, so each definition is inserted with nDef==1, in array order.
-pub fn sqlite3WindowFunctions() {
-    for def in sqlite3WindowFunctionDefs() {
-        sqlite3InsertBuiltinFuncs(&Rc::new(def), 1);
-    }
+/// Rust: the global hash table (C sqlite3BuiltinFunctions) is passed
+/// explicitly.
+pub fn sqlite3WindowFunctions(pHash: &mut crate::callback::FuncDefHash) {
+    sqlite3InsertBuiltinFuncs(pHash, &sqlite3WindowFunctionDefs());
 }
 
 fn windowFind(db: &mut Sqlite3, pList: WindowId, zName: &[u8]) -> WindowId {
@@ -992,7 +990,7 @@ fn selectWindowRewriteExprCb(w: &mut Walker<'_>, pExpr: ExprId) -> i32 {
             let n = db.el(pSub).nExpr();
             for i in 0..n {
                 let e = db.el(pSub).a[i as usize].pExpr;
-                if 0 == sqlite3ExprCompare(db, e, pExpr, -1) {
+                if 0 == sqlite3ExprCompare(db, false, e, pExpr, -1) {
                     iCol = i;
                     break;
                 }
@@ -1113,7 +1111,7 @@ fn exprListAppendList(
             if bIntToNull {
                 let mut iDummy = 0;
                 let pSub = sqlite3ExprSkipCollateAndLikely(db, pDup);
-                if sqlite3ExprIsInteger(db, pSub, &mut iDummy, 0) != 0 {
+                if sqlite3ExprIsInteger(db, pSub, &mut iDummy, false, 0) != 0 {
                     let s = db.exm(pSub);
                     s.op = TK_NULL;
                     s.flags &= !(EP_IntValue | EP_IsTrue | EP_IsFalse);
@@ -1440,7 +1438,7 @@ pub fn sqlite3WindowListDelete(db: &mut Sqlite3, p: WindowId) {
 */
 fn sqlite3WindowOffsetExpr(db: &mut Sqlite3, pExpr: ExprId) -> ExprId {
     /* A NULL expression is constant (sqlite3ExprIsConstant(0,0) is true) */
-    if pExpr.nn() && 0 == sqlite3ExprIsConstant(db, pExpr) {
+    if pExpr.nn() && 0 == sqlite3ExprIsConstant(db, false, pExpr) {
         if db.ppr().IN_RENAME_OBJECT() {
             crate::alter::sqlite3RenameExprUnmap(db, pExpr);
         }
@@ -1676,10 +1674,10 @@ pub fn sqlite3WindowCompare(db: &mut Sqlite3, p1: WindowId, p2: WindowId, bFilte
     if a.eExclude != b.eExclude {
         return 1;
     }
-    if sqlite3ExprCompare(db, a.pStart, b.pStart, -1) != 0 {
+    if sqlite3ExprCompare(db, true, a.pStart, b.pStart, -1) != 0 {
         return 1;
     }
-    if sqlite3ExprCompare(db, a.pEnd, b.pEnd, -1) != 0 {
+    if sqlite3ExprCompare(db, true, a.pEnd, b.pEnd, -1) != 0 {
         return 1;
     }
     let res = sqlite3ExprListCompare(db, a.pPartition, b.pPartition, -1);
@@ -1691,7 +1689,7 @@ pub fn sqlite3WindowCompare(db: &mut Sqlite3, p1: WindowId, p2: WindowId, bFilte
         return res;
     }
     if bFilter != 0 {
-        let res = sqlite3ExprCompare(db, a.pFilter, b.pFilter, -1);
+        let res = sqlite3ExprCompare(db, true, a.pFilter, b.pFilter, -1);
         if res != 0 {
             return res;
         }
@@ -2913,13 +2911,15 @@ pub fn sqlite3WindowListDup(db: &mut Sqlite3, p: WindowId) -> WindowId {
 */
 fn windowExprGtZero(db: &mut Sqlite3, pExpr: ExprId) -> bool {
     let mut ret = false;
-    let mut aVal = [Mem::default()];
+    let mut pVal: Option<Box<Mem>> = None;
     let enc = db.enc;
-    sqlite3ValueFromExpr(db, pExpr, enc, SQLITE_AFF_NUMERIC, &mut aVal);
-    if (aVal[0].flags & MEM_TypeMask) != 0 && sqlite3_value_int(&mut aVal[0]) > 0 {
-        ret = true;
+    sqlite3ValueFromExpr(db, pExpr, enc, SQLITE_AFF_NUMERIC, &mut pVal);
+    if let Some(mut v) = pVal {
+        if sqlite3_value_int(&mut v) > 0 {
+            ret = true;
+        }
+        sqlite3ValueFree(db, &mut v);
     }
-    sqlite3ValueFree(db, &mut aVal[0]);
     ret
 }
 

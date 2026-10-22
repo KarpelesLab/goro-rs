@@ -18,16 +18,9 @@ use crate::trigger::{
 use crate::util::sqlite3_stricmp;
 use crate::vdbeaux::*;
 use crate::where_::{
-    WhereInfo, sqlite3WhereBegin, sqlite3WhereEnd, sqlite3WhereOkOnePass,
+    sqlite3WhereBegin, sqlite3WhereEnd, sqlite3WhereOkOnePass,
     sqlite3WhereUsesDeferredSeek,
 };
-
-/// sqlite3WhereOkOnePass() with the C `int aiCur[2]` out-array.
-pub(crate) fn whereOkOnePass(pWInfo: &mut WhereInfo, aiCur: &mut [i32; 2]) -> i32 {
-    // TODO(integration): the where_.rs skeleton takes `&mut i32`; it must
-    // become `&mut [i32; 2]` (or a slice) so that both cursors are returned.
-    sqlite3WhereOkOnePass(pWInfo, &mut aiCur[0])
-}
 
 /// C: `Table * sqlite3SrcListLookup(Parse *pParse, SrcList *pSrc)`
 ///
@@ -155,7 +148,7 @@ pub fn sqlite3MaterializeView(
 ) {
     let iDb = db.schema_index(pView.borrow().pSchema);
     let pWhere = sqlite3ExprDup(db, pWhere, 0);
-    let pFrom = sqlite3SrcListAppend(db, SrcListId::NULL, &Token::default(), &Token::default());
+    let pFrom = sqlite3SrcListAppend(db, SrcListId::NULL, None, None);
     if pFrom.nn() {
         debug_assert!(db.src(pFrom).nSrc() == 1);
         let zName = pView.borrow().zName.clone();
@@ -533,7 +526,7 @@ pub fn sqlite3DeleteFrom(
                 Some(w) => w,
                 None => break 'cleanup,
             };
-            let eOnePass = whereOkOnePass(&mut pWInfo, &mut aiCurOnePass);
+            let eOnePass = sqlite3WhereOkOnePass(&mut pWInfo, &mut aiCurOnePass);
             debug_assert!(!pTab.borrow().IsVirtual() || eOnePass != ONEPASS_MULTI);
             if eOnePass != ONEPASS_SINGLE {
                 sqlite3MultiWrite(db);
@@ -554,7 +547,7 @@ pub fn sqlite3DeleteFrom(
                     let c = pk.borrow().aiColumn[i];
                     debug_assert!(c >= 0);
                     sqlite3ExprCodeGetColumnOfTable(
-                        db.v(),
+                        db,
                         &pTab,
                         iTabCur,
                         c as i32,
@@ -565,7 +558,7 @@ pub fn sqlite3DeleteFrom(
             } else {
                 db.pp().nMem += 1;
                 iKeyV = db.ppr().nMem;
-                sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, iTabCur, -1, iKeyV);
+                sqlite3ExprCodeGetColumnOfTable(db, &pTab, iTabCur, -1, iKeyV);
             }
 
             if eOnePass != ONEPASS_OFF {
@@ -733,7 +726,7 @@ pub fn sqlite3DeleteFrom(
     }
 
     // delete_from_cleanup:
-    sqlite3AuthContextPop(&mut sContext);
+    sqlite3AuthContextPop(db, &mut sContext);
     sqlite3SrcListDelete(db, pTabList);
     sqlite3ExprDelete(db, pWhere);
 }
@@ -835,7 +828,7 @@ pub fn sqlite3GenerateRowDelete(
         for iCol in 0..nCol {
             if mask == 0xffffffff || (iCol <= 31 && (mask & MASKBIT32(iCol)) != 0) {
                 let kk = sqlite3TableColumnToStorage(pTab, iCol as i16) as i32;
-                sqlite3ExprCodeGetColumnOfTable(db.v(), pTab, iDataCur, iCol, iOld + kk + 1);
+                sqlite3ExprCodeGetColumnOfTable(db, pTab, iDataCur, iCol, iOld + kk + 1);
             }
         }
 

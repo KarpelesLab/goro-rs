@@ -293,13 +293,9 @@ fn run_vacuum_body(
         let pager = sqlite3BtreePager(&pTemp);
         let exists = {
             let mut pg = pager.borrow_mut();
-            match crate::pager::sqlite3PagerFile(&mut pg) {
-                Some(id) => {
-                    let mut sz = 0i64;
-                    crate::os::sqlite3OsFileSize(id, &mut sz) != SQLITE_OK || sz > 0
-                }
-                None => false,
-            }
+            let id = crate::pager::sqlite3PagerFile(&mut pg);
+            let mut sz = 0i64;
+            crate::os::isOpen(id) && (crate::os::sqlite3OsFileSize(id, &mut sz) != SQLITE_OK || sz > 0)
         };
         if exists {
             *pzErrMsg = Some(b"output file already exists".to_vec());

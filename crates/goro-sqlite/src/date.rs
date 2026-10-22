@@ -1599,12 +1599,10 @@ pub fn sqlite3DateTimeFunctionDefs() -> Vec<FuncDef> {
 ///
 /// This function registered all of the above C functions as SQL functions.
 ///
-/// Rust: the skeleton's sqlite3InsertBuiltinFuncs() takes one FuncDef at a
-/// time, so each definition is inserted with nDef==1, in array order.
-pub fn sqlite3RegisterDateTimeFunctions() {
-    for def in sqlite3DateTimeFunctionDefs() {
-        crate::callback::sqlite3InsertBuiltinFuncs(&Rc::new(def), 1);
-    }
+/// Rust: the global hash table (C sqlite3BuiltinFunctions) is passed
+/// explicitly.
+pub fn sqlite3RegisterDateTimeFunctions(pHash: &mut crate::callback::FuncDefHash) {
+    crate::callback::sqlite3InsertBuiltinFuncs(pHash, &sqlite3DateTimeFunctionDefs());
 }
 
 #[cfg(test)]

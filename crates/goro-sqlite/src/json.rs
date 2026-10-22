@@ -9,7 +9,11 @@ use crate::int::*;
 use std::rc::Rc;
 
 /// C: `void sqlite3RegisterJsonFunctions(void)`
-pub fn sqlite3RegisterJsonFunctions() {
+///
+/// Rust: inserts into the global hash table passed explicitly (like
+/// sqlite3RegisterDateTimeFunctions); call it from
+/// func::sqlite3RegisterBuiltinFunctions() once ported.
+pub fn sqlite3RegisterJsonFunctions(pHash: &mut crate::callback::FuncDefHash) {
     todo!("sqlite3RegisterJsonFunctions")
 }
 

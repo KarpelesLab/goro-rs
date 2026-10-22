@@ -75,7 +75,7 @@ fn minmaxFunc(context: &mut Context, argv: &mut [Mem]) {
         if sqlite3_value_type(&mut argv[i]) == SQLITE_NULL {
             return;
         }
-        if (crate::vdbeaux::sqlite3MemCompare(context.db, &argv[iBest], &argv[i], &pColl) ^ mask)
+        if (crate::vdbeaux::sqlite3MemCompare(context.db, &argv[iBest], &argv[i], Some(&pColl)) ^ mask)
             >= 0
         {
             iBest = i;
@@ -883,7 +883,7 @@ fn likeFunc(context: &mut Context, argv: &mut [Mem]) {
 /// arguments are equal to each other.
 fn nullifFunc(context: &mut Context, argv: &mut [Mem]) {
     let pColl = sqlite3GetFuncCollSeq(context);
-    if crate::vdbeaux::sqlite3MemCompare(context.db, &argv[0], &argv[1], &pColl) != 0 {
+    if crate::vdbeaux::sqlite3MemCompare(context.db, &argv[0], &argv[1], Some(&pColl)) != 0 {
         sqlite3_result_value(context, &mut argv[0]);
     }
 }
@@ -1774,7 +1774,7 @@ fn minmaxStep(context: &mut Context, argv: &mut [Mem]) {
         let max = sqlite3_user_data(context).as_int() != 0;
         let mut best =
             std::mem::take(sqlite3_aggregate_context::<Mem>(context, szMem).expect("agg"));
-        let cmp = crate::vdbeaux::sqlite3MemCompare(context.db, &best, &argv[0], &pColl);
+        let cmp = crate::vdbeaux::sqlite3MemCompare(context.db, &best, &argv[0], Some(&pColl));
         let replace = (max && cmp < 0) || (!max && cmp > 0);
         if replace {
             crate::vdbemem::sqlite3VdbeMemCopy(&mut best, &argv[0]);
@@ -1971,27 +1971,6 @@ pub fn sqlite3RegisterPerConnectionBuiltinFunctions(db: &mut Sqlite3) {
     }
 }
 
-/// Replace the application-defined function `pOld` by `pNew` in db.aFunc,
-/// keeping its position in the chain (C code modifies the FuncDef
-/// returned by sqlite3FindFunction() in place; FuncDefs are immutable
-/// here).  Same as callback.rs's sqlite3FuncDefReplace().
-fn funcDefReplace(db: &mut Sqlite3, pOld: &FuncDefRef, pNew: FuncDef) -> FuncDefRef {
-    let p = Rc::new(pNew);
-    let key = pOld.zName.clone();
-    if let Some(chain) = db.aFunc.find_mut(&key) {
-        for f in chain.iter_mut() {
-            if Rc::ptr_eq(f, pOld) {
-                *f = p.clone();
-                return p;
-            }
-        }
-        chain.insert(0, p.clone());
-    } else {
-        db.aFunc.insert(&key, vec![p.clone()]);
-    }
-    p
-}
-
 /// C: `void sqlite3RegisterLikeFunctions(sqlite3 *db, int caseSensitive)`
 ///
 /// Re-register the built-in LIKE functions.  The caseSensitive parameter
@@ -2024,7 +2003,7 @@ pub fn sqlite3RegisterLikeFunctions(db: &mut Sqlite3, caseSensitive: i32) {
         let mut d = (*pDef).clone();
         d.funcFlags |= flags;
         d.funcFlags &= !SQLITE_FUNC_UNSAFE;
-        funcDefReplace(db, &pDef, d);
+        crate::callback::sqlite3FuncDefReplace(db, &pDef, d);
     }
 }
 
@@ -2699,17 +2678,17 @@ fn fmod(x: f64, y: f64) -> f64 {
 /// global function hash table.  This occurs at start-time (as a
 /// consequence of a call to sqlite3_initialize()).
 ///
-/// Rust: the skeleton's sqlite3InsertBuiltinFuncs() takes one FuncDef at a
-/// time, so each definition is inserted with nDef==1, in array order (the
-/// same order as C's single call on the whole array).
-pub fn sqlite3RegisterBuiltinFunctions() {
-    crate::alter::sqlite3AlterFunctions();
-    crate::window::sqlite3WindowFunctions();
-    crate::date::sqlite3RegisterDateTimeFunctions();
-    crate::json::sqlite3RegisterJsonFunctions();
-    for def in sqlite3BuiltinFunctionDefs() {
-        crate::callback::sqlite3InsertBuiltinFuncs(&Rc::new(def), 1);
-    }
+/// Rust: the global hash table (C sqlite3BuiltinFunctions) is passed
+/// explicitly; it is built by sqlite3_initialize().  The registration
+/// order is the C one: ALTER TABLE helpers, window functions, date/time
+/// functions, JSON functions, then the aBuiltinFunc[] array.
+pub fn sqlite3RegisterBuiltinFunctions(pHash: &mut crate::callback::FuncDefHash) {
+    crate::callback::sqlite3InsertBuiltinFuncs(pHash, &crate::alter::sqlite3AlterFunctions());
+    crate::window::sqlite3WindowFunctions(pHash);
+    crate::date::sqlite3RegisterDateTimeFunctions(pHash);
+    /* sqlite3RegisterJsonFunctions(pHash): json.c is not ported yet, so the
+     ** JSON functions are not registered. */
+    crate::callback::sqlite3InsertBuiltinFuncs(pHash, &sqlite3BuiltinFunctionDefs());
 }
 
 #[cfg(test)]

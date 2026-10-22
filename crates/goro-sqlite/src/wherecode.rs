@@ -1101,7 +1101,7 @@ fn whereApplyPartialIndexConstraints(
         if t.wtFlags & TERM_CODED != 0 {
             continue;
         }
-        if exprCompareNP(db, t.pExpr, pTruth, iTabCur) == 0 {
+        if sqlite3ExprCompare(db, false, t.pExpr, pTruth, iTabCur) == 0 {
             wi.wcm(pWC).a[i].wtFlags |= TERM_CODED;
         }
     }
@@ -2188,7 +2188,7 @@ pub fn sqlite3WhereCodeOneLoopStart(
                     if (wi.wctrlFlags & WHERE_DUPLICATES_OK) == 0 {
                         let iSet: i32 = if ii == nOr - 1 { -1 } else { ii as i32 };
                         if pTab.borrow().HasRowid() {
-                            sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, iCur, -1, regRowid);
+                            sqlite3ExprCodeGetColumnOfTable(db, &pTab, iCur, -1, regRowid);
                             jmp1 = sqlite3VdbeAddOp4Int(
                                 db.v(),
                                 OP_RowSetTest,
@@ -2208,7 +2208,7 @@ pub fn sqlite3WhereCodeOneLoopStart(
                             let r = sqlite3GetTempRange(db, nPk);
                             for iPk in 0..nPk {
                                 let iCol = pkCols[iPk as usize] as i32;
-                                sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, iCur, iCol, r + iPk);
+                                sqlite3ExprCodeGetColumnOfTable(db, &pTab, iCur, iCol, r + iPk);
                             }
 
                             // Check if the temp table already contains this
@@ -2513,7 +2513,7 @@ pub fn sqlite3WhereCodeOneLoopStart(
         if pTab.borrow().HasRowid() {
             r = sqlite3GetTempRange(db, 2);
             let tc = wi.a[lv].iTabCur;
-            sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, tc, -1, r + 1);
+            sqlite3ExprCodeGetColumnOfTable(db, &pTab, tc, -1, r + 1);
             nPk = 1;
         } else {
             let pPk = crate::build::sqlite3PrimaryKeyIndex(&pTab).unwrap();
@@ -2522,7 +2522,7 @@ pub fn sqlite3WhereCodeOneLoopStart(
             r = sqlite3GetTempRange(db, nPk + 1);
             for iPk in 0..nPk {
                 let iCol = pkCols[iPk as usize] as i32;
-                sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, iCur, iCol, r + 1 + iPk);
+                sqlite3ExprCodeGetColumnOfTable(db, &pTab, iCur, iCol, r + 1 + iPk);
             }
         }
         let jmp1 = sqlite3VdbeAddOp4Int(db.v(), OP_Found, pRJ.iMatch, 0, r + 1, nPk);
@@ -2689,7 +2689,7 @@ pub fn sqlite3WhereRightJoinLoop(
         let addrCont = sqlite3WhereContinueLabel(&mut sub);
         let pTab = item_tab(db, pTabItem); // Table on RHS of RIGHT JOIN
         if pTab.borrow().HasRowid() {
-            sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, iCur, -1, r);
+            sqlite3ExprCodeGetColumnOfTable(db, &pTab, iCur, -1, r);
             nPk = 1;
         } else {
             let pPk = crate::build::sqlite3PrimaryKeyIndex(&pTab).unwrap();
@@ -2698,7 +2698,7 @@ pub fn sqlite3WhereRightJoinLoop(
             db.pp().nMem += nPk - 1;
             for iPk in 0..nPk {
                 let iCol = pkCols[iPk as usize] as i32;
-                sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, iCur, iCol, r + iPk);
+                sqlite3ExprCodeGetColumnOfTable(db, &pTab, iCur, iCol, r + iPk);
             }
         }
 

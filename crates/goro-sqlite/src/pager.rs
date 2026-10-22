@@ -338,11 +338,8 @@ fn backup_update(pPager: &mut Pager, pgno: Pgno, aData: &[u8]) {
         return;
     }
     pPager.pBackup.retain(|w| w.strong_count() > 0);
-    for w in pPager.pBackup.clone() {
-        if let Some(b) = w.upgrade() {
-            crate::backup::sqlite3BackupUpdate(&mut b.borrow_mut(), pgno, aData);
-        }
-    }
+    let list: Vec<crate::backup::BackupP> = pPager.pBackup.iter().filter_map(|w| w.upgrade()).collect();
+    crate::backup::sqlite3BackupUpdate(&list, pgno, aData);
 }
 
 /// Call sqlite3BackupRestart() for each registered backup.
@@ -351,11 +348,8 @@ fn backup_restart(pPager: &mut Pager) {
         return;
     }
     pPager.pBackup.retain(|w| w.strong_count() > 0);
-    for w in pPager.pBackup.clone() {
-        if let Some(b) = w.upgrade() {
-            crate::backup::sqlite3BackupRestart(&mut b.borrow_mut());
-        }
-    }
+    let list: Vec<crate::backup::BackupP> = pPager.pBackup.iter().filter_map(|w| w.upgrade()).collect();
+    crate::backup::sqlite3BackupRestart(&list);
 }
 
 /// Check the internal consistency of the pager state (C

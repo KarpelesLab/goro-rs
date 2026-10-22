@@ -1030,8 +1030,17 @@ pub const aPragmaName: [PragmaName; 66] = [
 /// and pId2 is the id.  If the left side is just "id" then pId1 is the
 /// id and pId2 is any empty string.
 ///
-/// Rust: a C NULL pValue is a Token whose `z` is None.
-pub fn sqlite3Pragma(db: &mut Sqlite3, pId1: &Token, pId2: &Token, pValue: &Token, minusFlag: i32) {
+/// Rust: pValue is None for C NULL; internally a NULL pValue is handled
+/// as a Token whose `z` is None.
+pub fn sqlite3Pragma(
+    db: &mut Sqlite3,
+    pId1: &Token,
+    pId2: &Token,
+    pValue: Option<&Token>,
+    minusFlag: i32,
+) {
+    let tValue: Token = pValue.cloned().unwrap_or_default();
+    let pValue: &Token = &tValue;
     if !crate::select::sqlite3GetVdbe(db) {
         return;
     }
@@ -1040,15 +1049,11 @@ pub fn sqlite3Pragma(db: &mut Sqlite3, pId1: &Token, pId2: &Token, pValue: &Toke
 
     // Interpret the [schema.] part of the pragma statement. iDb is the
     // index of the database this pragma is being applied to in db.aDb[].
-    let mut pId: Option<Box<Token>> = None;
+    let mut pId: Token = Token::default();
     let mut iDb = crate::build::sqlite3TwoPartName(db, pId1, pId2, &mut pId);
     if iDb < 0 {
         return;
     }
-    let pId: Token = match pId {
-        Some(t) => *t,
-        None => pId1.clone(),
-    };
 
     // If the temp database has been explicitly named as part of the
     // pragma, make sure it is open.
@@ -1615,14 +1620,13 @@ pub fn sqlite3Pragma(db: &mut Sqlite3, pId1: &Token, pId2: &Token, pValue: &Toke
                     ii -= 1;
                 }
             }
-            let mut buf = (-1i64).to_ne_bytes();
+            sz = -1;
             let rc = crate::mainapi::sqlite3_file_control(
                 db,
                 zDb.as_deref(),
                 SQLITE_FCNTL_MMAP_SIZE,
-                &mut buf,
+                crate::os::FcntlArg::I64(&mut sz),
             );
-            sz = i64::from_ne_bytes(buf);
             if rc == SQLITE_OK {
                 returnSingleInt(db.v(), sz);
             } else if rc != SQLITE_NOTFOUND {
@@ -1674,7 +1678,7 @@ pub fn sqlite3Pragma(db: &mut Sqlite3, pId1: &Token, pId2: &Token, pValue: &Toke
                     let pVfs = db.pVfs.clone();
                     let rc = crate::os::sqlite3OsAccess(
                         &pVfs,
-                        Some(zr),
+                        zr,
                         SQLITE_ACCESS_READWRITE,
                         &mut res,
                     );
@@ -1826,7 +1830,7 @@ pub fn sqlite3Pragma(db: &mut Sqlite3, pId1: &Token, pId2: &Token, pValue: &Toke
                                 }
                             }
                         };
-                        let pColExpr = crate::build::sqlite3ColumnExpr(&pTab, i as usize);
+                        let pColExpr = crate::build::sqlite3ColumnExpr(db, &pTab, i as usize);
                         let zDflt: Option<ZStr> = if isHidden >= 2 || pColExpr.is_null() {
                             None
                         } else {
@@ -2290,7 +2294,7 @@ pub fn sqlite3Pragma(db: &mut Sqlite3, pId1: &Token, pId2: &Token, pValue: &Toke
                             None => fk.aCol[j].iFrom,
                         };
                         crate::expr::sqlite3ExprCodeGetColumnOfTable(
-                            db.v(),
+                            db,
                             &pTab,
                             0,
                             iCol,
@@ -2987,7 +2991,7 @@ fn pragmaIntegrityCheck(
                 OP_OpenRead as i32,
                 0,
                 1,
-                &mut [],
+                None,
                 &mut iDataCur,
                 &mut iIdxCur,
             );
@@ -3083,7 +3087,7 @@ fn pragmaIntegrityCheck(
                 // Compute the operands that will be needed for OP_IsType
                 p4 = SQLITE_NULL;
                 if (pCol.colFlags & COLFLAG_VIRTUAL) != 0 {
-                    crate::expr::sqlite3ExprCodeGetColumnOfTable(db.v(), pTab, iDataCur, j, 3);
+                    crate::expr::sqlite3ExprCodeGetColumnOfTable(db, pTab, iDataCur, j, 3);
                     p1 = -1;
                     p3 = 3;
                 } else {
@@ -3129,7 +3133,7 @@ fn pragmaIntegrityCheck(
                         // using OP_Column to reliably determine if the value is
                         // a NULL.
                         sqlite3VdbeAddOp3(db.v(), OP_Column, p1, p3, 3);
-                        crate::update::sqlite3ColumnDefault(db.v(), pTab, j, 3);
+                        crate::update::sqlite3ColumnDefault(db, pTab, j, 3);
                         jmp3 = sqlite3VdbeAddOp2(db.v(), OP_NotNull, 3, labelOk);
                     }
                     let zErr = mprintf!(db, b"NULL value in %s.%s", &zTabName, &pCol.zCnName);
@@ -3177,7 +3181,7 @@ fn pragmaIntegrityCheck(
                     sqlite3VdbeAddOp4Int(db.v(), OP_IsType, p1, labelOk, p3, p4);
                     sqlite3VdbeChangeP5(db.v(), 0x1b); // NULL, INT, FLOAT, or BLOB
                     if p1 >= 0 {
-                        crate::expr::sqlite3ExprCodeGetColumnOfTable(db.v(), pTab, iDataCur, j, 3);
+                        crate::expr::sqlite3ExprCodeGetColumnOfTable(db, pTab, iDataCur, j, 3);
                     }
                     sqlite3VdbeAddOp4(
                         db.v(),
@@ -3243,7 +3247,7 @@ fn pragmaIntegrityCheck(
                         iDataCur,
                         0,
                         0,
-                        &mut jmp3,
+                        Some(&mut jmp3),
                         pPrior.as_ref(),
                         r1,
                     );

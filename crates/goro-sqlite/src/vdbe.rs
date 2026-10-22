@@ -2971,8 +2971,9 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         OP_SorterCompare => {
             let nKeyCol = p4_i!();
             let mut res = 0;
-            let pC = p.apCsr[p1 as usize].as_deref().expect("cursor");
+            let pC = p.apCsr[p1 as usize].as_deref_mut().expect("cursor");
             let rc = crate::vdbesort::sqlite3VdbeSorterCompare(
+                db,
                 pC,
                 &mut p.aMem[p3 as usize],
                 nKeyCol,
@@ -3125,7 +3126,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             let rc;
             let pC = p.apCsr[p1 as usize].as_deref_mut().expect("cursor");
             if isSorter(pC) {
-                rc = crate::vdbesort::sqlite3VdbeSorterRewind(pC, &mut res);
+                rc = crate::vdbesort::sqlite3VdbeSorterRewind(db, pC, &mut res);
             } else {
                 let pCrsr = btcsr!(pC);
                 rc = sqlite3BtreeFirst(db, &pCrsr, &mut res);
@@ -3159,7 +3160,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         // Opcode: SorterNext P1 P2 * * P5
         OP_SorterNext | OP_Prev | OP_Next => {
             let rc = if opcode == OP_SorterNext {
-                let pC = p.apCsr[p1 as usize].as_deref().expect("cursor");
+                let pC = p.apCsr[p1 as usize].as_deref_mut().expect("cursor");
                 crate::vdbesort::sqlite3VdbeSorterNext(db, pC)
             } else {
                 let pCrsr = btcsr!(csr!(p1));
@@ -3231,7 +3232,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         // instructions.  This opcode writes that key into the sorter P1.
         OP_SorterInsert => {
             chk!(ExpandBlob(db, &mut mem!(p2)));
-            let pC = p.apCsr[p1 as usize].as_deref().expect("cursor");
+            let pC = p.apCsr[p1 as usize].as_deref_mut().expect("cursor");
             chk!(crate::vdbesort::sqlite3VdbeSorterWrite(
                 pC,
                 &mut p.aMem[p2 as usize]
@@ -3854,7 +3855,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         OP_Checkpoint => {
             let mut aRes: [i32; 3] = [0, -1, -1];
             let (mut a1, mut a2) = (-1, -1);
-            let rc = crate::mainapi::sqlite3Checkpoint(db, p1, p2, &mut a1, &mut a2);
+            let rc = crate::mainapi::sqlite3Checkpoint(db, p1, p2, Some(&mut a1), Some(&mut a2));
             aRes[1] = a1;
             aRes[2] = a2;
             if rc != 0 {
@@ -5318,13 +5319,7 @@ fn op_parseschema(
             if rc == SQLITE_OK {
                 for row in &rows {
                     let argv: Vec<Option<&[u8]>> = row.iter().map(|a| a.as_deref()).collect();
-                    if crate::prepare::sqlite3InitCallback(
-                        db,
-                        &mut initData,
-                        argv.len() as i32,
-                        &argv,
-                        &[],
-                    ) != 0
+                    if crate::prepare::sqlite3InitCallback(db, &mut initData, Some(&argv)) != 0
                     {
                         rc = SQLITE_ABORT;
                         crate::util::sqlite3Error(db, SQLITE_ABORT);
@@ -5366,10 +5361,11 @@ fn op_program(
     _p3: i32,
     p5: u16,
 ) -> Result<Fl, Ex> {
-    let pProgram: Rc<SubProgram> = match &p.aOp[pc as usize].p4 {
+    let pProgramRef: SubProgramRef = match &p.aOp[pc as usize].p4 {
         P4::Program(sp) => sp.clone(),
         _ => panic!("OP_Program without sub-program"),
     };
+    let pProgram = pProgramRef.borrow();
 
     // If the p5 flag is clear, then recursive invocation of triggers is
     // disabled for backwards compatibility (p5 is set if this sub-program is

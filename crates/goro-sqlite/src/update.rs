@@ -4,7 +4,7 @@ use crate::auth::{sqlite3AuthCheck, sqlite3AuthContextPop, sqlite3AuthContextPus
 use crate::build::*;
 use crate::delete::{
     sqlite3CodeChangeCount, sqlite3GenerateRowIndexDelete, sqlite3IsReadOnly,
-    sqlite3MaterializeView, sqlite3SrcListLookup, whereOkOnePass,
+    sqlite3MaterializeView, sqlite3SrcListLookup,
 };
 use crate::expr::*;
 use crate::fkey::{sqlite3FkActions, sqlite3FkCheck, sqlite3FkOldmask, sqlite3FkRequired};
@@ -22,21 +22,6 @@ use crate::select::{
 use crate::trigger::{sqlite3CodeRowTrigger, sqlite3TriggerColmask, sqlite3TriggersExist};
 use crate::vdbeaux::*;
 use crate::where_::{sqlite3WhereBegin, sqlite3WhereEnd, sqlite3WhereUsesDeferredSeek};
-
-/// sqlite3ValueFromExpr() returning the value (C `sqlite3_value **ppVal`).
-fn valueFromExpr(db: &mut Sqlite3, pExpr: ExprId, enc: u8, affinity: u8) -> Option<Box<Mem>> {
-    // TODO(integration): the vdbemem.rs skeleton takes `ppVal: &mut [Mem]`;
-    // it should return/fill an Option<Box<Mem>> (NULL when the expression is
-    // not a constant).  A slot whose flags stay 0 is treated as "no value".
-    let mut a = [Mem::default()];
-    crate::vdbemem::sqlite3ValueFromExpr(db, pExpr, enc, affinity, &mut a);
-    let [m] = a;
-    if m.flags == 0 {
-        None
-    } else {
-        Some(Box::new(m))
-    }
-}
 
 /// The most recently coded instruction was an OP_Column to retrieve the
 /// i-th column of table pTab. This routine sets the P4 parameter of the
@@ -71,7 +56,9 @@ fn columnDefaultUncommonCase(db: &mut Sqlite3, pTab: &TableRef, i: i32) {
     debug_assert!(!pTab.borrow().IsView());
     let affinity = pTab.borrow().aCol[i as usize].affinity;
     let e = sqlite3ColumnExprAuth(db, pTab, i as usize);
-    if let Some(pValue) = valueFromExpr(db, e, enc, affinity) {
+    let mut pValue: Option<Box<Mem>> = None;
+    crate::vdbemem::sqlite3ValueFromExpr(db, e, enc, affinity, &mut pValue);
+    if let Some(pValue) = pValue {
         sqlite3VdbeAppendP4(db.v(), P4::Mem(pValue), P4_MEM as i32);
     }
 }
@@ -504,7 +491,7 @@ pub fn sqlite3Update(
                     if (pTab.borrow().aCol[i].colFlags & COLFLAG_GENERATED) == 0 {
                         continue;
                     }
-                    let e = sqlite3ColumnExpr(&pTab, i);
+                    let e = sqlite3ColumnExpr(db, &pTab, i);
                     if sqlite3ExprReferencesUpdatedColumn(db, e, &aXRef, chngRowid as i32) != 0 {
                         aXRef[i] = 99999;
                         bProgress = true;
@@ -780,7 +767,7 @@ pub fn sqlite3Update(
                  ** Fall back to ONEPASS_OFF if where.c has selected a ONEPASS_MULTI
                  ** strategy that uses an index for which one or more columns are being
                  ** updated.  */
-                eOP = whereOkOnePass(&mut w, &mut aiCurOnePass);
+                eOP = crate::where_::sqlite3WhereOkOnePass(&mut w, &mut aiCurOnePass);
                 bFinishSeek = sqlite3WhereUsesDeferredSeek(&mut w);
                 if eOP != ONEPASS_SINGLE {
                     sqlite3MultiWrite(db);
@@ -819,7 +806,7 @@ pub fn sqlite3Update(
                     let c = pk.borrow().aiColumn[i];
                     debug_assert!(c >= 0);
                     sqlite3ExprCodeGetColumnOfTable(
-                        db.v(),
+                        db,
                         &pTab,
                         iDataCur,
                         c as i32,
@@ -988,7 +975,7 @@ pub fn sqlite3Update(
                     || (i < 32 && (oldmask & MASKBIT32(i)) != 0)
                     || (colFlags & COLFLAG_PRIMKEY) != 0
                 {
-                    sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, iDataCur, i, k);
+                    sqlite3ExprCodeGetColumnOfTable(db, &pTab, iDataCur, i, k);
                 } else {
                     sqlite3VdbeAddOp2(db.v(), OP_Null, 0, k);
                 }
@@ -1049,7 +1036,7 @@ pub fn sqlite3Update(
                      ** if there are one or more BEFORE triggers that use this value via
                      ** a new.* reference in a trigger program.
                      */
-                    sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, iDataCur, i, k);
+                    sqlite3ExprCodeGetColumnOfTable(db, &pTab, iDataCur, i, k);
                     bFinishSeek = 0;
                 } else {
                     sqlite3VdbeAddOp2(db.v(), OP_Null, 0, k);
@@ -1115,7 +1102,7 @@ pub fn sqlite3Update(
                             k -= 1;
                         }
                     } else if aXRef[i as usize] < 0 && i != iPKey {
-                        sqlite3ExprCodeGetColumnOfTable(db.v(), &pTab, iDataCur, i, k);
+                        sqlite3ExprCodeGetColumnOfTable(db, &pTab, iDataCur, i, k);
                     }
                     k += 1;
                 }
@@ -1284,7 +1271,7 @@ pub fn sqlite3Update(
     }
 
     // update_cleanup:
-    sqlite3AuthContextPop(&mut sContext);
+    sqlite3AuthContextPop(db, &mut sContext);
     sqlite3SrcListDelete(db, pTabList);
     sqlite3ExprListDelete(db, pChanges);
     sqlite3ExprDelete(db, pWhere);
@@ -1434,7 +1421,7 @@ fn updateVirtualTable(
             sqlite3VdbeAddOp2(db.v(), OP_SCopy, regArg + 2 + iPk, regArg + 1);
         }
 
-        eOnePass = whereOkOnePass(&mut w, &mut aDummy);
+        eOnePass = crate::where_::sqlite3WhereOkOnePass(&mut w, &mut aDummy);
 
         /* There is no ONEPASS_MULTI on virtual tables */
         debug_assert!(eOnePass == ONEPASS_OFF || eOnePass == ONEPASS_SINGLE);

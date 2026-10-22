@@ -375,7 +375,7 @@ pub fn sqlite3ComputeGeneratedColumns(db: &mut Sqlite3, iRegStore: i32, pTab: &T
         for i in 0..nCol {
             if (pTab.borrow().aCol[i].colFlags & COLFLAG_NOTAVAIL) != 0 {
                 pTab.borrow_mut().aCol[i].colFlags |= COLFLAG_BUSY;
-                let e = sqlite3ColumnExpr(pTab, i);
+                let e = sqlite3ColumnExpr(db, pTab, i);
                 let eCode = {
                     let mut w = Walker::new(db);
                     w.u.pTab = Some(pTab.clone());
@@ -711,7 +711,7 @@ pub fn sqlite3MultiValuesEnd(db: &mut Sqlite3, pVal: SelectId) {
                 }
             };
             if let Some((regReturn, addrFillSub)) = sub {
-                sqlite3VdbeEndCoroutine(db.v(), regReturn);
+                sqlite3VdbeEndCoroutine(db, regReturn);
                 sqlite3VdbeJumpHere(db.v(), addrFillSub - 1);
             }
         }
@@ -1294,7 +1294,7 @@ pub fn sqlite3Insert(
                     if rc != 0 || db.ppr().nErr != 0 {
                         break 'cleanup;
                     }
-                    sqlite3VdbeEndCoroutine(db.v(), regYield);
+                    sqlite3VdbeEndCoroutine(db, regYield);
                     sqlite3VdbeJumpHere(db.v(), addrTop - 1); /* label B: */
                     let el = db.sel(pSelect).pEList;
                     debug_assert!(el.nn());
@@ -3090,7 +3090,7 @@ fn xferCompatibleIndex(db: &mut Sqlite3, pDest: &IndexRef, pSrc: &IndexRef) -> b
             let a = db.el(srcColExpr).a[i].pExpr;
             let b = db.el(destColExpr).a[i].pExpr;
             // C passes pParse==0.
-            if sqlite3ExprCompare(db, a, b, -1) != 0 {
+            if sqlite3ExprCompare(db, false, a, b, -1) != 0 {
                 return false; /* Different expressions in the index */
             }
         }
@@ -3109,7 +3109,7 @@ fn xferCompatibleIndex(db: &mut Sqlite3, pDest: &IndexRef, pSrc: &IndexRef) -> b
     let dw = pDest.borrow().pPartIdxWhere.clone();
     let sw = db.tree(&sw);
     let dw = db.tree(&dw);
-    if sqlite3ExprCompare(db, sw, dw, -1) != 0 {
+    if sqlite3ExprCompare(db, false, sw, dw, -1) != 0 {
         return false; /* Different WHERE clauses */
     }
 
@@ -3330,9 +3330,9 @@ fn xferOptimization(
          ** This requirement could be relaxed for VIRTUAL columns, I suppose.
          */
         if (pDestCol.colFlags & COLFLAG_GENERATED) != 0 {
-            let a = sqlite3ColumnExpr(&pSrc, i);
-            let b = sqlite3ColumnExpr(pDest, i);
-            if sqlite3ExprCompare(db, a, b, -1) != 0 {
+            let a = sqlite3ColumnExpr(db, &pSrc, i);
+            let b = sqlite3ColumnExpr(db, pDest, i);
+            if sqlite3ExprCompare(db, false, a, b, -1) != 0 {
                 return 0; /* Different generator expressions */
             }
         }
@@ -3349,8 +3349,8 @@ fn xferOptimization(
         }
         /* Default values for second and subsequent columns need to match. */
         if (pDestCol.colFlags & COLFLAG_GENERATED) == 0 && i > 0 {
-            let pDestExpr = sqlite3ColumnExpr(pDest, i);
-            let pSrcExpr = sqlite3ColumnExpr(&pSrc, i);
+            let pDestExpr = sqlite3ColumnExpr(db, pDest, i);
+            let pSrcExpr = sqlite3ColumnExpr(db, &pSrc, i);
             debug_assert!(pDestExpr.is_null() || db.ex(pDestExpr).op == TK_SPAN);
             debug_assert!(pSrcExpr.is_null() || db.ex(pSrcExpr).op == TK_SPAN);
             if pDestExpr.is_null() != pSrcExpr.is_null()

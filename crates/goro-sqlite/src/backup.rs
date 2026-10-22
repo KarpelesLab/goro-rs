@@ -340,7 +340,7 @@ fn attachBackupObject(p: &BackupP) {
     let pPager = sqlite3BtreePager(&pSrc);
     {
         let mut pg = pPager.borrow_mut();
-        sqlite3PagerBackupPtr(&mut pg).insert(0, p.clone());
+        sqlite3PagerBackupPtr(&mut pg).insert(0, Rc::downgrade(p));
     }
     p.borrow_mut().isAttached = 1;
 }
@@ -610,10 +610,8 @@ fn backup_step(
                         if rc == SQLITE_OK {
                             let zData = pSrcPg.as_ref().unwrap().borrow().aData.clone();
                             let mut pg = pDestPager.borrow_mut();
-                            rc = match sqlite3PagerFile(&mut pg) {
-                                Some(f) => crate::os::sqlite3OsWrite(f, &zData, pgszSrc, iOff),
-                                None => SQLITE_OK,
-                            };
+                            let f = sqlite3PagerFile(&mut pg);
+                            rc = crate::os::sqlite3OsWrite(f, &zData, pgszSrc, iOff);
                         }
                         if let Some(pg) = pSrcPg.as_ref() {
                             sqlite3PagerUnref(pg);
@@ -622,9 +620,8 @@ fn backup_step(
                     }
                     if rc == SQLITE_OK {
                         let mut pg = pDestPager.borrow_mut();
-                        if let Some(f) = sqlite3PagerFile(&mut pg) {
-                            rc = backupTruncateFile(f, iSize);
-                        }
+                        let f = sqlite3PagerFile(&mut pg);
+                        rc = backupTruncateFile(f, iSize);
                     }
 
                     // Sync the database file to disk.
@@ -694,7 +691,7 @@ fn backup_finish(pDestDb: Option<&mut Sqlite3>, pSrcDb: &mut Sqlite3, pp: &Backu
         let pPager = sqlite3BtreePager(&pSrc);
         let mut pg = pPager.borrow_mut();
         let list = sqlite3PagerBackupPtr(&mut pg);
-        if let Some(i) = list.iter().position(|b| Rc::ptr_eq(b, pp)) {
+        if let Some(i) = list.iter().position(|b| std::ptr::eq(b.as_ptr(), Rc::as_ptr(pp))) {
             list.remove(i);
         }
     }
@@ -742,7 +739,8 @@ pub fn sqlite3_backup_pagecount(p: &BackupP) -> i32 {
 /// to be updated with the new data before the backup operation is
 /// complete.
 ///
-/// Rust: `pBackup` is (a clone of) the source pager's backup list.
+/// Rust: `pBackup` is the source pager's backup list (C Pager.pBackup,
+/// a `Vec<Weak<..>>`), upgraded by the pager before the call.
 pub fn sqlite3BackupUpdate(pBackup: &[BackupP], iPage: Pgno, aData: &[u8]) {
     for p in pBackup.iter() {
         let (rc, iNext, pDest, nSrcPgsz) = {
@@ -794,9 +792,14 @@ pub fn sqlite3BtreeCopyFile(db: &mut Sqlite3, pTo: &BtreeP, pFrom: &BtreeP) -> i
         let nByte = sqlite3BtreeGetPageSize(pFrom) as i64 * sqlite3BtreeLastPage(pFrom) as i64;
         let pPager = sqlite3BtreePager(pTo);
         let mut pg = pPager.borrow_mut();
-        if let Some(pFd) = sqlite3PagerFile(&mut pg) {
-            let mut arg = nByte.to_ne_bytes();
-            rc = crate::os::sqlite3OsFileControl(pFd, SQLITE_FCNTL_OVERWRITE, &mut arg);
+        let pFd = sqlite3PagerFile(&mut pg);
+        if crate::os::isOpen(pFd) {
+            let mut arg = nByte;
+            rc = crate::os::sqlite3OsFileControl(
+                pFd,
+                SQLITE_FCNTL_OVERWRITE,
+                crate::os::FcntlArg::I64(&mut arg),
+            );
             if rc == SQLITE_NOTFOUND {
                 rc = SQLITE_OK;
             }

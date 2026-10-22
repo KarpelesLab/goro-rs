@@ -591,7 +591,7 @@ fn schemaIsValid(db: &mut Sqlite3) {
 ///
 /// Rust: takes the SchemaId; an unknown id (C: a NULL pSchema, i.e. a
 /// transient table created by a sub-select) returns -32768.
-pub fn sqlite3SchemaToIndex(db: &mut Sqlite3, pSchema: SchemaId) -> i32 {
+pub fn sqlite3SchemaToIndex(db: &Sqlite3, pSchema: SchemaId) -> i32 {
     for (i, d) in db.aDb.iter().enumerate() {
         if d.pSchema.id == pSchema {
             return i as i32;
@@ -758,12 +758,7 @@ fn sqlite3Prepare(
             }
         }
         let zText: Rc<[u8]> = Rc::from(sqlText(zSql, nBytes));
-        {
-            let p = db.pp();
-            p.zSql = Some(zText.clone());
-            p.zTail = 0;
-        }
-        crate::tokenize::sqlite3RunParser(db, Some(&zText));
+        crate::tokenize::sqlite3RunParser(db, &zText, 0);
         zTail = db.ppr().zTail.min(zText.len());
         debug_assert!(0 == db.ppr().nQueryLoop);
 

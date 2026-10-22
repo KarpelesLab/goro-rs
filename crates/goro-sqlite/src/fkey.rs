@@ -1172,7 +1172,7 @@ pub fn sqlite3FkCheck(
 
         /* Create a SrcList structure containing the child table.  We need the
          ** child table as a SrcList for sqlite3WhereBegin() */
-        let pSrc = sqlite3SrcListAppend(db, SrcListId::NULL, &Token::default(), &Token::default());
+        let pSrc = sqlite3SrcListAppend(db, SrcListId::NULL, None, None);
         if pSrc.nn() {
             let pFrom = fk_from(pFKey);
             let zFrom = pFrom.borrow().zName.clone();
@@ -1502,7 +1502,7 @@ fn fkActionTrigger(
                 db.exm(pRaise).affExpr = OE_Abort;
             }
             let pSrc =
-                sqlite3SrcListAppend(db, SrcListId::NULL, &Token::default(), &Token::default());
+                sqlite3SrcListAppend(db, SrcListId::NULL, None, None);
             if pSrc.nn() {
                 let it = &mut db.srcm(pSrc).a[0];
                 it.zName = Some(zFrom.clone());
@@ -1526,7 +1526,7 @@ fn fkActionTrigger(
 
         /* Build the trigger and its single step (DisableLookaside: n/a). */
         let stepSrc =
-            sqlite3SrcListAppend(db, SrcListId::NULL, &Token::default(), &Token::default());
+            sqlite3SrcListAppend(db, SrcListId::NULL, None, None);
         if stepSrc.nn() {
             let it = &mut db.srcm(stepSrc).a[0];
             it.zName = Some(zFrom.clone());

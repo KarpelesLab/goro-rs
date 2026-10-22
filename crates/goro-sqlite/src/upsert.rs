@@ -199,7 +199,7 @@ pub fn sqlite3UpsertAnalyzeTarget(
                 }
                 let pw = pIdx.borrow().pPartIdxWhere.clone();
                 let pw = db.tree(&pw);
-                if sqlite3ExprCompare(db, tw, pw, iCursor) != 0 {
+                if sqlite3ExprCompare(db, true, tw, pw, iCursor) != 0 {
                     continue;
                 }
             }
@@ -232,7 +232,7 @@ pub fn sqlite3UpsertAnalyzeTarget(
                 while jj < nn {
                     let t = db.el(pTarget).a[jj as usize].pExpr;
                     // C passes pParse==0 here (no bound-variable comparison).
-                    if sqlite3ExprCompare(db, t, pExpr, iCursor) < 2 {
+                    if sqlite3ExprCompare(db, false, t, pExpr, iCursor) < 2 {
                         break; /* Column ii of the index matches column jj of target */
                     }
                     jj += 1;

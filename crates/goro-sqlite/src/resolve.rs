@@ -1798,7 +1798,7 @@ fn resolveOrderByTermToExprList(
     let n = db.el(pEList).nExpr();
     for i in 0..n {
         let e = db.el(pEList).a[i as usize].pExpr;
-        if sqlite3ExprCompare(db, e, pE, -1) < 2 {
+        if sqlite3ExprCompare(db, false, e, pE, -1) < 2 {
             return i + 1;
         }
     }
@@ -1882,7 +1882,7 @@ fn resolveCompoundOrderBy(
             if pE.is_null() {
                 continue;
             }
-            if sqlite3ExprIsInteger(db, pE, &mut iCol, 0) != 0 {
+            if sqlite3ExprIsInteger(db, pE, &mut iCol, false, 0) != 0 {
                 if iCol <= 0 || iCol > nEList {
                     resolveOutOfRangeError(db, b"ORDER", i + 1, nEList, pE);
                     return 1;
@@ -2071,7 +2071,7 @@ fn resolveOrderGroupBy(
             }
         }
         let mut iCol = 0;
-        if sqlite3ExprIsInteger(db, pE2, &mut iCol, 0) != 0 {
+        if sqlite3ExprIsInteger(db, pE2, &mut iCol, false, 0) != 0 {
             /* The ORDER BY term is an integer constant.  Again, set the column
              ** number so that sqlite3ResolveOrderGroupBy() will convert the
              ** order-by term to a copy of the result-set expression */
@@ -2092,7 +2092,7 @@ fn resolveOrderGroupBy(
         let nE = db.el(pSelEList).nExpr();
         for j in 0..nE {
             let ej = db.el(pSelEList).a[j as usize].pExpr;
-            if sqlite3ExprCompare(db, pE, ej, -1) == 0 {
+            if sqlite3ExprCompare(db, false, pE, ej, -1) == 0 {
                 /* Since this expression is being changed into a reference
                  ** to an identical expression in the result set, remove all Window
                  ** objects belonging to the expression from the Select.pWin list. */

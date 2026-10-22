@@ -69,7 +69,7 @@ fn IsWindowFunc(db: &Sqlite3, p: ExprId) -> bool {
 fn is_binary(p: &Option<CollSeqRef>) -> bool {
     match p {
         None => true,
-        Some(c) => crate::mainapi::sqlite3IsBinary(c) != 0,
+        Some(c) => crate::mainapi::sqlite3IsBinary(Some(c)) != 0,
     }
 }
 
@@ -103,36 +103,6 @@ fn with_parse_vdbe<R>(db: &mut Sqlite3, f: impl FnOnce(&mut Sqlite3, &mut Vdbe) 
     let r = f(db, &mut v);
     db.pp().pVdbe = Some(v);
     Some(r)
-}
-
-/// sqlite3Dequote() on an owned string.
-fn dequote_vec(z: &mut Vec<u8>) {
-    if z.is_empty() {
-        return;
-    }
-    let mut quote = z[0];
-    if !crate::global::sqlite3Isquote(quote) {
-        return;
-    }
-    if quote == b'[' {
-        quote = b']';
-    }
-    let mut out = Vec::with_capacity(z.len());
-    let mut i = 1;
-    while i < z.len() {
-        if z[i] == quote {
-            if i + 1 < z.len() && z[i + 1] == quote {
-                out.push(quote);
-                i += 1;
-            } else {
-                break;
-            }
-        } else {
-            out.push(z[i]);
-        }
-        i += 1;
-    }
-    *z = out;
 }
 
 /// sqlite3DbSpanDup(): the text between two offsets of the SQL being
@@ -183,8 +153,7 @@ fn exprAffinity(db: &Sqlite3, pExpr: ExprId) -> u8 {
         }
         if op == TK_CAST {
             debug_assert!(!e.HasProperty(EP_IntValue));
-            let mut col = Column::default();
-            return crate::build::sqlite3AffinityType(e.u.zToken.as_deref(), &mut col);
+            return crate::build::sqlite3AffinityType(e.u.zToken.as_deref(), None);
         }
         if op == TK_SELECT_COLUMN {
             let pEList = db.sel(db.ex(e.pLeft).x.pSelect).pEList;
@@ -431,10 +400,8 @@ pub fn sqlite3ExprCollSeq(db: &mut Sqlite3, pExpr: ExprId) -> Option<CollSeqRef>
             break;
         }
     }
-    if let Some(c) = &pColl {
-        if crate::callback::sqlite3CheckCollSeq(db, c) != 0 {
-            pColl = None;
-        }
+    if crate::callback::sqlite3CheckCollSeq(db, pColl.as_ref()) != 0 {
+        pColl = None;
     }
     pColl
 }
@@ -2040,11 +2007,16 @@ pub fn sqlite3ExprListSetName(db: &mut Sqlite3, pList: ExprListId, pName: &Token
             /* If dequote==0, then pName->z does not point to part of a DDL
              ** statement handled by the parser. And so no token need be added
              ** to the token-map.  */
-            dequote_vec(&mut z);
+            crate::util::sqlite3Dequote(&mut z);
         }
         let rename = dequote != 0 && in_rename(db);
         if rename {
-            crate::alter::sqlite3RenameTokenMap(db, &z, pName);
+            let i = el_n(db, pList) - 1;
+            crate::alter::sqlite3RenameTokenMap(
+                db,
+                crate::alter::rename_key_elist_item(pList, i as i32),
+                pName,
+            );
         }
         let pItem = db.elm(pList).a.last_mut().unwrap();
         debug_assert!(pItem.zEName.is_none());
@@ -4317,7 +4289,7 @@ pub fn sqlite3ExprCodeGeneratedColumn(db: &mut Sqlite3, pTab: &TableRef, pCol: u
     } else {
         0
     };
-    let e = crate::build::sqlite3ColumnExpr(pTab, pCol);
+    let e = crate::build::sqlite3ColumnExpr(db, pTab, pCol);
     sqlite3ExprCodeCopy(db, e, regOut);
     let (colFlags, affinity, tabFlags) = {
         let t = pTab.borrow();
@@ -4396,7 +4368,7 @@ pub fn sqlite3ExprCodeGetColumnOfTable(
             x = crate::build::sqlite3TableColumnToStorage(pTab, iCol as i16) as i32;
         }
         sqlite3VdbeAddOp3(db.v(), OP_Column, iTabCur, x, regOut);
-        crate::update::sqlite3ColumnDefault(db.v(), pTab, iCol, regOut);
+        crate::update::sqlite3ColumnDefault(db, pTab, iCol, regOut);
     }
 }
 
@@ -5056,8 +5028,7 @@ pub fn sqlite3ExprCodeTarget(db: &mut Sqlite3, pExpr: ExprId, target: i32) -> i3
                 };
                 sqlite3ExprCode(db, pLeft, target);
                 debug_assert!(inReg == target);
-                let mut col = Column::default();
-                let aff = crate::build::sqlite3AffinityType(z.as_deref(), &mut col);
+                let aff = crate::build::sqlite3AffinityType(z.as_deref(), None);
                 sqlite3VdbeAddOp2(db.v(), OP_Cast, target, aff as i32);
                 return inReg;
             }
@@ -6337,16 +6308,6 @@ pub fn sqlite3ExprIfFalseDup(db: &mut Sqlite3, pExpr: ExprId, dest: i32, jumpIfN
 // Expression comparison
 // ---------------------------------------------------------------------------
 
-/// sqlite3ValueFromExpr() returning the value, or None for the C NULL
-/// result.  (The vdbemem skeleton returns the value through a one-element
-/// slice; a Mem whose flags are still 0 means "no value".)
-fn value_from_expr(db: &mut Sqlite3, pExpr: ExprId, enc: u8, aff: u8) -> Option<Mem> {
-    let mut slot = [Mem::default()];
-    crate::vdbemem::sqlite3ValueFromExpr(db, pExpr, enc, aff, &mut slot);
-    let [m] = slot;
-    if m.flags == 0 { None } else { Some(m) }
-}
-
 /// Expression pVar is guaranteed to be an SQL variable. pExpr may be any
 /// type of expression.
 ///
@@ -6370,7 +6331,8 @@ fn exprCompareVariable(db: &mut Sqlite3, pVar: ExprId, pExpr: ExprId) -> i32 {
     if (db.flags & SQLITE_EnableQPSG) != 0 {
         return 2;
     }
-    let pR = value_from_expr(db, pExpr, SQLITE_UTF8, SQLITE_AFF_BLOB);
+    let mut pR: Option<Box<Mem>> = None;
+    crate::vdbemem::sqlite3ValueFromExpr(db, pExpr, SQLITE_UTF8, SQLITE_AFF_BLOB, &mut pR);
     if let Some(mut pR) = pR {
         with_parse_vdbe(db, |db, v| sqlite3VdbeReprepareOnBind(db, v, iVar, 0));
         let pL = bound_value(db, iVar, SQLITE_AFF_BLOB);
@@ -6379,13 +6341,11 @@ fn exprCompareVariable(db: &mut Sqlite3, pVar: ExprId, pExpr: ExprId) -> i32 {
                 crate::vdbeapi::sqlite3_value_text(&mut pL); /* Make sure the encoding is UTF-8 */
             }
             /* A NULL collating sequence compares with memcmp(), as BINARY does */
-            if let Some(coll) = db.pDfltColl.clone() {
-                res = if crate::vdbeaux::sqlite3MemCompare(db, &pL, &pR, &coll) != 0 {
-                    2
-                } else {
-                    0
-                };
-            }
+            res = if crate::vdbeaux::sqlite3MemCompare(db, &pL, &pR, None) != 0 {
+                2
+            } else {
+                0
+            };
             crate::vdbemem::sqlite3ValueFree(db, &mut pL);
         }
         crate::vdbemem::sqlite3ValueFree(db, &mut pR);
@@ -7644,16 +7604,16 @@ mod tests {
     #[test]
     fn dequote() {
         let mut z = b"\"a\"\"b\"".to_vec();
-        dequote_vec(&mut z);
+        crate::util::sqlite3Dequote(&mut z);
         assert_eq!(z, b"a\"b");
         let mut z = b"[x y]".to_vec();
-        dequote_vec(&mut z);
+        crate::util::sqlite3Dequote(&mut z);
         assert_eq!(z, b"x y");
         let mut z = b"'it''s'".to_vec();
-        dequote_vec(&mut z);
+        crate::util::sqlite3Dequote(&mut z);
         assert_eq!(z, b"it's");
         let mut z = b"plain".to_vec();
-        dequote_vec(&mut z);
+        crate::util::sqlite3Dequote(&mut z);
         assert_eq!(z, b"plain");
     }
 

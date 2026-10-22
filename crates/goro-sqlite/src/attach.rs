@@ -103,7 +103,7 @@ fn attachFunc(context: &mut Context, argv: &mut [Mem]) {
                 break 'attach_error;
             }
             let pVfs = match crate::os::sqlite3_vfs_find(Some(b"memdb")) {
-                Some(v) => Rc::from(v),
+                Some(v) => v,
                 None => return,
             };
             let mut pNewBt: Option<BtreeP> = None;
@@ -161,9 +161,10 @@ fn attachFunc(context: &mut Context, argv: &mut [Mem]) {
             // Allocate the new entry in the db->aDb[] array and initialize the
             // schema hash tables.
             let mut flags: u32 = db.openFlags;
-            let mut pVfs: Option<Box<crate::os::Vfs>> = None;
+            let mut pVfs: Option<Rc<crate::os::Vfs>> = None;
+            let zDefaultVfs = db.pVfs.zName.clone();
             rc = crate::mainapi::sqlite3ParseUri(
-                None,
+                Some(&zDefaultVfs),
                 Some(&zFile),
                 &mut flags,
                 &mut pVfs,
@@ -182,7 +183,7 @@ fn attachFunc(context: &mut Context, argv: &mut [Mem]) {
                 flags &= !(SQLITE_OPEN_CREATE as u32);
             }
             let pVfs: Rc<crate::os::Vfs> = match pVfs {
-                Some(v) => Rc::from(v),
+                Some(v) => v,
                 None => db.pVfs.clone(),
             };
             flags |= SQLITE_OPEN_MAIN_DB as u32;

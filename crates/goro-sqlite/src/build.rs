@@ -18,7 +18,7 @@ use crate::expr::{
     sqlite3ExprDelete, sqlite3ExprListAppend, sqlite3ExprListDelete, sqlite3ExprSkipCollate,
 };
 use crate::global::{
-    sqlite3Isdigit, sqlite3Isquote, sqlite3Isspace, sqlite3StdType, sqlite3StdTypeAffinity,
+    sqlite3Isdigit, sqlite3Isspace, sqlite3StdType, sqlite3StdTypeAffinity,
     sqlite3StdTypeLen, sqlite3StrBINARY, sqlite3UpperToLower,
 };
 use crate::int::*;
@@ -99,54 +99,6 @@ fn tail(z: &[u8], n: usize) -> &[u8] {
     if z.len() >= n { &z[n..] } else { b"" }
 }
 
-/// In-place sqlite3Dequote() (util.c): remove the quotes around an
-/// identifier or string, collapsing doubled quote characters.
-fn dequote(z: &mut ZStr) {
-    if z.is_empty() {
-        return;
-    }
-    let mut quote = z[0];
-    if !sqlite3Isquote(quote) {
-        return;
-    }
-    if quote == b'[' {
-        quote = b']';
-    }
-    let mut out = Vec::with_capacity(z.len());
-    let mut i = 1;
-    while i < z.len() {
-        if z[i] == quote {
-            if i + 1 < z.len() && z[i + 1] == quote {
-                out.push(quote);
-                i += 1;
-            } else {
-                break;
-            }
-        } else {
-            out.push(z[i]);
-        }
-        i += 1;
-    }
-    *z = out;
-}
-
-/// In-place sqlite3DequoteToken() (util.c).
-fn dequote_token(p: &mut Token) {
-    if p.n < 2 {
-        return;
-    }
-    if !sqlite3Isquote(p.at(0)) {
-        return;
-    }
-    for i in 1..(p.n - 1) {
-        if sqlite3Isquote(p.at(i as isize)) {
-            return;
-        }
-    }
-    p.n -= 2;
-    p.off += 1;
-}
-
 /// sqlite3DbSpanDup(): copy the text zSrc[iStart..iEnd], with leading and
 /// trailing white space removed.
 fn span_dup(zSrc: &[u8], mut iStart: usize, iEnd: usize) -> ZStr {
@@ -164,94 +116,13 @@ fn span_dup(zSrc: &[u8], mut iStart: usize, iEnd: usize) -> ZStr {
 // --- ALTER TABLE rename-token bookkeeping ---------------------------------
 //
 // C maps the address of the object a token names (a string, a Column, an
-// Expr) to the token.  Rust uses RenameKey values; the helpers below define
-// the keys used for the objects created in this file.
-
-/// Identity of a reference-counted object, for RenameKey values.
-#[inline]
-fn rc_addr<T>(r: &Rc<RefCell<T>>) -> usize {
-    Rc::as_ptr(r) as *const u8 as usize
-}
-
-/// RenameKey of the name of a Table (C: the pTab->zName pointer).
-pub fn rename_key_table_name(pTab: &TableRef) -> RenameKey {
-    RenameKey::Other(rc_addr(pTab))
-}
-/// RenameKey of the name of column iCol of pTab (C: the Column pointer
-/// / its zCnName).
-pub fn rename_key_column(pTab: &TableRef, iCol: i32) -> RenameKey {
-    RenameKey::Col(rc_addr(pTab), iCol)
-}
-/// RenameKey of &pTab->iPKey.
-pub fn rename_key_ipkey(pTab: &TableRef) -> RenameKey {
-    RenameKey::Other(rc_addr(pTab) + 1)
-}
-/// RenameKey of pFKey->zTo.
-pub fn rename_key_fkey_to(pFKey: &FKeyRef) -> RenameKey {
-    RenameKey::Other(rc_addr(pFKey))
-}
-/// RenameKey of &pFKey->aCol[i] (the child column).
-pub fn rename_key_fkey_from_col(pFKey: &FKeyRef, i: i32) -> RenameKey {
-    RenameKey::Other(rc_addr(pFKey) + 8 + 2 * i as usize)
-}
-/// RenameKey of pFKey->aCol[i].zCol (the parent column name).
-pub fn rename_key_fkey_to_col(pFKey: &FKeyRef, i: i32) -> RenameKey {
-    RenameKey::Other(rc_addr(pFKey) + 9 + 2 * i as usize)
-}
-/// RenameKey of pList->a[i].zEName of an ExprList.
-pub fn rename_key_elist_item(pList: ExprListId, i: i32) -> RenameKey {
-    RenameKey::Other((1usize << 60) | ((pList.0 as usize) << 20) | (i as usize))
-}
-/// RenameKey of pList->a[i].zName of an IdList.
-pub fn rename_key_idlist_item(pList: IdListId, i: i32) -> RenameKey {
-    RenameKey::Other((2usize << 60) | ((pList.0 as usize) << 20) | (i as usize))
-}
-/// RenameKey of pSrc->a[i].zName of a SrcList.
-pub fn rename_key_srcitem_name(pItem: SrcItemId) -> RenameKey {
-    RenameKey::Other((3usize << 60) | (((pItem.0).0 as usize) << 20) | (pItem.1 as usize))
-}
-
-/// sqlite3RenameTokenMap() (alter.c): remember that token `t` names the
-/// object `key`.  The list is kept most-recent-first like the C
-/// pParse->pRename list.
-fn rename_token_map(db: &mut Sqlite3, key: RenameKey, t: &Token) {
-    if db.ppr().eParseMode != PARSE_MODE_UNMAP {
-        db.pp().pRename.insert(
-            0,
-            RenameToken {
-                p: key,
-                t: t.clone(),
-            },
-        );
-    }
-}
-
-/// sqlite3RenameTokenRemap() (alter.c).
-fn rename_token_remap(db: &mut Sqlite3, pTo: RenameKey, pFrom: RenameKey) {
-    for r in db.pp().pRename.iter_mut() {
-        if r.p == pFrom {
-            r.p = pTo;
-            break;
-        }
-    }
-}
-
-/// sqlite3ColumnsFromExprList() adapter.
-///
-/// FIXME(integrator): select.rs declares the column array as
-/// `&mut Option<Box<Column>>`; it must become `&mut Vec<Column>`.  Fix this
-/// adapter when it does.
-fn columns_from_expr_list(
-    db: &mut Sqlite3,
-    pEList: ExprListId,
-    pnCol: &mut i16,
-    paCol: &mut Vec<Column>,
-) -> i32 {
-    let mut a: Option<Box<Column>> = None;
-    let rc = crate::select::sqlite3ColumnsFromExprList(db, pEList, pnCol, &mut a);
-    *paCol = a.map(|c| vec![*c]).unwrap_or_default();
-    rc
-}
+// Expr) to the token.  Rust uses RenameKey values built by the canonical
+// alter.rs rename_key_*() helpers.
+use crate::alter::{
+    rename_key_column, rename_key_elist_item, rename_key_fkey_from_col, rename_key_fkey_to,
+    rename_key_fkey_to_col, rename_key_idlist_item, rename_key_ipkey, rename_key_srcitem_name,
+    rename_key_table_name, sqlite3RenameTokenMap, sqlite3RenameTokenRemap,
+};
 
 /// sqlite3TriggerList() adapter: the list of triggers on pTab, TEMP
 /// triggers first (C links them through Trigger.pNext).
@@ -625,7 +496,8 @@ pub fn sqlite3NestedParse(db: &mut Sqlite3, zFormat: Option<&[u8]>, args: &[PfAr
     db.pp().nested += 1;
     let saveBuf = ParseTail::take(db.pp());
     db.mDbFlags |= DBFLAG_PreferBuiltin;
-    crate::tokenize::sqlite3RunParser(db, Some(&zSql));
+    let zSql: Rc<[u8]> = Rc::from(zSql);
+    crate::tokenize::sqlite3RunParser(db, &zSql, 0);
     db.mDbFlags = savedDbFlags;
     saveBuf.restore(db.pp());
     db.pp().nested -= 1;
@@ -1195,7 +1067,7 @@ pub fn sqlite3NameFromToken(db: &mut Sqlite3, pName: &Token) -> Option<ZStr> {
     let _ = db;
     pName.z.as_ref()?;
     let mut z = pName.text().to_vec();
-    dequote(&mut z);
+    crate::util::sqlite3Dequote(&mut z);
     Some(z)
 }
 
@@ -1639,7 +1511,7 @@ fn start_table_common(
             ..Default::default()
         }));
         if renameName {
-            rename_token_map(db, rename_key_table_name(&pTable), &pName);
+            sqlite3RenameTokenMap(db, rename_key_table_name(&pTable), &pName);
         }
         debug_assert!(db.ppr().pNewTable.is_none());
         db.pp().pNewTable = Some(pTable.clone());
@@ -1862,7 +1734,7 @@ pub fn sqlite3AddColumn(db: &mut Sqlite3, mut sName: Token, mut sType: Token) {
         return;
     }
     if !db.ppr().IN_RENAME_OBJECT() {
-        dequote_token(&mut sName);
+        crate::util::sqlite3DequoteToken(&mut sName);
     }
 
     // Because keywords GENERATE ALWAYS can be converted into identifiers
@@ -1886,7 +1758,7 @@ pub fn sqlite3AddColumn(db: &mut Sqlite3, mut sName: Token, mut sType: Token) {
     // set the Column.eType field rather than storing the typename after
     // the column name, in order to save space.
     if sType.n >= 3 {
-        dequote_token(&mut sType);
+        crate::util::sqlite3DequoteToken(&mut sType);
         for i in 0..SQLITE_N_STDTYPE {
             if sType.n == sqlite3StdTypeLen[i] as u32
                 && strneq(sType.text(), sqlite3StdType[i], sType.n as i32)
@@ -1904,9 +1776,9 @@ pub fn sqlite3AddColumn(db: &mut Sqlite3, mut sName: Token, mut sType: Token) {
 
     let mut z = sName.text().to_vec();
     if db.ppr().IN_RENAME_OBJECT() {
-        rename_token_map(db, rename_key_column(&p, nCol), &sName);
+        sqlite3RenameTokenMap(db, rename_key_column(&p, nCol), &sName);
     }
-    dequote(&mut z);
+    crate::util::sqlite3Dequote(&mut z);
     if nCol > 0 && crate::select::sqlite3ColumnIndex(&p, Some(&z)) >= 0 {
         errmsg!(db, "duplicate column name: %s", &z);
         return;
@@ -1925,7 +1797,7 @@ pub fn sqlite3AddColumn(db: &mut Sqlite3, mut sName: Token, mut sType: Token) {
         col.szEst = szEst;
     } else {
         let mut zType = sType.text().to_vec();
-        dequote(&mut zType);
+        crate::util::sqlite3Dequote(&mut zType);
         col.affinity = sqlite3AffinityType(Some(&zType), Some(&mut col));
         col.colFlags |= COLFLAG_HASTYPE;
         col.zCnType = Some(zType);
@@ -2249,7 +2121,7 @@ pub fn sqlite3AddPrimaryKey(
             if db.ppr().IN_RENAME_OBJECT() && pList.nn() {
                 let e = db.el(pList).a[0].pExpr;
                 let pCExpr = sqlite3ExprSkipCollate(db, e);
-                rename_token_remap(db, rename_key_ipkey(&pTab), RenameKey::Expr(pCExpr));
+                sqlite3RenameTokenRemap(db, Some(rename_key_ipkey(&pTab)), RenameKey::Expr(pCExpr));
             }
             {
                 let mut t = pTab.borrow_mut();
@@ -2769,7 +2641,7 @@ fn convertToWithoutRowidTable(db: &mut Sqlite3, pTab: &TableRef) {
         }
         if db.ppr().IN_RENAME_OBJECT() {
             let e0 = db.el(pList).a[0].pExpr;
-            rename_token_remap(db, RenameKey::Expr(e0), rename_key_ipkey(pTab));
+            sqlite3RenameTokenRemap(db, Some(RenameKey::Expr(e0)), rename_key_ipkey(pTab));
         }
         let so = db.ppr().iPkSortOrder;
         db.elm(pList).a[0].fg.sortFlags = so;
@@ -3142,7 +3014,7 @@ pub fn sqlite3EndTable(
         };
         let l = db.tree(&chk);
         p.borrow_mut().pCheck = Tree::from_id(l);
-        crate::resolve::sqlite3ResolveSelfReference(db, &p, NC_IsCheck, ExprId::NULL, l);
+        crate::resolve::sqlite3ResolveSelfReference(db, Some(&p), NC_IsCheck, ExprId::NULL, l);
         if db.ppr().nErr != 0 {
             // If errors are seen, delete the CHECK constraints now, else they might
             // actually be used if PRAGMA writable_schema=ON is set.
@@ -3159,7 +3031,7 @@ pub fn sqlite3EndTable(
                 let pX = sqlite3ColumnExpr(db, &p, ii);
                 if crate::resolve::sqlite3ResolveSelfReference(
                     db,
-                    &p,
+                    Some(&p),
                     NC_GenCol,
                     pX,
                     ExprListId::NULL,
@@ -3281,8 +3153,8 @@ pub fn sqlite3EndTable(
             if db.ppr().nErr != 0 {
                 return;
             }
+            sqlite3VdbeEndCoroutine(db, regYield);
             let v = db.v();
-            sqlite3VdbeEndCoroutine(v, regYield);
             sqlite3VdbeJumpHere(v, addrTop - 1);
             let addrInsLoop = sqlite3VdbeAddOp1(v, OP_Yield, dest.iSDParm);
             sqlite3VdbeAddOp3(v, OP_MakeRecord, dest.iSdst, dest.nSdst, regRec);
@@ -3350,7 +3222,7 @@ pub fn sqlite3EndTable(
 
         // Reparse everything to update our internal data structures
         let zWhere = mprintf!(db, "tbl_name='%q' AND type!='trigger'", &zTabName);
-        sqlite3VdbeAddParseSchemaOp(db.v(), iDb, zWhere, 0);
+        sqlite3VdbeAddParseSchemaOp(db, iDb, Some(zWhere), 0);
 
         // Test for cycles in generated columns and illegal expressions
         // in CHECK constraints and in DEFAULT clauses.
@@ -3584,7 +3456,7 @@ fn viewGetColumnNames(db: &mut Sqlite3, pTable: &TableRef) -> i32 {
                 let l = db.tree(&chk);
                 let mut nCol: i16 = 0;
                 let mut aCol: Vec<Column> = Vec::new();
-                columns_from_expr_list(db, l, &mut nCol, &mut aCol);
+                crate::select::sqlite3ColumnsFromExprList(db, l, &mut nCol, &mut aCol);
                 {
                     let mut t = pTable.borrow_mut();
                     t.nCol = nCol;
@@ -4067,7 +3939,7 @@ pub fn sqlite3CreateForeignKey(
             nCol = db.el(pFromCol).nExpr();
         }
         let mut zTo = pTo.text().to_vec();
-        dequote(&mut zTo);
+        crate::util::sqlite3Dequote(&mut zTo);
         let pFKey: FKeyRef = Rc::new(RefCell::new(FKey {
             pFrom: Rc::downgrade(&p),
             zTo: zTo.clone(),
@@ -4077,7 +3949,7 @@ pub fn sqlite3CreateForeignKey(
         }));
         debug_assert!(p.borrow().IsOrdinaryTable());
         if db.ppr().IN_RENAME_OBJECT() {
-            rename_token_map(db, rename_key_fkey_to(&pFKey), pTo);
+            sqlite3RenameTokenMap(db, rename_key_fkey_to(&pFKey), pTo);
         }
         if pFromCol.is_null() {
             pFKey.borrow_mut().aCol[0].iFrom = pNCol - 1;
@@ -4105,9 +3977,9 @@ pub fn sqlite3CreateForeignKey(
                 }
                 pFKey.borrow_mut().aCol[i as usize].iFrom = found;
                 if db.ppr().IN_RENAME_OBJECT() {
-                    rename_token_remap(
+                    sqlite3RenameTokenRemap(
                         db,
-                        rename_key_fkey_from_col(&pFKey, i),
+                        Some(rename_key_fkey_from_col(&pFKey, i)),
                         rename_key_elist_item(pFromCol, i),
                     );
                 }
@@ -4118,9 +3990,9 @@ pub fn sqlite3CreateForeignKey(
                 let zEName = db.el(pToCol).a[i as usize].zEName.clone();
                 pFKey.borrow_mut().aCol[i as usize].zCol = Some(zEName.unwrap_or_default());
                 if db.ppr().IN_RENAME_OBJECT() {
-                    rename_token_remap(
+                    sqlite3RenameTokenRemap(
                         db,
-                        rename_key_fkey_to_col(&pFKey, i),
+                        Some(rename_key_fkey_to_col(&pFKey, i)),
                         rename_key_elist_item(pToCol, i),
                     );
                 }
@@ -4265,17 +4137,14 @@ fn sqlite3RefillIndex(db: &mut Sqlite3, pIndex: &IndexRef, memRootPage: i32) {
     sqlite3MultiWrite(db);
 
     let mut iPartIdxLabel = 0;
-    // C passes pPrior==0; passing the index itself with regPrior==0 is
-    // equivalent (sqlite3GenerateIndexKey() ignores pPrior unless
-    // regPrior equals its base register).
     crate::delete::sqlite3GenerateIndexKey(
         db,
         pIndex,
         iTab,
         regRecord,
         0,
-        &mut iPartIdxLabel,
-        pIndex,
+        Some(&mut iPartIdxLabel),
+        None,
         0,
     );
     sqlite3VdbeAddOp2(db.v(), OP_SorterInsert, iSorter, regRecord);
@@ -4665,7 +4534,7 @@ pub fn sqlite3CreateIndex(
         if pPIWhere.nn() {
             crate::resolve::sqlite3ResolveSelfReference(
                 db,
-                &pTabR,
+                Some(&pTabR),
                 NC_PartIdx,
                 pPIWhere,
                 ExprListId::NULL,
@@ -4701,7 +4570,7 @@ pub fn sqlite3CreateIndex(
             sqlite3StringToId(db, itemExpr);
             crate::resolve::sqlite3ResolveSelfReference(
                 db,
-                &pTabR,
+                Some(&pTabR),
                 NC_IdxExpr,
                 itemExpr,
                 ExprListId::NULL,
@@ -5009,7 +4878,7 @@ pub fn sqlite3CreateIndex(
                     sqlite3RefillIndex(db, &idx, iMem);
                     sqlite3ChangeCookie(db, iDb);
                     let zWhere = mprintf!(db, "name='%q' AND type='index'", &zName);
-                    sqlite3VdbeAddParseSchemaOp(db.v(), iDb, zWhere, 0);
+                    sqlite3VdbeAddParseSchemaOp(db, iDb, Some(zWhere), 0);
                     sqlite3VdbeAddOp2(db.v(), OP_Expire, 0, 1);
                 }
 
@@ -5225,7 +5094,7 @@ pub fn sqlite3IdListAppend(db: &mut Sqlite3, mut pList: IdListId, pToken: &Token
     let i = db.idl(pList).nId();
     db.idlm(pList).a.push(IdListItem { zName });
     if db.ppr().IN_RENAME_OBJECT() && has {
-        rename_token_map(db, rename_key_idlist_item(pList, i), pToken);
+        sqlite3RenameTokenMap(db, rename_key_idlist_item(pList, i), pToken);
     }
     pList
 }
@@ -5589,7 +5458,7 @@ pub fn sqlite3SrcListAppendFromTerm(
                 _ => pTable.unwrap(),
             };
             let tk = pToken.clone();
-            rename_token_map(db, rename_key_srcitem_name(pItem), &tk);
+            sqlite3RenameTokenMap(db, rename_key_srcitem_name(pItem), &tk);
         }
         if pAlias.n != 0 {
             let a = sqlite3NameFromToken(db, pAlias);
@@ -6382,23 +6251,23 @@ mod tests {
     #[test]
     fn test_dequote() {
         let mut z = b"\"ab\"\"c\"".to_vec();
-        dequote(&mut z);
+        crate::util::sqlite3Dequote(&mut z);
         assert_eq!(z, b"ab\"c");
         let mut z = b"[x y]".to_vec();
-        dequote(&mut z);
+        crate::util::sqlite3Dequote(&mut z);
         assert_eq!(z, b"x y");
         let mut z = b"plain".to_vec();
-        dequote(&mut z);
+        crate::util::sqlite3Dequote(&mut z);
         assert_eq!(z, b"plain");
     }
 
     #[test]
     fn test_dequote_token() {
         let mut t = Token::from_bytes(b"`abc`");
-        dequote_token(&mut t);
+        crate::util::sqlite3DequoteToken(&mut t);
         assert_eq!(t.text(), b"abc");
         let mut t = Token::from_bytes(b"\"a\"b\"");
-        dequote_token(&mut t);
+        crate::util::sqlite3DequoteToken(&mut t);
         assert_eq!(t.text(), b"\"a\"b\"");
     }
 

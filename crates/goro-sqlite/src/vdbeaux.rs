@@ -571,8 +571,8 @@ pub fn sqlite3VdbeReusable(p: &mut Vdbe) {
 /// VdbeOpIter / opIterNext()).  Calls `f` on each opcode until it returns
 /// false.
 fn opIterAll(v: &Vdbe, mut f: impl FnMut(&VdbeOp) -> bool) {
-    let mut apSub: Vec<Rc<SubProgram>> = Vec::new();
-    let mut visit = |aOp: &[VdbeOp], apSub: &mut Vec<Rc<SubProgram>>| -> bool {
+    let mut apSub: Vec<SubProgramRef> = Vec::new();
+    let mut visit = |aOp: &[VdbeOp], apSub: &mut Vec<SubProgramRef>| -> bool {
         for op in aOp {
             if let P4::Program(prg) = &op.p4 {
                 if op.p4type == P4_SUBPROGRAM && !apSub.iter().any(|s| Rc::ptr_eq(s, prg)) {
@@ -591,7 +591,7 @@ fn opIterAll(v: &Vdbe, mut f: impl FnMut(&VdbeOp) -> bool) {
     let mut iSub = 0;
     while iSub < apSub.len() {
         let s = apSub[iSub].clone();
-        if !visit(&s.aOp, &mut apSub) {
+        if !visit(&s.borrow().aOp, &mut apSub) {
             return;
         }
         iSub += 1;
@@ -1397,15 +1397,15 @@ pub fn sqlite3VdbeFrameMemDel(pArg: &mut [u8]) {}
 /// whose aOp holds the opcode, or None for the main program (p.aOp).
 pub fn sqlite3VdbeNextOpcode(
     p: &mut Vdbe,
-    mut apSub: Option<&mut Vec<Rc<SubProgram>>>,
+    mut apSub: Option<&mut Vec<SubProgramRef>>,
     eMode: i32,
     piPc: &mut i32,
     piAddr: &mut i32,
-    paOp: &mut Option<Rc<SubProgram>>,
+    paOp: &mut Option<SubProgramRef>,
 ) -> i32 {
     let mut rc = SQLITE_OK;
     let mut i: i32;
-    let mut aOp: Option<Rc<SubProgram>> = None;
+    let mut aOp: Option<SubProgramRef> = None;
 
     /* When the number of output rows reaches nRow, that means the
      ** listing has finished and sqlite3_step() should return SQLITE_DONE.
@@ -1417,7 +1417,7 @@ pub fn sqlite3VdbeNextOpcode(
     let mut nRow = p.aOp.len() as i32;
     if let Some(subs) = apSub.as_deref() {
         for s in subs.iter() {
-            nRow += s.aOp.len() as i32;
+            nRow += s.borrow().aOp.len() as i32;
         }
     }
     let mut iPc = *piPc;
@@ -1430,8 +1430,9 @@ pub fn sqlite3VdbeNextOpcode(
             rc = SQLITE_DONE;
             break;
         }
+        let holder: SubProgramRef;
+        let guard;
         let op: &VdbeOp;
-        let holder: Rc<SubProgram>;
         if (i as usize) < p.aOp.len() {
             /* The rowid is small enough that we are still in the
              ** main program. */
@@ -1443,13 +1444,14 @@ pub fn sqlite3VdbeNextOpcode(
             i -= p.aOp.len() as i32;
             let subs = apSub.as_deref().expect("sub-program list");
             let mut j = 0usize;
-            while i >= subs[j].aOp.len() as i32 {
-                i -= subs[j].aOp.len() as i32;
+            while i >= subs[j].borrow().aOp.len() as i32 {
+                i -= subs[j].borrow().aOp.len() as i32;
                 j += 1;
             }
             holder = subs[j].clone();
             aOp = Some(holder.clone());
-            op = &holder.aOp[i as usize];
+            guard = holder.borrow();
+            op = &guard.aOp[i as usize];
         }
 
         /* When an OP_Program opcode is encounter (the only opcode that has
@@ -1461,7 +1463,7 @@ pub fn sqlite3VdbeNextOpcode(
             if op.p4type == P4_SUBPROGRAM {
                 if let P4::Program(prg) = &op.p4 {
                     if !subs.iter().any(|s| Rc::ptr_eq(s, prg)) {
-                        nRow += prg.aOp.len() as i32;
+                        nRow += prg.borrow().aOp.len() as i32;
                         subs.push(prg.clone());
                     }
                 }
@@ -1504,7 +1506,7 @@ pub fn sqlite3VdbeFrameDelete(db: &mut Sqlite3, p: &mut VdbeFrame) {
 
 /// The list of sub-programs kept in aMem[9] while listing EXPLAIN output
 /// (C stores an array of SubProgram pointers in the blob of that register).
-type SubList = RefCell<Vec<Rc<SubProgram>>>;
+type SubList = RefCell<Vec<SubProgramRef>>;
 
 /// C: `int sqlite3VdbeList( Vdbe *p )`
 ///
@@ -1573,7 +1575,7 @@ pub fn sqlite3VdbeList(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
 
     /* Figure out which opcode is next to display */
     let mut i = 0;
-    let mut aOp: Option<Rc<SubProgram>> = None;
+    let mut aOp: Option<SubProgramRef> = None;
     let mut pc = p.pc;
     {
         let mut guard = pSub.as_ref().map(|s| s.borrow_mut());
@@ -1601,7 +1603,7 @@ pub fn sqlite3VdbeList(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
     if rc == SQLITE_OK {
         let pOp: VdbeOp = match &aOp {
             None => p.aOp[i as usize].clone(),
-            Some(s) => s.aOp[i as usize].clone(),
+            Some(s) => s.borrow().aOp[i as usize].clone(),
         };
         if db.isInterrupted.get() != 0 {
             p.rc = SQLITE_INTERRUPT;
@@ -2050,9 +2052,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
      ** committed atomically.
      */
     else {
-        let Some(mut pVfs) = superJournalVfs(db) else {
-            return SQLITE_ERROR;
-        };
+        let pVfs = db.pVfs.clone();
         let mut zSuper: Vec<u8>;
         let mut pSuperJrnl: Option<Box<crate::os::SqliteFile>> = None;
         let mut offset: i64 = 0;
@@ -2069,7 +2069,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
                         b"MJ delete: %s",
                         &[PfArg::Str(Some(&zSuper))],
                     );
-                    crate::os::sqlite3OsDelete(&mut pVfs, Some(&zSuper), 0);
+                    crate::os::sqlite3OsDelete(&pVfs, &zSuper, 0);
                     break;
                 } else if retryCount == 1 {
                     crate::printf::sqlite3_log(
@@ -2096,8 +2096,8 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
             debug_assert!(zSuper[zSuper.len() - 3] == b'9');
             /* sqlite3FileSuffix3(zMainFile, zSuper): 8+3 names not enabled */
             rc = crate::os::sqlite3OsAccess(
-                &mut pVfs,
-                Some(&zSuper),
+                &pVfs,
+                &zSuper,
                 SQLITE_ACCESS_EXISTS,
                 &mut res,
             );
@@ -2109,14 +2109,14 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
             /* Open the super-journal. */
             let mut outFlags = 0;
             rc = crate::os::sqlite3OsOpenMalloc(
-                &mut pVfs,
+                &pVfs,
                 Some(&zSuper),
                 &mut pSuperJrnl,
                 SQLITE_OPEN_READWRITE
                     | SQLITE_OPEN_CREATE
                     | SQLITE_OPEN_EXCLUSIVE
                     | SQLITE_OPEN_SUPER_JOURNAL,
-                &mut outFlags,
+                Some(&mut outFlags),
             );
         }
         if rc != SQLITE_OK {
@@ -2143,7 +2143,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
                 offset += zFile.len() as i64;
                 if rc != SQLITE_OK {
                     crate::os::sqlite3OsCloseFree(&mut pSuperJrnl);
-                    crate::os::sqlite3OsDelete(&mut pVfs, Some(&zSuper), 0);
+                    crate::os::sqlite3OsDelete(&pVfs, &zSuper, 0);
                     return rc;
                 }
             }
@@ -2158,7 +2158,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
             rc = crate::os::sqlite3OsSync(&mut pSuperJrnl, SQLITE_SYNC_NORMAL);
             if rc != SQLITE_OK {
                 crate::os::sqlite3OsCloseFree(&mut pSuperJrnl);
-                crate::os::sqlite3OsDelete(&mut pVfs, Some(&zSuper), 0);
+                crate::os::sqlite3OsDelete(&pVfs, &zSuper, 0);
                 return rc;
             }
         }
@@ -2190,7 +2190,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
          ** doing this the directory is synced again before any individual
          ** transaction files are deleted.
          */
-        rc = crate::os::sqlite3OsDelete(&mut pVfs, Some(&zSuper), 1);
+        rc = crate::os::sqlite3OsDelete(&pVfs, &zSuper, 1);
         if rc != 0 {
             return rc;
         }
@@ -2212,15 +2212,6 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
     }
 
     rc
-}
-
-/// The VFS used for the super-journal of a multi-file commit.
-///
-/// INTEGRATOR: the os.rs skeleton takes `&mut Vfs` while the connection
-/// holds `Rc<Vfs>` (db.pVfs); until the VFS layer settles this, the default
-/// VFS is looked up here.  Replace by `db.pVfs` once os.rs takes `&Vfs`.
-fn superJournalVfs(db: &Sqlite3) -> Option<Box<crate::os::Vfs>> {
-    crate::os::sqlite3_vfs_find(None)
 }
 
 /// vdbeCloseStatement()
@@ -2668,7 +2659,7 @@ fn sqlite3VdbeClearObject(db: &mut Sqlite3, p: &mut Vdbe) {
          ** reference to the SubProgram goes away; give back TABLEREF
          ** references when this was the last one. */
         if let Ok(sub) = Rc::try_unwrap(pSub) {
-            vdbeFreeOpArray(db, sub.aOp);
+            vdbeFreeOpArray(db, sub.into_inner().aOp);
         }
     }
     if p.eVdbeState != VDBE_INIT_STATE {
@@ -3753,7 +3744,7 @@ pub fn sqlite3VdbeFindCompare(p: &mut UnpackedRecord) -> RecordCompare {
         }
         let isBinary = match ki.aColl.first() {
             None | Some(None) => true,
-            Some(Some(c)) => crate::mainapi::sqlite3IsBinary(c) != 0,
+            Some(Some(c)) => crate::mainapi::sqlite3IsBinary(Some(c)) != 0,
         };
         if (flags & (MEM_Real | MEM_IntReal | MEM_Null | MEM_Blob)) == 0 && isBinary {
             debug_assert!(flags & MEM_Str != 0);
