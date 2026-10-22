@@ -37775,16 +37775,10 @@ impl Vm {
 
                 OpCode::Eval => match outlined(|| -> Result<Flow, VmError> {
                     let code_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let code_str = code_val.to_php_string().to_string_lossy();
-
-                    // PHP eval expects code without <?php opening tag typically,
-                    // but if it has one, the lexer handles it.
-                    // eval() wraps the code as if it were a file: <?php is optional
-                    let source = if code_str.trim_start().starts_with("<?") {
-                        code_str.as_bytes().to_vec()
-                    } else {
-                        format!("<?php {}", code_str).into_bytes()
-                    };
+                    // eval()'d code starts in scripting mode (an opening
+                    // tag in it is a syntax error).
+                    let mut source = b"<?php ".to_vec();
+                    source.extend_from_slice(code_val.to_php_string().as_bytes());
 
                     let result = {
                         let mut lexer = goro_parser::Lexer::new(&source);
