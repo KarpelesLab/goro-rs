@@ -263,7 +263,9 @@ impl Vm {
         // Located at the call site when called through a direct call_user_func()
         let at = self.ucf_call_line.take().unwrap_or(0);
         // zend_call_function(): a by-reference parameter given a plain value
-        // warns (zend_param_must_be_ref) and gets a temporary reference.
+        // warns (zend_param_must_be_ref) and gets a temporary reference (to
+        // a separated copy: the caller's array is not modified).
+        let mut separated: Option<Vec<Value>> = None;
         if let Some(info) = crate::arginfo::lookup(lname) {
             for (i, a) in args.iter().enumerate() {
                 let Some(p) = info
@@ -273,6 +275,13 @@ impl Vm {
                 else {
                     break;
                 };
+                if p.by_ref != 0 {
+                    if let Value::Array(arr) = a {
+                        let copy = arr.borrow().clone();
+                        separated.get_or_insert_with(|| args.to_vec())[i] =
+                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(copy)));
+                    }
+                }
                 if p.by_ref == 1 && !matches!(a, Value::Reference(_)) {
                     let line = self.current_line;
                     self.emit_warning_at(
@@ -287,6 +296,7 @@ impl Vm {
                 }
             }
         }
+        let args: &[Value] = separated.as_deref().unwrap_or(args);
         let Some((info, flags)) = self.zpp_info(lname) else {
             // zend_call_function() -> the function's own zpp: the arity
             // check holds for every internal function, even those whose
@@ -344,6 +354,38 @@ impl Vm {
                 hook(self);
             }
         }
+    }
+
+    /// call_builtin_from_internal() with named arguments: they are mapped
+    /// onto the parameters first (zend_handle_named_arg), so the
+    /// by-reference and zpp checks see them in place.
+    pub fn call_builtin_from_internal_named(
+        &mut self,
+        f: crate::vm::BuiltinFn,
+        lname: &[u8],
+        args: &[Value],
+        named: Vec<(Vec<u8>, Value)>,
+    ) -> Result<Value, crate::vm::VmError> {
+        if named.is_empty() {
+            return self.call_builtin_from_internal(f, lname, args);
+        }
+        let Some(info) = crate::arginfo::lookup(lname) else {
+            self.pending_named_args = named;
+            return f(self, args);
+        };
+        let mut owned = args.to_vec();
+        if let Err(e) = self.zpp_resolve_named(info, &mut owned, named) {
+            let line = self.current_line;
+            if let crate::arginfo::ZppError::Throw(cls, msg) = e {
+                let exc = self.create_exception(cls, &msg, line);
+                self.current_exception = Some(exc);
+            }
+            return Err(crate::vm::VmError {
+                message: self.uncaught_exception_message(),
+                line,
+            });
+        }
+        self.call_builtin_from_internal(f, lname, &owned)
     }
 
     /// Run builtin `f` (lowercase name `lname`), with the observer's

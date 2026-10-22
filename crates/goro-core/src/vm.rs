@@ -1130,7 +1130,7 @@ pub struct Vm {
     /// flush_callable_deprecations() after the check.
     pub(crate) pending_callable_deprecations: RefCell<Vec<String>>,
     /// Line of a direct call_user_func() call, for its callee's frame.
-    pub(crate) ucf_call_line: Option<u32>,
+    pub ucf_call_line: Option<u32>,
     /// INI on-modify handlers registered by extensions (key -> handler).
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
@@ -7310,6 +7310,13 @@ impl Vm {
                     );
                     let line = self.current_line;
                     self.emit_warning_at(&msg, line);
+                    // An error handler that threw aborts the call.
+                    if self.current_exception.is_some() {
+                        return Err(VmError {
+                            message: self.uncaught_exception_message(),
+                            line,
+                        });
+                    }
                 }
             }
         }
@@ -7337,10 +7344,16 @@ impl Vm {
             push_lossy(&mut frame_display, &op_array.name);
         }
         // RECV of a callback invoked by an internal function: weak-mode
-        // checks and coercion (the caller is internal, so no "called in").
+        // checks and coercion (the caller is internal, so no "called in" --
+        // except for a direct call_user_func(), compiled to
+        // ZEND_INIT_USER_CALL in the calling user code).
         if !op_array.param_types.is_empty() {
             let had_exc = self.current_exception.is_some();
             if let Some(msg) = self.callback_recv_types(op_array, &mut call.args, lead, cv_shift) {
+                let msg = match self.ucf_call_line {
+                    Some(l) => format!("{}, called in {} on line {}", msg, self.current_file, l),
+                    None => msg,
+                };
                 let line = if op_array.decl_line > 0 {
                     op_array.decl_line
                 } else {
@@ -23651,7 +23664,17 @@ impl Vm {
                                 .map(|call| self.native_method_arg_by_ref(call, arg_index))
                                 .unwrap_or(false);
 
-                        if callee_expects_ref && matches!(op.opcode, OpCode::SendValChecked) {
+                        // An internal function's by-reference parameter
+                        // (SEND_VAL_EX / SEND_VAR_NO_REF_EX resolved at run time).
+                        let builtin_ref = !callee_expects_ref
+                            && matches!(op.opcode, OpCode::SendValChecked)
+                            && self
+                                .pending_calls
+                                .last()
+                                .is_some_and(|call| self.builtin_arg_must_be_ref(call, arg_index));
+                        if (callee_expects_ref || builtin_ref)
+                            && matches!(op.opcode, OpCode::SendValChecked)
+                        {
                             let is_call_result = matches!(
                                 self.read_operand(&op.result, &cvs, &tmps, &op_array.literals),
                                 Value::Long(0)
@@ -23970,9 +23993,6 @@ impl Vm {
                         })
                         .map(|(br, vr)| (Some(br), vr))
                         .unwrap_or((None, false));
-                    let current_arg_offset =
-                        self.pending_calls.last().map(|c| c.args.len()).unwrap_or(0);
-
                     // Get source array Rc for by-ref modifications
                     let source_arr_rc = if let Value::Array(arr) = &val {
                         Some(arr.clone())
@@ -24283,7 +24303,23 @@ impl Vm {
                         }
                         Err(e) => Err(e),
                         Ok(pairs) => {
-                            if let Some(call) = self.pending_calls.last_mut() {
+                            // The keys of the source array's positional elements
+                            // (a by-reference parameter binds to that element).
+                            let src_int_keys: Vec<i64> = source_arr_rc
+                                .as_ref()
+                                .map(|a| {
+                                    a.borrow()
+                                        .iter()
+                                        .filter_map(|(k, _)| match k {
+                                            ArrayKey::Int(i) => Some(*i),
+                                            _ => None,
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let from_traversable = !matches!(val, Value::Array(_));
+                            let mut by_value_refs: Vec<usize> = Vec::new();
+                            let r = if let Some(call) = self.pending_calls.last_mut() {
                                 let mut had_named = false;
                                 let mut result = Ok(());
                                 let mut unpack_idx = 0usize;
@@ -24303,22 +24339,29 @@ impl Vm {
                                             result = Err("Cannot use positional argument after named argument during unpacking".into());
                                             break;
                                         }
-                                        let arg_pos = current_arg_offset + call.args.len();
+                                        let arg_pos = call.args.len();
                                         // Check if callee expects by-ref at this position
                                         let is_by_ref = callee_by_ref
                                             .as_ref()
                                             .and_then(|br| br.get(arg_pos).copied())
                                             .unwrap_or(callee_variadic_is_ref);
-                                        if is_by_ref {
+                                        if is_by_ref && from_traversable {
+                                            by_value_refs.push(arg_pos);
+                                            call.args.push(v);
+                                        } else if is_by_ref {
                                             // Create a shared reference between the source array element and the arg
-                                            if let Some(ref src_arr) = source_arr_rc {
-                                                let r = Rc::new(RefCell::new(v));
+                                            if let (Some(src_arr), Some(&k)) =
+                                                (source_arr_rc.as_ref(), src_int_keys.get(unpack_idx))
+                                            {
+                                                let r = match v {
+                                                    Value::Reference(r) => r,
+                                                    v => Rc::new(RefCell::new(v)),
+                                                };
                                                 // Update the source array element to point to this reference
-                                                let key =
-                                                    crate::array::ArrayKey::Int(unpack_idx as i64);
-                                                src_arr
-                                                    .borrow_mut()
-                                                    .set(key, Value::Reference(r.clone()));
+                                                src_arr.borrow_mut().set(
+                                                    crate::array::ArrayKey::Int(k),
+                                                    Value::Reference(r.clone()),
+                                                );
                                                 call.args.push(Value::Reference(r));
                                             } else {
                                                 // No source array to write back to (e.g., literal array)
@@ -24333,7 +24376,21 @@ impl Vm {
                                 result
                             } else {
                                 Ok(())
+                            };
+                            if !by_value_refs.is_empty() {
+                                let (callee, this_off) = self.pending_callee_display();
+                                for pos in by_value_refs {
+                                    self.emit_warning_at(
+                                        &format!(
+                                            "Cannot pass by-reference argument {} of {}() by unpacking a Traversable, passing by-value instead",
+                                            pos + 1 - this_off,
+                                            callee
+                                        ),
+                                        op.line,
+                                    );
+                                }
                             }
+                            r
                         }
                     };
 
@@ -42015,7 +42072,22 @@ impl Vm {
                             });
                         }
                     } else if let Value::Array(arr) = arr_val {
-                        arr.borrow_mut().push(raw_val);
+                        let pushed = arr.borrow_mut().try_push(raw_val);
+                        if let Err(msg) = pushed {
+                            let exc = self.create_exception(b"Error", msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
                     } else if matches!(arr_val, Value::Null | Value::Undef | Value::False) {
                         // `$undef[] = &$x`: the write vivifies an array.
                         if matches!(arr_val, Value::False) {
@@ -43041,6 +43113,19 @@ impl Vm {
                             obj.borrow().get_property(&pkey)
                         }
                     } else {
+                        // FETCH_OBJ_W on a non-object (zend_throw_non_object_error)
+                        let v = obj_val.deref();
+                        // (BP_VAR_W: an undefined container does not warn)
+                        let v = if matches!(v, Value::Undef) {
+                            Value::Null
+                        } else {
+                            v
+                        };
+                        ref_error = Some(format!(
+                            "Attempt to modify property \"{}\" on {}",
+                            prop_name.to_string_lossy(),
+                            Self::value_type_name(&v)
+                        ));
                         Value::Null
                     };
                     if let Some(msg) = ref_error {
@@ -51537,7 +51622,27 @@ impl Vm {
                         // FETCH_OBJ_UNSET on a non-object: nothing to unset.
                         Value::Null
                     } else if is_w_fetch {
-                        // FETCH_OBJ_W/RW on a non-object.
+                        // FETCH_OBJ_W/RW on a non-object (an undefined CV
+                        // container warns, except for BP_VAR_W).
+                        if let OperandType::Cv(i) = op.op1 {
+                            if matches!(
+                                op.opcode,
+                                OpCode::PropertyGetWRW | OpCode::PropertyGetWObjRW
+                            ) && matches!(
+                                Self::read_operand_raw(&cvs, &op.op1).deref(),
+                                Value::Undef
+                            ) {
+                                if let Some(name) = op_array.cv_names.get(i as usize) {
+                                    self.emit_warning_at(
+                                        &format!(
+                                            "Undefined variable ${}",
+                                            String::from_utf8_lossy(name)
+                                        ),
+                                        op.line,
+                                    );
+                                }
+                            }
+                        }
                         let type_name = Self::value_type_name(&obj_val);
                         let msg = format!(
                             "Attempt to modify property \"{}\" on {}",

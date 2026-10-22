@@ -1643,7 +1643,7 @@ impl Compiler {
                         ExprKind::FunctionCall { .. }
                             | ExprKind::MethodCall { .. }
                             | ExprKind::StaticMethodCall { .. }
-                    );
+                    ) && !self.is_special_builtin_call(&arg.value);
                     let info = func_name.and_then(|f| {
                         crate::arginfo::lookup(&f.to_ascii_lowercase())
                             .and_then(|fi| fi.params.get(i).map(|p| (fi.name, p.name)))
@@ -1945,6 +1945,14 @@ impl Compiler {
                     None
                 } else {
                     match &arg.value.kind {
+                        // A call compiled to a VM builtin yields a TMP, and
+                        // $GLOBALS is passed like one (SEND_VAL_EX).
+                        ExprKind::FunctionCall { .. }
+                            if self.is_special_builtin_call(&arg.value) =>
+                        {
+                            Some(1)
+                        }
+                        ExprKind::Variable(n) if n.as_slice() == b"GLOBALS" => Some(1),
                         ExprKind::FunctionCall { .. }
                         | ExprKind::MethodCall { .. }
                         | ExprKind::StaticMethodCall { .. }
@@ -17022,11 +17030,7 @@ impl Compiler {
                             | ExprKind::DynamicStaticPropertyAccess { .. } => OperandType::Tmp(
                                 self.emit_static_prop_fetch(OpCode::StaticPropGetRef, value)?,
                             ),
-                            _ => {
-                                let v = self.compile_expr(value)?;
-                                self.emit_assign_ref_call_notice(value, expr.span.line);
-                                v
-                            }
+                            _ => self.compile_expr(value)?,
                         };
                         let obj = self.compile_obj_write_base(object)?;
                         let name = self.compile_property_name(property)?;
@@ -17037,6 +17041,21 @@ impl Compiler {
                             result: name,
                             line: expr.span.line,
                         });
+                        // (ZEND_ASSIGN_OBJ_REF raises it once the property
+                        // slot was fetched)
+                        if !matches!(
+                            value.kind,
+                            ExprKind::Variable(_)
+                                | ExprKind::ArrayAccess { .. }
+                                | ExprKind::PropertyAccess {
+                                    nullsafe: false,
+                                    ..
+                                }
+                                | ExprKind::StaticPropertyAccess { .. }
+                                | ExprKind::DynamicStaticPropertyAccess { .. }
+                        ) {
+                            self.emit_assign_ref_call_notice(value, expr.span.line);
+                        }
                         Ok(value_op)
                     }
                     (
@@ -17202,7 +17221,6 @@ impl Compiler {
                         // $arr[key] = &<expr> — evaluate expr and store reference
                         let arr = self.compile_dim_write_base(array)?;
                         let val = self.compile_expr(value)?;
-                        self.emit_assign_ref_call_notice(value, expr.span.line);
                         if let Some(idx_expr) = index {
                             let idx = self.compile_expr(idx_expr)?;
                             self.op_array.emit(Op {
@@ -17221,6 +17239,8 @@ impl Compiler {
                                 line: expr.span.line,
                             });
                         }
+                        // (after the dimension fetch, which may throw)
+                        self.emit_assign_ref_call_notice(value, expr.span.line);
                         Ok(self.ref_assign_result(val, result_discarded, expr.span.line))
                     }
                     (

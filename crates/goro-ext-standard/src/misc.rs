@@ -1547,6 +1547,18 @@ fn call_user_func_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
 fn call_user_func_array_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(cb) = args.first() {
         let r = validate_callback_arg_check(vm, "call_user_func_array", cb)?;
+        // Z_PARAM_ARRAY($args)
+        if let Some(a) = args.get(1).map(|v| v.deref()) {
+            if !matches!(a, Value::Array(_)) {
+                return Err(throw_type_error_msg(
+                    vm,
+                    format!(
+                        "call_user_func_array(): Argument #2 ($args) must be of type array, {} given",
+                        Vm::value_type_name(&a)
+                    ),
+                ));
+            }
+        }
         if r.trampoline.is_some() {
             if let Some(Value::Array(a)) = args.get(1).map(|v| v.deref()) {
                 let a = a.borrow().clone();
@@ -1674,6 +1686,22 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         return Ok(Value::Null);
     }
 
+    // [$closure, '__invoke']: Closure::__invoke() (internal) makes the
+    // call, so the closure is not called from user code.
+    if let Value::Array(arr) = args[0].deref() {
+        let a = arr.borrow();
+        let mut it = a.values();
+        if let (Some(Value::Object(o)), Some(m)) = (it.next().map(|v| v.deref()), it.next()) {
+            if o.borrow().class_name.eq_ignore_ascii_case(b"Closure")
+                && m.deref()
+                    .to_php_string()
+                    .as_bytes()
+                    .eq_ignore_ascii_case(b"__invoke")
+            {
+                vm.ucf_call_line = None;
+            }
+        }
+    }
     let callback_v = args[0].closure_callable();
     let callback = &callback_v;
     if let Value::String(s) = callback {
@@ -2106,12 +2134,7 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
 
         // Try builtin first
         if let Some(builtin) = vm.functions.get(fn_lower).copied() {
-            // For builtins, forward named args via pending_named_args
-            if !named_args.is_empty() {
-                vm.pending_named_args = named_args;
-                return builtin(vm, &call_args);
-            }
-            return vm.call_builtin_from_internal(builtin, fn_lower, &call_args);
+            return vm.call_builtin_from_internal_named(builtin, fn_lower, &call_args, named_args);
         }
 
         // Try user function (but not "Class::method" strings - those need proper LSB handling below)

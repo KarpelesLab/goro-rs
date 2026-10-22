@@ -402,9 +402,65 @@ impl Vm {
         r
     }
 
+    /// The (lowercase) internal function a pending call goes to, if any:
+    /// an unqualified call in a namespace falls back to the global one.
+    fn pending_builtin_name(&self, call: &crate::vm::PendingCall) -> Option<Vec<u8>> {
+        let name = call.name.as_bytes();
+        let name = name.strip_prefix(b"\\").unwrap_or(name);
+        if name.contains(&b':') || self.user_fn_lookup(name).is_some() {
+            return None;
+        }
+        let lower = name.to_ascii_lowercase();
+        if self.functions.contains_key(&lower) {
+            return Some(lower);
+        }
+        let short = &lower[lower.iter().rposition(|&b| b == b'\\')? + 1..];
+        (self.user_fn_lookup(short).is_none() && self.functions.contains_key(short))
+            .then(|| short.to_vec())
+    }
+
+    /// Whether parameter `arg_index` of the internal function `call` is
+    /// taken by reference (not prefer-ref).
+    pub(crate) fn builtin_arg_must_be_ref(
+        &self,
+        call: &crate::vm::PendingCall,
+        arg_index: usize,
+    ) -> bool {
+        let Some(lower) = self.pending_builtin_name(call) else {
+            return false;
+        };
+        crate::arginfo::lookup(&lower).is_some_and(|fi| {
+            let p = fi
+                .params
+                .get(arg_index)
+                .or_else(|| fi.params.last().filter(|p| p.variadic));
+            p.is_some_and(|p| p.by_ref == 1)
+        })
+    }
+
     /// zend_cannot_pass_by_reference() message for argument `arg_index`
     /// (0-based) of the pending call.
     pub(crate) fn cannot_pass_by_ref_msg(&self, arg_index: usize) -> String {
+        if let Some(call) = self.pending_calls.last() {
+            if self.builtin_arg_must_be_ref(call, arg_index) {
+                let lower = self.pending_builtin_name(call).unwrap_or_default();
+                if let Some(fi) = crate::arginfo::lookup(&lower) {
+                    return match fi.params.get(arg_index).filter(|p| !p.variadic) {
+                        Some(p) => format!(
+                            "{}(): Argument #{} (${}) could not be passed by reference",
+                            fi.name,
+                            arg_index + 1,
+                            p.name
+                        ),
+                        None => format!(
+                            "{}(): Argument #{} could not be passed by reference",
+                            fi.name,
+                            arg_index + 1
+                        ),
+                    };
+                }
+            }
+        }
         // An extension's native method ("__spl::class::method", $this first)
         if let Some(call) = self.pending_calls.last() {
             if let Some(rest) = call.name.as_bytes().strip_prefix(b"__spl::") {
@@ -433,6 +489,33 @@ impl Vm {
                 }
             }
         }
+        self.cannot_pass_by_ref_user_msg(arg_index)
+    }
+
+    /// The pending user call's display name ("f", "C::m") and whether its
+    /// first argument is $this (1) or not (0).
+    pub(crate) fn pending_callee_display(&self) -> (String, usize) {
+        let Some(call) = self.pending_calls.last() else {
+            return (String::new(), 0);
+        };
+        let lower: Vec<u8> = call.name.as_bytes().to_ascii_lowercase();
+        match self.user_functions.get(&lower) {
+            Some(f) => {
+                let is_method = f.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                    && matches!(call.args.first(), Some(Value::Object(_)));
+                let disp =
+                    if call.name.as_bytes().windows(2).any(|w| w == b"::") || f.name.is_empty() {
+                        call.name.to_string_lossy().to_string()
+                    } else {
+                        String::from_utf8_lossy(f.effective_name()).to_string()
+                    };
+                (disp, usize::from(is_method))
+            }
+            None => (call.name.to_string_lossy().to_string(), 0),
+        }
+    }
+
+    fn cannot_pass_by_ref_user_msg(&self, arg_index: usize) -> String {
         let (fname, pname, num) = self
             .pending_calls
             .last()
@@ -450,7 +533,13 @@ impl Vm {
                         String::from_utf8_lossy(f.effective_name()).to_string()
                     };
                     let num = if is_method { arg_index } else { arg_index + 1 };
-                    (disp, f.cv_names.get(arg_index).cloned(), num)
+                    // (a variadic parameter is not named)
+                    let pname = f
+                        .cv_names
+                        .get(arg_index)
+                        .filter(|_| f.variadic_param.is_none_or(|v| (arg_index as u32) < v))
+                        .cloned();
+                    (disp, pname, num)
                 })
             })
             .unwrap_or_default();
