@@ -244,7 +244,8 @@ impl UCollator {
             let end = k[pos..].iter().position(|&b| b == 1).map(|e| pos + e).unwrap_or(k.len());
             out.extend_from_slice(&k[pos..end]);
             pos = end;
-            if trailing && pos < k.len() && k[pos] == 1 {
+            // (a NO_CE byte is followed by the next level's separator)
+            if trailing && pos + 1 < k.len() && k[pos] == 1 && k[pos + 1] == 1 {
                 pos += 1;
             }
         }
