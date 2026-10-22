@@ -4450,6 +4450,7 @@ impl Compiler {
                 directives,
                 body,
                 attributes,
+                ..
             } => {
                 // If attributes are present and there's more than one directive,
                 // this is `#[Attr] const A=1, B=2;` which is a fatal error.

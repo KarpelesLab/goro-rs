@@ -1795,6 +1795,7 @@ impl Parser {
                 directives,
                 body: None,
                 attributes,
+                is_const: true,
             },
             span,
         })
@@ -3772,6 +3773,7 @@ impl Parser {
                 directives,
                 body,
                 attributes: Vec::new(),
+                is_const: false,
             },
             span,
         })
@@ -5129,6 +5131,7 @@ impl Parser {
                             | ExprKind::MethodCall { .. }
                             | ExprKind::StaticMethodCall { .. }
                             | ExprKind::DynamicStaticMethodCall { .. }
+                            | ExprKind::Pipe { .. }
                     ) && !Self::is_short_circuited(root);
                     if !writable {
                         return Err(ParseError {

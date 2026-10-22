@@ -95,6 +95,8 @@ pub enum StmtKind {
         directives: Vec<(Vec<u8>, Expr)>,
         body: Option<Vec<Statement>>,
         attributes: Vec<Attribute>,
+        /// `const A = 1, B = 2;` (rather than a `declare()` statement).
+        is_const: bool,
     },
     NamespaceDecl {
         name: Option<Vec<Vec<u8>>>,

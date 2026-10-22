@@ -1654,13 +1654,8 @@ fn export_stmt(s: &mut String, st: &Statement, indent: usize) {
             directives,
             body: None,
             attributes,
-        } if !directives.iter().any(|(n, _)| {
-            matches!(
-                n.to_ascii_lowercase().as_slice(),
-                b"strict_types" | b"ticks" | b"encoding"
-            )
-        }) =>
-        {
+            is_const: true,
+        } => {
             export_attributes(s, attributes, indent, true);
             s.push_str("const ");
             for (i, (n, v)) in directives.iter().enumerate() {
