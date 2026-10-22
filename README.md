@@ -16,7 +16,7 @@ extensions run the official php-src test suite.
 | Total tests | 21582 (the generic PDO tests run once per driver) |
 | Pass | 19449 (90.1% of all, **98.2% of runnable**) |
 | Fail / Error | 359 |
-| Skip / XFail | 1774 (mostly extensions not implemented yet: ldap, ffi, odbc, snmp, enchant, …; plus Windows-only, root-only and huge-memory tests) |
+| Skip / XFail | 1774 (mostly extensions not implemented yet: ffi, odbc, snmp, enchant, …; plus Windows-only, root-only and huge-memory tests) |
 
 CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n`), plus
 `cargo fmt --check` and `cargo clippy -D warnings`.
@@ -46,6 +46,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/sqlite3 / pdo_sqlite (goro-sqlite, a SQLite 3.54.1 port) | 174 | 175 | 99.4% |
 | ext/pdo_mysql / pdo_pgsql | 219 | 219 | 100% |
 | ext/pgsql (libpq port, embedded PostgreSQL fixture) | 96 | 96 | 100% |
+| ext/ldap (pure-Rust libldap port, in-process LDAP server fixture) | 131 | 140 | 93.6% |
 | ext/session | 256 | 256 | 100% |
 | ext/pcre (PCRE2 port) | 155 | 155 | 100% |
 | ext/hash / random / zlib / bz2 | 305 | 306 | 99.7% |
@@ -65,7 +66,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 
 
 *The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
-EXPECTF/EXPECTREGEX matching, XFAIL, per-test timeouts, and embedded MySQL and PostgreSQL fixtures for ext/mysqli, ext/pgsql, ext/pdo_mysql, ext/pdo_pgsql and the generic ext/pdo tests.*
+EXPECTF/EXPECTREGEX matching, XFAIL, per-test timeouts, embedded MySQL and PostgreSQL fixtures for ext/mysqli, ext/pgsql, ext/pdo_mysql, ext/pdo_pgsql and the generic ext/pdo tests, and an in-process LDAP server fixture for ext/ldap.*
 
 ## Features
 
@@ -161,6 +162,8 @@ Workspace crates:
 - `goro-tidy` - a pure Rust port of tidy-html5 5.8.0 (libtidy)
 - `goro-ext-tidy` - ext/tidy on `goro-tidy`
 - `goro-ext-opcache` - Zend OPcache (INI, opcache_*() API, preloading), over goro-core's script cache
+- `goro-ldap` - a pure-Rust LDAP client modelled on OpenLDAP's libldap/liblber (BER, LDAPv3, URL/DN, filters, controls, TLS over purecrypto)
+- `goro-ext-ldap` - ext/ldap (LDAP\Connection, LDAP\Result, LDAP\ResultEntry) on `goro-ldap`
 - `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,sodium,xml,zlib}` - misc extensions
 - `goro-phpt` - PHPT test file runner
 
