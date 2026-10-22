@@ -11,7 +11,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use super::{CallTarget, MethodCallInfo, PendingCall, Vm};
-use crate::object::{PhpObject, Visibility};
+use crate::object::{NewTemplate, PhpObject, Visibility};
 use crate::opcode::{Op, OpArray, OperandType};
 use crate::string::PhpString;
 use crate::value::Value;
@@ -40,7 +40,8 @@ pub(crate) struct MethodSite {
     method: Option<std::rc::Weak<OpArray>>,
     /// The fast path does not apply to the class: the general handler runs.
     fallback: bool,
-    /// The pending call's name, `Class::method` (shared by the calls).
+    /// The pending call's name, `Class::method` (shared by the calls; like
+    /// PHP's function names, not counted by memory_get_usage()).
     func_name: PhpString,
     /// The call's frame name and scope (for a method).
     info: Option<Rc<MethodCallInfo>>,
@@ -125,12 +126,18 @@ impl Vm {
             return NewFast::No;
         };
         let name_lower: &[u8] = name_lower;
-        match self.classes.get(name_lower) {
+        let template = match self.classes.get(name_lower) {
             Some(ce)
                 if ce.filename.is_some()
                     && ce.attributes.is_empty()
-                    && !(ce.is_abstract || ce.is_interface || ce.is_enum || ce.is_trait) => {}
+                    && !(ce.is_abstract || ce.is_interface || ce.is_enum || ce.is_trait) =>
+            {
+                ce.new_template.borrow().as_ref().filter(|t| t.fits(ce)).cloned()
+            }
             _ => return NewFast::No,
+        };
+        if let Some(t) = template {
+            return NewFast::Obj(self.new_from_template(&t, op, tmps));
         }
         if !self.user_class_chain(name_lower) {
             return NewFast::No;
@@ -172,7 +179,64 @@ impl Vm {
             }
             self.list_destructible(obj_value.clone());
         }
+        // What the next objects of the class get (see NewTemplate).
+        if let Some(ce) = self
+            .classes
+            .get(name_lower)
+            .filter(|_| self.consts_updated.contains(name_lower))
+        {
+            if let Some(slots) = self.plain_declared_slots(name_lower) {
+                let has_array = slots.iter().any(|(_, v)| matches!(v, Value::Array(_)));
+                *ce.new_template.borrow_mut() = Some(Rc::new(NewTemplate {
+                    props_ptr: ce.properties.as_ptr(),
+                    props_len: ce.properties.len(),
+                    methods_len: ce.methods.len(),
+                    class_name: ce.name.clone(),
+                    slots,
+                    has_array,
+                    has_destruct,
+                }));
+            }
+        }
         NewFast::Obj(obj_value)
+    }
+
+    /// new_object_fast() of a class whose NewTemplate is known: what it
+    /// does then.
+    fn new_from_template(&mut self, t: &NewTemplate, op: &Op, tmps: &[Value]) -> Value {
+        // Recycle the old object ID from the result slot before allocating
+        // a new one.
+        if let OperandType::Tmp(idx) = &op.result {
+            if let Some(old_val) = tmps.get(*idx as usize) {
+                self.maybe_recycle_object_id(old_val);
+            }
+        }
+        let obj_id = self.alloc_object_id();
+        let mut obj = PhpObject::new(t.class_name.clone(), obj_id);
+        // (as init_declared_props() sets them, one by one)
+        obj.properties.reserve(t.slots.len());
+        for (name, v) in &t.slots {
+            let v = match v {
+                Value::Array(a) if t.has_array => {
+                    Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                }
+                v => v.clone(),
+            };
+            obj.properties.push((name.clone(), v));
+            obj.account();
+        }
+        obj.mark_declared();
+        let rc = Rc::new(RefCell::new(obj));
+        self.run_object_create_hook(&rc);
+        let obj_value = Value::Object(rc);
+        if t.has_destruct {
+            if let Value::Object(ref rc) = obj_value {
+                rc.borrow_mut()
+                    .set_property(b"__ctor_pending".to_vec(), Value::True);
+            }
+            self.list_destructible(obj_value.clone());
+        }
+        obj_value
     }
 
     /// INIT_METHOD_CALL of a public user method named by a constant on an
@@ -340,7 +404,8 @@ impl Vm {
             }
             let mut func_name = class_name_orig.clone();
             func_name.extend_from_slice(b"::__construct");
-            let func_name = PhpString::from_vec(func_name);
+            // (the call site's, not counted by memory_get_usage(), see MethodSite)
+            let func_name = PhpString::from_bytes_untracked(&func_name);
             op_array
                 .sites
                 .borrow_mut()
@@ -388,7 +453,7 @@ impl Vm {
         let sep = func_name.len();
         func_name.extend_from_slice(b"::");
         func_name.extend_from_slice(&method.name);
-        let func_name = PhpString::from_vec(func_name);
+        let func_name = PhpString::from_bytes_untracked(&func_name);
         let info = Rc::new(self.method_call_info(&method_op_array, &func_name, sep));
         op_array
             .sites
@@ -426,20 +491,25 @@ impl Vm {
 
     /// The pending call of a `new` of a user class without a constructor.
     fn push_noctor_call(&mut self, func_name: PhpString, obj: Rc<RefCell<PhpObject>>) {
-        let mut args = self.take_values(0);
-        args.push(Value::Object(obj));
         let fn_gen = self.user_functions.len() + 1;
-        self.pending_calls.push(PendingCall {
-            name: func_name,
-            args,
-            named_args: Vec::new(),
-            target: CallTarget {
-                no_ctor: true,
-                no_ns_fallback: false,
-                fn_gen,
-                ..CallTarget::NONE
-            },
-        });
+        // (built in place, see push_method_call)
+        self.pending_calls
+            .extend(std::iter::once_with(move || PendingCall {
+                name: func_name,
+                args: Vec::new(),
+                named_args: Vec::new(),
+                target: CallTarget::NONE,
+            }));
+        let Some(call) = self.pending_calls.last_mut() else {
+            return;
+        };
+        if let Some(buf) = self.value_pool.pop() {
+            call.args = buf;
+        }
+        call.args
+            .extend(std::iter::once_with(move || Value::Object(obj)));
+        call.target.no_ctor = true;
+        call.target.fn_gen = fn_gen;
     }
 
     /// The pending call of public user method `method_op_array` (named

@@ -1035,7 +1035,7 @@ pub struct Vm {
     const_thunks_active: Vec<Vec<u8>>,
     /// Classes whose constant expressions were all evaluated
     /// (ZEND_ACC_CONSTANTS_UPDATED).
-    consts_updated: std::collections::HashSet<Vec<u8>>,
+    pub(crate) consts_updated: crate::fxhash::FxHashSet<Vec<u8>>,
     /// Typed properties a reference is bound to (ZEND_REF_HAS_TYPE_SOURCES),
     /// keyed by the reference cell's address.
     /// Current call depth
@@ -1558,7 +1558,7 @@ impl Vm {
             class_scope_stack: Vec::new(),
             static_name_cache: (usize::MAX, std::collections::HashSet::new(), 0),
             const_thunks_active: Vec::new(),
-            consts_updated: std::collections::HashSet::new(),
+            consts_updated: Default::default(),
             call_depth: 0,
             vm_call: false,
             stack_configured: false,
@@ -18769,7 +18769,68 @@ impl Vm {
     /// A new object of class `name_lower` gets its declared instance
     /// properties, with their defaults (NEW: object_properties_init()).
     pub(crate) fn init_declared_props(&mut self, name_lower: &[u8], obj: &mut PhpObject) {
-        if let Some(class) = self.classes.get(name_lower) {
+        let Some(props) = self.declared_prop_list(name_lower) else {
+            return;
+        };
+        obj.properties.reserve(props.len());
+        for (name, default, is_readonly, is_virtual) in props {
+            // Virtual properties have no backing store and should not be initialized
+            if is_virtual {
+                continue;
+            }
+            if is_readonly || matches!(default, Value::Undef) {
+                // Readonly properties and typed properties without defaults
+                // stay Undef until explicitly assigned
+                obj.set_property(name, Value::Undef);
+            } else {
+                let resolved = self.resolve_deferred_value(&default);
+                // Each instance gets its own copy of an array
+                // default (the class entry's Rc must not be shared).
+                let resolved = match resolved {
+                    Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
+                    other => other,
+                };
+                obj.set_property(name, resolved);
+            }
+        }
+    }
+
+    /// The declared property slots of class `name_lower` as
+    /// init_declared_props() sets them, with their defaults (arrays not
+    /// copied), when no default needs evaluating for each object (see
+    /// NewTemplate).
+    pub(crate) fn plain_declared_slots(&self, name_lower: &[u8]) -> Option<Vec<(Vec<u8>, Value)>> {
+        let props = self.declared_prop_list(name_lower)?;
+        let mut slots: Vec<(Vec<u8>, Value)> = Vec::with_capacity(props.len());
+        for (name, default, is_readonly, is_virtual) in props {
+            if is_virtual {
+                continue;
+            }
+            let v = if is_readonly || matches!(default, Value::Undef) {
+                Value::Undef
+            } else {
+                // (what resolve_deferred_value() gives each object anew)
+                if matches!(&default, Value::String(s) if s.as_bytes().starts_with(b"__deferred_"))
+                {
+                    return None;
+                }
+                default
+            };
+            // (set_property(): a slot declared again keeps its place)
+            match slots.iter_mut().find(|(k, _)| *k == name) {
+                Some(slot) => slot.1 = v,
+                None => slots.push((name, v)),
+            }
+        }
+        Some(slots)
+    }
+
+    /// The declared instance properties of class `name_lower` (see
+    /// init_declared_props): slot name, default, readonly, virtual.
+    #[allow(clippy::type_complexity)]
+    fn declared_prop_list(&self, name_lower: &[u8]) -> Option<Vec<(Vec<u8>, Value, bool, bool)>> {
+        {
+            let class = self.classes.get(name_lower)?;
             // Detect names declared more than once across the hierarchy
             // (a private property redeclared by a subclass). Such private
             // slots must be stored under a mangled key so parent and child
@@ -18817,27 +18878,7 @@ impl Vm {
                     (key, p.default.clone(), p.is_readonly, p.is_virtual)
                 })
                 .collect();
-            obj.properties.reserve(props.len());
-            for (name, default, is_readonly, is_virtual) in props {
-                // Virtual properties have no backing store and should not be initialized
-                if is_virtual {
-                    continue;
-                }
-                if is_readonly || matches!(default, Value::Undef) {
-                    // Readonly properties and typed properties without defaults
-                    // stay Undef until explicitly assigned
-                    obj.set_property(name, Value::Undef);
-                } else {
-                    let resolved = self.resolve_deferred_value(&default);
-                    // Each instance gets its own copy of an array
-                    // default (the class entry's Rc must not be shared).
-                    let resolved = match resolved {
-                        Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
-                        other => other,
-                    };
-                    obj.set_property(name, resolved);
-                }
-            }
+            Some(props)
         }
     }
 

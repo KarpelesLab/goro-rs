@@ -86,6 +86,41 @@ pub struct ClassEntry {
     pub const_closures: Vec<crate::opcode::OpArray>,
     /// Whether the class has #[AllowDynamicProperties]
     pub allow_dynamic_properties: bool,
+    /// What NEW gives an object of the class, once known (see
+    /// Vm::new_object_fast).
+    pub new_template: std::cell::RefCell<Option<std::rc::Rc<NewTemplate>>>,
+}
+
+/// What NEW gives an object of a plain user class (all its hierarchy user
+/// code, constant expressions evaluated, no default needing evaluation):
+/// the same for every object while the class's properties are the ones it
+/// was made from.
+#[derive(Debug)]
+pub struct NewTemplate {
+    /// The properties it was made from (a class entry copied or changed
+    /// since does not use it).
+    pub(crate) props_ptr: *const PropertyDef,
+    pub(crate) props_len: usize,
+    pub(crate) methods_len: usize,
+    /// The class's declared name.
+    pub(crate) class_name: Vec<u8>,
+    /// The declared property slots and their defaults (arrays are copied
+    /// for each object).
+    pub(crate) slots: Vec<(Vec<u8>, Value)>,
+    pub(crate) has_array: bool,
+    /// The class has a destructor.
+    pub(crate) has_destruct: bool,
+}
+
+impl NewTemplate {
+    /// Made from `ce`'s properties as they are.
+    #[inline]
+    pub(crate) fn fits(&self, ce: &ClassEntry) -> bool {
+        self.props_ptr == ce.properties.as_ptr()
+            && self.props_len == ce.properties.len()
+            && self.methods_len == ce.methods.len()
+            && self.class_name == ce.name
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -169,6 +204,7 @@ impl ClassEntry {
             attributes: Vec::new(),
             const_closures: Vec::new(),
             allow_dynamic_properties: false,
+            new_template: Default::default(),
         }
     }
 
