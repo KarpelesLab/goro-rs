@@ -126,15 +126,26 @@ impl StubFunc {
     }
 }
 
-fn class_index() -> &'static HashMap<String, usize> {
-    static IDX: OnceLock<HashMap<String, usize>> = OnceLock::new();
+fn class_index() -> &'static crate::fxhash::FxHashMap<Vec<u8>, usize> {
+    static IDX: OnceLock<crate::fxhash::FxHashMap<Vec<u8>, usize>> = OnceLock::new();
     IDX.get_or_init(|| {
         crate::stub_sigs::CLASSES
             .iter()
             .enumerate()
-            .map(|(i, c)| (c.name.to_ascii_lowercase(), i))
+            .map(|(i, c)| (c.name.to_ascii_lowercase().into_bytes(), i))
             .collect()
     })
+}
+
+/// Index in CLASSES of an internal class (any case, optional leading
+/// backslash).
+fn class_index_of(name: &[u8]) -> Option<usize> {
+    let n = name.strip_prefix(b"\\").unwrap_or(name);
+    if n.iter().any(|b| b.is_ascii_uppercase()) {
+        class_index().get(&n.to_ascii_lowercase()).copied()
+    } else {
+        class_index().get(n).copied()
+    }
 }
 
 fn function_index() -> &'static HashMap<String, usize> {
@@ -159,9 +170,7 @@ fn lower_str(name: &[u8]) -> String {
 
 /// Look up the stub of an internal class/interface/trait/enum.
 pub fn find_class(name: &[u8]) -> Option<&'static StubClass> {
-    class_index()
-        .get(&lower_str(name))
-        .map(|&i| &crate::stub_sigs::CLASSES[i])
+    class_index_of(name).map(|i| &crate::stub_sigs::CLASSES[i])
 }
 
 /// Hierarchy of an internal class, precomputed from the stubs.
@@ -537,20 +546,28 @@ pub fn literal_value(expr: &str) -> Option<Value> {
 }
 
 thread_local! {
-    static ENTRY_CACHE: RefCell<HashMap<String, Option<&'static ClassEntry>>> = RefCell::new(HashMap::new());
+    /// class_entry() results, by index in CLASSES.
+    static ENTRY_CACHE: RefCell<Vec<Option<&'static ClassEntry>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// A synthesized `ClassEntry` for an internal class, built from its stub
 /// (methods flattened over the parent chain and interfaces). Cached per
 /// thread for the life of the process. Constant values come from the VM.
 pub fn class_entry(vm: &crate::vm::Vm, name: &[u8]) -> Option<&'static ClassEntry> {
-    let key = lower_str(name);
-    if let Some(e) = ENTRY_CACHE.with(|c| c.borrow().get(&key).copied()) {
-        return e;
+    let idx = class_index_of(name)?;
+    if let Some(e) = ENTRY_CACHE.with(|c| c.borrow().get(idx).copied().flatten()) {
+        return Some(e);
     }
-    let built = find_class(name).map(|c| &*Box::leak(Box::new(build_entry(vm, c))));
-    ENTRY_CACHE.with(|c| c.borrow_mut().insert(key, built));
-    built
+    let built: &'static ClassEntry =
+        Box::leak(Box::new(build_entry(vm, &crate::stub_sigs::CLASSES[idx])));
+    ENTRY_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.len() <= idx {
+            c.resize(crate::stub_sigs::CLASSES.len().max(idx + 1), None);
+        }
+        c[idx] = Some(built);
+    });
+    Some(built)
 }
 
 fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {

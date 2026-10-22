@@ -165,16 +165,18 @@ pub(crate) fn rcls<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a crate::object::Cl
     if let Some(c) = vm.classes.get(lower) {
         return Some(c);
     }
-    let l = if lower.iter().any(|b| b.is_ascii_uppercase()) {
-        lower.to_ascii_lowercase()
+    let owned;
+    let l: &[u8] = if lower.iter().any(|b| b.is_ascii_uppercase()) {
+        owned = lower.to_ascii_lowercase();
+        if let Some(c) = vm.classes.get(&owned) {
+            return Some(c);
+        }
+        &owned
     } else {
-        lower.to_vec()
+        lower
     };
-    if let Some(c) = vm.classes.get(&l) {
-        return Some(c);
-    }
-    if internal_class_known(vm, &l) {
-        crate::stubs::class_entry(vm, &l)
+    if internal_class_known(vm, l) {
+        crate::stubs::class_entry(vm, l)
     } else {
         None
     }
@@ -369,10 +371,10 @@ fn with_internal_ctor_frame(
     };
     // The frame names the internal class declaring the constructor.
     let mut cur = cls;
-    let mut decl: Option<&'static str> = None;
+    let mut decl: Option<(&'static str, &'static crate::stubs::StubFunc)> = None;
     for _ in 0..64 {
         if !vm.classes.contains_key(&cur) {
-            decl = crate::stubs::find_method(&cur, b"__construct").map(|(c, _)| c.name);
+            decl = crate::stubs::find_method(&cur, b"__construct").map(|(c, m)| (c.name, m));
             break;
         }
         match vm.classes.get(&cur).and_then(|c| c.parent.clone()) {
@@ -380,11 +382,10 @@ fn with_internal_ctor_frame(
             None => break,
         }
     }
-    let decl = match decl {
-        Some(d) => d,
+    let (decl, sig) = match decl {
+        Some((d, m)) => (d, Some(m)),
         None => return f(vm, args, line),
     };
-    let sig = crate::stubs::find_method(decl.as_bytes(), b"__construct").map(|(_, m)| m);
     let frame_args: Vec<Value> = args
         .iter()
         .skip(1)

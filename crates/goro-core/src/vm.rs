@@ -810,15 +810,19 @@ pub struct Vm {
     pub builtin_named_skipped: Vec<usize>,
     /// Builtins with verified stub arginfo (see arginfo.rs), rebuilt when
     /// the number of registered functions changes.
-    pub(crate) zpp_map: HashMap<Vec<u8>, (&'static crate::arginfo::FuncInfo, u8)>,
+    pub(crate) zpp_map: crate::fxhash::FxHashMap<Vec<u8>, (&'static crate::arginfo::FuncInfo, u8)>,
     pub(crate) zpp_map_fn_count: usize,
     /// Internal methods (class -> method) with verified stub arginfo
-    pub(crate) zpp_method_map:
-        HashMap<Vec<u8>, HashMap<Vec<u8>, Option<(&'static crate::arginfo::FuncInfo, u8)>>>,
+    pub(crate) zpp_method_map: crate::fxhash::FxHashMap<
+        Vec<u8>,
+        crate::fxhash::FxHashMap<Vec<u8>, Option<(&'static crate::arginfo::FuncInfo, u8)>>,
+    >,
     /// Class -> its nearest internal class (with the class count it was computed at)
-    pub(crate) zpp_internal_class_cache: HashMap<Vec<u8>, (usize, Option<Vec<u8>>)>,
+    pub(crate) zpp_internal_class_cache:
+        crate::fxhash::FxHashMap<Vec<u8>, (usize, Option<Vec<u8>>)>,
     /// Pending-call names of internal methods run at INIT time (see arginfo.rs)
-    pub(crate) zpp_return_names: HashMap<Vec<u8>, HashMap<Vec<u8>, PhpString>>,
+    pub(crate) zpp_return_names:
+        crate::fxhash::FxHashMap<Vec<u8>, crate::fxhash::FxHashMap<Vec<u8>, PhpString>>,
     /// Builtin calls in progress (see internal_frames.rs)
     pub(crate) builtin_frames: Vec<crate::internal_frames::BuiltinFrame>,
     /// Parameter CVs of running user functions (see internal_frames.rs)
@@ -1942,11 +1946,11 @@ impl Vm {
             builtin_param_types: HashMap::new(),
             builtin_self_coercing: std::collections::HashSet::new(),
             builtin_named_skipped: Vec::new(),
-            zpp_map: HashMap::new(),
+            zpp_map: Default::default(),
             zpp_map_fn_count: usize::MAX,
-            zpp_method_map: HashMap::new(),
-            zpp_internal_class_cache: HashMap::new(),
-            zpp_return_names: HashMap::new(),
+            zpp_method_map: Default::default(),
+            zpp_internal_class_cache: Default::default(),
+            zpp_return_names: Default::default(),
             builtin_frames: Vec::new(),
             cv_frames: Vec::new(),
             gc_frames: Vec::new(),
@@ -8606,7 +8610,13 @@ impl Vm {
                 None => {
                     // Current class is not user-defined; check if it's a built-in
                     // that extends the target through the built-in hierarchy
-                    return targets.iter().any(|t| is_builtin_subclass(&current, t));
+                    // (one hierarchy lookup for all the targets)
+                    return crate::stubs::class_hierarchy(&current).is_some_and(|(_, h)| {
+                        targets.iter().any(|t| {
+                            h.parents_lower.iter().any(|p| p == t)
+                                || h.interfaces_lower.iter().any(|i| i == t)
+                        })
+                    });
                 }
             };
             // Also resolve the parent via canonical name (in case parent stored as alias key)
