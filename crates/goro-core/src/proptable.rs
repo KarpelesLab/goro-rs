@@ -140,8 +140,28 @@ pub fn is_internal_prop_name(name: &[u8]) -> bool {
         b"__cert_id",
         b"__csr_id",
         b"__xml_",
+        b"__dir_",
+        b"__rng_",
+        b"__sensitive_value",
     ];
-    name.starts_with(b"__") && P.iter().any(|p| name.starts_with(p))
+    name.starts_with(b"__")
+        && (P.iter().any(|p| name.starts_with(p))
+            // ReflectionType and DateInterval state
+            || matches!(
+                name,
+                b"__type_name"
+                    | b"__allows_null"
+                    | b"__is_builtin"
+                    | b"__types"
+                    | b"__y"
+                    | b"__m"
+                    | b"__d"
+                    | b"__h"
+                    | b"__i"
+                    | b"__s"
+                    | b"__f"
+                    | b"__invert"
+            ))
 }
 
 /// Internal property of an object whose property table has an order of its
