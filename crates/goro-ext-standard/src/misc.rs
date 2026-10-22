@@ -3646,7 +3646,6 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         && !k.starts_with(b"__fiber_")
                         && !k.starts_with(b"__timestamp")
                         && !k.starts_with(b"__lazy_")
-                        && !k.starts_with(b"__uri_")
                         && !matches!(v, Value::Undef)
                 })
                 .map(|(k, v)| {
@@ -4960,8 +4959,7 @@ fn obj_slots(obj: &Rc<RefCell<PhpObject>>) -> Vec<(Vec<u8>, Option<Value>)> {
                 || k.starts_with(b"__clone_")
                 || k.starts_with(b"__destructed")
                 || k.starts_with(b"__fiber_")
-                || k.starts_with(b"__lazy_")
-                || k.starts_with(b"__uri_"))
+                || k.starts_with(b"__lazy_"))
         })
         .map(|(k, v)| {
             (

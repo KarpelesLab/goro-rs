@@ -54793,11 +54793,6 @@ impl Vm {
                 let obj_borrow = obj.borrow();
                 return obj_borrow.get_property(b"text").to_php_string();
             }
-            // Built-in __toString for Uri classes: the serialized URI
-            if class_lower == b"uri\\whatwg\\url" || class_lower == b"uri\\rfc3986\\uri" {
-                let obj_borrow = obj.borrow();
-                return obj_borrow.get_property(b"__uri_serialized").to_php_string();
-            }
             // Built-in __toString for Reflection classes
             let is_reflection = class_lower.starts_with(b"reflection");
             if is_reflection {
@@ -54975,7 +54970,6 @@ impl Vm {
             let is_gmp = class_lower == b"gmp";
             let is_simplexml = class_lower == b"simplexmlelement";
             let is_phptoken = class_lower == b"phptoken";
-            let is_uri = class_lower == b"uri\\whatwg\\url" || class_lower == b"uri\\rfc3986\\uri";
             let is_spl_str = self.spl_has_builtin_tostring(&class_lower);
             let is_native_str = native_handlers(obj)
                 .map(|h| h.cast.is_some())
@@ -54987,7 +54981,6 @@ impl Vm {
                 && !is_gmp
                 && !is_simplexml
                 && !is_phptoken
-                && !is_uri
                 && !is_spl_str
             {
                 let class_display = crate::value::display_class_name(&class_name);

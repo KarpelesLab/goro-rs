@@ -17,7 +17,7 @@ pub(crate) fn is_internal_property(name: &[u8]) -> bool {
         || name.starts_with(b"__clone_") || name.starts_with(b"__destructed")
         || name.starts_with(b"__weak_ref_id") || name.starts_with(b"__sxml_")
         || name.starts_with(b"__hash_") || name.starts_with(b"__hmac_")
-        || name.starts_with(b"__lazy_") || name.starts_with(b"__uri_")
+        || name.starts_with(b"__lazy_")
         || name.starts_with(b"__dir_") || name.starts_with(b"__rng_")
         || name.starts_with(b"__pkey_id")
         || name.starts_with(b"__cert_id")
@@ -1002,55 +1002,6 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                 }
                 vm.write_output(format!("{}  [\"name\"]=>\n", prefix).as_bytes());
                 var_dump_value(vm, &name_val, indent + 2, seen);
-                vm.write_output(format!("{}}}\n", prefix).as_bytes());
-                seen.remove(&oid);
-                return;
-            }
-
-            // Uri classes: expose __uri_* properties as scheme/username/... for var_dump
-            let is_uri_class = matches!(
-                class_lower.as_slice(),
-                b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri"
-            );
-            if is_uri_class {
-                // Define property display order (matches PHP Uri class layout).
-                let order: &[(&[u8], &[u8])] = &[
-                    (b"scheme", b"__uri_scheme"),
-                    (b"username", b"__uri_user"),
-                    (b"password", b"__uri_pass"),
-                    (b"host", b"__uri_host"),
-                    (b"port", b"__uri_port"),
-                    (b"path", b"__uri_path"),
-                    (b"query", b"__uri_query"),
-                    (b"fragment", b"__uri_fragment"),
-                ];
-                let class_name_owned = class_name.to_string();
-                // Collect display values upfront
-                let display: Vec<(Vec<u8>, Value)> = order
-                    .iter()
-                    .map(|(pub_name, int_name)| {
-                        (pub_name.to_vec(), obj_borrow.get_property(int_name))
-                    })
-                    .collect();
-                let prop_count = display.len();
-                drop(obj_borrow);
-                vm.write_output(
-                    format!(
-                        "{}object({})#{} ({}) {{\n",
-                        prefix, class_name_owned, oid, prop_count
-                    )
-                    .as_bytes(),
-                );
-                if !seen.insert(oid) {
-                    vm.write_output(format!("{}  *RECURSION*\n", prefix).as_bytes());
-                    vm.write_output(format!("{}}}\n", prefix).as_bytes());
-                    return;
-                }
-                for (name, value) in &display {
-                    let name_str = String::from_utf8_lossy(name);
-                    vm.write_output(format!("{}  [\"{}\"]=>\n", prefix, name_str).as_bytes());
-                    var_dump_value(vm, value, indent + 2, seen);
-                }
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 seen.remove(&oid);
                 return;

@@ -207,7 +207,7 @@ pub fn register(vm: &mut Vm) {
         has_method,
         call: call_method,
         prop_added: None,
-        prop_write: None,
+        prop_write: Some(uri_prop_write),
         compare_check: None,
         prop_read: None,
         param_names: Some(param_names),
@@ -224,6 +224,20 @@ pub fn register(vm: &mut Vm) {
     );
     vm.object_construct_handlers
         .insert(VALIDATION_ERROR_LOWER.to_vec(), construct_validation_error);
+    // The other @strict-properties classes: their properties are guarded,
+    // their methods are the engine's.
+    let guard = NativeClassHandler {
+        has_method: |_, _, _| false,
+        call: |_, _, _, _, _, _| Value::Null,
+        prop_added: None,
+        prop_write: Some(strict_prop_write),
+        compare_check: None,
+        prop_read: None,
+        param_names: None,
+    };
+    for c in STRICT_PROPERTY_CLASSES {
+        vm.native_class_handlers.insert(c.to_vec(), guard);
+    }
     // The enums
     let error_types: Vec<&str> = ALL_ERROR_TYPES.iter().map(|t| t.php_case().0).collect();
     for (name, cases) in [
@@ -285,6 +299,107 @@ const ALL_ERROR_TYPES: [whatwg::ErrorType; 29] = {
         FileInvalidWindowsDriveLetterHost,
     ]
 };
+
+/// The exception classes and UrlValidationError (`@strict-properties`).
+const STRICT_PROPERTY_CLASSES: [&[u8]; 5] = [
+    b"uri\\uriexception",
+    b"uri\\urierror",
+    b"uri\\invaliduriexception",
+    b"uri\\whatwg\\invalidurlexception",
+    VALIDATION_ERROR_LOWER,
+];
+
+/// Property writes on the `@strict-properties` classes themselves
+/// (ZEND_ACC_NO_DYNAMIC_PROPERTIES is not inherited): no dynamic
+/// properties, and their own readonly properties stay as initialized.
+fn strict_prop_write(vm: &mut Vm, o: &Obj, name: &[u8], kind: u8) -> bool {
+    let cls = o.borrow().class_name.to_ascii_lowercase();
+    if !STRICT_PROPERTY_CLASSES.contains(&cls.as_slice()) {
+        return true;
+    }
+    let readonly = match cls.as_slice() {
+        VALIDATION_ERROR_LOWER => matches!(name, b"context" | b"type" | b"failure"),
+        b"uri\\whatwg\\invalidurlexception" => name == b"errors",
+        _ => false,
+    };
+    let disp = class_name_of(o);
+    let pname = String::from_utf8_lossy(name);
+    let declared = o.borrow().properties.iter().any(|(k, _)| k == name);
+    let msg = if readonly {
+        if kind != 0 {
+            format!("Cannot unset readonly property {}::${}", disp, pname)
+        } else if prop_initialized(o, name) {
+            format!("Cannot modify readonly property {}::${}", disp, pname)
+        } else {
+            let scope = match vm.current_class_scope() {
+                Some(s) => format!("scope {}", crate::value::display_class_name(&s)),
+                None => "global scope".to_string(),
+            };
+            format!(
+                "Cannot initialize readonly property {}::${} from {}",
+                disp, pname, scope
+            )
+        }
+    } else if kind == 0 && !declared {
+        format!("Cannot create dynamic property {}::${}", disp, pname)
+    } else {
+        return true;
+    };
+    throw(vm, b"Error", &msg);
+    false
+}
+
+/// The classes have no properties and forbid dynamic ones
+/// (ZEND_ACC_NO_DYNAMIC_PROPERTIES).
+fn uri_prop_write(vm: &mut Vm, o: &Obj, name: &[u8], kind: u8) -> bool {
+    if kind != 0 {
+        return true;
+    }
+    let msg = format!(
+        "Cannot create dynamic property {}::${}",
+        class_name_of(o),
+        String::from_utf8_lossy(name)
+    );
+    throw(vm, b"Error", &msg);
+    false
+}
+
+/// Z_PARAM_OBJ_OF_CLASS(_OR_NULL) / Z_PARAM_OBJECT_OF_CLASS(_OR_NULL) for
+/// argument `i` (0-based) of `func`: false (TypeError thrown) when it is
+/// not an instance of `class_lower`. An omitted argument passes.
+#[allow(clippy::too_many_arguments)]
+fn check_class_arg(
+    vm: &mut Vm,
+    func: &str,
+    args: &[Value],
+    i: usize,
+    pname: &str,
+    class_lower: &[u8],
+    class_disp: &str,
+    nullable: bool,
+) -> bool {
+    let v = match args.get(i).map(|v| v.deref()) {
+        None | Some(Value::Undef) => return true,
+        Some(v) => v,
+    };
+    if nullable && matches!(v, Value::Null) {
+        return true;
+    }
+    if matches!(v, Value::Object(_)) && vm.obj_instanceof(&v, class_lower) {
+        return true;
+    }
+    let msg = format!(
+        "{}(): Argument #{} (${}) must be of type {}{}, {} given",
+        func,
+        i + 1,
+        pname,
+        if nullable { "?" } else { "" },
+        class_disp,
+        Vm::value_type_name(&v)
+    );
+    throw(vm, b"TypeError", &msg);
+    false
+}
 
 /// php_uri_object_create_rfc3986() / php_uri_object_create_whatwg()
 fn create_object(_vm: &mut Vm, o: &Obj) {
@@ -922,6 +1037,15 @@ fn method_create(
     args: &[Value],
     is_constructor: bool,
 ) -> Value {
+    let (class_disp, func) = match (class_lower == WHATWG_LOWER, is_constructor) {
+        (true, true) => (WHATWG_CLASS, "Uri\\WhatWg\\Url::__construct"),
+        (true, false) => (WHATWG_CLASS, "Uri\\WhatWg\\Url::parse"),
+        (false, true) => (RFC3986_CLASS, "Uri\\Rfc3986\\Uri::__construct"),
+        (false, false) => (RFC3986_CLASS, "Uri\\Rfc3986\\Uri::parse"),
+    };
+    if !check_class_arg(vm, func, args, 1, "baseUrl", class_lower, class_disp, true) {
+        return Value::Null;
+    }
     let uri_str = str_arg(args, 0);
     let base = match args.get(1).map(|v| v.deref()) {
         Some(Value::Object(o)) => Some(o),
@@ -1001,7 +1125,19 @@ fn construct_invalid_url_exception(vm: &mut Vm, args: &[Value], _line: u32) -> R
 }
 
 fn invalid_url_exception_ctor(vm: &mut Vm, this: &Obj, a: &[Value]) -> Result<(), String> {
-    let class = class_name_of(this);
+    // (the generic zpp layer checked the scalar and array parameters)
+    if !check_class_arg(
+        vm,
+        "Uri\\WhatWg\\InvalidUrlException::__construct",
+        a,
+        3,
+        "previous",
+        b"throwable",
+        "Throwable",
+        true,
+    ) {
+        return Err("exception".to_string());
+    }
     // zend_update_exception_properties()
     if let Some(m) = a.first().map(|v| v.deref()) {
         if !matches!(m, Value::Undef) {
@@ -1042,7 +1178,6 @@ fn invalid_url_exception_ctor(vm: &mut Vm, this: &Obj, a: &[Value]) -> Result<()
     };
     if prop_initialized(this, b"errors") {
         readonly_error(vm, "Uri\\WhatWg\\InvalidUrlException", "errors");
-        let _ = class;
         return Err("exception".to_string());
     }
     this.borrow_mut().set_property(b"errors".to_vec(), errors);
@@ -1065,9 +1200,23 @@ fn construct_validation_error(vm: &mut Vm, args: &[Value], _line: u32) -> Result
         true,
     ));
     let r = (|| {
+        const FUNC: &str = "Uri\\WhatWg\\UrlValidationError::__construct";
+        // (the generic zpp layer checked $context)
+        if !check_class_arg(
+            vm,
+            FUNC,
+            a,
+            1,
+            "type",
+            VALIDATION_ERROR_TYPE_LOWER,
+            "Uri\\WhatWg\\UrlValidationErrorType",
+            false,
+        ) {
+            return Err("exception".to_string());
+        }
+        let failure = bool_param(vm, FUNC, a, 2, "failure")?;
         let context = str_arg(a, 0);
         let ty = a.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
-        let failure = a.get(2).map(|v| v.deref().is_truthy()).unwrap_or(false);
         for (name, v) in [
             ("context", s(&context)),
             ("type", ty),
@@ -1083,6 +1232,41 @@ fn construct_validation_error(vm: &mut Vm, args: &[Value], _line: u32) -> Result
     })();
     vm.call_stack.pop();
     r
+}
+
+/// Z_PARAM_BOOL for argument `i` (0-based) of `func`.
+fn bool_param(vm: &mut Vm, func: &str, a: &[Value], i: usize, pname: &str) -> Result<bool, String> {
+    let v = a.get(i).map(|v| v.deref()).unwrap_or(Value::Undef);
+    let strict = vm.caller_strict_types;
+    let line = vm.current_line;
+    if matches!(v, Value::Null | Value::Undef) && !strict {
+        let msg = format!(
+            "{}(): Passing null to parameter #{} (${}) of type bool is deprecated",
+            func,
+            i + 1,
+            pname
+        );
+        vm.emit_deprecated_at(&msg, line);
+        if vm.current_exception.is_some() {
+            return Err("exception".to_string());
+        }
+        return Ok(false);
+    }
+    match vm.zpp_coerce_scalar(crate::arginfo::T_BOOL, &v, strict, line) {
+        Ok(Some(b)) => Ok(b.is_truthy()),
+        Ok(None) => {
+            let msg = format!(
+                "{}(): Argument #{} (${}) must be of type bool, {} given",
+                func,
+                i + 1,
+                pname,
+                Vm::value_type_name(&v)
+            );
+            throw(vm, b"TypeError", &msg);
+            Err("exception".to_string())
+        }
+        Err(()) => Err("exception".to_string()),
+    }
 }
 
 // ----------------------------------------------------------------------
@@ -1360,7 +1544,28 @@ fn call_method(
             Component::Fragment,
             WriteValue::Str(opt_str_arg(args, 0)),
         ),
-        b"equals" => uri_equals(vm, &o, &uri, args),
+        b"equals" => {
+            let (func, pname) = if is_rfc {
+                ("Uri\\Rfc3986\\Uri::equals", "uri")
+            } else {
+                ("Uri\\WhatWg\\Url::equals", "url")
+            };
+            if !check_class_arg(vm, func, args, 0, pname, class, class_disp, false)
+                || !check_class_arg(
+                    vm,
+                    func,
+                    args,
+                    1,
+                    "comparisonMode",
+                    b"uri\\uricomparisonmode",
+                    "Uri\\UriComparisonMode",
+                    false,
+                )
+            {
+                return Value::Null;
+            }
+            uri_equals(vm, &o, &uri, args)
+        }
         b"tostring" => s(&to_string(&uri, Recompose::NormalizedAscii, false)),
         b"torawstring" | b"toasciistring" => s(&to_string(&uri, Recompose::RawAscii, false)),
         b"tounicodestring" => s(&to_string(&uri, Recompose::RawUnicode, false)),
