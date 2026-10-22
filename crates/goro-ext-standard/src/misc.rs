@@ -547,6 +547,7 @@ final class StreamBucket {
     vm.register_function(b"php_ini_loaded_file", php_ini_loaded_file_fn);
     vm.register_function(b"php_ini_scanned_files", php_ini_scanned_files_fn);
     vm.register_function(b"getmypid", getmypid_fn);
+    vm.register_function(b"ftok", ftok_fn);
     vm.register_function(b"getmyuid", getmyuid_fn);
     vm.register_function(b"getlastmod", getlastmod_fn);
     vm.register_function(b"getmyinode", getmyinode_fn);
@@ -17419,6 +17420,54 @@ fn php_ini_loaded_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
 
 fn php_ini_scanned_files_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
+}
+
+/// ftok(): a System V IPC key from a path and a project identifier.
+fn ftok_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args
+        .first()
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
+    let proj = args
+        .get(1)
+        .map(|v| v.to_php_string())
+        .unwrap_or_else(PhpString::empty);
+    if path.as_bytes().contains(&0) {
+        return Err(throw_value_error_in(
+            vm,
+            "ftok",
+            args,
+            "ftok(): Argument #1 ($filename) must not contain any null bytes",
+        ));
+    }
+    if path.is_empty() {
+        return Err(throw_value_error_in(
+            vm,
+            "ftok",
+            args,
+            "ftok(): Argument #1 ($filename) must not be empty",
+        ));
+    }
+    if proj.len() != 1 {
+        return Err(throw_value_error_in(
+            vm,
+            "ftok",
+            args,
+            "ftok(): Argument #2 ($project_id) must be a single character",
+        ));
+    }
+    let p = path.to_string_lossy();
+    if !vm.check_open_basedir("ftok", &p) {
+        return Ok(Value::Long(-1));
+    }
+    let c = std::ffi::CString::new(path.as_bytes().to_vec()).unwrap_or_default();
+    let k = unsafe { libc::ftok(c.as_ptr(), proj.as_bytes()[0] as libc::c_int) };
+    if k == -1 {
+        let e = std::io::Error::last_os_error().raw_os_error().unwrap_or(0);
+        let msg = unsafe { std::ffi::CStr::from_ptr(libc::strerror(e)) }.to_string_lossy();
+        vm.emit_warning(&format!("ftok(): ftok() failed - {}", msg));
+    }
+    Ok(Value::Long(k as i64))
 }
 
 fn getmypid_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

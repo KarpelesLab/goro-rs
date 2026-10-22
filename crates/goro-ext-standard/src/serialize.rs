@@ -2949,6 +2949,13 @@ impl UnserializeScope {
     }
 }
 
+/// php_var_unserialize() of the value at the start of `data`, for other
+/// extensions: None when it is malformed (no notice is raised).
+pub fn php_var_unserialize(vm: &mut Vm, data: &[u8]) -> Option<Value> {
+    let mut pos = 0;
+    unserialize_value_hook(vm, data, &mut pos)
+}
+
 /// php_lookup_class_name() of an __PHP_Incomplete_Class object.
 fn incomplete_class_name(obj: &Rc<RefCell<PhpObject>>) -> String {
     match obj.borrow().get_property(b"__PHP_Incomplete_Class_Name") {
