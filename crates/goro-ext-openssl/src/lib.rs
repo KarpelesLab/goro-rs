@@ -23,6 +23,7 @@ mod params;
 mod pkcs12;
 mod pkey;
 mod pkey_fns;
+mod pwhash;
 mod req;
 mod smime;
 mod x509;
@@ -147,6 +148,8 @@ pub fn register(vm: &mut Vm) {
             "openssl_spki_export_challenge",
             x509::openssl_spki_export_challenge
         ),
+        checked!("openssl_password_hash", pwhash::openssl_password_hash),
+        checked!("openssl_password_verify", pwhash::openssl_password_verify),
         checked!(
             "openssl_get_cert_locations",
             openssl_get_cert_locations_stub
