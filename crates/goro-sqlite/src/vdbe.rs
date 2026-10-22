@@ -8,7 +8,58 @@
 use crate::int::*;
 use std::rc::Rc;
 
-pub struct VdbeFrame {}
+/// When a sub-program is executed (OP_Program), an instance of this
+/// structure stores the state of the calling (parent) frame.
+///
+/// Rust port (defined by the vdbeaux.c port, mirroring C's VdbeFrame):
+/// * the frame stack is `Vdbe::pFrame`; each frame owns its parent frame
+///   through `pParent` (C pParent).
+/// * OP_Program moves the caller's arrays into the frame
+///   (`aOp`/`aMem`/`apCsr` = C aOp/aMem/apCsr of the *parent*) and installs
+///   the sub-program's in the Vdbe (`v.aOp = pProgram.aOp.clone()`, fresh
+///   `aMem` of nChildMem MEM_Undefined cells, `apCsr` of nChildCsr None).
+///   `aOnce` is the sub-program's OP_Once bitmask (as in C: pFrame->aOnce
+///   belongs to the child), zeroed on each invocation.
+/// * sqlite3VdbeFrameRestore() closes the child's cursors and moves the
+///   parent arrays back into the Vdbe; the child's registers/cursors end
+///   up in `aChildMem`/`apChildCsr`.  The caller then disposes of the frame
+///   with sqlite3VdbeFrameDelete().  Frames are not cached for reuse in
+///   register P3 as C does (nothing observable depends on that reuse: the
+///   child registers are always rewritten before use and aOnce is reset).
+#[derive(Default)]
+pub struct VdbeFrame {
+    /// Parent of this frame, or None if the parent is the main program.
+    pub pParent: Option<Box<VdbeFrame>>,
+    /// Program instructions of the parent frame.
+    pub aOp: Vec<VdbeOp>,
+    /// Registers of the parent frame.
+    pub aMem: Vec<Mem>,
+    /// Cursors of the parent frame.
+    pub apCsr: Vec<Option<Box<VdbeCursor>>>,
+    /// OP_Once bitmask of the child (sub-program) frame.
+    pub aOnce: Vec<u8>,
+    /// Copy of SubProgram.token.
+    pub token: usize,
+    /// Last insert rowid (sqlite3.lastRowid) of the parent.
+    pub lastRowid: i64,
+    /// Auxdata allocations of the parent.
+    pub pAuxData: Vec<AuxData>,
+    pub nCursor: i32,
+    /// Program counter in the parent (calling) frame.
+    pub pc: i32,
+    pub nOp: i32,
+    pub nMem: i32,
+    pub nChildMem: i32,
+    pub nChildCsr: i32,
+    /// Statement changes (Vdbe.nChange) of the parent.
+    pub nChange: i64,
+    /// Value of db->nChange.
+    pub nDbChange: i64,
+    /// Rust: the child's registers once the frame has been restored.
+    pub aChildMem: Vec<Mem>,
+    /// Rust: the child's cursors once the frame has been restored.
+    pub apChildCsr: Vec<Option<Box<VdbeCursor>>>,
+}
 
 /// C: `int sqlite3_value_numeric_type(sqlite3_value *pVal)`
 pub fn sqlite3_value_numeric_type(db: &mut Sqlite3, pVal: &mut Mem) -> i32 {
