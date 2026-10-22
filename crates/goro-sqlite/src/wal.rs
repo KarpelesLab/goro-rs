@@ -3354,6 +3354,97 @@ mod tests {
         assert_eq!(l, vec![3, 4, 2, 5]);
     }
 
+    fn exec(db: &mut Sqlite3, sql: &str) -> (i32, Vec<String>) {
+        let mut rows = Vec::new();
+        let mut cb = |argv: &[Option<&[u8]>], _cols: &[&[u8]]| {
+            let r: Vec<String> = argv
+                .iter()
+                .map(|v| String::from_utf8_lossy(v.unwrap_or(b"")).into_owned())
+                .collect();
+            rows.push(r.join("|"));
+            0
+        };
+        let mut zErr = None;
+        let rc = crate::legacy::sqlite3_exec(db, Some(sql.as_bytes()), Some(&mut cb), &mut zErr);
+        (rc, rows)
+    }
+
+    /// Several threads of the process write to the same WAL database
+    /// through their own connections: they share one unixShmNode (one
+    /// mapping, in-process lock counting) and serialize on the WAL write
+    /// lock through the busy handler.
+    #[test]
+    fn threads_share_wal_index() {
+        let dir = std::env::temp_dir().join(format!("goro-sqlite-wal-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("mt.db");
+        for s in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{}", path.display(), s));
+        }
+        let zPath = path.to_str().unwrap().as_bytes().to_vec();
+        let open = |z: &[u8]| {
+            let mut pdb = None;
+            let rc = crate::mainapi::sqlite3_open_v2(
+                Some(z),
+                &mut pdb,
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE,
+                None,
+            );
+            assert_eq!(rc, SQLITE_OK);
+            pdb.unwrap()
+        };
+        let mut db = open(&zPath);
+        assert_eq!(
+            exec(&mut db, "pragma journal_mode=wal; create table t(a,b);").1,
+            vec!["wal"]
+        );
+        let mut hs = Vec::new();
+        for k in 0..4 {
+            let z = zPath.clone();
+            hs.push(std::thread::spawn(move || {
+                let mut pdb = None;
+                let rc = crate::mainapi::sqlite3_open_v2(
+                    Some(&z),
+                    &mut pdb,
+                    SQLITE_OPEN_READWRITE,
+                    None,
+                );
+                assert_eq!(rc, SQLITE_OK);
+                let mut db = pdb.unwrap();
+                assert_eq!(exec(&mut db, "pragma busy_timeout=20000").0, SQLITE_OK);
+                for i in 0..50 {
+                    let sql = format!(
+                        "begin immediate; insert into t values({k},{i}); \
+                         select count(*) from t; commit;"
+                    );
+                    let (rc, _) = exec(&mut db, &sql);
+                    assert_eq!(rc, SQLITE_OK);
+                    if i % 10 == 0 {
+                        let (rc, _) = exec(&mut db, "pragma wal_checkpoint(passive)");
+                        assert_eq!(rc, SQLITE_OK);
+                    }
+                }
+                crate::mainapi::sqlite3_close(&mut db);
+            }));
+        }
+        for h in hs {
+            h.join().unwrap();
+        }
+        assert_eq!(
+            exec(
+                &mut db,
+                "select count(*), sum(b) from t; pragma integrity_check;"
+            )
+            .1,
+            vec!["200|4900", "ok"]
+        );
+        crate::mainapi::sqlite3_close(&mut db);
+        // The last connection checkpointed and removed the WAL and shm.
+        assert!(!std::path::Path::new(&format!("{}-wal", path.display())).exists());
+        assert!(!std::path::Path::new(&format!("{}-shm", path.display())).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn hash_slots() {
         let loc = WalHashLoc {

@@ -19,8 +19,9 @@ Compile-time configuration we mirror: the default amalgamation build plus
 `SQLITE_OMIT_SHARED_CACHE`, default `SQLITE_DQS=3`, no
 `SQLITE_ENABLE_EXPLAIN_COMMENTS`, no `SQLITE_DEBUG` (asserts become
 `debug_assert!`), UTF-8 only (UTF-16 entry points may stay unimplemented),
-no load_extension, no mmap.  Virtual tables, WAL and JSON come later: keep
-their call sites but stubs may return errors.
+no load_extension, no mmap of the database file (the WAL -shm file is
+mapped, see below).  Virtual tables and JSON come later: keep their call
+sites but stubs may return errors.
 
 ## Layout
 
@@ -186,6 +187,13 @@ out of its slot so that `sqlite3VdbeExec(db, &mut v)` can borrow both.
 * files: `os.rs` / `os_unix.rs` implement the VFS over `std::fs` plus POSIX
   advisory locks (`libc::fcntl`), with SQLite's exact locking protocol so
   that the real `sqlite3` CLI can share databases with us.
+* WAL: `wal.rs` is a complete port of wal.c.  The wal-index lives in the
+  "-shm" file, mapped `MAP_SHARED` with `libc::mmap` by os_unix.rs (one
+  `UnixShmNode` per inode and process, POSIX locks on bytes 120..128 of
+  the -shm file), so goro and the C library can use the same WAL
+  database concurrently.  The mapped memory is seen as `&[AtomicU32]`
+  (`os::ShmRegion`); the WAL reaches the shm methods of the database
+  file through an `os::ShmHandle` obtained when the WAL is opened.
 
 ### 8. Asserts, testcase(), debugging aids
 
