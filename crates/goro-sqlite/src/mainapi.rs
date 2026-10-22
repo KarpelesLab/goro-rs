@@ -3233,7 +3233,7 @@ pub fn sqlite3_test_control(db: &mut Sqlite3, op: i32, args: &[crate::printf::Pf
             _ => 0,
         };
         if let Some(PfArg::Int(1)) = args.get(1) {
-            let y = db.aDb[0].pSchema.schema_cookie;
+            let y = db.aDb[0].pSchema.borrow().schema_cookie;
             if y != 0 {
                 x = y;
             }

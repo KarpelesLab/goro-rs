@@ -5565,7 +5565,7 @@ fn op_aggstep(
                     argc: argc as u16,
                     zErr: None,
                     pColl,
-                    pCurrentTime: Some(iCurrentTime),
+                    piCurrentTime: Some(iCurrentTime),
                     pOpInfo: Some((OP_AggStep1, p5)),
                 };
                 xFunc(&mut ctx, args);
@@ -5590,7 +5590,7 @@ fn op_aggstep(
                     argc: argc as u16,
                     zErr: None,
                     pColl,
-                    pCurrentTime: Some(iCurrentTime),
+                    piCurrentTime: Some(iCurrentTime),
                     pOpInfo: Some((OP_AggStep1, p5)),
                 };
                 xFunc(&mut ctx, &mut args);
@@ -5677,7 +5677,7 @@ fn op_function(
             argc: argc as u16,
             zErr: None,
             pColl,
-            pCurrentTime: Some(iCurrentTime),
+            piCurrentTime: Some(iCurrentTime),
             pOpInfo: Some((opcode, p5)),
         };
         xSFunc(&mut ctx, args);

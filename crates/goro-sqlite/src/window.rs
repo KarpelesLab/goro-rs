@@ -1328,8 +1328,7 @@ pub fn sqlite3WindowRewrite(db: &mut Sqlite3, p: SelectId) -> i32 {
             0,
             ExprId::NULL,
         );
-        let nullTok = Token::default();
-        let newSrc = sqlite3SrcListAppend(db, SrcListId::NULL, &nullTok, &nullTok);
+        let newSrc = sqlite3SrcListAppend(db, SrcListId::NULL, None, None);
         db.selm(p).pSrc = newSrc;
         debug_assert!(pSub.nn() || newSrc.is_null()); /* Due to db->mallocFailed test inside
          ** of sqlite3DbMallocRawNN() called from
@@ -1548,8 +1547,8 @@ pub fn sqlite3WindowAssemble(
         let w = db.winm(pWin);
         w.pPartition = pPartition;
         w.pOrderBy = pOrderBy;
-        if !pBase.is_null() {
-            w.zBase = Some(pBase.text().to_vec());
+        if let Some(b) = pBase.filter(|b| !b.is_null()) {
+            w.zBase = Some(b.text().to_vec());
         }
     } else {
         sqlite3ExprListDelete(db, pPartition);

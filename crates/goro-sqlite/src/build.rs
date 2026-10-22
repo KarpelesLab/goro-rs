@@ -600,7 +600,9 @@ pub fn sqlite3LocateTable(
                 pMod = crate::pragma::sqlite3PragmaVtabRegister(db, Some(z));
             }
             if pMod.is_none() && crate::util::sqlite3StrNICmp(Some(z), Some(b"json"), 4) == 0 {
-                pMod = crate::json::sqlite3JsonVtabRegister(db, Some(z));
+                if let Some((zMod, m)) = crate::json::sqlite3JsonVtabRegister(db, z) {
+                    pMod = crate::vtab::sqlite3VtabCreateModule(db, zMod, Some(m), None);
+                }
             }
             if let Some(pMod) = pMod {
                 if crate::vtab::sqlite3VtabEponymousTableInit(db, &pMod) != 0 {
