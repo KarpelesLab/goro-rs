@@ -192,7 +192,9 @@ fn php_image_type_to_mime_type(image_type: i64) -> &'static str {
         IMAGE_FILETYPE_WEBP => "image/webp",
         IMAGE_FILETYPE_AVIF => "image/avif",
         IMAGE_FILETYPE_HEIF => "image/heif",
-        _ => "application/octet-stream",
+        t => goro_core::image_handlers::find(t)
+            .map(|h| h.mime_type)
+            .unwrap_or("application/octet-stream"),
     }
 }
 
@@ -228,7 +230,10 @@ fn image_type_to_extension_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         IMAGE_FILETYPE_WEBP => ".webp",
         IMAGE_FILETYPE_AVIF => ".avif",
         IMAGE_FILETYPE_HEIF => ".heif",
-        _ => return Ok(Value::False),
+        t => match goro_core::image_handlers::find(t) {
+            Some(h) => h.extension,
+            None => return Ok(Value::False),
+        },
     };
     let s = if inc_dot { ext } else { &ext[1..] };
     Ok(Value::String(PhpString::from_bytes(s.as_bytes())))
@@ -1705,6 +1710,10 @@ fn getimagetype(vm: &mut Vm, func: &str, s: &mut ImgStream, input: &[u8]) -> i64
     if get_xbm(s).is_some() {
         return IMAGE_FILETYPE_XBM;
     }
+    // php_image_handlers registered by extensions
+    if let Some(t) = goro_core::image_handlers::identify(&s.data) {
+        return t;
+    }
     IMAGE_FILETYPE_UNKNOWN
 }
 
@@ -1716,6 +1725,8 @@ fn getimagesize_from_stream(
     info: Option<&mut PhpArray>,
 ) -> Value {
     let itype = getimagetype(vm, func, s, input);
+    // width_unit / height_unit of a registered handler's result
+    let mut units: (Option<String>, Option<String>) = (None, None);
     let result = match itype {
         IMAGE_FILETYPE_GIF => handle_gif(s),
         IMAGE_FILETYPE_JPEG => handle_jpeg(vm, func, s, info),
@@ -1749,7 +1760,16 @@ fn getimagesize_from_stream(
                 None
             }
         }
-        _ => None,
+        t => goro_core::image_handlers::find(t)
+            .and_then(|h| (h.get_info)(&s.data))
+            .map(|i| {
+                units = (i.width_unit, i.height_unit);
+                GfxInfo {
+                    width: i.width,
+                    height: i.height,
+                    ..Default::default()
+                }
+            }),
     };
     let r = match result {
         Some(r) => r,
@@ -1760,13 +1780,16 @@ fn getimagesize_from_stream(
     arr.set(ArrayKey::Int(0), Value::Long(r.width as i64));
     arr.set(ArrayKey::Int(1), Value::Long(r.height as i64));
     arr.set(ArrayKey::Int(2), Value::Long(itype));
-    arr.set(
-        ArrayKey::Int(3),
-        Value::String(PhpString::from_string(format!(
-            "width=\"{}\" height=\"{}\"",
-            r.width as i32, r.height as i32
-        ))),
-    );
+    let px = |u: &Option<String>| u.as_deref().is_none_or(|u| u == "px");
+    if px(&units.0) && px(&units.1) {
+        arr.set(
+            ArrayKey::Int(3),
+            Value::String(PhpString::from_string(format!(
+                "width=\"{}\" height=\"{}\"",
+                r.width as i32, r.height as i32
+            ))),
+        );
+    }
     if r.bits != 0 {
         arr.set(sk(b"bits"), Value::Long(r.bits as i64));
     }
@@ -1781,11 +1804,15 @@ fn getimagesize_from_stream(
     );
     arr.set(
         sk(b"width_unit"),
-        Value::String(PhpString::from_bytes(b"px")),
+        Value::String(PhpString::from_string(
+            units.0.clone().unwrap_or_else(|| "px".to_string()),
+        )),
     );
     arr.set(
         sk(b"height_unit"),
-        Value::String(PhpString::from_bytes(b"px")),
+        Value::String(PhpString::from_string(
+            units.1.clone().unwrap_or_else(|| "px".to_string()),
+        )),
     );
     Value::Array(Rc::new(RefCell::new(arr)))
 }

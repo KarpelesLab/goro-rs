@@ -2,6 +2,7 @@ pub mod c14n;
 pub mod dom;
 pub mod html;
 pub mod html5;
+mod image_svg;
 pub mod io;
 pub mod libxml;
 pub mod parser;

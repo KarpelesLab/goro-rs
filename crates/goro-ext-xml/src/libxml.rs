@@ -323,6 +323,16 @@ fn libxml_clear_errors(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
 fn libxml_set_streams_context(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let v = args.first().map(|v| v.deref()).unwrap_or(Value::Undef);
     match v {
+        Value::Resource(_) if v.resource_type_name().as_deref() != Some(b"stream-context") => {
+            // zend_fetch_resource_ex(..., "Stream-Context", ...)
+            let e = vm.create_exception(
+                b"TypeError",
+                "libxml_set_streams_context(): supplied resource is not a valid Stream-Context resource",
+                vm.current_line,
+            );
+            vm.current_exception = Some(e);
+            Ok(Value::Null)
+        }
         Value::Resource(_) => {
             STATE.with(|s| s.borrow_mut().streams_context = Some(v));
             Ok(Value::Null)
@@ -422,6 +432,7 @@ fn prop(name: &str, default: Value) -> PropertyDef {
 }
 
 pub fn register(vm: &mut Vm) {
+    crate::image_svg::register(vm);
     let c = |vm: &mut Vm, n: &str, v: i64| {
         vm.constants.insert(n.as_bytes().to_vec(), Value::Long(v));
     };
