@@ -1012,6 +1012,9 @@ pub struct Vm {
     pub rfc1867_callback: Option<crate::rfc1867::Callback>,
     /// SG(headers_sent): set once output reaches the SAPI.
     pub headers_sent: bool,
+    /// SG(callback_func): header_register_callback(), run when the headers
+    /// are sent.
+    pub header_callback: Option<Value>,
     /// Constants registered by extensions with CONST_DEPRECATED: name -> message.
     pub internal_deprecated_constants: HashMap<Vec<u8>, String>,
     /// Declarations of builtins carrying what their stub declares besides
@@ -1238,6 +1241,19 @@ impl Vm {
                     b"default_charset".to_vec(),
                     Value::String(PhpString::from_bytes(b"UTF-8")),
                 );
+                // main.c: input/internal/output_encoding default to "",
+                // meaning "use default_charset".
+                for k in [
+                    &b"input_encoding"[..],
+                    b"internal_encoding",
+                    b"output_encoding",
+                ] {
+                    c.insert(k.to_vec(), Value::String(PhpString::from_bytes(b"")));
+                }
+                c.insert(
+                    b"report_memleaks".to_vec(),
+                    Value::String(PhpString::from_bytes(b"1")),
+                );
                 // PHP constants
                 c.insert(
                     b"PHP_EOL".to_vec(),
@@ -1276,6 +1292,10 @@ impl Vm {
                 c.insert(
                     b"PHP_EXTRA_VERSION".to_vec(),
                     Value::String(PhpString::from_bytes(b"")),
+                );
+                c.insert(
+                    b"PHP_BUILD_DATE".to_vec(),
+                    Value::String(PhpString::from_string(crate::php_build_date())),
                 );
                 c.insert(b"PHP_DEBUG".to_vec(), Value::Long(0));
                 c.insert(b"PHP_ZTS".to_vec(), Value::Long(0));
@@ -2145,6 +2165,7 @@ impl Vm {
             request_startup_hooks: Vec::new(),
             request_shutdown_hooks: Vec::new(),
             headers_sent: false,
+            header_callback: None,
             rfc1867_callback: None,
             internal_deprecated_constants: HashMap::new(),
             internal_function_decls: HashMap::new(),
@@ -15639,6 +15660,11 @@ impl Vm {
         for hook in hooks {
             hook(self);
         }
+        // php_output_deactivate(): php_output_header() sends the headers
+        // (running a header_register_callback()) if nothing was output.
+        if self.header_callback.is_some() {
+            self.mark_output_started();
+        }
         self.exit_requested = exited || self.exit_requested;
 
         result
@@ -15650,6 +15676,12 @@ impl Vm {
         if !self.headers_sent {
             if self.output_start.is_none() && !self.current_file.is_empty() {
                 self.output_start = Some((self.current_file.clone(), self.current_line));
+            }
+            // sapi_send_headers(): sapi_run_header_callback()
+            if let Some(cb) = self.header_callback.take() {
+                if self.call_callback(&cb, &[]).is_err() && self.current_exception.is_none() {
+                    self.emit_warning("Could not call the sapi_header_callback");
+                }
             }
             self.headers_sent = true;
         }

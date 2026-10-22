@@ -924,8 +924,7 @@ fn parse_ini_settings(ini_section: Option<&str>) -> Vec<(String, String)> {
 }
 
 /// Parse error reporting expressions like "E_ALL&~E_DEPRECATED"
-/// Supports operators: | (OR), ^ (XOR), & (AND), ~ (NOT), ! (NOT)
-/// with proper precedence: ~ and ! (unary, highest) > & > ^ > | (lowest)
+/// Supports operators: | (OR), ^ (XOR), & (AND), ~ (NOT), ! (logical NOT)
 fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
     // PHP error level constants
     fn resolve_constant(name: &str) -> Option<i64> {
@@ -984,43 +983,29 @@ fn parse_error_reporting_expr(expr: &str) -> Option<i64> {
         tokens
     }
 
-    /// Recursive descent parser for bitwise expressions
-    /// Precedence (lowest to highest): | , ^ , & , unary ~/!
+    /// zend_ini_parser.y: `%left '|' '&' '^'` -- the binary operators share
+    /// one precedence level and associate left; `~`/`!` bind tighter.
     fn parse_or(tokens: &[String], pos: &mut usize) -> Option<i64> {
-        let mut left = parse_xor(tokens, pos)?;
-        while *pos < tokens.len() && tokens[*pos] == "|" {
-            *pos += 1;
-            let right = parse_xor(tokens, pos)?;
-            left |= right;
-        }
-        Some(left)
-    }
-
-    fn parse_xor(tokens: &[String], pos: &mut usize) -> Option<i64> {
-        let mut left = parse_and(tokens, pos)?;
-        while *pos < tokens.len() && tokens[*pos] == "^" {
-            *pos += 1;
-            let right = parse_and(tokens, pos)?;
-            left ^= right;
-        }
-        Some(left)
-    }
-
-    fn parse_and(tokens: &[String], pos: &mut usize) -> Option<i64> {
         let mut left = parse_unary(tokens, pos)?;
-        while *pos < tokens.len() && tokens[*pos] == "&" {
+        while *pos < tokens.len() && matches!(tokens[*pos].as_str(), "|" | "&" | "^") {
+            let op = tokens[*pos].clone();
             *pos += 1;
             let right = parse_unary(tokens, pos)?;
-            left &= right;
+            match op.as_str() {
+                "|" => left |= right,
+                "&" => left &= right,
+                _ => left ^= right,
+            }
         }
         Some(left)
     }
 
     fn parse_unary(tokens: &[String], pos: &mut usize) -> Option<i64> {
         if *pos < tokens.len() && (tokens[*pos] == "~" || tokens[*pos] == "!") {
+            let logical = tokens[*pos] == "!";
             *pos += 1;
             let val = parse_unary(tokens, pos)?;
-            return Some(!val);
+            return Some(if logical { (val == 0) as i64 } else { !val });
         }
         if *pos < tokens.len() && tokens[*pos] == "(" {
             *pos += 1; // skip '('
@@ -1654,6 +1639,7 @@ fn execute_php_inner_impl(
     goro_ext_standard::ob::request_startup(&mut vm);
 
     // Request startup: superglobals, $argv/$argc, php://input (main FILE only).
+    let had_request = PHPT_REQUEST.with(|r| r.borrow().is_some());
     if let Some(req) = PHPT_REQUEST.with(|r| r.borrow_mut().take()) {
         // CLI tests: pending output reaches descriptor 1 (shared with
         // stderr) when a child process is spawned or STDERR is written,
@@ -1712,7 +1698,7 @@ fn execute_php_inner_impl(
     // touch $_SERVER themselves typically expect the "Undefined global
     // variable" warning, so don't auto-populate it for them.
     let source_str = std::str::from_utf8(source).unwrap_or("");
-    {
+    if !had_request {
         use goro_core::array::{ArrayKey, PhpArray};
         let mut server = PhpArray::new();
         let script_name = filename.to_string();

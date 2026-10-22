@@ -436,6 +436,38 @@ fn push_class_name(buf: &mut Vec<u8>, name: &[u8]) {
 }
 
 /// Format a double like zend_gcvt(value, serialize_precision, '.', 'E').
+/// serialize()'s double: zend_gcvt() with serialize_precision directly, so
+/// a precision of 0 behaves differently from var_export()'s
+/// smart_str_append_double() (which bumps it to 1).
+fn format_serialize_double_gcvt(f: f64) -> String {
+    if f.is_finite() && goro_core::value::get_php_serialize_precision() == 0 {
+        // zend_gcvt(value, 0, ...): one significant digit, and E-style as
+        // soon as the decimal point would follow it (decpt > ndigit == 0).
+        let e = format!("{:.0e}", f.abs());
+        let (digit, exp) = e.split_once('e').unwrap_or(("0", "0"));
+        let exp: i32 = exp.parse().unwrap_or(0);
+        let sign = if f.is_sign_negative() && f != 0.0 {
+            "-"
+        } else {
+            ""
+        };
+        let decpt = exp + 1;
+        if decpt > 0 || decpt < -3 {
+            format!(
+                "{}{}.0E{}{}",
+                sign,
+                digit,
+                if exp < 0 { '-' } else { '+' },
+                exp.abs()
+            )
+        } else {
+            format!("{}0.{}{}", sign, "0".repeat((-decpt) as usize), digit)
+        }
+    } else {
+        format_serialize_double(f)
+    }
+}
+
 pub(crate) fn format_serialize_double(f: f64) -> String {
     if f.is_nan() {
         return "NAN".to_string();
@@ -556,7 +588,7 @@ impl Serializer {
             Value::Double(f) => {
                 self.buf.extend_from_slice(b"d:");
                 self.buf
-                    .extend_from_slice(format_serialize_double(*f).as_bytes());
+                    .extend_from_slice(format_serialize_double_gcvt(*f).as_bytes());
                 self.buf.push(b';');
             }
             Value::String(s) => {

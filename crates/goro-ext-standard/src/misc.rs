@@ -5204,6 +5204,11 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(msg) = ini_handler_deprecation(&key, &value) {
         vm.emit_deprecated(&msg);
     }
+    if key == b"report_memleaks" {
+        if let Some(msg) = assert_ini_deprecation(&key, &value) {
+            vm.emit_deprecated(&format!("ini_set(): {}", msg));
+        }
+    }
     if key.starts_with(b"assert.") {
         if key == b"assert.callback" {
             ASSERT_CALLBACK.with(|c| *c.borrow_mut() = None);
@@ -5414,6 +5419,11 @@ pub fn assert_ini_deprecation(key: &[u8], value: &Value) -> Option<String> {
         b"assert.active" | b"assert.warning" | b"assert.exception" => !ini_parse_bool(value),
         b"assert.bail" => ini_parse_bool(value),
         b"assert.callback" => !value.to_php_string().as_bytes().is_empty(),
+        // OnUpdateReportMemleaks
+        b"report_memleaks" => {
+            return (!ini_parse_bool(value))
+                .then(|| "Directive 'report_memleaks' is deprecated".to_string());
+        }
         _ => false,
     };
     if deprecated {
@@ -9896,7 +9906,12 @@ fn get_called_class_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn get_defined_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
 }
-fn get_defined_functions_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn get_defined_functions_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() == 1 {
+        vm.emit_deprecated(
+            "get_defined_functions(): The $exclude_disabled parameter has no effect since PHP 8.0",
+        );
+    }
     let mut internal = PhpArray::new();
     for name in vm.functions.keys() {
         if name.as_slice() == goro_core::gc::DESTRUCTOR_FIBER_FN {
@@ -15695,9 +15710,9 @@ fn do_open_temporary_file(_vm: &mut Vm, dir: &str, pfx: &[u8]) -> Option<Vec<u8>
     Some(buf)
 }
 
-fn sys_get_temp_dir_fn3(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn sys_get_temp_dir_fn3(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(
-        std::env::temp_dir().to_string_lossy().to_string(),
+        php_get_temporary_directory(vm),
     )))
 }
 
@@ -17213,6 +17228,13 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
             .extend_from_slice(format!("\nDeprecated: {} in Unknown on line 0\n", msg).as_bytes());
         startup_messages.extend_from_slice(&append);
     }
+    // php_ini_register_extensions(): goro has no shared extensions, so an
+    // `extension=` naming a module that is not built in cannot be loaded.
+    for (key, value) in ini {
+        if key == "extension" {
+            startup_load_extension(vm, value);
+        }
+    }
     // OnChangeMemoryLimit at startup: memory_limit above max_memory_limit is
     // clamped with a startup warning.
     if let (Some(ml), Some(mx)) = (
@@ -17241,6 +17263,91 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
 }
 
 /// OnSetExceptionStringParamMaxLen: 0..=1000000.
+/// php_load_extension() with MODULE_PERSISTENT, for an `extension=` INI
+/// entry: built-in modules load silently, anything else fails with
+/// E_CORE_WARNING.
+fn startup_load_extension(vm: &mut Vm, filename: &str) {
+    let base = filename.rsplit('/').next().unwrap_or(filename);
+    let base = base.strip_suffix(".so").unwrap_or(base);
+    let base = base.strip_prefix("php_").unwrap_or(base);
+    let base = base.strip_suffix(".dll").unwrap_or(base);
+    if vm
+        .loaded_extensions
+        .contains(base.to_ascii_lowercase().as_bytes())
+    {
+        return;
+    }
+    let ini_s = |vm: &Vm, k: &[u8]| {
+        vm.constants
+            .get(k)
+            .map(|v| v.to_php_string().to_string_lossy())
+            .unwrap_or_default()
+    };
+    let (libpath, libpath2) = if filename.contains('/') {
+        (filename.to_string(), None)
+    } else {
+        let dir = ini_s(vm, b"extension_dir");
+        if dir.is_empty() {
+            return;
+        }
+        let sep = if dir.ends_with('/') { "" } else { "/" };
+        (
+            format!("{}{}{}", dir, sep, filename),
+            Some(format!("{}{}{}.so", dir, sep, filename)),
+        )
+    };
+    let err = |p: &str| {
+        if std::path::Path::new(p).exists() {
+            format!("{}: invalid ELF header", p)
+        } else {
+            format!(
+                "{}: cannot open shared object file: No such file or directory",
+                p
+            )
+        }
+    };
+    let msg = match &libpath2 {
+        Some(p2) => format!(
+            "PHP Startup: Unable to load dynamic library '{}' (tried: {} ({}), {} ({}))",
+            filename,
+            libpath,
+            err(&libpath),
+            p2,
+            err(p2)
+        ),
+        // A full path is tried as given only.
+        None => format!(
+            "PHP Startup: Unable to load dynamic library '{}' (tried: {} ({}))",
+            filename,
+            libpath,
+            err(&libpath)
+        ),
+    };
+    let ini_on = |vm: &Vm, k: &[u8], default: bool| {
+        vm.constants
+            .get(k)
+            .map(|v| ini_parse_bool(&Value::String(v.to_php_string())))
+            .unwrap_or(default)
+    };
+    // php_error_cb(): E_CORE_WARNING, shown when display_startup_errors is on
+    if vm.error_reporting & 32 == 0
+        || !ini_on(vm, b"display_errors", true)
+        || !ini_on(vm, b"display_startup_errors", true)
+    {
+        return;
+    }
+    let html = ini_on(vm, b"html_errors", false);
+    let out = if html {
+        format!(
+            "<br />\n<b>Warning</b>:  {} in <b>Unknown</b> on line <b>0</b><br />\n",
+            msg
+        )
+    } else {
+        format!("\nWarning: {} in Unknown on line 0\n", msg)
+    };
+    vm.write_output(out.as_bytes());
+}
+
 /// Record a startup configuration directive for get_cfg_var().
 pub fn register_cfg_var(key: &str, value: &str) {
     CFG_VARS.with(|c| c.borrow_mut().push((key.to_string(), value.to_string())));
@@ -20746,7 +20853,31 @@ fn dl_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::False)
 }
 
-fn header_register_callback_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+fn header_register_callback_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let callback = args.first().cloned().unwrap_or(Value::Null);
+    // Z_PARAM_FUNC
+    let (ok, _, err) = check_callable(vm, &callback, false);
+    if vm.current_exception.is_some() {
+        return Err(VmError {
+            message: "Uncaught exception".into(),
+            line: vm.current_line,
+        });
+    }
+    if !ok {
+        return Err(throw_type_error_msg(
+            vm,
+            format!(
+                "header_register_callback(): Argument #1 ($callback) must be a valid callback, {}",
+                err.unwrap_or_default()
+            ),
+        ));
+    }
+    // A callback registered after the headers were sent is never used.
+    vm.header_callback = if vm.headers_sent {
+        None
+    } else {
+        Some(callback)
+    };
     Ok(Value::True)
 }
 
