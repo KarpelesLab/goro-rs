@@ -55,6 +55,13 @@ fn register_ext(
         return false;
     }
     vm.register_extension(name);
+    // PHP_MINFO_FUNCTION(): "<name> support => enabled"
+    vm.phpinfo_hooks.push(match name {
+        b"shmop" => |_| "\nshmop\n\nshmop support => enabled\n".to_string(),
+        b"sysvsem" => |_| "\nsysvsem\n\nsysvsem support => enabled\n".to_string(),
+        b"sysvshm" => |_| "\nsysvshm\n\nsysvshm support => enabled\n".to_string(),
+        _ => |_| "\nsysvmsg\n\nsysvmsg support => enabled\n".to_string(),
+    });
     for &(fname, f) in functions {
         let params: Vec<&[u8]> = goro_core::stubs::find_function(fname.as_bytes())
             .map(|s| s.args.iter().map(|a| a.name.as_bytes()).collect())

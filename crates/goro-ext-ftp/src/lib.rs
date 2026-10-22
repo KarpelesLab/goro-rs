@@ -109,6 +109,9 @@ pub fn register(vm: &mut Vm) {
         return;
     }
     vm.register_extension(NAME);
+    // PHP_MINFO_FUNCTION(ftp)
+    vm.phpinfo_hooks
+        .push(|_| "\nftp\n\nFTP support => enabled\nFTPS support => enabled\n".to_string());
     let mut ce = match goro_core::stubs::class_entry(vm, CLASS_NAME) {
         Some(stub) => stub.clone(),
         None => ClassEntry::new(CLASS_NAME.to_vec()),

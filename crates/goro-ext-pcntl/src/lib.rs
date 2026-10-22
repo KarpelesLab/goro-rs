@@ -328,6 +328,9 @@ pub fn register(vm: &mut Vm) {
         return;
     }
     vm.register_extension(NAME);
+    // PHP_MINFO_FUNCTION(pcntl)
+    vm.phpinfo_hooks
+        .push(|_| "\npcntl\n\npcntl support => enabled\n".to_string());
     for &(name, f) in FUNCTIONS {
         let params: Vec<&[u8]> = goro_core::stubs::find_function(name.as_bytes())
             .map(|s| s.args.iter().map(|a| a.name.as_bytes()).collect())
