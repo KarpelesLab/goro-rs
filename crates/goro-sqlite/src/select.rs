@@ -39,7 +39,12 @@ pub fn sqlite3SelectDeleteGeneric(db: &mut Sqlite3, p: &mut [u8]) {
 }
 
 /// C: `int sqlite3JoinType(Parse *pParse, Token *pA, Token *pB, Token *pC)`
-pub fn sqlite3JoinType(db: &mut Sqlite3, pA: &Token, pB: &Token, pC: &Token) -> i32 {
+pub fn sqlite3JoinType(
+    db: &mut Sqlite3,
+    pA: &Token,
+    pB: Option<&Token>,
+    pC: Option<&Token>,
+) -> i32 {
     todo!("sqlite3JoinType")
 }
 

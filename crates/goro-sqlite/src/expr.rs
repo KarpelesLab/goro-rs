@@ -293,12 +293,7 @@ pub fn sqlite3ExprListSetName(db: &mut Sqlite3, pList: ExprListId, pName: &Token
 }
 
 /// C: `void sqlite3ExprListSetSpan( Parse *pParse, ExprList *pList, const char *zStart, const char *zEnd )`
-pub fn sqlite3ExprListSetSpan(
-    db: &mut Sqlite3,
-    pList: ExprListId,
-    zStart: Option<&[u8]>,
-    zEnd: Option<&[u8]>,
-) {
+pub fn sqlite3ExprListSetSpan(db: &mut Sqlite3, pList: ExprListId, zStart: usize, zEnd: usize) {
     todo!("sqlite3ExprListSetSpan")
 }
 

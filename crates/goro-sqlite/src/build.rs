@@ -251,12 +251,7 @@ pub fn sqlite3AffinityType(zIn: Option<&[u8]>, pCol: &mut Column) -> u8 {
 }
 
 /// C: `void sqlite3AddDefaultValue( Parse *pParse, Expr *pExpr, const char *zStart, const char *zEnd )`
-pub fn sqlite3AddDefaultValue(
-    db: &mut Sqlite3,
-    pExpr: ExprId,
-    zStart: Option<&[u8]>,
-    zEnd: Option<&[u8]>,
-) {
+pub fn sqlite3AddDefaultValue(db: &mut Sqlite3, pExpr: ExprId, zStart: usize, zEnd: usize) {
     todo!("sqlite3AddDefaultValue")
 }
 
@@ -272,12 +267,7 @@ pub fn sqlite3AddPrimaryKey(
 }
 
 /// C: `void sqlite3AddCheckConstraint( Parse *pParse, Expr *pCheckExpr, const char *zStart, const char *zEnd )`
-pub fn sqlite3AddCheckConstraint(
-    db: &mut Sqlite3,
-    pCheckExpr: ExprId,
-    zStart: Option<&[u8]>,
-    zEnd: Option<&[u8]>,
-) {
+pub fn sqlite3AddCheckConstraint(db: &mut Sqlite3, pCheckExpr: ExprId, zStart: usize, zEnd: usize) {
     todo!("sqlite3AddCheckConstraint")
 }
 
@@ -287,7 +277,7 @@ pub fn sqlite3AddCollateType(db: &mut Sqlite3, pToken: &Token) {
 }
 
 /// C: `void sqlite3AddGenerated(Parse *pParse, Expr *pExpr, Token *pType)`
-pub fn sqlite3AddGenerated(db: &mut Sqlite3, pExpr: ExprId, pType: &Token) {
+pub fn sqlite3AddGenerated(db: &mut Sqlite3, pExpr: ExprId, pType: Option<&Token>) {
     todo!("sqlite3AddGenerated")
 }
 
@@ -319,8 +309,8 @@ pub fn sqlite3ShadowTableName(db: &mut Sqlite3, zName: Option<&[u8]>) -> i32 {
 /// C: `void sqlite3EndTable( Parse *pParse, Token *pCons, Token *pEnd, u32 tabOpts, Select *pSelect )`
 pub fn sqlite3EndTable(
     db: &mut Sqlite3,
-    pCons: &Token,
-    pEnd: &Token,
+    pCons: Option<&Token>,
+    pEnd: Option<&Token>,
     tabOpts: u32,
     pSelect: SelectId,
 ) {
@@ -400,12 +390,12 @@ pub fn sqlite3HasExplicitNulls(db: &mut Sqlite3, pList: ExprListId) -> i32 {
 /// C: `void sqlite3CreateIndex( Parse *pParse, Token *pName1, Token *pName2, SrcList *pTblName, ExprList *pList, int onError, Token *pStart, Expr *pPIWhere, int sortOrder, int ifNotExist, u8 idxType )`
 pub fn sqlite3CreateIndex(
     db: &mut Sqlite3,
-    pName1: &Token,
-    pName2: &Token,
+    pName1: Option<&Token>,
+    pName2: Option<&Token>,
     pTblName: SrcListId,
     pList: ExprListId,
     onError: i32,
-    pStart: &Token,
+    pStart: Option<&Token>,
     pPIWhere: ExprId,
     sortOrder: i32,
     ifNotExist: i32,
@@ -464,8 +454,8 @@ pub fn sqlite3SrcListEnlarge(
 pub fn sqlite3SrcListAppend(
     db: &mut Sqlite3,
     pList: SrcListId,
-    pTable: &Token,
-    pDatabase: &Token,
+    pTable: Option<&Token>,
+    pDatabase: Option<&Token>,
 ) -> SrcListId {
     todo!("sqlite3SrcListAppend")
 }
@@ -504,11 +494,11 @@ pub fn sqlite3SrcItemAttachSubquery(
 pub fn sqlite3SrcListAppendFromTerm(
     db: &mut Sqlite3,
     p: SrcListId,
-    pTable: &Token,
-    pDatabase: &Token,
+    pTable: Option<&Token>,
+    pDatabase: Option<&Token>,
     pAlias: &Token,
     pSubquery: SelectId,
-    pOnUsing: &mut OnOrUsing,
+    pOnUsing: Option<&mut OnOrUsing>,
 ) -> SrcListId {
     todo!("sqlite3SrcListAppendFromTerm")
 }
@@ -601,7 +591,7 @@ pub fn sqlite3RowidConstraint(db: &mut Sqlite3, onError: i32, pTab: &TableRef) {
 }
 
 /// C: `void sqlite3Reindex(Parse *pParse, Token *pName1, Token *pName2)`
-pub fn sqlite3Reindex(db: &mut Sqlite3, pName1: &Token, pName2: &Token) {
+pub fn sqlite3Reindex(db: &mut Sqlite3, pName1: Option<&Token>, pName2: Option<&Token>) {
     todo!("sqlite3Reindex")
 }
 

@@ -9,7 +9,7 @@ use crate::int::*;
 use std::rc::Rc;
 
 /// C: `void sqlite3Vacuum(Parse *pParse, Token *pNm, Expr *pInto)`
-pub fn sqlite3Vacuum(db: &mut Sqlite3, pNm: &Token, pInto: ExprId) {
+pub fn sqlite3Vacuum(db: &mut Sqlite3, pNm: Option<&Token>, pInto: ExprId) {
     todo!("sqlite3Vacuum")
 }
 
