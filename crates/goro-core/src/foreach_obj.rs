@@ -186,9 +186,25 @@ impl Vm {
             if is_internal_slot(&name) || matches!(value, Value::Undef) {
                 continue;
             }
-            let Some(key) = self.foreach_prop_key(&class_lower, scope_lower.as_deref(), &name)
-            else {
-                continue;
+            // A dynamic property an inherited private one moved away from
+            // (Vm::prop_access_key): zend_check_property_access() decides.
+            let moved_from = self.class_layout_of(&class_name).slots.iter().any(|sl| {
+                sl.storage_key == name
+                    && sl
+                        .moved_key
+                        .as_ref()
+                        .is_some_and(|mk| obj.borrow().has_property(mk))
+            });
+            let key = if moved_from {
+                if !self.check_property_access(&class_lower, &name, true) {
+                    continue;
+                }
+                name.clone()
+            } else {
+                match self.foreach_prop_key(&class_lower, scope_lower.as_deref(), &name) {
+                    Some(k) => k,
+                    None => continue,
+                }
             };
             let value = if by_ref {
                 match value {

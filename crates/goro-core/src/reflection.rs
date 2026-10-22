@@ -3578,14 +3578,13 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         let self_obj = ob.get_property(b"__reflection_object");
                         drop(ob);
                         if let Value::Object(inst) = &self_obj {
-                            let io = inst.borrow();
-                            io.properties
-                                .iter()
-                                .filter(|(name, _)| !name.starts_with(b"__"))
-                                .filter(|(name, _)| {
-                                    !visible_declared_names.iter().any(|n| n == name)
-                                })
-                                .map(|(n, _)| n.clone())
+                            // The dynamic entries of its property table.
+                            vm.object_prop_table(inst)
+                                .into_iter()
+                                .filter(|e| e.slot.is_none())
+                                .map(|e| e.key)
+                                .filter(|name| !name.starts_with(b"__") && name.first() != Some(&0))
+                                .filter(|name| !visible_declared_names.iter().any(|n| n == name))
                                 .collect()
                         } else {
                             Vec::new()

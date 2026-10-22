@@ -26,6 +26,13 @@ pub struct PropSlot {
     pub is_virtual: bool,
     /// Key of the slot in `PhpObject::properties`
     pub storage_key: Vec<u8>,
+    /// A private property inherited from a user class is kept under its bare
+    /// name until a dynamic property of the same name is created on the
+    /// object: it then moves to this (mangled) key. See
+    /// `Vm::prop_access_key`.
+    pub moved_key: Option<Vec<u8>>,
+    /// Default of a property of an internal class (stub source text)
+    pub internal_default: Option<&'static str>,
 }
 
 impl PropSlot {
@@ -65,6 +72,53 @@ pub struct PropEntry {
     pub slot: Option<PropSlot>,
 }
 
+/// The declared instance property slots of a class.
+#[derive(Debug)]
+pub struct ClassLayout {
+    pub slots: Vec<PropSlot>,
+    /// Names of the private slots not stored under their bare name (or that
+    /// may move away from it): the accesses that need `prop_access_key`.
+    pub special_names: Vec<Vec<u8>>,
+    /// For each special name: Some(slot index) when it is the only slot of
+    /// that name and a movable private one (the common case of an
+    /// ancestor's private property), resolved without the full lookup.
+    pub special_movable: Vec<Option<usize>>,
+    /// The table follows the storage order: classes registered by
+    /// extensions keep their properties in the order they create them.
+    pub storage_order: bool,
+}
+
+std::thread_local! {
+    /// Class layouts by lowercase class name, valid while the class table
+    /// has the recorded size (classes are only ever added).
+    /// (by lowercase name, by name as stored in objects)
+    #[allow(clippy::type_complexity)]
+    static LAYOUTS: RefCell<(
+        usize,
+        crate::fxhash::FxHashMap<Vec<u8>, Rc<ClassLayout>>,
+        crate::fxhash::FxHashMap<Vec<u8>, Rc<ClassLayout>>,
+    )> = RefCell::new((0, Default::default(), Default::default()));
+}
+
+std::thread_local! {
+    /// The layout class_layout_of() returned last: (class table size,
+    /// class name, layout).
+    #[allow(clippy::type_complexity)]
+    static LAST_LAYOUT: RefCell<(usize, Vec<u8>, Option<Rc<ClassLayout>>)> =
+        const { RefCell::new((0, Vec::new(), None)) };
+}
+
+/// Forget the cached class layouts (a class was declared).
+pub fn invalidate_class_layouts() {
+    LAST_LAYOUT.with(|c| c.borrow_mut().2 = None);
+    LAYOUTS.with(|c| {
+        let mut c = c.borrow_mut();
+        c.0 = usize::MAX;
+        c.1.clear();
+        c.2.clear();
+    });
+}
+
 /// VM bookkeeping stored among the properties.
 pub fn is_internal_prop_name(name: &[u8]) -> bool {
     const P: &[&[u8]] = &[
@@ -88,6 +142,83 @@ pub fn is_internal_prop_name(name: &[u8]) -> bool {
         b"__xml_",
     ];
     name.starts_with(b"__") && P.iter().any(|p| name.starts_with(p))
+}
+
+/// Internal property of an object whose property table has an order of its
+/// own (ArrayObject sorted it): the table follows the storage order.
+pub const OWN_ORDER: &[u8] = b"__spl_own_order";
+
+/// The rows of `ob`'s property table, in table order: declared slots (with
+/// the index of their storage entry, if any), then dynamic properties.
+fn table_rows<'a>(
+    ob: &PhpObject,
+    layout: &'a ClassLayout,
+) -> Vec<(Option<&'a PropSlot>, Option<usize>)> {
+    let slots = &layout.slots;
+    let props = &ob.properties;
+    let find = |slot: &PropSlot| match &slot.moved_key {
+        Some(mk) => props
+            .iter()
+            .position(|(k, _)| k == mk)
+            .or_else(|| props.iter().position(|(k, _)| *k == slot.storage_key)),
+        None => props.iter().position(|(k, _)| *k == slot.storage_key),
+    };
+    let slot_at: Vec<Option<usize>> = slots.iter().map(find).collect();
+    let mut owner: Vec<Option<usize>> = vec![None; props.len()];
+    for (si, at) in slot_at.iter().enumerate() {
+        if let Some(i) = at {
+            owner[*i] = Some(si);
+        }
+    }
+    let dynamic = |i: usize| {
+        let (k, v) = &props[i];
+        !is_internal_prop_name(k) && !matches!(v, Value::Undef)
+    };
+    let mut out = Vec::with_capacity(slots.len() + props.len());
+    if layout.storage_order || ob.has_property(OWN_ORDER) {
+        for (i, own) in owner.iter().enumerate() {
+            match own {
+                Some(si) => out.push((Some(&slots[*si]), Some(i))),
+                None if dynamic(i) => out.push((None, Some(i))),
+                None => {}
+            }
+        }
+        // Slots without a storage entry come last.
+        for (si, slot) in slots.iter().enumerate() {
+            if slot_at[si].is_none() {
+                out.push((Some(slot), None));
+            }
+        }
+        return out;
+    }
+    for (si, slot) in slots.iter().enumerate() {
+        out.push((Some(slot), slot_at[si]));
+    }
+    for (i, own) in owner.iter().enumerate() {
+        if own.is_none() && dynamic(i) {
+            out.push((None, Some(i)));
+        }
+    }
+    out
+}
+
+/// The value of a simple stub default (`""`, `0`, `null`, `[]`, ...).
+fn stub_default_value(src: &str) -> Option<Value> {
+    let src = src.trim();
+    Some(match src {
+        "null" | "NULL" => Value::Null,
+        "true" => Value::True,
+        "false" => Value::False,
+        "\"\"" | "''" => Value::String(crate::string::PhpString::empty()),
+        "[]" => Value::Array(Rc::new(RefCell::new(crate::array::PhpArray::new()))),
+        _ => {
+            if let Ok(n) = src.parse::<i64>() {
+                Value::Long(n)
+            } else {
+                return None;
+            }
+        }
+    })
 }
 
 fn lower(b: &[u8]) -> Vec<u8> {
@@ -137,6 +268,11 @@ impl Vm {
                 chain.push(p);
             }
             for c in chain.iter().rev() {
+                // ext/date's objects build their property tables themselves
+                // (date_object_get_properties_for): no slots of their own.
+                if c.ext == "date" {
+                    continue;
+                }
                 for p in c.props {
                     use crate::stubs::{F_PRIVATE, F_PROTECTED, F_STATIC, F_VIRTUAL};
                     if p.flags & F_STATIC != 0 {
@@ -157,6 +293,8 @@ impl Vm {
                         has_get_hook: p.flags & F_VIRTUAL != 0,
                         is_virtual: p.flags & F_VIRTUAL != 0,
                         storage_key: name.clone(),
+                        moved_key: None,
+                        internal_default: p.default,
                         name,
                     };
                     match slots
@@ -212,6 +350,8 @@ impl Vm {
                     has_get_hook: p.has_get_hook,
                     is_virtual: p.is_virtual,
                     storage_key: p.name.clone(),
+                    moved_key: None,
+                    internal_default: None,
                 };
                 // A redeclared non-private property reuses the inherited slot.
                 match slots.iter_mut().find(|s| {
@@ -245,10 +385,264 @@ impl Vm {
                     && names.iter().any(|(n, d)| *n == s.name && *d != s.decl)
                 {
                     s.storage_key = mangle(&s.name, Visibility::Private, &s.decl_name);
+                } else if s.vis == Visibility::Private
+                    && s.decl.as_slice() != cl
+                    && self.classes.contains_key(&s.decl)
+                {
+                    s.moved_key = Some(mangle(&s.name, Visibility::Private, &s.decl_name));
                 }
             }
         }
         slots
+    }
+
+    /// Whether property `name` of an object of class `cl` may be accessed
+    /// from the current scope (a dynamic property always may).
+    pub(crate) fn prop_visible_from_scope(&self, cl: &[u8], name: &[u8]) -> bool {
+        let Some(ce) = self.classes.get(cl) else {
+            return true;
+        };
+        let scope = self.class_scope_ref();
+        let in_scope = |d: &[u8]| scope.is_some_and(|s| s.eq_ignore_ascii_case(d));
+        let mut non_private = None;
+        let mut private = None;
+        for p in ce.properties.iter().filter(|p| p.name == name) {
+            match p.visibility {
+                Visibility::Private if in_scope(&p.declaring_class) => return true,
+                Visibility::Private => private = Some(p),
+                v => {
+                    if non_private.is_none() {
+                        non_private = Some(v)
+                    }
+                }
+            }
+        }
+        match non_private {
+            Some(Visibility::Public) => true,
+            Some(_) => scope.is_some_and(|s| {
+                let s = lower(s);
+                s.as_slice() == cl || self.class_extends(&s, cl) || self.class_extends(cl, &s)
+            }),
+            // An ancestor's private property: the name is a dynamic one.
+            None => private.is_none_or(|p| !p.declaring_class.eq_ignore_ascii_case(cl)),
+        }
+    }
+
+    /// zend_std_has_property(ZEND_PROPERTY_EXISTS) from the current scope:
+    /// the slot the access refers to is initialized, or the dynamic
+    /// property exists.
+    pub fn prop_exists_from_scope(&self, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> bool {
+        let cl = lower(&obj.borrow().class_name);
+        match self.scoped_prop_info(&cl, name) {
+            Ok(Some(slot)) => {
+                let b = obj.borrow();
+                let v = slot
+                    .moved_key
+                    .as_ref()
+                    .and_then(|mk| b.properties.iter().find(|(k, _)| k == mk))
+                    .or_else(|| b.properties.iter().find(|(k, _)| *k == slot.storage_key));
+                v.is_some_and(|(_, v)| !matches!(v, Value::Undef))
+            }
+            Ok(None) => self
+                .object_prop_table(obj)
+                .iter()
+                .any(|e| e.slot.is_none() && e.key == name),
+            Err(()) => false,
+        }
+    }
+
+    /// Whether declared property `p` of class `cl` is invisible to the
+    /// current scope as a slot: an ancestor's private property (accesses to
+    /// its name find a dynamic property).
+    pub fn prop_def_hidden(&self, p: &crate::object::PropertyDef, cl: &[u8]) -> bool {
+        p.visibility == Visibility::Private
+            && !p.declaring_class.eq_ignore_ascii_case(cl)
+            && self
+                .current_class_scope()
+                .is_none_or(|s| !p.declaring_class.eq_ignore_ascii_case(&s))
+    }
+
+    /// The storage key of property `name` of `obj` for an access from the
+    /// current scope (see prop_access_key).
+    pub fn prop_key_for<'n>(&self, obj: &Value, name: &'n [u8]) -> std::borrow::Cow<'n, [u8]> {
+        match match obj {
+            Value::Object(o) => self.prop_access_key(o, name),
+            Value::Reference(r) => match &*r.borrow() {
+                Value::Object(o) => self.prop_access_key(o, name),
+                _ => None,
+            },
+            _ => None,
+        } {
+            Some(k) => std::borrow::Cow::Owned(k),
+            None => std::borrow::Cow::Borrowed(name),
+        }
+    }
+
+    /// class_layout() by an object's class name (as stored in the object).
+    pub fn class_layout_of(&self, class_name: &[u8]) -> Rc<ClassLayout> {
+        let n = self.classes.len();
+        if let Some(l) = LAST_LAYOUT.with(|c| {
+            let c = c.borrow();
+            (c.0 == n && c.1 == class_name)
+                .then(|| c.2.clone())
+                .flatten()
+        }) {
+            return l;
+        }
+        let l = self.class_layout_of_slow(class_name);
+        LAST_LAYOUT.with(|c| *c.borrow_mut() = (n, class_name.to_vec(), Some(l.clone())));
+        l
+    }
+
+    fn class_layout_of_slow(&self, class_name: &[u8]) -> Rc<ClassLayout> {
+        let n = self.classes.len();
+        if let Some(l) = LAYOUTS.with(|c| {
+            let c = c.borrow();
+            if c.0 != n {
+                return None;
+            }
+            c.2.get(class_name).cloned()
+        }) {
+            return l;
+        }
+        let l = self.class_layout(&lower(class_name));
+        LAYOUTS.with(|c| c.borrow_mut().2.insert(class_name.to_vec(), l.clone()));
+        l
+    }
+
+    /// The class's property layout (object_prop_slots), cached.
+    pub fn class_layout(&self, cl: &[u8]) -> Rc<ClassLayout> {
+        let n = self.classes.len();
+        if let Some(l) = LAYOUTS.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 != n {
+                c.0 = n;
+                c.1.clear();
+                c.2.clear();
+            }
+            c.1.get(cl).cloned()
+        }) {
+            return l;
+        }
+        let slots = self.object_prop_slots(cl);
+        let special_names: Vec<Vec<u8>> = slots
+            .iter()
+            .filter(|s| s.moved_key.is_some() || s.storage_key != s.name)
+            .map(|s| s.name.clone())
+            .collect();
+        let special_movable = special_names
+            .iter()
+            .map(|n| {
+                let mut it = slots.iter().enumerate().filter(|(_, s)| s.name == *n);
+                match (it.next(), it.next()) {
+                    (Some((i, s)), None) if s.moved_key.is_some() => Some(i),
+                    _ => None,
+                }
+            })
+            .collect();
+        let mut storage_order = false;
+        let mut cur = cl.to_vec();
+        for _ in 0..64 {
+            let Some(c) = self.classes.get(&cur) else {
+                break;
+            };
+            if c.filename.is_none() {
+                storage_order = true;
+                break;
+            }
+            match &c.parent {
+                Some(p) => cur = lower(p),
+                None => break,
+            }
+        }
+        let l = Rc::new(ClassLayout {
+            slots,
+            special_names,
+            special_movable,
+            storage_order,
+        });
+        LAYOUTS.with(|c| c.borrow_mut().1.insert(cl.to_vec(), l.clone()));
+        l
+    }
+
+    /// The key in `obj`'s storage of the property `name` an access from the
+    /// current scope refers to, when it isn't `name` itself: a private
+    /// property stored under its mangled name (zend_get_property_offset()
+    /// picks the slot by scope). An access that finds a dynamic property
+    /// where an inherited private one is stored under the bare name first
+    /// moves that one to its mangled key, so the bare name is the dynamic
+    /// property's.
+    pub fn prop_access_key(&self, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Option<Vec<u8>> {
+        let layout = {
+            let b = obj.borrow();
+            if b.native.is_some() {
+                return None;
+            }
+            let n = self.classes.len();
+            let hit = LAST_LAYOUT.with(|c| {
+                let c = c.borrow();
+                if c.0 != n || c.1 != b.class_name {
+                    return None;
+                }
+                c.2.as_ref()
+                    .map(|l| l.special_names.iter().any(|s| s == name))
+            });
+            if hit == Some(false) {
+                return None;
+            }
+            self.class_layout_of(&b.class_name)
+        };
+        let si = layout.special_names.iter().position(|n| n == name)?;
+        if let Some(i) = layout.special_movable[si] {
+            // An ancestor's private property, the only slot of that name: it
+            // is the one accessed from its class, else the name is dynamic.
+            let slot = &layout.slots[i];
+            let mk = slot.moved_key.as_ref()?;
+            let from_decl = self
+                .class_scope_ref()
+                .is_some_and(|s| s.eq_ignore_ascii_case(&slot.decl));
+            let mut b = obj.borrow_mut();
+            let moved = b.has_property(mk);
+            if from_decl {
+                return moved.then(|| mk.clone());
+            }
+            if !moved {
+                match b.properties.iter_mut().find(|(k, _)| k.as_slice() == name) {
+                    Some(e) => e.0 = mk.clone(),
+                    None => b.properties.push((mk.clone(), Value::Undef)),
+                }
+            }
+            return None;
+        }
+        let cl = lower(&obj.borrow().class_name);
+        let scope = self.current_class_scope().map(|s| lower(&s));
+        match self.scoped_prop_info_in(&layout.slots, &cl, name, scope.as_deref()) {
+            Ok(Some(slot)) => {
+                if let Some(mk) = &slot.moved_key {
+                    let has = obj.borrow().has_property(mk);
+                    return has.then(|| mk.clone());
+                }
+                (slot.storage_key != name).then_some(slot.storage_key)
+            }
+            Ok(None) => {
+                // A dynamic property: move the private one out of its way
+                // (an unset one leaves an undef marker, so the bare name is
+                // known to be the dynamic property's from now on).
+                for s in layout.slots.iter().filter(|s| s.name == name) {
+                    let Some(mk) = &s.moved_key else { continue };
+                    let mut b = obj.borrow_mut();
+                    if b.has_property(mk) {
+                        continue;
+                    }
+                    match b.properties.iter_mut().find(|(k, _)| k.as_slice() == name) {
+                        Some(e) => e.0 = mk.clone(),
+                        None => b.properties.push((mk.clone(), Value::Undef)),
+                    }
+                }
+                None
+            }
+            Err(()) => None,
+        }
     }
 
     /// The property table of `obj` (zend_std_get_properties): declared slots
@@ -256,43 +650,104 @@ impl Vm {
     /// which have no backing value to show), then dynamic properties.
     pub fn object_prop_table(&self, obj: &Rc<RefCell<PhpObject>>) -> Vec<PropEntry> {
         let ob = obj.borrow();
-        let cl = lower(&ob.class_name);
-        let slots = self.object_prop_slots(&cl);
+        let layout = self.class_layout_of(&ob.class_name);
         let props = &ob.properties;
-        let mut used = vec![false; props.len()];
         let mut out = Vec::with_capacity(props.len());
-        for slot in slots {
-            match props.iter().position(|(k, _)| *k == slot.storage_key) {
-                Some(i) => {
-                    used[i] = true;
+        for (slot, at) in table_rows(&ob, &layout) {
+            match (slot, at) {
+                (Some(slot), Some(i)) => {
                     if matches!(props[i].1, Value::Undef) && !slot.has_get_hook {
                         continue;
                     }
                     out.push(PropEntry {
                         key: slot.mangled(),
                         value: props[i].1.clone(),
-                        slot: Some(slot),
+                        slot: Some(slot.clone()),
                     });
                 }
-                None if slot.has_get_hook => out.push(PropEntry {
+                (Some(slot), None) if slot.has_get_hook => out.push(PropEntry {
                     key: slot.mangled(),
                     value: Value::Undef,
-                    slot: Some(slot),
+                    slot: Some(slot.clone()),
                 }),
-                None => {}
+                (Some(_), None) => {}
+                (None, Some(i)) => out.push(PropEntry {
+                    key: props[i].0.clone(),
+                    value: props[i].1.clone(),
+                    slot: None,
+                }),
+                (None, None) => {}
             }
-        }
-        for (i, (k, v)) in props.iter().enumerate() {
-            if used[i] || is_internal_prop_name(k) || matches!(v, Value::Undef) {
-                continue;
-            }
-            out.push(PropEntry {
-                key: k.clone(),
-                value: v.clone(),
-                slot: None,
-            });
         }
         out
+    }
+
+    /// The property table php_var_dump() / print_r() walk
+    /// (zend_get_properties_for(DEBUG) of a standard object): the table
+    /// keys (mangled for declared private/protected properties) with their
+    /// values; an uninitialized typed slot comes with its type (shown as
+    /// `uninitialized(type)`), virtual properties have no entry.
+    pub fn object_debug_table(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Vec<(Vec<u8>, Value, Option<String>)> {
+        let ob = obj.borrow();
+        let layout = self.class_layout_of(&ob.class_name);
+        let props = &ob.properties;
+        let mut out = Vec::with_capacity(props.len());
+        for (slot, at) in table_rows(&ob, &layout) {
+            let Some(slot) = slot else {
+                if let Some(i) = at {
+                    out.push((props[i].0.clone(), props[i].1.clone(), None));
+                }
+                continue;
+            };
+            if slot.is_virtual {
+                continue;
+            }
+            let internal = !self.classes.contains_key(&slot.decl);
+            let value = match at {
+                Some(i) => props[i].1.clone(),
+                None => match slot.internal_default.and_then(stub_default_value) {
+                    Some(v) => v,
+                    None => Value::Undef,
+                },
+            };
+            if matches!(value, Value::Undef) {
+                // (internal objects keep their state elsewhere)
+                if internal {
+                    continue;
+                }
+                match self.slot_type_name(slot) {
+                    Some(t) => out.push((slot.mangled(), Value::Undef, Some(t))),
+                    None => continue,
+                }
+            } else {
+                out.push((slot.mangled(), value, None));
+            }
+        }
+        out
+    }
+
+    /// The declared type of a slot, as var_dump() shows it.
+    fn slot_type_name(&self, slot: &PropSlot) -> Option<String> {
+        if let Some(c) = self.classes.get(&slot.decl) {
+            let p = c
+                .properties
+                .iter()
+                .find(|p| {
+                    p.name == slot.name && !p.is_static && lower(&p.declaring_class) == slot.decl
+                })
+                .or_else(|| {
+                    c.properties
+                        .iter()
+                        .find(|p| p.name == slot.name && !p.is_static)
+                })?;
+            return p.property_type.as_ref().map(|t| self.param_type_name(t));
+        }
+        let c = crate::stubs::find_class(&slot.decl)?;
+        let p = c.props.iter().find(|p| p.name.as_bytes() == slot.name)?;
+        (!p.ty.is_empty()).then(|| p.ty.to_string())
     }
 
     /// The property info zend_get_property_info() finds for `name` on class
@@ -300,8 +755,19 @@ impl Vm {
     /// when the name is a dynamic property, Err(()) when inaccessible
     /// (ZEND_WRONG_PROPERTY_INFO).
     pub(crate) fn scoped_prop_info(&self, cl: &[u8], name: &[u8]) -> Result<Option<PropSlot>, ()> {
-        let slots = self.object_prop_slots(cl);
+        let layout = self.class_layout(cl);
         let scope = self.get_current_class_name().map(|s| lower(&s));
+        self.scoped_prop_info_in(&layout.slots, cl, name, scope.as_deref())
+    }
+
+    fn scoped_prop_info_in(
+        &self,
+        slots: &[PropSlot],
+        cl: &[u8],
+        name: &[u8],
+        scope: Option<&[u8]>,
+    ) -> Result<Option<PropSlot>, ()> {
+        let scope = scope.map(|s| s.to_vec());
         // The class's own view: the most derived declaration of the name.
         let Some(info) = slots
             .iter()
@@ -315,13 +781,13 @@ impl Vm {
                 Ok(None)
             };
         };
-        if info.vis == Visibility::Public && !self.prop_changed(&slots, &info) {
+        if info.vis == Visibility::Public && !self.prop_changed(slots, &info) {
             return Ok(Some(info));
         }
         if scope.as_deref() == Some(info.decl.as_slice()) {
             return Ok(Some(info));
         }
-        if self.prop_changed(&slots, &info) {
+        if self.prop_changed(slots, &info) {
             // zend_get_parent_private_property()
             if let Some(sc) = &scope {
                 if sc.as_slice() != cl && self.class_extends(cl, sc) {
@@ -346,7 +812,7 @@ impl Vm {
                 }
             }
             _ => {
-                let root = self.prop_root_class(&slots, &info);
+                let root = self.prop_root_class(slots, &info);
                 let ok = scope.as_ref().is_some_and(|sc| {
                     sc.as_slice() == root.as_slice()
                         || self.class_extends(sc, &root)

@@ -954,6 +954,11 @@ impl Vm {
                     for (k, v) in sorted.iter() {
                         props.push((key_name(k), v.clone()));
                     }
+                    // The property table now has its own order (see
+                    // Vm::object_prop_table).
+                    if !props.iter().any(|(k, _)| k == crate::proptable::OWN_ORDER) {
+                        props.push((crate::proptable::OWN_ORDER.to_vec(), Value::True));
+                    }
                     o.borrow_mut().properties = props;
                 }
             }

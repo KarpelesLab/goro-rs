@@ -16658,27 +16658,9 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // Otherwise consider this as a dynamic property only if it is
             // present on the instance AND not declared anywhere on the
             // class hierarchy (so that inherited private props don't count).
-            if !obj_borrow.has_property(prop_bytes) {
-                return Ok(Value::False);
-            }
             drop(obj_borrow);
-            let mut declared_anywhere = false;
-            let mut current = Some(class_lower);
-            while let Some(cl) = current {
-                if let Some(ce) = vm.get_class_def(&cl) {
-                    if ce.properties.iter().any(|p| p.name == prop_bytes) {
-                        declared_anywhere = true;
-                        break;
-                    }
-                    current = ce
-                        .parent
-                        .as_ref()
-                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
-                } else {
-                    break;
-                }
-            }
-            Ok(if !declared_anywhere {
+            // has_property(ZEND_PROPERTY_EXISTS) from the calling scope.
+            Ok(if vm.prop_exists_from_scope(obj, prop_bytes) {
                 Value::True
             } else {
                 Value::False

@@ -73,6 +73,48 @@ pub(crate) fn debug_zval_dump(vm: &mut Vm, args: &[Value]) {
     ZVAL_DUMP.with(|z| z.set(prev));
 }
 
+/// zend_unmangle_property_name(): (class, property) of a `\0Class\0name`
+/// key (an anonymous class name holds a NUL itself).
+fn unmangle_prop_name(key: &[u8]) -> Option<(&[u8], &[u8])> {
+    if key.first() != Some(&0) {
+        return None;
+    }
+    let rest = &key[1..];
+    let mut sep = rest.iter().position(|&b| b == 0)?;
+    if let Some(more) = rest[sep + 1..].iter().position(|&b| b == 0) {
+        sep += 1 + more;
+    }
+    Some((&rest[..sep], &rest[sep + 1..]))
+}
+
+/// php_object_property_dump()'s key: `"name"`, `"name":protected` or
+/// `"name":"Class":private` from a property table key (int-like keys of
+/// GMP's table print bare).
+fn debug_prop_key(key: &[u8], int_keys: bool) -> String {
+    if let Some((class, name)) = unmangle_prop_name(key) {
+        {
+            let name = String::from_utf8_lossy(name);
+            if class == b"*" {
+                return format!("\"{}\":protected", name);
+            }
+            return format!(
+                "\"{}\":\"{}\":private",
+                name,
+                goro_core::value::display_class_name(class)
+            );
+        }
+    }
+    let name = String::from_utf8_lossy(key);
+    if int_keys {
+        if let Ok(n) = name.parse::<i64>() {
+            if n.to_string() == name {
+                return name.to_string();
+            }
+        }
+    }
+    format!("\"{}\"", name)
+}
+
 /// Run `__debugInfo()` for var_dump() with the object protected from
 /// recursion, also for var_dump() calls it makes.
 fn debug_info_protected(
@@ -1164,21 +1206,18 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                 // If __debugInfo didn't return an array, fall through to normal display
             }
 
-            // Count visible properties excluding uninitialized typed properties
-            // PHP counts only initialized properties in the object header count
-            let prop_count = obj_borrow
-                .properties
+            // The property table (zend_get_properties_for(DEBUG)).
+            drop(obj_borrow);
+            let table: Vec<(Vec<u8>, Value, Option<String>)> = vm
+                .object_debug_table(obj)
+                .into_iter()
+                .filter(|(k, _, _)| !is_internal_property(k))
+                .collect();
+            obj_borrow = obj.borrow();
+            // Uninitialized typed properties are shown but not counted.
+            let prop_count = table
                 .iter()
-                .filter(|(name, val)| {
-                    if is_internal_property(name) {
-                        return false;
-                    }
-                    // Uninitialized properties (Value::Undef) are displayed but not counted
-                    if matches!(val, Value::Undef) {
-                        return false;
-                    }
-                    true
-                })
+                .filter(|(_, v, _)| !matches!(v, Value::Undef))
                 .count();
             // Lazy object prefix: "lazy ghost " / "lazy proxy " before object(...)
             let lazy_prefix: &str = match obj_borrow.get_property(b"__lazy_state") {
@@ -1229,203 +1268,22 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                 vm.write_output(format!("{}}}\n", prefix).as_bytes());
                 return;
             }
-
-            // Look up class to get property visibility info
-            let class_info = vm.classes.get(&class_lower).cloned();
-
-            // Properties are in declaration order (Vec preserves insertion order)
-            // Unshared references (held only by this slot) print without `&`;
-            // deref them before cloning bumps their refcount.
-            let props: Vec<_> = obj_borrow
-                .properties
-                .iter()
-                .map(|(k, v)| {
-                    (
-                        k.clone(),
-                        match v {
-                            Value::Reference(r) if std::rc::Rc::strong_count(r) == 1 => {
-                                r.borrow().clone()
-                            }
-                            _ => v.clone(),
-                        },
-                    )
-                })
-                .collect();
-            let obj_class_name = obj_borrow.class_name.clone();
             drop(obj_borrow);
-            for (name, value) in &props {
-                // Skip internal SPL/Reflection properties
-                if is_internal_property(name) {
-                    continue;
-                }
-                // Demangle private/protected storage keys of the form
-                // \0Class\0name (used when a redeclared private property
-                // would otherwise collide with the parent's slot).
-                let (bare_name, mangled_decl): (Vec<u8>, Option<Vec<u8>>) =
-                    if name.first() == Some(&0) {
-                        if let Some(sep) = name[1..].iter().position(|&b| b == 0) {
-                            (
-                                name[1 + sep + 1..].to_vec(),
-                                Some(name[1..1 + sep].to_vec()),
-                            )
-                        } else {
-                            (name.clone(), None)
-                        }
-                    } else {
-                        (name.clone(), None)
-                    };
-                let name_str = String::from_utf8_lossy(&bare_name);
-                // Resolve the property definition. Instance properties are
-                // non-static, so prefer a non-static def when a static one
-                // shadows the same name (bug79862). For mangled keys, match
-                // the declaring class encoded in the key.
-                let prop_def = class_info.as_ref().and_then(|c| {
-                    let decl_lower = mangled_decl.as_ref().map(|d| {
-                        d.iter()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect::<Vec<u8>>()
-                    });
-                    c.properties
-                        .iter()
-                        .filter(|p| p.name == bare_name && !p.is_static)
-                        .find(|p| match &decl_lower {
-                            Some(dl) => {
-                                let pdl: Vec<u8> = p
-                                    .declaring_class
-                                    .iter()
-                                    .map(|b| b.to_ascii_lowercase())
-                                    .collect();
-                                pdl == *dl
-                            }
-                            None => true,
-                        })
-                        .or_else(|| {
-                            c.properties
-                                .iter()
-                                .find(|p| p.name == bare_name && !p.is_static)
-                        })
-                });
-                let vis = prop_def.map(|p| p.visibility);
-                // Integer property keys only arise from object_properties_load()
-                // (e.g. GMP::__unserialize); other objects always use string keys.
-                let is_int_key = !bare_name.is_empty()
-                    && (bare_name[0] == b'-' || bare_name[0].is_ascii_digit())
-                    && bare_name
-                        .iter()
-                        .enumerate()
-                        .all(|(i, &b)| (i == 0 && b == b'-') || b.is_ascii_digit())
-                    && bare_name.iter().any(|&b| b.is_ascii_digit())
-                    && {
-                        // Avoid "01" matches: PHP only treats canonical integer strings
-                        // as int keys. Parse and reformat to verify canonical.
-                        let s = std::str::from_utf8(&bare_name).unwrap_or("");
-                        if let Ok(n) = s.parse::<i64>() {
-                            n.to_string() == s
-                        } else {
-                            false
-                        }
-                    };
-                let display_name = if is_int_key && vis.is_none() && class_lower == b"gmp" {
-                    name_str.to_string()
-                } else {
-                    match vis {
-                        Some(goro_core::object::Visibility::Protected) => {
-                            format!("\"{}\":protected", name_str)
-                        }
-                        Some(goro_core::object::Visibility::Private) => {
-                            // PHP shows the declaring class, not the object class.
-                            let decl_raw = mangled_decl
-                                .clone()
-                                .or_else(|| prop_def.map(|p| p.declaring_class.clone()))
-                                .unwrap_or_else(|| obj_class_name.clone());
-                            let decl_lower: Vec<u8> =
-                                decl_raw.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            let canonical = vm
-                                .classes
-                                .get(&decl_lower)
-                                .map(|c| c.name.clone())
-                                .unwrap_or(decl_raw);
-                            let class_name = goro_core::value::display_class_name(&canonical);
-                            format!("\"{}\":\"{}\":private", name_str, class_name)
-                        }
-                        _ => match &mangled_decl {
-                            // Undeclared property stored under a mangled name.
-                            Some(d) if d.as_slice() == b"*" => {
-                                format!("\"{}\":protected", name_str)
-                            }
-                            Some(d) => format!(
-                                "\"{}\":\"{}\":private",
-                                name_str,
-                                goro_core::value::display_class_name(d)
-                            ),
-                            None => format!("\"{}\"", name_str),
-                        },
-                    }
+            for (key, value, uninit_type) in table {
+                // Unshared references (held only by this slot) print
+                // without `&`.
+                let value = match value {
+                    Value::Reference(r) if std::rc::Rc::strong_count(&r) == 2 => r.borrow().clone(),
+                    v => v,
                 };
-                // Handle uninitialized typed properties
-                if matches!(value, Value::Undef) {
-                    let prop_type = prop_def.and_then(|p| p.property_type.as_ref());
-                    if let Some(ptype) = prop_type {
-                        let type_name = vm.param_type_name(ptype);
-                        vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
-                        vm.write_output(
-                            format!("{}  uninitialized({})\n", prefix, type_name).as_bytes(),
-                        );
-                    }
+                let display_name = debug_prop_key(&key, class_lower.as_slice() == b"gmp");
+                if let Some(t) = uninit_type {
+                    vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
+                    vm.write_output(format!("{}  uninitialized({})\n", prefix, t).as_bytes());
                     continue;
                 }
                 vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
-                var_dump_value(vm, value, indent + 2, seen);
-            }
-            // Show class-declared typed properties that were unset (removed from instance)
-            if let Some(ref ci) = class_info {
-                for prop_def in &ci.properties {
-                    if prop_def.property_type.is_none() || prop_def.is_static {
-                        continue;
-                    }
-                    // Skip if already shown (exists on instance). Stored keys
-                    // may be mangled (\0Class\0name), so compare bare names.
-                    if props.iter().any(|(n, _)| {
-                        let bare: &[u8] = if n.first() == Some(&0) {
-                            n[1..]
-                                .iter()
-                                .position(|&b| b == 0)
-                                .map(|sep| &n[1 + sep + 1..])
-                                .unwrap_or(n.as_slice())
-                        } else {
-                            n.as_slice()
-                        };
-                        bare == prop_def.name.as_slice()
-                    }) {
-                        continue;
-                    }
-                    let name_str = String::from_utf8_lossy(&prop_def.name);
-                    let display_name = match prop_def.visibility {
-                        goro_core::object::Visibility::Protected => {
-                            format!("\"{}\":protected", name_str)
-                        }
-                        goro_core::object::Visibility::Private => {
-                            let decl_lower: Vec<u8> = prop_def
-                                .declaring_class
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            let canonical = vm
-                                .classes
-                                .get(&decl_lower)
-                                .map(|c| c.name.clone())
-                                .unwrap_or_else(|| prop_def.declaring_class.clone());
-                            let class_name = goro_core::value::display_class_name(&canonical);
-                            format!("\"{}\":\"{}\":private", name_str, class_name)
-                        }
-                        _ => format!("\"{}\"", name_str),
-                    };
-                    let type_name = vm.param_type_name(prop_def.property_type.as_ref().unwrap());
-                    vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
-                    vm.write_output(
-                        format!("{}  uninitialized({})\n", prefix, type_name).as_bytes(),
-                    );
-                }
+                var_dump_value(vm, &value, indent + 2, seen);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
             seen.remove(&oid);
@@ -1517,7 +1375,7 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .collect();
 
     prepare_closure_debug(vm, &args[0]);
-    let materialized = materialize_native(vm, &args[0], 0, &mut HashSet::new());
+    let materialized = materialize_print_r(vm, &args[0], &mut std::collections::HashMap::new());
     let args: &[Value] = match &materialized {
         Some(v) => std::slice::from_ref(v),
         None => args,
@@ -1916,6 +1774,22 @@ fn print_r_value_inner(
                     buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
                     return;
                 }
+            }
+
+            // A property table materialized for print_r: keys as in the
+            // table (mangled names carry the visibility).
+            if is_print_r_shadow(&obj_borrow) {
+                buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
+                buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
+                for (name, value) in &obj_borrow.properties {
+                    buf.extend_from_slice(format!("{}    [", prefix).as_bytes());
+                    print_r_key(buf, name);
+                    buf.extend_from_slice(b"] => ");
+                    print_r_value(value, buf, indent + 8, classes, closure_info_table);
+                    buf.push(b'\n');
+                }
+                buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
+                return;
             }
 
             // Look up class for property visibility
@@ -2504,6 +2378,188 @@ pub fn native_props(
         }
     }
     f(vm, obj, purpose)
+}
+
+/// Marks the shadow objects materialize_print_r() makes.
+static PRINT_R_SHADOW: goro_core::vm::NativeObjectHandlers =
+    goro_core::vm::NativeObjectHandlers::EMPTY;
+
+fn is_print_r_shadow(o: &goro_core::object::PhpObject) -> bool {
+    o.native
+        .as_ref()
+        .is_some_and(|n| std::ptr::eq(n.handlers, &PRINT_R_SHADOW))
+}
+
+/// print_hash()'s object key: `name`, `name:protected` or
+/// `name:Class:private` from a property table key.
+fn print_r_key(buf: &mut Vec<u8>, key: &[u8]) {
+    if let Some((class, name)) = unmangle_prop_name(key) {
+        {
+            buf.extend_from_slice(name);
+            if class == b"*" {
+                buf.extend_from_slice(b":protected");
+            } else {
+                buf.push(b':');
+                buf.extend_from_slice(goro_core::value::display_class_name(class).as_bytes());
+                buf.extend_from_slice(b":private");
+            }
+            return;
+        }
+    }
+    buf.extend_from_slice(key);
+}
+
+/// For print_r(): replace the objects inside `v` by shadow objects holding
+/// the property table print_r() shows (zend_get_properties_for(DEBUG):
+/// __debugInfo(), an extension's table, or the standard table with mangled
+/// keys). Objects print_r() renders itself are kept. Returns None when
+/// nothing changed.
+pub fn materialize_print_r(
+    vm: &mut Vm,
+    v: &Value,
+    memo: &mut std::collections::HashMap<usize, Option<Value>>,
+) -> Option<Value> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    match v {
+        Value::Reference(r) => {
+            let inner = r.borrow().clone();
+            materialize_print_r(vm, &inner, memo)
+        }
+        Value::Array(a) => {
+            let key = Rc::as_ptr(a) as *const u8 as usize;
+            if let Some(m) = memo.get(&key) {
+                return m.clone();
+            }
+            memo.insert(key, None);
+            let entries: Vec<_> = a
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let mut changed: Vec<(usize, Value)> = Vec::new();
+            for (i, (_, ev)) in entries.iter().enumerate() {
+                if let Some(nv) = materialize_print_r(vm, ev, memo) {
+                    changed.push((i, nv));
+                }
+            }
+            memo.remove(&key);
+            if changed.is_empty() {
+                return None;
+            }
+            let mut out = goro_core::array::PhpArray::new();
+            let mut ci = 0;
+            for (i, (k, ev)) in entries.into_iter().enumerate() {
+                if ci < changed.len() && changed[ci].0 == i {
+                    out.set(k, changed[ci].1.clone());
+                    ci += 1;
+                } else {
+                    out.set(k, ev);
+                }
+            }
+            Some(Value::Array(Rc::new(RefCell::new(out))))
+        }
+        Value::Object(o) => {
+            let key = Rc::as_ptr(o) as *const u8 as usize;
+            if let Some(m) = memo.get(&key) {
+                return m.clone();
+            }
+            let (cl, cn, keep) = {
+                let b = o.borrow();
+                let cl = b.class_name.to_ascii_lowercase();
+                let keep = b.closure.is_some()
+                    || b.has_property(b"__enum_case")
+                    || b.has_property(b"__lazy_state")
+                    || matches!(
+                        cl.as_slice(),
+                        b"arrayobject"
+                            | b"arrayiterator"
+                            | b"recursivearrayiterator"
+                            | b"splfixedarray"
+                            | b"spldoublylinkedlist"
+                            | b"splstack"
+                            | b"splqueue"
+                    );
+                (cl, b.class_name.clone(), keep)
+            };
+            if keep {
+                // Rendered by print_r itself: materialize what it holds.
+                memo.insert(key, None);
+                let props: Vec<(Vec<u8>, Value)> = o.borrow().properties.clone();
+                let mut changed = false;
+                let mut newp = Vec::with_capacity(props.len());
+                for (k, pv) in props {
+                    match materialize_print_r(vm, &pv, memo) {
+                        Some(nv) => {
+                            changed = true;
+                            newp.push((k, nv));
+                        }
+                        None => newp.push((k, pv)),
+                    }
+                }
+                memo.remove(&key);
+                if !changed {
+                    return None;
+                }
+                let b = o.borrow();
+                let mut shadow = goro_core::object::PhpObject::new(b.class_name.clone(), 0);
+                shadow.closure = b.closure.clone();
+                shadow.properties = newp;
+                return Some(Value::Object(Rc::new(RefCell::new(shadow))));
+            }
+            let mut shadow = goro_core::object::PhpObject::new(cn, 0);
+            shadow.native = Some(goro_core::object::NativeData {
+                data: Rc::new(()),
+                handlers: &PRINT_R_SHADOW,
+            });
+            let shadow = Rc::new(RefCell::new(shadow));
+            let shadow_val = Value::Object(shadow.clone());
+            memo.insert(key, Some(shadow_val.clone()));
+            let rows: Vec<(Vec<u8>, Value)> = if let Some(arr) = native_props(vm, o, 0) {
+                arr.iter()
+                    .map(|(k, v)| (array_key_bytes(k), v.clone()))
+                    .collect()
+            } else if vm
+                .classes
+                .get(&cl)
+                .and_then(|c| c.get_method(b"__debuginfo"))
+                .is_some()
+            {
+                match vm
+                    .call_object_method(v, b"__debugInfo", &[])
+                    .map(|r| r.deref())
+                {
+                    Some(Value::Array(a)) => a
+                        .borrow()
+                        .iter()
+                        .map(|(k, v)| (array_key_bytes(k), v.clone()))
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            } else {
+                vm.object_debug_table(o)
+                    .into_iter()
+                    .filter(|(k, v, _)| !matches!(v, Value::Undef) && !is_internal_property(k))
+                    .map(|(k, v, _)| (k, v))
+                    .collect()
+            };
+            let mut props = Vec::with_capacity(rows.len());
+            for (k, pv) in rows {
+                let nv = materialize_print_r(vm, &pv, memo).unwrap_or(pv);
+                props.push((k, nv));
+            }
+            shadow.borrow_mut().properties = props;
+            Some(shadow_val)
+        }
+        _ => None,
+    }
+}
+
+fn array_key_bytes(k: &goro_core::array::ArrayKey) -> Vec<u8> {
+    match k {
+        goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+        goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+    }
 }
 
 /// Replace extension objects inside `v` by plain shadow objects holding

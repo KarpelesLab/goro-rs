@@ -273,6 +273,7 @@ pub(crate) struct PropEntry {
 pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
     let class_lower = lower(&obj.class_name);
     let ce = vm.classes.get(&class_lower);
+    let layout = vm.class_layout_of(&obj.class_name);
     let exc_base = throwable_base(vm, &class_lower);
     let mut out: Vec<PropEntry> = Vec::new();
     if let Some(base) = exc_base {
@@ -336,34 +337,13 @@ pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
             });
             continue;
         }
-        let php_key = match ce {
-            Some(c) => {
-                let defs: Vec<_> = c
-                    .properties
-                    .iter()
-                    .filter(|p| p.name == *key && !p.is_static)
-                    .collect();
-                let def = if defs.len() > 1 {
-                    defs.iter()
-                        .find(|p| p.visibility != Visibility::Private)
-                        .copied()
-                } else {
-                    defs.first().copied()
-                };
-                match def {
-                    Some(p) if p.visibility == Visibility::Private => {
-                        let decl = canonical_class_name(
-                            vm,
-                            &lower(&p.declaring_class),
-                            &p.declaring_class,
-                        );
-                        mangle(&decl, key)
-                    }
-                    Some(p) if p.visibility == Visibility::Protected => mangle(b"*", key),
-                    _ => key.clone(),
-                }
-            }
-            None => key.clone(),
+        // The slot stored under this bare name, unless it is a private one
+        // that moved away from a dynamic property (Vm::prop_access_key).
+        let php_key = match layout.slots.iter().find(|sl| {
+            sl.storage_key == *key && sl.moved_key.as_ref().is_none_or(|mk| !obj.has_property(mk))
+        }) {
+            Some(sl) if ce.is_some() => sl.mangled(),
+            _ => key.clone(),
         };
         out.push(PropEntry {
             php_key,
@@ -2210,9 +2190,20 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        let layout = vm.class_layout_of(&obj.borrow().class_name);
         if let Some(d) = decl.iter().find(|d| d.0 == key) {
             if d.3 {
                 return self.virtual_prop(vm, class_lower, &d.4);
+            }
+            // A private slot that moved away from a dynamic property.
+            if let Some(mk) = layout
+                .slots
+                .iter()
+                .find(|sl| sl.mangled() == key)
+                .and_then(|sl| sl.moved_key.clone())
+                .filter(|mk| obj.borrow().has_property(mk))
+            {
+                return Ok((mk, d.2.clone(), canonical_class_name(vm, &d.6, &d.6)));
             }
             return Ok((
                 d.1.clone(),
@@ -2240,7 +2231,9 @@ impl<'a> Parser<'a> {
                 let found = decl
                     .iter()
                     .find(|d| d.4 == uname && (d.6 == class_lower || d.5 != Visibility::Private))
-                    .or_else(|| decl.iter().find(|d| d.4 == uname && d.6 == class_lower));
+                    .or_else(|| decl.iter().find(|d| d.4 == uname && d.6 == class_lower))
+                    // (an ancestor's private property is in properties_info too)
+                    .or_else(|| decl.iter().find(|d| d.4 == uname));
                 if let Some(d) = found {
                     if d.3 {
                         return self.virtual_prop(vm, class_lower, &d.4);
@@ -2253,7 +2246,19 @@ impl<'a> Parser<'a> {
                 }
             }
         }
-        // Dynamic property
+        // Dynamic property: an inherited private slot stored under the bare
+        // name moves to its mangled one (Vm::prop_access_key).
+        for sl in layout.slots.iter().filter(|sl| sl.storage_key == key) {
+            let Some(mk) = &sl.moved_key else { continue };
+            let mut b = obj.borrow_mut();
+            if b.has_property(mk) {
+                continue;
+            }
+            match b.properties.iter_mut().find(|(k, _)| k.as_slice() == key) {
+                Some(e) => e.0 = mk.clone(),
+                None => b.properties.push((mk.clone(), Value::Undef)),
+            }
+        }
         if obj.borrow().has_property(key) {
             return Ok((key.to_vec(), None, Vec::new()));
         }

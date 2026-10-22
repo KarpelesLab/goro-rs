@@ -2450,7 +2450,51 @@ impl Vm {
     ///  1. If caller_scope is set: a private prop declared by the scope class.
     ///  2. The first non-private prop with this name.
     ///  3. The most-derived (last in declaration order) private prop, for error reporting.
-    fn find_property_def_for_scope(
+    pub(crate) fn find_property_def_for_scope(
+        &self,
+        class_name_lower: &[u8],
+        prop_name: &[u8],
+        caller_scope: Option<&[u8]>,
+    ) -> Option<(
+        Visibility,
+        Vec<u8>,
+        bool,
+        Option<crate::opcode::ParamType>,
+        Option<Visibility>,
+    )> {
+        self.find_property_def_impl(class_name_lower, prop_name, caller_scope, true)
+    }
+
+    /// find_property_def_for_scope(); with `access`, a private property of
+    /// an ancestor the scope can't see is no match (zend_get_property_offset
+    /// goes to its dynamic property).
+    fn find_property_def_impl(
+        &self,
+        class_name_lower: &[u8],
+        prop_name: &[u8],
+        caller_scope: Option<&[u8]>,
+        access: bool,
+    ) -> Option<(
+        Visibility,
+        Vec<u8>,
+        bool,
+        Option<crate::opcode::ParamType>,
+        Option<Visibility>,
+    )> {
+        let r = self.find_property_def_walk(class_name_lower, prop_name, caller_scope);
+        if access {
+            if let Some((Visibility::Private, decl, ..)) = &r {
+                if !decl.eq_ignore_ascii_case(class_name_lower)
+                    && caller_scope.is_none_or(|s| !decl.eq_ignore_ascii_case(s))
+                {
+                    return None;
+                }
+            }
+        }
+        r
+    }
+
+    fn find_property_def_walk(
         &self,
         class_name_lower: &[u8],
         prop_name: &[u8],
@@ -8559,6 +8603,15 @@ impl Vm {
     /// Get the current class scope name (lowercase), if any
     pub fn get_current_class_name(&self) -> Option<Vec<u8>> {
         self.class_scope_stack.last().cloned()
+    }
+
+    /// The scope current_class_scope() names, without copying it (case as
+    /// stored).
+    pub(crate) fn class_scope_ref(&self) -> Option<&[u8]> {
+        self.class_scope_stack
+            .last()
+            .or_else(|| self.called_class_stack.last())
+            .map(|s| s.as_slice())
     }
 
     /// Get a class definition by lowercase name
@@ -29743,7 +29796,15 @@ impl Vm {
                     // `$a[] = $r` with $r a reference to $a itself keeps the
                     // (recursive) array rather than a copy; `$a[] = $a` copies.
                     let self_ref = matches!((&arr_val, &val), (Value::Array(c), Value::Array(v)) if Rc::ptr_eq(c, v))
-                        && op.op1 != op.op2
+                        && (op.op1 != op.op2
+                            // `$a[] = $b[] = &$a`: the value is the result
+                            // of the reference assignment (a VAR in PHP).
+                            || (ip >= 2
+                                && matches!(
+                                    op_array.ops[ip - 2].opcode,
+                                    OpCode::ArrayAppendRef | OpCode::ArraySetRef
+                                )
+                                && op_array.ops[ip - 2].op2 == op.op2))
                         && matches!(Self::read_operand_raw(&cvs, &op.op2), Value::Reference(_));
                     let val = if self_ref {
                         val
@@ -29929,7 +29990,15 @@ impl Vm {
                         // `$a[] = $r` with $r a reference to $a itself keeps the
                         // (recursive) array rather than a copy; `$a[] = $a` copies.
                         let self_ref = matches!((&arr_val, &val), (Value::Array(c), Value::Array(v)) if Rc::ptr_eq(c, v))
-                            && op.op1 != op.op2
+                            && (op.op1 != op.op2
+                                // `$a[] = $b[] = &$a`: the value is the result
+                                // of the reference assignment (a VAR in PHP).
+                                || (ip >= 2
+                                    && matches!(
+                                        op_array.ops[ip - 2].opcode,
+                                        OpCode::ArrayAppendRef | OpCode::ArraySetRef
+                                    )
+                                    && op_array.ops[ip - 2].op2 == op.op2))
                             && matches!(Self::read_operand_raw(&cvs, &op.op2), Value::Reference(_));
                         let val = if self_ref {
                             val
@@ -36658,7 +36727,9 @@ impl Vm {
                                     crate::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
                                     crate::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
                                 };
-                                obj.borrow_mut().set_property(prop_name, value);
+                                // The slot this scope's access refers to.
+                                let pkey = self.prop_key_for(&obj_val, &prop_name).into_owned();
+                                obj.borrow_mut().set_property(pkey, value);
                             }
                         }
                     }
@@ -36945,6 +37016,8 @@ impl Vm {
                         }
                     }
                     let result = if let Value::Object(obj) = &obj_val {
+                        // The slot this scope's access refers to (privates by scope).
+                        let pkey = self.prop_key_for(&obj_val, prop_name.as_bytes());
                         let ob = obj.borrow();
                         let class_lower: Vec<u8> = ob
                             .class_name
@@ -36953,49 +37026,13 @@ impl Vm {
                             .collect();
                         let class_name_orig = ob.class_name.clone();
                         // Check if property exists AND is accessible from current scope
-                        let prop_accessible = if ob.has_property(prop_name.as_bytes()) {
-                            // Check visibility
-                            let current_scope =
-                                self.class_scope_stack.last().cloned().unwrap_or_default();
-                            let prop_visibility = self
-                                .classes
-                                .get(&class_lower)
-                                .and_then(|c| {
-                                    c.properties.iter().find(|p| p.name == prop_name.as_bytes())
-                                })
-                                .map(|p| p.visibility);
-                            match prop_visibility {
-                                Some(crate::object::Visibility::Private) => {
-                                    // Private: only accessible from the declaring class
-                                    let declaring = self
-                                        .classes
-                                        .get(&class_lower)
-                                        .and_then(|c| {
-                                            c.properties
-                                                .iter()
-                                                .find(|p| p.name == prop_name.as_bytes())
-                                        })
-                                        .map(|p| p.declaring_class.clone())
-                                        .unwrap_or_else(|| class_lower.clone());
-                                    current_scope == declaring
-                                }
-                                Some(crate::object::Visibility::Protected) => {
-                                    // Protected: accessible from same class or subclass
-                                    if current_scope.is_empty() {
-                                        false
-                                    } else {
-                                        current_scope == class_lower
-                                            || self.class_extends(&current_scope, &class_lower)
-                                            || self.class_extends(&class_lower, &current_scope)
-                                    }
-                                }
-                                _ => true, // Public or no visibility info (dynamic property)
-                            }
+                        let prop_accessible = if ob.has_property(&pkey) {
+                            self.prop_visible_from_scope(&class_lower, prop_name.as_bytes())
                         } else {
                             false
                         };
                         if prop_accessible {
-                            let val = ob.get_property(prop_name.as_bytes());
+                            let val = ob.get_property(&pkey);
                             drop(ob);
                             if matches!(val, Value::Null | Value::Undef) {
                                 Value::False
@@ -37731,7 +37768,9 @@ impl Vm {
                                 });
                             }
                         }
-                        let has_prop = obj.borrow().has_property(prop_name.as_bytes());
+                        // The slot this scope's access refers to (privates by scope).
+                        let pkey = self.prop_key_for(&obj_val, prop_name.as_bytes());
+                        let has_prop = obj.borrow().has_property(&pkey);
                         let class_name_orig_u = obj.borrow().class_name.clone();
                         let class_lower_u: Vec<u8> = class_name_orig_u
                             .iter()
@@ -37850,9 +37889,22 @@ impl Vm {
                             // Remove the property from the object entirely.
                             // For typed properties: this allows __set/__get to be triggered on subsequent access.
                             // var_dump reconstructs uninitialized typed properties from the class definition.
-                            obj.borrow_mut()
-                                .properties
-                                .retain(|(name, _)| name != prop_name.as_bytes());
+                            let mut ob = obj.borrow_mut();
+                            if *pkey != *prop_name.as_bytes()
+                                && ob.has_property(prop_name.as_bytes())
+                            {
+                                // A private slot moved away from a dynamic
+                                // property keeps its key (as unset).
+                                if let Some(e) =
+                                    ob.properties.iter_mut().find(|(k, _)| **k == *pkey)
+                                {
+                                    let old = std::mem::replace(&mut e.1, Value::Undef);
+                                    crate::gc::on_child_released(&old);
+                                }
+                            } else {
+                                ob.properties.retain(|(name, _)| **name != *pkey);
+                            }
+                            drop(ob);
                         } else {
                             // Try __unset magic method (or throw avis error if no __unset)
                             let class_lower: Vec<u8> = obj
@@ -39242,12 +39294,19 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
+                        // The slot this scope's access refers to (privates by scope).
+                        let pkey = self.prop_key_for(&obj_val, prop_name.as_bytes());
+                        let scope_l = self.current_class_scope().map(|s| s.to_ascii_lowercase());
                         // Asymmetric visibility / readonly: a reference would allow
                         // modification. Objects yield a copy, other values error.
                         let mut deny: Option<String> = None;
                         let mut inaccessible: Option<String> = None;
-                        if let Some((vis, declaring_class, is_readonly, _pt, set_vis)) =
-                            self.find_property_def(&class_lower, prop_name.as_bytes())
+                        if let Some((vis, declaring_class, is_readonly, _pt, set_vis)) = self
+                            .find_property_def_for_scope(
+                                &class_lower,
+                                prop_name.as_bytes(),
+                                scope_l.as_deref(),
+                            )
                         {
                             let caller_scope = self.current_class_scope();
                             inaccessible = self.check_visibility(
@@ -39298,7 +39357,7 @@ impl Vm {
                         let oid = obj.borrow().object_id;
                         let guard_key = (oid, prop_name.as_bytes().to_vec(), 0u8);
                         let overloaded = hooks.is_none()
-                            && (inaccessible.is_some() || !obj.borrow().has_property(prop_name.as_bytes()))
+                            && (inaccessible.is_some() || !obj.borrow().has_property(&pkey))
                             && get_method.is_some()
                             && !self.magic_prop_guards.contains(&guard_key)
                             // Not every __get dispatch path records its guard:
@@ -39315,7 +39374,7 @@ impl Vm {
                                 );
                                 (v, self.last_call_by_ref)
                             } else {
-                                (obj.borrow().get_property(prop_name.as_bytes()), false)
+                                (obj.borrow().get_property(&pkey), false)
                             };
                             if self.current_exception.is_some() {
                                 Value::Null
@@ -39371,7 +39430,7 @@ impl Vm {
                             ref_error = Some(msg);
                             Value::Null
                         } else if let Some(msg) = deny {
-                            let cur = obj.borrow().get_property(prop_name.as_bytes());
+                            let cur = obj.borrow().get_property(&pkey);
                             if matches!(cur, Value::Object(_)) {
                                 cur
                             } else {
@@ -39379,18 +39438,14 @@ impl Vm {
                                 Value::Null
                             }
                         } else if obj.try_borrow_mut().is_ok() {
-                            let pn = prop_name.as_bytes();
+                            let pn: &[u8] = &pkey;
                             // Shadowed privates live in mangled slots this path
                             // does not address yet: leave those untyped.
-                            let scope = self.current_class_scope();
-                            let src =
-                                if self.property_storage_key(&class_lower, pn, scope.as_deref())
-                                    == pn
-                                {
-                                    self.typed_ref_source_for(obj, pn)
-                                } else {
-                                    None
-                                };
+                            let src = if pn == prop_name.as_bytes() {
+                                self.typed_ref_source_for(obj, pn)
+                            } else {
+                                None
+                            };
                             let uninit = src.is_some()
                                 && matches!(
                                     obj.borrow().properties.iter().find(|(k, _)| k == pn),
@@ -39419,7 +39474,7 @@ impl Vm {
                         } else {
                             // The object is being inspected (e.g. var_dump calling
                             // __debugInfo): fall back to the value.
-                            obj.borrow().get_property(prop_name.as_bytes())
+                            obj.borrow().get_property(&pkey)
                         }
                     } else {
                         Value::Null
@@ -39601,6 +39656,8 @@ impl Vm {
                         }
                     }
                     if let Value::Object(obj) = &obj_val {
+                        // The slot this scope's access refers to (privates by scope).
+                        let pkey = self.prop_key_for(&obj_val, prop_name.as_bytes());
                         match value {
                             Value::Reference(r) => {
                                 let src = self.typed_ref_source_for(obj, prop_name.as_bytes());
@@ -39624,8 +39681,7 @@ impl Vm {
                                         });
                                     }
                                 }
-                                obj.borrow_mut()
-                                    .set_property_ref(prop_name.as_bytes().to_vec(), r.clone());
+                                obj.borrow_mut().set_property_ref(pkey.to_vec(), r.clone());
                                 if let Some(s) = src {
                                     typed_ref::add_source(&r, s);
                                 }
@@ -39639,14 +39695,12 @@ impl Vm {
                                     other
                                 };
                                 let mut ob = obj.borrow_mut();
-                                if let Some(slot) = ob
-                                    .properties
-                                    .iter_mut()
-                                    .find(|(k, _)| k.as_slice() == prop_name.as_bytes())
+                                if let Some(slot) =
+                                    ob.properties.iter_mut().find(|(k, _)| **k == *pkey)
                                 {
                                     slot.1 = other;
                                 } else {
-                                    ob.properties.push((prop_name.as_bytes().to_vec(), other));
+                                    ob.properties.push((pkey.to_vec(), other));
                                 }
                             }
                         }
@@ -45337,6 +45391,7 @@ impl Vm {
                             }
                         }
                         self.classes.insert(name_lower, class);
+                        crate::proptable::invalidate_class_layouts();
                     }
                     Ok(Flow::Next)
                 })? {
@@ -46422,6 +46477,8 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
+                        // The slot this scope's access refers to (privates by scope).
+                        let pkey = self.prop_key_for(&obj_val, prop_name.as_bytes());
 
                         // ArrayObject/ArrayIterator ARRAY_AS_PROPS: route $obj->foo to $obj['foo']
                         // when the ARRAY_AS_PROPS flag (bit 2) is set, unless the property is
@@ -46839,13 +46896,9 @@ impl Vm {
                                 }
                             }
                         } else {
-                            // Resolve the storage key (mangled for private props that
-                            // collide with a subclass redeclaration).
-                            let storage_key = self.property_storage_key(
-                                &class_lower,
-                                prop_name.as_bytes(),
-                                caller_scope_for_get.as_deref(),
-                            );
+                            // The storage key (mangled for private props stored
+                            // apart from a same-named property).
+                            let storage_key = pkey.to_vec();
                             // When the property is a parent-class private (hidden
                             // from subclass scope), force the "not found" path:
                             // storage may still hold the inherited slot under the
@@ -47750,6 +47803,8 @@ impl Vm {
                             .iter()
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
+                        // The slot this scope's access refers to (privates by scope).
+                        let pkey = self.prop_key_for(&obj_val, prop_name.as_bytes());
 
                         // ArrayObject/ArrayIterator ARRAY_AS_PROPS: route $obj->foo = $v to the array.
                         if !prop_name.as_bytes().starts_with(b"__spl_")
@@ -48213,8 +48268,8 @@ impl Vm {
                             // Enforce readonly: if property is readonly and already initialized (not Undef), reject
                             // Exception: during __clone(), readonly properties can be modified once
                             if prop_is_readonly {
-                                let current_val = obj.borrow().get_property(prop_name.as_bytes());
-                                if obj.borrow().has_property(prop_name.as_bytes())
+                                let current_val = obj.borrow().get_property(&pkey);
+                                if obj.borrow().has_property(&pkey)
                                     && !matches!(current_val, Value::Undef)
                                 {
                                     let in_clone_window = matches!(
@@ -48294,7 +48349,7 @@ impl Vm {
                                     if incdec_overflow
                                         && typed_ref::any()
                                         && matches!(
-                                            obj.borrow().properties.iter().find(|(k, _)| k.as_slice() == prop_name.as_bytes()),
+                                            obj.borrow().properties.iter().find(|(k, _)| **k == *pkey),
                                             Some((_, Value::Reference(r))) if typed_ref::is_typed(r)
                                         )
                                     {
@@ -48424,8 +48479,7 @@ impl Vm {
                         } else if let Some(err_msg) = visibility_error {
                             // For asymmetric visibility: only try __set if property has been unset from the object
                             // For regular visibility errors: always try __set (PHP behavior for private/protected)
-                            let prop_exists_on_instance =
-                                obj.borrow().has_property(prop_name.as_bytes());
+                            let prop_exists_on_instance = obj.borrow().has_property(&pkey);
                             let has_set = self
                                 .classes
                                 .get(&class_lower)
@@ -48550,7 +48604,7 @@ impl Vm {
                             let guard_key = (obj_id_for_guard, prop_name.as_bytes().to_vec(), 2u8);
                             let already_setting = self.magic_prop_guards.contains(&guard_key);
                             if has_set
-                                && !obj.borrow().has_property(prop_name.as_bytes())
+                                && !obj.borrow().has_property(&pkey)
                                 && self.magic_depth < 5
                                 && !already_setting
                             {
@@ -48628,8 +48682,7 @@ impl Vm {
                                 // (PHP semantics: recursive __set creates a
                                 // dynamic property rather than re-entering
                                 // __set).
-                                obj.borrow_mut()
-                                    .set_property(prop_name.as_bytes().to_vec(), value);
+                                obj.borrow_mut().set_property(pkey.to_vec(), value);
                             } else {
                                 if matches!(
                                     obj.borrow().get_property(b"__clone_window"),
@@ -48643,7 +48696,7 @@ impl Vm {
                                         .set_property(modified_key.into_bytes(), Value::True);
                                 }
                                 // Emit deprecation warning for dynamic property creation
-                                if !obj.borrow().has_property(prop_name.as_bytes())
+                                if !obj.borrow().has_property(&pkey)
                                     && !prop_name.as_bytes().starts_with(b"__")
                                 {
                                     // Check if property is declared in class definition
@@ -48651,9 +48704,10 @@ impl Vm {
                                         .classes
                                         .get(&class_lower)
                                         .map(|c| {
-                                            c.properties
-                                                .iter()
-                                                .any(|p| p.name == prop_name.as_bytes())
+                                            c.properties.iter().any(|p| {
+                                                p.name == prop_name.as_bytes()
+                                                    && !self.prop_def_hidden(p, &class_lower)
+                                            })
                                         })
                                         .unwrap_or(false);
                                     if !prop_declared {
@@ -48707,13 +48761,13 @@ impl Vm {
                                         }
                                     }
                                 }
-                                let was_new = !obj.borrow().has_property(prop_name.as_bytes());
+                                let was_new = !obj.borrow().has_property(&pkey);
                                 if typed_ref::any() && !was_new {
                                     let incdec =
                                         Self::incdec_overflow_kind(op_array, ip, &op.op2, &value);
                                     if let Err(msg) = self.typed_ref_slot_write_check(
                                         obj,
-                                        prop_name.as_bytes(),
+                                        &pkey,
                                         &mut value,
                                         op_array.strict_types,
                                         incdec,
@@ -48741,16 +48795,7 @@ impl Vm {
                                         }
                                     }
                                 }
-                                // A private redeclared by a subclass has a slot
-                                // per declaring class (mangled key).
-                                let scope_lower =
-                                    self.current_class_scope().map(|s| s.to_ascii_lowercase());
-                                let storage_key = self.property_storage_key(
-                                    &class_lower,
-                                    prop_name.as_bytes(),
-                                    scope_lower.as_deref(),
-                                );
-                                obj.borrow_mut().set_property(storage_key, value);
+                                obj.borrow_mut().set_property(pkey.to_vec(), value);
                                 if was_new && !self.native_class_handlers.is_empty() {
                                     if let Some((_, h)) =
                                         self.find_native_class_handler(&class_lower)
