@@ -51749,7 +51749,7 @@ impl Vm {
                         }
                     }
                     // A user class (see new_object_fast)
-                    match self.new_object_fast(op, &op_array.literals, &tmps) {
+                    match self.new_object_fast(op_array, ip - 1, &tmps) {
                         fastcall::NewFast::No => {}
                         fastcall::NewFast::Obj(obj_value) => {
                             self.write_operand(

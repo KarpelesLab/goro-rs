@@ -102,8 +102,9 @@ pub struct NewTemplate {
     pub(crate) props_ptr: *const PropertyDef,
     pub(crate) props_len: usize,
     pub(crate) methods_len: usize,
-    /// The class's declared name.
+    /// The class's declared name, and the name it is looked up by.
     pub(crate) class_name: Vec<u8>,
+    pub(crate) lower: Vec<u8>,
     /// The declared property slots and their defaults (arrays are copied
     /// for each object).
     pub(crate) slots: Vec<(Vec<u8>, Value)>,

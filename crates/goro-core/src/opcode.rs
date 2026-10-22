@@ -580,6 +580,9 @@ pub(crate) struct SiteCaches {
     /// class name, the pending call's name and whether the method takes
     /// no argument by reference (see Vm::init_spl_method_fast).
     pub(crate) spl_sites: crate::fxhash::FxHashMap<u32, (Vec<u8>, crate::string::PhpString, bool)>,
+    /// The template the NEWs of a user class last used (see
+    /// Vm::new_object_fast).
+    pub(crate) new_sites: crate::fxhash::FxHashMap<u32, std::rc::Rc<crate::object::NewTemplate>>,
 }
 
 impl OpArray {

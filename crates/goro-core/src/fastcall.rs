@@ -102,10 +102,30 @@ impl Vm {
     /// general handler does for one whose hierarchy is all user code.
     pub(crate) fn new_object_fast(
         &mut self,
-        op: &Op,
-        literals: &[Value],
+        op_array: &OpArray,
+        ip: usize,
         tmps: &[Value],
     ) -> NewFast {
+        let op = &op_array.ops[ip];
+        let literals = &op_array.literals;
+        // The template the site used last, while the class still has it
+        // (its name lowercased then).
+        let site = op_array
+            .sites
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.new_sites.get(&(ip as u32)).cloned());
+        if let Some(t) = site {
+            let same = self.classes.get(t.lower.as_slice()).is_some_and(|ce| {
+                ce.new_template
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|ct| Rc::ptr_eq(ct, &t) && t.fits(ce))
+            });
+            if same {
+                return NewFast::Obj(self.new_from_template(&t, op, tmps));
+            }
+        }
         let OperandType::Const(ci) = op.op1 else {
             return NewFast::No;
         };
@@ -137,6 +157,7 @@ impl Vm {
             _ => return NewFast::No,
         };
         if let Some(t) = template {
+            Self::note_new_site(op_array, ip, &t);
             return NewFast::Obj(self.new_from_template(&t, op, tmps));
         }
         if !self.user_class_chain(name_lower) {
@@ -187,18 +208,30 @@ impl Vm {
         {
             if let Some(slots) = self.plain_declared_slots(name_lower) {
                 let has_array = slots.iter().any(|(_, v)| matches!(v, Value::Array(_)));
-                *ce.new_template.borrow_mut() = Some(Rc::new(NewTemplate {
+                let t = Rc::new(NewTemplate {
                     props_ptr: ce.properties.as_ptr(),
                     props_len: ce.properties.len(),
                     methods_len: ce.methods.len(),
                     class_name: ce.name.clone(),
+                    lower: name_lower.to_vec(),
                     slots,
                     has_array,
                     has_destruct,
-                }));
+                });
+                Self::note_new_site(op_array, ip, &t);
+                *ce.new_template.borrow_mut() = Some(t);
             }
         }
         NewFast::Obj(obj_value)
+    }
+
+    fn note_new_site(op_array: &OpArray, ip: usize, t: &Rc<NewTemplate>) {
+        op_array
+            .sites
+            .borrow_mut()
+            .get_or_insert_with(Default::default)
+            .new_sites
+            .insert(ip as u32, Rc::clone(t));
     }
 
     /// new_object_fast() of a class whose NewTemplate is known: what it
