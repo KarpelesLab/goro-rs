@@ -863,7 +863,7 @@ fn zend_test_compile_to_ast(vm: &mut Vm, args: &[Value]) -> R {
             goro_core::ast_export::export_program(&program),
         ))),
         Err(e) => {
-            let msg = if e.message.starts_with("syntax error") {
+            let msg = if goro_parser::is_php_parse_error(&e.message) {
                 e.message.clone()
             } else {
                 "syntax error".to_string()

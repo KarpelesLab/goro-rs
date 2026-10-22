@@ -212,7 +212,7 @@ pub(crate) fn compile_and_run(
     let program = match parser.parse() {
         Ok(p) => p,
         Err(e) => {
-            let msg = if e.message.starts_with("syntax error") {
+            let msg = if goro_parser::is_php_parse_error(&e.message) {
                 e.message.clone()
             } else {
                 "syntax error".to_string()

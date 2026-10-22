@@ -2,10 +2,10 @@
 //! php-src ext/tokenizer/tokenizer.c.
 //!
 //! Tokens come from the re2c-equivalent scanner (`php_scanner`). With
-//! TOKEN_PARSE the source is also run through the parser: lexer
-//! deprecations are raised, a syntax error throws ParseError, and
-//! semi-reserved keywords the grammar uses as identifiers are reported as
-//! T_STRING (the parser's ON_FEEDBACK event).
+//! TOKEN_PARSE the source is also run through php-src's grammar
+//! (`php_recognizer`): lexer diagnostics are raised, a syntax error throws
+//! ParseError, and semi-reserved keywords the grammar uses as identifiers
+//! are reported as T_STRING (the parser's ON_FEEDBACK event).
 
 use crate::array::PhpArray;
 use crate::object::PhpObject;
@@ -66,95 +66,6 @@ fn scan(src: &[u8]) -> Vec<Tok> {
     out
 }
 
-fn is_ignorable(id: i64) -> bool {
-    matches!(
-        id as i32,
-        ps::T_WHITESPACE | ps::T_COMMENT | ps::T_DOC_COMMENT | ps::T_OPEN_TAG
-    )
-}
-
-/// A keyword the grammar's `semi_reserved` rule accepts as an identifier.
-fn is_semi_reserved(t: &Tok, src: &[u8]) -> bool {
-    let id = t.id as i32;
-    ((ps::T_INCLUDE..=ps::T_NS_C).contains(&id) || id == ps::T_PROPERTY_C)
-        && t.end > t.start
-        && src[t.start..t.end]
-            .iter()
-            .all(|&c| c.is_ascii_alphanumeric() || c == b'_')
-}
-
-/// The parser's ON_FEEDBACK: semi-reserved keywords used as names become
-/// T_STRING.
-fn apply_identifier_feedback(toks: &mut [Tok], src: &[u8]) {
-    let meaningful: Vec<usize> = (0..toks.len())
-        .filter(|&i| !is_ignorable(toks[i].id))
-        .collect();
-    let id_at = |toks: &[Tok], k: Option<usize>| k.map(|k| toks[meaningful[k]].id).unwrap_or(0);
-    let is_char = |id: i64, c: u8| id == c as i64;
-    // Trait adaptation block (`use T { a as b; }`) tracking.
-    let mut pending_use = false;
-    let mut adapt_depth: Option<usize> = None;
-    let mut depth = 0usize;
-    for k in 0..meaningful.len() {
-        let i = meaningful[k];
-        let id = toks[i].id;
-        let prev = id_at(toks, k.checked_sub(1));
-        let prev2 = id_at(toks, k.checked_sub(2));
-        let next = id_at(toks, (k + 1 < meaningful.len()).then_some(k + 1));
-        if is_semi_reserved(&toks[i], src) {
-            let p = prev as i32;
-            let demote = matches!(
-                p,
-                ps::T_OBJECT_OPERATOR | ps::T_NULLSAFE_OBJECT_OPERATOR | ps::T_PAAMAYIM_NEKUDOTAYIM
-            ) || p == ps::T_CONST
-                // method name
-                || ((p == ps::T_FUNCTION
-                    || (prev2 as i32 == ps::T_FUNCTION
-                        && matches!(
-                            p,
-                            ps::T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG
-                                | ps::T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG
-                        )))
-                    && is_char(next, b'('))
-                // named argument
-                || ((is_char(prev, b'(') || is_char(prev, b',')) && is_char(next, b':'))
-                // enum case
-                || (p == ps::T_CASE && (is_char(next, b';') || is_char(next, b'=')))
-                // trait adaptations
-                || (adapt_depth.is_some()
-                    && (matches!(next as i32, ps::T_AS | ps::T_INSTEADOF)
-                        || p == ps::T_AS
-                        || (prev2 as i32 == ps::T_AS
-                            && matches!(p, ps::T_PUBLIC | ps::T_PROTECTED | ps::T_PRIVATE))));
-            if demote {
-                toks[i].id = ps::T_STRING as i64;
-                continue;
-            }
-        }
-        match id {
-            x if x == ps::T_USE as i64 => pending_use = true,
-            x if is_char(x, b'(') || is_char(x, b';') => pending_use = false,
-            x if is_char(x, b'{')
-                || x == ps::T_CURLY_OPEN as i64
-                || x == ps::T_DOLLAR_OPEN_CURLY_BRACES as i64 =>
-            {
-                depth += 1;
-                if pending_use && is_char(x, b'{') {
-                    adapt_depth = Some(depth);
-                }
-                pending_use = false;
-            }
-            x if is_char(x, b'}') => {
-                if adapt_depth == Some(depth) {
-                    adapt_depth = None;
-                }
-                depth = depth.saturating_sub(1);
-            }
-            _ => {}
-        }
-    }
-}
-
 /// Throw `class` with `msg` at `line` of the (nameless) tokenized code.
 fn throw_at(vm: &mut Vm, class: &[u8], msg: &str, line: u32) {
     let exc = vm.create_exception(class, msg, line);
@@ -168,50 +79,56 @@ fn throw_at(vm: &mut Vm, class: &[u8], msg: &str, line: u32) {
 
 /// tokenize_common(): the tokens, or None when an exception was thrown.
 pub fn tokenize(vm: &mut Vm, src: &[u8], flags: i64) -> Option<Vec<Tok>> {
-    let mut toks = scan(src);
     if flags & TOKEN_PARSE == 0 {
-        return Some(toks);
+        return Some(scan(src));
     }
-    // zendparse(): the lexer's diagnostics (compiled file name "") and
-    // syntax errors.
-    let _ = goro_parser::take_lexer_deprecations();
-    let mut lexer = goro_parser::Lexer::new(src);
-    let tokens = lexer.tokenize();
-    let mut deprecations = goro_parser::take_lexer_deprecations();
-    let _ = goro_parser::take_lexer_warnings();
-    let parsed = goro_parser::Parser::new(tokens).with_source(src).parse();
-    let err_line = parsed.as_ref().err().map(|e| e.span.line);
-    deprecations.sort_by_key(|(_, l)| *l);
-    for (msg, line) in deprecations {
+    // zendparse() (goro_parser::php_recognizer): php-src's grammar decides
+    // the syntax errors and which keywords became identifiers; the
+    // scanner's diagnostics (compiled file name "") come first, up to the
+    // error.
+    let parsed = goro_parser::php_recognizer::tokenize(src, true);
+    let err_line = parsed.as_ref().err().map(|e| e.line);
+    let mut diags: Vec<(bool, String, u32)> = goro_parser::take_lexer_deprecations()
+        .into_iter()
+        .map(|(m, l)| (true, m, l))
+        .chain(
+            goro_parser::take_lexer_warnings()
+                .into_iter()
+                .map(|(m, l)| (false, m, l)),
+        )
+        .collect();
+    diags.sort_by_key(|(_, _, l)| *l);
+    for (deprecation, msg, line) in diags {
         if err_line.is_some_and(|el| line > el) {
             break;
         }
         let saved = std::mem::take(&mut vm.current_file);
-        vm.emit_deprecated_at(&msg, line);
+        if deprecation {
+            vm.emit_deprecated_at(&msg, line);
+        } else {
+            vm.emit_warning_at(&msg, line);
+        }
         vm.current_file = saved;
         if vm.current_exception.is_some() {
             return None;
         }
     }
-    if let Err(e) = parsed {
-        let msg = &e.message;
-        let msg = if msg.contains("unexpected")
-            || msg.starts_with("syntax error")
-            || msg.starts_with("Invalid ")
-            || msg.starts_with("The (real) cast")
-            || msg.starts_with("Unclosed '")
-            || msg.starts_with("Unmatched '")
-            || msg.starts_with("Unterminated comment")
-        {
-            msg.clone()
-        } else {
-            "syntax error".to_string()
-        };
-        throw_at(vm, b"ParseError", &msg, e.span.line);
-        return None;
+    match parsed {
+        Ok(toks) => Some(
+            toks.into_iter()
+                .map(|(id, start, end, line)| Tok {
+                    id: id as i64,
+                    start,
+                    end,
+                    line,
+                })
+                .collect(),
+        ),
+        Err(e) => {
+            throw_at(vm, b"ParseError", &e.message, e.line);
+            None
+        }
     }
-    apply_identifier_feedback(&mut toks, src);
-    Some(toks)
 }
 
 fn text<'a>(src: &'a [u8], t: &Tok) -> &'a [u8] {

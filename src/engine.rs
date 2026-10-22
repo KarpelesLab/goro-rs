@@ -237,10 +237,11 @@ pub fn compile(
         Ok(p) => p,
         Err(e) => {
             let msg = e.message.clone();
-            let (kind, message) = if is_fatal_parse_error(&msg) {
+            let (kind, message) = if goro_parser::is_php_parse_error(&msg) {
+                ("Parse error", msg)
+            } else if is_fatal_parse_error(&msg) {
                 ("Fatal error", msg)
-            } else if msg.starts_with("syntax error")
-                || msg.starts_with("The (real) cast")
+            } else if msg.starts_with("The (real) cast")
                 || msg.starts_with("Invalid UTF-8 codepoint")
                 || msg.starts_with("Invalid numeric literal")
                 || msg.starts_with("Invalid body indentation level")

@@ -264,6 +264,18 @@ impl<'a> Lexer<'a> {
         self.source[start..self.pos].to_vec()
     }
 
+    /// Consume any `("\\"{LABEL})+` continuing the label just scanned;
+    /// returns whether at least one segment was consumed.
+    fn scan_name_tail(&mut self) -> bool {
+        let mut any = false;
+        while self.peek() == Some(b'\\') && self.peek_at(1).is_some_and(is_label_start) {
+            self.advance();
+            self.scan_identifier();
+            any = true;
+        }
+        any
+    }
+
     fn scan_number(&mut self) -> TokenKind {
         let start = self.pos;
         let mut is_float = false;
@@ -1162,6 +1174,18 @@ impl<'a> Lexer<'a> {
             b'a'..=b'z' | b'A'..=b'Z' | b'_' | 0x80..=0xFF => {
                 let ident = self.scan_identifier();
 
+                // `{LABEL}("\\"{LABEL})+`: a namespaced name is one token
+                // (T_NAME_QUALIFIED, or T_NAME_RELATIVE for `namespace\...`).
+                if self.scan_name_tail() {
+                    let text = self.source[start..self.pos].to_vec();
+                    let kind = if ident.eq_ignore_ascii_case(b"namespace") {
+                        TokenKind::NameRelative(text)
+                    } else {
+                        TokenKind::NameQualified(text)
+                    };
+                    return Token::new(kind, Span::new(start as u32, self.pos as u32, start_line));
+                }
+
                 // Handle b"...", b'...', and b<<< binary string prefix (PHP treats them as regular strings)
                 if (ident == b"b" || ident == b"B") && self.pos < self.source.len() {
                     if self.source[self.pos] == b'"' {
@@ -1561,7 +1585,14 @@ impl<'a> Lexer<'a> {
             }
             b'\\' => {
                 self.advance();
-                TokenKind::Backslash
+                // `"\\"{LABEL}("\\"{LABEL})*`: T_NAME_FULLY_QUALIFIED.
+                if self.peek().is_some_and(is_label_start) {
+                    self.scan_identifier();
+                    self.scan_name_tail();
+                    TokenKind::NameFullyQualified(self.source[start..self.pos].to_vec())
+                } else {
+                    TokenKind::Backslash
+                }
             }
 
             b'#' if self.peek_at(1) == Some(b'[') => {
@@ -2137,6 +2168,10 @@ impl<'a> Lexer<'a> {
 /// `{$...}` inside a string (T_CURLY_OPEN): `src[start]` is the `{`. The
 /// braced expression is lexed as PHP code; returns its tokens between
 /// InterpExprStart / InterpExprEnd, and the index after the closing `}`.
+fn is_label_start(c: u8) -> bool {
+    c.is_ascii_alphabetic() || c == b'_' || c >= 0x80
+}
+
 fn lex_braced_interpolation(src: &[u8], start: usize, line: u32) -> (Vec<Token>, usize) {
     lex_interp_code(src, start, line, b"", b"")
 }

@@ -80,91 +80,91 @@ pub const T_FINAL: i32 = 323;
 pub const T_PRIVATE: i32 = 324;
 pub const T_PROTECTED: i32 = 325;
 pub const T_PUBLIC: i32 = 326;
-pub const T_READONLY: i32 = 327;
-pub const T_VAR: i32 = 328;
-pub const T_UNSET: i32 = 329;
-pub const T_ISSET: i32 = 330;
-pub const T_EMPTY: i32 = 331;
-pub const T_HALT_COMPILER: i32 = 332;
-pub const T_CLASS: i32 = 333;
-pub const T_TRAIT: i32 = 334;
-pub const T_INTERFACE: i32 = 335;
-pub const T_ENUM: i32 = 336;
-pub const T_EXTENDS: i32 = 337;
-pub const T_IMPLEMENTS: i32 = 338;
-pub const T_NAMESPACE: i32 = 339;
-pub const T_LIST: i32 = 340;
-pub const T_ARRAY: i32 = 341;
-pub const T_CALLABLE: i32 = 342;
-pub const T_LINE: i32 = 343;
-pub const T_FILE: i32 = 344;
-pub const T_DIR: i32 = 345;
-pub const T_CLASS_C: i32 = 346;
-pub const T_TRAIT_C: i32 = 347;
-pub const T_METHOD_C: i32 = 348;
-pub const T_FUNC_C: i32 = 349;
-pub const T_NS_C: i32 = 350;
-pub const T_ATTRIBUTE: i32 = 351;
-pub const T_PLUS_EQUAL: i32 = 352;
-pub const T_MINUS_EQUAL: i32 = 353;
-pub const T_MUL_EQUAL: i32 = 354;
-pub const T_DIV_EQUAL: i32 = 355;
-pub const T_CONCAT_EQUAL: i32 = 356;
-pub const T_MOD_EQUAL: i32 = 357;
-pub const T_AND_EQUAL: i32 = 358;
-pub const T_OR_EQUAL: i32 = 359;
-pub const T_XOR_EQUAL: i32 = 360;
-pub const T_SL_EQUAL: i32 = 361;
-pub const T_SR_EQUAL: i32 = 362;
-pub const T_COALESCE_EQUAL: i32 = 363;
-pub const T_BOOLEAN_OR: i32 = 364;
-pub const T_BOOLEAN_AND: i32 = 365;
-pub const T_IS_EQUAL: i32 = 366;
-pub const T_IS_NOT_EQUAL: i32 = 367;
-pub const T_IS_IDENTICAL: i32 = 368;
-pub const T_IS_NOT_IDENTICAL: i32 = 369;
-pub const T_IS_SMALLER_OR_EQUAL: i32 = 370;
-pub const T_IS_GREATER_OR_EQUAL: i32 = 371;
-pub const T_SPACESHIP: i32 = 372;
-pub const T_SL: i32 = 373;
-pub const T_SR: i32 = 374;
-pub const T_INC: i32 = 375;
-pub const T_DEC: i32 = 376;
-pub const T_INT_CAST: i32 = 377;
-pub const T_DOUBLE_CAST: i32 = 378;
-pub const T_STRING_CAST: i32 = 379;
-pub const T_ARRAY_CAST: i32 = 380;
-pub const T_OBJECT_CAST: i32 = 381;
-pub const T_BOOL_CAST: i32 = 382;
-pub const T_UNSET_CAST: i32 = 383;
-pub const T_OBJECT_OPERATOR: i32 = 384;
-pub const T_NULLSAFE_OBJECT_OPERATOR: i32 = 385;
-pub const T_DOUBLE_ARROW: i32 = 386;
-pub const T_COMMENT: i32 = 387;
-pub const T_DOC_COMMENT: i32 = 388;
-pub const T_OPEN_TAG: i32 = 389;
-pub const T_OPEN_TAG_WITH_ECHO: i32 = 390;
-pub const T_CLOSE_TAG: i32 = 391;
-pub const T_WHITESPACE: i32 = 392;
-pub const T_START_HEREDOC: i32 = 393;
-pub const T_END_HEREDOC: i32 = 394;
-pub const T_DOLLAR_OPEN_CURLY_BRACES: i32 = 395;
-pub const T_CURLY_OPEN: i32 = 396;
-pub const T_PAAMAYIM_NEKUDOTAYIM: i32 = 397;
-pub const T_NS_SEPARATOR: i32 = 398;
-pub const T_ELLIPSIS: i32 = 399;
-pub const T_COALESCE: i32 = 400;
-pub const T_POW: i32 = 401;
-pub const T_POW_EQUAL: i32 = 402;
-pub const T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG: i32 = 403;
-pub const T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG: i32 = 404;
-pub const T_BAD_CHARACTER: i32 = 405;
-pub const T_PRIVATE_SET: i32 = 406;
-pub const T_PROTECTED_SET: i32 = 407;
-pub const T_PUBLIC_SET: i32 = 408;
-pub const T_PROPERTY_C: i32 = 409;
-pub const T_VOID_CAST: i32 = 410;
-pub const T_PIPE: i32 = 411;
+pub const T_READONLY: i32 = 330;
+pub const T_VAR: i32 = 331;
+pub const T_UNSET: i32 = 332;
+pub const T_ISSET: i32 = 333;
+pub const T_EMPTY: i32 = 334;
+pub const T_HALT_COMPILER: i32 = 335;
+pub const T_CLASS: i32 = 336;
+pub const T_TRAIT: i32 = 337;
+pub const T_INTERFACE: i32 = 338;
+pub const T_ENUM: i32 = 339;
+pub const T_EXTENDS: i32 = 340;
+pub const T_IMPLEMENTS: i32 = 341;
+pub const T_NAMESPACE: i32 = 342;
+pub const T_LIST: i32 = 343;
+pub const T_ARRAY: i32 = 344;
+pub const T_CALLABLE: i32 = 345;
+pub const T_LINE: i32 = 346;
+pub const T_FILE: i32 = 347;
+pub const T_DIR: i32 = 348;
+pub const T_CLASS_C: i32 = 349;
+pub const T_TRAIT_C: i32 = 350;
+pub const T_METHOD_C: i32 = 351;
+pub const T_FUNC_C: i32 = 352;
+pub const T_NS_C: i32 = 354;
+pub const T_ATTRIBUTE: i32 = 355;
+pub const T_PLUS_EQUAL: i32 = 356;
+pub const T_MINUS_EQUAL: i32 = 357;
+pub const T_MUL_EQUAL: i32 = 358;
+pub const T_DIV_EQUAL: i32 = 359;
+pub const T_CONCAT_EQUAL: i32 = 360;
+pub const T_MOD_EQUAL: i32 = 361;
+pub const T_AND_EQUAL: i32 = 362;
+pub const T_OR_EQUAL: i32 = 363;
+pub const T_XOR_EQUAL: i32 = 364;
+pub const T_SL_EQUAL: i32 = 365;
+pub const T_SR_EQUAL: i32 = 366;
+pub const T_COALESCE_EQUAL: i32 = 367;
+pub const T_BOOLEAN_OR: i32 = 368;
+pub const T_BOOLEAN_AND: i32 = 369;
+pub const T_IS_EQUAL: i32 = 370;
+pub const T_IS_NOT_EQUAL: i32 = 371;
+pub const T_IS_IDENTICAL: i32 = 372;
+pub const T_IS_NOT_IDENTICAL: i32 = 373;
+pub const T_IS_SMALLER_OR_EQUAL: i32 = 374;
+pub const T_IS_GREATER_OR_EQUAL: i32 = 375;
+pub const T_SPACESHIP: i32 = 376;
+pub const T_SL: i32 = 377;
+pub const T_SR: i32 = 378;
+pub const T_INC: i32 = 379;
+pub const T_DEC: i32 = 380;
+pub const T_INT_CAST: i32 = 381;
+pub const T_DOUBLE_CAST: i32 = 382;
+pub const T_STRING_CAST: i32 = 383;
+pub const T_ARRAY_CAST: i32 = 384;
+pub const T_OBJECT_CAST: i32 = 385;
+pub const T_BOOL_CAST: i32 = 386;
+pub const T_UNSET_CAST: i32 = 387;
+pub const T_OBJECT_OPERATOR: i32 = 389;
+pub const T_NULLSAFE_OBJECT_OPERATOR: i32 = 390;
+pub const T_DOUBLE_ARROW: i32 = 391;
+pub const T_COMMENT: i32 = 392;
+pub const T_DOC_COMMENT: i32 = 393;
+pub const T_OPEN_TAG: i32 = 394;
+pub const T_OPEN_TAG_WITH_ECHO: i32 = 395;
+pub const T_CLOSE_TAG: i32 = 396;
+pub const T_WHITESPACE: i32 = 397;
+pub const T_START_HEREDOC: i32 = 398;
+pub const T_END_HEREDOC: i32 = 399;
+pub const T_DOLLAR_OPEN_CURLY_BRACES: i32 = 400;
+pub const T_CURLY_OPEN: i32 = 401;
+pub const T_PAAMAYIM_NEKUDOTAYIM: i32 = 402;
+pub const T_NS_SEPARATOR: i32 = 403;
+pub const T_ELLIPSIS: i32 = 404;
+pub const T_COALESCE: i32 = 405;
+pub const T_POW: i32 = 406;
+pub const T_POW_EQUAL: i32 = 407;
+pub const T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG: i32 = 409;
+pub const T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG: i32 = 410;
+pub const T_BAD_CHARACTER: i32 = 411;
+pub const T_PRIVATE_SET: i32 = 327;
+pub const T_PROTECTED_SET: i32 = 328;
+pub const T_PUBLIC_SET: i32 = 329;
+pub const T_PROPERTY_C: i32 = 353;
+pub const T_VOID_CAST: i32 = 388;
+pub const T_PIPE: i32 = 408;
 
 /// One raw scanner token. `id` is either a single-character token (its byte
 /// value, < 256) or one of the `T_*` ids above.
@@ -175,6 +175,9 @@ pub struct ScanToken {
     pub end: usize,
     /// Line of the first byte of the token (1-based).
     pub line: u32,
+    /// Matched in the ST_IN_SCRIPTING state (where brackets are nesting
+    /// checked; `[`/`]` of a `"$a[0]"` offset are not).
+    pub scripting: bool,
 }
 
 /// Whether the scanner hands the token's text to the caller as a semantic
@@ -243,6 +246,8 @@ pub struct Scanner<'a> {
     short_tags: bool,
     line: u32,
     line_pos: usize,
+    /// State the token being scanned was matched in.
+    tok_state: St,
 }
 
 impl<'a> Scanner<'a> {
@@ -259,6 +264,7 @@ impl<'a> Scanner<'a> {
             short_tags,
             line: 1,
             line_pos: 0,
+            tok_state: St::Initial,
         };
         if skip_shebang && s.starts_with(b"#!") {
             // <SHEBANG>"#!" .* {NEWLINE}
@@ -328,6 +334,7 @@ impl<'a> Scanner<'a> {
             start,
             end,
             line,
+            scripting: self.tok_state == St::InScripting,
         })
     }
 
@@ -1341,6 +1348,7 @@ impl<'a> Scanner<'a> {
     /// Return the next token, or None at the end of input.
     pub fn next_token(&mut self) -> Option<ScanToken> {
         loop {
+            self.tok_state = self.state;
             match self.state {
                 St::Initial => return self.scan_initial(),
                 St::InScripting => return self.scan_scripting(),

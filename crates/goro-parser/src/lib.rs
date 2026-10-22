@@ -2,6 +2,9 @@ pub mod ast;
 pub mod lexer;
 pub mod multibyte;
 pub mod parser;
+#[rustfmt::skip]
+pub mod php_grammar;
+pub mod php_recognizer;
 pub mod php_scanner;
 pub mod token;
 
@@ -32,6 +35,22 @@ pub fn push_lexer_error(msg: String, line: u32) {
             *e = Some((msg, line));
         }
     });
+}
+
+/// Whether php-src reports a parser message as a ParseError (E_PARSE):
+/// syntax errors and the errors its scanner raises.
+pub fn is_php_parse_error(msg: &str) -> bool {
+    msg.starts_with("syntax error")
+        || msg.starts_with("Unclosed '")
+        || msg.starts_with("Unmatched '")
+        || msg == "Cannot use \"<?=\" as an identifier"
+        || msg.starts_with("The (real) cast")
+        || msg.starts_with("Invalid UTF-8 codepoint")
+        || msg.starts_with("Invalid numeric literal")
+        || msg.starts_with("Invalid body indentation level")
+        || msg.starts_with("Invalid indentation - tabs and spaces")
+        || msg.starts_with("Unterminated comment")
+        || msg == "memory exhausted"
 }
 
 /// Take the pending lexer error, if any.

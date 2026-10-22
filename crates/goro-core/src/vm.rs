@@ -1971,9 +1971,9 @@ impl Vm {
                 c.insert(b"IMAGETYPE_UNKNOWN".to_vec(), Value::Long(0));
                 c.insert(b"IMAGETYPE_COUNT".to_vec(), Value::Long(21));
                 c.insert(b"IMAGETYPE_JPEG2000".to_vec(), Value::Long(9)); // alias for JPC
-                // Token constants (T_*). Values follow the PHP 8.2 grammar ordering
-                // from zend_language_parser.y. Must stay in sync with
-                // token_kind_to_php_id() and token_id_to_name() in goro-parser.
+                // Token constants (T_*): the values bison assigns in php-src's
+                // zend_language_parser.y (goro_parser::php_grammar::TOKEN_VALUES);
+                // must stay in sync with goro_parser::php_scanner / token_id_to_name().
                 c.insert(b"TOKEN_PARSE".to_vec(), Value::Long(1));
                 c.insert(b"T_LNUMBER".to_vec(), Value::Long(260));
                 c.insert(b"T_DNUMBER".to_vec(), Value::Long(261));
@@ -2042,103 +2042,101 @@ impl Vm {
                 c.insert(b"T_PRIVATE".to_vec(), Value::Long(324));
                 c.insert(b"T_PROTECTED".to_vec(), Value::Long(325));
                 c.insert(b"T_PUBLIC".to_vec(), Value::Long(326));
-                c.insert(b"T_READONLY".to_vec(), Value::Long(327));
-                c.insert(b"T_VAR".to_vec(), Value::Long(328));
-                c.insert(b"T_UNSET".to_vec(), Value::Long(329));
-                c.insert(b"T_ISSET".to_vec(), Value::Long(330));
-                c.insert(b"T_EMPTY".to_vec(), Value::Long(331));
-                c.insert(b"T_HALT_COMPILER".to_vec(), Value::Long(332));
-                c.insert(b"T_CLASS".to_vec(), Value::Long(333));
-                c.insert(b"T_TRAIT".to_vec(), Value::Long(334));
-                c.insert(b"T_INTERFACE".to_vec(), Value::Long(335));
-                c.insert(b"T_ENUM".to_vec(), Value::Long(336));
-                c.insert(b"T_EXTENDS".to_vec(), Value::Long(337));
-                c.insert(b"T_IMPLEMENTS".to_vec(), Value::Long(338));
-                c.insert(b"T_NAMESPACE".to_vec(), Value::Long(339));
-                c.insert(b"T_LIST".to_vec(), Value::Long(340));
-                c.insert(b"T_ARRAY".to_vec(), Value::Long(341));
-                c.insert(b"T_CALLABLE".to_vec(), Value::Long(342));
-                c.insert(b"T_LINE".to_vec(), Value::Long(343));
-                c.insert(b"T_FILE".to_vec(), Value::Long(344));
-                c.insert(b"T_DIR".to_vec(), Value::Long(345));
-                c.insert(b"T_CLASS_C".to_vec(), Value::Long(346));
-                c.insert(b"T_TRAIT_C".to_vec(), Value::Long(347));
-                c.insert(b"T_METHOD_C".to_vec(), Value::Long(348));
-                c.insert(b"T_FUNC_C".to_vec(), Value::Long(349));
-                c.insert(b"T_NS_C".to_vec(), Value::Long(350));
-                c.insert(b"T_ATTRIBUTE".to_vec(), Value::Long(351));
-                c.insert(b"T_PLUS_EQUAL".to_vec(), Value::Long(352));
-                c.insert(b"T_MINUS_EQUAL".to_vec(), Value::Long(353));
-                c.insert(b"T_MUL_EQUAL".to_vec(), Value::Long(354));
-                c.insert(b"T_DIV_EQUAL".to_vec(), Value::Long(355));
-                c.insert(b"T_CONCAT_EQUAL".to_vec(), Value::Long(356));
-                c.insert(b"T_MOD_EQUAL".to_vec(), Value::Long(357));
-                c.insert(b"T_AND_EQUAL".to_vec(), Value::Long(358));
-                c.insert(b"T_OR_EQUAL".to_vec(), Value::Long(359));
-                c.insert(b"T_XOR_EQUAL".to_vec(), Value::Long(360));
-                c.insert(b"T_SL_EQUAL".to_vec(), Value::Long(361));
-                c.insert(b"T_SR_EQUAL".to_vec(), Value::Long(362));
-                c.insert(b"T_COALESCE_EQUAL".to_vec(), Value::Long(363));
-                c.insert(b"T_BOOLEAN_OR".to_vec(), Value::Long(364));
-                c.insert(b"T_BOOLEAN_AND".to_vec(), Value::Long(365));
-                c.insert(b"T_IS_EQUAL".to_vec(), Value::Long(366));
-                c.insert(b"T_IS_NOT_EQUAL".to_vec(), Value::Long(367));
-                c.insert(b"T_IS_IDENTICAL".to_vec(), Value::Long(368));
-                c.insert(b"T_IS_NOT_IDENTICAL".to_vec(), Value::Long(369));
-                c.insert(b"T_IS_SMALLER_OR_EQUAL".to_vec(), Value::Long(370));
-                c.insert(b"T_IS_GREATER_OR_EQUAL".to_vec(), Value::Long(371));
-                c.insert(b"T_SPACESHIP".to_vec(), Value::Long(372));
-                c.insert(b"T_SL".to_vec(), Value::Long(373));
-                c.insert(b"T_SR".to_vec(), Value::Long(374));
-                c.insert(b"T_INC".to_vec(), Value::Long(375));
-                c.insert(b"T_DEC".to_vec(), Value::Long(376));
-                c.insert(b"T_INT_CAST".to_vec(), Value::Long(377));
-                c.insert(b"T_DOUBLE_CAST".to_vec(), Value::Long(378));
-                c.insert(b"T_STRING_CAST".to_vec(), Value::Long(379));
-                c.insert(b"T_ARRAY_CAST".to_vec(), Value::Long(380));
-                c.insert(b"T_OBJECT_CAST".to_vec(), Value::Long(381));
-                c.insert(b"T_BOOL_CAST".to_vec(), Value::Long(382));
-                c.insert(b"T_UNSET_CAST".to_vec(), Value::Long(383));
-                c.insert(b"T_OBJECT_OPERATOR".to_vec(), Value::Long(384));
-                c.insert(b"T_NULLSAFE_OBJECT_OPERATOR".to_vec(), Value::Long(385));
-                c.insert(b"T_DOUBLE_ARROW".to_vec(), Value::Long(386));
-                c.insert(b"T_COMMENT".to_vec(), Value::Long(387));
-                c.insert(b"T_DOC_COMMENT".to_vec(), Value::Long(388));
-                c.insert(b"T_OPEN_TAG".to_vec(), Value::Long(389));
-                c.insert(b"T_OPEN_TAG_WITH_ECHO".to_vec(), Value::Long(390));
-                c.insert(b"T_CLOSE_TAG".to_vec(), Value::Long(391));
-                c.insert(b"T_WHITESPACE".to_vec(), Value::Long(392));
-                c.insert(b"T_START_HEREDOC".to_vec(), Value::Long(393));
-                c.insert(b"T_END_HEREDOC".to_vec(), Value::Long(394));
-                c.insert(b"T_DOLLAR_OPEN_CURLY_BRACES".to_vec(), Value::Long(395));
-                c.insert(b"T_CURLY_OPEN".to_vec(), Value::Long(396));
+                c.insert(b"T_READONLY".to_vec(), Value::Long(330));
+                c.insert(b"T_VAR".to_vec(), Value::Long(331));
+                c.insert(b"T_UNSET".to_vec(), Value::Long(332));
+                c.insert(b"T_ISSET".to_vec(), Value::Long(333));
+                c.insert(b"T_EMPTY".to_vec(), Value::Long(334));
+                c.insert(b"T_HALT_COMPILER".to_vec(), Value::Long(335));
+                c.insert(b"T_CLASS".to_vec(), Value::Long(336));
+                c.insert(b"T_TRAIT".to_vec(), Value::Long(337));
+                c.insert(b"T_INTERFACE".to_vec(), Value::Long(338));
+                c.insert(b"T_ENUM".to_vec(), Value::Long(339));
+                c.insert(b"T_EXTENDS".to_vec(), Value::Long(340));
+                c.insert(b"T_IMPLEMENTS".to_vec(), Value::Long(341));
+                c.insert(b"T_NAMESPACE".to_vec(), Value::Long(342));
+                c.insert(b"T_LIST".to_vec(), Value::Long(343));
+                c.insert(b"T_ARRAY".to_vec(), Value::Long(344));
+                c.insert(b"T_CALLABLE".to_vec(), Value::Long(345));
+                c.insert(b"T_LINE".to_vec(), Value::Long(346));
+                c.insert(b"T_FILE".to_vec(), Value::Long(347));
+                c.insert(b"T_DIR".to_vec(), Value::Long(348));
+                c.insert(b"T_CLASS_C".to_vec(), Value::Long(349));
+                c.insert(b"T_TRAIT_C".to_vec(), Value::Long(350));
+                c.insert(b"T_METHOD_C".to_vec(), Value::Long(351));
+                c.insert(b"T_FUNC_C".to_vec(), Value::Long(352));
+                c.insert(b"T_NS_C".to_vec(), Value::Long(354));
+                c.insert(b"T_ATTRIBUTE".to_vec(), Value::Long(355));
+                c.insert(b"T_PLUS_EQUAL".to_vec(), Value::Long(356));
+                c.insert(b"T_MINUS_EQUAL".to_vec(), Value::Long(357));
+                c.insert(b"T_MUL_EQUAL".to_vec(), Value::Long(358));
+                c.insert(b"T_DIV_EQUAL".to_vec(), Value::Long(359));
+                c.insert(b"T_CONCAT_EQUAL".to_vec(), Value::Long(360));
+                c.insert(b"T_MOD_EQUAL".to_vec(), Value::Long(361));
+                c.insert(b"T_AND_EQUAL".to_vec(), Value::Long(362));
+                c.insert(b"T_OR_EQUAL".to_vec(), Value::Long(363));
+                c.insert(b"T_XOR_EQUAL".to_vec(), Value::Long(364));
+                c.insert(b"T_SL_EQUAL".to_vec(), Value::Long(365));
+                c.insert(b"T_SR_EQUAL".to_vec(), Value::Long(366));
+                c.insert(b"T_COALESCE_EQUAL".to_vec(), Value::Long(367));
+                c.insert(b"T_BOOLEAN_OR".to_vec(), Value::Long(368));
+                c.insert(b"T_BOOLEAN_AND".to_vec(), Value::Long(369));
+                c.insert(b"T_IS_EQUAL".to_vec(), Value::Long(370));
+                c.insert(b"T_IS_NOT_EQUAL".to_vec(), Value::Long(371));
+                c.insert(b"T_IS_IDENTICAL".to_vec(), Value::Long(372));
+                c.insert(b"T_IS_NOT_IDENTICAL".to_vec(), Value::Long(373));
+                c.insert(b"T_IS_SMALLER_OR_EQUAL".to_vec(), Value::Long(374));
+                c.insert(b"T_IS_GREATER_OR_EQUAL".to_vec(), Value::Long(375));
+                c.insert(b"T_SPACESHIP".to_vec(), Value::Long(376));
+                c.insert(b"T_SL".to_vec(), Value::Long(377));
+                c.insert(b"T_SR".to_vec(), Value::Long(378));
+                c.insert(b"T_INC".to_vec(), Value::Long(379));
+                c.insert(b"T_DEC".to_vec(), Value::Long(380));
+                c.insert(b"T_INT_CAST".to_vec(), Value::Long(381));
+                c.insert(b"T_DOUBLE_CAST".to_vec(), Value::Long(382));
+                c.insert(b"T_STRING_CAST".to_vec(), Value::Long(383));
+                c.insert(b"T_ARRAY_CAST".to_vec(), Value::Long(384));
+                c.insert(b"T_OBJECT_CAST".to_vec(), Value::Long(385));
+                c.insert(b"T_BOOL_CAST".to_vec(), Value::Long(386));
+                c.insert(b"T_UNSET_CAST".to_vec(), Value::Long(387));
+                c.insert(b"T_OBJECT_OPERATOR".to_vec(), Value::Long(389));
+                c.insert(b"T_NULLSAFE_OBJECT_OPERATOR".to_vec(), Value::Long(390));
+                c.insert(b"T_DOUBLE_ARROW".to_vec(), Value::Long(391));
+                c.insert(b"T_COMMENT".to_vec(), Value::Long(392));
+                c.insert(b"T_DOC_COMMENT".to_vec(), Value::Long(393));
+                c.insert(b"T_OPEN_TAG".to_vec(), Value::Long(394));
+                c.insert(b"T_OPEN_TAG_WITH_ECHO".to_vec(), Value::Long(395));
+                c.insert(b"T_CLOSE_TAG".to_vec(), Value::Long(396));
+                c.insert(b"T_WHITESPACE".to_vec(), Value::Long(397));
+                c.insert(b"T_START_HEREDOC".to_vec(), Value::Long(398));
+                c.insert(b"T_END_HEREDOC".to_vec(), Value::Long(399));
+                c.insert(b"T_DOLLAR_OPEN_CURLY_BRACES".to_vec(), Value::Long(400));
+                c.insert(b"T_CURLY_OPEN".to_vec(), Value::Long(401));
                 // T_DOUBLE_COLON and T_PAAMAYIM_NEKUDOTAYIM share the same id
-                c.insert(b"T_PAAMAYIM_NEKUDOTAYIM".to_vec(), Value::Long(397));
-                c.insert(b"T_DOUBLE_COLON".to_vec(), Value::Long(397));
-                c.insert(b"T_NS_SEPARATOR".to_vec(), Value::Long(398));
-                c.insert(b"T_ELLIPSIS".to_vec(), Value::Long(399));
-                c.insert(b"T_COALESCE".to_vec(), Value::Long(400));
-                c.insert(b"T_POW".to_vec(), Value::Long(401));
-                c.insert(b"T_POW_EQUAL".to_vec(), Value::Long(402));
+                c.insert(b"T_PAAMAYIM_NEKUDOTAYIM".to_vec(), Value::Long(402));
+                c.insert(b"T_DOUBLE_COLON".to_vec(), Value::Long(402));
+                c.insert(b"T_NS_SEPARATOR".to_vec(), Value::Long(403));
+                c.insert(b"T_ELLIPSIS".to_vec(), Value::Long(404));
+                c.insert(b"T_COALESCE".to_vec(), Value::Long(405));
+                c.insert(b"T_POW".to_vec(), Value::Long(406));
+                c.insert(b"T_POW_EQUAL".to_vec(), Value::Long(407));
                 c.insert(
                     b"T_AMPERSAND_FOLLOWED_BY_VAR_OR_VARARG".to_vec(),
-                    Value::Long(403),
+                    Value::Long(409),
                 );
                 c.insert(
                     b"T_AMPERSAND_NOT_FOLLOWED_BY_VAR_OR_VARARG".to_vec(),
-                    Value::Long(404),
+                    Value::Long(410),
                 );
-                c.insert(b"T_BAD_CHARACTER".to_vec(), Value::Long(405));
+                c.insert(b"T_BAD_CHARACTER".to_vec(), Value::Long(411));
                 // PHP 8.4+ additions
-                c.insert(b"T_PRIVATE_SET".to_vec(), Value::Long(406));
-                c.insert(b"T_PROTECTED_SET".to_vec(), Value::Long(407));
-                c.insert(b"T_PUBLIC_SET".to_vec(), Value::Long(408));
+                c.insert(b"T_PRIVATE_SET".to_vec(), Value::Long(327));
+                c.insert(b"T_PROTECTED_SET".to_vec(), Value::Long(328));
+                c.insert(b"T_PUBLIC_SET".to_vec(), Value::Long(329));
                 // PHP 8.5 additions
-                c.insert(b"T_PROPERTY_C".to_vec(), Value::Long(409));
-                c.insert(b"T_VOID_CAST".to_vec(), Value::Long(410));
-                c.insert(b"T_PIPE".to_vec(), Value::Long(411));
-                // Non-grammar / internal tokens used by some PHP builds
-                c.insert(b"T_NAMED_ARGUMENT".to_vec(), Value::Long(412));
+                c.insert(b"T_PROPERTY_C".to_vec(), Value::Long(353));
+                c.insert(b"T_VOID_CAST".to_vec(), Value::Long(388));
+                c.insert(b"T_PIPE".to_vec(), Value::Long(408));
                 // Boolean constants
                 c.insert(b"TRUE".to_vec(), Value::True);
                 c.insert(b"FALSE".to_vec(), Value::False);
@@ -55375,7 +55373,8 @@ fn commutative_swap(op1: &OperandType, op2: &OperandType) -> bool {
 /// Whether a parser message is one php-src's scanner/parser produces (others
 /// are reported as a bare "syntax error").
 fn is_php_parse_message(msg: &str) -> bool {
-    msg.contains("unexpected")
+    goro_parser::is_php_parse_error(msg)
+        || msg.contains("unexpected")
         || msg.contains("syntax error")
         || msg.starts_with("Invalid ")
         || msg.starts_with("Unclosed '")

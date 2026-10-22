@@ -112,7 +112,6 @@ impl Parser {
                                     | TokenKind::NullsafeArrow
                                     | TokenKind::DoubleColon
                                     | TokenKind::Function
-                                    | TokenKind::Backslash
                             );
                         if !is_member {
                             halt = Some((i, tokens[i + 3].span.end));
@@ -137,17 +136,16 @@ impl Parser {
                 }
             }
         }
-        let mut j = 0;
-        while j < hi.min(tokens.len()) {
-            let is_const = matches!(&tokens[j].kind, TokenKind::Identifier(n) if n.as_slice() == b"__COMPILER_HALT_OFFSET__");
+        for j in 0..hi.min(tokens.len()) {
+            // `\X` is the global constant; `ns\X` / `namespace\X` are not.
+            let is_const = match &tokens[j].kind {
+                TokenKind::Identifier(n) => n.as_slice() == b"__COMPILER_HALT_OFFSET__",
+                TokenKind::NameFullyQualified(n) => n.as_slice() == b"\\__COMPILER_HALT_OFFSET__",
+                _ => false,
+            };
             if is_const {
                 let prev = if j > 0 {
                     Some(&tokens[j - 1].kind)
-                } else {
-                    None
-                };
-                let prev2 = if j > 1 {
-                    Some(&tokens[j - 2].kind)
                 } else {
                     None
                 };
@@ -160,23 +158,9 @@ impl Parser {
                         | Some(TokenKind::Function)
                 );
                 if !member {
-                    if matches!(prev, Some(TokenKind::Backslash)) {
-                        // `\X` is the global constant; `ns\X` / `namespace\X` are not.
-                        if !matches!(
-                            prev2,
-                            Some(TokenKind::Identifier(_)) | Some(TokenKind::Namespace)
-                        ) {
-                            tokens[j].kind = TokenKind::LongNumber(offset as i64);
-                            tokens.remove(j - 1);
-                            docs.remove(j - 1);
-                            continue;
-                        }
-                    } else {
-                        tokens[j].kind = TokenKind::LongNumber(offset as i64);
-                    }
+                    tokens[j].kind = TokenKind::LongNumber(offset as i64);
                 }
             }
-            j += 1;
         }
     }
 
@@ -492,6 +476,17 @@ impl Parser {
                 span,
             });
         }
+        // php-src's own grammar decides what is a syntax error, and how it
+        // is worded (see php_recognizer).
+        if !self.source.is_empty() {
+            let shebang = self.source.starts_with(b"#!")
+                && self.tokens.first().is_some_and(|t| t.span.start > 0);
+            if let Some(e) =
+                crate::php_recognizer::check(&self.source, crate::short_open_tag(), shebang)
+            {
+                return Err(self.merge_syntax_error(e));
+            }
+        }
         let nesting = self.first_nesting_error();
         let result = self.parse_program();
         match (result, nesting) {
@@ -504,6 +499,35 @@ impl Parser {
             }
             (r, _) => r,
         }
+    }
+
+    /// Combine php-src's syntax error with what goro's own scanner and
+    /// parser find: errors php-src raises while scanning (invalid literals)
+    /// or from parser actions (modifier checks) win when they come first.
+    fn merge_syntax_error(&mut self, e: crate::php_recognizer::SyntaxError) -> ParseError {
+        let php = ParseError {
+            message: e.message,
+            span: Span::new(e.offset as u32, e.offset as u32, e.line),
+        };
+        if let Some((message, line)) = crate::take_lexer_error() {
+            // goro's lexer approximates some syntax errors itself; php-src's
+            // grammar is authoritative for those.
+            if line <= e.line && !message.starts_with("syntax error") {
+                let mut span = php.span;
+                span.line = line;
+                return ParseError { message, span };
+            }
+            return php;
+        }
+        if let Err(ge) = self.parse_program() {
+            let parse_time = (ge.message.starts_with("Multiple ")
+                && ge.message.ends_with("modifiers are not allowed"))
+                || (ge.message.starts_with("Cannot use the ") && ge.message.contains(" modifier "));
+            if parse_time && (ge.span.start as usize) < e.offset {
+                return ge;
+            }
+        }
+        php
     }
 
     fn parse_program(&mut self) -> ParseResult<Program> {
@@ -545,56 +569,28 @@ impl Parser {
             self.advance();
             group += 1;
             loop {
-                let mut parts = Vec::new();
                 let line = self.span().line;
-                // A fully qualified name keeps its leading backslash.
-                let fq = self.eat(&TokenKind::Backslash);
-                let fq_prefix = |n: Vec<u8>| {
-                    if fq {
-                        [b"\\".as_slice(), &n].concat()
-                    } else {
-                        n
+                // attribute_decl: class_name (T_STATIC | name); a fully
+                // qualified name keeps its leading backslash.
+                let parts: Vec<Vec<u8>> = match self.peek() {
+                    TokenKind::Static => {
+                        self.advance();
+                        vec![b"static".to_vec()]
                     }
+                    k => match Self::name_of(k) {
+                        Some(n) => {
+                            self.advance();
+                            let mut parts: Vec<Vec<u8>> =
+                                n.split(|&c| c == b'\\').map(|p| p.to_vec()).collect();
+                            if parts.len() > 1 && parts[0].is_empty() {
+                                parts.remove(0);
+                                parts[0].insert(0, b'\\');
+                            }
+                            parts
+                        }
+                        None => return Err(self.unexpected_error()),
+                    },
                 };
-                match self.peek().clone() {
-                    TokenKind::Identifier(n) => {
-                        parts.push(fq_prefix(n));
-                        self.advance();
-                    }
-                    _ if self.is_semi_reserved_keyword() => {
-                        parts.push(fq_prefix(self.keyword_to_identifier()));
-                        self.advance();
-                    }
-                    TokenKind::Variable(v) => {
-                        return Err(ParseError {
-                            message: format!(
-                                "syntax error, unexpected variable \"${}\"",
-                                String::from_utf8_lossy(&v)
-                            ),
-                            span: self.span(),
-                        });
-                    }
-                    _ => {
-                        return Err(ParseError {
-                            message: "expected attribute name".into(),
-                            span: self.span(),
-                        });
-                    }
-                }
-                while matches!(self.peek(), TokenKind::Backslash) {
-                    self.advance();
-                    match self.peek().clone() {
-                        TokenKind::Identifier(n) => {
-                            parts.push(n);
-                            self.advance();
-                        }
-                        _ if self.is_semi_reserved_keyword() => {
-                            parts.push(self.keyword_to_identifier());
-                            self.advance();
-                        }
-                        _ => break,
-                    }
-                }
                 let has_args = matches!(self.peek(), TokenKind::OpenParen);
                 let args = if has_args {
                     self.advance();
@@ -940,15 +936,6 @@ impl Parser {
                 }
             }
             TokenKind::Const => self.parse_const_with_attrs(Vec::new()),
-            // `namespace\foo();`: a namespace-relative name in an expression.
-            TokenKind::Namespace if matches!(self.peek_at(1), TokenKind::Backslash) => {
-                let expr = self.parse_expression()?;
-                self.expect_semicolon()?;
-                Ok(Statement {
-                    kind: StmtKind::Expression(expr),
-                    span,
-                })
-            }
             TokenKind::Namespace => {
                 self.advance();
                 // zend_compile_namespace(): `namespace namespace;` parses (the
@@ -967,62 +954,37 @@ impl Parser {
                         span: self.current().span,
                     });
                 }
-                // namespace Name\Space;  or  namespace Name\Space { ... }
-                // Namespace names can contain reserved keywords as parts
+                // namespace_declaration_name: identifier | T_NAME_QUALIFIED.
                 let mut name_parts = Vec::new();
-                if matches!(self.peek(), TokenKind::Identifier(_))
-                    || self.is_semi_reserved_keyword()
-                    || matches!(
-                        self.peek(),
-                        TokenKind::Fn
-                            | TokenKind::Match
-                            | TokenKind::Null
-                            | TokenKind::True
-                            | TokenKind::False
-                    )
-                {
-                    loop {
-                        match self.peek().clone() {
-                            TokenKind::Identifier(part) => {
-                                self.advance();
-                                name_parts.push(part);
-                            }
-                            _ if self.is_semi_reserved_keyword()
-                                || matches!(
-                                    self.peek(),
-                                    TokenKind::Fn
-                                        | TokenKind::Match
-                                        | TokenKind::Null
-                                        | TokenKind::True
-                                        | TokenKind::False
-                                ) =>
-                            {
-                                let kw = self.keyword_to_identifier();
-                                self.advance();
-                                name_parts.push(kw);
-                            }
-                            _ => break,
-                        }
-                        if !self.eat(&TokenKind::Backslash) {
-                            break;
-                        }
+                match self.peek().clone() {
+                    TokenKind::Identifier(n) | TokenKind::NameQualified(n) => {
+                        self.advance();
+                        name_parts = n.split(|&c| c == b'\\').map(|p| p.to_vec()).collect();
                     }
+                    TokenKind::OpenBrace => {}
+                    TokenKind::NameRelative(_) | TokenKind::NameFullyQualified(_) => {
+                        return Err(self.expecting_error("\"{\""));
+                    }
+                    _ if self.is_semi_reserved_keyword()
+                        || matches!(
+                            self.peek(),
+                            TokenKind::Fn
+                                | TokenKind::Match
+                                | TokenKind::Null
+                                | TokenKind::True
+                                | TokenKind::False
+                        ) =>
+                    {
+                        name_parts.push(self.keyword_to_identifier());
+                        self.advance();
+                    }
+                    _ => return Err(self.unexpected_error()),
                 }
-                // `namespace\...` lexes as a namespace-relative name.
                 if name_parts
                     .first()
                     .is_some_and(|p| p.eq_ignore_ascii_case(b"namespace"))
                 {
                     let joined = name_parts.join(&b'\\');
-                    if name_parts.len() > 1 {
-                        return Err(ParseError {
-                            message: format!(
-                                "syntax error, unexpected namespace-relative name \"{}\", expecting \"{{\"",
-                                String::from_utf8_lossy(&joined)
-                            ),
-                            span,
-                        });
-                    }
                     return Err(ParseError {
                         message: format!(
                             "Cannot use '{}' as namespace name",
@@ -1052,205 +1014,133 @@ impl Parser {
             }
             TokenKind::Use => {
                 self.advance();
-                // Check for `use function` or `use const`
-                let default_kind = match self.peek() {
-                    TokenKind::Function => {
-                        self.advance();
-                        UseKind::Function
-                    }
-                    TokenKind::Const => {
-                        self.advance();
-                        UseKind::Constant
-                    }
-                    _ => UseKind::Normal,
+                let use_type = match self.peek() {
+                    TokenKind::Function => Some(UseKind::Function),
+                    TokenKind::Const => Some(UseKind::Constant),
+                    _ => None,
                 };
-
-                let mut items = Vec::new();
-
-                // Parse the first name (could be a prefix for group use)
-                let mut first_parts = Vec::new();
-                // Handle optional leading backslash
-                self.eat(&TokenKind::Backslash);
-                loop {
-                    match self.peek().clone() {
-                        TokenKind::Identifier(part) => {
-                            self.advance();
-                            first_parts.push(part);
-                        }
-                        _ if self.is_semi_reserved_keyword() => {
-                            first_parts.push(self.keyword_to_identifier());
-                            self.advance();
-                        }
-                        _ => break,
-                    }
-                    if !self.eat(&TokenKind::Backslash) {
-                        break;
-                    }
+                if use_type.is_some() {
+                    self.advance();
                 }
-
-                if matches!(self.peek(), TokenKind::OpenBrace) {
-                    // Group use: use Foo\Bar\{Baz, Qux as Q};
-                    // first_parts is the prefix (e.g., ["Foo", "Bar"])
-                    self.advance(); // eat {
+                let default_kind = use_type.unwrap_or(UseKind::Normal);
+                let split = |n: &[u8]| -> Vec<Vec<u8>> {
+                    n.split(|&c| c == b'\\').map(|p| p.to_vec()).collect()
+                };
+                // legacy_namespace_name: T_STRING | T_NAME_QUALIFIED |
+                // T_NAME_FULLY_QUALIFIED (the leading separator is dropped).
+                let legacy_name = |p: &Self| -> Option<Vec<Vec<u8>>> {
+                    match p.peek() {
+                        TokenKind::Identifier(n) | TokenKind::NameQualified(n) => Some(split(n)),
+                        TokenKind::NameFullyQualified(n) => Some(split(&n[1..])),
+                        _ => None,
+                    }
+                };
+                let Some(first_parts) = legacy_name(self) else {
+                    return Err(if use_type.is_some() {
+                        self.expecting_error(
+                            "identifier or fully qualified name or namespaced name",
+                        )
+                    } else {
+                        self.unexpected_error()
+                    });
+                };
+                self.advance();
+                // `T_AS T_STRING`
+                let parse_alias = |p: &mut Self| -> ParseResult<Option<Vec<u8>>> {
+                    if !p.eat(&TokenKind::As) {
+                        return Ok(None);
+                    }
+                    match p.peek().clone() {
+                        TokenKind::Identifier(a) => {
+                            p.advance();
+                            Ok(Some(a))
+                        }
+                        _ => Err(p.expecting_error("identifier")),
+                    }
+                };
+                let mut items = Vec::new();
+                if matches!(self.peek(), TokenKind::Backslash)
+                    && matches!(self.peek_at(1), TokenKind::OpenBrace)
+                {
+                    // Group use: `prefix\{ ... }`.
+                    self.advance();
+                    self.advance();
+                    let mixed = use_type.is_none();
                     loop {
-                        if matches!(self.peek(), TokenKind::CloseBrace) {
-                            break;
-                        }
-                        // A leading separator is a fully qualified name.
-                        if matches!(self.peek(), TokenKind::Backslash) {
-                            let mut fq = String::new();
-                            let mut i = self.pos;
-                            while let Some(t) = self.tokens.get(i) {
-                                match &t.kind {
-                                    TokenKind::Backslash => fq.push('\\'),
-                                    TokenKind::Identifier(p) => {
-                                        fq.push_str(&String::from_utf8_lossy(p))
-                                    }
-                                    _ => break,
-                                }
-                                i += 1;
-                            }
-                            return Err(ParseError {
-                                message: format!(
-                                    "syntax error, unexpected fully qualified name \"{}\", expecting identifier or namespaced name or \"function\" or \"const\"",
-                                    fq
-                                ),
-                                span: self.span(),
-                            });
-                        }
-                        // Check for `function` or `const` per-item kind
-                        // (only in a mixed group use).
-                        let mixed = matches!(default_kind, UseKind::Normal);
                         let item_kind = match self.peek() {
-                            TokenKind::Function | TokenKind::Const if !mixed => {
-                                return Err(ParseError {
-                                    message: format!(
-                                        "syntax error, unexpected {}, expecting \"}}\"",
-                                        self.peek().to_php_unexpected()
-                                    ),
-                                    span: self.span(),
-                                });
-                            }
-                            TokenKind::Function => {
-                                // `function` keyword as per-item use kind
+                            TokenKind::Function if mixed => {
                                 self.advance();
                                 UseKind::Function
                             }
-                            TokenKind::Const => {
-                                // `const` keyword as per-item use kind
+                            TokenKind::Const if mixed => {
                                 self.advance();
                                 UseKind::Constant
                             }
                             _ => default_kind,
                         };
-                        let mut name_parts = first_parts.clone();
-                        loop {
-                            match self.peek().clone() {
-                                TokenKind::Identifier(part) => {
-                                    self.advance();
-                                    name_parts.push(part);
-                                }
-                                _ if self.is_semi_reserved_keyword() => {
-                                    name_parts.push(self.keyword_to_identifier());
-                                    self.advance();
-                                }
-                                _ => break,
+                        let name = match self.peek() {
+                            TokenKind::Identifier(n) | TokenKind::NameQualified(n) => split(n),
+                            _ => {
+                                return Err(self.expecting_error(
+                                    if mixed && item_kind == UseKind::Normal {
+                                        "identifier or namespaced name or \"function\" or \"const\""
+                                    } else {
+                                        "identifier or namespaced name"
+                                    },
+                                ));
                             }
-                            if !self.eat(&TokenKind::Backslash) {
-                                break;
-                            }
-                        }
-                        let alias = if self.eat(&TokenKind::As) {
-                            match self.peek().clone() {
-                                TokenKind::Identifier(a) => {
-                                    self.advance();
-                                    Some(a)
-                                }
-                                _ if self.is_semi_reserved_keyword() => {
-                                    let kw = self.keyword_to_identifier();
-                                    self.advance();
-                                    Some(kw)
-                                }
-                                _ => None,
-                            }
-                        } else {
-                            None
                         };
+                        self.advance();
+                        let alias = parse_alias(self)?;
+                        let mut full = first_parts.clone();
+                        full.extend(name);
                         items.push(UseItem {
-                            name: name_parts,
+                            name: full,
                             alias,
                             kind: item_kind,
                         });
                         if !self.eat(&TokenKind::Comma) {
                             break;
                         }
-                    }
-                    self.expect(&TokenKind::CloseBrace)?;
-                } else {
-                    // Simple use: use Foo\Bar\Baz as Alias;
-                    // or multiple: use Foo\Bar, Baz\Qux;
-                    let alias = if self.eat(&TokenKind::As) {
-                        match self.peek().clone() {
-                            TokenKind::Identifier(a) => {
-                                self.advance();
-                                Some(a)
-                            }
-                            _ if self.is_semi_reserved_keyword() => {
-                                let kw = self.keyword_to_identifier();
-                                self.advance();
-                                Some(kw)
-                            }
-                            _ => None,
+                        if matches!(self.peek(), TokenKind::CloseBrace) {
+                            break;
                         }
-                    } else {
-                        None
-                    };
+                        if !(matches!(
+                            self.peek(),
+                            TokenKind::Identifier(_) | TokenKind::NameQualified(_)
+                        ) || mixed
+                            && matches!(self.peek(), TokenKind::Function | TokenKind::Const))
+                        {
+                            break;
+                        }
+                    }
+                    if !matches!(self.peek(), TokenKind::CloseBrace) {
+                        return Err(self.expecting_error("\"}\""));
+                    }
+                    self.advance();
+                } else {
+                    let alias = parse_alias(self)?;
                     items.push(UseItem {
                         name: first_parts,
                         alias,
                         kind: default_kind,
                     });
-                    // Parse additional comma-separated use items
                     while self.eat(&TokenKind::Comma) {
-                        let mut name_parts = Vec::new();
-                        self.eat(&TokenKind::Backslash);
-                        loop {
-                            match self.peek().clone() {
-                                TokenKind::Identifier(part) => {
-                                    self.advance();
-                                    name_parts.push(part);
-                                }
-                                _ if self.is_semi_reserved_keyword() => {
-                                    name_parts.push(self.keyword_to_identifier());
-                                    self.advance();
-                                }
-                                _ => break,
-                            }
-                            if !self.eat(&TokenKind::Backslash) {
-                                break;
-                            }
-                        }
-                        let alias = if self.eat(&TokenKind::As) {
-                            match self.peek().clone() {
-                                TokenKind::Identifier(a) => {
-                                    self.advance();
-                                    Some(a)
-                                }
-                                _ if self.is_semi_reserved_keyword() => {
-                                    let kw = self.keyword_to_identifier();
-                                    self.advance();
-                                    Some(kw)
-                                }
-                                _ => None,
-                            }
-                        } else {
-                            None
+                        let Some(parts) = legacy_name(self) else {
+                            return Err(self.expecting_error(
+                                "identifier or fully qualified name or namespaced name",
+                            ));
                         };
+                        self.advance();
+                        let alias = parse_alias(self)?;
                         items.push(UseItem {
-                            name: name_parts,
+                            name: parts,
                             alias,
                             kind: default_kind,
                         });
+                    }
+                    if !matches!(self.peek(), TokenKind::Semicolon | TokenKind::CloseTag) {
+                        return Err(self.expecting_error("\",\" or \";\""));
                     }
                 }
                 self.expect_semicolon()?;
@@ -2217,11 +2107,9 @@ impl Parser {
     /// trait_adaptation: trait_precedence ';' | trait_alias ';'
     fn parse_trait_adaptation(&mut self) -> ParseResult<TraitAdaptation> {
         // trait_method_reference: identifier | class_name '::' identifier
-        let is_absolute = matches!(self.peek(), TokenKind::Backslash | TokenKind::Static)
-            || matches!(
-                self.peek_at(1),
-                TokenKind::DoubleColon | TokenKind::Backslash
-            );
+        let is_absolute = matches!(self.peek(), TokenKind::Static)
+            || Self::is_compound_name(self.peek())
+            || matches!(self.peek_at(1), TokenKind::DoubleColon);
         let (trait_name, method) = if is_absolute {
             let t = self.parse_trait_name()?;
             self.expect(&TokenKind::DoubleColon)?;
@@ -2310,47 +2198,20 @@ impl Parser {
         Ok(adaptation)
     }
 
-    /// Parse a class/interface/trait name reference that may be qualified.
-    /// Handles: Foo, Foo\Bar, \Foo\Bar (fully qualified, prefixed with \)
+    /// class_name: T_STATIC | name. Fully qualified names keep their
+    /// leading `\\`; relative ones are spelled `namespace\\...`.
     fn parse_class_name_ref(&mut self) -> ParseResult<Vec<u8>> {
-        let has_leading_backslash = self.eat(&TokenKind::Backslash);
-        let mut name = if has_leading_backslash {
-            vec![b'\\']
-        } else {
-            Vec::new()
-        };
-        match self.peek().clone() {
-            TokenKind::Identifier(part) => {
-                self.advance();
-                name.extend_from_slice(&part);
-            }
-            _ if self.is_semi_reserved_keyword() => {
-                name.extend_from_slice(&self.keyword_to_identifier());
-                self.advance();
-            }
-            _ => {
-                return Err(ParseError {
-                    message: "expected class name".into(),
-                    span: self.span(),
-                });
-            }
+        if matches!(self.peek(), TokenKind::Static) {
+            self.advance();
+            return Ok(b"static".to_vec());
         }
-        while self.eat(&TokenKind::Backslash) {
-            match self.peek().clone() {
-                TokenKind::Identifier(part) => {
-                    self.advance();
-                    name.push(b'\\');
-                    name.extend_from_slice(&part);
-                }
-                _ if self.is_semi_reserved_keyword() => {
-                    name.push(b'\\');
-                    name.extend_from_slice(&self.keyword_to_identifier());
-                    self.advance();
-                }
-                _ => break,
+        match Self::name_of(self.peek()) {
+            Some(n) => {
+                self.advance();
+                Ok(n)
             }
+            None => Err(self.unexpected_error()),
         }
-        Ok(name)
     }
 
     /// Check if a type hint is a scalar/builtin type that cannot be part of an intersection type
@@ -2376,53 +2237,11 @@ impl Parser {
     }
 
     fn parse_simple_type(&mut self) -> ParseResult<TypeHint> {
-        // Handle leading backslash for fully qualified names
-        if self.eat(&TokenKind::Backslash) {
-            // Fully qualified name - prefix with \ to mark as absolute
-            let mut name = vec![b'\\'];
-            while let TokenKind::Identifier(part) = self.peek().clone() {
-                self.advance();
-                if name.len() > 1 {
-                    name.push(b'\\');
-                }
-                name.extend_from_slice(&part);
-                if !self.eat(&TokenKind::Backslash) {
-                    break;
-                }
-            }
-            return Ok(TypeHint::Simple(name));
+        if let Some(n) = Self::name_of(self.peek()) {
+            self.advance();
+            return Ok(TypeHint::Simple(n));
         }
         match self.peek().clone() {
-            // A namespace-relative name: namespace\Foo
-            TokenKind::Namespace if matches!(self.peek_at(1), TokenKind::Backslash) => {
-                self.advance();
-                let mut full_name = b"namespace".to_vec();
-                while self.eat(&TokenKind::Backslash) {
-                    if let TokenKind::Identifier(part) = self.peek().clone() {
-                        self.advance();
-                        full_name.push(b'\\');
-                        full_name.extend_from_slice(&part);
-                    } else {
-                        break;
-                    }
-                }
-                Ok(TypeHint::Simple(full_name))
-            }
-            TokenKind::Identifier(name) => {
-                self.advance();
-                // Check for qualified name continuation
-                let mut full_name = name;
-                while self.eat(&TokenKind::Backslash) {
-                    if let TokenKind::Identifier(part) = self.peek().clone() {
-                        self.advance();
-                        full_name.push(b'\\');
-                        full_name.extend_from_slice(&part);
-                    } else {
-                        break;
-                    }
-                }
-                Ok(TypeHint::Simple(full_name))
-            }
             TokenKind::Array => {
                 self.advance();
                 Ok(TypeHint::Simple(b"array".to_vec()))
@@ -2849,13 +2668,9 @@ impl Parser {
                 self.advance();
                 let mut traits = Vec::new();
                 loop {
-                    if matches!(
-                        self.peek(),
-                        TokenKind::Identifier(_)
-                            | TokenKind::Backslash
-                            | TokenKind::Static
-                            | TokenKind::Namespace
-                    ) {
+                    if matches!(self.peek(), TokenKind::Static)
+                        || Self::name_of(self.peek()).is_some()
+                    {
                         traits.push(self.parse_trait_name()?);
                     } else {
                         break;
@@ -3830,34 +3645,19 @@ impl Parser {
 
             let mut types = Vec::new();
             loop {
-                // Parse qualified name: [\]Identifier[\Identifier]*
-                let is_fqn = self.eat(&TokenKind::Backslash); // optional leading backslash
-                let mut type_name = Vec::new();
-                if is_fqn {
-                    type_name.push(Vec::new()); // empty part marks fully qualified
-                }
-                loop {
-                    match self.peek().clone() {
-                        TokenKind::Identifier(name) => {
-                            self.advance();
-                            type_name.push(name);
-                        }
-                        _ if self.is_semi_reserved_keyword() => {
-                            type_name.push(self.keyword_to_identifier());
-                            self.advance();
-                        }
-                        _ if type_name.is_empty() => {
-                            return Err(ParseError {
-                                message: "expected exception class name".into(),
-                                span: self.span(),
-                            });
-                        }
-                        _ => break,
+                // catch_name_list: class_name ('|' class_name)*; a fully
+                // qualified name starts with an empty part.
+                let type_name: Vec<Vec<u8>> = match Self::name_of(self.peek()) {
+                    _ if matches!(self.peek(), TokenKind::Static) => {
+                        self.advance();
+                        vec![b"static".to_vec()]
                     }
-                    if !self.eat(&TokenKind::Backslash) {
-                        break;
+                    Some(n) => {
+                        self.advance();
+                        n.split(|&c| c == b'\\').map(|p| p.to_vec()).collect()
                     }
-                }
+                    None => return Err(self.unexpected_error()),
+                };
                 types.push(type_name);
                 if !self.eat(&TokenKind::Pipe) {
                     break;
@@ -6003,19 +5803,12 @@ impl Parser {
                     span,
                 })
             }
-            TokenKind::Identifier(name) => {
+            TokenKind::Identifier(_)
+            | TokenKind::NameQualified(_)
+            | TokenKind::NameFullyQualified(_)
+            | TokenKind::NameRelative(_) => {
+                let full_name = Self::name_of(self.peek()).unwrap_or_default();
                 self.advance();
-                // Check for qualified name: Foo\Bar\Baz
-                let mut full_name = name;
-                while self.eat(&TokenKind::Backslash) {
-                    if let TokenKind::Identifier(part) = self.peek().clone() {
-                        self.advance();
-                        full_name.push(b'\\');
-                        full_name.extend_from_slice(&part);
-                    } else {
-                        break;
-                    }
-                }
                 // Check if this is a function call
                 if matches!(self.peek(), TokenKind::OpenParen) {
                     self.advance();
@@ -6214,36 +6007,12 @@ impl Parser {
                 // Parse class name (not a full primary expression - don't consume parens)
                 let class_span = self.span();
                 let class = match self.peek().clone() {
-                    TokenKind::Identifier(name) => {
+                    TokenKind::Identifier(_)
+                    | TokenKind::NameQualified(_)
+                    | TokenKind::NameFullyQualified(_)
+                    | TokenKind::NameRelative(_) => {
+                        let full_name = Self::name_of(self.peek()).unwrap_or_default();
                         self.advance();
-                        // Handle qualified names: Foo\Bar\Baz
-                        let mut full_name = name;
-                        while self.eat(&TokenKind::Backslash) {
-                            if let TokenKind::Identifier(part) = self.peek().clone() {
-                                self.advance();
-                                full_name.push(b'\\');
-                                full_name.extend_from_slice(&part);
-                            }
-                        }
-                        Expr {
-                            kind: ExprKind::Identifier(full_name),
-                            span: class_span,
-                        }
-                    }
-                    // `new namespace\Foo`: a namespace-relative name.
-                    TokenKind::Namespace
-                        if matches!(self.peek_at(1), TokenKind::Backslash)
-                            && matches!(self.peek_at(2), TokenKind::Identifier(_)) =>
-                    {
-                        self.advance();
-                        let mut full_name = b"namespace".to_vec();
-                        while self.eat(&TokenKind::Backslash) {
-                            if let TokenKind::Identifier(part) = self.peek().clone() {
-                                self.advance();
-                                full_name.push(b'\\');
-                                full_name.extend_from_slice(&part);
-                            }
-                        }
                         Expr {
                             kind: ExprKind::Identifier(full_name),
                             span: class_span,
@@ -6286,7 +6055,23 @@ impl Parser {
                                 TokenKind::Arrow | TokenKind::NullsafeArrow => {
                                     let nullsafe = matches!(self.peek(), TokenKind::NullsafeArrow);
                                     self.advance();
-                                    let prop = self.parse_primary()?;
+                                    // After `->` any label is a T_STRING.
+                                    let prop = if matches!(self.peek(), TokenKind::Identifier(_))
+                                        || self.is_semi_reserved_keyword()
+                                    {
+                                        let name = match self.peek() {
+                                            TokenKind::Identifier(n) => n.clone(),
+                                            _ => self.keyword_to_identifier(),
+                                        };
+                                        let sp = self.span();
+                                        self.advance();
+                                        Expr {
+                                            kind: ExprKind::Identifier(name),
+                                            span: sp,
+                                        }
+                                    } else {
+                                        self.parse_primary()?
+                                    };
                                     let s = expr.span;
                                     expr = Expr {
                                         kind: ExprKind::PropertyAccess {
@@ -6350,49 +6135,16 @@ impl Parser {
                         } else {
                             Vec::new()
                         };
-                        // Parse optional extends
+                        // Parse optional extends / implements
                         let extends = if self.eat(&TokenKind::Extends) {
-                            let mut name = Vec::new();
-                            while matches!(
-                                self.peek(),
-                                TokenKind::Identifier(_) | TokenKind::Backslash
-                            ) {
-                                if let TokenKind::Identifier(part) = self.peek().clone() {
-                                    if !name.is_empty() {
-                                        name.push(b'\\');
-                                    }
-                                    name.extend_from_slice(&part);
-                                    self.advance();
-                                } else {
-                                    self.advance(); // backslash
-                                }
-                            }
-                            Some(name)
+                            Some(self.parse_class_name_ref()?)
                         } else {
                             None
                         };
-                        // Parse optional implements
                         let mut implements = Vec::new();
                         if self.eat(&TokenKind::Implements) {
                             loop {
-                                let mut iface_name = Vec::new();
-                                while matches!(
-                                    self.peek(),
-                                    TokenKind::Identifier(_) | TokenKind::Backslash
-                                ) {
-                                    if let TokenKind::Identifier(part) = self.peek().clone() {
-                                        if !iface_name.is_empty() {
-                                            iface_name.push(b'\\');
-                                        }
-                                        iface_name.extend_from_slice(&part);
-                                        self.advance();
-                                    } else {
-                                        self.advance(); // backslash
-                                    }
-                                }
-                                if !iface_name.is_empty() {
-                                    implements.push(iface_name);
-                                }
+                                implements.push(self.parse_class_name_ref()?);
                                 if !self.eat(&TokenKind::Comma) {
                                     break;
                                 }
@@ -6438,26 +6190,6 @@ impl Parser {
                             },
                             span,
                         });
-                    }
-                    TokenKind::Backslash => {
-                        // Fully qualified: new \Foo\Bar()
-                        // Prefix with \ to mark as fully qualified
-                        self.advance();
-                        let mut full_name = vec![b'\\'];
-                        while let TokenKind::Identifier(part) = self.peek().clone() {
-                            self.advance();
-                            if full_name.len() > 1 {
-                                full_name.push(b'\\');
-                            }
-                            full_name.extend_from_slice(&part);
-                            if !self.eat(&TokenKind::Backslash) {
-                                break;
-                            }
-                        }
-                        Expr {
-                            kind: ExprKind::Identifier(full_name),
-                            span: class_span,
-                        }
                     }
                     _ => self.parse_primary()?,
                 };
@@ -6639,12 +6371,7 @@ impl Parser {
                     },
                 })
             }
-            TokenKind::Fn
-                if !matches!(
-                    self.tokens.get(self.pos + 1).map(|t| &t.kind),
-                    Some(TokenKind::Backslash)
-                ) =>
-            {
+            TokenKind::Fn => {
                 let arrow_doc = self
                     .pending_closure_doc
                     .take()
@@ -6956,67 +6683,6 @@ impl Parser {
                     kind: ExprKind::Spread(Box::new(expr)),
                 })
             }
-            TokenKind::Backslash => {
-                // Fully qualified name like \Exception, \Foo\Bar
-                // Prefix with \ to mark as fully qualified for the compiler
-                self.advance();
-                let mut name = vec![b'\\'];
-                loop {
-                    match self.peek().clone() {
-                        TokenKind::Identifier(part) => {
-                            self.advance();
-                            if name.len() > 1 {
-                                name.push(b'\\');
-                            }
-                            name.extend_from_slice(&part);
-                        }
-                        _ if self.is_semi_reserved_keyword() => {
-                            if name.len() > 1 {
-                                name.push(b'\\');
-                            }
-                            name.extend_from_slice(&self.keyword_to_identifier());
-                            self.advance();
-                        }
-                        _ => break,
-                    }
-                    if !self.eat(&TokenKind::Backslash) {
-                        break;
-                    }
-                }
-                // Check if this is a function call or static access
-                if matches!(self.peek(), TokenKind::OpenParen) {
-                    self.advance();
-                    let args = self.parse_arguments()?;
-                    let is_fcc = self.first_class_callable_flag;
-                    let end_span = self.span();
-                    self.expect(&TokenKind::CloseParen)?;
-                    let name_expr = Expr {
-                        kind: ExprKind::Identifier(name),
-                        span,
-                    };
-                    if is_fcc {
-                        Ok(Expr {
-                            span: span.merge(end_span),
-                            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(
-                                name_expr,
-                            ))),
-                        })
-                    } else {
-                        Ok(Expr {
-                            span: span.merge(end_span),
-                            kind: ExprKind::FunctionCall {
-                                name: Box::new(name_expr),
-                                args,
-                            },
-                        })
-                    }
-                } else {
-                    Ok(Expr {
-                        kind: ExprKind::Identifier(name),
-                        span,
-                    })
-                }
-            }
             TokenKind::Static => {
                 self.advance();
                 Ok(Expr {
@@ -7024,28 +6690,15 @@ impl Parser {
                     span,
                 })
             }
-            _ if self.is_semi_reserved_keyword() => {
-                // Allow keywords used as identifiers in expression context
+            // `T_LIST '(' ...` and `T_READONLY argument_list`; other
+            // keywords are not names in an expression.
+            TokenKind::List | TokenKind::Readonly
+                if matches!(self.peek_at(1), TokenKind::OpenParen) =>
+            {
                 let is_list = matches!(self.peek(), TokenKind::List);
-                let mut full_name = self.keyword_to_identifier();
+                let full_name = self.keyword_to_identifier();
                 self.advance();
-                // Check for qualified name: keyword\Identifier\...
-                while self.eat(&TokenKind::Backslash) {
-                    match self.peek().clone() {
-                        TokenKind::Identifier(part) => {
-                            self.advance();
-                            full_name.push(b'\\');
-                            full_name.extend_from_slice(&part);
-                        }
-                        _ if self.is_semi_reserved_keyword() => {
-                            full_name.push(b'\\');
-                            full_name.extend_from_slice(&self.keyword_to_identifier());
-                            self.advance();
-                        }
-                        _ => break,
-                    }
-                }
-                if matches!(self.peek(), TokenKind::OpenParen) {
+                {
                     self.advance();
                     if is_list {
                         // Parse list() as an Array expression (supports keyed and empty slots)
@@ -7101,20 +6754,9 @@ impl Parser {
                             })
                         }
                     }
-                } else {
-                    Ok(Expr {
-                        kind: ExprKind::Identifier(full_name),
-                        span,
-                    })
                 }
             }
-            _ => Err(ParseError {
-                message: format!(
-                    "syntax error, unexpected {}",
-                    self.peek().to_php_unexpected()
-                ),
-                span,
-            }),
+            _ => Err(self.unexpected_error()),
         }
     }
 
@@ -7492,6 +7134,103 @@ impl Parser {
     pub fn with_source(mut self, source: &[u8]) -> Self {
         self.source = source.to_vec();
         self
+    }
+
+    /// `name` (T_STRING | T_NAME_QUALIFIED | T_NAME_FULLY_QUALIFIED |
+    /// T_NAME_RELATIVE) in goro's AST spelling: fully qualified names keep
+    /// their leading `\\`, relative ones are `namespace\\...`.
+    fn name_of(kind: &TokenKind) -> Option<Vec<u8>> {
+        match kind {
+            TokenKind::Identifier(n)
+            | TokenKind::NameQualified(n)
+            | TokenKind::NameFullyQualified(n) => Some(n.clone()),
+            TokenKind::NameRelative(n) => Some([b"namespace".as_slice(), &n[9..]].concat()),
+            _ => None,
+        }
+    }
+
+    /// Whether `kind` is a T_NAME_* (multi-segment name) token.
+    fn is_compound_name(kind: &TokenKind) -> bool {
+        matches!(
+            kind,
+            TokenKind::NameQualified(_)
+                | TokenKind::NameFullyQualified(_)
+                | TokenKind::NameRelative(_)
+        )
+    }
+
+    /// Bison's message for an unexpected current token (no expected list).
+    fn unexpected_error(&self) -> ParseError {
+        ParseError {
+            message: format!("syntax error, unexpected {}", self.unexpected_desc()),
+            span: self.span(),
+        }
+    }
+
+    /// Bison's message for an unexpected current token with the expected list.
+    fn expecting_error(&self, expecting: &str) -> ParseError {
+        ParseError {
+            message: format!(
+                "syntax error, unexpected {}, expecting {}",
+                self.unexpected_desc(),
+                expecting
+            ),
+            span: self.span(),
+        }
+    }
+
+    /// zend_yytnamerr() for the current token: the token kind followed by
+    /// its source text (truncated at a newline / to 30 characters).
+    fn unexpected_desc(&self) -> String {
+        self.unexpected_desc_at(self.pos)
+    }
+
+    fn unexpected_desc_at(&self, idx: usize) -> String {
+        let tok = &self.tokens[idx.min(self.tokens.len() - 1)];
+        let kind_name = match &tok.kind {
+            TokenKind::LongNumber(_) => "integer",
+            TokenKind::DoubleNumber(_) => "floating-point number",
+            TokenKind::Identifier(_) | TokenKind::True | TokenKind::False | TokenKind::Null => {
+                "identifier"
+            }
+            TokenKind::NameQualified(_) => "namespaced name",
+            TokenKind::NameFullyQualified(_) => "fully qualified name",
+            TokenKind::NameRelative(_) => "namespace-relative name",
+            TokenKind::Variable(_) => "variable",
+            TokenKind::ConstantString(_) => "quoted string",
+            _ => return tok.kind.to_php_unexpected(),
+        };
+        let (s, e) = (tok.span.start as usize, tok.span.end as usize);
+        let Some(text) = self.source.get(s..e).filter(|t| !t.is_empty()) else {
+            return tok.kind.to_php_unexpected();
+        };
+        let mut text = text;
+        if let Some(nl) = text.iter().position(|&c| c == b'\n') {
+            text = &text[..nl];
+        }
+        let mut kind_name = kind_name;
+        if kind_name == "quoted string" {
+            match text.first() {
+                Some(b'"') => kind_name = "double-quoted string",
+                Some(b'\'') => kind_name = "single-quoted string",
+                _ => {}
+            }
+        }
+        if matches!(text.first(), Some(b'\'' | b'"')) {
+            text = &text[1..];
+        }
+        if matches!(text.last(), Some(b'\'' | b'"')) {
+            text = &text[..text.len() - 1];
+        }
+        if text.len() > 33 {
+            format!(
+                "{} \"{}...\"",
+                kind_name,
+                String::from_utf8_lossy(&text[..30])
+            )
+        } else {
+            format!("{} \"{}\"", kind_name, String::from_utf8_lossy(text))
+        }
     }
 
     fn keyword_to_identifier(&self) -> Vec<u8> {
