@@ -43693,6 +43693,26 @@ impl Vm {
                                             });
                                         }
                                     }
+                                    // date_interface_gets_implemented()
+                                    b"datetimeinterface"
+                                        if !class.is_interface
+                                            && !class.parent.as_ref().is_some_and(|p| {
+                                                let pl = p.to_ascii_lowercase();
+                                                pl == b"datetime"
+                                                    || pl == b"datetimeimmutable"
+                                                    || self.class_extends_any(
+                                                        &pl,
+                                                        &[b"datetime", b"datetimeimmutable"],
+                                                    )
+                                            }) =>
+                                    {
+                                        return Err(VmError {
+                                            message:
+                                                "DateTimeInterface can't be implemented by user classes"
+                                                    .to_string(),
+                                            line: op.line,
+                                        });
+                                    }
                                     b"throwable" => {
                                         // Throwable cannot be implemented by user classes/enums
                                         let kind = if class.is_enum { "Enum" } else { "Class" };

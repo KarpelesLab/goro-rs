@@ -1258,9 +1258,18 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
         .map(|b| b.to_ascii_lowercase())
         .collect();
 
-    // Check if class exists (user-defined or built-in)
-    let is_user_class = vm.classes.contains_key(&class_lower);
-    let is_builtin_class = vm.is_known_builtin_class(&class_lower);
+    // Check if class exists (user-defined or built-in); zend_lookup_class()
+    // runs the autoloaders.
+    let mut is_user_class = vm.classes.contains_key(&class_lower);
+    let mut is_builtin_class = vm.is_known_builtin_class(&class_lower);
+    if !is_user_class && !is_builtin_class {
+        vm.try_autoload_class(class_name.as_bytes());
+        if vm.current_exception.is_some() {
+            return false;
+        }
+        is_user_class = vm.classes.contains_key(&class_lower);
+        is_builtin_class = vm.is_known_builtin_class(&class_lower);
+    }
     if !is_user_class && !is_builtin_class {
         let err_msg = format!("Class \"{}\" does not exist", class_name);
         let exc = vm.create_exception(b"ReflectionException", &err_msg, line);
