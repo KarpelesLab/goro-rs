@@ -966,7 +966,7 @@ fn vdbeFreeOpArray(db: &mut Sqlite3, aOp: Vec<VdbeOp>) {
 /// Link the SubProgram object passed as the second argument into the list
 /// at Vdbe.pProgram.  This list is used to delete all sub-program objects
 /// when the VM is no longer required.
-pub fn sqlite3VdbeLinkSubProgram(pVdbe: &mut Vdbe, p: &Rc<SubProgram>) {
+pub fn sqlite3VdbeLinkSubProgram(pVdbe: &mut Vdbe, p: &SubProgramRef) {
     /* C pushes on the front of a linked list */
     pVdbe.pProgram.insert(0, p.clone());
 }

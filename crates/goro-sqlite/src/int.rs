@@ -41,6 +41,10 @@ pub type IndexRef = Rc<RefCell<Index>>;
 pub type FKeyRef = Rc<RefCell<FKey>>;
 pub type TriggerRef = Rc<RefCell<Trigger>>;
 pub type KeyInfoRef = Rc<RefCell<KeyInfo>>;
+/// A trigger sub-program.  Mutable because a TriggerPrg (and the
+/// OP_Program opcodes that reference its SubProgram) is created before the
+/// trigger body is coded, so that recursive triggers can refer to it.
+pub type SubProgramRef = Rc<RefCell<SubProgram>>;
 pub type CollSeqRef = Rc<CollSeq>;
 pub type FuncDefRef = Rc<FuncDef>;
 pub type BtreeP = Rc<RefCell<crate::btree::Btree>>;
@@ -1286,7 +1290,7 @@ pub struct AutoincInfo {
 #[derive(Clone)]
 pub struct TriggerPrg {
     pub pTrigger: TriggerRef,
-    pub pProgram: Rc<SubProgram>,
+    pub pProgram: SubProgramRef,
     pub orconf: i32,
     pub aColmask: [u32; 2],
 }
@@ -1610,7 +1614,7 @@ pub enum P4 {
     /// P4_INTARRAY
     Ai(Rc<Vec<u32>>),
     /// P4_SUBPROGRAM
-    Program(Rc<SubProgram>),
+    Program(SubProgramRef),
     /// P4_TABLE / P4_TABLEREF
     Tab(TableRef),
     /// P4_INDEX
@@ -1896,7 +1900,7 @@ pub struct Vdbe {
     pub expmask: u32,
     pub smimask: u32,
     /// Sub-programs used by this statement (C pProgram list)
-    pub pProgram: Vec<Rc<SubProgram>>,
+    pub pProgram: Vec<SubProgramRef>,
     pub pAuxData: Vec<AuxData>,
     pub aScan: Vec<ScanStatus>,
     /// aOnce flags of the main program
