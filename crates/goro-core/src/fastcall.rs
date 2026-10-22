@@ -40,8 +40,8 @@ pub(crate) struct MethodSite {
     method: Option<std::rc::Weak<OpArray>>,
     /// The fast path does not apply to the class: the general handler runs.
     fallback: bool,
-    /// The pending call's name, `Class::method`.
-    func_name: Vec<u8>,
+    /// The pending call's name, `Class::method` (shared by the calls).
+    func_name: PhpString,
     /// Where "::" is in it.
     sep: usize,
     is_static: bool,
@@ -310,7 +310,7 @@ impl Vm {
                         scope,
                         method: None,
                         fallback: true,
-                        func_name: Vec::new(),
+                        func_name: PhpString::empty(),
                         sep: 0,
                         is_static: false,
                         reg_gen: 0,
@@ -329,6 +329,7 @@ impl Vm {
             }
             let mut func_name = class_name_orig.clone();
             func_name.extend_from_slice(b"::__construct");
+            let func_name = PhpString::from_vec(func_name);
             op_array
                 .sites
                 .borrow_mut()
@@ -375,6 +376,7 @@ impl Vm {
         let sep = func_name.len();
         func_name.extend_from_slice(b"::");
         func_name.extend_from_slice(&method.name);
+        let func_name = PhpString::from_vec(func_name);
         op_array
             .sites
             .borrow_mut()
@@ -408,12 +410,12 @@ impl Vm {
     }
 
     /// The pending call of a `new` of a user class without a constructor.
-    fn push_noctor_call(&mut self, func_name: Vec<u8>, obj: Rc<RefCell<PhpObject>>) {
+    fn push_noctor_call(&mut self, func_name: PhpString, obj: Rc<RefCell<PhpObject>>) {
         let mut args = self.take_values(0);
         args.push(Value::Object(obj));
         let fn_gen = self.user_functions.len() + 1;
         self.pending_calls.push(PendingCall {
-            name: PhpString::from_vec(func_name),
+            name: func_name,
             args,
             named_args: Vec::new(),
             target: CallTarget {
@@ -437,13 +439,14 @@ impl Vm {
         obj: Rc<RefCell<PhpObject>>,
         tmps: &mut [Value],
         method_op_array: Rc<OpArray>,
-        func_name: Vec<u8>,
+        func_name: PhpString,
         sep: usize,
         is_static: bool,
         reg_gen: usize,
     ) {
         let op = &op_array.ops[ip];
-        let is_ctor = func_name[sep + 2..].eq_ignore_ascii_case(b"__construct");
+        let fname = func_name.as_bytes();
+        let is_ctor = fname[sep + 2..].eq_ignore_ascii_case(b"__construct");
         // INIT_METHOD_CALL consumes a temporary object operand (`new` keeps
         // its result for the constructor call).
         let obj_val = match op.op1 {
@@ -455,11 +458,11 @@ impl Vm {
         // Register the method as a user function (usually it is already).
         if reg_gen != self.user_functions.len() + 1 {
             if !self
-                .user_fn_lookup(&func_name)
+                .user_fn_lookup(fname)
                 .is_some_and(|f| Rc::ptr_eq(f, &method_op_array))
             {
                 self.user_functions
-                    .insert(func_name.to_ascii_lowercase(), method_op_array.clone());
+                    .insert(fname.to_ascii_lowercase(), method_op_array.clone());
             }
             let fn_gen = self.user_functions.len() + 1;
             if let Some(s) = op_array
@@ -479,7 +482,7 @@ impl Vm {
         // What DO_FCALL's fast path looks up again (see fast_fcall_target;
         // it leaves PhpToken::tokenize() to the general path).
         let target =
-            if func_name[sep + 2..].eq_ignore_ascii_case(b"tokenize") || func_name[0] == b'_' {
+            if fname[sep + 2..].eq_ignore_ascii_case(b"tokenize") || fname[0] == b'_' {
                 CallTarget::NONE
             } else {
                 CallTarget {
@@ -497,7 +500,7 @@ impl Vm {
                 }
             };
         self.pending_calls.push(PendingCall {
-            name: PhpString::from_vec(func_name),
+            name: func_name,
             args,
             named_args: Vec::new(),
             target,
