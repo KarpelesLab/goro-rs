@@ -389,8 +389,11 @@ mod tests {
     use super::*;
 
     fn ex(s: &str, nt: bool) -> Option<Vec<String>> {
-        explode_dn(s.as_bytes(), nt)
-            .map(|v| v.into_iter().map(|x| String::from_utf8_lossy(&x).into_owned()).collect())
+        explode_dn(s.as_bytes(), nt).map(|v| {
+            v.into_iter()
+                .map(|x| String::from_utf8_lossy(&x).into_owned())
+                .collect()
+        })
     }
     fn ufn(s: &str) -> Option<String> {
         dn2ufn(s.as_bytes()).map(|v| String::from_utf8_lossy(&v).into_owned())

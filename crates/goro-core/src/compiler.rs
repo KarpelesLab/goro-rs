@@ -592,7 +592,7 @@ impl Compiler {
                     // ext/intl: as its stubs declare (collator_sort(),
                     // numfmt_parse(), grapheme_extract(), idn_to_ascii()...)
                     (name, p) => crate::stubs::find_function(name).is_some_and(|f| {
-                        f.ext == "intl"
+                        (f.ext == "intl" || f.ext == "ldap")
                             && f.args
                                 .get(p)
                                 .is_some_and(|a| a.flags & crate::stubs::A_BY_REF != 0)

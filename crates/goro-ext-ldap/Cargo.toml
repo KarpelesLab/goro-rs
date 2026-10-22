@@ -1,0 +1,12 @@
+[package]
+name = "goro-ext-ldap"
+version = "0.1.0"
+edition = "2024"
+description = "PHP ldap extension (LDAP\\Connection, LDAP\\Result, LDAP\\ResultEntry) for goro-rs, over goro-ldap"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ldap = { path = "../goro-ldap" }

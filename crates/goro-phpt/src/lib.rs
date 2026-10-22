@@ -373,7 +373,16 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
     }
     // --ARGS-- are passed to the script as $argv (inherited by the forked child).
     TEST_ARGS.with(|a| *a.borrow_mut() = test.sections.get("ARGS").map(|s| s.trim().to_string()));
-    TEST_ENV.with(|a| *a.borrow_mut() = test.sections.get("ENV").map(|s| s.to_string()));
+    TEST_ENV.with(|a| {
+        *a.borrow_mut() = test.sections.get("ENV").map(|s| {
+            // run-tests.php substitutes {PWD}/{TMP} in --ENV-- too.
+            let pwd = test_dir
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
+            s.replace("{PWD}", &pwd)
+                .replace("{TMP}", &std::env::temp_dir().to_string_lossy())
+        })
+    });
 
     // Check goro skip-list: tests that depend on infrastructure goro doesn't have
     // (JIT, phpdbg, CLI server, real MySQL, external php spawn, real network, live curl).
@@ -435,6 +444,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_tidy::register(&mut vm);
                 goro_ext_opcache::register(&mut vm);
                 goro_ext_sqlite3::register(&mut vm);
+                goro_ext_ldap::register(&mut vm);
                 // Loadable on request (see run_test_inner).
                 vm.register_extension(goro_ext_zend_test::NAME);
                 vm.register_extension(b"simplexml");
@@ -1796,6 +1806,7 @@ fn execute_php_inner_impl(
     goro_ext_readline::register(&mut vm);
     goro_ext_tidy::register(&mut vm);
     goro_ext_sqlite3::register(&mut vm);
+    goro_ext_ldap::register(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }

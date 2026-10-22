@@ -55,6 +55,8 @@ goro-ext-fileinfo = { path = "../goro-ext-fileinfo" }
 goro-ext-sodium = { path = "../goro-ext-sodium" }
 goro-ext-intl = { path = "../goro-ext-intl" }
 goro-ext-sqlite3 = { path = "../goro-ext-sqlite3" }
+goro-ext-ldap = { path = "../goro-ext-ldap" }
+goro-ldap = { path = "../goro-ldap" }
 libc = "0.2"
 tempfile = "3"
 regex = "1"

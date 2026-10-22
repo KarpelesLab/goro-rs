@@ -139,9 +139,17 @@ pub fn parse_ext(url_in: &str, flags: u32) -> Result<LdapUrl, UrlErr> {
     let bytes = url.clone();
     let (hostport, mut p, mut novell_q): (String, Option<String>, Option<String>) =
         match bytes.find('/') {
-            Some(i) => (bytes[..i].to_string(), Some(bytes[i + 1..].to_string()), None),
+            Some(i) => (
+                bytes[..i].to_string(),
+                Some(bytes[i + 1..].to_string()),
+                None,
+            ),
             None => match bytes.find('?') {
-                Some(i) => (bytes[..i].to_string(), None, Some(bytes[i + 1..].to_string())),
+                Some(i) => (
+                    bytes[..i].to_string(),
+                    None,
+                    Some(bytes[i + 1..].to_string()),
+                ),
                 None => (bytes.clone(), None, None),
             },
         };
@@ -176,7 +184,10 @@ pub fn parse_ext(url_in: &str, flags: u32) -> Result<LdapUrl, UrlErr> {
             }
             // Novell kludge: a port can be followed by the dn when no '/'
             // was seen. strtol stops at first non-digit.
-            let digits: String = pp.chars().take_while(|c| c.is_ascii_digit() || *c == '-').collect();
+            let digits: String = pp
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '-')
+                .collect();
             let port: i64 = digits.parse().map_err(|_| UrlErr::BadUrl)?;
             if digits.len() != pp.len() {
                 // trailing chars; for Novell kludge only when no '/' part

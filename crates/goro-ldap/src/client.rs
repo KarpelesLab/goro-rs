@@ -6,7 +6,7 @@ use std::net::ToSocketAddrs;
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::time::Duration;
 
-use crate::ber::{self, Reader, Writer, TAG_OCTETSTRING, TAG_SET};
+use crate::ber::{self, Reader, TAG_OCTETSTRING, TAG_SET, Writer};
 use crate::consts::*;
 use crate::message::{Control, Entry, LdapMessage, Reference};
 use crate::tls::{TlsClientConfig, TlsStream};
@@ -90,6 +90,7 @@ pub struct Options {
     // string options
     pub matched_dn: Option<Vec<u8>>,
     pub diagnostic: Option<Vec<u8>>,
+    pub host_name: Option<Vec<u8>>,
     pub sasl_mech: Option<Vec<u8>>,
     pub sasl_realm: Option<Vec<u8>>,
     pub sasl_authcid: Option<Vec<u8>>,
@@ -129,6 +130,7 @@ impl Default for Options {
             client_controls: Vec::new(),
             matched_dn: None,
             diagnostic: None,
+            host_name: None,
             sasl_mech: None,
             sasl_realm: None,
             sasl_authcid: None,
@@ -330,7 +332,12 @@ impl Conn {
 
     // ---- message framing ----
 
-    fn write_message(&mut self, msgid: i64, op: &[u8], controls: &[Control]) -> std::io::Result<()> {
+    fn write_message(
+        &mut self,
+        msgid: i64,
+        op: &[u8],
+        controls: &[Control],
+    ) -> std::io::Result<()> {
         let mut w = Writer::new();
         w.start_seq();
         w.int(msgid);
@@ -407,7 +414,9 @@ impl Conn {
                     out.entries.push(e);
                 }
                 LDAP_RES_SEARCH_REFERENCE => {
-                    let refc = seq.enter(LDAP_RES_SEARCH_REFERENCE).map_err(|_| LDAP_DECODING_ERROR)?;
+                    let refc = seq
+                        .enter(LDAP_RES_SEARCH_REFERENCE)
+                        .map_err(|_| LDAP_DECODING_ERROR)?;
                     let mut refs = Vec::new();
                     let mut rr = refc;
                     while !rr.is_empty() {
@@ -452,7 +461,12 @@ impl Conn {
     }
 
     /// ldap_bind_ext (async bind → result object).
-    pub fn bind_ext(&mut self, dn: &[u8], pw: &[u8], controls: &[Control]) -> Result<LdapMessage, i32> {
+    pub fn bind_ext(
+        &mut self,
+        dn: &[u8],
+        pw: &[u8],
+        controls: &[Control],
+    ) -> Result<LdapMessage, i32> {
         self.bind_op(dn, pw, controls)
     }
 
@@ -714,9 +728,7 @@ fn parse_entry(seq: &mut Reader) -> Result<Entry, i32> {
 
 /// Parse the LDAPResult fields + op-specific trailers.
 fn parse_result_op(op_tag: u32, seq: &mut Reader, out: &mut LdapMessage) -> Result<(), i32> {
-    let mut body = seq
-        .enter(op_tag)
-        .map_err(|_| LDAP_DECODING_ERROR)?;
+    let mut body = seq.enter(op_tag).map_err(|_| LDAP_DECODING_ERROR)?;
     if op_tag == LDAP_RES_EXTENDED {
         // {resultCode, matchedDN, errorMessage, [referral], [responseName
         // [10]], [responseValue [11]]}

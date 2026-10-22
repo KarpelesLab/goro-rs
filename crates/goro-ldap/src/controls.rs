@@ -2,7 +2,7 @@
 //! sortctrl.c, vlvctrl.c, assertion.c, RFC 4527 pre/post read, RFC 3876
 //! ValuesReturnFilter).
 
-use crate::ber::{BerError, Reader, Writer, TAG_OCTETSTRING};
+use crate::ber::{BerError, Reader, TAG_OCTETSTRING, Writer};
 use crate::consts::*;
 use crate::filter;
 
@@ -162,9 +162,7 @@ pub fn parse_sortresponse(val: &[u8]) -> Result<(i64, Option<Vec<u8>>), BerError
     let mut r = Reader::new(val);
     let mut s = r.seq()?;
     let code = s.enumerated()?;
-    let attr = s
-        .optional(LDAP_ATTRTYPES_IDENTIFIER)?
-        .map(|v| v.to_vec());
+    let attr = s.optional(LDAP_ATTRTYPES_IDENTIFIER)?.map(|v| v.to_vec());
     Ok((code, attr))
 }
 
@@ -176,9 +174,7 @@ pub fn parse_vlvresponse(val: &[u8]) -> Result<(i64, i64, i64, Option<Vec<u8>>),
     let target = s.int()?;
     let count = s.int()?;
     let err = s.enumerated()?;
-    let context = s
-        .optional(LDAP_VLVCONTEXT_IDENTIFIER)?
-        .map(|v| v.to_vec());
+    let context = s.optional(LDAP_VLVCONTEXT_IDENTIFIER)?.map(|v| v.to_vec());
     Ok((target, count, err, context))
 }
 

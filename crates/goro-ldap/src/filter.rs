@@ -1,7 +1,7 @@
 //! RFC 4515 search-filter string → BER (filter.c: ldap_pvt_put_filter and
 //! helpers), and ldap_put_vrFilter for the ValuesReturnFilter control.
 
-use crate::ber::{Writer, TAG_OCTETSTRING};
+use crate::ber::{TAG_OCTETSTRING, Writer};
 use crate::consts::*;
 
 fn is_space(c: u8) -> bool {

@@ -383,7 +383,9 @@ mod tests {
         w.start_seq().int(1).octets(b"opaque").end();
         assert_eq!(
             w.finish(),
-            vec![0x30, 0x0b, 2, 1, 1, 4, 6, b'o', b'p', b'a', b'q', b'u', b'e']
+            vec![
+                0x30, 0x0b, 2, 1, 1, 4, 6, b'o', b'p', b'a', b'q', b'u', b'e'
+            ]
         );
         let big = vec![b'x'; 300];
         let mut w = Writer::new();
