@@ -7307,6 +7307,9 @@ fn rebuildPage(pCArray: &CellArray, iFirst: usize, nCell: usize, pPg: &DbPage) -
         if pData < 0 {
             return SQLITE_CORRUPT_BKPT();
         }
+        if pCellptr + 2 > g.aData.len() {
+            return SQLITE_CORRUPT_BKPT();
+        }
         put2byte(&mut g.aData, pCellptr, pData as usize);
         pCellptr += 2;
         if pData < pCellptr as isize {
@@ -7536,6 +7539,9 @@ fn editPage(pPg: &DbPage, iOld: i32, iNew: i32, nNew: i32, pCArray: &mut CellArr
             {
                 let mut g = pPg.borrow_mut();
                 let len = nCell as usize * 2;
+                if pCellptr + nAdd as usize * 2 + len > g.aData.len() {
+                    break 'editpage_fail; /* corrupt */
+                }
                 g.aData
                     .copy_within(pCellptr..pCellptr + len, pCellptr + nAdd as usize * 2);
             }
@@ -7562,6 +7568,9 @@ fn editPage(pPg: &DbPage, iOld: i32, iNew: i32, nNew: i32, pCArray: &mut CellArr
                 if nCell > iCell {
                     let mut g = pPg.borrow_mut();
                     let len = (nCell - iCell) as usize * 2;
+                    if pCellptr + 2 + len > g.aData.len() {
+                        break 'editpage_fail; /* corrupt */
+                    }
                     g.aData.copy_within(pCellptr..pCellptr + len, pCellptr + 2);
                 }
                 nCell += 1;
@@ -8514,6 +8523,9 @@ fn balance_nonroot(pParent: &DbPage, iParentIdx: i32, isRoot: i32, bBulk: i32) -
             let mut fromCellArray = true;
             if newLeaf == 0 {
                 b.copyCell(j, 0, sz as usize, &mut pCell, None);
+                if pCell.len() < 4 {
+                    pCell.resize(4, 0);
+                }
                 pNew.borrow_mut().aData[8..12].copy_from_slice(&pCell[0..4]);
             } else if leafData != 0 {
                 /* If the tree is a leaf-data tree, and the siblings are leaves,
@@ -9335,7 +9347,9 @@ fn btreeInsertCell(
             let g = pPage.borrow();
             let off = findCell(&g.pExtra, &g.aData, idx);
             if g.pExtra.leaf == 0 {
-                newCell[0..4].copy_from_slice(&g.aData[off..off + 4]);
+                for k in 0..4 {
+                    newCell[k] = at(&g.aData, off + k);
+                }
             }
             off
         };
