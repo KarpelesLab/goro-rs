@@ -1,0 +1,15 @@
+[package]
+name = "goro-ext-fileinfo"
+version = "0.1.0"
+edition = "2024"
+description = "PHP fileinfo extension (with a port of libmagic) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+goro-pcre = { path = "../goro-pcre" }
+goro-zlib = { path = "../goro-zlib" }
+libc = "0.2"

@@ -10334,6 +10334,7 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         "sysvshm" => &["SysvSharedMemory"],
         "sysvmsg" => &["SysvMessageQueue"],
         "zip" => &["ZipArchive"],
+        "fileinfo" => &["finfo"],
         "filter" => &["Filter\\FilterException", "Filter\\FilterFailedException"],
         _ => &[],
     }

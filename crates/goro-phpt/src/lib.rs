@@ -414,6 +414,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_phar::register(&mut vm);
                 goro_ext_exif::register(&mut vm);
                 goro_ext_zip::register(&mut vm);
+                goro_ext_fileinfo::register(&mut vm);
                 // Loadable on request (see run_test_inner).
                 vm.register_extension(goro_ext_zend_test::NAME);
                 vm.register_extension(b"simplexml");
@@ -1687,6 +1688,7 @@ fn execute_php_inner_impl(
     goro_ext_phar::register(&mut vm);
     goro_ext_exif::register(&mut vm);
     goro_ext_zip::register(&mut vm);
+    goro_ext_fileinfo::register(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }

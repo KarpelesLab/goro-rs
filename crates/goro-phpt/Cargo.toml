@@ -43,6 +43,7 @@ goro-ext-calendar = { path = "../goro-ext-calendar" }
 goro-ext-phar = { path = "../goro-ext-phar" }
 goro-ext-exif = { path = "../goro-ext-exif" }
 goro-ext-zip = { path = "../goro-ext-zip" }
+goro-ext-fileinfo = { path = "../goro-ext-fileinfo" }
 libc = "0.2"
 tempfile = "3"
 regex = "1"

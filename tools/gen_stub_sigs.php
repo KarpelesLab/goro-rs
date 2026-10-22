@@ -56,6 +56,7 @@ $dirs = [
     'ext/phar' => 'Phar',
     'ext/exif' => 'exif',
     'ext/zip' => 'zip',
+    'ext/fileinfo' => 'fileinfo',
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',
     'ext/dom' => 'dom',
