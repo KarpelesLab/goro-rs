@@ -541,6 +541,15 @@ impl Vm {
     ) -> Option<crate::vm::VmError> {
         let mut fatal: Option<crate::vm::VmError> = None;
         let args = vec![class_name.clone()];
+        // Called by the engine for user code (new, static access, ...) the
+        // autoloader's frame is at the current line; from a built-in
+        // function (class_exists(), ...) at [internal function].
+        let from_builtin = self.spl_caller_is_internal() || self.in_builtin_frame();
+        let (site_file, site_line) = if from_builtin {
+            (String::new(), 0)
+        } else {
+            (self.current_file.clone(), self.current_line)
+        };
         // Invokable objects: call __invoke with the object's class scope.
         if let Value::Object(o) = cb {
             let cl = obj_class_lower(o);
@@ -633,8 +642,8 @@ impl Vm {
                             format!("{}{}{}", decl_disp, sep, String::from_utf8_lossy(&m.name));
                         self.call_stack.push((
                             fname,
-                            String::new(),
-                            0,
+                            site_file,
+                            site_line,
                             args.clone(),
                             this.is_some(),
                         ));
@@ -661,11 +670,11 @@ impl Vm {
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
-                if self.user_functions.contains_key(&lower) {
+                if self.user_functions.contains_key(&lower) && from_builtin {
                     self.call_stack.push((
                         s.to_string_lossy(),
-                        String::new(),
-                        0,
+                        site_file,
+                        site_line,
                         args.clone(),
                         false,
                     ));
@@ -673,6 +682,13 @@ impl Vm {
                         fatal = Some(e);
                     }
                     self.call_stack.pop();
+                } else if self.user_functions.contains_key(&lower) {
+                    // The callee's frame is located at the current line.
+                    self.ucf_call_line = Some(site_line);
+                    if let Err(e) = self.call_callback(cb, &args) {
+                        fatal = Some(e);
+                    }
+                    self.ucf_call_line = None;
                 } else {
                     if let Err(e) = self.call_callback(cb, &args) {
                         fatal = Some(e);
