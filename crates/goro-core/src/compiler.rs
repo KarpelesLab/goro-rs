@@ -14745,8 +14745,12 @@ impl Compiler {
             ExprKind::InterpolatedString(parts) => {
                 // Compile each part and concatenate
                 let mut result: Option<OperandType> = None;
+                // Whether the result is one expression yet (not a string)
+                let mut lone_expr = false;
                 for part in parts {
                     let part_op = match part {
+                        // (an empty piece adds nothing to the rope)
+                        StringPart::Literal(s) if s.is_empty() && parts.len() > 1 => continue,
                         StringPart::Literal(s) => {
                             let idx = self
                                 .op_array
@@ -14755,6 +14759,7 @@ impl Compiler {
                         }
                         StringPart::Expr(e) => self.compile_expr(e)?,
                     };
+                    lone_expr = result.is_none() && matches!(part, StringPart::Expr(_));
                     result = Some(if let Some(prev) = result {
                         let tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
@@ -14768,6 +14773,17 @@ impl Compiler {
                     } else {
                         part_op
                     });
+                }
+                if let (true, Some(op)) = (lone_expr, result) {
+                    let tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::CastString,
+                        op1: op,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(tmp),
+                        line: expr.span.line,
+                    });
+                    return Ok(OperandType::Tmp(tmp));
                 }
                 Ok(result.unwrap_or_else(|| {
                     let idx = self.op_array.add_literal(Value::String(PhpString::empty()));
