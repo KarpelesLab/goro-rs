@@ -899,7 +899,10 @@ fn get_parts_iterator(vm: &mut Vm, c: &mut Call) -> Value {
         key_type: kt,
     };
     match iterator::new_iterator(vm, b"intlpartsiterator", Box::new(src)) {
-        Some(o) => Value::Object(o),
+        Some(o) => {
+            iterator::wrap_self(&o);
+            Value::Object(o)
+        }
         None => Value::Null,
     }
 }

@@ -95,7 +95,17 @@ pub fn new_iterator(vm: &mut Vm, class_lower: &[u8], src: Box<dyn Source>) -> Op
 /// An IntlIterator over a fixed list of values, keys 0..n
 /// (IntlIterator_from_StringEnumeration()).
 pub fn new_array_iterator(vm: &mut Vm, values: Vec<Value>) -> Option<Obj> {
-    new_iterator(vm, b"intliterator", Box::new(Values { vals: values, pos: 0 }))
+    let o = new_iterator(vm, b"intliterator", Box::new(Values { vals: values, pos: 0 }))?;
+    wrap_self(&o);
+    Some(o)
+}
+
+/// zoi_with_current's wrapping_obj: the iterator references its object,
+/// a cycle only the collector frees (as in php-src).
+pub fn wrap_self(o: &Obj) {
+    let v = Value::Object(o.clone());
+    o.borrow_mut()
+        .set_property(b"__spl_intl_wrapping".to_vec(), v);
 }
 
 /// The source object of an IntlIterator (IntlPartsIterator's break iterator).
