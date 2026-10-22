@@ -210,7 +210,7 @@ pub fn quote_literal(s: &str, out: &mut String) {
                 in_q = false;
             }
             out.push_str("''");
-        } else if ch.is_ascii_alphabetic() {
+        } else if ch.is_ascii_alphabetic() || ch.is_lowercase() || ch.is_uppercase() {
             if !in_q {
                 out.push('\'');
                 in_q = true;
@@ -234,12 +234,27 @@ fn idx_of(names: &[String], v: &str) -> bool {
 }
 
 /// Recover the CLDR pattern behind a style format: two probe instants
-/// (2345-11-23 15:47:58 and 2005-01-02 03:04:05) tell the fields apart
+/// (2345-11-23 15:47:58 and 2005-01-02 00:04:05) tell the fields apart
 /// (2-digit years, hour cycles, zero padding, name widths).
 fn pattern_of(ld: &LocaleData, o: &DateTimeFormatOptions, zone: &str) -> String {
-    let p1 = parts(&ld.lang, &mk(2345, 11, 23, 15, 47, 58), o);
-    let p2 = parts(&ld.lang, &mk(2005, 1, 2, 3, 4, 5), o);
-    let aligned = p1.len() == p2.len() && p1.iter().zip(&p2).all(|(a, b)| a.kind == b.kind);
+    let p1 = parts(&ld.lang, &probe1(), o);
+    let p2 = parts(&ld.lang, &probe2(), o);
+    pattern_from_parts(ld, &p1, &p2, zone)
+}
+
+/// The first probe instant: 2345-11-23 15:47:58.
+pub fn probe1() -> DateTime {
+    mk(2345, 11, 23, 15, 47, 58)
+}
+
+/// The second probe instant: 2005-01-02 00:04:05.
+pub fn probe2() -> DateTime {
+    mk(2005, 1, 2, 0, 4, 5)
+}
+
+/// The pattern behind the formatting of the two probe instants.
+pub fn pattern_from_parts(ld: &LocaleData, p1: &[DateTimePart], p2: &[DateTimePart], zone: &str) -> String {
+    let aligned = p1.len() == p2.len() && p1.iter().zip(p2).all(|(a, b)| a.kind == b.kind);
     // 2345-11-23 is a Friday
     let wd1 = 5;
     let mut out = String::new();
@@ -283,9 +298,16 @@ fn pattern_of(ld: &LocaleData, o: &DateTimeFormatOptions, zone: &str) -> String 
                 }
             }
             P::Hour => {
-                let c = if v == "15" { 'H' } else { 'h' };
+                // 15:47 tells the 12/24 hour clocks apart, 00:04 the origin
+                let v2 = q.map(|q| q.value.as_str()).unwrap_or("");
+                let c = match (v == "15", v2) {
+                    (true, "24") => 'k',
+                    (true, _) => 'H',
+                    (false, "0" | "00") => 'K',
+                    (false, _) => 'h',
+                };
                 out.push(c);
-                if padded {
+                if padded && c != 'h' || c == 'h' && v.len() == 2 {
                     out.push(c);
                 }
             }

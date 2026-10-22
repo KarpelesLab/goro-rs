@@ -667,15 +667,32 @@ impl ParseCtx<'_> {
 
     /// The instant of parsed fields (the calendar cleared first: missing
     /// fields from 1970-01-01 00:00:00.000), and the zone to use.
-    pub fn resolve(&self, p: &Parsed) -> (f64, String) {
+    /// With `keep` (udat_parseCalendar()), the calendar is not cleared: the
+    /// fields not parsed keep the calendar's.
+    pub fn resolve(&self, p: &Parsed, keep: bool) -> (f64, String) {
         let tz = p.tz.clone().unwrap_or_else(|| self.info.tz_id.clone());
+        let base = if keep {
+            Some(dc::compute_fields(self.info))
+        } else {
+            None
+        };
         let mut f = [0i32; dc::FIELD_COUNT];
         let greg = self.greg();
-        let g = |i: usize| p.f[i];
-        let year = g(dc::YEAR)
-            .or(g(dc::YEAR_WOY))
-            .or(g(dc::EXTENDED_YEAR))
+        let g = |i: usize| p.f[i].or(base.map(|b| b[i]).filter(|_| i != dc::DAY_OF_YEAR));
+        let year = p.f[dc::YEAR]
+            .or(p.f[dc::YEAR_WOY])
+            .or(p.f[dc::EXTENDED_YEAR])
             .map(|v| v as i64);
+        let year = match (year, base) {
+            (None, Some(b)) => Some(if greg && b[dc::ERA] == 0 {
+                1 - b[dc::YEAR] as i64
+            } else if greg {
+                b[dc::YEAR] as i64
+            } else {
+                b[dc::EXTENDED_YEAR] as i64
+            }),
+            (y, _) => y,
+        };
         let mut ext = match year {
             Some(y) => y,
             None if greg => 1970,
@@ -689,7 +706,7 @@ impl ParseCtx<'_> {
                 dc::compute_fields(&e)[dc::EXTENDED_YEAR] as i64
             }
         };
-        if greg && g(dc::ERA) == Some(0) && g(dc::YEAR).is_some() {
+        if greg && p.f[dc::ERA] == Some(0) && p.f[dc::YEAR].is_some() {
             ext = 1 - ext;
         }
         f[dc::ERA] = g(dc::ERA).unwrap_or(1);
@@ -697,8 +714,8 @@ impl ParseCtx<'_> {
         f[dc::EXTENDED_YEAR] = ext as i32;
         let mut month = g(dc::MONTH).unwrap_or(0);
         let mut date = g(dc::DATE).unwrap_or(1);
-        if g(dc::MONTH).is_none() && g(dc::DATE).is_none() && greg {
-            if let Some(doy) = g(dc::DAY_OF_YEAR) {
+        if p.f[dc::MONTH].is_none() && p.f[dc::DATE].is_none() && greg {
+            if let Some(doy) = p.f[dc::DAY_OF_YEAR] {
                 let d = dc::days_from_civil(ext, 1, 1) + doy as i64 - 1;
                 let (_, m, dd) = dc::civil_from_days(d);
                 month = m as i32 - 1;
@@ -707,16 +724,21 @@ impl ParseCtx<'_> {
         }
         f[dc::MONTH] = month;
         f[dc::DATE] = date;
-        f[dc::HOUR_OF_DAY] = match (g(dc::HOUR), g(dc::HOUR_OF_DAY)) {
-            (Some(h), _) => h + 12 * g(dc::AM_PM).unwrap_or(0),
+        let ampm = p.f[dc::AM_PM].or(base.map(|b| b[dc::AM_PM])).unwrap_or(0);
+        f[dc::HOUR_OF_DAY] = match (p.f[dc::HOUR], p.f[dc::HOUR_OF_DAY]) {
+            (Some(h), _) => h + 12 * ampm,
             (None, Some(h)) => h,
-            (None, None) => 0,
+            (None, None) => match base {
+                Some(b) if p.f[dc::AM_PM].is_some() => b[dc::HOUR] + 12 * ampm,
+                Some(b) => b[dc::HOUR_OF_DAY],
+                None => 12 * ampm,
+            },
         };
         f[dc::MINUTE] = g(dc::MINUTE).unwrap_or(0);
         f[dc::SECOND] = g(dc::SECOND).unwrap_or(0);
         f[dc::MILLISECOND] = g(dc::MILLISECOND).unwrap_or(0);
-        if let Some(ms) = g(dc::MILLISECONDS_IN_DAY) {
-            if g(dc::HOUR).is_none() && g(dc::HOUR_OF_DAY).is_none() {
+        if let Some(ms) = p.f[dc::MILLISECONDS_IN_DAY] {
+            if p.f[dc::HOUR].is_none() && p.f[dc::HOUR_OF_DAY].is_none() {
                 f[dc::HOUR_OF_DAY] = ms / 3_600_000;
                 f[dc::MINUTE] = (ms / 60_000) % 60;
                 f[dc::SECOND] = (ms / 1000) % 60;

@@ -267,7 +267,7 @@ fn valid_style(t: i64) -> bool {
 
 /// Run `f` with intl.use_exceptions on and intl.error_level 0 (what the
 /// constructors do).
-fn with_exceptions<R>(vm: &mut Vm, f: impl FnOnce(&mut Vm) -> R) -> R {
+pub fn with_exceptions<R>(vm: &mut Vm, f: impl FnOnce(&mut Vm) -> R) -> R {
     let ue = vm.constants.get(b"intl.use_exceptions".as_slice()).cloned();
     let el = vm.constants.get(b"intl.error_level".as_slice()).cloned();
     vm.constants.insert(b"intl.use_exceptions".to_vec(), s("1"));
@@ -1020,7 +1020,7 @@ fn utf16_map(text: &str) -> (Vec<char>, Vec<usize>) {
 
 /// Parse `text` from UTF-16 position `pos`: Ok((millis, zone, fields, end))
 /// or Err(error position), both in UTF-16 units.
-fn do_parse(st: &DateFmt, text: &str, pos: i64) -> Result<(f64, String, usize), usize> {
+fn do_parse(st: &DateFmt, text: &str, pos: i64, keep: bool) -> Result<(f64, String, usize), usize> {
     let (chars, offs) = utf16_map(text);
     let start = offs.iter().position(|&o| o as i64 >= pos.max(0)).unwrap_or(chars.len());
     let ld = locale_data(&st.requested_locale);
@@ -1032,7 +1032,7 @@ fn do_parse(st: &DateFmt, text: &str, pos: i64) -> Result<(f64, String, usize), 
     };
     match cx.parse(&st.items, &chars, start) {
         Ok((p, end)) => {
-            let (millis, tz) = cx.resolve(&p);
+            let (millis, tz) = cx.resolve(&p, keep);
             Ok((millis, tz, offs[end.min(chars.len())]))
         }
         Err(e) => Err(offs[e.min(chars.len())]),
@@ -1068,7 +1068,7 @@ fn parse_common(vm: &mut Vm, c: &mut Call, update_calendar: bool) -> Value {
             "Error converting timezone to UTF-16",
         ),
         Ok(t) => {
-            let r = do_parse(&st.borrow(), t, pos.unwrap_or(0));
+            let r = do_parse(&st.borrow(), t, pos.unwrap_or(0), update_calendar);
             match r {
                 Ok((millis, tz, end)) => {
                     new_pos = end as i64;
@@ -1123,7 +1123,7 @@ fn localtime(vm: &mut Vm, c: &mut Call) -> Value {
             "Error converting timezone to UTF-16",
         ),
         Ok(t) => {
-            let r = do_parse(&st.borrow(), t, pos.unwrap_or(0));
+            let r = do_parse(&st.borrow(), t, pos.unwrap_or(0), true);
             match r {
                 Ok((millis, tz, end)) => {
                     new_pos = end as i64;

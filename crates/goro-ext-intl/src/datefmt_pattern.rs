@@ -116,6 +116,9 @@ pub struct Fmt<'a> {
     pub info: &'a CalInfo,
     pub f: [i32; dc::FIELD_COUNT],
     pub locale: &'a str,
+    /// The pattern being formatted has minute / second fields (ICU's noon
+    /// rule for the day periods).
+    has_ms: std::cell::Cell<(bool, bool)>,
 }
 
 impl<'a> Fmt<'a> {
@@ -125,6 +128,7 @@ impl<'a> Fmt<'a> {
             info,
             f: dc::compute_fields(info),
             locale,
+            has_ms: std::cell::Cell::new((true, true)),
         }
     }
 
@@ -194,38 +198,50 @@ impl<'a> Fmt<'a> {
         )
     }
 
+    /// The flexible day period (B) of a time of day from intl.
+    fn intl_day_period(&self, count: usize, h: i32, mi: i32, s: i32) -> Option<String> {
+        let mut o = dt::DateTimeFormatOptions::default();
+        o.hour = Some(dt::Numeric2Digit::Numeric);
+        o.day_period = Some(match count {
+            4 => NameStyle::Long,
+            5 => NameStyle::Narrow,
+            _ => NameStyle::Short,
+        });
+        let d = dt::DateTime {
+            year: 2000,
+            month: 1,
+            day: 1,
+            hour: h as u8,
+            minute: mi as u8,
+            second: s as u8,
+            millisecond: 0,
+        };
+        let ps = dt::format_to_parts(&self.ld.lang, &d, &o).ok()?;
+        ps.iter()
+            .find(|p| p.kind == dt::DateTimePartType::DayPeriod)
+            .map(|p| p.value.clone())
+    }
+
+    /// 'b' (am, pm, noon) and 'B' (flexible day periods); ICU never
+    /// outputs "midnight".
     fn day_period(&self, count: usize, flexible: bool) -> String {
         let h = self.f[dc::HOUR_OF_DAY];
-        let mi = self.f[dc::MINUTE];
-        let s = self.f[dc::SECOND];
-        let ms = self.f[dc::MILLISECOND];
-        let at_exact = mi == 0 && s == 0 && ms == 0 && (h == 0 || h == 12);
-        if flexible || at_exact {
-            let mut o = dt::DateTimeFormatOptions::default();
-            o.hour = Some(dt::Numeric2Digit::Numeric);
-            o.day_period = Some(match count {
-                4 => NameStyle::Long,
-                5 => NameStyle::Narrow,
-                _ => NameStyle::Short,
-            });
-            let d = dt::DateTime {
-                year: 2000,
-                month: 1,
-                day: 1,
-                hour: h as u8,
-                minute: mi as u8,
-                second: s as u8,
-                millisecond: ms as u16,
-            };
-            if let Ok(ps) = dt::format_to_parts(&self.ld.lang, &d, &o) {
-                if let Some(p) = ps.iter().find(|p| p.kind == dt::DateTimePartType::DayPeriod) {
-                    if flexible || p.value != self.ld.ampm[(h >= 12) as usize] {
-                        return p.value.clone();
-                    }
-                }
+        let (has_m, has_s) = self.has_ms.get();
+        let ampm = self.ld.ampm[(h >= 12) as usize].clone();
+        let noon = h == 12
+            && (!has_m || self.f[dc::MINUTE] == 0)
+            && (!has_s || self.f[dc::SECOND] == 0);
+        if noon {
+            let at = self.intl_day_period(count, 12, 0, 0);
+            let after = self.intl_day_period(count, 12, 30, 0);
+            if at.is_some() && at != after {
+                return at.unwrap_or(ampm);
             }
         }
-        self.ld.ampm[(h >= 12) as usize].clone()
+        if !flexible {
+            return ampm;
+        }
+        self.intl_day_period(count, h, 30, 0).unwrap_or(ampm)
     }
 
     /// Format one field; Err(()) for a letter ICU does not know.
@@ -376,6 +392,8 @@ impl<'a> Fmt<'a> {
     }
 
     pub fn format(&self, items: &[Item]) -> Result<String, ()> {
+        let has = |c: char| items.iter().any(|i| matches!(i, Item::Field(x, _) if *x == c));
+        self.has_ms.set((has('m'), has('s')));
         let mut out = String::new();
         for it in items {
             match it {
