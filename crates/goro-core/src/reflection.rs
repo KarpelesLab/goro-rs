@@ -6331,6 +6331,15 @@ thread_local! {
 
 /// Reflection's view of a function: the user function, or for an internal
 /// function a signature-only `OpArray` synthesized from its stub.
+/// 1 when `lower` names a method ("class::method") whose op array has
+/// `$this` as its first CV (an instance method), else 0.
+fn method_this_hidden(lower: &[u8], op: &OpArray) -> usize {
+    (lower.windows(2).any(|w| w == b"::")
+        && op.scope_class.is_some()
+        && op.param_count > 0
+        && op.cv_names.first().is_some_and(|n| n == b"this")) as usize
+}
+
 pub(crate) fn rfunc<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a OpArray> {
     if let Some(op) = vm.user_functions.get(lower) {
         return Some(op);
@@ -6688,7 +6697,8 @@ pub fn reflection_function_method(
         }
         b"getnumberofparameters" => {
             if let Some(op_array) = rfunc(vm, &func_lower) {
-                let hidden = closure_hidden_params(op_array);
+                let hidden =
+                    closure_hidden_params(op_array) + method_this_hidden(&func_lower, op_array);
                 Some(Value::Long(
                     (op_array.param_count as usize).saturating_sub(hidden) as i64,
                 ))
@@ -6719,7 +6729,15 @@ pub fn reflection_function_method(
         }
         b"getparameters" => {
             if let Some(op_array) = rfunc(vm, &func_lower).cloned() {
-                let list = create_reflection_parameters(vm, &op_array);
+                // (a closure of a method: the method's parameters)
+                let list = if func_lower.windows(2).any(|w| w == b"::")
+                    && op_array.scope_class.is_some()
+                {
+                    let is_static = method_this_hidden(&func_lower, &op_array) == 0;
+                    create_reflection_parameters_method(vm, &op_array, is_static)
+                } else {
+                    create_reflection_parameters(vm, &op_array)
+                };
                 let closure = obj.borrow().get_property(b"__reflection_closure_obj");
                 if !matches!(closure, Value::Null | Value::Undef) {
                     let scope = vm.closure_scope(&closure);

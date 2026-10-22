@@ -3091,6 +3091,8 @@ fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let replacement: Option<Vec<Value>> = match args.get(3).map(|v| v.deref()) {
         None => None,
         Some(Value::Array(a)) => Some(a.borrow().values().cloned().collect()),
+        // (array) of a Closure is [closure]
+        Some(c @ Value::Object(_)) if c.is_closure_obj() => Some(vec![c]),
         Some(Value::Object(obj)) => Some(
             vm.object_to_array(&obj)
                 .borrow()
