@@ -556,6 +556,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function_with_params(b"pdo_drivers", w_pdo_drivers, &[]);
     vm.phpinfo_hooks.push(minfo);
     vm.shutdown_hooks.push(dbh::free_persistent);
+    goro_core::gc::register_native_gc(objects::stmt_handlers(), objects::stmt_get_gc);
 
     let mut pe = ClassEntry::new(b"PDOException".to_vec());
     pe.parent = Some(b"RuntimeException".to_vec());

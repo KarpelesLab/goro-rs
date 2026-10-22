@@ -169,6 +169,32 @@ thread_local! {
     static GC_EPOCH: std::time::Instant = std::time::Instant::now();
 }
 
+/// get_gc of a native object: report each value its native data holds a
+/// strong reference to, exactly once (a value reported but not owned would
+/// make live data look like garbage; report nothing when unsure).
+pub type NativeGcFn = fn(&Rc<dyn std::any::Any>, &mut dyn FnMut(&Value));
+
+thread_local! {
+    static NATIVE_GC: RefCell<Vec<(usize, NativeGcFn)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Register the get_gc handler of the objects using `handlers`. Garbage
+/// objects with one have their native data released (free_obj).
+pub fn register_native_gc(handlers: &'static crate::vm::NativeObjectHandlers, f: NativeGcFn) {
+    let key = handlers as *const _ as usize;
+    NATIVE_GC.with(|g| {
+        let mut g = g.borrow_mut();
+        if !g.iter().any(|(k, _)| *k == key) {
+            g.push((key, f));
+        }
+    });
+}
+
+fn native_gc_of(n: &crate::object::NativeData) -> Option<NativeGcFn> {
+    let key = n.handlers as *const _ as usize;
+    NATIVE_GC.with(|g| g.borrow().iter().find(|(k, _)| *k == key).map(|(_, f)| *f))
+}
+
 /// Register an object as a permanent cycle-collection candidate.
 #[inline]
 pub fn track_object(rc: &Rc<RefCell<PhpObject>>) {
@@ -783,6 +809,22 @@ impl<'a> Graph<'a> {
                             kids.push(c);
                         }
                     }
+                    // What native data holds (the get_gc handler).
+                    if let Some(n) = &b.native {
+                        if let Some(f) = native_gc_of(n) {
+                            let mut vals: Vec<Value> = Vec::new();
+                            f(&n.data, &mut |v| {
+                                if Node::ptr_of(v).is_some() {
+                                    vals.push(v.clone());
+                                }
+                            });
+                            for v in &vals {
+                                if let Some(c) = self.add_value(v) {
+                                    kids.push(c);
+                                }
+                            }
+                        }
+                    }
                     // A suspended fiber owns the locals of its frames
                     // (zend_fiber_object_gc).
                     if b.class_name.eq_ignore_ascii_case(b"Fiber") {
@@ -1375,6 +1417,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         let mut dead_arrays: Vec<PhpArray> = Vec::new();
         let mut dead_vals: Vec<Value> = Vec::new();
         let mut dead_gens: Vec<Vec<Value>> = Vec::new();
+        let mut dead_natives: Vec<crate::object::NativeData> = Vec::new();
         if !free_nodes.is_empty() {
             let ptrs: PtrSet = free_nodes.iter().map(|(n, _)| n.ptr()).collect();
             let weakmaps: Vec<u64> = free_nodes
@@ -1396,6 +1439,9 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                             dead_props.push(std::mem::take(&mut b.properties));
                             if let Some(c) = b.closure.take() {
                                 dead_vals.push(*c);
+                            }
+                            if b.native.as_ref().and_then(native_gc_of).is_some() {
+                                dead_natives.extend(b.native.take());
                             }
                             count += 1;
                         }
@@ -1428,6 +1474,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
         // Release our clones first, then the detached contents: this is
         // where the cycles actually get freed.
         drop(free_nodes);
+        drop(dead_natives);
         drop(dead_vals);
         drop(dead_gens);
         drop(dead_arrays);

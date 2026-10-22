@@ -152,6 +152,43 @@ impl Drop for Stmt {
     }
 }
 
+/// dbstmt_get_gc: the PDO object, and the FETCH_INTO object or the
+/// FETCH_CLASS constructor arguments. Only reported while this object is
+/// the sole owner of the statement (the iterator and PDORow objects share
+/// it).
+pub fn stmt_get_gc(data: &Rc<dyn std::any::Any>, visit: &mut dyn FnMut(&Value)) {
+    if Rc::strong_count(data) != 1 {
+        return;
+    }
+    let Some(d) = data.downcast_ref::<StmtData>() else {
+        return;
+    };
+    if Rc::strong_count(&d.stmt) != 1 {
+        return;
+    }
+    let Ok(st) = d.stmt.try_borrow() else {
+        return;
+    };
+    if let Some(o) = &st.database_object_handle {
+        visit(&Value::Object(o.clone()));
+    }
+    let mode = st.default_fetch_type & !crate::core::PDO_FETCH_FLAGS;
+    if mode == crate::core::PDO_FETCH_INTO {
+        if let Some(o) = &st.fetch.into {
+            visit(&Value::Object(o.clone()));
+        }
+    } else if mode == crate::core::PDO_FETCH_CLASS {
+        if let Some(a) = &st.fetch.cls_ctor_args {
+            visit(&Value::Array(a.clone()));
+        }
+    }
+}
+
+/// The handlers of PDOStatement objects (for gc registration).
+pub fn stmt_handlers() -> &'static NativeObjectHandlers {
+    &STMT_HANDLERS
+}
+
 static STMT_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
     read_property: None,
     write_property: Some(stmt_prop_write),
