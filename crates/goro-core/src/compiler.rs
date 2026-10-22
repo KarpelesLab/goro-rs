@@ -11237,6 +11237,44 @@ impl Compiler {
         Ok(tmp)
     }
 
+    /// zend_compile_var_inner() in write context: the base of a dimension
+    /// or property chain being written must itself be a variable or a call
+    /// (`"abc"[0] = 1`, `[1][0]++`, `(new A)->x = 1` are compile errors).
+    fn check_writable_base(target: &Expr) -> CompileResult<()> {
+        let mut root = target;
+        loop {
+            match &root.kind {
+                ExprKind::ArrayAccess { array, .. } => root = array,
+                ExprKind::PropertyAccess {
+                    object,
+                    nullsafe: false,
+                    ..
+                } => root = object,
+                _ => break,
+            }
+        }
+        if std::ptr::eq(root, target)
+            || matches!(
+                root.kind,
+                ExprKind::Variable(_)
+                    | ExprKind::DynamicVariable(_)
+                    | ExprKind::StaticPropertyAccess { .. }
+                    | ExprKind::DynamicStaticPropertyAccess { .. }
+                    | ExprKind::PropertyAccess { .. }
+                    | ExprKind::FunctionCall { .. }
+                    | ExprKind::MethodCall { .. }
+                    | ExprKind::StaticMethodCall { .. }
+                    | ExprKind::DynamicStaticMethodCall { .. }
+            )
+        {
+            return Ok(());
+        }
+        Err(CompileError {
+            message: "Cannot use temporary expression in write context".into(),
+            line: target.span.line,
+        })
+    }
+
     fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         self.zend_lineno = expr.span.line;
         if self.memoize_mode != 0
@@ -11244,6 +11282,25 @@ impl Compiler {
             && expr as *const Expr as usize != self.memoize_root
         {
             return self.compile_memoized_expr(expr);
+        }
+        match &expr.kind {
+            ExprKind::Assign { target, .. } | ExprKind::CompoundAssign { target, .. } => {
+                Self::check_writable_base(target)?
+            }
+            ExprKind::AssignRef { target, value } => {
+                Self::check_writable_base(target)?;
+                Self::check_writable_base(value)?;
+            }
+            ExprKind::UnaryOp {
+                op:
+                    UnaryOp::PreIncrement
+                    | UnaryOp::PreDecrement
+                    | UnaryOp::PostIncrement
+                    | UnaryOp::PostDecrement,
+                operand,
+                ..
+            } => Self::check_writable_base(operand)?,
+            _ => {}
         }
         match &expr.kind {
             ExprKind::Int(n) => {
@@ -11674,7 +11731,9 @@ impl Compiler {
                                     ExprKind::FunctionCall { .. } => {
                                         "Can't use function return value in write context"
                                     }
-                                    ExprKind::MethodCall { .. } => {
+                                    ExprKind::MethodCall { .. }
+                                    | ExprKind::StaticMethodCall { .. }
+                                    | ExprKind::DynamicStaticMethodCall { .. } => {
                                         "Can't use method return value in write context"
                                     }
                                     _ => "Can't use function return value in write context",
@@ -12202,7 +12261,9 @@ impl Compiler {
                         ExprKind::FunctionCall { .. } => {
                             Some("Can't use function return value in write context")
                         }
-                        ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. } => {
+                        ExprKind::MethodCall { .. }
+                        | ExprKind::StaticMethodCall { .. }
+                        | ExprKind::DynamicStaticMethodCall { .. } => {
                             Some("Can't use method return value in write context")
                         }
                         _ => None,

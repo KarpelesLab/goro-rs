@@ -69,6 +69,10 @@ pub struct Parser {
     is_interface_stack: Vec<bool>,
     /// Nesting of statements being parsed (1 = top level).
     stmt_nesting: u32,
+    /// Token index of the `)` that closed the most recent grouping
+    /// `( expr )` (not a call's argument list): an expression ending there
+    /// is not a `variable` in PHP's grammar, so it cannot be assigned to.
+    last_group_close: usize,
 }
 
 const MAX_PARSE_DEPTH: u32 = 512;
@@ -215,6 +219,7 @@ impl Parser {
             array_syntax: std::collections::HashMap::new(),
             array_literal_depth: 0,
             in_foreach_target: false,
+            last_group_close: usize::MAX,
         }
     }
 
@@ -4064,9 +4069,32 @@ impl Parser {
             TokenKind::NullCoalesceAssign => Some(BinaryOp::Coalesce),
             _ => return Ok(left),
         };
-        let assign_span = self.span();
+        // In PHP's grammar an assignment is `variable '=' expr` (or a
+        // `list()`/`[...]` destructuring for plain `=`): anything else before
+        // the operator, including a parenthesized expression, is a syntax
+        // error at the operator.
+        let unexpected_here = |p: &Self| ParseError {
+            message: format!("syntax error, unexpected {}", p.peek().to_php_unexpected()),
+            span: p.span(),
+        };
+        if self.last_group_close == self.pos.wrapping_sub(1)
+            || !Self::is_variable_target(Self::graft_target(&left), compound_op.is_none())
+        {
+            return Err(unexpected_here(self));
+        }
         self.advance();
-        let by_ref = compound_op.is_none() && self.eat(&TokenKind::Ampersand);
+        let by_ref = compound_op.is_none() && matches!(self.peek(), TokenKind::Ampersand);
+        if by_ref {
+            // `[$a] =& $b` / `list($a) =& $b`: only `variable '=' '&' ...`.
+            if matches!(Self::graft_target(&left).kind, ExprKind::Array(_)) {
+                return Err(unexpected_here(self));
+            }
+            self.advance();
+            // `$a = &new A` was removed in PHP 7.
+            if matches!(self.peek(), TokenKind::New) {
+                return Err(unexpected_here(self));
+            }
+        }
         let right = self.parse_assignment()?;
         let after_span = self.span();
         // zend_verify_list_assign_target() for a destructuring target.
@@ -4075,21 +4103,10 @@ impl Parser {
                 self.verify_list_assign(elems, style)?;
             }
         }
-        // In PHP's grammar an assignment is `variable '=' expr`: the operator
-        // always binds to the variable right before it, however tightly the
-        // operators to its left bind. `$a + !$b = $c` is `$a + !($b = $c)`,
-        // `$s ?? $s = ''` is `$s ?? ($s = '')`.
+        // The operator always binds to the variable right before it, however
+        // tightly the operators to its left bind. `$a + !$b = $c` is
+        // `$a + !($b = $c)`, `$s ?? $s = ''` is `$s ?? ($s = '')`.
         Self::graft_assignment(left, move |target| {
-            // A class constant is not writable: `C::X = v` is a syntax error.
-            if compound_op.is_none()
-                && !by_ref
-                && matches!(target.kind, ExprKind::ClassConstAccess { .. })
-            {
-                return Err(ParseError {
-                    message: "syntax error, unexpected token \"=\"".into(),
-                    span: assign_span,
-                });
-            }
             // Nor can a reference to one be taken (`$a = &C::X`).
             if by_ref && matches!(right.kind, ExprKind::ClassConstAccess { .. }) {
                 return Err(ParseError {
@@ -4107,6 +4124,106 @@ impl Parser {
             };
             Ok(Expr { span, kind })
         })
+    }
+
+    /// `T_INC variable` / `T_DEC variable`: report a non-variable operand
+    /// where bison does. A token that cannot start a `variable` is itself
+    /// unexpected (`++1`, `++-$a`); `++$a++` fails at the postfix operator;
+    /// a dereferenceable non-variable (`++($a)`, `++A`) at the token after it.
+    fn check_prefix_incdec_operand(&self, operand_pos: usize, operand: &Expr) -> ParseResult<()> {
+        let unexpected = |pos: usize, expecting: &str| {
+            let tok = &self.tokens[pos.min(self.tokens.len() - 1)];
+            Err(ParseError {
+                message: format!(
+                    "syntax error, unexpected {}{}",
+                    tok.kind.to_php_unexpected(),
+                    expecting
+                ),
+                span: tok.span,
+            })
+        };
+        if matches!(
+            operand.kind,
+            ExprKind::UnaryOp {
+                op: UnaryOp::PostIncrement | UnaryOp::PostDecrement,
+                ..
+            }
+        ) {
+            return unexpected(self.pos - 1, "");
+        }
+        if self.last_group_close != self.pos.wrapping_sub(1)
+            && Self::is_variable_target(operand, false)
+        {
+            return Ok(());
+        }
+        let starts_variable = matches!(
+            self.tokens.get(operand_pos).map(|t| &t.kind),
+            Some(
+                TokenKind::Variable(_)
+                    | TokenKind::VariableVariable(_)
+                    | TokenKind::Dollar
+                    | TokenKind::DollarOpenBrace
+                    | TokenKind::Identifier(_)
+                    | TokenKind::Backslash
+                    | TokenKind::Namespace
+                    | TokenKind::Static
+                    | TokenKind::OpenParen
+                    | TokenKind::OpenBracket
+                    | TokenKind::Array
+                    | TokenKind::ConstantString(_)
+                    | TokenKind::InterpolatedStringPart(_)
+                    | TokenKind::InterpolatedStringEnd(_)
+                    | TokenKind::New
+            )
+        );
+        if !starts_variable {
+            return unexpected(operand_pos, "");
+        }
+        unexpected(self.pos, ", expecting \"->\" or \"?->\" or \"{\" or \"[\"")
+    }
+
+    /// The operand of `left` that graft_assignment() would assign to.
+    fn graft_target(left: &Expr) -> &Expr {
+        if Self::is_lvalue(left) {
+            return left;
+        }
+        match &left.kind {
+            ExprKind::BinaryOp { right, .. } | ExprKind::NullCoalesce { right, .. } => {
+                Self::graft_target(right)
+            }
+            ExprKind::UnaryOp {
+                op,
+                operand,
+                prefix: true,
+            } if !matches!(op, UnaryOp::PreIncrement | UnaryOp::PreDecrement) => {
+                Self::graft_target(operand)
+            }
+            ExprKind::Cast(_, operand) | ExprKind::Suppress(operand) => Self::graft_target(operand),
+            ExprKind::Ternary { if_false, .. } => Self::graft_target(if_false),
+            _ => left,
+        }
+    }
+
+    /// Whether `e` is a `variable` of PHP's grammar (an assignment or
+    /// increment target as far as the parser is concerned; the compiler
+    /// rejects calls and temporaries in write context). `list` also allows a
+    /// `list()` / `[...]` destructuring pattern.
+    fn is_variable_target(e: &Expr, list: bool) -> bool {
+        match &e.kind {
+            ExprKind::Variable(_)
+            | ExprKind::DynamicVariable(_)
+            | ExprKind::ArrayAccess { .. }
+            | ExprKind::PropertyAccess { .. }
+            | ExprKind::StaticPropertyAccess { .. }
+            | ExprKind::DynamicStaticPropertyAccess { .. }
+            | ExprKind::MethodCall { .. }
+            | ExprKind::StaticMethodCall { .. }
+            | ExprKind::DynamicStaticMethodCall { .. }
+            | ExprKind::FunctionCall { .. }
+            | ExprKind::FirstClassCallable(_) => true,
+            ExprKind::Array(_) => list,
+            _ => false,
+        }
     }
 
     /// Attach an assignment to the rightmost operand of `left` that the
@@ -4592,7 +4709,9 @@ impl Parser {
             }
             TokenKind::Increment => {
                 self.advance();
+                let operand_pos = self.pos;
                 let operand = self.parse_unary()?;
+                self.check_prefix_incdec_operand(operand_pos, &operand)?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::UnaryOp {
@@ -4604,7 +4723,9 @@ impl Parser {
             }
             TokenKind::Decrement => {
                 self.advance();
+                let operand_pos = self.pos;
                 let operand = self.parse_unary()?;
+                self.check_prefix_incdec_operand(operand_pos, &operand)?;
                 Ok(Expr {
                     span: span.merge(operand.span),
                     kind: ExprKind::UnaryOp {
@@ -5161,6 +5282,18 @@ impl Parser {
         loop {
             match self.peek().clone() {
                 TokenKind::Increment => {
+                    // `variable T_INC`: `($a)++`, `1++`, `$a++++` are errors.
+                    if self.last_group_close == self.pos.wrapping_sub(1)
+                        || !Self::is_variable_target(&expr, false)
+                    {
+                        return Err(ParseError {
+                            message: format!(
+                                "syntax error, unexpected {}",
+                                self.peek().to_php_unexpected()
+                            ),
+                            span: self.span(),
+                        });
+                    }
                     let span = self.span();
                     self.advance();
                     expr = Expr {
@@ -5173,6 +5306,18 @@ impl Parser {
                     };
                 }
                 TokenKind::Decrement => {
+                    // `variable T_INC`: `($a)++`, `1++`, `$a++++` are errors.
+                    if self.last_group_close == self.pos.wrapping_sub(1)
+                        || !Self::is_variable_target(&expr, false)
+                    {
+                        return Err(ParseError {
+                            message: format!(
+                                "syntax error, unexpected {}",
+                                self.peek().to_php_unexpected()
+                            ),
+                            span: self.span(),
+                        });
+                    }
                     let span = self.span();
                     self.advance();
                     expr = Expr {
@@ -5491,11 +5636,19 @@ impl Parser {
         // right side is a variable, and what follows applies to the whole
         // assignment (`$r = &$o->p + 1` is `($r = &$o->p) + 1`).
         if Self::is_lvalue(&expr)
+            && self.last_group_close != self.pos.wrapping_sub(1)
             && matches!(self.peek(), TokenKind::Assign)
             && matches!(self.peek_at(1), TokenKind::Ampersand)
         {
             self.advance();
             self.advance();
+            // `$a = &new A` was removed in PHP 7.
+            if matches!(self.peek(), TokenKind::New) {
+                return Err(ParseError {
+                    message: "syntax error, unexpected token \"new\"".into(),
+                    span: self.span(),
+                });
+            }
             let right = self.parse_postfix()?;
             // A class constant cannot be referenced (`$a = &C::X`).
             if matches!(right.kind, ExprKind::ClassConstAccess { .. }) {
@@ -5898,6 +6051,7 @@ impl Parser {
                 self.advance();
                 let mut expr = self.parse_expression()?;
                 self.expect(&TokenKind::CloseParen)?;
+                self.last_group_close = self.pos - 1;
                 // `(fn() => ...)` keeps its parentheses in AST exports
                 // (not as a callee: `(fn() => ...)()`).
                 if let ExprKind::ArrowFunction { parenthesized, .. } = &mut expr.kind {
