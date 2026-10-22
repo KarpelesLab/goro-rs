@@ -17854,46 +17854,6 @@ impl Vm {
                 // Implicit return - use Undef to signal "none returned" for return type checks
                 return Ok(Value::Undef);
             }
-            // Runs of opcodes on plain values (see run_fast_ops); the first
-            // one it does not handle takes the general path below.
-            let mut fast_tried = false;
-            if !track
-                && single_step.is_none()
-                && self.current_exception.is_none()
-                && !self.error_handler_threw
-                && !typed_ref::any()
-            {
-                if !crate::fastpath::runs_fast(op_array.ops[ip].opcode) {
-                    fast_tried = true;
-                }
-            }
-            if !fast_tried
-                && !track
-                && single_step.is_none()
-                && self.current_exception.is_none()
-                && !self.error_handler_threw
-                && !typed_ref::any()
-            {
-                let no_release = !self.has_release_work();
-                let next = self.run_fast_ops(
-                    op_array,
-                    ip,
-                    cvs.as_mut_slice(),
-                    tmps.as_mut_slice(),
-                    internal_code,
-                    true,
-                    no_release,
-                    foreach_snap.is_empty()
-                        && foreach_obj.is_empty()
-                        && foreach_iter_handles.is_empty(),
-                );
-                if next != ip {
-                    ip = next;
-                    continue 'exec;
-                }
-                fast_tried = true;
-            }
-
             if track {
                 if let Some(p) = prev_op {
                     // A write to $GLOBALS[...] may have changed the table's shape.
@@ -17930,6 +17890,40 @@ impl Vm {
                     }
                 }
                 prev_op = Some(ip);
+            }
+            // Runs of opcodes on plain values (see run_fast_ops); the first
+            // one it does not handle takes the general path below. (In a
+            // frame bound to a symbol table, after the previous opcode's
+            // bindings were repaired, on variables that are bound.)
+            let mut fast_tried = false;
+            if single_step.is_none()
+                && self.current_exception.is_none()
+                && !self.error_handler_threw
+                && !typed_ref::any()
+            {
+                if !crate::fastpath::runs_fast(op_array.ops[ip].opcode) {
+                    fast_tried = true;
+                } else {
+                    let no_release = !self.has_release_work();
+                    let next = self.run_fast_ops(
+                        op_array,
+                        ip,
+                        cvs.as_mut_slice(),
+                        tmps.as_mut_slice(),
+                        internal_code,
+                        true,
+                        no_release,
+                        foreach_snap.is_empty()
+                            && foreach_obj.is_empty()
+                            && foreach_iter_handles.is_empty(),
+                        (bound || globals_cv.is_some()).then_some(globals_cv),
+                    );
+                    if next != ip {
+                        ip = next;
+                        continue 'exec;
+                    }
+                    fast_tried = true;
+                }
             }
 
             let op = &op_array.ops[ip];

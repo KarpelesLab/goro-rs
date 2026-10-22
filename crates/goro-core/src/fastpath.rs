@@ -567,6 +567,17 @@ fn dim_key(
     }
 }
 
+/// Whether the CVs `op` names all hold references, none of them `globals`.
+#[inline]
+fn cv_operands_bound(op: &Op, cvs: &[Value], globals: Option<u32>) -> bool {
+    [op.op1, op.op2, op.result].iter().all(|o| match o {
+        OperandType::Cv(i) => {
+            Some(*i) != globals && matches!(cvs.get(*i as usize), Some(Value::Reference(_)))
+        }
+        _ => true,
+    })
+}
+
 /// Whether run_fast_ops() may handle an opcode (a superset of what the
 /// dispatch loop's own fast attempt handles).
 #[inline(always)]
@@ -617,7 +628,9 @@ impl crate::vm::Vm {
     /// hand control back to it). Returns the index of the first opcode not
     /// handled (or of the next one to run when the loop has to look).
     /// `refs_ok` / `no_release`: see fast_op(); `foreach_idle`: the frame
-    /// has no foreach iteration state (see FreeTmps).
+    /// has no foreach iteration state (see FreeTmps); `bound`: the frame's
+    /// variables are bound to a symbol table or it uses $GLOBALS (the CV
+    /// index of $GLOBALS, if it does).
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_fast_ops(
@@ -630,6 +643,7 @@ impl crate::vm::Vm {
         refs_ok: bool,
         no_release: bool,
         foreach_idle: bool,
+        bound: Option<Option<u32>>,
     ) -> usize {
         let ops = &op_array.ops;
         let literals = &op_array.literals;
@@ -637,6 +651,14 @@ impl crate::vm::Vm {
             let Some(op) = ops.get(ip) else {
                 return ip;
             };
+            // A frame bound to a symbol table: only opcodes whose variables
+            // are all bound (references), none of them $GLOBALS, run here
+            // (the dispatch loop repairs bindings after the others).
+            if let Some(globals) = bound {
+                if !cv_operands_bound(op, cvs, globals) {
+                    return ip;
+                }
+            }
             let fast = match op.opcode {
                 // A call by a constant plain function name (see the
                 // INIT_FCALL arm of the dispatch loop).
