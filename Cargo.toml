@@ -47,6 +47,7 @@ members = [
     "crates/goro-gd",
     "crates/goro-ext-gd",
     "crates/goro-ext-dba",
+    "crates/goro-ext-readline",
 ]
 resolver = "2"
 
@@ -115,6 +116,7 @@ goro-ext-sodium = { path = "crates/goro-ext-sodium" }
 goro-ext-intl = { path = "crates/goro-ext-intl" }
 goro-ext-xsl = { path = "crates/goro-ext-xsl" }
 goro-ext-dba = { path = "crates/goro-ext-dba" }
+goro-ext-readline = { path = "crates/goro-ext-readline" }
 
 [features]
 default = ["ext-standard"]

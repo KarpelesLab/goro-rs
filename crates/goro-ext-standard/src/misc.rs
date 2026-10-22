@@ -17954,6 +17954,7 @@ const MODULE_ORDER: &[&str] = &[
     "Phar",
     "posix",
     "random",
+    "readline",
     "Reflection",
     "shmop",
     "SimpleXML",

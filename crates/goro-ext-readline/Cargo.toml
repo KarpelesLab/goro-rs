@@ -1,0 +1,12 @@
+[package]
+name = "goro-ext-readline"
+version = "0.1.0"
+edition = "2024"
+description = "PHP readline extension (GNU readline emulation) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+libc = "0.2"

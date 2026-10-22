@@ -13,6 +13,7 @@ mod getopt;
 #[allow(dead_code)] // the ported parser also handles responses
 mod http_parser;
 mod mime_types;
+mod readline_shell;
 
 use engine::IniSettings;
 use getopt::{GETOPT_INVALID_ARG, GetOpt};
@@ -382,9 +383,13 @@ fn do_cli(argv: &mut [Vec<u8>], ini: &IniSettings) -> i32 {
         };
         match (c, ch) {
             (_, 'a') => {
-                // goro has no readline extension
-                param_error = Some("Interactive shell (-a) requires the readline extension.\n");
-                let _ = &mut interactive;
+                if !interactive {
+                    if mode != Mode::Standard {
+                        param_error = Some(PARAM_MODE_CONFLICT);
+                        continue;
+                    }
+                    interactive = true;
+                }
             }
             (_, 'C') | (_, 'q') => {}
             (_, 'F') => {
@@ -528,6 +533,10 @@ fn do_cli(argv: &mut [Vec<u8>], ini: &IniSettings) -> i32 {
         return 1;
     }
 
+    if interactive {
+        puts("Interactive shell\n\n");
+    }
+
     if num_repeats > 1 {
         puts("Executing for the first time...\n");
     }
@@ -554,6 +563,7 @@ fn do_cli(argv: &mut [Vec<u8>], ini: &IniSettings) -> i32 {
             exec_run.as_deref(),
             exec_end.as_deref(),
             reflection_what.as_deref(),
+            interactive,
             &mut exit_status,
         );
         if !status {
@@ -652,6 +662,7 @@ fn run_request(
     exec_run: Option<&[u8]>,
     exec_end: Option<&[u8]>,
     reflection_what: Option<&[u8]>,
+    interactive: bool,
     exit_status: &mut i32,
 ) -> bool {
     // The script source (file or stdin), read like cli_seek_file_begin().
@@ -673,7 +684,7 @@ fn run_request(
             .unwrap_or_else(|_| sf.to_vec());
     } else {
         php_self = b"Standard input code".to_vec();
-        if mode < Mode::CliDirect {
+        if mode < Mode::CliDirect && !interactive {
             source = Some(read_stdin());
         }
     }
@@ -743,6 +754,20 @@ fn run_request(
     vm.current_file = main_name.clone();
     let info = cli_request_info(&php_self, &script_filename, &rest);
     engine::request_startup(&mut vm, &info, ini);
+
+    if mode == Mode::Standard && interactive {
+        let status = readline_shell::shell_run(&mut vm);
+        let r = vm.finish_request(Ok(goro_core::value::Value::Null));
+        let failed = r.is_err();
+        finish_errors(&mut vm, r);
+        flush_output(&mut vm);
+        *exit_status = if failed || vm.exit_requested {
+            request_exit_status(&vm, failed)
+        } else {
+            status
+        };
+        return true;
+    }
 
     let failed = match mode {
         Mode::Standard => {

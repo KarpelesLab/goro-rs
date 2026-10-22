@@ -10372,6 +10372,7 @@ fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
         "bcmath" => &["bcmath.scale"],
         "gd" => &["gd.jpeg_ignore_warning"],
         "dba" => &["dba.default_handler"],
+        "readline" => &["cli.pager", "cli.prompt"],
         "filter" => &["filter.default", "filter.default_flags"],
         "exif" => &[
             "exif.encode_unicode",
