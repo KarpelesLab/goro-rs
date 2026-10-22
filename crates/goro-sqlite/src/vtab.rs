@@ -11,6 +11,189 @@
 use crate::int::*;
 use std::rc::Rc;
 
+// ---------------------------------------------------------------------------
+// The virtual table interface (sqlite3_module / sqlite3_vtab /
+// sqlite3_vtab_cursor / sqlite3_index_info) as Rust traits.  This is the
+// contract between the vtab machinery and module implementations (pragma
+// eponymous tables, json_each/json_tree, application modules).
+//
+// Return values are SQLite result codes; error messages go into the
+// `zErrMsg` of the vtab (C pVtab->zErrMsg) via `VtabBase`.
+// ---------------------------------------------------------------------------
+
+/// struct sqlite3_index_constraint
+#[derive(Clone, Copy, Default, Debug)]
+pub struct IndexConstraint {
+    pub iColumn: i32,
+    pub op: u8,
+    pub usable: u8,
+    pub iTermOffset: i32,
+}
+
+/// struct sqlite3_index_orderby
+#[derive(Clone, Copy, Default, Debug)]
+pub struct IndexOrderBy {
+    pub iColumn: i32,
+    pub desc: u8,
+}
+
+/// struct sqlite3_index_constraint_usage
+#[derive(Clone, Copy, Default, Debug)]
+pub struct IndexConstraintUsage {
+    pub argvIndex: i32,
+    pub omit: u8,
+}
+
+/// sqlite3_index_info (nConstraint/nOrderBy are the Vec lengths).
+#[derive(Clone, Default, Debug)]
+pub struct IndexInfo {
+    pub aConstraint: Vec<IndexConstraint>,
+    pub aOrderBy: Vec<IndexOrderBy>,
+    pub aConstraintUsage: Vec<IndexConstraintUsage>,
+    pub idxNum: i32,
+    pub idxStr: Option<ZStr>,
+    pub orderByConsumed: i32,
+    pub estimatedCost: f64,
+    pub estimatedRows: i64,
+    pub idxFlags: i32,
+    pub colUsed: u64,
+}
+
+/// A virtual table instance (sqlite3_vtab).  Optional methods have default
+/// implementations equivalent to a NULL function pointer in C; the
+/// `has_*` methods report whether the C pointer would be non-NULL.
+pub trait Vtab {
+    fn xBestIndex(&mut self, db: &mut Sqlite3, info: &mut IndexInfo) -> i32;
+    fn xDisconnect(&mut self, db: &mut Sqlite3) -> i32 {
+        let _ = db;
+        SQLITE_OK
+    }
+    fn xDestroy(&mut self, db: &mut Sqlite3) -> i32 {
+        self.xDisconnect(db)
+    }
+    fn xOpen(&mut self, db: &mut Sqlite3) -> Result<Box<dyn VtabCursor>, i32>;
+    fn has_xUpdate(&self) -> bool {
+        false
+    }
+    /// argv as in C (argv[0] = old rowid, argv[1] = new rowid, ...).
+    fn xUpdate(&mut self, db: &mut Sqlite3, argv: &mut [Mem], pRowid: &mut i64) -> i32 {
+        let _ = (db, argv, pRowid);
+        SQLITE_READONLY
+    }
+    fn has_xBegin(&self) -> bool {
+        false
+    }
+    fn xBegin(&mut self, db: &mut Sqlite3) -> i32 {
+        let _ = db;
+        SQLITE_OK
+    }
+    fn xSync(&mut self, db: &mut Sqlite3) -> i32 {
+        let _ = db;
+        SQLITE_OK
+    }
+    fn xCommit(&mut self, db: &mut Sqlite3) -> i32 {
+        let _ = db;
+        SQLITE_OK
+    }
+    fn xRollback(&mut self, db: &mut Sqlite3) -> i32 {
+        let _ = db;
+        SQLITE_OK
+    }
+    /// xFindFunction: Some((score, function, user data)) to overload.
+    fn xFindFunction(&mut self, nArg: i32, zName: &[u8]) -> Option<(i32, XSFunc, FuncUserData)> {
+        let _ = (nArg, zName);
+        None
+    }
+    fn has_xRename(&self) -> bool {
+        false
+    }
+    fn xRename(&mut self, db: &mut Sqlite3, zNew: &[u8]) -> i32 {
+        let _ = (db, zNew);
+        SQLITE_OK
+    }
+    fn xSavepoint(&mut self, db: &mut Sqlite3, i: i32) -> i32 {
+        let _ = (db, i);
+        SQLITE_OK
+    }
+    fn xRelease(&mut self, db: &mut Sqlite3, i: i32) -> i32 {
+        let _ = (db, i);
+        SQLITE_OK
+    }
+    fn xRollbackTo(&mut self, db: &mut Sqlite3, i: i32) -> i32 {
+        let _ = (db, i);
+        SQLITE_OK
+    }
+    fn has_xIntegrity(&self) -> bool {
+        false
+    }
+    fn xIntegrity(
+        &mut self,
+        db: &mut Sqlite3,
+        zSchema: &[u8],
+        zTab: &[u8],
+        mFlags: i32,
+        pzErr: &mut Option<ZStr>,
+    ) -> i32 {
+        let _ = (db, zSchema, zTab, mFlags, pzErr);
+        SQLITE_OK
+    }
+    /// C pVtab->zErrMsg
+    fn zErrMsg(&mut self) -> &mut Option<ZStr>;
+}
+
+/// A cursor on a virtual table (sqlite3_vtab_cursor).
+pub trait VtabCursor {
+    fn xFilter(
+        &mut self,
+        db: &mut Sqlite3,
+        idxNum: i32,
+        idxStr: Option<&[u8]>,
+        argv: &mut [Mem],
+    ) -> i32;
+    fn xNext(&mut self, db: &mut Sqlite3) -> i32;
+    fn xEof(&mut self) -> bool;
+    fn xColumn(&mut self, ctx: &mut Context, i: i32) -> i32;
+    fn xRowid(&mut self, pRowid: &mut i64) -> i32;
+    fn xClose(&mut self) -> i32 {
+        SQLITE_OK
+    }
+}
+
+/// A virtual table module (sqlite3_module).  `xCreate` returning None
+/// means the C xCreate pointer is NULL (eponymous-only module); a module
+/// whose xCreate is the same function as xConnect sets `create_is_connect`.
+pub trait VtabModule {
+    fn iVersion(&self) -> i32 {
+        1
+    }
+    /// argv: module name, database name, table name, then the arguments.
+    /// The implementation must call sqlite3_declare_vtab(db, ...).
+    fn xConnect(
+        &self,
+        db: &mut Sqlite3,
+        argv: &[&[u8]],
+        pzErr: &mut Option<ZStr>,
+    ) -> Result<Box<dyn Vtab>, i32>;
+    fn has_xCreate(&self) -> bool {
+        true
+    }
+    fn create_is_connect(&self) -> bool {
+        true
+    }
+    fn xCreate(
+        &self,
+        db: &mut Sqlite3,
+        argv: &[&[u8]],
+        pzErr: &mut Option<ZStr>,
+    ) -> Result<Box<dyn Vtab>, i32> {
+        self.xConnect(db, argv, pzErr)
+    }
+    fn xShadowName(&self, zName: &[u8]) -> bool {
+        let _ = zName;
+        false
+    }
+}
+
 /// C: `Module * sqlite3VtabCreateModule( sqlite3 *db, const char *zName, const sqlite3_module *pModule, void *pAux, void (*xDestroy)(void *) )`
 pub fn sqlite3VtabCreateModule(
     db: &mut Sqlite3,
