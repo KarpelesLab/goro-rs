@@ -15,13 +15,13 @@ use crate::datecore::{self, CalInfo};
 
 /// SimpleDateFormat::format() with `pattern` for `locale`.
 pub fn format_date_pattern(vm: &mut Vm, locale: &str, pattern: &str, info: &CalInfo) -> String {
-    fallback::format_date_pattern(vm, locale, pattern, info)
+    crate::dateformat::format_date_pattern(vm, locale, pattern, info)
 }
 
 /// The pattern of DateFormat::createDateTimeInstance(date_style,
 /// time_style) for `locale` (IntlDateFormatter::FULL..SHORT, NONE = -1).
 pub fn style_pattern(locale: &str, date_style: i64, time_style: i64) -> String {
-    fallback::style_pattern(locale, date_style, time_style)
+    crate::dateformat::style_pattern(locale, date_style, time_style)
 }
 
 const MONTHS: [&str; 12] = [

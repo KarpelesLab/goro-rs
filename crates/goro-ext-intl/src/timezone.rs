@@ -42,17 +42,10 @@ crate::intl_functions! { pub FUNCTIONS:
 
 pub const METHODS: &[(&str, crate::Imp)] = &[
     ("IntlTimeZone::__construct", construct),
-    // IntlIterator over a string enumeration (see string_enum_iterator())
-    ("IntlIterator::current", it_current),
-    ("IntlIterator::key", it_key),
-    ("IntlIterator::next", it_next),
-    ("IntlIterator::rewind", it_rewind),
-    ("IntlIterator::valid", it_valid),
 ];
 
 pub const CLASSES: &[(&str, Option<crate::obj::CreateFn>)] = &[
     ("IntlTimeZone", Some(create_object)),
-    ("IntlIterator", None),
 ];
 
 static HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
@@ -606,68 +599,11 @@ fn get_id_for_windows_id(vm: &mut Vm, c: &mut Call) -> Value {
 // ---------------------------------------------------------------------------
 // IntlIterator over a StringEnumeration (IntlIterator_from_StringEnumeration)
 
-/// The state of an IntlIterator over a list of strings.
-pub struct StringEnum {
-    pub items: Vec<Value>,
-    pub pos: usize,
-}
-
-static ITER_HANDLERS: NativeObjectHandlers = NativeObjectHandlers::EMPTY;
-
 /// IntlIterator_from_StringEnumeration(): a new IntlIterator object over
 /// `items`.
 pub fn string_enum_iterator(vm: &mut Vm, items: Vec<String>) -> Value {
-    let Some(o) = crate::obj::object_init_ex(vm, b"intliterator") else {
-        return Value::Null;
-    };
-    crate::obj::attach(
-        &o,
-        StringEnum {
-            items: items.into_iter().map(s).collect(),
-            pos: 0,
-        },
-        &ITER_HANDLERS,
-    );
-    Value::Object(o)
-}
-
-fn it_state(c: &Call) -> Option<Rc<RefCell<StringEnum>>> {
-    crate::obj::state::<StringEnum>(c.this.as_ref()?)
-}
-
-fn it_current(_vm: &mut Vm, c: &mut Call) -> Value {
-    let Some(st) = it_state(c) else {
-        return Value::Null;
-    };
-    let b = st.borrow();
-    b.items.get(b.pos).cloned().unwrap_or(Value::Null)
-}
-
-fn it_key(_vm: &mut Vm, c: &mut Call) -> Value {
-    let Some(st) = it_state(c) else {
-        return Value::Null;
-    };
-    Value::Long(st.borrow().pos as i64)
-}
-
-fn it_next(_vm: &mut Vm, c: &mut Call) -> Value {
-    if let Some(st) = it_state(c) {
-        st.borrow_mut().pos += 1;
+    match crate::iterator::new_array_iterator(vm, items.into_iter().map(s).collect()) {
+        Some(o) => Value::Object(o),
+        None => Value::Null,
     }
-    Value::Null
-}
-
-fn it_rewind(_vm: &mut Vm, c: &mut Call) -> Value {
-    if let Some(st) = it_state(c) {
-        st.borrow_mut().pos = 0;
-    }
-    Value::Null
-}
-
-fn it_valid(_vm: &mut Vm, c: &mut Call) -> Value {
-    let Some(st) = it_state(c) else {
-        return Value::False;
-    };
-    let b = st.borrow();
-    bool_v(b.pos < b.items.len())
 }
