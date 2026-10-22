@@ -1420,6 +1420,13 @@ impl Vm {
                     n.extend_from_slice(if ml == b"tryfrom" { b"tryFrom" } else { &ml });
                     return Ok(self.make_closure_object(str_val(&n)));
                 }
+                // A method inherited from an internal class.
+                if obj.is_some() && self.internal_method_frame_name(&cl, &ml).is_some() {
+                    let mut arr = PhpArray::new();
+                    arr.push(obj.unwrap_or_else(|| str_val(cls)));
+                    arr.push(str_val(m));
+                    return Ok(self.make_closure_object(Value::Array(Rc::new(RefCell::new(arr)))));
+                }
                 if obj.is_some() && has_call {
                     return Ok(self.magic_call_closure(&canon, m, obj));
                 }

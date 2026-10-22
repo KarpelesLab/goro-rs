@@ -7453,7 +7453,8 @@ impl Vm {
                 };
                 // (raised by the callee's RECV, inside its frame, which shows
                 // the arguments as RECV left them)
-                let own = !matches!(self.call_stack.last(), Some((n, f, 0, _, _)) if (f.is_empty() || f == "[internal function]") && *n == frame_display);
+                let own = self.call_stack.len() <= self.exec_frame_len
+                    || !matches!(self.call_stack.last(), Some((n, f, 0, _, _)) if (f.is_empty() || f == "[internal function]") && *n == frame_display);
                 if own {
                     let is_instance = this_cv == 1
                         && lead > 0
@@ -7628,8 +7629,9 @@ impl Vm {
         let is_instance =
             this_cv == 1 && lead > 0 && matches!(call.args.first(), Some(Value::Object(_)));
         // Callers that already recorded this frame (fibers, exception handlers)
-        // must not get a duplicate.
-        let pushed = !matches!(self.call_stack.last(), Some((n, f, 0, _, _)) if (f.is_empty() || f == "[internal function]") && *n == frame_display);
+        // must not get a duplicate (a frame above the running code).
+        let pushed = self.call_stack.len() <= self.exec_frame_len
+            || !matches!(self.call_stack.last(), Some((n, f, 0, _, _)) if (f.is_empty() || f == "[internal function]") && *n == frame_display);
         if pushed {
             // call_user_func() called directly is compiled away by php-src: its
             // callee is located at the call site instead of "[internal function]".
@@ -15542,6 +15544,75 @@ impl Vm {
         arr
     }
 
+    /// The internal methods of Exception / Error (final getters,
+    /// getTraceAsString(), __toString()) called from internal code
+    /// (call_user_func(), array_map(), ...).
+    #[inline(never)]
+    fn throwable_builtin_method(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) -> Option<Value> {
+        if !matches!(
+            method_lower,
+            b"getmessage"
+                | b"getcode"
+                | b"getfile"
+                | b"getline"
+                | b"gettrace"
+                | b"getprevious"
+                | b"gettraceasstring"
+                | b"__tostring"
+                | b"getseverity"
+        ) {
+            return None;
+        }
+        let is_throwable = class_lower == b"exception"
+            || class_lower == b"error"
+            || is_builtin_subclass(class_lower, b"exception")
+            || is_builtin_subclass(class_lower, b"error")
+            || self.class_extends_any(class_lower, &[b"exception", b"error"]);
+        if !is_throwable {
+            return None;
+        }
+        let prop = |name: &[u8]| obj.borrow().get_property(name);
+        Some(match method_lower {
+            b"getmessage" => prop(b"message"),
+            b"getcode" => prop(b"code"),
+            b"getfile" => prop(b"file"),
+            b"getline" => prop(b"line"),
+            b"gettrace" => prop(b"trace"),
+            b"getprevious" => prop(b"previous"),
+            b"getseverity" => {
+                if !(class_lower == b"errorexception"
+                    || self.class_extends(class_lower, b"errorexception"))
+                {
+                    return None;
+                }
+                match prop(b"severity") {
+                    Value::Undef | Value::Null => Value::Long(1),
+                    v => v,
+                }
+            }
+            b"gettraceasstring" => {
+                let trace = prop(b"trace");
+                let max_len = self.exception_string_param_max_len;
+                Value::String(PhpString::from_string(
+                    self.trace_to_string(&trace, true, max_len),
+                ))
+            }
+            _ => {
+                let result = self.throwable_chain_string(obj);
+                obj.borrow_mut().set_property(
+                    b"string".to_vec(),
+                    Value::String(PhpString::from_string(result.clone())),
+                );
+                Value::String(PhpString::from_string(result))
+            }
+        })
+    }
+
     /// Call a method on an object by looking up the class method and executing it
     pub fn call_object_method(
         &mut self,
@@ -15638,9 +15709,13 @@ impl Vm {
             let args = {
                 let mut a = args.to_vec();
                 let line = self.current_line;
+                // (a method inherited from an internal class: its arginfo)
+                let zpp_class = self
+                    .internal_base_class(&class_lower)
+                    .unwrap_or_else(|| class_lower.clone());
                 if self
                     .zpp_method_call(
-                        &class_lower,
+                        &zpp_class,
                         &method_lower,
                         &mut a,
                         0,
@@ -15656,6 +15731,9 @@ impl Vm {
                 zpp_args = a;
                 zpp_args.as_slice()
             };
+            if let Some(v) = self.throwable_builtin_method(obj, &class_lower, &method_lower) {
+                return Some(v);
+            }
             // Handle WeakMap method calls
             if class_lower == b"weakmap" {
                 let wm_id = obj.borrow().object_id;

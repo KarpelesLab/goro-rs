@@ -461,11 +461,16 @@ impl Vm {
         if let ZppError::Throw(cls, msg) = e {
             let push = in_call && frame.is_some();
             if push {
-                let file = self.current_file.clone();
+                // ("[internal function]" when internal code calls it)
+                let (file, fline) = if self.caller_is_internal() {
+                    (String::new(), 0)
+                } else {
+                    (self.current_file.clone(), line)
+                };
                 let is_instance = frame == Some(true);
                 let shown = orig.unwrap_or_else(|| args[skip..].to_vec());
                 self.call_stack
-                    .push((info.name.to_string(), file, line, shown, is_instance));
+                    .push((info.name.to_string(), file, fline, shown, is_instance));
             }
             let exc = self.create_exception(cls, &msg, line);
             if push {

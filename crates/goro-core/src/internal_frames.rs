@@ -202,11 +202,18 @@ impl Vm {
         class_lower: &[u8],
         method_lower: &[u8],
     ) -> Option<String> {
+        let cur = self.internal_base_class(class_lower)?;
+        let (c, m) = crate::stubs::find_method(&cur, method_lower)?;
+        Some(format!("{}->{}", c.name, m.name))
+    }
+
+    /// The nearest internal class in the class chain of `class_lower`
+    /// (itself when internal), lowercase.
+    pub fn internal_base_class(&self, class_lower: &[u8]) -> Option<Vec<u8>> {
         let mut cur = class_lower.to_vec();
         for _ in 0..64 {
             if crate::stubs::find_class_lower(&cur).is_some() {
-                let (c, m) = crate::stubs::find_method(&cur, method_lower)?;
-                return Some(format!("{}->{}", c.name, m.name));
+                return Some(cur);
             }
             cur = match self.classes.get(&cur).and_then(|c| c.parent.as_ref()) {
                 Some(p) => p.to_ascii_lowercase(),
