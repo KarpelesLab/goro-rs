@@ -39,7 +39,9 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/openssl (incl. TLS streams, on purecrypto) | 205 | 211 | 97.2% |
 | ext/mysqli (embedded MySQL fixture) | 401 | 419 | 95.7% |
 | ext/pdo_mysql (embedded MySQL fixture) | 160 | 160 | 100% |
-| ext/pdo (generic PDO tests, run against pdo_mysql) | 122 | 125 | 97.6% |
+| ext/pgsql (libpq port, embedded PostgreSQL fixture) | 95 | 95 | 100% |
+| ext/pdo_pgsql (embedded PostgreSQL fixture) | 58 | 59 | 98.3% |
+| ext/pdo (generic PDO tests, run against pdo_mysql and pdo_pgsql) | 241 | 247 | 97.6% |
 | ext/session | 255 | 256 | 99.6% |
 | ext/pcre (PCRE2 port) | 154 | 154 | 100% |
 | ext/hash / ext/random / ext/zlib / ext/bz2 | 304 | 306 | 99.3% |
@@ -59,7 +61,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 
 
 *The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
-EXPECTF/EXPECTREGEX matching, XFAIL, per-test timeouts and an embedded MySQL fixture for ext/mysqli, ext/pdo_mysql and the generic ext/pdo tests.*
+EXPECTF/EXPECTREGEX matching, XFAIL, per-test timeouts, and embedded MySQL and PostgreSQL fixtures for ext/mysqli, ext/pgsql, ext/pdo_mysql, ext/pdo_pgsql and the generic ext/pdo tests.*
 
 ## Features
 
@@ -81,7 +83,8 @@ Highlights beyond the core language:
   hash, random, zlib (zlib port, byte-identical output), json, ctype, mbstring, spl,
   reflection, session, dom/simplexml/xml/xmlreader/xmlwriter (libxml2-style tree, lexbor
   HTML5 parser port), openssl (on [purecrypto](https://crates.io/crates/purecrypto)),
-  mysqli (mysqlnd port), PDO with pdo_mysql (over the same mysqlnd), gmp, sockets, curl, bz2, tokenizer,
+  mysqli (mysqlnd port), pgsql (libpq port: SCRAM/MD5 auth, TLS, COPY, async, large objects),
+  PDO with pdo_mysql (over the same mysqlnd) and pdo_pgsql (over the same libpq), gmp, sockets, curl, bz2, tokenizer,
   bcmath (libbcmath port), filter, iconv (glibc iconv emulation), calendar, posix,
   pcntl (fork, signals with async dispatch), ftp (with FTPS), shmop/sysvsem/sysvshm/sysvmsg,
   gettext (libintl emulation reading .mo catalogs), sodium (libsodium API on purecrypto,
@@ -89,7 +92,7 @@ Highlights beyond the core language:
   keep-alive, proxies, Basic/Digest auth, compression; SoapServer), zend_test.
 
 ### Not Yet Implemented
-- gd, pdo_sqlite/pdo_pgsql/…, ffi, ldap, pgsql, sqlite3, xsl, tidy (in progress: phar, intl, zip, exif, fileinfo)
+- gd, pdo_sqlite/…, ffi, ldap, sqlite3, xsl, tidy (in progress: phar, intl, zip, exif, fileinfo)
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
 - Exact opcache optimizer behaviour
 
@@ -128,7 +131,8 @@ Workspace crates:
 - `goro-ext-hash` - Hash extension (all php-src algorithms, HMAC/HKDF/PBKDF2)
 - `goro-ext-reflection` - Reflection extension (stub; most logic lives in `goro-core::reflection`)
 - `goro-ext-spl` - SPL extension (autoload helpers; SPL classes are compiled into `goro-core`)
-- `goro-ext-pdo` - PDO (ext/pdo) and the MySQL driver (ext/pdo_mysql)
+- `goro-ext-pdo` - PDO (ext/pdo) and the MySQL and PostgreSQL drivers (ext/pdo_mysql, ext/pdo_pgsql)
+- `goro-ext-pgsql` - ext/pgsql over `libpq`, a pure-Rust port of PostgreSQL's client library
 - `goro-ext-soap` - SOAP client and server (ext/soap)
 - `goro-ext-sysvipc` - shmop, sysvsem, sysvshm and sysvmsg
 - `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,sodium,xml,zlib}` - misc extensions
