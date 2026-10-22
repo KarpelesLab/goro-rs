@@ -11,6 +11,8 @@ use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
 use crate::string::PhpString;
 use crate::value::Value;
 
+#[path = "internal_static.rs"]
+pub mod internal_static;
 #[path = "static_props.rs"]
 mod static_props;
 #[path = "typed_ref.rs"]
@@ -3008,6 +3010,9 @@ impl Vm {
 
     pub fn call_callback(&mut self, callback: &Value, args: &[Value]) -> Result<Value, VmError> {
         let callback = &callback.closure_callable();
+        if let Some(t) = self.internal_static_target(callback) {
+            return self.call_internal_static(t, args, Vec::new());
+        }
         match callback {
             Value::String(s) => {
                 if let Some(msg) = Self::forbidden_dynamic_call(s.as_bytes()) {
@@ -21133,6 +21138,17 @@ impl Vm {
                                                 None if c.get_method(b"__callstatic").is_some() => {
                                                     None
                                                 }
+                                                // An enum's from() / tryFrom() / cases()
+                                                None if c.is_enum
+                                                    && (ml == b"cases"
+                                                        || (c.enum_backing_type.is_some()
+                                                            && matches!(
+                                                                ml.as_slice(),
+                                                                b"from" | b"tryfrom"
+                                                            ))) =>
+                                                {
+                                                    None
+                                                }
                                                 None if c.get_method(b"__call").is_some()
                                                     && this_in_scope =>
                                                 {
@@ -22874,8 +22890,38 @@ impl Vm {
                             message: FIBER_SUSPEND_SENTINEL.to_string(),
                             line: op.line,
                         });
-                    } else if func_name_lower == b"fiber::getcurrent" {
-                        let result = self.current_fiber.clone().unwrap_or(Value::Null);
+                    } else if let Some(target) = self.vm_static_builtin_target(&func_name_lower) {
+                        // Static methods of internal classes the VM implements
+                        // (internal_static.rs)
+                        let this =
+                            if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                                cvs.first()
+                                    .map(|v| v.deref())
+                                    .filter(|v| matches!(v, Value::Object(_)))
+                            } else {
+                                None
+                            };
+                        let result = self.vm_static_builtin(
+                            &target,
+                            &call.args,
+                            &call.named_args,
+                            this,
+                            op_array.strict_types,
+                            op.line,
+                        );
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: self.uncaught_exception_message(),
+                                line: op.line,
+                            });
+                        }
                         self.write_operand(
                             &op.result,
                             result,
@@ -23009,86 +23055,6 @@ impl Vm {
                                 }
                                 return Err(e);
                             }
-                        }
-                    } else if func_name_lower == b"weakreference::create" {
-                        // WeakReference::create($object) - create a weak reference
-                        let arg = call.args.first().cloned().unwrap_or(Value::Null);
-                        if let Value::Object(obj_rc) = &arg {
-                            let target_oid = obj_rc.borrow().object_id;
-                            // Check for existing WeakReference (singleton pattern)
-                            let existing = self.weak_ref_cache.get(&target_oid).and_then(
-                                |(wid, wr_val)| {
-                                    // Verify the WeakReference itself is still alive
-                                    if let Value::Object(wr_rc) = wr_val {
-                                        if Rc::strong_count(wr_rc) > 0 {
-                                            Some((*wid, wr_val.clone()))
-                                        } else {
-                                            None
-                                        }
-                                    } else {
-                                        None
-                                    }
-                                },
-                            );
-                            if let Some((_wid, wr_val)) = existing {
-                                self.write_operand(
-                                    &op.result,
-                                    wr_val,
-                                    &mut cvs,
-                                    &mut tmps,
-                                    &static_cv_keys,
-                                );
-                            } else {
-                                // Create a Weak pointer and store it in the VM's weak_refs table
-                                let weak = Rc::downgrade(obj_rc);
-                                let weak_id = self.next_weak_ref_id;
-                                self.next_weak_ref_id += 1;
-                                self.weak_refs.insert(weak_id, weak);
-
-                                // Create the WeakReference object
-                                let wr_id = self.alloc_object_id();
-                                let mut wr_obj =
-                                    PhpObject::new(b"WeakReference".to_vec(), wr_id);
-                                wr_obj.set_property(
-                                    b"__weak_ref_id".to_vec(),
-                                    Value::Long(weak_id as i64),
-                                );
-                                let wr_val = Value::Object(Rc::new(RefCell::new(wr_obj)));
-                                self.weak_ref_cache
-                                    .insert(target_oid, (weak_id, wr_val.clone()));
-                                self.write_operand(
-                                    &op.result,
-                                    wr_val,
-                                    &mut cvs,
-                                    &mut tmps,
-                                    &static_cv_keys,
-                                );
-                            }
-                        } else {
-                            let msg = "WeakReference::create(): Argument #1 ($object) must be of type object, {} given";
-                            let type_name = match &arg {
-                                Value::Null => "null",
-                                Value::Long(_) => "int",
-                                Value::Double(_) => "float",
-                                Value::String(_) => "string",
-                                Value::True | Value::False => "bool",
-                                Value::Array(_) => "array",
-                                _ => "unknown",
-                            };
-                            let err_msg = msg.replace("{}", type_name);
-                            let exc = self.create_exception(b"TypeError", &err_msg, op.line);
-                            self.current_exception = Some(exc);
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
-                                ip = *catch_target as usize;
-                                return Ok(Flow::Continue);
-                            }
-                            return Err(VmError {
-                                message: format!("Uncaught TypeError: {}", err_msg),
-                                line: op.line,
-                            });
                         }
                     } else if func_name_lower.starts_with(b"__weakmap::") {
                         // WeakMap instance method calls
@@ -23301,406 +23267,6 @@ impl Vm {
                             }
                             _ => {}
                         }
-                    } else if func_name_lower == b"closure::getcurrent" {
-                        // Closure::getCurrent(): the Closure of the calling frame.
-                        let depth = self.call_stack.len();
-                        while self.closure_frames.last().is_some_and(|f| f.0 > depth) {
-                            self.closure_frames.pop();
-                        }
-                        let cur = self.closure_frames.last().and_then(|(d, name, c)| {
-                            (*d == depth
-                                && self.call_stack.last().is_some_and(|f| f.0 == *name))
-                            .then(|| c.upgrade().map(Value::Object))
-                            .flatten()
-                        });
-                        match cur {
-                            Some(c) => self.write_operand(
-                                &op.result,
-                                c,
-                                &mut cvs,
-                                &mut tmps,
-                                &static_cv_keys,
-                            ),
-                            None => {
-                                let msg = "Current function is not a closure";
-                                let exc = self.create_exception(b"Error", msg, op.line);
-                                self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, saved_pc)) =
-                                    exception_handlers.pop()
-                                {
-                                    pending_calls_catch_depth = Some(saved_pc);
-                                    ip = catch_target as usize;
-                                    return Ok(Flow::Continue);
-                                }
-                                return Err(VmError {
-                                    message: format!("Uncaught Error: {}", msg),
-                                    line: op.line,
-                                });
-                            }
-                        }
-                    } else if func_name_lower == b"closure::fromcallable" {
-                        // Closure::fromCallable($callable) - convert callable to a Closure
-                        let callable = call.args.first().cloned().unwrap_or(Value::Null);
-                        let scope = self.class_scope_stack.last().cloned();
-                        let this = if op_array.cv_names.first().map(|n| n.as_slice())
-                            == Some(b"this")
-                        {
-                            cvs.first()
-                                .map(|v| v.deref())
-                                .filter(|v| matches!(v, Value::Object(_)))
-                        } else {
-                            None
-                        };
-                        let result = match self.closure_from_callable(&callable, scope, this) {
-                            Ok(c) => c,
-                            Err(e) => {
-                                if self.current_exception.is_none() {
-                                    let exc = self.throw_type_error(format!(
-                                        "Failed to create closure from callable: {}",
-                                        e
-                                    ));
-                                    self.current_exception = Some(exc);
-                                }
-                                Value::Null
-                            }
-                        };
-                        if self.current_exception.is_some() {
-                            if let Some((catch_target, _, _, _, saved_pc)) =
-                                exception_handlers.pop()
-                            {
-                                pending_calls_catch_depth = Some(saved_pc);
-                                ip = catch_target as usize;
-                                return Ok(Flow::Continue);
-                            } else {
-                                return Err(VmError {
-                                    message: "Uncaught TypeError".into(),
-                                    line: op.line,
-                                });
-                            }
-                        }
-                        self.write_operand(
-                            &op.result,
-                            result,
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
-                    } else if func_name_lower == b"closure::bind"
-                        || func_name_lower == b"closure::bindto"
-                    {
-                        // Closure::bind($closure, $newThis, $newScope)
-                        let closure = call.args.first().cloned().unwrap_or(Value::Null);
-                        let new_this = call.args.get(1).cloned().unwrap_or(Value::Null);
-                        let scope = call
-                            .args
-                            .get(2)
-                            .cloned()
-                            .unwrap_or(Value::String(PhpString::from_bytes(b"static")));
-                        let scope_provided = call.args.len() >= 3;
-                        let result =
-                            self.bind_closure(&closure, new_this, scope, scope_provided);
-                        if self.current_exception.is_some() {
-                            if let Some((catch_target, _, _, _, saved_pc)) =
-                                exception_handlers.pop()
-                            {
-                                pending_calls_catch_depth = Some(saved_pc);
-                                ip = catch_target as usize;
-                                return Ok(Flow::Continue);
-                            } else {
-                                return Err(VmError {
-                                    message: "Uncaught TypeError".into(),
-                                    line: op.line,
-                                });
-                            }
-                        }
-                        self.write_operand(
-                            &op.result,
-                            result,
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
-                    } else if func_name_lower == b"splfixedarray::fromarray" {
-                        // SplFixedArray::fromArray($array, $preserveKeys = true)
-                        let fa_args = call.args.clone();
-                        let result = self.fa_from_array(&fa_args);
-                        if self.current_exception.is_some() {
-                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                exception_handlers.last()
-                            {
-                                pending_calls_catch_depth = Some(*eh_pc_depth);
-                                ip = *catch_target as usize;
-                                return Ok(Flow::Continue);
-                            }
-                            let msg = match &self.current_exception {
-                                Some(Value::Object(o)) => {
-                                    let ob = o.borrow();
-                                    format!(
-                                        "Uncaught {}: {}",
-                                        crate::value::display_class_name(&ob.class_name),
-                                        ob.get_property(b"message")
-                                            .to_php_string()
-                                            .to_string_lossy()
-                                    )
-                                }
-                                _ => "Uncaught exception".to_string(),
-                            };
-                            return Err(VmError {
-                                message: msg,
-                                line: op.line,
-                            });
-                        }
-                        self.write_operand(
-                            &op.result,
-                            result,
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
-                    } else if func_name_lower == b"uri\\whatwg\\url::parse"
-                        || func_name_lower == b"uri\\rfc3986\\uri::parse"
-                    {
-                        // static parse(string $uri, ?string $baseUrl = null, mixed &$errors = null): ?static
-                        let is_whatwg = func_name_lower.starts_with(b"uri\\whatwg");
-                        let uri_val = call.args.first().cloned().unwrap_or(Value::Null);
-                        let uri_str = uri_val.to_php_string().to_string_lossy();
-                        // base URL may be a string or a Uri\WhatWg\Url / Uri\Rfc3986\Uri
-                        // object. For objects, extract the stored serialized form.
-                        let base_str = call.args.get(1).and_then(|v| {
-                            let v = match v {
-                                Value::Reference(r) => r.borrow().clone(),
-                                other => other.clone(),
-                            };
-                            match v {
-                                Value::Null | Value::Undef => None,
-                                Value::Object(o) => {
-                                    let ob = o.borrow();
-                                    match ob.get_property(b"__uri_serialized") {
-                                        Value::String(s) => Some(s.to_string_lossy()),
-                                        _ => None,
-                                    }
-                                }
-                                other => Some(other.to_php_string().to_string_lossy()),
-                            }
-                        });
-                        let obj_id = self.next_object_id();
-                        let class_name: Vec<u8> = if is_whatwg {
-                            b"Uri\\WhatWg\\Url".to_vec()
-                        } else {
-                            b"Uri\\Rfc3986\\Uri".to_vec()
-                        };
-                        let mut new_obj = PhpObject::new(class_name, obj_id);
-                        let ok = crate::uri::parse_into(
-                            &mut new_obj,
-                            &uri_str,
-                            base_str.as_deref(),
-                            !is_whatwg,
-                        );
-                        let result = if ok {
-                            Value::Object(Rc::new(RefCell::new(new_obj)))
-                        } else {
-                            Value::Null
-                        };
-                        // If caller provided an `errors` argument (positional
-                        // index 2 or named), populate it with an array
-                        // (empty on success). The value must be a Reference
-                        // for the update to propagate back to the caller.
-                        let errors_val = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
-                        if let Some(Value::Reference(r)) = call.args.get(2) {
-                            *r.borrow_mut() = errors_val.clone();
-                        }
-                        for (name, val) in call.named_args.iter() {
-                            if name.eq_ignore_ascii_case(b"errors") {
-                                if let Value::Reference(r) = val {
-                                    *r.borrow_mut() = errors_val.clone();
-                                }
-                            }
-                        }
-                        self.write_operand(
-                            &op.result,
-                            result,
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
-                    } else if func_name_lower.ends_with(b"::tokenize") && {
-                        // Match PhpToken itself or any subclass.
-                        let class_part =
-                            &func_name_lower[..func_name_lower.len() - b"::tokenize".len()];
-                        class_part == b"phptoken" || self.class_extends(class_part, b"phptoken")
-                    } {
-                        // PhpToken::tokenize(string $code, int $flags = 0): array
-                        // If called as SubClass::tokenize, create SubClass instances.
-                        let class_part =
-                            &func_name_lower[..func_name_lower.len() - b"::tokenize".len()];
-                        // Recover the original class name (preserve case) by looking it up.
-                        let class_name: Vec<u8> = if class_part == b"phptoken" {
-                            b"PhpToken".to_vec()
-                        } else {
-                            self.classes
-                                .get(class_part)
-                                .map(|ce| ce.name.clone())
-                                .unwrap_or_else(|| class_part.to_vec())
-                        };
-                        let source = call
-                            .args
-                            .first()
-                            .cloned()
-                            .unwrap_or(Value::Null)
-                            .to_php_string();
-                        let _flags = call.args.get(1).map(|v| v.to_long()).unwrap_or(0);
-                        let mut lexer = goro_parser::Lexer::new(source.as_bytes());
-                        lexer.set_preserve_trivia(true);
-                        let tokens = lexer.tokenize();
-                        let src = source.as_bytes();
-                        let mut result = PhpArray::new();
-                        // Pre-pass: combine adjacent T_STRING / T_NS_SEPARATOR / T_NAMESPACE
-                        // sequences into T_NAME_QUALIFIED (Foo\Bar), T_NAME_FULLY_QUALIFIED
-                        // (\Foo\Bar), or T_NAME_RELATIVE (namespace\Foo). Combining requires
-                        // zero whitespace/comments between consecutive lexer tokens (i.e.
-                        // next token's start == previous token's end).
-                        use goro_parser::token::TokenKind as TK;
-                        let is_ident = |k: &TK| matches!(k, TK::Identifier(_));
-                        let mut i = 0usize;
-                        let mut combined: Vec<(i64, usize, usize, u32)> =
-                            Vec::with_capacity(tokens.len());
-                        while i < tokens.len() {
-                            let tok = &tokens[i];
-                            if matches!(tok.kind, TK::Eof) {
-                                i += 1;
-                                continue;
-                            }
-                            let token_id = goro_parser::token::token_kind_to_php_id(&tok.kind);
-                            let s_start = tok.span.start as usize;
-                            let s_end = tok.span.end as usize;
-                            let s_line = tok.span.line;
-
-                            // Look-ahead helper: is next token directly adjacent (no
-                            // intervening whitespace/comments) and a given kind?
-                            let adjacent = |idx: usize, end_pos: usize| -> bool {
-                                tokens
-                                    .get(idx)
-                                    .is_some_and(|t| t.span.start as usize == end_pos)
-                            };
-
-                            // Case 1: starts with `\` Backslash + Identifier → T_NAME_FULLY_QUALIFIED
-                            if matches!(tok.kind, TK::Backslash)
-                                && adjacent(i + 1, s_end)
-                                && tokens.get(i + 1).is_some_and(|t| is_ident(&t.kind))
-                            {
-                                let mut j = i + 1;
-                                let mut end = tokens[j].span.end as usize;
-                                j += 1;
-                                // Chain: (\Ident)( \Ident)*
-                                while j + 1 < tokens.len()
-                                    && matches!(tokens[j].kind, TK::Backslash)
-                                    && tokens[j].span.start as usize == end
-                                    && is_ident(&tokens[j + 1].kind)
-                                    && tokens[j + 1].span.start as usize
-                                        == tokens[j].span.end as usize
-                                {
-                                    end = tokens[j + 1].span.end as usize;
-                                    j += 2;
-                                }
-                                if j > i + 1 {
-                                    combined.push((263, s_start, end, s_line));
-                                    i = j;
-                                    continue;
-                                }
-                            }
-                            // Case 2: `namespace` (T_NAMESPACE = 374) + `\` + Identifier → T_NAME_RELATIVE
-                            if matches!(tok.kind, TK::Namespace)
-                                && adjacent(i + 1, s_end)
-                                && tokens
-                                    .get(i + 1)
-                                    .is_some_and(|t| matches!(t.kind, TK::Backslash))
-                                && tokens.get(i + 2).is_some_and(|t| is_ident(&t.kind))
-                                && tokens[i + 2].span.start as usize
-                                    == tokens[i + 1].span.end as usize
-                            {
-                                let mut j = i + 3;
-                                let mut end = tokens[i + 2].span.end as usize;
-                                while j + 1 < tokens.len()
-                                    && matches!(tokens[j].kind, TK::Backslash)
-                                    && tokens[j].span.start as usize == end
-                                    && is_ident(&tokens[j + 1].kind)
-                                    && tokens[j + 1].span.start as usize
-                                        == tokens[j].span.end as usize
-                                {
-                                    end = tokens[j + 1].span.end as usize;
-                                    j += 2;
-                                }
-                                combined.push((264, s_start, end, s_line));
-                                i = j;
-                                continue;
-                            }
-                            // Case 3: Identifier + `\` + Identifier → T_NAME_QUALIFIED
-                            if is_ident(&tok.kind)
-                                && tokens
-                                    .get(i + 1)
-                                    .is_some_and(|t| matches!(t.kind, TK::Backslash))
-                                && tokens[i + 1].span.start as usize == s_end
-                                && tokens.get(i + 2).is_some_and(|t| is_ident(&t.kind))
-                                && tokens[i + 2].span.start as usize
-                                    == tokens[i + 1].span.end as usize
-                            {
-                                let mut j = i + 3;
-                                let mut end = tokens[i + 2].span.end as usize;
-                                while j + 1 < tokens.len()
-                                    && matches!(tokens[j].kind, TK::Backslash)
-                                    && tokens[j].span.start as usize == end
-                                    && is_ident(&tokens[j + 1].kind)
-                                    && tokens[j + 1].span.start as usize
-                                        == tokens[j].span.end as usize
-                                {
-                                    end = tokens[j + 1].span.end as usize;
-                                    j += 2;
-                                }
-                                combined.push((265, s_start, end, s_line));
-                                i = j;
-                                continue;
-                            }
-
-                            // Fallback: emit single token.
-                            let id_for_combined = if token_id == 0 {
-                                src.get(s_start).copied().unwrap_or(0) as i64
-                            } else {
-                                token_id
-                            };
-                            combined.push((id_for_combined, s_start, s_end, s_line));
-                            i += 1;
-                        }
-
-                        for (id_val, s_start, s_end, s_line) in combined {
-                            let text: &[u8] =
-                                if s_start < src.len() && s_end <= src.len() && s_start < s_end
-                                {
-                                    &src[s_start..s_end]
-                                } else {
-                                    b""
-                                };
-                            let obj_id = self.next_object_id();
-                            let mut tok_obj = PhpObject::new(class_name.clone(), obj_id);
-                            tok_obj.set_property(b"id".to_vec(), Value::Long(id_val));
-                            tok_obj.set_property(
-                                b"text".to_vec(),
-                                Value::String(PhpString::from_bytes(text)),
-                            );
-                            tok_obj.set_property(b"line".to_vec(), Value::Long(s_line as i64));
-                            tok_obj.set_property(b"pos".to_vec(), Value::Long(s_start as i64));
-                            // If the class defines additional properties with defaults, initialize them.
-                            if class_part != b"phptoken" {
-                                self.apply_class_property_defaults(&mut tok_obj, class_part);
-                            }
-                            result.push(Value::Object(Rc::new(RefCell::new(tok_obj))));
-                        }
-                        self.write_operand(
-                            &op.result,
-                            Value::Array(Rc::new(RefCell::new(result))),
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
                     } else if func_name_lower == b"datetime::createfromformat"
                         || func_name_lower == b"datetimeimmutable::createfromformat"
                     {
@@ -24623,298 +24189,6 @@ impl Vm {
                         self.write_operand(
                             &op.result,
                             Value::Null,
-                            &mut cvs,
-                            &mut tmps,
-                            &static_cv_keys,
-                        );
-                    } else if func_name_lower.contains(&b':') && {
-                        // Check if this is an enum static method call (from/tryFrom/cases)
-                        let sep_pos =
-                            func_name_lower.iter().position(|&b| b == b':').unwrap_or(0);
-                        if sep_pos > 0 && func_name_lower.get(sep_pos + 1) == Some(&b':') {
-                            let class_part = &func_name_lower[..sep_pos];
-                            let method_part = &func_name_lower[sep_pos + 2..];
-                            self.classes
-                                .get(class_part)
-                                .map(|c| c.is_enum)
-                                .unwrap_or(false)
-                                && (method_part == b"from"
-                                    || method_part == b"tryfrom"
-                                    || method_part == b"cases")
-                        } else {
-                            false
-                        }
-                    } {
-                        // Handle enum static methods: from(), tryFrom(), cases()
-                        let sep_pos = func_name_lower.iter().position(|&b| b == b':').unwrap();
-                        let class_part = func_name_lower[..sep_pos].to_vec();
-                        let method_part = func_name_lower[sep_pos + 2..].to_vec();
-
-                        let result = match method_part.as_slice() {
-                            b"from" => {
-                                let arg = call.args.first().cloned().unwrap_or(Value::Null);
-                                let class = self.classes.get(&class_part).cloned();
-                                if let Some(class) = class {
-                                    if class.enum_backing_type.is_none() {
-                                        // Unit enums don't have from()
-                                        let class_name = String::from_utf8_lossy(&class.name);
-                                        let msg = format!(
-                                            "Cannot use ::from on non-backed enum {}",
-                                            class_name
-                                        );
-                                        let exc =
-                                            self.create_exception(b"Error", &msg, op.line);
-                                        self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, saved_pc)) =
-                                            exception_handlers.pop()
-                                        {
-                                            pending_calls_catch_depth = Some(saved_pc);
-                                            ip = catch_target as usize;
-                                            return Ok(Flow::Continue);
-                                        }
-                                        return Err(VmError {
-                                            message: msg,
-                                            line: op.line,
-                                        });
-                                    }
-                                    // Type check: for int-backed enums, only int is accepted
-                                    // For string-backed enums, both string and int are accepted
-                                    let bt = class.enum_backing_type.as_ref().unwrap();
-                                    // Z_PARAM_LONG: weak mode coerces scalars.
-                                    let arg = self.enum_from_weak_int(
-                                        bt,
-                                        arg,
-                                        op_array.strict_types,
-                                        op.line,
-                                    );
-                                    let is_int_backed = bt.eq_ignore_ascii_case(b"int");
-                                    if (is_int_backed && !matches!(arg, Value::Long(_)))
-                                        || (!is_int_backed
-                                            && op_array.strict_types
-                                            && !matches!(arg, Value::String(_)))
-                                    {
-                                        let class_name = String::from_utf8_lossy(&class.name);
-                                        let arg_type = Self::value_type_name(&arg);
-                                        let msg = format!(
-                                            "{}::from(): Argument #1 ($value) must be of type {}, {} given",
-                                            class_name,
-                                            if is_int_backed { "int" } else { "string" },
-                                            arg_type
-                                        );
-                                        let exc =
-                                            self.create_exception(b"TypeError", &msg, op.line);
-                                        self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, saved_pc)) =
-                                            exception_handlers.pop()
-                                        {
-                                            pending_calls_catch_depth = Some(saved_pc);
-                                            ip = catch_target as usize;
-                                            return Ok(Flow::Continue);
-                                        }
-                                        return Err(VmError {
-                                            message: msg,
-                                            line: op.line,
-                                        });
-                                    }
-                                    if let Some((exc_class, err_msg)) =
-                                        self.enum_backed_table_error(&class_part)
-                                    {
-                                        // An empty class: the value expression's exception is pending.
-                                        if !exc_class.is_empty() {
-                                            let exc =
-                                                self.create_exception(exc_class, &err_msg, op.line);
-                                            self.current_exception = Some(exc);
-                                        }
-                                        if let Some((catch_target, _, _, _, saved_pc)) =
-                                            exception_handlers.pop()
-                                        {
-                                            pending_calls_catch_depth = Some(saved_pc);
-                                            ip = catch_target as usize;
-                                            return Ok(Flow::Continue);
-                                        }
-                                        return Err(VmError {
-                                            message: err_msg,
-                                            line: op.line,
-                                        });
-                                    }
-                                    // For string-backed enums, convert arg to string for comparison
-                                    let lookup_arg = if bt.eq_ignore_ascii_case(b"string")
-                                        && !matches!(arg, Value::String(_))
-                                    {
-                                        Value::String(arg.to_php_string())
-                                    } else {
-                                        arg.clone()
-                                    };
-                                    let mut found = None;
-                                    for (case_name, case_val) in &class.enum_cases {
-                                        if self
-                                            .resolve_deferred_value(case_val)
-                                            .identical(&lookup_arg)
-                                        {
-                                            found = Some(case_name.clone());
-                                            break;
-                                        }
-                                    }
-                                    if let Some(case_name) = found {
-                                        self.get_enum_case(&class_part, &case_name)
-                                            .unwrap_or(Value::Null)
-                                    } else {
-                                        let class_name = String::from_utf8_lossy(&class.name);
-                                        let arg_str =
-                                            lookup_arg.to_php_string().to_string_lossy();
-                                        let msg = if bt.eq_ignore_ascii_case(b"string") {
-                                            format!(
-                                                "\"{}\" is not a valid backing value for enum {}",
-                                                arg_str, class_name
-                                            )
-                                        } else {
-                                            format!(
-                                                "{} is not a valid backing value for enum {}",
-                                                arg_str, class_name
-                                            )
-                                        };
-                                        let exc =
-                                            self.create_exception(b"ValueError", &msg, op.line);
-                                        self.current_exception = Some(exc);
-                                        if let Some((catch_target, _, _, _, saved_pc)) =
-                                            exception_handlers.pop()
-                                        {
-                                            pending_calls_catch_depth = Some(saved_pc);
-                                            ip = catch_target as usize;
-                                            return Ok(Flow::Continue);
-                                        }
-                                        return Err(VmError {
-                                            message: msg,
-                                            line: op.line,
-                                        });
-                                    }
-                                } else {
-                                    Value::Null
-                                }
-                            }
-                            b"tryfrom" => {
-                                let arg = call.args.first().cloned().unwrap_or(Value::Null);
-                                let class = self.classes.get(&class_part).cloned();
-                                if let Some(class) = class {
-                                    // Z_PARAM_LONG: weak mode coerces scalars.
-                                    let arg = match class.enum_backing_type.as_ref() {
-                                        Some(bt) => self.enum_from_weak_int(
-                                            bt,
-                                            arg,
-                                            op_array.strict_types,
-                                            op.line,
-                                        ),
-                                        None => arg,
-                                    };
-                                    // Type check for int-backed enums
-                                    if let Some(ref bt) = class.enum_backing_type {
-                                        let is_int_backed = bt.eq_ignore_ascii_case(b"int");
-                                        if (is_int_backed && !matches!(arg, Value::Long(_)))
-                                            || (!is_int_backed
-                                                && op_array.strict_types
-                                                && !matches!(arg, Value::String(_)))
-                                        {
-                                            let class_name =
-                                                String::from_utf8_lossy(&class.name);
-                                            let arg_type = Self::value_type_name(&arg);
-                                            let msg = format!(
-                                                "{}::tryFrom(): Argument #1 ($value) must be of type {}, {} given",
-                                                class_name,
-                                                if is_int_backed { "int" } else { "string" },
-                                                arg_type
-                                            );
-                                            let exc = self.create_exception(
-                                                b"TypeError",
-                                                &msg,
-                                                op.line,
-                                            );
-                                            self.current_exception = Some(exc);
-                                            if let Some((catch_target, _, _, _, saved_pc)) =
-                                                exception_handlers.pop()
-                                            {
-                                                pending_calls_catch_depth = Some(saved_pc);
-                                                ip = catch_target as usize;
-                                                return Ok(Flow::Continue);
-                                            }
-                                            return Err(VmError {
-                                                message: msg,
-                                                line: op.line,
-                                            });
-                                        }
-                                    }
-                                    if let Some((exc_class, err_msg)) =
-                                        self.enum_backed_table_error(&class_part)
-                                    {
-                                        // An empty class: the value expression's exception is pending.
-                                        if !exc_class.is_empty() {
-                                            let exc =
-                                                self.create_exception(exc_class, &err_msg, op.line);
-                                            self.current_exception = Some(exc);
-                                        }
-                                        if let Some((catch_target, _, _, _, saved_pc)) =
-                                            exception_handlers.pop()
-                                        {
-                                            pending_calls_catch_depth = Some(saved_pc);
-                                            ip = catch_target as usize;
-                                            return Ok(Flow::Continue);
-                                        }
-                                        return Err(VmError {
-                                            message: err_msg,
-                                            line: op.line,
-                                        });
-                                    }
-                                    // For string-backed enums, convert arg to string
-                                    let lookup_arg = if class
-                                        .enum_backing_type
-                                        .as_ref()
-                                        .map(|bt| bt.eq_ignore_ascii_case(b"string"))
-                                        .unwrap_or(false)
-                                        && !matches!(arg, Value::String(_))
-                                    {
-                                        Value::String(arg.to_php_string())
-                                    } else {
-                                        arg.clone()
-                                    };
-                                    let mut found = None;
-                                    for (case_name, case_val) in &class.enum_cases {
-                                        if self
-                                            .resolve_deferred_value(case_val)
-                                            .identical(&lookup_arg)
-                                        {
-                                            found = Some(case_name.clone());
-                                            break;
-                                        }
-                                    }
-                                    if let Some(case_name) = found {
-                                        self.get_enum_case(&class_part, &case_name)
-                                            .unwrap_or(Value::Null)
-                                    } else {
-                                        Value::Null
-                                    }
-                                } else {
-                                    Value::Null
-                                }
-                            }
-                            b"cases" => {
-                                let class = self.classes.get(&class_part).cloned();
-                                if let Some(class) = class {
-                                    let mut arr = PhpArray::new();
-                                    for (case_name, _) in &class.enum_cases {
-                                        let case_obj = self
-                                            .get_enum_case(&class_part, case_name)
-                                            .unwrap_or(Value::Null);
-                                        arr.push(case_obj);
-                                    }
-                                    Value::Array(Rc::new(RefCell::new(arr)))
-                                } else {
-                                    Value::Null
-                                }
-                            }
-                            _ => Value::Null,
-                        };
-                        self.write_operand(
-                            &op.result,
-                            result,
                             &mut cvs,
                             &mut tmps,
                             &static_cv_keys,

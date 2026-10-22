@@ -1620,6 +1620,11 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
             });
         }
     }
+    // A static method of an internal class: zend_call_function() on it.
+    if let Some(t) = vm.internal_static_target(callback) {
+        let named = std::mem::take(&mut vm.pending_named_args);
+        return vm.call_internal_static(t, &args[1..], named);
+    }
     let call_args: Vec<Value> = args[1..].to_vec();
     // Take any forwarded named args from the VM
     let named_args: Vec<(Vec<u8>, Value)> = std::mem::take(&mut vm.pending_named_args);

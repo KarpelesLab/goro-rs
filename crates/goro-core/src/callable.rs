@@ -148,6 +148,23 @@ impl Vm {
                             is_abstract: m.is_abstract,
                         });
                     }
+                    // An enum's from() / tryFrom() / cases()
+                    if c.is_enum
+                        && (ml == b"cases"
+                            || (c.enum_backing_type.is_some()
+                                && matches!(ml, b"from" | b"tryfrom")))
+                    {
+                        return Some(MethodInfo {
+                            name: match ml {
+                                b"tryfrom" => b"tryFrom".to_vec(),
+                                _ => ml.to_vec(),
+                            },
+                            decl: cur,
+                            vis: Visibility::Public,
+                            is_static: true,
+                            is_abstract: false,
+                        });
+                    }
                     cur = lower(c.parent.as_ref()?);
                 }
                 None => break,
@@ -190,13 +207,13 @@ impl Vm {
         if self.is_known_builtin_class(&cur) && cur.as_slice() == b"closure" {
             if matches!(
                 ml,
-                b"__invoke" | b"call" | b"bind" | b"bindto" | b"fromcallable"
+                b"__invoke" | b"call" | b"bind" | b"bindto" | b"fromcallable" | b"getcurrent"
             ) {
                 return Some(MethodInfo {
                     name: ml.to_vec(),
                     decl: cur,
                     vis: Visibility::Public,
-                    is_static: matches!(ml, b"bind" | b"fromcallable"),
+                    is_static: matches!(ml, b"bind" | b"fromcallable" | b"getcurrent"),
                     is_abstract: false,
                 });
             }

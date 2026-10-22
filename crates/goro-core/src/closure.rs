@@ -971,6 +971,17 @@ impl Vm {
             None if has_call_static || (has_call && bound_this.is_some()) => {
                 Ok(self.make_closure_object(wrapper))
             }
+            // An enum's from() / tryFrom() / cases()
+            None if ce.is_enum
+                && (ml == b"cases"
+                    || (ce.enum_backing_type.is_some()
+                        && matches!(ml.as_slice(), b"from" | b"tryfrom"))) =>
+            {
+                let mut n = canon.clone();
+                n.extend_from_slice(b"::");
+                n.extend_from_slice(if ml == b"tryfrom" { b"tryFrom" } else { &ml });
+                Ok(self.make_closure_object(str_val(&n)))
+            }
             None => Err((
                 b"Error",
                 format!(
@@ -1351,6 +1362,18 @@ impl Vm {
                 Ok(self.make_closure_object(Value::Array(Rc::new(RefCell::new(arr)))))
             }
             None => {
+                // An enum's from() / tryFrom() / cases()
+                let (is_enum, backed) = self.classes.get(&cl).map_or((false, false), |c| {
+                    (c.is_enum, c.enum_backing_type.is_some())
+                });
+                if is_enum
+                    && (ml == b"cases" || (backed && matches!(ml.as_slice(), b"from" | b"tryfrom")))
+                {
+                    let mut n = canon.clone();
+                    n.extend_from_slice(b"::");
+                    n.extend_from_slice(if ml == b"tryfrom" { b"tryFrom" } else { &ml });
+                    return Ok(self.make_closure_object(str_val(&n)));
+                }
                 if obj.is_some() && has_call {
                     return Ok(self.magic_call_closure(&canon, m, obj));
                 }
