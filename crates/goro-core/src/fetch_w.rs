@@ -412,6 +412,14 @@ impl Vm {
     /// an unqualified call in a namespace falls back to the global one.
     fn pending_builtin_name(&self, call: &crate::vm::PendingCall) -> Option<Vec<u8>> {
         let name = call.name.as_bytes();
+        // A call resolved to a user function of its name when it was set up
+        // (the name it looked up: no leading backslash).
+        if call.target.user.is_some()
+            && call.target.fn_gen == self.user_functions.len() + 1
+            && name.first() != Some(&b'\\')
+        {
+            return None;
+        }
         let name = name.strip_prefix(b"\\").unwrap_or(name);
         if name.contains(&b':') || self.user_fn_lookup(name).is_some() {
             return None;
