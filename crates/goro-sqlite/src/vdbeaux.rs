@@ -2035,7 +2035,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
             while rc == SQLITE_OK && i < db.aDb.len() {
                 if txnState(db, i) >= SQLITE_TXN_WRITE {
                     let pBt = db.aDb[i].pBt.clone().unwrap();
-                    rc = crate::btree::sqlite3BtreeCommitPhaseOne(&pBt, None);
+                    rc = crate::btree::sqlite3BtreeCommitPhaseOne(db, &pBt, None);
                 }
                 i += 1;
             }
@@ -2052,7 +2052,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
             if txn != SQLITE_TXN_NONE {
                 debug_assert!(needXcommit != 0 || txn == SQLITE_TXN_READ);
                 let pBt = db.aDb[i].pBt.clone().unwrap();
-                rc = crate::btree::sqlite3BtreeCommitPhaseTwo(&pBt, 0);
+                rc = crate::btree::sqlite3BtreeCommitPhaseTwo(db, &pBt, 0);
             }
             i += 1;
         }
@@ -2184,7 +2184,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
         let mut i = 0usize;
         while rc == SQLITE_OK && i < db.aDb.len() {
             if let Some(pBt) = db.aDb[i].pBt.clone() {
-                rc = crate::btree::sqlite3BtreeCommitPhaseOne(&pBt, Some(&zSuper));
+                rc = crate::btree::sqlite3BtreeCommitPhaseOne(db, &pBt, Some(&zSuper));
             }
             i += 1;
         }
@@ -2212,7 +2212,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
          */
         for i in 0..db.aDb.len() {
             if let Some(pBt) = db.aDb[i].pBt.clone() {
-                crate::btree::sqlite3BtreeCommitPhaseTwo(&pBt, 1);
+                crate::btree::sqlite3BtreeCommitPhaseTwo(db, &pBt, 1);
             }
         }
 

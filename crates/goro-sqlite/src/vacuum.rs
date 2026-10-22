@@ -473,7 +473,7 @@ fn run_vacuum_body(
         if rc != SQLITE_OK {
             return rc;
         }
-        rc = sqlite3BtreeCommit(&pTemp);
+        rc = sqlite3BtreeCommit(db, &pTemp);
         if rc != SQLITE_OK {
             return rc;
         }

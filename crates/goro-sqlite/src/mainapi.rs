@@ -826,7 +826,7 @@ pub fn sqlite3RollbackAll(db: &mut Sqlite3, tripCode: i32) {
             if sqlite3BtreeTxnState(db, &p) == SQLITE_TXN_WRITE {
                 inTrans = true;
             }
-            sqlite3BtreeRollback(&p, tripCode, (!schemaChange) as i32);
+            sqlite3BtreeRollback(db, &p, tripCode, (!schemaChange) as i32);
         }
     }
     crate::vtab::sqlite3VtabRollback(db);

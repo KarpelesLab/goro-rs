@@ -114,7 +114,7 @@ fn vdbeSorterCompareTail(
     pKey2: &[u8],
 ) -> i32 {
     if !*pbKey2Cached {
-        crate::vdbeaux::sqlite3VdbeRecordUnpack(t.db, pKey2.len() as i32, pKey2, t.r2);
+        crate::vdbeaux::sqlite3VdbeRecordUnpack(pKey2.len() as i32, pKey2, t.r2);
         *pbKey2Cached = true;
     }
     crate::vdbeaux::sqlite3VdbeRecordCompareWithSkip(t.db, pKey1.len() as i32, pKey1, t.r2, 1)
@@ -125,7 +125,7 @@ fn vdbeSorterCompareTail(
 /// of key2 is already in t.r2.
 fn vdbeSorterCompare(t: &mut SortCtx, pbKey2Cached: &mut bool, pKey1: &[u8], pKey2: &[u8]) -> i32 {
     if !*pbKey2Cached {
-        crate::vdbeaux::sqlite3VdbeRecordUnpack(t.db, pKey2.len() as i32, pKey2, t.r2);
+        crate::vdbeaux::sqlite3VdbeRecordUnpack(pKey2.len() as i32, pKey2, t.r2);
         *pbKey2Cached = true;
     }
     crate::vdbeaux::sqlite3VdbeRecordCompare(pKey1.len() as i32, pKey1, t.r2)
@@ -704,7 +704,7 @@ pub fn sqlite3VdbeSorterCompare(
     debug_assert!(r2.nField as i32 == nKeyCol);
 
     let pKey = vdbeSorterRowkey(pSorter);
-    crate::vdbeaux::sqlite3VdbeRecordUnpack(db, pKey.len() as i32, pKey, &mut r2);
+    crate::vdbeaux::sqlite3VdbeRecordUnpack(pKey.len() as i32, pKey, &mut r2);
     let mut hasNull = false;
     for i in 0..nKeyCol as usize {
         if r2

@@ -522,7 +522,7 @@ fn backup_step(
                     crate::build::sqlite3ResetAllSchemasOfConnection(d);
                 }
                 if destMode == PAGER_JOURNALMODE_WAL {
-                    rc = sqlite3BtreeSetVersion(&pD, 2);
+                    rc = sqlite3BtreeSetVersion(ddb!(), &pD, 2);
                 }
             }
             if rc == SQLITE_OK {
@@ -638,7 +638,7 @@ fn backup_step(
                 // Finish committing the transaction to the destination
                 // database.
                 if SQLITE_OK == rc {
-                    rc = sqlite3BtreeCommitPhaseTwo(&pD, 0);
+                    rc = sqlite3BtreeCommitPhaseTwo(ddb!(), &pD, 0);
                     if rc == SQLITE_OK {
                         rc = SQLITE_DONE;
                     }
@@ -652,8 +652,8 @@ fn backup_step(
         // methods here, as "committing" a read-only transaction cannot
         // fail.
         if bCloseTrans {
-            sqlite3BtreeCommitPhaseOne(&pSrc, None);
-            sqlite3BtreeCommitPhaseTwo(&pSrc, 0);
+            sqlite3BtreeCommitPhaseOne(&mut *pSrcDb, &pSrc, None);
+            sqlite3BtreeCommitPhaseTwo(&mut *pSrcDb, &pSrc, 0);
         }
 
         if rc == SQLITE_IOERR_NOMEM {
@@ -671,7 +671,7 @@ pub fn sqlite3_backup_finish(pDestDb: &mut Sqlite3, pSrcDb: &mut Sqlite3, p: Bac
     backup_finish(Some(pDestDb), pSrcDb, &p)
 }
 
-fn backup_finish(pDestDb: Option<&mut Sqlite3>, pSrcDb: &mut Sqlite3, pp: &BackupP) -> i32 {
+fn backup_finish(mut pDestDb: Option<&mut Sqlite3>, pSrcDb: &mut Sqlite3, pp: &BackupP) -> i32 {
     let (hasDestDb, pSrc, isAttached, pDest, prc) = {
         let p = pp.borrow();
         (
@@ -702,7 +702,11 @@ fn backup_finish(pDestDb: Option<&mut Sqlite3>, pSrcDb: &mut Sqlite3, pp: &Backu
 
     // If a transaction is still open on the Btree, roll it back.
     if let Some(d) = pDest.as_ref() {
-        sqlite3BtreeRollback(d, SQLITE_OK, 0);
+        let dd: &mut Sqlite3 = match pDestDb.as_deref_mut() {
+            Some(x) => x,
+            None => &mut *pSrcDb,
+        };
+        sqlite3BtreeRollback(dd, d, SQLITE_OK, 0);
     }
 
     // Set the error code of the destination database handle.

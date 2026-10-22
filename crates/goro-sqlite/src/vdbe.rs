@@ -2630,7 +2630,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
                     None => return Err(Ex::NoMem),
                 };
                 let key = mem!(p3).bytes().to_vec();
-                sqlite3VdbeRecordUnpack(db, key.len() as i32, &key, &mut pIdxKey);
+                sqlite3VdbeRecordUnpack(key.len() as i32, &key, &mut pIdxKey);
                 pIdxKey.default_rc = 0;
                 rc = sqlite3BtreeIndexMoveto(db, &pCrsr, &mut pIdxKey, &mut seekResult);
             }
@@ -5718,8 +5718,11 @@ fn op_journalmode(
             // journal mode, this transaction always uses a rollback journal.
             debug_assert!(sqlite3BtreeTxnState(db, &pBt) != SQLITE_TXN_WRITE);
             if rc == SQLITE_OK {
-                rc =
-                    sqlite3BtreeSetVersion(&pBt, if eNew == PAGER_JOURNALMODE_WAL { 2 } else { 1 });
+                rc = sqlite3BtreeSetVersion(
+                    db,
+                    &pBt,
+                    if eNew == PAGER_JOURNALMODE_WAL { 2 } else { 1 },
+                );
             }
         }
     }

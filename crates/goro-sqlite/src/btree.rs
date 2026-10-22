@@ -2937,7 +2937,7 @@ fn lockBtree(pBt: &BtSharedP, db: &BtDbState) -> i32 {
              */
             if page1[19] == 2 && (pBt.borrow().btsFlags as i32 & BTS_NO_WAL) == 0 {
                 let mut isOpen = 0;
-                rc = sqlite3PagerOpenWal(&mut pager.borrow_mut(), &mut isOpen);
+                rc = sqlite3PagerOpenWal(&mut pager.borrow_mut(), Some(&mut isOpen));
                 if rc != SQLITE_OK {
                     break 'page1_init_failed;
                 } else {

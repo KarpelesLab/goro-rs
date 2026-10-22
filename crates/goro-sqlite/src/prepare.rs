@@ -457,7 +457,7 @@ pub fn sqlite3InitOne(db: &mut Sqlite3, iDb: i32, pzErrMsg: &mut Option<ZStr>, m
         // before that point, jump to error_out.
         // initone_error_out:
         if openedTransaction {
-            sqlite3BtreeCommit(&pBt);
+            sqlite3BtreeCommit(db, &pBt);
         }
     }
 
@@ -575,7 +575,7 @@ fn schemaIsValid(db: &mut Sqlite3) {
 
         // Close the transaction, if one was opened.
         if openedTransaction {
-            sqlite3BtreeCommit(&pBt);
+            sqlite3BtreeCommit(db, &pBt);
         }
         iDb += 1;
     }
