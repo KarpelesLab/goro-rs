@@ -4733,6 +4733,25 @@ impl Vm {
         &f.3
     }
 
+    /// A closure's name in error messages: qualified by its scope
+    /// (zend_verify_type_error_common, zend_missing_arg_error: `Foo::{closure:...}`).
+    pub(crate) fn closure_scoped_display(&self, op: &OpArray) -> Option<String> {
+        if !op.display_name.starts_with(b"{closure") {
+            return None;
+        }
+        let sc = op.scope_class.as_ref()?;
+        let cname = self
+            .classes
+            .get(&sc.to_ascii_lowercase())
+            .map(|c| crate::value::display_class_name(&c.name))
+            .unwrap_or_else(|| crate::value::display_class_name(sc));
+        Some(format!(
+            "{}::{}",
+            cname,
+            String::from_utf8_lossy(&op.display_name)
+        ))
+    }
+
     /// call_stack index of the running fiber's bottom frame (0 outside fibers)
     #[inline]
     pub(crate) fn fiber_call_base(&self) -> usize {
@@ -5566,7 +5585,9 @@ impl Vm {
                 continue;
             }
             if !self.value_matches_type_mode(&v, &info.param_type, false) {
-                let fname = if !op_array.display_name.is_empty() {
+                let fname = if let Some(n) = self.closure_scoped_display(op_array) {
+                    n
+                } else if !op_array.display_name.is_empty() {
                     String::from_utf8_lossy(&op_array.display_name).into_owned()
                 } else {
                     let base = String::from_utf8_lossy(op_array.effective_name()).into_owned();
@@ -15798,7 +15819,10 @@ impl Vm {
         };
         // Build display name from call.name. For closures, prefer
         // the canonical PHP display name (e.g. {closure:file:line}).
-        let display_name = if !user_fn.display_name.is_empty() {
+        let scoped = self.closure_scoped_display(user_fn);
+        let display_name = if let Some(n) = &scoped {
+            std::borrow::Cow::Borrowed(n.as_str())
+        } else if !user_fn.display_name.is_empty() {
             String::from_utf8_lossy(&user_fn.display_name)
         } else {
             String::from_utf8_lossy(call.name.as_bytes())
@@ -16187,7 +16211,9 @@ impl Vm {
                     let raw_name = String::from_utf8_lossy(&op_array.name);
                     // Include class name in the function display name for methods.
                     // For closures, prefer the canonical PHP display name.
-                    let func_name = if !op_array.display_name.is_empty() {
+                    let func_name = if let Some(n) = self.closure_scoped_display(op_array) {
+                        n
+                    } else if !op_array.display_name.is_empty() {
                         String::from_utf8_lossy(&op_array.display_name).to_string()
                     } else if let Some(ref scope) = op_array.scope_class {
                         let class_display = self
@@ -25553,7 +25579,8 @@ impl Vm {
                                 // zend_missing_arg_error(): the function as declared, a
                                 // method qualified by its declaring class.
                                 let fn_display = if display_name.starts_with("{closure") {
-                                    display_name.clone()
+                                    self.closure_scoped_display(&user_fn)
+                                        .unwrap_or_else(|| display_name.clone())
                                 } else {
                                     let mut fname =
                                         String::from_utf8_lossy(user_fn.effective_name())

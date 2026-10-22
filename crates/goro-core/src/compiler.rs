@@ -13288,12 +13288,18 @@ impl Compiler {
                     });
                     self.compile_send_args(args, expr.span.line)?;
                     let discard_tmp = self.op_array.alloc_temp();
+                    // (on the class name's line, GH-8810)
+                    let call_line = if class.span.line > 0 {
+                        class.span.line
+                    } else {
+                        expr.span.line
+                    };
                     self.op_array.emit(Op {
                         opcode: OpCode::DoFCall,
                         op1: OperandType::Unused,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(discard_tmp),
-                        line: expr.span.line,
+                        line: call_line,
                     });
                 }
 
@@ -15716,12 +15722,18 @@ impl Compiler {
                     .and_then(|m| Self::builtin_method_to_bridge_func(m));
                 self.compile_send_args_with_name(args, expr.span.line, bridge_name.as_deref())?;
 
+                // The call is on the method name's line (GH-8810).
+                let call_line = if method.span.line > 0 {
+                    method.span.line
+                } else {
+                    expr.span.line
+                };
                 self.op_array.emit(Op {
                     opcode: OpCode::DoFCall,
                     op1: discard_flag,
                     op2: OperandType::Unused,
                     result: OperandType::Tmp(tmp),
-                    line: expr.span.line,
+                    line: call_line,
                 });
 
                 if let Some(jmp) = jmp_null {
