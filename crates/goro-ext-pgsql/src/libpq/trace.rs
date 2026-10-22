@@ -45,7 +45,12 @@ impl Out<'_> {
         let v = self.b.get(self.p).copied().unwrap_or(0);
         self.p += 1;
         self.line.push(b' ');
-        self.line.push(v);
+        if (0x20..0x7f).contains(&v) {
+            self.line.push(v);
+        } else {
+            self.line
+                .extend_from_slice(format!("\\x{:02x}", v).as_bytes());
+        }
         v
     }
     fn string(&mut self, suppress: bool) {
@@ -164,7 +169,15 @@ pub fn trace_message(f: &mut std::fs::File, flags: i32, from_server: bool, ty: u
         }
     };
     o.line.extend_from_slice(name.as_bytes());
-    o.line.push(b'\t');
+    // messages without content have no field separator
+    let empty = if from_server {
+        matches!(ty, b'1' | b'2' | b'3' | b'n' | b'I' | b's' | b'c')
+    } else {
+        matches!(ty, b'S' | b'H' | b'X' | b'c')
+    };
+    if !empty {
+        o.line.push(b'\t');
+    }
     match (from_server, ty) {
         (false, b'Q') | (true, b'C') => o.string(false),
         (false, b'P') => {

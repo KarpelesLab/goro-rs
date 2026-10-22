@@ -146,6 +146,11 @@ pub struct PgConn {
     // SSL
     pub ssl_in_use: bool,
     allow_ssl_try: bool,
+    /// the encryption methods left to try on this address (true: SSL),
+    /// the current one first
+    enc_methods: Vec<bool>,
+    /// reconnect to the same address with the next method
+    retry_same_addr: bool,
     // authentication
     pub(crate) sasl: Option<ScramState>,
     pub password_needed: bool,
@@ -296,6 +301,8 @@ impl PgConn {
             single_row_mode: false,
             ssl_in_use: false,
             allow_ssl_try: true,
+            enc_methods: Vec::new(),
+            retry_same_addr: false,
             sasl: None,
             password_needed: false,
             auth_req_received: false,
@@ -873,14 +880,15 @@ impl PgConn {
             match self.status {
                 ConnStatus::Needed => {
                     // pick the next address to try
-                    if self.try_next_addr {
+                    let retry = std::mem::take(&mut self.retry_same_addr);
+                    if !retry && self.try_next_addr {
                         self.whichaddr += 1;
                         if self.whichaddr >= self.addrs.len() {
                             self.try_next_host = true;
                         }
                         self.try_next_addr = false;
                     }
-                    if self.try_next_host {
+                    if !retry && self.try_next_host {
                         if !self.addrs.is_empty() || self.whichaddr > 0 {
                             self.whichhost += 1;
                         }
@@ -901,7 +909,22 @@ impl PgConn {
                         continue;
                     }
                     self.close_socket();
-                    self.allow_ssl_try = self.opts.get("sslmode") != Some("disable");
+                    if !retry {
+                        // the encryption methods sslmode allows, in order
+                        let unix = matches!(self.addrs[self.whichaddr], Addr::Unix(_));
+                        self.enc_methods = match self.opts.get("sslmode").unwrap_or("prefer") {
+                            "disable" => vec![false],
+                            "allow" => vec![false, true],
+                            "prefer" => vec![true, false],
+                            _ => vec![true],
+                        };
+                        if unix {
+                            self.enc_methods = vec![false];
+                        }
+                    }
+                    self.allow_ssl_try = self.enc_methods.first() == Some(&true);
+                    self.async_status = AsyncStatus::Idle;
+                    self.result = None;
                     self.sasl = None;
                     self.auth_req_received = false;
                     self.password_needed = false;
@@ -984,7 +1007,13 @@ impl PgConn {
                         return PollingStatus::Reading;
                     }
                     let pkt = self.build_startup_packet();
-                    if !self.raw_send_all(&pkt) {
+                    let sent = if self.ssl_in_use {
+                        self.outbuf.extend_from_slice(&pkt);
+                        self.flush() == 0
+                    } else {
+                        self.raw_send_all(&pkt)
+                    };
+                    if !sent {
                         let e = errno();
                         self.append_error(&format!(
                             "could not send startup packet: {}",
@@ -1019,13 +1048,18 @@ impl PgConn {
                     match b[0] {
                         b'S' => {
                             if !self.start_tls() {
+                                if self.connection_failed() {
+                                    continue;
+                                }
                                 return self.error_return();
                             }
                             self.status = ConnStatus::Made;
                         }
                         b'N' => {
-                            let mode = self.opts.get("sslmode").unwrap_or("prefer");
-                            if mode.starts_with('r') || mode.starts_with('v') {
+                            // the server refuses SSL: go on in plaintext on
+                            // this connection if that is allowed
+                            self.enc_methods.retain(|&m| !m);
+                            if self.enc_methods.is_empty() {
                                 self.append_error(
                                     "server does not support SSL, but SSL was required",
                                 );
@@ -1073,11 +1107,13 @@ impl PgConn {
                     match ty {
                         b'E' => {
                             self.get_error_notice(&body, true);
-                            // CONNECTION_FAILED(): try the next host
-                            self.close_socket();
-                            self.try_next_host = true;
-                            self.status = ConnStatus::Needed;
-                            continue;
+                            // CONNECTION_FAILED(): the next encryption method
+                            // (authentication failures do not move on to the
+                            // other hosts)
+                            if self.connection_failed() {
+                                continue;
+                            }
+                            return self.error_return();
                         }
                         b'v' => {
                             // NegotiateProtocolVersion: accept the minor
@@ -1143,6 +1179,21 @@ impl PgConn {
                 }
             }
         }
+    }
+
+    /// connection_failed: retry the address with the next encryption
+    /// method, if any is left
+    fn connection_failed(&mut self) -> bool {
+        if !self.enc_methods.is_empty() {
+            self.enc_methods.remove(0);
+        }
+        if self.enc_methods.is_empty() {
+            return false;
+        }
+        self.close_socket();
+        self.retry_same_addr = true;
+        self.status = ConnStatus::Needed;
+        true
     }
 
     fn error_return(&mut self) -> PollingStatus {
