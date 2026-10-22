@@ -150,6 +150,16 @@ fn new_sxe_object(vm: &mut Vm, class_name: &[u8], sxe: Sxe) -> Obj {
     Rc::new(RefCell::new(o))
 }
 
+/// An object of `class` (SimpleXMLElement or a subclass) for `node` of
+/// `doc` (object_init_ex + php_libxml_increment_node_ptr, as ext/xsl's
+/// transformToDoc() does with a result document).
+pub fn wrap_node(vm: &mut Vm, class_name: &[u8], doc: NodeId, node: NodeId) -> Value {
+    let s = Sxe::new();
+    s.doc.set(Some(doc));
+    s.node.set(Some(node));
+    Value::Object(new_sxe_object(vm, class_name, s))
+}
+
 /// node_as_zval
 fn node_as_zval(
     vm: &mut Vm,

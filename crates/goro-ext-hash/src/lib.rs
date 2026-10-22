@@ -18,6 +18,17 @@ use ops::{Ctx, InitArgs, Ops, fetch_ops};
 
 const PHP_HASH_HMAC: i64 = 1;
 
+/// The raw digest of `data` with the algorithm `algo` (hash('algo', data,
+/// true)), for other extensions; None for an unknown algorithm.
+pub fn digest(algo: &str, data: &[u8]) -> Option<Vec<u8>> {
+    let ops = fetch_ops(algo.as_bytes())?;
+    let mut ctx = ops.new_ctx(None);
+    ctx.update(data);
+    let mut out = vec![0u8; ops.digest_size];
+    ctx.finish(&mut out);
+    Some(out)
+}
+
 /// Register all hash extension functions
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"hash");
