@@ -135,6 +135,24 @@ impl Vm {
         self.current_exception.is_some()
     }
 
+    /// zend_generator_get_iterator() + rewind for internal code traversing
+    /// a generator (iterator_to_array(), unpacking, ...): a finished
+    /// generator cannot be traversed, a started one not rewound. False when
+    /// an exception was thrown.
+    pub fn generator_traverse_start(&mut self, g: &Value) -> bool {
+        if let Value::Generator(gr) = g {
+            let closed = gr
+                .try_borrow()
+                .is_ok_and(|b| b.state == crate::generator::GeneratorState::Completed);
+            if closed {
+                self.spl_throw(b"Exception", "Cannot traverse an already closed generator");
+                return false;
+            }
+        }
+        self.it_rewind(g);
+        !self.exc()
+    }
+
     fn gen_prime(&mut self, g: &Rc<RefCell<crate::generator::PhpGenerator>>) {
         let created = matches!(
             g.try_borrow().map(|b| b.state.clone()),
@@ -147,7 +165,7 @@ impl Vm {
         }
     }
 
-    pub(crate) fn it_rewind(&mut self, it: &Value) {
+    pub fn it_rewind(&mut self, it: &Value) {
         match it {
             Value::Object(_) => {
                 self.spl_call_method(it, b"rewind", &[]);
@@ -173,7 +191,7 @@ impl Vm {
         }
     }
 
-    pub(crate) fn it_valid(&mut self, it: &Value) -> bool {
+    pub fn it_valid(&mut self, it: &Value) -> bool {
         match it {
             Value::Object(_) => self
                 .spl_call_method(it, b"valid", &[])
@@ -202,7 +220,7 @@ impl Vm {
         plain && !self.it_valid(it)
     }
 
-    pub(crate) fn it_current(&mut self, it: &Value) -> Value {
+    pub fn it_current(&mut self, it: &Value) -> Value {
         if self.sxe_iterator_exhausted(it) {
             return Value::Null;
         }
@@ -220,7 +238,7 @@ impl Vm {
         }
     }
 
-    pub(crate) fn it_key(&mut self, it: &Value) -> Value {
+    pub fn it_key(&mut self, it: &Value) -> Value {
         if self.sxe_iterator_exhausted(it) {
             return Value::Null;
         }
@@ -236,7 +254,7 @@ impl Vm {
         }
     }
 
-    pub(crate) fn it_next(&mut self, it: &Value) {
+    pub fn it_next(&mut self, it: &Value) {
         match it {
             Value::Object(_) => {
                 self.spl_call_method(it, b"next", &[]);

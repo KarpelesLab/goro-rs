@@ -24269,8 +24269,10 @@ impl Vm {
                             let prev_caller = self
                                 .generator_caller
                                 .replace((self.current_file.clone(), op.line));
-                            // Resume to first yield if not yet started
-                            {
+                            // zend_generator_get_iterator() + rewind
+                            if !self.generator_traverse_start(&Value::Generator(gen_clone.clone())) {
+                                gen_err = Some("__exception__".to_string());
+                            } else {
                                 let state = gen_clone.borrow().state.clone();
                                 if state == crate::generator::GeneratorState::Created {
                                     let mut gb = gen_clone.borrow_mut();
@@ -35452,13 +35454,12 @@ impl Vm {
                         // For generators, advance to the first yield on init only if not already started.
                         // If valid()/current()/key() was called before foreach, the generator is
                         // already Suspended and we should not advance past the current yield.
-                        // If the generator is already Completed and has advanced past the first yield,
+                        // A finished generator cannot be iterated again (zend_generator_get_iterator()).
                         // iterating again is an error.
                         {
                             let already_closed = {
                                 let gen_borrow = gen_rc.borrow();
                                 gen_borrow.state == crate::generator::GeneratorState::Completed
-                                    && gen_borrow.advanced_past_first
                             };
                             if already_closed {
                                 let msg = "Cannot traverse an already closed generator";
@@ -44314,8 +44315,10 @@ impl Vm {
                             let gen_clone = gen_rc.clone();
                             let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
                             let mut spread_err: Option<String> = None;
-                            // Resume to first yield
-                            {
+                            // zend_generator_get_iterator() + rewind
+                            if !self.generator_traverse_start(&source) {
+                                spread_err = Some(String::new());
+                            } else {
                                 let state = gen_clone.borrow().state.clone();
                                 if state == crate::generator::GeneratorState::Created {
                                     let mut gb = gen_clone.borrow_mut();

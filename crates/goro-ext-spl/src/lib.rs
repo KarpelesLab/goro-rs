@@ -280,7 +280,7 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             let mut result = PhpArray::new();
             // Call rewind, then iterate with valid/current/key/next
             vm.call_object_method(val, b"rewind", &[]);
-            for _ in 0..100000 {
+            loop {
                 let valid = vm
                     .call_object_method(val, b"valid", &[])
                     .unwrap_or(Value::False);
@@ -306,23 +306,17 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             }
             Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
-        Some(Value::Generator(gen_rc)) => {
+        Some(g @ Value::Generator(_)) => {
             let mut result = PhpArray::new();
-            // Advance to first yield if needed
-            {
-                let mut gen_init = gen_rc.borrow_mut();
-                if gen_init.state == goro_core::generator::GeneratorState::Created {
-                    let _ = gen_init.resume(vm);
-                }
+            if !vm.generator_traverse_start(g) {
+                return Ok(Value::Null);
             }
-            for _ in 0..100000 {
-                let gen_b = gen_rc.borrow();
-                if gen_b.state == goro_core::generator::GeneratorState::Completed {
+            loop {
+                if !vm.it_valid(g) {
                     break;
                 }
-                let value = gen_b.current_value.clone();
-                let key = gen_b.current_key.clone();
-                drop(gen_b);
+                let value = vm.it_current(g);
+                let key = vm.it_key(g);
                 if use_keys {
                     match key {
                         Value::Long(n) => result.set(ArrayKey::Int(n), value),
@@ -384,9 +378,10 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                 } else {
                     result.push(value);
                 }
-                let mut gen_bm = gen_rc.borrow_mut();
-                gen_bm.write_send_value();
-                let _ = gen_bm.resume(vm);
+                vm.it_next(g);
+                if vm.current_exception.is_some() {
+                    return Ok(Value::Null);
+                }
             }
             Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
@@ -448,7 +443,7 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(val @ Value::Object(_)) => {
             let mut count: i64 = 0;
             vm.call_object_method(val, b"rewind", &[]);
-            for _ in 0..100000 {
+            loop {
                 let valid = vm
                     .call_object_method(val, b"valid", &[])
                     .unwrap_or(Value::False);
@@ -460,24 +455,17 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             Ok(Value::Long(count))
         }
-        Some(Value::Generator(gen_rc)) => {
+        Some(g @ Value::Generator(_)) => {
             let mut count: i64 = 0;
-            {
-                let mut gen_init = gen_rc.borrow_mut();
-                if gen_init.state == goro_core::generator::GeneratorState::Created {
-                    let _ = gen_init.resume(vm);
-                }
+            if !vm.generator_traverse_start(g) {
+                return Ok(Value::Null);
             }
-            loop {
-                let gen_check = gen_rc.borrow();
-                if gen_check.state == goro_core::generator::GeneratorState::Completed {
-                    break;
-                }
+            while vm.it_valid(g) {
                 count += 1;
-                drop(gen_check);
-                let mut gen_bm = gen_rc.borrow_mut();
-                gen_bm.write_send_value();
-                let _ = gen_bm.resume(vm);
+                vm.it_next(g);
+                if vm.current_exception.is_some() {
+                    return Ok(Value::Null);
+                }
             }
             Ok(Value::Long(count))
         }
@@ -539,10 +527,17 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     // Iterate over the iterator and call the callback for each element
-    if let Value::Object(_) = &iterator {
+    let is_gen = matches!(iterator, Value::Generator(_));
+    if is_gen || matches!(iterator, Value::Object(_)) {
         // Call rewind on the iterator. Propagate exceptions thrown by rewind
         // back to the caller (don't keep iterating).
-        let _ = vm.call_object_method(&iterator, b"rewind", &[]);
+        if is_gen {
+            if !vm.generator_traverse_start(&iterator) {
+                return Ok(Value::Null);
+            }
+        } else {
+            let _ = vm.call_object_method(&iterator, b"rewind", &[]);
+        }
         if vm.current_exception.is_some() {
             return Ok(Value::Null);
         }
@@ -550,7 +545,15 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut count = 0i64;
         loop {
             // Check valid()
-            let valid = vm.call_object_method(&iterator, b"valid", &[]);
+            let valid = if is_gen {
+                Some(if vm.it_valid(&iterator) {
+                    Value::True
+                } else {
+                    Value::False
+                })
+            } else {
+                vm.call_object_method(&iterator, b"valid", &[])
+            };
             if vm.current_exception.is_some() {
                 return Ok(Value::Null);
             }
@@ -585,7 +588,11 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
 
             // Call next()
-            let _ = vm.call_object_method(&iterator, b"next", &[]);
+            if is_gen {
+                vm.it_next(&iterator);
+            } else {
+                let _ = vm.call_object_method(&iterator, b"next", &[]);
+            }
             if vm.current_exception.is_some() {
                 return Ok(Value::Null);
             }
