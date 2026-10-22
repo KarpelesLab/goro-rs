@@ -406,7 +406,17 @@ pub(crate) fn web_phar(vm: &mut Vm, a: Vec<A>) -> R {
     let pt = script_name.clone();
     if let Some(cb) = rewrite {
         let r = vm.call_callback(&cb, &[sv(&entry)]);
-        if vm.current_exception.is_some() {
+        if let Some(prev) = vm.current_exception.take() {
+            // (no return value: the callback threw; zend_throw_exception_ex()
+            // chains the pending exception)
+            throw(
+                vm,
+                PE,
+                "phar error: rewrite callback must return a string or false",
+            )?;
+            if let Some(exc) = &vm.current_exception {
+                Vm::exception_set_previous(exc, prev);
+            }
             return Ok(Value::Null);
         }
         match r {

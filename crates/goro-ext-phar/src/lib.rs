@@ -39,7 +39,9 @@ thread_local! {
     static PREV_STREAM: std::cell::Cell<Option<fn(&mut Vm, &str, u8) -> Option<Result<Vec<u8>, VmError>>>> =
         const { std::cell::Cell::new(None) };
     /// Plain .phar files whose compilation is redirected (phar_compile_file).
-    static COMPILE_REDIRECT: RefCell<Vec<(String, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
+    /// (file compiled, URL opened instead, whether a failure to open the
+    /// URL falls back to the file itself)
+    static COMPILE_REDIRECT: RefCell<Vec<(String, Vec<u8>, bool)>> = const { RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn cur_fn(vm: &Vm) -> String {
@@ -676,7 +678,7 @@ fn compile_redirect(vm: &mut Vm, file: &[u8]) -> bool {
     } else {
         return false;
     };
-    COMPILE_REDIRECT.with(|c| c.borrow_mut().push((l(file), url)));
+    COMPILE_REDIRECT.with(|c| c.borrow_mut().push((l(file), url, true)));
     true
 }
 
@@ -690,7 +692,7 @@ fn include_resolve(vm: &mut Vm, path: &str) -> Option<Result<String, VmError>> {
         if !starts_with_ci(&c, b"phar://") {
             // the stub of the archive: opened through the wrapper, named
             // after the archive (its opened_path)
-            COMPILE_REDIRECT.with(|r| r.borrow_mut().push((l(&c), p.to_vec())));
+            COMPILE_REDIRECT.with(|r| r.borrow_mut().push((l(&c), p.to_vec(), false)));
         }
         return Some(Ok(l(&c)));
     }
@@ -781,10 +783,11 @@ fn resolve_plain(path: &str, exec_file: &str) -> String {
 fn include_stream(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<Vec<u8>, VmError>> {
     let redirect = COMPILE_REDIRECT.with(|c| {
         let mut c = c.borrow_mut();
-        let pos = c.iter().position(|(f, _)| f == path)?;
-        Some(c.remove(pos).1)
+        let pos = c.iter().position(|(f, _, _)| f == path)?;
+        let (_, url, fallback) = c.remove(pos);
+        Some((url, fallback))
     });
-    if let Some(url) = redirect {
+    if let Some((url, fallback)) = redirect {
         if url.is_empty() {
             // compressed phar: the decompressed contents
             let phar = open_from_filename(vm, path.as_bytes(), None, 0).ok()?;
@@ -794,7 +797,21 @@ fn include_stream(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<Vec<u8>, V
             let data = phar.borrow().fp.as_ref().map(|f| f.borrow().clone());
             return data.map(Ok);
         }
-        return prev_stream(vm, &l(&url), kind);
+        if !fallback {
+            return prev_stream(vm, &l(&url), kind);
+        }
+        // (when the stub cannot be opened, the archive itself is compiled)
+        match goro_ext_standard::native_streams::include_open_url(vm, &l(&url), kind) {
+            Ok(Some(src)) => return Some(Ok(src)),
+            Ok(None) if vm.current_exception.is_none() => {}
+            Ok(None) => {
+                return Some(Err(VmError {
+                    message: String::new(),
+                    line: vm.current_line,
+                }));
+            }
+            Err(e) => return Some(Err(e)),
+        }
     }
     prev_stream(vm, path, kind)
 }
