@@ -866,6 +866,7 @@ fn run_request(
         _ => false,
     };
     flush_output(&mut vm);
+    vm.module_shutdown();
     *exit_status = request_exit_status(&vm, failed);
     true
 }

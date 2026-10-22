@@ -2038,18 +2038,27 @@ fn execute_php_inner_impl(
     SCRIPT_EXIT.store(exit_status, std::sync::atomic::Ordering::Relaxed);
     #[cfg(not(unix))]
     let _ = exit_status;
-    match main_result {
-        Ok(_) => Ok(vm.take_output()),
-        Err(e) => {
-            // The VM displays uncaught exceptions / fatal errors itself
-            // (through the output layer, before shutdown functions).
-            if vm.current_exception.is_some() || !vm.fatal_emitted {
-                vm.report_uncaught(&e);
-            }
-            vm.run_shutdown_destructors();
-            Ok(vm.take_output())
+    if let Err(e) = main_result {
+        // The VM displays uncaught exceptions / fatal errors itself
+        // (through the output layer, before shutdown functions).
+        if vm.current_exception.is_some() || !vm.fatal_emitted {
+            vm.report_uncaught(&e);
         }
+        vm.run_shutdown_destructors();
     }
+    let out = vm.take_output();
+    if vm.module_shutdown_hooks.is_empty() {
+        return Ok(out);
+    }
+    // MSHUTDOWN handlers run once the output is sent.
+    {
+        use std::io::Write;
+        let mut so = std::io::stdout();
+        let _ = so.write_all(&out);
+        let _ = so.flush();
+    }
+    vm.module_shutdown();
+    Ok(Vec::new())
 }
 
 /// The code that requires the auto_prepend_file / auto_append_file `key`.

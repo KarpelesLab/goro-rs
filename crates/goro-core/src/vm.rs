@@ -1207,6 +1207,9 @@ pub struct Vm {
     /// Extension shutdown handlers, run after the shutdown destructors (where
     /// PHP frees the remaining objects, e.g. XMLWriter flushing its output).
     pub shutdown_hooks: Vec<fn(&mut Vm)>,
+    /// Module shutdown (MSHUTDOWN) handlers, run by the SAPI once the
+    /// request is over and its output sent.
+    pub module_shutdown_hooks: Vec<fn(&mut Vm)>,
     /// Whether the current caller has strict_types=1 (set before calling builtins)
     pub caller_strict_types: bool,
     pub stored_attr_op_arrays: Vec<OpArray>,
@@ -1396,9 +1399,10 @@ impl Vm {
                 c.insert(b"serialize_precision".to_vec(), Value::Long(-1));
                 c.insert(b"error_reporting".to_vec(), Value::Long(30719)); // E_ALL
                 c.insert(b"display_errors".to_vec(), Value::Long(1));
+                // PHP_INCLUDE_PATH: ".:" + the PEAR install directory
                 c.insert(
                     b"include_path".to_vec(),
-                    Value::String(PhpString::from_bytes(b".")),
+                    Value::String(PhpString::from_bytes(b".:/usr/share/php")),
                 );
                 c.insert(
                     b"open_basedir".to_vec(),
@@ -2381,6 +2385,7 @@ impl Vm {
             crypto_hooks: None,
             include_resolve_hook: None,
             resource_shutdown_hooks: Vec::new(),
+            module_shutdown_hooks: Vec::new(),
             shutdown_hooks: Vec::new(),
             caller_strict_types: false,
             stored_attr_op_arrays: Vec::new(),
@@ -16634,6 +16639,13 @@ impl Vm {
             b"InternalIterator".to_vec(),
             id,
         ))))
+    }
+
+    /// php_module_shutdown(): run the extensions' MSHUTDOWN handlers.
+    pub fn module_shutdown(&mut self) {
+        for hook in std::mem::take(&mut self.module_shutdown_hooks) {
+            hook(self);
+        }
     }
 
     /// Run the shutdown destructors, like php-src's shutdown_destructors():

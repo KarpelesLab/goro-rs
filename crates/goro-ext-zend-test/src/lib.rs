@@ -56,6 +56,15 @@ pub fn register(vm: &mut Vm) {
     iterators::register(vm);
     handlers::register(vm);
     observer::register(vm);
+    vm.module_shutdown_hooks.push(mshutdown);
+}
+
+/// PHP_MSHUTDOWN_FUNCTION(zend_test)
+fn mshutdown(vm: &mut Vm) {
+    if ini::ini_bool(vm, "zend_test.print_stderr_mshutdown") {
+        use std::io::Write;
+        let _ = std::io::stderr().write_all(b"[zend_test] MSHUTDOWN\n");
+    }
 }
 
 fn register_constants(vm: &mut Vm) {
