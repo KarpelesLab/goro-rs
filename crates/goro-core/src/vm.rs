@@ -36297,11 +36297,16 @@ impl Vm {
                     let func_idx = func_idx_val.to_long() as usize;
 
                     if let Some(func_op_array) = op_array.child_functions.get(func_idx) {
-                        // Validate function-level attributes
+                        // Validate function-level attributes (unless delayed by
+                        // #[\DelayedTargetValidation]).
+                        let delayed = func_op_array
+                            .attributes
+                            .iter()
+                            .any(|a| a.name.eq_ignore_ascii_case(b"DelayedTargetValidation"));
                         for attr in &func_op_array.attributes {
                             let attr_lower: Vec<u8> =
                                 attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if attr_lower == b"returntypewillchange" {
+                            if attr_lower == b"returntypewillchange" && !delayed {
                                 let func_display = if !func_op_array.display_name.is_empty() {
                                     String::from_utf8_lossy(&func_op_array.display_name).to_string()
                                 } else {
@@ -48932,19 +48937,8 @@ impl Vm {
                         });
                     }
 
-                    // Check for #[\Deprecated] attribute on the class
-                    if let Some(class) = self.classes.get(&name_lower) {
-                        if !class.attributes.is_empty() {
-                            let attrs_clone = class.attributes.clone();
-                            if let Some(custom_msg) = self.get_deprecated_message(&attrs_clone) {
-                                let class_display =
-                                    crate::value::display_class_name(class_name.as_bytes());
-                                let prefix = format!("Class {}", class_display);
-                                let msg = self.format_deprecated_message(&prefix, &custom_msg);
-                                self.emit_user_deprecated_at(&msg, op.line);
-                            }
-                        }
-                    }
+                    // (#[\Deprecated] on a class only marks traits: instantiation
+                    // reports nothing.)
 
                     // Check for reserved internal classes
                     if name_lower == b"generator"
