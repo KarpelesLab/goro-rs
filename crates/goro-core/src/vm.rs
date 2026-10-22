@@ -27595,6 +27595,9 @@ impl Vm {
                                 if let Some(this) = call.args.first() {
                                     self.note_frame_this(this);
                                 }
+                                // methods parsing their own arguments coerce
+                                // per the caller's strict_types
+                                self.caller_strict_types = op_array.strict_types;
                                 let mut spl_args = call.args.clone();
                                 let mut named_err = None;
                                 let mut named_ok = true;
