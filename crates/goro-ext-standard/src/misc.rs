@@ -9880,7 +9880,12 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::True)
     } else if vm.is_known_builtin_class(&original_lower) {
         // Create a ClassEntry for the alias pointing to the builtin
-        let mut class = goro_core::object::ClassEntry::new(original.as_bytes().to_vec());
+        // (named as declared, not as the alias call spelled it)
+        let canonical = vm
+            .internal_class(&original_lower)
+            .map(|c| c.name.as_bytes().to_vec())
+            .unwrap_or_else(|| original.as_bytes().to_vec());
+        let mut class = goro_core::object::ClassEntry::new(canonical);
         class.allow_dynamic_properties = true; // builtins generally allow this
         vm.classes.insert(alias_lower.clone(), class);
         vm.class_aliases

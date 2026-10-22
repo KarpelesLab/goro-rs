@@ -4417,7 +4417,8 @@ impl Vm {
         class: &crate::object::ClassEntry,
         attr_lower: &[u8],
     ) -> Option<String> {
-        let name = String::from_utf8_lossy(&class.name);
+        // (an anonymous class shows as "class@anonymous")
+        let name = crate::value::display_class_name(&class.name);
         let attr = attr_lower.strip_prefix(b"\\").unwrap_or(attr_lower);
         match attr {
             b"attribute" => {
@@ -5034,6 +5035,45 @@ impl Vm {
             }
         }
         key.to_vec()
+    }
+
+    /// Key the static variables of a trait method copied into `class_lower`
+    /// as `method_lower` by that class and name.
+    fn rekey_trait_statics(
+        m: &mut crate::object::MethodDef,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) {
+        let keys: Vec<u32> = m
+            .op_array
+            .ops
+            .iter()
+            .filter(|o| matches!(o.opcode, OpCode::StaticVarInit | OpCode::StaticVarInitOrJmp))
+            .filter_map(|o| match o.result {
+                OperandType::Const(k) => Some(k),
+                _ => None,
+            })
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+        let oa = Rc::make_mut(&mut m.op_array);
+        for k in keys {
+            let Some(Value::String(s)) = oa.literals.get(k as usize) else {
+                continue;
+            };
+            let b = s.as_bytes();
+            let var = match b.windows(2).rposition(|w| w == b"::") {
+                Some(p) => &b[p + 2..],
+                None => b,
+            };
+            let mut nk = class_lower.to_vec();
+            nk.extend_from_slice(b"::");
+            nk.extend_from_slice(method_lower);
+            nk.extend_from_slice(b"::");
+            nk.extend_from_slice(var);
+            oa.literals[k as usize] = Value::String(PhpString::from_vec(nk));
+        }
     }
 
     /// `as final` in a trait alias (zend_traits_copy_functions): true when
@@ -18132,8 +18172,13 @@ impl Vm {
                 matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"never"));
             let msg = if is_never && implicit_return {
                 format!(
-                    "{}(): never-returning function must not implicitly return",
-                    func_name
+                    "{}(): never-returning {} must not implicitly return",
+                    func_name,
+                    if op_array.scope_class.is_some() {
+                        "method"
+                    } else {
+                        "function"
+                    }
                 )
             } else {
                 format!(
@@ -47110,6 +47155,13 @@ impl Vm {
                                             &trait_name_original,
                                             &class.name,
                                         );
+                                        // Each copy of the method (per class and alias)
+                                        // has its own static variables.
+                                        Self::rekey_trait_statics(
+                                            &mut m,
+                                            &class_name_lower,
+                                            &display.to_ascii_lowercase(),
+                                        );
                                         m.name = display.clone();
                                         // A trait method replacing an inherited parent method is
                                         // checked against it like an own method would be.
@@ -53146,6 +53198,29 @@ impl Vm {
                 },
 
                 OpCode::InitMethodCall => match outlined(|| -> Result<Flow, VmError> {
+                    // `$o->$name()`: the name must be a string.
+                    if !matches!(op.op2, OperandType::Const(_))
+                        && !matches!(
+                            self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
+                                .deref(),
+                            Value::String(_)
+                        )
+                    {
+                        let msg = "Method name must be a string";
+                        let exc = self.create_exception(b"Error", msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
+                    }
                     // A public method of a user class (see init_method_call_fast)
                     if self.init_method_call_fast(op_array, ip - 1, &cvs, &mut tmps) {
                         return Ok(Flow::Next);

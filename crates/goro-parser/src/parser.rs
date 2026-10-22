@@ -2068,6 +2068,42 @@ impl Parser {
         self.parse_simple_type()
     }
 
+    /// `C::$$v` / `C::${e}`: the static property named by `name_expr`, or,
+    /// followed by `(`, a call of the method named by that variable's value
+    /// (member_name: simple_variable).
+    fn dynamic_static_member(
+        &mut self,
+        class: Expr,
+        name_expr: Expr,
+        member_span: Span,
+    ) -> ParseResult<Expr> {
+        if !matches!(self.peek(), TokenKind::OpenParen) {
+            return Ok(Expr {
+                span: class.span.merge(member_span),
+                kind: ExprKind::DynamicStaticPropertyAccess {
+                    class: Box::new(class),
+                    property: Box::new(name_expr),
+                },
+            });
+        }
+        self.advance(); // (
+        let args = self.parse_arguments()?;
+        let end_span = self.span();
+        self.expect(&TokenKind::CloseParen)?;
+        let span = name_expr.span;
+        Ok(Expr {
+            span: class.span.merge(end_span),
+            kind: ExprKind::DynamicStaticMethodCall {
+                class: Box::new(class),
+                method: Box::new(Expr {
+                    kind: ExprKind::DynamicVariable(Box::new(name_expr)),
+                    span,
+                }),
+                args,
+            },
+        })
+    }
+
     /// A class_name in a trait use / adaptation (`static` is reserved).
     fn parse_trait_name(&mut self) -> ParseResult<Vec<u8>> {
         if matches!(self.peek(), TokenKind::Static) {
@@ -5454,26 +5490,14 @@ impl Parser {
                             self.advance();
                             let name_expr = self.parse_expression()?;
                             self.expect(&TokenKind::CloseBrace)?;
-                            expr = Expr {
-                                span: expr.span.merge(member_span),
-                                kind: ExprKind::DynamicStaticPropertyAccess {
-                                    class: Box::new(expr),
-                                    property: Box::new(name_expr),
-                                },
-                            };
+                            expr = self.dynamic_static_member(expr, name_expr, member_span)?;
                         }
                         TokenKind::Dollar => {
                             // Test::$$$bar / Test::$${expr}: the name is the
                             // value of the simple variable after the `$`.
                             self.advance();
                             let name_expr = self.parse_simple_variable()?;
-                            expr = Expr {
-                                span: expr.span.merge(member_span),
-                                kind: ExprKind::DynamicStaticPropertyAccess {
-                                    class: Box::new(expr),
-                                    property: Box::new(name_expr),
-                                },
-                            };
+                            expr = self.dynamic_static_member(expr, name_expr, member_span)?;
                         }
                         TokenKind::VariableVariable(name) => {
                             // Test::$$bar - access static property whose name is in $bar
@@ -5482,13 +5506,7 @@ impl Parser {
                                 kind: ExprKind::Variable(name),
                                 span: member_span,
                             };
-                            expr = Expr {
-                                span: expr.span.merge(member_span),
-                                kind: ExprKind::DynamicStaticPropertyAccess {
-                                    class: Box::new(expr),
-                                    property: Box::new(var_expr),
-                                },
-                            };
+                            expr = self.dynamic_static_member(expr, var_expr, member_span)?;
                         }
                         _ if self.is_semi_reserved_keyword() => {
                             let name = self.keyword_to_identifier();
@@ -6190,9 +6208,17 @@ impl Parser {
                     | TokenKind::NameRelative(_) => {
                         let full_name = Self::name_of(self.peek()).unwrap_or_default();
                         self.advance();
-                        Expr {
+                        let class = Expr {
                             kind: ExprKind::Identifier(full_name),
                             span: class_span,
+                        };
+                        // new_variable: class_name '::' simple_variable
+                        if matches!(self.peek(), TokenKind::DoubleColon)
+                            && matches!(self.peek_at(1), TokenKind::Variable(_))
+                        {
+                            self.parse_new_variable_tail(class)?
+                        } else {
+                            class
                         }
                     }
                     TokenKind::Static => {

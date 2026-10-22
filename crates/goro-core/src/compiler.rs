@@ -1761,8 +1761,16 @@ impl Compiler {
                     let ref_start = self.op_array.current_offset();
                     self.op_array.patch_jump(jmp_ref, ref_start);
                     let mut base = &arg.value;
-                    while let ExprKind::ArrayAccess { array, .. } = &base.kind {
-                        base = array;
+                    loop {
+                        match &base.kind {
+                            ExprKind::ArrayAccess { array, .. } => base = array,
+                            ExprKind::PropertyAccess {
+                                object,
+                                nullsafe: false,
+                                ..
+                            } => base = object,
+                            _ => break,
+                        }
                     }
                     let temp_base = !matches!(
                         base.kind,
@@ -1771,7 +1779,11 @@ impl Compiler {
                             | ExprKind::PropertyAccess { .. }
                             | ExprKind::StaticPropertyAccess { .. }
                             | ExprKind::DynamicStaticPropertyAccess { .. }
-                    );
+                            | ExprKind::FunctionCall { .. }
+                            | ExprKind::MethodCall { .. }
+                            | ExprKind::StaticMethodCall { .. }
+                            | ExprKind::DynamicStaticMethodCall { .. }
+                    ) || self.is_special_builtin_call(base);
                     if temp_base {
                         self.compile_throw_error(
                             b"Cannot use temporary expression in write context",
@@ -7612,12 +7624,7 @@ impl Compiler {
                                 // Check for promoted properties in non-constructors
                                 if mn_lower != b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some()
-                                            || param.readonly
-                                            || param.is_final
-                                            || param.get_hook.is_some()
-                                            || param.set_hook.is_some()
-                                        {
+                                        if is_promoted_param(param) {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property outside a constructor".to_string(),
                                                 line: stmt.span.line,
@@ -7630,12 +7637,7 @@ impl Compiler {
                                     && (*is_abstract || modifiers.is_interface)
                                 {
                                     for param in params {
-                                        if param.visibility.is_some()
-                                            || param.readonly
-                                            || param.is_final
-                                            || param.get_hook.is_some()
-                                            || param.set_hook.is_some()
-                                        {
+                                        if is_promoted_param(param) {
                                             return Err(CompileError {
                                                 message: "Cannot declare promoted property in an abstract constructor".to_string(),
                                                 line: stmt.span.line,
@@ -7645,12 +7647,7 @@ impl Compiler {
                                 }
                                 if mn_lower == b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some()
-                                            || param.set_visibility.is_some()
-                                            || param.is_final
-                                            || param.get_hook.is_some()
-                                            || param.set_hook.is_some()
-                                        {
+                                        if is_promoted_param(param) {
                                             let prop_vis = match param
                                                 .visibility
                                                 .as_ref()
@@ -8260,7 +8257,7 @@ impl Compiler {
 
                                     // Store parameter type info
                                     // Constructor-promoted properties: fatal error for null default with non-nullable type
-                                    if param.visibility.is_some() {
+                                    if is_promoted_param(param) {
                                         if let Some(hint) = &param.type_hint {
                                             if let Some(default_expr) = &param.default {
                                                 let pt_tmp = type_hint_to_param_type_with_ns(
@@ -8400,10 +8397,7 @@ impl Compiler {
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if method_name_lower == b"__construct" {
                                     for param in params {
-                                        if param.visibility.is_some()
-                                            || param.get_hook.is_some()
-                                            || param.set_hook.is_some()
-                                        {
+                                        if is_promoted_param(param) {
                                             // Promoted param: assign to $this->name
                                             let this_cv = 0u32; // $this is always CV 0
                                             let param_cv = method_compiler
@@ -20594,6 +20588,17 @@ fn args_to_source_string(args: &[Argument]) -> String {
 fn next_loop_id() -> u32 {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// A constructor parameter declaring a promoted property (any of the
+/// property modifiers, or hooks).
+fn is_promoted_param(p: &Param) -> bool {
+    p.visibility.is_some()
+        || p.set_visibility.is_some()
+        || p.readonly
+        || p.is_final
+        || p.get_hook.is_some()
+        || p.set_hook.is_some()
 }
 
 /// Whether a type declaration includes `callable` (not allowed on properties).
