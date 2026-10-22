@@ -4146,7 +4146,7 @@ impl Compiler {
                     }
                     // Validate type hint for redundancy and standalone constraints
                     if let Some(err) = validate_type_hint(hint, self.current_class.as_deref())
-                        .or_else(|| self.type_redundancy_error(hint))
+                        .or_else(|| self.type_redundancy_error(hint, stmt.span.line))
                     {
                         return Err(CompileError {
                             message: err,
@@ -4182,7 +4182,7 @@ impl Compiler {
                         }
                         // Validate type hint for redundancy and standalone constraints
                         if let Some(err) = validate_type_hint(hint, self.current_class.as_deref())
-                            .or_else(|| self.type_redundancy_error(hint))
+                            .or_else(|| self.type_redundancy_error(hint, stmt.span.line))
                         {
                             return Err(CompileError {
                                 message: err,
@@ -5752,7 +5752,7 @@ impl Compiler {
                                     Some(&qualified_name),
                                     class.parent.as_deref(),
                                 )
-                                .or_else(|| self.type_redundancy_error(hint))
+                                .or_else(|| self.type_redundancy_error(hint, *prop_line))
                                 .or_else(|| relative_type_in_intersection(hint, modifiers.is_trait))
                                 {
                                     return Err(CompileError {
@@ -7973,7 +7973,7 @@ impl Compiler {
                                         Some(&qualified_name),
                                         class.parent.as_deref(),
                                     )
-                                    .or_else(|| self.type_redundancy_error(hint))
+                                    .or_else(|| self.type_redundancy_error(hint, *method_line))
                                     .or_else(|| {
                                         relative_type_in_intersection(hint, modifiers.is_trait)
                                     }) {
@@ -8001,7 +8001,7 @@ impl Compiler {
                                             Some(&qualified_name),
                                             class.parent.as_deref(),
                                         )
-                                        .or_else(|| self.type_redundancy_error(hint))
+                                        .or_else(|| self.type_redundancy_error(hint, *method_line))
                                         .or_else(|| {
                                             relative_type_in_intersection(hint, modifiers.is_trait)
                                         }) {
@@ -8064,7 +8064,7 @@ impl Compiler {
                                         Some(&qualified_name),
                                         class.parent.as_deref(),
                                     )
-                                    .or_else(|| self.type_redundancy_error(hint))
+                                    .or_else(|| self.type_redundancy_error(hint, *method_line))
                                     .or_else(|| {
                                         relative_type_in_intersection(hint, modifiers.is_trait)
                                     }) {
@@ -8166,7 +8166,7 @@ impl Compiler {
                                             Some(&qualified_name),
                                             class.parent.as_deref(),
                                         )
-                                        .or_else(|| self.type_redundancy_error(hint))
+                                        .or_else(|| self.type_redundancy_error(hint, *method_line))
                                         .or_else(|| {
                                             relative_type_in_intersection(hint, modifiers.is_trait)
                                         }) {
@@ -17735,7 +17735,56 @@ impl Compiler {
     /// Redundancy checks of zend_compile_typename that need resolved class
     /// names (use imports): duplicate intersection members, DNF members made
     /// redundant by another member, unresolvable self/parent in intersections.
-    fn type_redundancy_error(&self, hint: &TypeHint) -> Option<String> {
+    /// zend_compile_single_typename(): an unqualified `integer`, `double`,
+    /// `boolean` or `resource` (not imported) is a class name, with a warning.
+    fn warn_confusable_types(&self, hint: &TypeHint, line: u32) {
+        match hint {
+            TypeHint::Simple(name) => {
+                let correct = match name.as_slice() {
+                    b"integer" => Some("int"),
+                    b"double" => Some("float"),
+                    b"boolean" => Some("bool"),
+                    b"resource" => None,
+                    _ => return,
+                };
+                if self.use_map.contains_key(&name.to_ascii_lowercase()) {
+                    return;
+                }
+                let resolved =
+                    type_hint_to_param_type_with_ns(hint, &self.current_namespace, &self.use_map);
+                let ParamType::Simple(class_name) = resolved else {
+                    return;
+                };
+                let extra = if self.current_namespace.is_empty() {
+                    ""
+                } else {
+                    " or import the class with \"use\""
+                };
+                let name = String::from_utf8_lossy(name);
+                let class_name = String::from_utf8_lossy(&class_name);
+                let msg = match correct {
+                    Some(c) => format!(
+                        "\"{}\" will be interpreted as a class name. Did you mean \"{}\"? Write \"\\{}\"{} to suppress this warning",
+                        name, c, class_name, extra
+                    ),
+                    None => format!(
+                        "\"{}\" is not a supported builtin type and will be interpreted as a class name. Write \"\\{}\"{} to suppress this warning",
+                        name, class_name, extra
+                    ),
+                };
+                push_compile_warning(msg, line);
+            }
+            TypeHint::Nullable(inner) => self.warn_confusable_types(inner, line),
+            TypeHint::Union(parts) | TypeHint::Intersection(parts) => {
+                for p in parts {
+                    self.warn_confusable_types(p, line);
+                }
+            }
+        }
+    }
+
+    fn type_redundancy_error(&self, hint: &TypeHint, line: u32) -> Option<String> {
+        self.warn_confusable_types(hint, line);
         fn relative_in_intersection(h: &TypeHint, in_trait: bool) -> Option<String> {
             match h {
                 TypeHint::Intersection(parts) => {
@@ -19086,12 +19135,9 @@ pub fn is_reserved_class_name(name: &[u8]) -> bool {
     matches!(
         lower.as_slice(),
         b"int"
-            | b"integer"
             | b"float"
-            | b"double"
             | b"string"
             | b"bool"
-            | b"boolean"
             | b"array"
             | b"object"
             | b"callable"

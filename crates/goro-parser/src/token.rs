@@ -341,6 +341,7 @@ impl TokenKind {
             TokenKind::DoubleArrow => "\"=>\"".into(),
             TokenKind::DoubleColon => "\"::\"".into(),
             TokenKind::Ellipsis => "\"...\"".into(),
+            TokenKind::AttributeOpen => "\"#[\"".into(),
             TokenKind::At => "\"@\"".into(),
             TokenKind::OpenParen => "\"(\"".into(),
             TokenKind::CloseParen => "\")\"".into(),

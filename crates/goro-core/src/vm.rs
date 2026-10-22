@@ -5812,7 +5812,8 @@ impl Vm {
                                     }
                                 }
                             } else {
-                                true // no called class context, skip checking
+                                // zend_value_instanceof_static(): no called scope.
+                                false
                             }
                         } else {
                             false

@@ -50,6 +50,8 @@ pub struct Parser {
     /// Set by parse_primary() for `new Foo` without an argument list
     /// (new_non_dereferenceable): no member access may follow it.
     new_non_dereferenceable: bool,
+    /// Parsing a property type (type_expr_without_static).
+    no_static_type: bool,
     /// Pending extra constants from comma-separated const declarations
     pending_extra_constants: Vec<ClassMember>,
     /// The source text (when given with `with_source`): keywords used as
@@ -194,6 +196,7 @@ impl Parser {
             anon_counter: 0,
             first_class_callable_flag: false,
             new_non_dereferenceable: false,
+            no_static_type: false,
             pending_extra_constants: Vec::new(),
             source: Vec::new(),
             pending_extra_properties: Vec::new(),
@@ -2264,6 +2267,10 @@ impl Parser {
                 self.advance();
                 Ok(TypeHint::Simple(b"false".to_vec()))
             }
+            TokenKind::Static if self.no_static_type => Err(ParseError {
+                message: "syntax error, unexpected token \"static\"".into(),
+                span: self.span(),
+            }),
             TokenKind::Static => {
                 self.advance();
                 Ok(TypeHint::Simple(b"static".to_vec()))
@@ -2274,7 +2281,10 @@ impl Parser {
                 Ok(TypeHint::Simple(b"var".to_vec()))
             }
             _ => Err(ParseError {
-                message: format!("expected type name, found {:?}", self.peek()),
+                message: format!(
+                    "syntax error, unexpected {}",
+                    self.peek().to_php_unexpected()
+                ),
                 span: self.span(),
             }),
         }
@@ -3088,7 +3098,10 @@ impl Parser {
             }
             _ => {
                 // Might be a typed property: type $name
-                let type_hint = self.parse_type_hint()?;
+                self.no_static_type = true;
+                let type_hint = self.parse_type_hint();
+                self.no_static_type = false;
+                let type_hint = type_hint?;
                 let prop_line = self.span().line;
                 let name = match self.peek().clone() {
                     TokenKind::Variable(name) => {
