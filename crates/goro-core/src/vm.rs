@@ -11883,23 +11883,53 @@ impl Vm {
     /// declared by reference in the method's stub.
     pub(crate) fn native_method_arg_by_ref(&self, call: &PendingCall, arg_index: usize) -> bool {
         let name = call.name.as_bytes();
-        let rest = match name.strip_prefix(b"__spl::") {
-            Some(r) if arg_index > 0 => r,
-            _ => return false,
+        // "Class::method" / "parent::method" (a static-form call: no $this
+        // in the arguments) or "__spl::class::method".
+        let (rest, this_arg) = match name.strip_prefix(b"__spl::") {
+            Some(r) if arg_index > 0 => (r, 1),
+            Some(_) => return false,
+            None => (name, 0),
         };
         let sep = match rest.windows(2).position(|w| w == b"::") {
             Some(p) => p,
             None => return false,
         };
         let (class, method) = (&rest[..sep], &rest[sep + 2..]);
-        if !self.native_class_handlers.contains_key(class) {
+        let mut class = class.to_ascii_lowercase();
+        if this_arg == 0 {
+            let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+            class = match class.as_slice() {
+                b"parent" => {
+                    match scope.and_then(|s| self.classes.get(&s).and_then(|c| c.parent.clone())) {
+                        Some(p) => p.to_ascii_lowercase(),
+                        None => return false,
+                    }
+                }
+                b"self" | b"static" => match scope {
+                    Some(s) => s,
+                    None => return false,
+                },
+                _ => class,
+            };
+        }
+        // A user subclass of a native class: its nearest native ancestor.
+        for _ in 0..64 {
+            if self.native_class_handlers.contains_key(&class) {
+                break;
+            }
+            match self.classes.get(&class).and_then(|c| c.parent.clone()) {
+                Some(p) => class = p.to_ascii_lowercase(),
+                None => return false,
+            }
+        }
+        if !self.native_class_handlers.contains_key(&class) {
             return false;
         }
-        let (_, m) = match crate::stubs::find_method(class, method) {
+        let (_, m) = match crate::stubs::find_method(&class, method) {
             Some(x) => x,
             None => return false,
         };
-        let p = arg_index - 1;
+        let p = arg_index - this_arg;
         let a = match m.args.get(p) {
             Some(a) => a,
             None => match m.args.last() {
@@ -42149,6 +42179,10 @@ impl Vm {
                                 })
                             })
                             .unwrap_or(false)
+                            // a by-reference parameter of an extension's method
+                            || self.pending_calls.last().is_some_and(|call| {
+                                self.native_method_arg_by_ref(call, call.args.len())
+                            })
                     };
                     if by_ref {
                         if let OperandType::JmpTarget(t) = op.op1 {
