@@ -4238,7 +4238,14 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                             continue;
                         }
                         removed.push(cur);
-                        ob.set_property(d.name.clone(), Value::Undef);
+                        // The slot lets go of a reference it held (which
+                        // loses this property as a type source).
+                        match ob.properties.iter_mut().find(|(k, _)| *k == d.name) {
+                            Some(slot) => {
+                                removed.push(std::mem::replace(&mut slot.1, Value::Undef))
+                            }
+                            None => ob.set_property(d.name.clone(), Value::Undef),
+                        }
                         lazy_count += 1;
                     }
                 }
