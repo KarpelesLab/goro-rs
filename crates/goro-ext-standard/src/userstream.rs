@@ -479,8 +479,9 @@ pub(crate) struct UserWrapperRef {
     pub scheme: Vec<u8>,
     pub class_name: Vec<u8>,
     pub is_url: bool,
-    /// A builtin wrapper implemented in Rust (compress.zlib://).
-    pub native: bool,
+    /// A builtin wrapper implemented in Rust (compress.zlib://,
+    /// compress.bzip2://): its wops->label.
+    pub native: Option<&'static str>,
 }
 
 /// Result of locating the wrapper for a path.
@@ -501,19 +502,25 @@ fn user_wrapper(scheme_lower: &[u8]) -> Option<UserWrapperRef> {
             scheme: scheme_lower.to_vec(),
             class_name: u.class_name.clone(),
             is_url: u.flags & 1 != 0,
-            native: false,
+            native: None,
         })
     });
     if user.is_some() {
         return user;
     }
-    // php_stream_gzip_wrapper is served by this layer too.
-    if scheme_lower == b"compress.zlib" && !builtin_disabled(scheme_lower) {
+    // php_stream_gzip_wrapper and php_stream_bzip2_wrapper are served by
+    // this layer too.
+    let label = match scheme_lower {
+        b"compress.zlib" => "ZLIB",
+        b"compress.bzip2" if BZ2_ENABLED.with(|c| c.get()) => "BZip2",
+        _ => return None,
+    };
+    if !builtin_disabled(scheme_lower) {
         return Some(UserWrapperRef {
             scheme: scheme_lower.to_vec(),
             class_name: Vec::new(),
             is_url: false,
-            native: true,
+            native: Some(label),
         });
     }
     None
@@ -2215,9 +2222,13 @@ fn wrapper_open(
     options: i64,
     context: Option<i64>,
 ) -> Result<Option<(i64, Us, Option<Vec<u8>>)>, VmError> {
-    if uw.native {
-        return Ok(zlib_stream::gzopen(vm, path, mode, options, context, true)?
-            .map(|(fid, us)| (fid, us, None)));
+    if let Some(label) = uw.native {
+        let r = if label == "BZip2" {
+            bz2_stream::bz2open(vm, path, mode, options, context, true)?
+        } else {
+            zlib_stream::gzopen(vm, path, mode, options, context, true)?
+        };
+        return Ok(r.map(|(fid, us)| (fid, us, None)));
     }
     if recursion_guard(path) {
         log_error(vm, options, "infinite recursion prevented".to_string());
@@ -2293,7 +2304,7 @@ fn wrapper_opendir(
     options: i64,
     context: Option<i64>,
 ) -> Result<Option<(i64, Us)>, VmError> {
-    if uw.native {
+    if uw.native.is_some() {
         log_error(vm, options, "not implemented".to_string());
         return Ok(None);
     }
@@ -2428,7 +2439,7 @@ fn wrapper_url_stat(
     url: &[u8],
     flags: i64,
 ) -> Result<Option<StatBuf>, VmError> {
-    if uw.native {
+    if uw.native.is_some() {
         return Ok(None);
     }
     let obj = match create_object(vm, uw, None)? {
@@ -2467,11 +2478,11 @@ fn wrapper_bool_op(
     method: &str,
     args: Vec<Value>,
 ) -> Result<bool, VmError> {
-    if uw.native {
+    if let Some(label) = uw.native {
         // wops->unlink / rename / mkdir / rmdir are NULL
         match method {
-            "unlink" => warn(vm, "ZLIB does not allow unlinking"),
-            "rename" => warn(vm, "ZLIB wrapper does not support renaming"),
+            "unlink" => warn(vm, &format!("{} does not allow unlinking", label)),
+            "rename" => warn(vm, &format!("{} wrapper does not support renaming", label)),
             _ => {}
         }
         return Ok(false);
@@ -4020,8 +4031,8 @@ fn h_rename(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
         }
         Loc::User(u) => u,
     };
-    if uw.native {
-        warn(vm, "ZLIB wrapper does not support renaming");
+    if let Some(label) = uw.native {
+        warn(vm, &format!("{} wrapper does not support renaming", label));
         return Ok(Some(Value::False));
     }
     let same = match locate(vm, &to, 0) {
@@ -4076,7 +4087,7 @@ fn metadata(
     option: i64,
     value: Value,
 ) -> Result<Option<Value>, VmError> {
-    if uw.native {
+    if uw.native.is_some() {
         // wops->stream_metadata is NULL
         let times_given = matches!(&value, Value::Array(a) if !a.borrow().is_empty());
         if option == PHP_STREAM_META_TOUCH && !times_given {
@@ -5164,7 +5175,7 @@ intercepts! {
 pub(crate) mod zlib_stream;
 
 macro_rules! zlib_intercepts {
-    ($( $w:ident => ($name:literal, $orig:literal, $h:path) ),* $(,)?) => {
+    ($reg:ident; $( $w:ident => ($name:literal, $orig:literal, $h:path) ),* $(,)?) => {
         $(
             fn $w(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 run(vm, $name, args, $h)
@@ -5172,7 +5183,7 @@ macro_rules! zlib_intercepts {
         )*
         /// ext/zlib's stream functions: gzopen() & co. and the gz* aliases
         /// of the stream functions (zif_fread & co. in zlib_arginfo.h).
-        pub(crate) fn register_zlib(vm: &mut Vm) {
+        pub(crate) fn $reg(vm: &mut Vm) {
             $(
                 if !$orig.is_empty() {
                     if let Some(orig) = ORIG.with(|m| m.borrow().get($orig).copied()) {
@@ -5186,6 +5197,7 @@ macro_rules! zlib_intercepts {
 }
 
 zlib_intercepts! {
+    register_zlib;
     w_gzwrite => ("gzwrite", "fwrite", h_fwrite),
     w_gzputs => ("gzputs", "fwrite", h_fwrite),
     w_gzrewind => ("gzrewind", "rewind", h_rewind),
@@ -5200,4 +5212,31 @@ zlib_intercepts! {
     w_gzopen => ("gzopen", "", zlib_stream::h_gzopen),
     w_gzfile => ("gzfile", "", zlib_stream::h_gzfile),
     w_readgzfile => ("readgzfile", "", zlib_stream::h_readgzfile),
+}
+
+/// compress.bzip2:// streams and bzopen() (ext/bz2/bz2.c).
+#[path = "bz2_stream.rs"]
+pub(crate) mod bz2_stream;
+
+thread_local! {
+    /// Whether ext/bz2 (and so compress.bzip2://) is loaded.
+    static BZ2_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+zlib_intercepts! {
+    register_bz2_functions;
+    w_bzwrite => ("bzwrite", "fwrite", h_fwrite),
+    w_bzflush => ("bzflush", "fflush", h_fflush),
+    w_bzclose => ("bzclose", "fclose", h_fclose),
+    w_bzopen => ("bzopen", "", bz2_stream::h_bzopen),
+    w_bzread => ("bzread", "", bz2_stream::h_bzread),
+    w_bzerrno => ("bzerrno", "", bz2_stream::h_bzerrno),
+    w_bzerrstr => ("bzerrstr", "", bz2_stream::h_bzerrstr),
+    w_bzerror => ("bzerror", "", bz2_stream::h_bzerror),
+}
+
+/// ext/bz2's stream functions and wrapper.
+pub(crate) fn register_bz2(vm: &mut Vm) {
+    BZ2_ENABLED.with(|c| c.set(true));
+    register_bz2_functions(vm);
 }

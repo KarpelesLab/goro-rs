@@ -70,6 +70,12 @@ pub fn register_standard_functions(vm: &mut Vm) {
     register_builtin_param_names(vm);
 }
 
+/// ext/bz2's stream functions (bzopen(), bzread(), bzerr*() and the bz*
+/// aliases of the stream functions) and compress.bzip2://.
+pub fn register_bz2_stream_functions(vm: &mut Vm) {
+    misc::userstream::register_bz2(vm);
+}
+
 /// ext/zlib's stream functions (gzopen(), gzfile(), readgzfile() and the
 /// gz* aliases of the stream functions), served by the stream layer here.
 pub fn register_zlib_stream_functions(vm: &mut Vm) {
