@@ -324,10 +324,13 @@ pub fn is_pgsql_test(path: &str) -> bool {
 /// have pointed at MySQL. ext/pdo_pgsql/tests/config.inc only overrides
 /// PDOTEST_DSN.
 pub fn child_env(filename: &str) {
-    if !filename.contains("/ext/pdo_pgsql/tests/") {
+    let variant = PDO_VARIANT.with(|v| v.get()) && filename.contains("/ext/pdo/tests/");
+    if !filename.contains("/ext/pdo_pgsql/tests/") && !variant {
         return;
     }
-    if let Ok(dsn) = std::env::var("PDO_PGSQL_TEST_DSN") {
+    let dsn = std::env::var("PDO_PGSQL_TEST_DSN")
+        .or_else(|_| std::env::var("PGSQL_TEST_CONNSTR").map(|c| format!("pgsql:{}", c)));
+    if let Ok(dsn) = dsn {
         unsafe {
             std::env::set_var("PDOTEST_DSN", dsn);
             std::env::remove_var("PDOTEST_USER");
@@ -335,6 +338,22 @@ pub fn child_env(filename: &str) {
             std::env::remove_var("PDOTEST_ATTR");
         }
     }
+}
+
+thread_local! {
+    /// Whether the test being run is a generic PDO test run against pgsql
+    static PDO_VARIANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub fn set_pdo_variant(v: bool) {
+    PDO_VARIANT.with(|c| c.set(v));
+}
+
+/// Whether a PostgreSQL server can be had for the tests
+pub fn can_start() -> bool {
+    std::env::var_os("PGSQL_TEST_CONNSTR").is_some()
+        || std::env::var_os("PDO_PGSQL_TEST_DSN").is_some()
+        || (unsafe { libc::geteuid() } != 0 && find_bindir().is_some())
 }
 
 pub fn shutdown() {

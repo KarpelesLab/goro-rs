@@ -2630,6 +2630,20 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
         collect_phpt_files(dir, &mut files);
     }
     files.sort();
+    // The generic PDO tests run a second time against the pgsql driver (as
+    // the --REDIRECTTEST-- of ext/pdo_pgsql/tests/common.phpt does) when a
+    // PostgreSQL server can be had: such a test is listed twice.
+    if pgsql_test::can_start() {
+        let extra: Vec<std::path::PathBuf> = files
+            .iter()
+            .filter(|f| f.to_string_lossy().contains("/ext/pdo/tests/"))
+            .cloned()
+            .collect();
+        if !extra.is_empty() {
+            files.extend(extra);
+            files.sort();
+        }
+    }
     // GORO_PHPT_SHARD=i/n keeps every n-th test starting at i (0-based), so CI
     // can split the suite across parallel jobs.
     if let Ok(spec) = std::env::var("GORO_PHPT_SHARD") {
@@ -2680,7 +2694,7 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
             }
         }
     }
-    let mut has_pgsql_tests = false;
+    let mut has_pgsql_tests = files.windows(2).any(|w| w[0] == w[1]);
     for p in files.iter_mut() {
         if let Ok(abs) = std::fs::canonicalize(&*p) {
             if pgsql_test::is_pgsql_test(&abs.to_string_lossy()) {
@@ -2723,7 +2737,14 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
         }
     }
 
+    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
     for path in &files {
+        // the second listing of a generic PDO test: its pgsql run
+        let pgsql_variant = !seen.insert(path.clone());
+        if pgsql_variant && !pgsql_test::is_available() {
+            continue;
+        }
+        pgsql_test::set_pdo_variant(pgsql_variant);
         if let Ok(content) = std::fs::read(path) {
             if let Some(mut test) = PhptTest::parse_bytes(&content) {
                 let test_dir = path.parent();
@@ -2757,10 +2778,13 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     run_test_with_dir_and_filename(&test, test_dir, &test_filename)
                 }));
-                let _dbg_name = path
+                let mut _dbg_name = path
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
+                if pgsql_variant {
+                    _dbg_name.push_str(" (pgsql)");
+                }
                 match result {
                     Ok(TestResult::Pass) => {
                         pass += 1;
