@@ -1118,6 +1118,13 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         } else if let Some(v) = vm.get_builtin_class_constant(&class_lower, const_name.as_bytes()) {
             // A natively implemented internal class.
+            if let Some(m) = vm.ext_class_constant_deprecation(&class_lower, const_name.as_bytes())
+            {
+                vm.emit_deprecated_at(&m, vm.current_line);
+                if vm.current_exception.is_some() {
+                    return Ok(Value::Null);
+                }
+            }
             return Ok(v);
         }
         let msg = format!("Undefined constant {}", name_str);
