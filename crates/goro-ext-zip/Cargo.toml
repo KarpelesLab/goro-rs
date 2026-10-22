@@ -1,0 +1,16 @@
+[package]
+name = "goro-ext-zip"
+version = "0.1.0"
+edition = "2024"
+description = "PHP zip extension (with a port of libzip) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+goro-zlib = { path = "../goro-zlib" }
+bzip2 = "0.6"
+libc = "0.2"
+purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "cipher", "kdf", "rng"] }

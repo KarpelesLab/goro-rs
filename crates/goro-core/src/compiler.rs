@@ -304,6 +304,10 @@ impl Compiler {
         match lower.as_slice() {
             b"bind_param" => Some(b"__mysqli_stmt_bind_param_method".to_vec()),
             b"bind_result" => Some(b"__mysqli_stmt_bind_result_method".to_vec()),
+            // ZipArchive::getExternalAttributesName/Index($x, &$opsys, &$attr)
+            b"getexternalattributesname" | b"getexternalattributesindex" => {
+                Some(b"__ziparchive_getexternalattributes_method".to_vec())
+            }
             _ => None,
         }
     }
@@ -451,6 +455,7 @@ impl Compiler {
                     (b"__mysqli_stmt_bind_param_method", p) if p >= 1 => true,
                     // mysqli_stmt::bind_result method form: (&$var1, &$var2, ...)
                     (b"__mysqli_stmt_bind_result_method", _) => true,
+                    (b"__ziparchive_getexternalattributes_method", 1..=2) => true,
                     _ => false,
                 }
             }
