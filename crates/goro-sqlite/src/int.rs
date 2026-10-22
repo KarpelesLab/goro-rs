@@ -1746,6 +1746,10 @@ pub struct Context<'a> {
     pub argc: u16,
     /// Error message set by sqlite3_result_error (copied into pOut too).
     pub zErr: Option<ZStr>,
+    /// The statement's current time (C &pVdbe->iCurrentTime, used by
+    /// sqlite3StmtCurrentTime()); None when the function runs outside a
+    /// statement.
+    pub piCurrentTime: Option<&'a mut i64>,
 }
 
 /// A cursor is a pointer into a single BTree within a database file.
