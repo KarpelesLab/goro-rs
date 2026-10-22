@@ -97,12 +97,45 @@ pub fn read_resource(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
             _ => None,
         };
     }
+    // php_libxml_streams_IO_open_wrapper: a scheme-less or file: URI is
+    // unescaped (xmlURIUnescapeString) before it is opened
+    let path = match crate::uri::parse_uri(filename) {
+        Some(u)
+            if u.scheme.as_deref().is_none_or(|s| s.starts_with("file")) && path.contains('%') =>
+        {
+            strip_file_scheme(&uri_unescape(filename))
+        }
+        _ => path,
+    };
     // The plain files wrapper (without REPORT_ERRORS) checks open_basedir.
     if !goro_core::basedir::check_open_basedir_ex(vm, "", &path, false) {
         return None;
     }
     let full = resolve_path(vm, &path);
     std::fs::read(&full).ok()
+}
+
+/// xmlURIUnescapeString
+pub fn uri_unescape(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
+        {
+            let h = (b[i + 1] as char).to_digit(16).unwrap_or(0);
+            let l = (b[i + 2] as char).to_digit(16).unwrap_or(0);
+            out.push((h * 16 + l) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn resolve_path(_vm: &Vm, path: &str) -> std::path::PathBuf {

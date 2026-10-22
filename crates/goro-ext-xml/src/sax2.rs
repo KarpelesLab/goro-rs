@@ -611,6 +611,10 @@ impl Sink for TreeBuilder {
             }
         }
         let in_entity = p.inputs.last().map(|i| i.entity.is_some()).unwrap_or(false);
+        // Entity content substituted into the tree (XML_PARSE_NOENT): libxml2
+        // copies the entity's nodes, and xmlStaticCopyNode() registers their
+        // IDs (quietly; an ID defined first wins).
+        let copied_entity = in_entity && self.in_entity.is_empty();
         let mut warn_undef: Option<String> = None;
         let validate = self.validate && !html;
         let v = &mut self.validator;
@@ -722,7 +726,13 @@ impl Sink for TreeBuilder {
                         && t.nodes[c.unwrap()].t == NType::Text
                         && t.nodes[c.unwrap()].next.is_none()
                 };
-                if single_text && !in_entity {
+                if single_text && copied_entity {
+                    let content = t.node_get_content(at);
+                    let is_xml_id = a.prefix.as_deref() == Some("xml") && a.localname == "id";
+                    if is_xml_id || is_id_attr(t, doc, el, at, html) {
+                        t.add_id_safe(at, &content);
+                    }
+                } else if single_text && !in_entity {
                     let content = t.node_get_content(at);
                     let is_xml_id = a.prefix.as_deref() == Some("xml") && a.localname == "id";
                     if is_xml_id && !is_valid_ncname(&content) {

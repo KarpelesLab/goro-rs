@@ -74,7 +74,8 @@ pub fn parse_uri(s: &str) -> Option<Uri> {
         None => (rest, None),
     };
     if let Some(f) = frag {
-        if !check_chars(f, b"/?") {
+        // xmlParse3986Fragment also accepts '[' and ']'
+        if !check_chars(f, b"/?[]") {
             return None;
         }
         u.fragment = Some(String::from_utf8_lossy(f).into_owned());

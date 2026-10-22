@@ -464,12 +464,277 @@ pub fn dump_doc(t: &Tree, ctx: &mut SaveCtx, doc: NodeId, encoding: Option<&str>
         }
         ctx.out.push_str("?>\n");
     }
+    let xhtml = is_xhtml_doc(t, doc);
     for c in t.children_of(doc) {
         ctx.level = 0;
-        dump_node(t, ctx, c);
+        if xhtml {
+            xhtml_node_dump(t, ctx, c, true);
+        } else {
+            dump_node(t, ctx, c);
+        }
         ctx.out.push('\n');
     }
     ctx.encoding = saved_enc;
+}
+
+// ---------------------------------------------------------------------------
+// XHTML serialization (xmlsave.c, LIBXML_HTML_ENABLED)
+
+/// xmlIsXHTML on the document's internal subset.
+pub fn is_xhtml_doc(t: &Tree, doc: NodeId) -> bool {
+    let Some(dtd) = t.int_subset(doc) else {
+        return false;
+    };
+    let Some(info) = t.dtd_info(dtd) else {
+        return false;
+    };
+    const PUBLIC: [&str; 3] = [
+        "-//W3C//DTD XHTML 1.0 Strict//EN",
+        "-//W3C//DTD XHTML 1.0 Frameset//EN",
+        "-//W3C//DTD XHTML 1.0 Transitional//EN",
+    ];
+    const SYSTEM: [&str; 3] = [
+        "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd",
+        "http://www.w3.org/TR/xhtml1/DTD/xhtml1-frameset.dtd",
+        "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd",
+    ];
+    if let Some(p) = &info.external_id {
+        if PUBLIC.contains(&p.as_str()) {
+            return true;
+        }
+    }
+    if let Some(sy) = &info.system_id {
+        if SYSTEM.contains(&sy.as_str()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// xmlNodeDumpOutput: nodes of XHTML documents get the XHTML serializer.
+pub fn dump_node_output(t: &Tree, ctx: &mut SaveCtx, id: NodeId) {
+    let xhtml = !t.is_doc(id) && t.nodes[id].doc.is_some_and(|d| is_xhtml_doc(t, d));
+    if xhtml {
+        xhtml_node_dump(t, ctx, id, true);
+    } else {
+        dump_node(t, ctx, id);
+    }
+}
+
+/// xhtmlIsEmpty
+fn xhtml_is_empty(t: &Tree, id: NodeId) -> bool {
+    let n = &t.nodes[id];
+    if n.t != NType::Element {
+        return false;
+    }
+    if let Some(ns) = n.ns {
+        if t.nss[ns].href != "http://www.w3.org/1999/xhtml" {
+            return false;
+        }
+    }
+    if n.children.is_some() {
+        return false;
+    }
+    matches!(
+        n.name.as_str(),
+        "area"
+            | "br"
+            | "base"
+            | "basefont"
+            | "col"
+            | "frame"
+            | "hr"
+            | "img"
+            | "input"
+            | "isindex"
+            | "link"
+            | "meta"
+            | "param"
+    )
+}
+
+/// xhtmlAttrListDumpOutput
+fn xhtml_attr_list(t: &Tree, ctx: &mut SaveCtx, el: NodeId) {
+    let (mut xml_lang, mut lang, mut name, mut id) = (None, None, None, None);
+    let mut a = t.nodes[el].properties;
+    while let Some(x) = a {
+        let n = &t.nodes[x];
+        if n.ns.is_none() && n.name == "id" {
+            id = Some(x);
+        } else if n.ns.is_none() && n.name == "name" {
+            name = Some(x);
+        } else if n.ns.is_none() && n.name == "lang" {
+            lang = Some(x);
+        } else if n.ns.is_some() && n.name == "lang" && t.ns_prefix(n.ns) == Some("xml") {
+            xml_lang = Some(x);
+        }
+        write_attr(t, ctx, x);
+        a = n.next;
+    }
+    // C.8
+    if let (Some(nm), None) = (name, id) {
+        if matches!(
+            t.nodes[el].name.as_str(),
+            "a" | "p" | "div" | "img" | "map" | "applet" | "form" | "frame" | "iframe"
+        ) {
+            ctx.out.push_str(" id=\"");
+            write_attr_content(t, ctx, nm);
+            ctx.out.push('"');
+        }
+    }
+    // C.7
+    if let (Some(l), None) = (lang, xml_lang) {
+        ctx.out.push_str(" xml:lang=\"");
+        write_attr_content(t, ctx, l);
+        ctx.out.push('"');
+    } else if let (Some(l), None) = (xml_lang, lang) {
+        ctx.out.push_str(" lang=\"");
+        write_attr_content(t, ctx, l);
+        ctx.out.push('"');
+    }
+}
+
+fn write_meta(ctx: &mut SaveCtx) {
+    ctx.out
+        .push_str("<meta http-equiv=\"Content-Type\" content=\"text/html; charset=");
+    let e = ctx.encoding.clone().unwrap_or_else(|| "UTF-8".to_string());
+    ctx.out.push_str(&e);
+    ctx.out.push_str("\" />");
+}
+
+fn write_end_tag(t: &Tree, ctx: &mut SaveCtx, id: NodeId) {
+    ctx.out.push_str("</");
+    write_qname(t, &mut ctx.out, id);
+    ctx.out.push('>');
+}
+
+/// One extra indentation step (xmlSaveWriteIndent(ctxt, 1)).
+fn write_indent_extra(ctx: &mut SaveCtx) {
+    ctx.level += 1;
+    ctx.write_indent();
+    ctx.level -= 1;
+}
+
+/// xhtmlNodeDumpOutput
+pub fn xhtml_node_dump(t: &Tree, ctx: &mut SaveCtx, id: NodeId, root: bool) {
+    let n = &t.nodes[id];
+    match n.t {
+        NType::Element => {}
+        NType::DocumentFrag => {
+            for c in t.children_of(id) {
+                xhtml_node_dump(t, ctx, c, false);
+                if ctx.format {
+                    ctx.out.push('\n');
+                }
+            }
+            return;
+        }
+        NType::Text => {
+            let no_enc = ctx.encoding.is_none();
+            if n.flags & 1 != 0 {
+                ctx.out.push_str(&n.content);
+            } else {
+                escape_text(&mut ctx.out, &n.content, no_enc);
+            }
+            return;
+        }
+        _ => {
+            dump_node(t, ctx, id);
+            return;
+        }
+    }
+    if !root && ctx.format {
+        ctx.write_indent();
+    }
+    ctx.out.push('<');
+    write_qname(t, &mut ctx.out, id);
+    write_ns_list(t, ctx, id);
+    if n.name == "html" && n.ns.is_none() && n.ns_def.is_empty() {
+        ctx.out.push_str(" xmlns=\"http://www.w3.org/1999/xhtml\"");
+    }
+    if n.properties.is_some() {
+        xhtml_attr_list(t, ctx, id);
+    }
+    let mut addmeta = false;
+    if let Some(p) = n.parent {
+        let pp = t.nodes[p].parent;
+        if pp.is_some() && pp == n.doc && n.name == "head" && t.nodes[p].name == "html" {
+            let mut found = false;
+            let mut c = n.children;
+            while let Some(x) = c {
+                if t.nodes[x].name == "meta" {
+                    if let Some(a) = t.has_ns_prop(x, "http-equiv", None) {
+                        if t.node_get_content(a).eq_ignore_ascii_case("Content-Type") {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                c = t.nodes[x].next;
+            }
+            addmeta = !found;
+        }
+    }
+    if n.children.is_none() {
+        if t.ns_prefix(n.ns).is_none() && xhtml_is_empty(t, id) && !addmeta {
+            ctx.out.push_str(" />");
+        } else {
+            ctx.out.push('>');
+            if addmeta {
+                if ctx.format {
+                    ctx.out.push('\n');
+                    write_indent_extra(ctx);
+                }
+                write_meta(ctx);
+                if ctx.format {
+                    ctx.out.push('\n');
+                }
+            }
+            write_end_tag(t, ctx, id);
+        }
+        return;
+    }
+    ctx.out.push('>');
+    if addmeta {
+        if ctx.format {
+            ctx.out.push('\n');
+            write_indent_extra(ctx);
+        }
+        write_meta(ctx);
+    }
+    let saved_format = ctx.format;
+    if ctx.format {
+        let mut c = n.children;
+        while let Some(x) = c {
+            if matches!(t.nodes[x].t, NType::Text | NType::EntityRef) {
+                ctx.format = false;
+                break;
+            }
+            c = t.nodes[x].next;
+        }
+    }
+    if ctx.format {
+        ctx.out.push('\n');
+    }
+    if ctx.level >= 0 {
+        ctx.level += 1;
+    }
+    let mut c = n.children;
+    while let Some(x) = c {
+        xhtml_node_dump(t, ctx, x, false);
+        if ctx.format {
+            ctx.out.push('\n');
+        }
+        c = t.nodes[x].next;
+    }
+    if ctx.level > 0 {
+        ctx.level -= 1;
+    }
+    if ctx.format {
+        ctx.write_indent();
+    }
+    write_end_tag(t, ctx, id);
+    ctx.format = saved_format;
 }
 
 /// Serialize a whole document to bytes (xmlDocDumpFormatMemoryEnc).
@@ -502,7 +767,7 @@ pub fn node_to_bytes(
     let enc = encoding.unwrap_or("UTF-8");
     let mut ctx = SaveCtx::new(Some(enc), format);
     ctx.no_empty = no_empty;
-    dump_node(t, &mut ctx, node);
+    dump_node_output(t, &mut ctx, node);
     ctx.out.into_bytes()
 }
 
