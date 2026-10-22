@@ -9,16 +9,16 @@ closures, generators, fibers, property hooks, lazy objects, typed properties and
 match, readonly, asymmetric visibility, pipe operator) and a large part of the standard
 extensions run the official php-src test suite.
 
-**php-src 8.5.4 test suite** (full run, master `4e8381e2`, 2026-10-22):
+**php-src 8.5.4 test suite** (full run, master `5f6166e6`, 2026-10-22):
 
 | Metric | Count |
 |---|---|
-| Total tests | 21455 |
-| Pass | 15529 (72.4% of all, **96.4% of runnable**) |
-| Fail | 556 |
-| Skip | 5350 (mostly extensions that are not implemented yet: phar, intl, gd, sqlite, …) |
+| Total tests | 21582 (the generic PDO tests run once per driver) |
+| Pass | 18106 (83.9% of all, **96.7% of runnable**) |
+| Fail | 603 |
+| Skip | 2852 (mostly extensions not implemented yet: gd, ldap, ffi, sqlite3, xsl, dba, tidy, odbc, …; plus opcache-only and Windows-only tests) |
 | Error | 10 |
-| XFail / XPass | 9 / 1 |
+| XFail / XPass | 11 / 1 |
 
 CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n`), plus
 `cargo fmt --check` and `cargo clippy -D warnings`.
@@ -27,37 +27,38 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 
 | Area | Pass | Run | Rate |
 |---|---|---|---|
-| Zend/tests | 4850 | 5230 | 92.7% |
-| tests/ (lang, classes, basic, …) | 818 | 828 | 98.8% |
-| ext/standard | 3251 | 3303 | 98.4% |
-| ext/spl | 764 | 775 | 98.6% |
-| ext/date | 673 | 676 | 99.6% |
-| ext/reflection | 468 | 491 | 95.3% |
-| ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 844 | 845 | 99.9% |
-| ext/simplexml / xml / xmlreader / xmlwriter / libxml | 336 | 342 | 98.2% |
+| Zend/tests | 4960 | 5233 | 94.8% |
+| tests/ (lang, classes, basic, …) | 819 | 829 | 98.8% |
+| ext/standard | 3292 | 3348 | 98.3% |
+| ext/spl | 768 | 779 | 98.6% |
+| ext/date | 674 | 677 | 99.6% |
+| ext/reflection | 470 | 491 | 95.7% |
+| ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 847 | 850 | 99.6% |
+| ext/simplexml / xml / xmlreader / xmlwriter / libxml | 337 | 344 | 98.0% |
+| ext/soap | 574 | 576 | 99.7% |
 | ext/mbstring | 415 | 415 | 100% |
-| ext/openssl (incl. TLS streams, on purecrypto) | 205 | 211 | 97.2% |
-| ext/mysqli (embedded MySQL fixture) | 401 | 419 | 95.7% |
-| ext/pdo_mysql (embedded MySQL fixture) | 160 | 160 | 100% |
-| ext/pgsql (libpq port, embedded PostgreSQL fixture) | 95 | 95 | 100% |
-| ext/pdo_pgsql (embedded PostgreSQL fixture) | 59 | 59 | 100% |
-| ext/pdo (generic PDO tests, run against pdo_mysql and pdo_pgsql) | 241 | 247 | 97.6% |
-| ext/session | 255 | 256 | 99.6% |
-| ext/pcre (PCRE2 port) | 154 | 154 | 100% |
-| ext/hash / ext/random / ext/zlib / ext/bz2 | 304 | 306 | 99.3% |
-| ext/json (port of json_encoder.c / scanner / parser) | 88 | 88 | 100% |
-| ext/bcmath (libbcmath port, `BcMath\Number`) | 165 | 165 | 100% |
-| ext/filter | 116 | 116 | 100% |
+| ext/intl (on the `intl` crate) | 413 | 427 | 96.7% |
 | ext/iconv (glibc iconv emulation) | 68 | 68 | 100% |
-| ext/sodium (libsodium API on purecrypto) | 30 | 30 | 100% |
-| ext/gmp | 96 | 98 | 98.0% |
-| ext/ctype / ext/uri / ext/tokenizer | 218 | 219 | 99.5% |
+| ext/openssl (incl. TLS streams, on purecrypto) | 206 | 212 | 97.2% |
+| ext/sodium (on purecrypto) | 30 | 30 | 100% |
+| ext/mysqli (embedded MySQL fixture) | 402 | 420 | 95.7% |
+| ext/pdo (generic tests, run against MySQL and PostgreSQL) | 241 | 247 | 97.6% |
+| ext/pdo_mysql / pdo_pgsql | 219 | 219 | 100% |
+| ext/pgsql (libpq port, embedded PostgreSQL fixture) | 95 | 95 | 100% |
+| ext/session | 255 | 256 | 99.6% |
+| ext/pcre (PCRE2 port) | 155 | 155 | 100% |
+| ext/hash / random / zlib / bz2 | 304 | 306 | 99.3% |
+| ext/phar (phar, tar, zip formats) | 534 | 542 | 98.5% |
+| ext/zip (libzip port) / exif / fileinfo (libmagic port) | 264 | 265 | 99.6% |
+| ext/json | 88 | 88 | 100% |
+| ext/bcmath / filter / gmp | 377 | 380 | 99.2% |
+| ext/ctype / tokenizer | 102 | 102 | 100% |
+| ext/uri (RFC 3986 + WHATWG URL) | 185 | 309 | 59.9% |
+| ext/posix / pcntl / calendar / ftp / gettext / shmop / sysv* | 254 | 254 | 100% |
+| ext/curl (libcurl emulation) / sockets | 252 | 253 | 99.6% |
 | ext/opcache (behavioural tests) | 300 | 303 | 99.0% |
-| ext/zend_test (engine test hooks) | 104 | 142 | 73.2% |
-| ext/curl (libcurl emulation) | 158 | 158 | 100% |
-| ext/sockets | 94 | 95 | 98.9% |
-| sapi/cli (incl. `php -S`) | 96 | 96 | 100% |
-| ext/soap (client incl. HTTP transport, server, WSDL/schema) | 574 | 577 | 99.5% |
+| ext/zend_test (engine test hooks) | 106 | 145 | 73.1% |
+| sapi/cli (incl. `php -S`) | 96 | 97 | 99.0% |
 
 
 *The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
@@ -92,7 +93,7 @@ Highlights beyond the core language:
   keep-alive, proxies, Basic/Digest auth, compression; SoapServer), zend_test.
 
 ### Not Yet Implemented
-- gd, pdo_sqlite/…, ffi, ldap, sqlite3, xsl, tidy (in progress: phar, intl, zip, exif, fileinfo)
+- pdo_sqlite/…, ffi, ldap, sqlite3, dba, tidy, odbc, snmp, enchant, readline (in progress: gd, xsl)
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
 - Exact opcache optimizer behaviour
 
