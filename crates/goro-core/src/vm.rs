@@ -36218,6 +36218,13 @@ impl Vm {
                                                 line: op.line,
                                             });
                                         }
+                                        // The assignment's value is the
+                                        // coerced one.
+                                        if let OperandType::Tmp(t) = op.op2 {
+                                            if let Some(slot) = tmps.get_mut(t as usize) {
+                                                *slot = val.clone();
+                                            }
+                                        }
                                     }
                                     *r.borrow_mut() = val;
                                 }
