@@ -28,6 +28,7 @@ struct Config {
     fiber_init: bool,
     fiber_switch: bool,
     fiber_destroy: bool,
+    observe_declaring: bool,
     function_names: HashSet<Vec<u8>>,
 }
 
@@ -66,6 +67,7 @@ fn startup(vm: &mut Vm) {
         fiber_init: ini_bool(vm, "zend_test.observer.fiber_init"),
         fiber_switch: ini_bool(vm, "zend_test.observer.fiber_switch"),
         fiber_destroy: ini_bool(vm, "zend_test.observer.fiber_destroy"),
+        observe_declaring: ini_bool(vm, "zend_test.observer.observe_declaring"),
         function_names: parse_names(&crate::ini::ini_str(
             vm,
             "zend_test.observer.observe_function_names",
@@ -79,6 +81,24 @@ fn startup(vm: &mut Vm) {
     }
     if fibers {
         vm.fiber_observer = Some(fiber_event);
+        vm.declare_observer = Some(declared);
+    }
+}
+
+/// declared_function_observer(), declared_class_observer()
+fn declared(vm: &mut Vm, class: bool, name: &[u8]) {
+    let (show, depth) = STATE.with(|s| {
+        let s = s.borrow();
+        (s.cfg.observe_declaring, s.depth)
+    });
+    if show {
+        let line = format!(
+            "{}<!-- declared {} '{}' -->\n",
+            indent(depth),
+            if class { "class" } else { "function" },
+            String::from_utf8_lossy(name)
+        );
+        vm.write_output(line.as_bytes());
     }
 }
 

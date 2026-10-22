@@ -1121,6 +1121,9 @@ pub struct Vm {
     pub observer: Option<ObserverHooks>,
     /// Observer API fiber hooks, if an extension installed them.
     pub fiber_observer: Option<fn(&mut Vm, FiberEvent)>,
+    /// Observer API declaration hooks (zend_observer_function_declared and
+    /// _class_linked): called with (is a class, lowercase name).
+    pub declare_observer: Option<fn(&mut Vm, bool, &[u8])>,
     /// The next top-level code run is a script, an included file or eval()'d
     /// code (observed as a "file" frame).
     pub(crate) observe_code: bool,
@@ -2363,6 +2366,7 @@ impl Vm {
             builtin_named_variadics: std::collections::HashSet::new(),
             observer: None,
             fiber_observer: None,
+            declare_observer: None,
             observe_code: false,
             zpp_method_map: Default::default(),
             zpp_internal_class_cache: Default::default(),
@@ -9010,8 +9014,34 @@ impl Vm {
         {
             return false;
         }
+        if op_array.name.is_empty() {
+            if let Some(f) = self.declare_observer {
+                self.observe_compiled_declarations(op_array, f);
+            }
+        }
         (h.begin)(self, &ObservedFrame::User(op_array));
         true
+    }
+
+    /// The declarations of a file bound when it was compiled (top-level
+    /// functions, early-bound classes): observed before it runs.
+    fn observe_compiled_declarations(&mut self, op_array: &OpArray, f: fn(&mut Vm, bool, &[u8])) {
+        for op in &op_array.ops {
+            let flag = match op.result {
+                OperandType::Const(c) => op_array.literals.get(c as usize).map(|v| v.to_long()),
+                _ => None,
+            };
+            let class = match (op.opcode, flag) {
+                (OpCode::DeclareFunction, Some(64)) => false,
+                (OpCode::DeclareClass, Some(1)) => true,
+                _ => continue,
+            };
+            let OperandType::Const(n) = op.op1 else {
+                continue;
+            };
+            let name = op_array.literals[n as usize].to_php_string();
+            f(self, class, &name.as_bytes().to_ascii_lowercase());
+        }
     }
 
     #[cold]
@@ -37633,6 +37663,14 @@ impl Vm {
                             &func_display,
                         );
                         self.register_user_function(name.as_bytes(), func_op_array.clone());
+                        // (a top-level declaration was bound at compile time:
+                        // observed before its file runs)
+                        if let (Some(f), OperandType::Const(c)) = (self.declare_observer, op.result)
+                        {
+                            if op_array.literals[c as usize].to_long() != 64 {
+                                f(self, false, &name.as_bytes().to_ascii_lowercase());
+                            }
+                        }
                     }
                     Ok(Flow::Next)
                 })? {
@@ -50210,8 +50248,15 @@ impl Vm {
                                 );
                             }
                         }
+                        let observed = match self.declare_observer {
+                            Some(f) if decl_flag != 1 => Some((f, name_lower.clone())),
+                            _ => None,
+                        };
                         self.classes.insert(name_lower, class);
                         crate::proptable::invalidate_class_layouts();
+                        if let Some((f, n)) = observed {
+                            f(self, true, &n);
+                        }
                     }
                     Ok(Flow::Next)
                 })? {
