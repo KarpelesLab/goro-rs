@@ -301,10 +301,7 @@ impl<'a> Lexer<'a> {
                     match i64::from_str_radix(&s[2..], 16) {
                         Ok(n) => return TokenKind::LongNumber(n),
                         Err(_) => {
-                            // Overflow: try u64 first for better precision
-                            if let Ok(n) = u64::from_str_radix(&s[2..], 16) {
-                                return TokenKind::DoubleNumber(n as f64);
-                            }
+                            // zend_hex_strtod(): digit by digit in a double
                             let mut val = 0.0f64;
                             for ch in s[2..].chars() {
                                 val = val * 16.0 + ch.to_digit(16).unwrap_or(0) as f64;
@@ -331,16 +328,13 @@ impl<'a> Lexer<'a> {
                     match i64::from_str_radix(&s[2..], 2) {
                         Ok(n) => return TokenKind::LongNumber(n),
                         Err(_) => {
-                            // Overflow: try u64 first for better precision, then fall back to f64
-                            if let Ok(n) = u64::from_str_radix(&s[2..], 2) {
-                                return TokenKind::DoubleNumber(n as f64);
-                            }
-                            // Truly large numbers: parse string as decimal first
+                            // zend_bin_strtod(): digit by digit in a double
                             let binary_str = &s[2..];
-                            // Convert binary string to decimal string to avoid FP accumulation errors
                             let mut val = 0.0f64;
-                            for ch in binary_str.chars() {
-                                val = val * 2.0 + ch.to_digit(2).unwrap_or(0) as f64;
+                            // (`value * 2 + c - '0'`: the character code is
+                            // added before '0' is taken off, rounding included)
+                            for ch in binary_str.bytes() {
+                                val = (val * 2.0 + ch as f64) - b'0' as f64;
                             }
                             return TokenKind::DoubleNumber(val);
                         }
@@ -366,9 +360,10 @@ impl<'a> Lexer<'a> {
                     match i64::from_str_radix(&s[2..], 8) {
                         Ok(n) => return TokenKind::LongNumber(n),
                         Err(_) => {
+                            // zend_oct_strtod(): `value * 8 + c - '0'`
                             let mut val = 0.0f64;
-                            for ch in s[2..].chars() {
-                                val = val * 8.0 + ch.to_digit(8).unwrap_or(0) as f64;
+                            for ch in s[2..].bytes() {
+                                val = (val * 8.0 + ch as f64) - b'0' as f64;
                             }
                             return TokenKind::DoubleNumber(val);
                         }
@@ -437,9 +432,10 @@ impl<'a> Lexer<'a> {
                             if !overflow {
                                 return TokenKind::LongNumber(v);
                             }
+                            // zend_oct_strtod(): `value * 8 + c - '0'`
                             let mut f = 0.0f64;
                             for d in &digits {
-                                f = f * 8.0 + (*d - b'0') as f64;
+                                f = (f * 8.0 + *d as f64) - b'0' as f64;
                             }
                             return TokenKind::DoubleNumber(f);
                         }
