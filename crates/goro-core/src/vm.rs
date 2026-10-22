@@ -4326,8 +4326,146 @@ impl Vm {
                 Some(s) => (a, s),
                 None => (a, b),
             },
+            (x @ (Value::Array(_) | Value::Object(_)), y @ (Value::Array(_) | Value::Object(_))) => {
+                match self.compare_precast_elements(&x, &y, &mut 4096) {
+                    Some((x, y)) => (x, y),
+                    None => (a, b),
+                }
+            }
             _ => (a, b),
         }
+    }
+
+    /// Arrays (or same-class plain objects) compared element by element:
+    /// an object element compared with a string element is cast with
+    /// __toString() (zend_compare() of the pair). Returns the containers
+    /// with the cast elements substituted (as arrays), or None when no
+    /// element needed it. The casts run on copies of the elements, so a
+    /// __toString() that releases the containers does not disturb them.
+    #[inline(never)]
+    fn compare_precast_elements(
+        &mut self,
+        a: &Value,
+        b: &Value,
+        budget: &mut usize,
+    ) -> Option<(Value, Value)> {
+        // (a bounded walk: deeply nested or cyclic structures are left to
+        // the plain comparison)
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let entries = |v: &Value| -> Option<Vec<(ArrayKey, Value)>> {
+            match v {
+                Value::Array(arr) => {
+                    let arr = arr.borrow();
+                    // Only worth looking into arrays holding objects.
+                    if !arr
+                        .values()
+                        .any(|e| matches!(e.deref(), Value::Object(_) | Value::Array(_)))
+                    {
+                        return None;
+                    }
+                    Some(arr.iter().map(|(k, v)| (k.clone(), v.deref())).collect())
+                }
+                _ => None,
+            }
+        };
+        let (ea, eb) = match (a, b) {
+            (Value::Array(_), Value::Array(_)) => {
+                let ea = entries(a);
+                let eb = entries(b);
+                if ea.is_none() && eb.is_none() {
+                    return None;
+                }
+                let all = |v: &Value| match v {
+                    Value::Array(arr) => arr
+                        .borrow()
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.deref()))
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                (ea.unwrap_or_else(|| all(a)), eb.unwrap_or_else(|| all(b)))
+            }
+            (Value::Object(oa), Value::Object(ob)) => {
+                if Rc::ptr_eq(oa, ob) {
+                    return None;
+                }
+                let (x, y) = (oa.borrow(), ob.borrow());
+                if x.native.is_some()
+                    || y.native.is_some()
+                    || !x.class_name.eq_ignore_ascii_case(&y.class_name)
+                    || !x.properties.iter().any(|(_, v)| matches!(v.deref(), Value::Object(_)))
+                        && !y.properties.iter().any(|(_, v)| matches!(v.deref(), Value::Object(_)))
+                {
+                    return None;
+                }
+                let conv = |o: &crate::object::PhpObject| -> Vec<(ArrayKey, Value)> {
+                    o.properties
+                        .iter()
+                        .map(|(k, v)| (ArrayKey::String(PhpString::from_bytes(k)), v.deref()))
+                        .collect()
+                };
+                (conv(&x), conv(&y))
+            }
+            _ => return None,
+        };
+        let has_tostring = |vm: &Vm, v: &Value| -> bool {
+            let Value::Object(obj) = v else { return false };
+            let ob = obj.borrow();
+            ob.native.is_none()
+                && vm
+                    .classes
+                    .get(&ob.class_name.to_ascii_lowercase())
+                    .is_some_and(|c| c.get_method(b"__tostring").is_some())
+        };
+        let mut changed = false;
+        let mut na = ea.clone();
+        let mut nb = eb.clone();
+        for (i, (k, va)) in ea.iter().enumerate() {
+            let Some(j) = eb.iter().position(|(kb, _)| kb == k) else {
+                continue;
+            };
+            let vb = &eb[j].1;
+            match (va, vb) {
+                (Value::Object(_), Value::String(_)) if has_tostring(self, va) => {
+                    let s = self.value_to_string(va);
+                    if self.current_exception.is_some() {
+                        return None;
+                    }
+                    na[i].1 = Value::String(s);
+                    changed = true;
+                }
+                (Value::String(_), Value::Object(_)) if has_tostring(self, vb) => {
+                    let s = self.value_to_string(vb);
+                    if self.current_exception.is_some() {
+                        return None;
+                    }
+                    nb[j].1 = Value::String(s);
+                    changed = true;
+                }
+                (Value::Array(_) | Value::Object(_), Value::Array(_) | Value::Object(_)) => {
+                    if let Some((x, y)) = self.compare_precast_elements(va, vb, budget) {
+                        na[i].1 = x;
+                        nb[j].1 = y;
+                        changed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !changed {
+            return None;
+        }
+        let build = |e: Vec<(ArrayKey, Value)>| {
+            let mut arr = PhpArray::new();
+            for (k, v) in e {
+                arr.set(k, v);
+            }
+            Value::Array(Rc::new(RefCell::new(arr)))
+        };
+        Some((build(na), build(nb)))
     }
 
     fn emit_object_comparison_notice(&mut self, a: &Value, b: &Value, line: u32) {
@@ -23926,6 +24064,13 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    // (a variable the error handler created through $GLOBALS
+                    // is defined by the time op1 is fetched)
+                    if let Some(fs) = fsym.as_mut() {
+                        if fs.bind.seen_gen != fs.tab.generation.get() {
+                            self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                        }
+                    }
                     let cv_val = self.read_operand_warn(
                         &op.op1,
                         &cvs,
@@ -35891,6 +36036,23 @@ impl Vm {
                                     &cvs, &op.op1,
                                 )) != before
                                 {
+                                    // A string container is held while its
+                                    // offset is checked (zend_assign_to_string_offset()):
+                                    // the offset's cast is still reported.
+                                    if !convert && matches!(arr_val.deref(), Value::String(_)) {
+                                        self.check_string_offset_w(
+                                            &key_val,
+                                            crate::fetch_w::DimFetch::W,
+                                            op.line,
+                                        );
+                                        native_exc_check!(
+                                            self,
+                                            exception_handlers,
+                                            pending_calls_catch_depth,
+                                            ip,
+                                            op.line
+                                        );
+                                    }
                                     return Ok(Flow::Next);
                                 }
                                 if let (Some(b), Value::Array(a)) = (rc_before, &arr_val) {
