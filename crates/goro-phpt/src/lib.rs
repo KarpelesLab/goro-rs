@@ -108,7 +108,15 @@ impl PhptTest {
 
         let mut raw_sections = HashMap::new();
         for sec in [
-            "POST", "POST_RAW", "PUT", "GET", "COOKIE", "ARGS", "ENV", "STDIN",
+            "POST",
+            "POST_RAW",
+            "PUT",
+            "GET",
+            "COOKIE",
+            "ARGS",
+            "ENV",
+            "STDIN",
+            "EXPECTHEADERS",
         ] {
             if let Some(r) = Self::raw_section(content, sec) {
                 raw_sections.insert(sec.to_string(), r);
@@ -1854,9 +1862,14 @@ fn execute_php_inner_impl(
         // stderr) when a child process is spawned or STDERR is written,
         // keeping the order run-tests.php sees.
         vm.cli_direct_output = !req.info.cgi;
+        // proc_open() leaves out the variables whose value is empty.
         for (k, v) in &req.env {
             unsafe {
-                std::env::set_var(k, v);
+                if v.is_empty() {
+                    std::env::remove_var(k);
+                } else {
+                    std::env::set_var(k, v);
+                }
             }
         }
         if let Some(stdin) = &req.stdin {
@@ -3057,10 +3070,12 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
         || ["GET", "POST", "POST_RAW", "PUT", "COOKIE"]
             .iter()
             .any(|k| not_empty(k))
+        // TestFile::isCGI(): !empty() of the section (a lone newline counts).
         || test
-            .sections
+            .raw_sections
             .get("EXPECTHEADERS")
-            .is_some_and(|s| !php_trim(s).is_empty());
+            .or_else(|| test.sections.get("EXPECTHEADERS"))
+            .is_some_and(|s| !s.is_empty() && s != "0");
     let mut env: Vec<(String, String)> = Vec::new();
     let set = |env: &mut Vec<(String, String)>, k: &str, v: String| {
         env.retain(|(a, _)| a != k);
@@ -3187,6 +3202,8 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
     for (k, v) in &env {
         full.push((k.clone().into_bytes(), v.clone().into_bytes()));
     }
+    // proc_open() leaves out the variables whose value is empty.
+    full.retain(|(_, v)| !v.is_empty());
     info.env = full;
     // The section is passed byte-exact, trailing newline included.
     let stdin = test
