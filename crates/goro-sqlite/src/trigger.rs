@@ -767,15 +767,8 @@ pub fn sqlite3TriggerUpdateStep(
                 ExprId::NULL,
             );
             let tas = Token::default();
-            pFromDup = sqlite3SrcListAppendFromTerm(
-                db,
-                SrcListId::NULL,
-                None,
-                None,
-                &tas,
-                pSub,
-                None,
-            );
+            pFromDup =
+                sqlite3SrcListAppendFromTerm(db, SrcListId::NULL, None, None, &tas, pSub, None);
         }
         let src = db.arena.tstep(pTriggerStep).pSrc;
         if pFromDup.nn() && src.nn() {
@@ -1843,6 +1836,9 @@ mod tests {
     fn span_dup_trims_and_flattens_whitespace() {
         let sql: &[u8] = b"  INSERT INTO t\n\tVALUES(1);  END";
         /* the span stops before ';' (offset 26) */
-        assert_eq!(spanDupText(sql, 0, 26), b"INSERT INTO t  VALUES(1)".to_vec());
+        assert_eq!(
+            spanDupText(sql, 0, 26),
+            b"INSERT INTO t  VALUES(1)".to_vec()
+        );
     }
 }

@@ -18,8 +18,7 @@ use crate::trigger::{
 use crate::util::sqlite3_stricmp;
 use crate::vdbeaux::*;
 use crate::where_::{
-    sqlite3WhereBegin, sqlite3WhereEnd, sqlite3WhereOkOnePass,
-    sqlite3WhereUsesDeferredSeek,
+    sqlite3WhereBegin, sqlite3WhereEnd, sqlite3WhereOkOnePass, sqlite3WhereUsesDeferredSeek,
 };
 
 /// C: `Table * sqlite3SrcListLookup(Parse *pParse, SrcList *pSrc)`
@@ -546,13 +545,7 @@ pub fn sqlite3DeleteFrom(
                 for i in 0..nPk as usize {
                     let c = pk.borrow().aiColumn[i];
                     debug_assert!(c >= 0);
-                    sqlite3ExprCodeGetColumnOfTable(
-                        db,
-                        &pTab,
-                        iTabCur,
-                        c as i32,
-                        iPk + i as i32,
-                    );
+                    sqlite3ExprCodeGetColumnOfTable(db, &pTab, iTabCur, c as i32, iPk + i as i32);
                 }
                 iKeyV = iPk;
             } else {

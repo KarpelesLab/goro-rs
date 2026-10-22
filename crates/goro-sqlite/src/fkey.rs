@@ -1501,8 +1501,7 @@ fn fkActionTrigger(
             if pRaise.nn() {
                 db.exm(pRaise).affExpr = OE_Abort;
             }
-            let pSrc =
-                sqlite3SrcListAppend(db, SrcListId::NULL, None, None);
+            let pSrc = sqlite3SrcListAppend(db, SrcListId::NULL, None, None);
             if pSrc.nn() {
                 let it = &mut db.srcm(pSrc).a[0];
                 it.zName = Some(zFrom.clone());
@@ -1525,8 +1524,7 @@ fn fkActionTrigger(
         }
 
         /* Build the trigger and its single step (DisableLookaside: n/a). */
-        let stepSrc =
-            sqlite3SrcListAppend(db, SrcListId::NULL, None, None);
+        let stepSrc = sqlite3SrcListAppend(db, SrcListId::NULL, None, None);
         if stepSrc.nn() {
             let it = &mut db.srcm(stepSrc).a[0];
             it.zName = Some(zFrom.clone());

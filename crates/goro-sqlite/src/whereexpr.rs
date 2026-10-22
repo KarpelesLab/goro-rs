@@ -129,34 +129,6 @@ pub(crate) fn operatorMask(op: u8) -> u16 {
     c
 }
 
-/// Lookup table of sqlite3Utf8Read().
-static sqlite3Utf8Trans1: [u8; 64] = [
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
-    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x00, 0x01, 0x02, 0x03, 0x00, 0x01, 0x00, 0x00,
-];
-
-/// Local equivalent of sqlite3Utf8Read() on a zero-terminated buffer: read
-/// one UTF-8 character starting at `z[*pos]` and advance `*pos`.  (The
-/// skeleton signature of utf.rs's sqlite3Utf8Read is a placeholder.)
-fn utf8_read(z: &[u8], pos: &mut usize) -> u32 {
-    let at = |i: usize| -> u8 { z.get(i).copied().unwrap_or(0) };
-    let mut c = at(*pos) as u32;
-    *pos += 1;
-    if c >= 0xc0 {
-        c = sqlite3Utf8Trans1[(c - 0xc0) as usize] as u32;
-        while (at(*pos) & 0xc0) == 0x80 {
-            c = (c << 6) + (0x3f & at(*pos) as u32);
-            *pos += 1;
-        }
-        if c < 0x80 || (c & 0xFFFFF800) == 0xD800 {
-            c = 0xFFFD;
-        }
-    }
-    c
-}
-
 /// Check to see if the given expression is a LIKE or GLOB operator that
 /// can be optimized using inequality constraints.  Return TRUE if it is
 /// so and false if not.
@@ -232,7 +204,10 @@ fn isLikeOrGlob(
                 cnt += 1;
             } else if c >= 0x80 {
                 let mut z2 = cnt - 1;
-                if c == 0xff || utf8_read(zz, &mut z2) == 0xfffd || db.ENC() == SQLITE_UTF16LE {
+                if c == 0xff
+                    || crate::utf::sqlite3Utf8Read(zz, &mut z2) == 0xfffd
+                    || db.ENC() == SQLITE_UTF16LE
+                {
                     cnt -= 1;
                     break;
                 } else {
@@ -1092,7 +1067,9 @@ fn exprMightBeIndexed2(
                     continue;
                 }
                 let e = idx_col_expr(db, wi, pIdx, i);
-                if sqlite3ExprCompareSkip(db, pExpr, e, iCur) == 0 && sqlite3ExprIsConstant(db, false, e) == 0 {
+                if sqlite3ExprCompareSkip(db, pExpr, e, iCur) == 0
+                    && sqlite3ExprIsConstant(db, false, e) == 0
+                {
                     aiCurCol[0] = iCur;
                     aiCurCol[1] = XN_EXPR as i32;
                     return 1;
@@ -2104,21 +2081,5 @@ mod tests {
         assert_eq!(operatorMask(TK_IN), WO_IN);
         assert_eq!(operatorMask(TK_IS), WO_IS);
         assert_eq!(operatorMask(TK_ISNULL), WO_ISNULL);
-    }
-
-    #[test]
-    fn utf8_reader() {
-        let z = "aé€😀\u{0}".as_bytes();
-        let mut p = 0;
-        assert_eq!(utf8_read(z, &mut p), 'a' as u32);
-        assert_eq!(utf8_read(z, &mut p), 'é' as u32);
-        assert_eq!(utf8_read(z, &mut p), '€' as u32);
-        assert_eq!(utf8_read(z, &mut p), '😀' as u32);
-        assert_eq!(p, z.len() - 1);
-        // overlong encoding and surrogate
-        let mut p = 0;
-        assert_eq!(utf8_read(&[0xc0, 0x80, 0], &mut p), 0xFFFD);
-        let mut p = 0;
-        assert_eq!(utf8_read(&[0xed, 0xa0, 0x80, 0], &mut p), 0xFFFD);
     }
 }

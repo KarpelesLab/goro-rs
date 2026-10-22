@@ -1371,6 +1371,19 @@ fn releaseMemArray(a: &mut [Mem]) {
     }
 }
 
+/// releaseMemArray() for register arrays that may hold aggregate
+/// accumulators: a MEM_Agg cell is finalized (its xFinalize is invoked)
+/// as C sqlite3VdbeMemRelease() does, which needs the connection.
+fn releaseMemArrayDb(db: &mut Sqlite3, a: &mut [Mem]) {
+    for p in a.iter_mut() {
+        if p.flags & MEM_Agg != 0 {
+            crate::vdbemem::sqlite3VdbeMemReleaseDb(db, p);
+            p.flags = MEM_Undefined;
+        }
+    }
+    releaseMemArray(a);
+}
+
 /// C: `int sqlite3VdbeFrameIsValid(VdbeFrame *pFrame)`
 /// (SQLITE_DEBUG only in C; frames are always valid here.)
 pub fn sqlite3VdbeFrameIsValid(pFrame: &mut VdbeFrame) -> i32 {
@@ -1497,8 +1510,8 @@ pub fn sqlite3VdbeFrameDelete(db: &mut Sqlite3, p: &mut VdbeFrame) {
         let mut c = c;
         freeCursorNN(db, &mut c);
     }
-    releaseMemArray(&mut p.aChildMem);
-    releaseMemArray(&mut p.aMem);
+    releaseMemArrayDb(db, &mut p.aChildMem);
+    releaseMemArrayDb(db, &mut p.aMem);
     p.aChildMem = Vec::new();
     p.aMem = Vec::new();
     sqlite3VdbeDeleteAuxData(db, &mut p.pAuxData, -1, 0);
@@ -1886,7 +1899,7 @@ fn closeAllCursors(db: &mut Sqlite3, p: &mut Vdbe) {
     }
     debug_assert!(p.nFrame == 0);
     closeCursorsInFrame(db, p);
-    releaseMemArray(&mut p.aMem);
+    releaseMemArrayDb(db, &mut p.aMem);
 
     /* Delete any auxdata allocations made by the VM */
     if !p.pAuxData.is_empty() {
@@ -2095,12 +2108,7 @@ fn vdbeCommit(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
              ** be "9" to avoid name collisions when using 8+3 filenames. */
             debug_assert!(zSuper[zSuper.len() - 3] == b'9');
             /* sqlite3FileSuffix3(zMainFile, zSuper): 8+3 names not enabled */
-            rc = crate::os::sqlite3OsAccess(
-                &pVfs,
-                &zSuper,
-                SQLITE_ACCESS_EXISTS,
-                &mut res,
-            );
+            rc = crate::os::sqlite3OsAccess(&pVfs, &zSuper, SQLITE_ACCESS_EXISTS, &mut res);
             if !(rc == SQLITE_OK && res != 0) {
                 break;
             }
@@ -4655,7 +4663,7 @@ mod tests {
         assert_eq!(
             s(sqlite3VdbeDisplayP4(&op(
                 P4_SUBPROGRAM,
-                P4::Program(Rc::new(SubProgram::default()))
+                P4::Program(Rc::new(RefCell::new(SubProgram::default())))
             )))
             .unwrap(),
             "program"

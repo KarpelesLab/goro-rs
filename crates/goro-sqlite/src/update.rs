@@ -805,13 +805,7 @@ pub fn sqlite3Update(
                 for i in 0..nPk as usize {
                     let c = pk.borrow().aiColumn[i];
                     debug_assert!(c >= 0);
-                    sqlite3ExprCodeGetColumnOfTable(
-                        db,
-                        &pTab,
-                        iDataCur,
-                        c as i32,
-                        iPk + i as i32,
-                    );
+                    sqlite3ExprCodeGetColumnOfTable(db, &pTab, iDataCur, c as i32, iPk + i as i32);
                 }
                 if eOP != 0 {
                     if addrOpen != 0 {

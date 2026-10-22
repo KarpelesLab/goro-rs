@@ -592,12 +592,7 @@ fn schemaIsValid(db: &mut Sqlite3) {
 /// Rust: takes the SchemaId; an unknown id (C: a NULL pSchema, i.e. a
 /// transient table created by a sub-select) returns -32768.
 pub fn sqlite3SchemaToIndex(db: &Sqlite3, pSchema: SchemaId) -> i32 {
-    for (i, d) in db.aDb.iter().enumerate() {
-        if d.pSchema.id == pSchema {
-            return i as i32;
-        }
-    }
-    -32768
+    db.schema_index(pSchema)
 }
 
 /// C: `void sqlite3ParseObjectReset(Parse *pParse)`

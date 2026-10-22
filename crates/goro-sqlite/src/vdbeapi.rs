@@ -20,21 +20,8 @@ use crate::vdbemem::*;
 use std::any::Any;
 use std::rc::Rc;
 
-/// sqlite3ApiExit() (malloc.c): this routine must be called before
-/// exiting any API function that might have encountered an OOM.  There is
-/// no OOM in this port, so it reduces to `rc & db->errMask`.
-pub fn sqlite3ApiExit(db: &mut Sqlite3, rc: i32) -> i32 {
-    if db.mallocFailed != 0 || rc != 0 {
-        /* apiHandleError() */
-        if db.mallocFailed != 0 || rc == SQLITE_IOERR_NOMEM {
-            db.mallocFailed = 0;
-            sqlite3Error(db, SQLITE_NOMEM);
-            return SQLITE_NOMEM;
-        }
-        return rc & db.errMask;
-    }
-    0
-}
+/// sqlite3ApiExit() (malloc.c) lives in mainapi.rs.
+pub use crate::mainapi::sqlite3ApiExit;
 
 impl<'a> Context<'a> {
     /// A function context with every optional member unset (the C

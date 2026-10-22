@@ -350,7 +350,15 @@ pub fn sqlite3JoinType(
         let zSp2: &[u8] = if pC.is_none() { b"" } else { b" " };
         let tB = pB.cloned().unwrap_or_default();
         let tC = pC.cloned().unwrap_or_default();
-        errmsg!(db, b"unknown join type: %T%s%T%s%T", pA, zSp1, &tB, zSp2, &tC);
+        errmsg!(
+            db,
+            b"unknown join type: %T%s%T%s%T",
+            pA,
+            zSp1,
+            &tB,
+            zSp2,
+            &tC
+        );
         jointype = JT_INNER as i32;
     }
     jointype
@@ -5568,8 +5576,7 @@ fn convertCompoundSelectToSubquery(w: &mut Walker, p: SelectId) -> i32 {
 
     let pNew = db.arena.new_select(Select::default());
     let dummy = Token::default();
-    let pNewSrc =
-        sqlite3SrcListAppendFromTerm(db, SrcListId::NULL, None, None, &dummy, pNew, None);
+    let pNewSrc = sqlite3SrcListAppendFromTerm(db, SrcListId::NULL, None, None, &dummy, pNew, None);
     debug_assert!(pNewSrc.nn() || db.ppr().nErr != 0);
     if db.ppr().nErr != 0 {
         sqlite3SrcListDelete(db, pNewSrc);
@@ -6382,7 +6389,11 @@ fn selectExpander(pWalker: &mut Walker, p: SelectId) -> i32 {
                             let mut pLeft = sqlite3Expr(db, TK_ID as i32, Some(&zTabName));
                             let mut pe = sqlite3PExpr(db, TK_DOT as i32, pLeft, pRight);
                             if inRename && pELeft.nn() {
-                                crate::alter::sqlite3RenameTokenRemap(db, Some(RenameKey::Expr(pLeft)), RenameKey::Expr(pELeft));
+                                crate::alter::sqlite3RenameTokenRemap(
+                                    db,
+                                    Some(RenameKey::Expr(pLeft)),
+                                    RenameKey::Expr(pELeft),
+                                );
                             }
                             if let Some(zs) = &zSchemaName {
                                 pLeft = sqlite3Expr(db, TK_ID as i32, Some(zs));

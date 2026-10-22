@@ -5,6 +5,11 @@ edition = "2024"
 description = "A pure-Rust port of the SQLite database engine (3.54.1) for goro-rs"
 license = "MIT"
 
+[lib]
+# Doc comments quote C/SQL snippets from the SQLite sources (indented
+# blocks), which rustdoc would otherwise try to compile as doctests.
+doctest = false
+
 [lints]
 workspace = true
 

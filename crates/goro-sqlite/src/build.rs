@@ -18,8 +18,8 @@ use crate::expr::{
     sqlite3ExprDelete, sqlite3ExprListAppend, sqlite3ExprListDelete, sqlite3ExprSkipCollate,
 };
 use crate::global::{
-    sqlite3Isdigit, sqlite3Isspace, sqlite3StdType, sqlite3StdTypeAffinity,
-    sqlite3StdTypeLen, sqlite3StrBINARY, sqlite3UpperToLower,
+    sqlite3Isdigit, sqlite3Isspace, sqlite3StdType, sqlite3StdTypeAffinity, sqlite3StdTypeLen,
+    sqlite3StrBINARY, sqlite3UpperToLower,
 };
 use crate::int::*;
 use crate::printf::PfArg;
@@ -123,34 +123,6 @@ use crate::alter::{
     rename_key_fkey_to_col, rename_key_idlist_item, rename_key_ipkey, rename_key_srcitem_name,
     rename_key_table_name, sqlite3RenameTokenMap, sqlite3RenameTokenRemap,
 };
-
-/// sqlite3TriggerList() adapter: the list of triggers on pTab, TEMP
-/// triggers first (C links them through Trigger.pNext).
-///
-/// FIXME(integrator): trigger.rs returns only the head of the C list
-/// (`Option<TriggerRef>`); this adapter rebuilds the list (without the
-/// RETURNING-trigger side effects of the C function, which do not matter
-/// for DROP TABLE).
-fn trigger_list(db: &mut Sqlite3, pTab: &TableRef) -> Vec<TriggerRef> {
-    let (sid, zName, own) = {
-        let t = pTab.borrow();
-        (t.pSchema, t.zName.clone(), t.pTrigger.clone())
-    };
-    let tmpId = db.aDb[1].pSchema.id;
-    let mut list = own;
-    for pTrig in db.aDb[1].pSchema.trigHash.values() {
-        let t = pTrig.borrow();
-        if t.pTabSchema == sid
-            && !t.table.is_empty()
-            && streq(&t.table, &zName)
-            && (t.pTabSchema != tmpId || t.bReturning != 0)
-        {
-            drop(t);
-            list.insert(0, pTrig.clone());
-        }
-    }
-    list
-}
 
 // ---------------------------------------------------------------------------
 // Table locks (shared cache)
@@ -1627,9 +1599,8 @@ pub fn sqlite3ColumnPropertiesFromName(pTab: &TableRef, pCol: usize) {
 ///
 /// Clean up the data structures associated with the RETURNING clause.
 ///
-/// Rust: C registers this with sqlite3ParserAddCleanup(); in the port the
-/// code that resets a Parse (sqlite3ParseObjectReset) must call it when
-/// `bReturning` is set.
+/// Rust: registered with sqlite3ParserAddCleanup() by sqlite3AddReturning()
+/// as in C; it reads the Returning object of the parse being reset.
 pub fn sqlite3DeleteReturning(db: &mut Sqlite3) {
     let zName = match db.ppr().u1.d.pReturning.as_ref() {
         Some(r) => r.zName.clone(),
@@ -1702,6 +1673,7 @@ pub fn sqlite3AddReturning(db: &mut Sqlite3, pList: ExprListId) {
         iRetReg: 0,
         zName: zName.clone(),
     }));
+    crate::prepare::sqlite3ParserAddCleanup(db, Box::new(sqlite3DeleteReturning));
     if db.mallocFailed != 0 {
         return;
     }
@@ -3684,7 +3656,7 @@ pub fn sqlite3CodeDropTable(db: &mut Sqlite3, pTab: &TableRef, iDb: i32, isView:
     // Drop all triggers associated with the table being dropped. Code
     // is generated to remove entries from sqlite_schema and/or
     // sqlite_temp_schema if required.
-    for pTrigger in trigger_list(db, pTab) {
+    for pTrigger in crate::trigger::sqlite3TriggerList(db, pTab) {
         crate::trigger::sqlite3DropTriggerPtr(db, &pTrigger);
     }
 

@@ -691,7 +691,10 @@ fn backup_finish(pDestDb: Option<&mut Sqlite3>, pSrcDb: &mut Sqlite3, pp: &Backu
         let pPager = sqlite3BtreePager(&pSrc);
         let mut pg = pPager.borrow_mut();
         let list = sqlite3PagerBackupPtr(&mut pg);
-        if let Some(i) = list.iter().position(|b| std::ptr::eq(b.as_ptr(), Rc::as_ptr(pp))) {
+        if let Some(i) = list
+            .iter()
+            .position(|b| std::ptr::eq(b.as_ptr(), Rc::as_ptr(pp)))
+        {
             list.remove(i);
         }
     }

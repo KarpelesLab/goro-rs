@@ -2484,7 +2484,10 @@ fn whereLoopOutputAdjust(
                 {
                     let pRight = db.ex(pOpExpr).pRight;
                     let mut k2 = 0;
-                    if sqlite3ExprIsInteger(db, pRight, &mut k2, true, 1) != 0 && k2 >= -1 && k2 <= 1 {
+                    if sqlite3ExprIsInteger(db, pRight, &mut k2, true, 1) != 0
+                        && k2 >= -1
+                        && k2 <= 1
+                    {
                         k2 = 10;
                     } else {
                         k2 = 20;
@@ -3443,8 +3446,9 @@ fn wherePartIdxExpr(
                     bMaybeNullRow: bNullRow as u8,
                     aff,
                 };
-                // C prepends to the pIdxPartExpr linked list
-                db.pp().pIdxPartExpr.insert(0, p);
+                // C prepends to the pIdxPartExpr linked list; the Vec keeps push order
+                // (C list head = last element), as expr.rs scans it from the end.
+                db.pp().pIdxPartExpr.push(p);
             } else if (iColumn as i32) < BMS - 1 {
                 if let Some(m) = pMask.as_mut() {
                     **m &= !((1 as Bitmask) << iColumn);
@@ -5657,8 +5661,9 @@ fn whereAddIndexedExpr(
             bMaybeNullRow: ((jt & (JT_LEFT | JT_LTORJ | JT_RIGHT)) != 0) as u8,
             aff,
         };
-        // C prepends to the pIdxEpr linked list
-        db.pp().pIdxEpr.insert(0, p);
+        // C prepends to the pIdxEpr linked list; the Vec keeps push order
+        // (C list head = last element), as expr.rs scans it from the end.
+        db.pp().pIdxEpr.push(p);
     }
 }
 

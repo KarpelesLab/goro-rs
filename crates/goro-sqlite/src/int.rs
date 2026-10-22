@@ -389,7 +389,9 @@ pub struct Trigger {
 }
 
 /// Identifies a Schema object.  Db::pSchema.id; sqlite3SchemaToIndex()
-/// maps it back to an index into db.aDb.
+/// maps it back to an index into db.aDb.  SchemaId(0) (the default) is the
+/// C NULL schema pointer; real schemas get ids from 1 up
+/// (sqlite3SchemaGet()).
 #[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, Default)]
 pub struct SchemaId(pub u32);
 
@@ -647,15 +649,19 @@ impl Sqlite3 {
     pub fn winm(&mut self, w: WindowId) -> &mut Window {
         self.arena.winm(w)
     }
-    /// Index of the schema `id` in aDb (sqlite3SchemaToIndex()); -1000000 if
-    /// not found (as in C for a NULL schema).
+    /// Index of the schema `id` in aDb (sqlite3SchemaToIndex()).  SchemaId(0)
+    /// is the C NULL schema (transient tables, detached slots): -32768 as in
+    /// C.  An unknown id also gives -32768 (C asserts it cannot happen).
     pub fn schema_index(&self, id: SchemaId) -> i32 {
+        if id == SchemaId(0) {
+            return -32768;
+        }
         for (i, d) in self.aDb.iter().enumerate() {
             if d.pSchema.id == id {
                 return i as i32;
             }
         }
-        -1000000
+        -32768
     }
     #[inline]
     pub fn nDb(&self) -> i32 {
@@ -1435,6 +1441,9 @@ pub struct Parse {
     /// lives in Vdbe::aLabel.
     pub nLabel: i32,
     pub pConstExpr: ExprListId,
+    /// C linked lists with new entries pushed at the head; the Vecs keep
+    /// push order (the C head is the last element), so they are scanned
+    /// from the end.
     pub pIdxEpr: Vec<IndexedExpr>,
     pub pIdxPartExpr: Vec<IndexedExpr>,
     pub writeMask: yDbMask,

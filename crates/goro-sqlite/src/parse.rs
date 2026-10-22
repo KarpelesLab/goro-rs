@@ -981,7 +981,13 @@ fn reduce_action(
             /* ccons ::= DEFAULT scantok term */
             let s = M!(-1).yy0();
             let zSql = parseSql(db);
-            sqlite3AddDefaultValue(db, M!(0).yy454(), &zSql, s.off as usize, (s.off + s.n) as usize);
+            sqlite3AddDefaultValue(
+                db,
+                M!(0).yy454(),
+                &zSql,
+                s.off as usize,
+                (s.off + s.n) as usize,
+            );
         }
         34 => {
             /* ccons ::= DEFAULT LP expr RP */
@@ -1011,7 +1017,13 @@ fn reduce_action(
             let p = sqlite3PExpr(db, TK_UMINUS as i32, M!(0).yy454(), N);
             let s = M!(-1).yy0();
             let zSql = parseSql(db);
-            sqlite3AddDefaultValue(db, p, &zSql, M!(-2).yy0().off as usize, (s.off + s.n) as usize);
+            sqlite3AddDefaultValue(
+                db,
+                p,
+                &zSql,
+                M!(-2).yy0().off as usize,
+                (s.off + s.n) as usize,
+            );
         }
         37 => {
             /* ccons ::= DEFAULT scantok ID|INDEXED */
@@ -2471,11 +2483,7 @@ fn reduce_action(
             );
             if IN_RENAME_OBJECT!() {
                 if let Some(idx) = db.ppr().pNewIndex.clone() {
-                    sqlite3RenameTokenMap(
-                        db,
-                        crate::alter::rename_key_index_name(&idx),
-                        &tTab,
-                    );
+                    sqlite3RenameTokenMap(db, crate::alter::rename_key_index_name(&idx), &tTab);
                 }
             }
         }

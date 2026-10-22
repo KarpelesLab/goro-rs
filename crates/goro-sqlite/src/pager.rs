@@ -338,7 +338,8 @@ fn backup_update(pPager: &mut Pager, pgno: Pgno, aData: &[u8]) {
         return;
     }
     pPager.pBackup.retain(|w| w.strong_count() > 0);
-    let list: Vec<crate::backup::BackupP> = pPager.pBackup.iter().filter_map(|w| w.upgrade()).collect();
+    let list: Vec<crate::backup::BackupP> =
+        pPager.pBackup.iter().filter_map(|w| w.upgrade()).collect();
     crate::backup::sqlite3BackupUpdate(&list, pgno, aData);
 }
 
@@ -348,7 +349,8 @@ fn backup_restart(pPager: &mut Pager) {
         return;
     }
     pPager.pBackup.retain(|w| w.strong_count() > 0);
-    let list: Vec<crate::backup::BackupP> = pPager.pBackup.iter().filter_map(|w| w.upgrade()).collect();
+    let list: Vec<crate::backup::BackupP> =
+        pPager.pBackup.iter().filter_map(|w| w.upgrade()).collect();
     crate::backup::sqlite3BackupRestart(&list);
 }
 

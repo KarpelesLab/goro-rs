@@ -75,7 +75,8 @@ fn minmaxFunc(context: &mut Context, argv: &mut [Mem]) {
         if sqlite3_value_type(&mut argv[i]) == SQLITE_NULL {
             return;
         }
-        if (crate::vdbeaux::sqlite3MemCompare(context.db, &argv[iBest], &argv[i], Some(&pColl)) ^ mask)
+        if (crate::vdbeaux::sqlite3MemCompare(context.db, &argv[iBest], &argv[i], Some(&pColl))
+            ^ mask)
             >= 0
         {
             iBest = i;

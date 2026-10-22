@@ -610,15 +610,10 @@ fn vdbeMemTypeName(pMem: &mut Mem) -> &'static [u8] {
 }
 
 /// Access the RowSet object stored in a register by
-/// sqlite3VdbeMemSetRowSet().  The RowSet lives in `Mem::pAgg` (as a
-/// `RowSet` or `Box<RowSet>`); the register has MEM_Blob set.
-fn mem_rowset(m: &mut Mem) -> Option<&mut crate::rowset::RowSet> {
-    let b = m.pAgg.as_mut()?;
-    if b.is::<crate::rowset::RowSet>() {
-        return b.downcast_mut::<crate::rowset::RowSet>();
-    }
-    b.downcast_mut::<Box<crate::rowset::RowSet>>()
-        .map(|x| &mut **x)
+/// sqlite3VdbeMemSetRowSet() (vdbemem.rs keeps it in `Mem::pPtr` as an
+/// `Rc<RefCell<RowSet>>`; the register has MEM_Blob|MEM_Dyn set).
+fn mem_rowset(m: &Mem) -> Option<Rc<std::cell::RefCell<crate::rowset::RowSet>>> {
+    crate::vdbemem::sqlite3VdbeMemRowSet(m)
 }
 
 /// Result of vdbeIndexKeyCompare(): true if the key of the index entry
@@ -3605,8 +3600,8 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
                     return Err(Ex::NoMem);
                 }
             }
-            if let Some(rs) = mem_rowset(&mut mem!(p1)) {
-                crate::rowset::sqlite3RowSetInsert(rs, v);
+            if let Some(rs) = mem_rowset(&mem!(p1)) {
+                crate::rowset::sqlite3RowSetInsert(&mut rs.borrow_mut(), v);
             }
             Ok(Fl::Next)
         }
@@ -3621,8 +3616,10 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             let got = if (mem!(p1).flags & MEM_Blob) == 0 {
                 false
             } else {
-                match mem_rowset(&mut mem!(p1)) {
-                    Some(rs) => crate::rowset::sqlite3RowSetNext(rs, &mut val) != 0,
+                match mem_rowset(&mem!(p1)) {
+                    Some(rs) => {
+                        crate::rowset::sqlite3RowSetNext(&mut rs.borrow_mut(), &mut val) != 0
+                    }
                     None => false,
                 }
             };
@@ -3654,15 +3651,15 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
                     return Err(Ex::NoMem);
                 }
             }
-            if let Some(rs) = mem_rowset(&mut mem!(p1)) {
+            if let Some(rs) = mem_rowset(&mem!(p1)) {
                 if iSet != 0 {
-                    let exists = crate::rowset::sqlite3RowSetTest(rs, iSet, v);
+                    let exists = crate::rowset::sqlite3RowSetTest(&mut rs.borrow_mut(), iSet, v);
                     if exists != 0 {
                         jump_to_p2!();
                     }
                 }
                 if iSet >= 0 {
-                    crate::rowset::sqlite3RowSetInsert(rs, v);
+                    crate::rowset::sqlite3RowSetInsert(&mut rs.borrow_mut(), v);
                 }
             }
             Ok(Fl::Next)
@@ -5319,8 +5316,7 @@ fn op_parseschema(
             if rc == SQLITE_OK {
                 for row in &rows {
                     let argv: Vec<Option<&[u8]>> = row.iter().map(|a| a.as_deref()).collect();
-                    if crate::prepare::sqlite3InitCallback(db, &mut initData, Some(&argv)) != 0
-                    {
+                    if crate::prepare::sqlite3InitCallback(db, &mut initData, Some(&argv)) != 0 {
                         rc = SQLITE_ABORT;
                         crate::util::sqlite3Error(db, SQLITE_ABORT);
                         break;

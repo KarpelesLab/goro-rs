@@ -1676,12 +1676,8 @@ pub fn sqlite3Pragma(
                 if !zr.is_empty() {
                     let mut res = 0;
                     let pVfs = db.pVfs.clone();
-                    let rc = crate::os::sqlite3OsAccess(
-                        &pVfs,
-                        zr,
-                        SQLITE_ACCESS_READWRITE,
-                        &mut res,
-                    );
+                    let rc =
+                        crate::os::sqlite3OsAccess(&pVfs, zr, SQLITE_ACCESS_READWRITE, &mut res);
                     if rc != SQLITE_OK || res == 0 {
                         errmsg!(db, b"not a writable directory");
                         return;
