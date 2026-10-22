@@ -442,6 +442,46 @@ impl Vm {
         Some(self.current_exception.is_none())
     }
 
+    /// spl_array_get_dimension_ptr(BP_VAR_W) for `&$ao[k]`: the storage
+    /// slot made a reference. `None` when an exception is pending.
+    pub(crate) fn ao_fetch_dim_ref(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        offset: &Value,
+    ) -> Option<Value> {
+        if !self.ao_sort_check(obj) {
+            return None;
+        }
+        let k = match self.ao_hash_key(obj, offset) {
+            Ok(k) => k,
+            Err(t) => {
+                self.ao_illegal_offset(obj, &t, b'w');
+                return None;
+            }
+        };
+        let t = self.ao_table(obj);
+        if let Some(Value::Reference(r)) = self.table_get(&t, &k) {
+            return Some(Value::Reference(r));
+        }
+        let cur = match self.table_get(&t, &k) {
+            None | Some(Value::Undef) => Value::Null,
+            Some(v) => v,
+        };
+        let r = Rc::new(RefCell::new(cur));
+        match &t {
+            Table::Arr(a) => a.borrow_mut().set(k, Value::Reference(r.clone())),
+            Table::Obj(o) => {
+                let name = key_name(&k);
+                let mut ob = o.borrow_mut();
+                match ob.properties.iter_mut().find(|(n, _)| *n == name) {
+                    Some((_, slot)) => *slot = Value::Reference(r.clone()),
+                    None => ob.properties.push((name, Value::Reference(r.clone()))),
+                }
+            }
+        }
+        Some(Value::Reference(r))
+    }
+
     pub(crate) fn ao_offset_set(&mut self, obj: &Rc<RefCell<PhpObject>>, offset: &Value, v: Value) {
         if !self.ao_sort_check(obj) {
             return;
@@ -599,7 +639,12 @@ impl Vm {
         offset: &Value,
         check_empty: u8,
     ) -> bool {
-        let k = match self.ao_hash_key(obj, offset) {
+        // isset()/empty() are quiet fetches, but converting the offset
+        // still reports its diagnostics.
+        let saved = self.unsilence_begin();
+        let k = self.ao_hash_key(obj, offset);
+        self.unsilence_end(saved);
+        let k = match k {
             Ok(k) => k,
             Err(tn) => {
                 self.ao_illegal_offset(obj, &tn, b'i');

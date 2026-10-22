@@ -33299,7 +33299,7 @@ impl Vm {
                             }
                         } else if matches!(
                             &arr_val,
-                            Value::True | Value::Long(_) | Value::Double(_)
+                            Value::True | Value::Long(_) | Value::Double(_) | Value::Resource(_)
                         ) {
                             // Cannot use a scalar value as an array: $true[k]=v,
                             // $42[k]=v, etc. PHP throws Error (not TypeError).
@@ -33650,7 +33650,10 @@ impl Vm {
                     // can read or warn. Mirrors FETCH_DIM_RW.
                     if is_rw {
                         // Scalar container (true/int/float) -> Error.
-                        if matches!(&arr_val, Value::True | Value::Long(_) | Value::Double(_)) {
+                        if matches!(
+                            &arr_val,
+                            Value::True | Value::Long(_) | Value::Double(_) | Value::Resource(_)
+                        ) {
                             let msg = "Cannot use a scalar value as an array".to_string();
                             let exc = self.create_exception(b"Error", &msg, op.line);
                             self.current_exception = Some(exc);
@@ -34166,6 +34169,7 @@ impl Vm {
                             Value::Long(_) => "int",
                             Value::Double(_) => "float",
                             Value::Null | Value::Undef => "null",
+                            Value::Resource(_) => "resource",
                             _ => "",
                         };
                         if !type_name.is_empty() {
@@ -39899,6 +39903,10 @@ impl Vm {
                             b"Error",
                             "Cannot unset offset in a non-array variable".to_string(),
                         )),
+                        // zend_std_unset_dimension() without offsetUnset().
+                        Some(o @ Value::Object(_)) => self
+                            .dim_write_container_error(o, false)
+                            .map(|m| (&b"Error"[..], m)),
                         _ => None,
                     };
                     if let Some((cls, msg)) = unset_err {
@@ -41495,6 +41503,33 @@ impl Vm {
                     } else {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
+                    // zend_fetch_dimension_address_W(): false converts (with a
+                    // deprecation), scalars and plain objects cannot be used.
+                    let append = matches!(op.op2, OperandType::Unused);
+                    let arr_val = if matches!(arr_val, Value::False) {
+                        self.emit_deprecated_at(
+                            "Automatic conversion of false to array is deprecated",
+                            op.line,
+                        );
+                        Value::Null
+                    } else {
+                        arr_val
+                    };
+                    if let Some(msg) = self.dim_write_container_error(&arr_val, append) {
+                        let exc = self.create_exception(b"Error", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                            exception_handlers.last()
+                        {
+                            pending_calls_catch_depth = Some(*eh_pc_depth);
+                            ip = *catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught Error: {}", msg),
+                            line: op.line,
+                        });
+                    }
 
                     if matches!(op.op2, OperandType::Unused) && matches!(arr_val, Value::Object(_))
                     {
@@ -41694,13 +41729,23 @@ impl Vm {
                         }
                         // read_dimension(BP_VAR_W): offsetGet() (an
                         // "Indirect modification" notice unless it returns a
-                        // reference), or ArrayObject's storage slot.
-                        let v = self.fetch_dim_from_object(
-                            &arr_val,
-                            Some(key_val),
-                            crate::fetch_w::DimFetch::W,
-                            op.line,
-                        );
+                        // reference), or ArrayObject's storage slot (bound
+                        // as is, not auto-vivified).
+                        let is_ao = self
+                            .spl_find_base(&class_lower, &[b"arrayobject", b"arrayiterator"])
+                            .is_some()
+                            && !self.ao_user_has(obj, b"offsetget");
+                        let v = if is_ao {
+                            let obj = obj.clone();
+                            self.ao_fetch_dim_ref(&obj, &key_val)
+                        } else {
+                            self.fetch_dim_from_object(
+                                &arr_val,
+                                Some(key_val),
+                                crate::fetch_w::DimFetch::W,
+                                op.line,
+                            )
+                        };
                         if self.current_exception.is_some() {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                 exception_handlers.last()
@@ -42921,6 +42966,65 @@ impl Vm {
                             } else {
                                 Value::False
                             }
+                        } else if let (Value::String(_), true, Some(t)) = (
+                            &arr_val,
+                            op.opcode == OpCode::ArrayIssetFetch,
+                            match key_val.deref() {
+                                Value::Array(_) => Some("array".to_string()),
+                                Value::Resource(_) => Some("resource".to_string()),
+                                Value::Object(o) => {
+                                    Some(crate::value::display_class_name(&o.borrow().class_name))
+                                }
+                                _ => None,
+                            },
+                        ) {
+                            // zend_illegal_string_offset() even in BP_VAR_IS.
+                            let msg = format!("Cannot access offset of type {} on string", t);
+                            let exc = self.create_exception(b"TypeError", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught TypeError: {}", msg),
+                                line: op.line,
+                            });
+                        } else if let (Value::String(s), Value::String(ks), true) = (
+                            &arr_val,
+                            key_val.deref(),
+                            op.opcode == OpCode::ArrayIssetFetch,
+                        ) {
+                            // FETCH_DIM_IS on a string: an integer-like key
+                            // (leading-numeric with a warning) is fetched,
+                            // anything else yields null.
+                            let (int_like, trailing) =
+                                Self::is_numeric_string_with_trailing(ks.as_bytes());
+                            if !int_like {
+                                Value::False
+                            } else {
+                                if trailing {
+                                    let saved = self.unsilence_begin();
+                                    self.emit_warning_at(
+                                        &format!(
+                                            "Illegal string offset \"{}\"",
+                                            ks.to_string_lossy()
+                                        ),
+                                        op.line,
+                                    );
+                                    self.unsilence_end(saved);
+                                }
+                                let idx = Value::String(ks.clone()).to_long();
+                                let len = s.as_bytes().len() as i64;
+                                if (idx >= 0 && idx < len) || (idx < 0 && (-idx) <= len) {
+                                    Value::True
+                                } else {
+                                    Value::False
+                                }
+                            }
                         } else if let Value::String(s) = &arr_val {
                             // `$str[$obj] ?? d` (FETCH_DIM_IS): an array / object
                             // offset is illegal (zend_illegal_string_offset());
@@ -42979,7 +43083,13 @@ impl Vm {
                                 // zval_get_long_ex(offset, strict): a fractional
                                 // float still deprecates.
                                 let idx = if let Value::Double(f) = &key_val {
-                                    let saved = self.unsilence_begin();
+                                    // FETCH_DIM_IS (`??`, outer dimensions of
+                                    // isset()) converts quietly.
+                                    let saved = if op.opcode == OpCode::ArrayIssetFetch {
+                                        None
+                                    } else {
+                                        self.unsilence_begin()
+                                    };
                                     let n = self.double_offset_to_long(*f, op.line);
                                     self.unsilence_end(saved);
                                     n

@@ -927,6 +927,11 @@ impl Vm {
             };
             let r = self.ao_fetch_dim_w(obj, key.as_ref(), m);
             if self.current_exception.is_some() {
+                // An illegal offset in an unset fetch throws and hands out
+                // uninitialized_zval (zend_fetch_dimension_address()).
+                if m == b'u' && r.is_none() {
+                    indirect_notice(self);
+                }
                 return None;
             }
             return match r {
@@ -965,6 +970,40 @@ impl Vm {
         {
             self.spl_throw(b"Error", "[] operator not supported for SplFixedArray");
             return None;
+        }
+        // spl_array_read_dimension_ex(): an overriding offsetGet() of an
+        // ArrayObject gets an undefined offset for `$ao[]`.
+        if key.is_none() && is_ao {
+            let m = self
+                .classes
+                .get(&class_lower)
+                .and_then(|c| c.get_method(b"offsetget"))
+                .map(|m| {
+                    (
+                        m.declaring_class.clone(),
+                        m.op_array
+                            .cv_names
+                            .iter()
+                            .find(|n| n.as_slice() != b"this")
+                            .cloned()
+                            .unwrap_or_default(),
+                    )
+                });
+            if let Some((decl, pname)) = m {
+                let decl = self
+                    .classes
+                    .get(&decl.to_ascii_lowercase())
+                    .map(|c| c.name.clone())
+                    .unwrap_or(decl);
+                let msg = format!(
+                    "{}::offsetGet(): Argument #1 (${}) not passed",
+                    crate::value::display_class_name(&decl),
+                    String::from_utf8_lossy(&pname)
+                );
+                self.throw_error_msg(b"ArgumentCountError", &msg);
+                indirect_notice(self);
+                return None;
+            }
         }
         let key_arg = key.map(|k| k.deref()).unwrap_or(Value::Null);
         self.last_call_by_ref = false;
