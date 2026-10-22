@@ -235,6 +235,15 @@ pub fn run_last<R>(conn: &ConnRef, f: impl FnOnce(&mut Sqlite3) -> R) -> Option<
 
 // ── blob streams ──────────────────────────────────────────────────────
 
+/// php_error_docref() from a stream operation: prefixed by the stream
+/// function running it (fwrite() ...)
+fn stream_warning(vm: &mut Vm, msg: &str) {
+    match vm.current_builtin_name() {
+        Some(f) if !f.is_empty() => vm.emit_warning(&format!("{}(): {}", f, msg)),
+        _ => vm.emit_warning(msg),
+    }
+}
+
 /// php_stream_pdosqlite3_data
 struct BlobStream {
     conn: ConnRef,
@@ -270,11 +279,11 @@ impl goro_core::ext_stream::ExtStream for BlobStream {
     fn write(&mut self, vm: &mut Vm, buf: &[u8]) -> i64 {
         let count = buf.len();
         if self.flags & SQLITE_OPEN_READONLY as i64 != 0 {
-            docref_warning(vm, "Can't write to blob stream: is open as read only");
+            stream_warning(vm, "Can't write to blob stream: is open as read only");
             return -1;
         }
         if self.position + count > self.size {
-            docref_warning(vm, "It is not possible to increase the size of a BLOB");
+            stream_warning(vm, "It is not possible to increase the size of a BLOB");
             return -1;
         }
         let Some(blob) = self.blob.as_deref_mut() else {
