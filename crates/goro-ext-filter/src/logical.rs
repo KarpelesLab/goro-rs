@@ -423,25 +423,54 @@ pub(crate) fn validate_url(vm: &mut Vm, value: &mut Value, ctx: &Ctx) -> bool {
     if !matches!(value, Value::String(_)) || old_len != bytes(value).len() {
         return validation_failed(vm, value, ctx.flags);
     }
-    if let Some(Value::String(p)) = ctx.opt("uri_parser_class") {
-        // php_uri_get_parser(): only the parse_url() parser is
-        // checked against the hostname rules below.
-        if !p.as_bytes().is_empty()
-            && !p.as_bytes().eq_ignore_ascii_case(b"Uri\\Rfc3986\\Uri")
-            && !p.as_bytes().eq_ignore_ascii_case(b"Uri\\WhatWg\\Url")
+    // FETCH_STR_OPTION(): a non-string option is ignored
+    let parser_name = match ctx.opt("uri_parser_class") {
+        Some(Value::String(p)) => Some(p.as_bytes().to_vec()),
+        _ => None,
+    };
+    let Some(parser) = goro_core::uri::get_parser(parser_name.as_deref()) else {
+        throw(
+            vm,
+            b"ValueError",
+            &format!(
+                "{}(): \"uri_parser_class\" option has invalid value",
+                ctx.fname
+            ),
+        );
+        return validation_failed(vm, value, ctx.flags);
+    };
+    let s = bytes(value);
+    if parser != goro_core::uri::Parser::PhpParseUrl {
+        // php_uri_parse_to_struct() with a URI class's parser: its own
+        // validation replaces the hostname and userinfo checks.
+        let Some(c) =
+            goro_core::uri::parse_components(vm, parser, &s, goro_core::uri::ReadMode::Raw, true)
+        else {
+            return validation_failed(vm, value, ctx.flags);
+        };
+        let str_of = |v: &Value| match v {
+            Value::String(s) => Some(s.as_bytes().to_vec()),
+            _ => None,
+        };
+        let (scheme, host, path, query) = (str_of(&c[0]), str_of(&c[3]), &c[5], &c[6]);
+        if let Some(sc) = &scheme {
+            if (sc.eq_ignore_ascii_case(b"http") || sc.eq_ignore_ascii_case(b"https"))
+                && host.is_none()
+            {
+                return validation_failed(vm, value, ctx.flags);
+            }
+        }
+        let Some(sc) = &scheme else {
+            return validation_failed(vm, value, ctx.flags);
+        };
+        if (host.is_none() && sc != b"mailto" && sc != b"news" && sc != b"file")
+            || (ctx.flags & FILTER_FLAG_PATH_REQUIRED != 0 && !matches!(path, Value::String(_)))
+            || (ctx.flags & FILTER_FLAG_QUERY_REQUIRED != 0 && !matches!(query, Value::String(_)))
         {
-            throw(
-                vm,
-                b"ValueError",
-                &format!(
-                    "{}(): \"uri_parser_class\" option has invalid value",
-                    ctx.fname
-                ),
-            );
             return validation_failed(vm, value, ctx.flags);
         }
+        return true;
     }
-    let s = bytes(value);
     let parsed = match vm.functions.get(b"parse_url".as_slice()).copied() {
         Some(f) => f(vm, &[sval(s.clone())]).unwrap_or(Value::False),
         None => Value::False,
