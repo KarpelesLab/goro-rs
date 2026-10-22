@@ -397,6 +397,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_xml::register(&mut vm);
                 goro_ext_session::register(&mut vm);
                 goro_ext_mysqli::register(&mut vm);
+                goro_ext_pdo::register(&mut vm);
                 goro_ext_sockets::register(&mut vm);
                 goro_ext_mbstring::register(&mut vm);
                 goro_ext_spl::register(&mut vm);
@@ -423,6 +424,14 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
         if let Some(reason) = skip {
             return TestResult::Skip(reason);
         }
+    }
+
+    // A --REDIRECTTEST-- runs another directory with its environment
+    // (run-tests.php reports it as REDIR, neither passed nor failed). The
+    // PDO driver tests it exists for get their environment from the
+    // database fixture instead (see mysqli_test.rs).
+    if test.sections.contains_key("REDIRECTTEST") {
+        return TestResult::Skip("redirect test".into());
     }
 
     // Handle SKIPIF section
@@ -500,10 +509,10 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
     // Execute the source with a timeout (longer for tests that spawn a server).
     // Tests talking to a database server do real I/O; a few of them insert
     // rows "for 5 seconds" on purpose.
-    let uses_mysqli = test
-        .sections
-        .get("EXTENSIONS")
-        .is_some_and(|e| e.split_whitespace().any(|x| x == "mysqli"));
+    let uses_mysqli = test.sections.get("EXTENSIONS").is_some_and(|e| {
+        e.split_whitespace()
+            .any(|x| matches!(x, "mysqli" | "pdo" | "pdo_mysql"))
+    });
     let timeout_secs: u64 = if source.contains("php_cli_server_start") || uses_mysqli {
         30
     } else {
@@ -1587,6 +1596,7 @@ fn execute_php_inner_impl(
     goro_ext_xml::register(&mut vm);
     goro_ext_session::register(&mut vm);
     goro_ext_mysqli::register(&mut vm);
+    goro_ext_pdo::register(&mut vm);
     goro_ext_sockets::register(&mut vm);
     goro_ext_mbstring::register(&mut vm);
     goro_ext_spl::register(&mut vm);
@@ -2486,7 +2496,11 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
     let mut has_mysqli_tests = false;
     for p in files.iter_mut() {
         if let Ok(abs) = std::fs::canonicalize(&*p) {
-            if abs.to_string_lossy().contains("/ext/mysqli/tests/") {
+            let a = abs.to_string_lossy();
+            if a.contains("/ext/mysqli/tests/")
+                || a.contains("/ext/pdo_mysql/tests/")
+                || a.contains("/ext/pdo/tests/")
+            {
                 has_mysqli_tests = true;
                 *p = abs;
             }
@@ -2494,6 +2508,12 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
     }
     if has_mysqli_tests {
         let start = std::time::Instant::now();
+        if let Some(root) = dir.ancestors().find(|a| a.join("run-tests.php").is_file()) {
+            if let Ok(p) = std::fs::canonicalize(root.join("ext/pdo/tests")) {
+                let d = format!("{}/", p.display());
+                mysqli_test::PDO_TESTS_DIR.with(|x| *x.borrow_mut() = Some(d));
+            }
+        }
         let up = mysqli_test::ensure_started();
         if up {
             eprintln!(

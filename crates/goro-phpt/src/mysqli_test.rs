@@ -310,6 +310,7 @@ pub fn ensure_started() -> bool {
         if std::env::var_os("MYSQL_TEST_HOST").is_some()
             && std::env::var_os("GORO_MYSQL_FIXTURE").is_none()
         {
+            export_pdo_env();
             AVAILABLE.store(true, std::sync::atomic::Ordering::SeqCst);
             return;
         }
@@ -324,11 +325,73 @@ pub fn ensure_started() -> bool {
                 std::env::set_var("MYSQL_TEST_SOCKET", fx.socket.display().to_string());
                 std::env::set_var("MYSQL_TEST_SKIP_CONNECT_FAILURE", "0");
             }
+            export_pdo_env();
             AVAILABLE.store(true, std::sync::atomic::Ordering::SeqCst);
             *FIXTURE.lock().unwrap() = Some(fx);
         }
     });
     AVAILABLE.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The environment of the ext/pdo_mysql tests (inc/config.inc) and of the
+/// generic ext/pdo tests run against the MySQL driver, as the
+/// --REDIRECTTEST-- of ext/pdo_mysql/tests/common.phpt sets it up, derived
+/// from the MYSQL_TEST_* variables. Variables already set are kept.
+fn export_pdo_env() {
+    let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    let host = get("MYSQL_TEST_HOST").unwrap_or_else(|| "localhost".to_string());
+    let db = get("MYSQL_TEST_DB").unwrap_or_else(|| "test".to_string());
+    let user = get("MYSQL_TEST_USER").unwrap_or_else(|| "root".to_string());
+    let pass = std::env::var("MYSQL_TEST_PASSWD").unwrap_or_default();
+    let mut dsn = format!("mysql:host={}", host);
+    if let Some(port) = get("MYSQL_TEST_PORT") {
+        dsn.push_str(&format!(";port={}", port));
+    }
+    dsn.push_str(&format!(";dbname={}", db));
+    let mut vars: Vec<(&str, String)> = vec![
+        ("PDO_MYSQL_TEST_DSN", dsn.clone()),
+        ("PDO_MYSQL_TEST_USER", user.clone()),
+        ("PDO_MYSQL_TEST_PASS", pass.clone()),
+        ("PDO_MYSQL_TEST_HOST", host),
+        ("PDO_MYSQL_TEST_DB", db),
+    ];
+    if let Some(port) = get("MYSQL_TEST_PORT") {
+        vars.push(("PDO_MYSQL_TEST_PORT", port));
+    }
+    for (k, v) in vars {
+        if std::env::var_os(k).is_none() {
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+    // common.phpt's redirect: the generic PDO tests against pdo_mysql
+    let pdo_dsn = std::env::var("PDO_MYSQL_TEST_DSN").unwrap_or(dsn);
+    let pdo_user = std::env::var("PDO_MYSQL_TEST_USER").unwrap_or(user);
+    let pdo_pass = std::env::var("PDO_MYSQL_TEST_PASS").unwrap_or(pass);
+    for (k, v) in [
+        ("PDOTEST_DSN", pdo_dsn),
+        ("PDOTEST_USER", pdo_user),
+        ("PDOTEST_PASS", pdo_pass),
+    ] {
+        if std::env::var_os(k).is_none() {
+            unsafe {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+    if std::env::var_os("REDIR_TEST_DIR").is_none() {
+        if let Some(dir) = PDO_TESTS_DIR.with(|d| d.borrow().clone()) {
+            unsafe {
+                std::env::set_var("REDIR_TEST_DIR", dir);
+            }
+        }
+    }
+}
+
+thread_local! {
+    /// realpath(ext/pdo/tests) . "/" of the php-src tree being run
+    pub static PDO_TESTS_DIR: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Is the embedded mysql server up and connectable?
