@@ -405,6 +405,34 @@ impl Vm {
     /// zend_cannot_pass_by_reference() message for argument `arg_index`
     /// (0-based) of the pending call.
     pub(crate) fn cannot_pass_by_ref_msg(&self, arg_index: usize) -> String {
+        // An extension's native method ("__spl::class::method", $this first)
+        if let Some(call) = self.pending_calls.last() {
+            if let Some(rest) = call.name.as_bytes().strip_prefix(b"__spl::") {
+                if let Some(sep) = rest.windows(2).position(|w| w == b"::") {
+                    let (class, method) = (&rest[..sep], &rest[sep + 2..]);
+                    if self.native_class_handlers.contains_key(class) {
+                        if let Some((c, m)) = crate::stubs::find_method(class, method) {
+                            let p = arg_index.saturating_sub(1);
+                            let pname = m
+                                .args
+                                .get(p)
+                                .filter(|a| a.flags & crate::stubs::A_VARIADIC == 0)
+                                .map(|a| a.name);
+                            return match pname {
+                                Some(pn) => format!(
+                                    "{}::{}(): Argument #{} (${}) could not be passed by reference",
+                                    c.name, m.name, arg_index, pn
+                                ),
+                                None => format!(
+                                    "{}::{}(): Argument #{} could not be passed by reference",
+                                    c.name, m.name, arg_index
+                                ),
+                            };
+                        }
+                    }
+                }
+            }
+        }
         let (fname, pname, num) = self
             .pending_calls
             .last()

@@ -3882,6 +3882,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 // An internal constructor: construct like `new` does.
                 if rmethod(vm, &class_lower, b"__construct")
                     .is_some_and(|m| m.op_array.internal_sig.is_some())
+                    || vm
+                        .object_construct_handlers
+                        .contains_key(class_lower.as_slice())
                 {
                     let mut a = PhpArray::new();
                     for arg in args.iter().skip(1) {
@@ -3916,6 +3919,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     }
                 }
                 let new_val = Value::Object(Rc::new(RefCell::new(new_obj)));
+                if let Value::Object(o) = &new_val {
+                    vm.run_object_create_hook(o);
+                }
 
                 // Call constructor if it exists
                 if has_constructor {
@@ -4062,6 +4068,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 // An internal constructor: construct like `new` does.
                 if rmethod(vm, &class_lower, b"__construct")
                     .is_some_and(|m| m.op_array.internal_sig.is_some())
+                    || vm
+                        .object_construct_handlers
+                        .contains_key(class_lower.as_slice())
                 {
                     return Some(
                         run_snippet_in_scope(
@@ -4091,6 +4100,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     }
                 }
                 let new_val = Value::Object(Rc::new(RefCell::new(new_obj)));
+                if let Value::Object(o) = &new_val {
+                    vm.run_object_create_hook(o);
+                }
 
                 if has_constructor {
                     let ctor = rcls(vm, &class_lower)

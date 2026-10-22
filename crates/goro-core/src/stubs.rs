@@ -754,6 +754,28 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
                 },
             );
         }
+        // Constants an extension registers on the class at startup.
+        let cls_lower = cls.name.to_ascii_lowercase().into_bytes();
+        if let Some(extra) = vm.ext_class_constants.get(&cls_lower) {
+            for (kn, val, _) in extra {
+                if ce.constants.contains_key(kn) {
+                    continue;
+                }
+                ce.constants.insert(kn.clone(), val.clone());
+                ce.constants_meta.insert(
+                    kn.clone(),
+                    ConstantMeta {
+                        visibility: Visibility::Public,
+                        is_final: false,
+                        declaring_class: cls_lower.clone(),
+                        attributes: Vec::new(),
+                        declared_type: None,
+                        doc_comment: None,
+                        referenced_constants: Vec::new(),
+                    },
+                );
+            }
+        }
     }
     ce.filename = None;
     ce

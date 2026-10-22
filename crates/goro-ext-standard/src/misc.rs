@@ -17388,6 +17388,13 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
                 return Ok(Value::True);
             }
+        } else if vm.internal_class(&class_lower).is_some()
+            && vm
+                .get_builtin_class_constant(&class_lower, const_name.as_bytes())
+                .is_some()
+        {
+            // a constant of a natively implemented internal class
+            return Ok(Value::True);
         }
         return Ok(Value::False);
     }

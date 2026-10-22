@@ -750,8 +750,9 @@ impl Vm {
                 },
             };
             if matches!(value, Value::Undef) {
-                // (internal objects keep their state elsewhere)
-                if internal {
+                // (internal objects keep their state elsewhere, unless the
+                // slot was explicitly left uninitialized)
+                if internal && at.is_none() {
                     continue;
                 }
                 match self.slot_type_name(slot) {

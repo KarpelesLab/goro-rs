@@ -672,7 +672,7 @@ pub struct Vm {
     /// Pending class definitions (from compiler, indexed by position)
     pub(crate) pending_classes: Vec<ClassEntry>,
     /// Whether we're executing the top-level script (vs a function)
-    pub(crate) is_global_scope: bool,
+    pub is_global_scope: bool,
     /// User-defined constants (from define())
     pub constants: crate::fxhash::FxHashMap<Vec<u8>, Value>,
     /// Attributes attached to user-defined constants
@@ -918,6 +918,11 @@ pub struct Vm {
         crate::fxhash::FxHashMap<Vec<u8>, fn(&mut Vm, &Rc<RefCell<PhpObject>>)>,
     /// Extension-provided method handlers keyed by lowercase built-in class name.
     pub native_class_handlers: crate::fxhash::FxHashMap<Vec<u8>, NativeClassHandler>,
+    /// Constants of natively implemented internal classes registered by
+    /// extensions, keyed by lowercase class name: (name, value, deprecation
+    /// message) in declaration order.
+    pub ext_class_constants:
+        crate::fxhash::FxHashMap<Vec<u8>, Vec<(Vec<u8>, Value, Option<String>)>>,
     /// INI on-update validators keyed by directive name: (vm, new value, at_startup) -> accept.
     /// A rejecting validator is responsible for emitting PHP's warning.
     pub ini_validators: std::collections::HashMap<Vec<u8>, fn(&mut Vm, &[u8], bool) -> bool>,
@@ -2102,6 +2107,7 @@ impl Vm {
             object_construct_handlers: Default::default(),
             object_create_handlers: Default::default(),
             native_class_handlers: Default::default(),
+            ext_class_constants: Default::default(),
             ini_validators: std::collections::HashMap::new(),
             warning_capture: None,
             spl_internal_frames: Vec::new(),
@@ -4909,10 +4915,35 @@ impl Vm {
         &self,
         func_name: &str,
     ) -> Option<(Vec<bool>, Option<usize>)> {
-        if func_name.contains("::") || func_name.contains("->") || func_name.starts_with('{') {
+        if func_name.starts_with('{') {
             return None;
         }
         let lower = func_name.to_ascii_lowercase();
+        if let Some(sep) = lower.find("::").or_else(|| lower.find("->")) {
+            // A method of an internal class implemented natively
+            let class = &lower.as_bytes()[..sep];
+            if self.classes.contains_key(class) || !self.native_class_handlers.contains_key(class) {
+                return None;
+            }
+            let (_, m) = crate::stubs::find_method(class, &lower.as_bytes()[sep + 2..])?;
+            let flags: Vec<bool> = m
+                .args
+                .iter()
+                .map(|a| a.flags & crate::stubs::A_SENSITIVE != 0)
+                .collect();
+            if !flags.iter().any(|f| *f) {
+                return None;
+            }
+            let variadic = m
+                .args
+                .last()
+                .filter(|a| {
+                    a.flags & crate::stubs::A_VARIADIC != 0
+                        && a.flags & crate::stubs::A_SENSITIVE != 0
+                })
+                .map(|_| flags.len() - 1);
+            return Some((flags, variadic));
+        }
         if self.user_functions.contains_key(lower.as_bytes()) {
             return None;
         }
@@ -11399,6 +11430,38 @@ impl Vm {
     }
 
     /// Check if this is an SPL method that needs call arguments
+    /// Whether argument `arg_index` of a pending call to an extension's
+    /// native method ("__spl::class::method", args[0] being the object) is
+    /// declared by reference in the method's stub.
+    pub(crate) fn native_method_arg_by_ref(&self, call: &PendingCall, arg_index: usize) -> bool {
+        let name = call.name.as_bytes();
+        let rest = match name.strip_prefix(b"__spl::") {
+            Some(r) if arg_index > 0 => r,
+            _ => return false,
+        };
+        let sep = match rest.windows(2).position(|w| w == b"::") {
+            Some(p) => p,
+            None => return false,
+        };
+        let (class, method) = (&rest[..sep], &rest[sep + 2..]);
+        if !self.native_class_handlers.contains_key(class) {
+            return false;
+        }
+        let (_, m) = match crate::stubs::find_method(class, method) {
+            Some(x) => x,
+            None => return false,
+        };
+        let p = arg_index - 1;
+        let a = match m.args.get(p) {
+            Some(a) => a,
+            None => match m.args.last() {
+                Some(a) if a.flags & crate::stubs::A_VARIADIC != 0 => a,
+                _ => return false,
+            },
+        };
+        a.flags & crate::stubs::A_BY_REF != 0
+    }
+
     pub(crate) fn is_spl_args_method(&self, class: &[u8], method: &[u8]) -> bool {
         if let Some(h) = self.native_class_handlers.get(class) {
             return (h.has_method)(class, method, false);
@@ -13678,6 +13741,27 @@ impl Vm {
             .unwrap_or_else(|| String::from_utf8_lossy(class_lower).to_string())
     }
 
+    /// The deprecation message of an extension-registered class constant
+    /// (looked up on the class and its internal ancestors).
+    pub fn ext_class_constant_deprecation(
+        &self,
+        class_lower: &[u8],
+        const_name: &[u8],
+    ) -> Option<String> {
+        let own = |c: &[u8]| {
+            self.ext_class_constants.get(c).and_then(|l| {
+                l.iter()
+                    .find(|(n, _, _)| n.as_slice() == const_name)
+                    .map(|(_, _, d)| d.clone())
+            })
+        };
+        if let Some(d) = own(class_lower) {
+            return d;
+        }
+        let (_, h) = crate::stubs::class_hierarchy(class_lower)?;
+        h.parents_lower.iter().find_map(|c| own(c))?
+    }
+
     /// Get built-in class constant values
     pub fn get_builtin_class_constant(
         &self,
@@ -13700,6 +13784,11 @@ impl Vm {
         class_lower: &[u8],
         const_name: &[u8],
     ) -> Option<Value> {
+        if let Some(list) = self.ext_class_constants.get(class_lower) {
+            if let Some((_, v, _)) = list.iter().find(|(n, _, _)| n.as_slice() == const_name) {
+                return Some(v.clone());
+            }
+        }
         // Try exact match first, then uppercase (for keyword names like "match" -> "MATCH")
         self.get_builtin_class_constant_inner(class_lower, const_name)
             .or_else(|| {
@@ -13945,6 +14034,12 @@ impl Vm {
     /// order PHP exposes them. Returns empty vec for classes that have no
     /// known built-in constants.
     pub fn get_builtin_class_constants_list(&self, class_lower: &[u8]) -> Vec<(Vec<u8>, Value)> {
+        if let Some(list) = self.ext_class_constants.get(class_lower) {
+            return list
+                .iter()
+                .map(|(n, v, _)| (n.clone(), v.clone()))
+                .collect();
+        }
         let names: &[&[u8]] = match class_lower {
             b"reflectionmethod" | b"reflectionfunction" | b"reflectionfunctionabstract" => &[
                 b"IS_STATIC",
@@ -21587,6 +21682,11 @@ impl Vm {
                                 .pending_calls
                                 .last()
                                 .map(|call| self.spl_deferred_arg_by_ref(call, arg_index))
+                                .unwrap_or(false)
+                            || self
+                                .pending_calls
+                                .last()
+                                .map(|call| self.native_method_arg_by_ref(call, arg_index))
                                 .unwrap_or(false);
 
                         if callee_expects_ref && matches!(op.opcode, OpCode::SendValChecked) {
@@ -35634,6 +35734,11 @@ impl Vm {
                                 self.get_builtin_class_constant(&class_lower, prop_name.as_bytes())
                             {
                                 // Built-in const deprecations
+                                if let Some(msg) = self
+                                    .ext_class_constant_deprecation(&class_lower, prop_name.as_bytes())
+                                {
+                                    self.emit_deprecated_at(&msg, op.line);
+                                }
                                 if matches!(
                                     class_lower.as_slice(),
                                     b"datetime" | b"datetimeimmutable" | b"datetimeinterface"
@@ -36480,8 +36585,19 @@ impl Vm {
                     // Try to read and execute the file
                     let path: &str = resolved_stream_path.as_deref().unwrap_or(&path_str);
                     // Resolve to absolute path for __DIR__/__FILE__
-                    let abs_path = if is_stream_path || std::path::Path::new(path).is_absolute() {
+                    let abs_path = if is_stream_path {
                         path.to_string()
+                    } else if std::path::Path::new(path).is_absolute() {
+                        // The opened path is the real path (tsrm_realpath):
+                        // "a/../b" and symlinks are resolved.
+                        let p = std::path::Path::new(path);
+                        if (path.contains("/.") || path.contains("//")) && p.is_file() {
+                            std::fs::canonicalize(p)
+                                .map(|c| c.to_string_lossy().into_owned())
+                                .unwrap_or_else(|_| path.to_string())
+                        } else {
+                            path.to_string()
+                        }
                     } else {
                         // Relative to the file of the executing function.
                         let exec_file = if op_array.filename.is_empty() {

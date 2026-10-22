@@ -859,6 +859,8 @@ impl Vm {
             DIT_ITERATOR => {
                 let is_iter = self.obj_instanceof(&inner, b"iterator");
                 if !is_iter {
+                    // The class whose get_iterator handler is used.
+                    let mut downcast: Option<Vec<u8>> = None;
                     if let Some(cv) = args.get(1) {
                         if !matches!(cv.deref(), Value::Null) {
                             let cname = cv.to_php_string();
@@ -876,9 +878,21 @@ impl Vm {
                                 );
                                 return false;
                             }
+                            downcast = Some(cname_lower);
                         }
                     }
-                    if self.obj_instanceof(&inner, b"iteratoraggregate") {
+                    // An extension class's own iterator (ce->get_iterator)
+                    let native_iter = downcast.as_ref().and_then(|c| {
+                        let h = self.native_class_handlers.get(c.as_slice()).copied()?;
+                        (h.has_method)(c, b"getiterator", false).then_some((c.clone(), h))
+                    });
+                    if let Some((c, h)) = native_iter {
+                        let r = (h.call)(self, &c, b"getIterator", &c, Some(&inner), &[]);
+                        if self.exc() {
+                            return false;
+                        }
+                        inner = r;
+                    } else if self.obj_instanceof(&inner, b"iteratoraggregate") {
                         let agg_cls = match &inner {
                             Value::Object(o) => {
                                 crate::value::display_class_name(&o.borrow().class_name).to_string()
