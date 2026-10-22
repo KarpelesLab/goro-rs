@@ -327,6 +327,9 @@ fn register_classes(vm: &mut Vm) {
         ce.start_line = 0;
         ce.end_line = 0;
     }
+    // sodium_exception_create_object()
+    vm.trace_without_args_classes
+        .push(b"sodiumexception".to_vec());
 }
 
 fn phpinfo(_vm: &mut Vm) -> String {

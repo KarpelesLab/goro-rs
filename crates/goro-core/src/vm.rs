@@ -1022,6 +1022,10 @@ pub struct Vm {
     /// every `new` of the class or a subclass, before the constructor.
     pub object_create_handlers:
         crate::fxhash::FxHashMap<Vec<u8>, fn(&mut Vm, &Rc<RefCell<PhpObject>>)>,
+    /// Lowercase throwable classes (with their subclasses) whose backtraces
+    /// carry no argument values: their create_object strips them
+    /// (ext/sodium's SodiumException).
+    pub trace_without_args_classes: Vec<Vec<u8>>,
     /// Extension-provided method handlers keyed by lowercase built-in class name.
     pub native_class_handlers: crate::fxhash::FxHashMap<Vec<u8>, NativeClassHandler>,
     /// Constants of natively implemented internal classes registered by
@@ -2251,6 +2255,7 @@ impl Vm {
             gmp_from_hex: None,
             object_construct_handlers: Default::default(),
             object_create_handlers: Default::default(),
+            trace_without_args_classes: Vec::new(),
             native_class_handlers: Default::default(),
             ext_class_constants: Default::default(),
             ini_validators: std::collections::HashMap::new(),
@@ -5361,6 +5366,35 @@ impl Vm {
                 matches!(s.as_str(), "1" | "on" | "yes" | "true")
                     || s.parse::<i64>().is_ok_and(|n| n != 0)
             })
+    }
+
+    /// The backtrace of a new `class_lower` throwable, its argument values
+    /// removed for the classes of `trace_without_args_classes`.
+    pub fn filter_new_exception_trace(&self, class_lower: &[u8], trace: &Value) {
+        if self.trace_without_args_classes.is_empty() {
+            return;
+        }
+        let targets: Vec<&[u8]> = self
+            .trace_without_args_classes
+            .iter()
+            .map(|c| c.as_slice())
+            .collect();
+        if !self.class_extends_any(class_lower, &targets) {
+            return;
+        }
+        let Value::Array(t) = trace else { return };
+        let frames: Vec<Value> = t.borrow().iter().map(|(_, v)| v.clone()).collect();
+        for f in frames {
+            if let Value::Array(fa) = f {
+                let has = fa.borrow().get_str(b"args").is_some();
+                if has {
+                    fa.borrow_mut().set(
+                        ArrayKey::String(PhpString::from_bytes(b"args")),
+                        Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                    );
+                }
+            }
+        }
     }
 
     pub fn build_exception_trace(&mut self) -> Value {
@@ -31196,6 +31230,10 @@ impl Vm {
                                             } else if is_exc {
                                                 // Capture stack trace for exceptions
                                                 let trace = self.build_exception_trace();
+                                                self.filter_new_exception_trace(
+                                                    &class_lower,
+                                                    &trace,
+                                                );
                                                 obj_mut.set_property(b"trace".to_vec(), trace);
                                                 obj_mut.set_property(
                                                     b"previous".to_vec(),
@@ -49082,6 +49120,7 @@ impl Vm {
                         obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
                         obj.set_property(b"previous".to_vec(), Value::Null);
                         let trace = self.build_exception_trace();
+                        self.filter_new_exception_trace(&name_lower, &trace);
                         obj.set_property(b"trace".to_vec(), trace);
                     }
 
