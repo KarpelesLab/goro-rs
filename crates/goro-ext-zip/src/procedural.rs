@@ -85,6 +85,26 @@ pub fn register(vm: &mut Vm) {
             .unwrap_or_default();
         vm.register_function_with_params(name.as_bytes(), f, &params);
     }
+    goro_core::value::register_resource_type_dtor(LE_DIR, free_dir);
+    goro_core::value::register_resource_type_dtor(LE_ENTRY, free_entry);
+}
+
+/// php_zip_free_dir(): the last reference to a zip_open() resource went
+/// away (it leaves the resource list).
+fn free_dir(vm: &mut Vm, id: i64) {
+    let r = DIRS.with(|d| d.borrow_mut().remove(&id));
+    if let Some(mut za) = r.and_then(|mut r| r.za.take()) {
+        if za.close(None).is_err() {
+            vm.emit_warning("Cannot destroy the zip context");
+        }
+    }
+    goro_core::value::remove_resource(id);
+}
+
+/// php_zip_free_entry()
+fn free_entry(_vm: &mut Vm, id: i64) {
+    ENTRIES.with(|e| e.borrow_mut().remove(&id));
+    goro_core::value::remove_resource(id);
 }
 
 /// The #[\Deprecated] attribute of the function: Err when the handler threw.
