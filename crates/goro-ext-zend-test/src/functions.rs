@@ -108,6 +108,7 @@ const FUNCTIONS: &[(&str, BuiltinFn, u8)] = &[
         ALL,
     ),
     ("zend_get_map_ptr_last", zend_get_map_ptr_last, ALL),
+    ("zend_test_cast_fread", zend_test_cast_fread, ALL),
     (
         "zend_test_zend_call_stack_get",
         zend_test_zend_call_stack_get,
@@ -1014,6 +1015,19 @@ fn init_with_user_constructor(
         Err(e) if vm.current_exception.is_none() => Some(Err(e)),
         _ => Some(Ok(Value::Null)),
     }
+}
+
+/// zend_test_cast_fread(): php_stream_cast(PHP_STREAM_AS_STDIO) and an
+/// fread() of 10240 bytes through the FILE (which reads the stream); a
+/// bailout while reading is propagated.
+fn zend_test_cast_fread(vm: &mut Vm, args: &[Value]) -> R {
+    let stream = arg(args, 0);
+    if !matches!(stream, Value::Resource(_)) {
+        return type_error(vm, "zend_test_cast_fread", 1, "stream", "resource", &stream);
+    }
+    let fread = Value::String(PhpString::from_bytes(b"fread"));
+    vm.call_callback(&fread, &[stream, Value::Long(10240)])?;
+    Ok(Value::Null)
 }
 
 /// zend_call_stack_get(): the (emulated) C stack: its base, size, the
