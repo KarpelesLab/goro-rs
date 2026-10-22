@@ -122,6 +122,25 @@ struct LoopContext {
     depth_tmp: Option<u32>,
 }
 
+#[derive(Default)]
+struct JumpState {
+    /// Forward gotos leaving try-with-finally regions:
+    /// (label, SaveJump offset, Jmp offset, regions at the goto)
+    pending_finally_gotos: Vec<(Vec<u8>, u32, u32, Vec<u32>)>,
+    /// Pending gotos for forward references: maps label name -> list of (jmp instruction offset, source line)
+    pending_gotos: HashMap<Vec<u8>, Vec<(u32, u32)>>,
+    /// label -> number of loops enclosing it
+    label_loop_depth: HashMap<Vec<u8>, usize>,
+    /// Loop-variable frees emitted by forward gotos (label, loop index, op
+    /// range): those of loops that also enclose the label are removed.
+    pending_goto_frees: Vec<(Vec<u8>, usize, u32, u32)>,
+    /// Per enclosing try-with-finally: break/continue jumps that leave it
+    /// with loop variables to free between its finally block and the next
+    /// (SaveJump offset, target loop index, is continue, line). They resume
+    /// after the finally block, in stubs emitted after the try statement.
+    finally_stubs: Vec<Vec<(u32, usize, bool, u32)>>,
+}
+
 /// Compiles an AST into bytecode
 pub struct Compiler {
     op_array: OpArray,
@@ -166,21 +185,9 @@ pub struct Compiler {
     try_finally_counter: u32,
     /// label -> enclosing try-with-finally regions
     label_try_finally: HashMap<Vec<u8>, Vec<u32>>,
-    /// Forward gotos leaving try-with-finally regions:
-    /// (label, SaveJump offset, Jmp offset, regions at the goto)
-    pending_finally_gotos: Vec<(Vec<u8>, u32, u32, Vec<u32>)>,
-    /// Pending gotos for forward references: maps label name -> list of (jmp instruction offset, source line)
-    pending_gotos: HashMap<Vec<u8>, Vec<(u32, u32)>>,
-    /// label -> number of loops enclosing it
-    label_loop_depth: HashMap<Vec<u8>, usize>,
-    /// Loop-variable frees emitted by forward gotos (label, loop index, op
-    /// range): those of loops that also enclose the label are removed.
-    pending_goto_frees: Vec<(Vec<u8>, usize, u32, u32)>,
-    /// Per enclosing try-with-finally: break/continue jumps that leave it
-    /// with loop variables to free between its finally block and the next
-    /// (SaveJump offset, target loop index, is continue, line). They resume
-    /// after the finally block, in stubs emitted after the try statement.
-    finally_stubs: Vec<Vec<(u32, usize, bool, u32)>>,
+    /// Bookkeeping of gotos and loop exits through finally blocks (boxed:
+    /// a Compiler lives on the stack of every recursive compile_expr frame).
+    jumps: Box<JumpState>,
     /// Source file path (for __FILE__, __DIR__)
     pub source_file: Vec<u8>,
     /// Whether the current function has a "never" return type
@@ -425,11 +432,7 @@ impl Compiler {
             try_finally_ids: Vec::new(),
             try_finally_counter: 0,
             label_try_finally: HashMap::new(),
-            pending_finally_gotos: Vec::new(),
-            label_loop_depth: HashMap::new(),
-            pending_goto_frees: Vec::new(),
-            finally_stubs: Vec::new(),
-            pending_gotos: HashMap::new(),
+            jumps: Box::default(),
             source_file: Vec::new(),
             has_never_return: false,
             anon_class_name_map: HashMap::new(),
@@ -503,7 +506,7 @@ impl Compiler {
                 }
             }
         }
-        if let Some((name, locs)) = self.pending_gotos.iter().next() {
+        if let Some((name, locs)) = self.jumps.pending_gotos.iter().next() {
             let label = String::from_utf8_lossy(name).into_owned();
             let line = locs.first().map(|(_, l)| *l).unwrap_or(0);
             return Err(CompileError {
@@ -2375,7 +2378,7 @@ impl Compiler {
             line,
         });
         if needs_stub {
-            if let Some(stubs) = self.finally_stubs.last_mut() {
+            if let Some(stubs) = self.jumps.finally_stubs.last_mut() {
                 stubs.push((save_jmp, target_index, is_continue, line));
             }
         } else if is_continue {
@@ -4351,7 +4354,10 @@ impl Compiler {
                         _ => None,
                     };
                     if let Some(v) = default.as_ref().and_then(Self::eval_const_expr) {
-                        self.op_array.static_defaults.push((key_idx, v));
+                        self.op_array
+                            .static_defaults
+                            .get_or_insert_with(Default::default)
+                            .push((key_idx, v));
                     }
                     let default_val = if let Some(expr) = default {
                         self.compile_expr(expr)?
@@ -4600,7 +4606,7 @@ impl Compiler {
                     self.finally_targets.push(0); // placeholder, patched below
                     self.try_finally_counter += 1;
                     self.try_finally_ids.push(self.try_finally_counter);
-                    self.finally_stubs.push(Vec::new());
+                    self.jumps.finally_stubs.push(Vec::new());
                 }
 
                 // Compile try body
@@ -4918,7 +4924,7 @@ impl Compiler {
                 }
                 // Jumps out of loops resumed after the finally block.
                 if has_finally {
-                    let stubs = self.finally_stubs.pop().unwrap_or_default();
+                    let stubs = self.jumps.finally_stubs.pop().unwrap_or_default();
                     if !stubs.is_empty() {
                         let skip = self.op_array.emit(Op {
                             opcode: OpCode::Jmp,
@@ -9383,10 +9389,11 @@ impl Compiler {
                 // Loop variables freed by forward gotos to this label stay
                 // alive for the loops that enclose it.
                 let depth = self.loop_stack.len();
-                let frees = std::mem::take(&mut self.pending_goto_frees);
+                let frees = std::mem::take(&mut self.jumps.pending_goto_frees);
                 for (label, loop_index, start, end) in frees {
                     if &label != name {
-                        self.pending_goto_frees
+                        self.jumps
+                            .pending_goto_frees
                             .push((label, loop_index, start, end));
                     } else if loop_index < depth {
                         for op in &mut self.op_array.ops[start as usize..end as usize] {
@@ -9394,7 +9401,7 @@ impl Compiler {
                         }
                     }
                 }
-                self.label_loop_depth.insert(name.clone(), depth);
+                self.jumps.label_loop_depth.insert(name.clone(), depth);
                 let offset = self.op_array.current_offset();
                 self.label_offsets.insert(name.clone(), offset);
                 self.label_finally_paths
@@ -9403,10 +9410,11 @@ impl Compiler {
                     .insert(name.clone(), self.try_finally_ids.clone());
                 // Forward gotos that may leave try/finally regions.
                 let mut fin_jmps = Vec::new();
-                let pending = std::mem::take(&mut self.pending_finally_gotos);
+                let pending = std::mem::take(&mut self.jumps.pending_finally_gotos);
                 for (label, save_at, jmp_at, regions) in pending {
                     if &label != name {
-                        self.pending_finally_gotos
+                        self.jumps
+                            .pending_finally_gotos
                             .push((label, save_at, jmp_at, regions));
                         continue;
                     }
@@ -9423,7 +9431,7 @@ impl Compiler {
                     }
                 }
                 // Patch any pending gotos that reference this label
-                if let Some(gotos) = self.pending_gotos.remove(name) {
+                if let Some(gotos) = self.jumps.pending_gotos.remove(name) {
                     for (goto_offset, _line) in gotos {
                         if !fin_jmps.contains(&goto_offset) {
                             self.op_array.patch_jump(goto_offset, offset);
@@ -9441,7 +9449,7 @@ impl Compiler {
                 // The loops it leaves free their variables first
                 // (zend_resolve_goto_label() keeps the frees of the loops the
                 // label is in).
-                match self.label_loop_depth.get(name).copied() {
+                match self.jumps.label_loop_depth.get(name).copied() {
                     Some(d) => {
                         self.emit_loop_frees(d, OperandType::Unused, stmt.span.line);
                     }
@@ -9449,7 +9457,9 @@ impl Compiler {
                         for (i, start, end) in
                             self.emit_loop_frees(0, OperandType::Unused, stmt.span.line)
                         {
-                            self.pending_goto_frees.push((name.clone(), i, start, end));
+                            self.jumps
+                                .pending_goto_frees
+                                .push((name.clone(), i, start, end));
                         }
                     }
                 }
@@ -9482,13 +9492,14 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                     if backward.is_none() {
-                        self.pending_finally_gotos.push((
+                        self.jumps.pending_finally_gotos.push((
                             name.clone(),
                             save_at,
                             jmp,
                             self.try_finally_ids.clone(),
                         ));
-                        self.pending_gotos
+                        self.jumps
+                            .pending_gotos
                             .entry(name.clone())
                             .or_default()
                             .push((jmp, stmt.span.line));
@@ -9511,7 +9522,8 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: stmt.span.line,
                     });
-                    self.pending_gotos
+                    self.jumps
+                        .pending_gotos
                         .entry(name.clone())
                         .or_default()
                         .push((jmp, stmt.span.line));

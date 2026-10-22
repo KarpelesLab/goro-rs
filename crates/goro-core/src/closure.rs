@@ -235,6 +235,7 @@ impl Vm {
                         };
                         op.static_defaults
                             .iter()
+                            .flat_map(|d| d.iter())
                             .find(|(k, _)| *k == key_idx)
                             .map(|(_, v)| v.clone())
                             .unwrap_or(Value::Null)
