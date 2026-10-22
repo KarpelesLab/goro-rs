@@ -4078,7 +4078,7 @@ impl Parser {
             span: p.span(),
         };
         if self.last_group_close == self.pos.wrapping_sub(1)
-            || !Self::is_variable_target(Self::graft_target(&left), compound_op.is_none())
+            || !self.is_variable_target(Self::graft_target(&left), compound_op.is_none())
         {
             return Err(unexpected_here(self));
         }
@@ -4152,7 +4152,7 @@ impl Parser {
             return unexpected(self.pos - 1, "");
         }
         if self.last_group_close != self.pos.wrapping_sub(1)
-            && Self::is_variable_target(operand, false)
+            && self.is_variable_target(operand, false)
         {
             return Ok(());
         }
@@ -4207,8 +4207,8 @@ impl Parser {
     /// Whether `e` is a `variable` of PHP's grammar (an assignment or
     /// increment target as far as the parser is concerned; the compiler
     /// rejects calls and temporaries in write context). `list` also allows a
-    /// `list()` / `[...]` destructuring pattern.
-    fn is_variable_target(e: &Expr, list: bool) -> bool {
+    /// `list()` / `[...]` destructuring pattern (not an `array(...)` literal).
+    fn is_variable_target(&self, e: &Expr, list: bool) -> bool {
         match &e.kind {
             ExprKind::Variable(_)
             | ExprKind::DynamicVariable(_)
@@ -4221,7 +4221,10 @@ impl Parser {
             | ExprKind::DynamicStaticMethodCall { .. }
             | ExprKind::FunctionCall { .. }
             | ExprKind::FirstClassCallable(_) => true,
-            ExprKind::Array(_) => list,
+            ExprKind::Array(_) => {
+                list && self.array_syntax.get(&(e.span.start, e.span.end))
+                    != Some(&LIST_SYNTAX_LONG)
+            }
             _ => false,
         }
     }
@@ -5284,7 +5287,7 @@ impl Parser {
                 TokenKind::Increment => {
                     // `variable T_INC`: `($a)++`, `1++`, `$a++++` are errors.
                     if self.last_group_close == self.pos.wrapping_sub(1)
-                        || !Self::is_variable_target(&expr, false)
+                        || !self.is_variable_target(&expr, false)
                     {
                         return Err(ParseError {
                             message: format!(
@@ -5308,7 +5311,7 @@ impl Parser {
                 TokenKind::Decrement => {
                     // `variable T_INC`: `($a)++`, `1++`, `$a++++` are errors.
                     if self.last_group_close == self.pos.wrapping_sub(1)
-                        || !Self::is_variable_target(&expr, false)
+                        || !self.is_variable_target(&expr, false)
                     {
                         return Err(ParseError {
                             message: format!(
