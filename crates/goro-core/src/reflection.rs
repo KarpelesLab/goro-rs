@@ -161,16 +161,28 @@ pub(crate) fn internal_class_known(vm: &Vm, lower: &[u8]) -> bool {
 
 /// Reflection's view of a class: the user class, or for an internal class a
 /// `ClassEntry` synthesized from php-src's stubs (see `crate::stubs`).
+/// An extension class registered as a bare entry (its methods are
+/// implemented natively, e.g. ext/dom's).
+fn bare_entry(c: &crate::object::ClassEntry) -> bool {
+    c.filename.is_none()
+        && c.start_line == 0
+        && c.methods.is_empty()
+        && c.properties.is_empty()
+        && !c.is_enum
+}
+
+/// Reflection sees the class through its stub: an internal class, or one
+/// an extension registers as a bare entry.
+pub(crate) fn stub_backed_class(vm: &Vm, lower: &[u8]) -> bool {
+    match vm.classes.get(lower) {
+        None => true,
+        Some(c) => bare_entry(c) && crate::stubs::find_class(lower).is_some(),
+    }
+}
+
 pub(crate) fn rcls<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a crate::object::ClassEntry> {
-    // An extension class registered as a bare entry (its methods are
-    // implemented natively, e.g. ext/dom): the stub declares it.
-    let bare = |c: &crate::object::ClassEntry| {
-        c.filename.is_none()
-            && c.start_line == 0
-            && c.methods.is_empty()
-            && c.properties.is_empty()
-            && !c.is_enum
-    };
+    // A bare extension entry: the stub declares the class.
+    let bare = bare_entry;
     if let Some(c) = vm.classes.get(lower) {
         if !bare(c) || crate::stubs::find_class(lower).is_none() {
             return Some(c);
@@ -629,7 +641,7 @@ pub(crate) fn rprops<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::Pro
             Some(c) => c,
             None => return out,
         };
-        if !vm.classes.contains_key(lower) {
+        if stub_backed_class(vm, lower) {
             // Internal: the synthesized entry is already in Zend's order.
             out.extend(ce.properties.iter());
             return out;

@@ -649,7 +649,9 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
             },
         );
     }
-    // Properties: own first, then inherited non-private ones from parents.
+    // Properties in properties_info order: an internal class inherits its
+    // parent's (non-private) properties when it is registered, before
+    // declaring its own; a redeclared one keeps the inherited position.
     let mut chain: Vec<&'static StubClass> = vec![c];
     let mut cur = c;
     while let Some(p) = cur.parent.and_then(|p| find_class(p.as_bytes())) {
@@ -659,12 +661,9 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
         chain.push(p);
         cur = p;
     }
-    for (depth, cls) in chain.iter().enumerate() {
+    for (depth, cls) in chain.iter().enumerate().rev() {
         for p in cls.props {
             if depth > 0 && p.flags & F_PRIVATE != 0 {
-                continue;
-            }
-            if ce.properties.iter().any(|x| x.name == p.name.as_bytes()) {
                 continue;
             }
             let vis = if p.flags & F_PRIVATE != 0 {
@@ -707,7 +706,10 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
             if def.is_static {
                 ce.static_properties.insert(def.name.clone(), default);
             }
-            ce.properties.push(def);
+            match ce.properties.iter_mut().find(|x| x.name == def.name) {
+                Some(slot) => *slot = def,
+                None => ce.properties.push(def),
+            }
         }
     }
     // Constants: own, then parents', then interfaces'.
