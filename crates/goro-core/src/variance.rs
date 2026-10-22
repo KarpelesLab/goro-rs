@@ -1144,6 +1144,68 @@ impl Vm {
         parent_class: &[u8],
         parent: &MethodDef,
     ) -> Option<(String, bool)> {
+        // An internal method implemented in PHP (an extension class declared
+        // from source): overriding methods are checked against its stub
+        // signature, a tentative return type only deprecating.
+        if let Some(sig) = parent
+            .op_array
+            .internal_sig
+            .filter(|_| !parent.op_array.ops.is_empty())
+        {
+            let mut pm = parent.clone();
+            pm.op_array = std::rc::Rc::new(crate::stubs::op_array_for(
+                sig,
+                Some(&parent.declaring_class),
+                !parent.is_static,
+            ));
+            if sig.flags & crate::stubs::F_TENTATIVE != 0 && pm.op_array.return_type.is_some() {
+                let mut relaxed = pm.clone();
+                std::rc::Rc::make_mut(&mut relaxed.op_array).return_type = None;
+                if let Some(r) =
+                    self.variance_check_method_inner(cur, child, parent_class, &relaxed)
+                {
+                    return Some(
+                        self.variance_check_method_inner(cur, child, parent_class, &pm)
+                            .unwrap_or(r),
+                    );
+                }
+                if let Some((msg, unresolved)) =
+                    self.variance_check_method_inner(cur, child, parent_class, &pm)
+                {
+                    if unresolved {
+                        return Some((msg, true));
+                    }
+                    let will_change = child.attributes.iter().any(|a| {
+                        let n = a.name.strip_prefix(b"\\").unwrap_or(&a.name);
+                        n.eq_ignore_ascii_case(b"ReturnTypeWillChange")
+                    });
+                    if !will_change {
+                        if let Some(rest) = msg.strip_prefix("Declaration of ") {
+                            if let Some((c, p)) = rest.split_once(" must be compatible with ") {
+                                let dep = format!(
+                                    "Return type of {} should either be compatible with {}, or the #[\\ReturnTypeWillChange] attribute should be used to temporarily suppress the notice",
+                                    c, p
+                                );
+                                let line = child.op_array.decl_line;
+                                self.emit_deprecated_at(&dep, line);
+                            }
+                        }
+                    }
+                }
+                return None;
+            }
+            return self.variance_check_method_inner(cur, child, parent_class, &pm);
+        }
+        self.variance_check_method_inner(cur, child, parent_class, parent)
+    }
+
+    fn variance_check_method_inner(
+        &mut self,
+        cur: &ClassEntry,
+        child: &MethodDef,
+        parent_class: &[u8],
+        parent: &MethodDef,
+    ) -> Option<(String, bool)> {
         let cur_lc = LinkClass::from_entry(cur);
         let mut attempt = 0;
         loop {

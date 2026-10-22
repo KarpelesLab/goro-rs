@@ -469,7 +469,8 @@ pub fn add_child(parent: Node, child: Node) -> Node {
 pub fn new_child(parent: Node, ns: Option<NsId>, name: &str, content: Option<&str>) -> Node {
     let d = doc(parent);
     let n = new_doc_node(d, name);
-    t(|t| t.nodes[n].ns = ns);
+    // With no namespace, the new element inherits its parent's.
+    t(|t| t.nodes[n].ns = ns.or(t.nodes[parent].ns));
     if let Some(c) = content {
         node_set_content(n, c);
     }

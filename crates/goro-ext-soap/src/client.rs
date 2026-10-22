@@ -748,7 +748,15 @@ fn do_soap_call_body(
         if is_obj(&fault).is_some() {
             return_value = fault.clone();
         } else {
-            let f = add_soap_fault_ex(vm, this, "Client", Some("Unknown Error"), None, None, "en");
+            let f = add_soap_fault_ex(
+                vm,
+                this,
+                "Client",
+                Some(&b"Unknown Error"[..]),
+                None,
+                None,
+                b"en",
+            );
             return_value = Value::Object(f);
         }
     } else if is_obj(&fault).is_some() {

@@ -253,6 +253,26 @@ pub fn set_sprop(o: &Obj, name: &str, v: Value) {
     b.properties.push((k, v));
 }
 
+/// Whether the class (lowercase name) or an ancestor declares the method.
+pub fn class_method_exists(vm: &Vm, class_lower: &[u8], method_lower: &[u8]) -> bool {
+    let mut cur = Some(class_lower.to_vec());
+    let mut guard = 0;
+    while let Some(c) = cur {
+        guard += 1;
+        if guard > 64 {
+            break;
+        }
+        let Some(ce) = vm.classes.get(&c) else {
+            return false;
+        };
+        if ce.methods.contains_key(method_lower) {
+            return true;
+        }
+        cur = ce.parent.as_ref().map(|p| lower(p));
+    }
+    false
+}
+
 pub fn is_obj(v: &Value) -> Option<Obj> {
     match v.deref() {
         Value::Object(o) => Some(o),
@@ -283,7 +303,11 @@ pub fn call_user(vm: &mut Vm, callable: &Value, args: &[Value]) -> SR<Value> {
             Ok(v)
         }
         Err(e) => {
-            PENDING_FATAL.with(|p| *p.borrow_mut() = Some(e));
+            // An exception thrown by the callee stays pending; anything
+            // else is a fatal error the native entry point returns.
+            if vm.current_exception.is_none() {
+                PENDING_FATAL.with(|p| *p.borrow_mut() = Some(e));
+            }
             Err(Bail)
         }
     }
@@ -324,7 +348,7 @@ pub fn raise_fatal(vm: &mut Vm, msg: &str) -> Bail {
         let use_exceptions = !matches!(cprop(o, "_exceptions"), Value::False);
         if use_exceptions {
             let code = code.unwrap_or("Client");
-            let fault = add_soap_fault_ex(vm, o, code, Some(msg), None, None, "en");
+            let fault = add_soap_fault_ex(vm, o, code, Some(msg.as_bytes()), None, None, b"en");
             vm.current_exception = Some(Value::Object(fault));
             return Bail;
         }
@@ -354,12 +378,12 @@ pub fn raise_fatal(vm: &mut Vm, msg: &str) -> Bail {
         vm,
         None,
         None,
-        Some(code),
-        Some(&buffer),
+        Some(code.as_bytes()),
+        Some(buffer.as_bytes()),
         None,
         outbuf.as_ref(),
         None,
-        "en",
+        b"en",
     );
     // The default handler runs with display_errors off.
     with_display_off(vm, |vm| {
@@ -505,19 +529,19 @@ pub fn new_soap_fault(vm: &mut Vm) -> Obj {
 pub fn set_soap_fault(
     vm: &mut Vm,
     obj: Option<&Obj>,
-    fault_code_ns: Option<&str>,
-    fault_code: Option<&str>,
-    fault_string: Option<&str>,
-    fault_actor: Option<&str>,
+    fault_code_ns: Option<&[u8]>,
+    fault_code: Option<&[u8]>,
+    fault_string: Option<&[u8]>,
+    fault_actor: Option<&[u8]>,
     fault_detail: Option<&Value>,
-    name: Option<&str>,
-    lang: &str,
+    name: Option<&[u8]>,
+    lang: &[u8],
 ) -> Obj {
     let o = match obj {
         Some(o) => o.clone(),
         None => new_soap_fault(vm),
     };
-    let fs = vstr(fault_string.unwrap_or(""));
+    let fs = vstr(fault_string.unwrap_or(b""));
     set_prop(&o, "faultstring", fs.clone());
     set_prop(&o, "message", fs);
     if let Some(code) = fault_code {
@@ -530,21 +554,21 @@ pub fn set_soap_fault(
                 set_prop(&o, "faultcode", vstr(code));
                 if matches!(
                     code,
-                    "Client" | "Server" | "VersionMismatch" | "MustUnderstand"
+                    b"Client" | b"Server" | b"VersionMismatch" | b"MustUnderstand"
                 ) {
                     set_prop(&o, "faultcodens", vstr(SOAP_1_1_ENV_NAMESPACE));
                 }
             } else if v == SOAP_1_2 {
                 match code {
-                    "Client" => {
+                    b"Client" => {
                         set_prop(&o, "faultcode", vstr("Sender"));
                         set_prop(&o, "faultcodens", vstr(SOAP_1_2_ENV_NAMESPACE));
                     }
-                    "Server" => {
+                    b"Server" => {
                         set_prop(&o, "faultcode", vstr("Receiver"));
                         set_prop(&o, "faultcodens", vstr(SOAP_1_2_ENV_NAMESPACE));
                     }
-                    "VersionMismatch" | "MustUnderstand" | "DataEncodingUnknown" => {
+                    b"VersionMismatch" | b"MustUnderstand" | b"DataEncodingUnknown" => {
                         set_prop(&o, "faultcode", vstr(code));
                         set_prop(&o, "faultcodens", vstr(SOAP_1_2_ENV_NAMESPACE));
                     }
@@ -574,23 +598,31 @@ pub fn add_soap_fault_ex(
     vm: &mut Vm,
     target: &Obj,
     code: &str,
-    string: Option<&str>,
-    actor: Option<&str>,
+    string: Option<&[u8]>,
+    actor: Option<&[u8]>,
     detail: Option<&Value>,
-    lang: &str,
+    lang: &[u8],
 ) -> Obj {
-    add_soap_fault_opt(vm, target, Some(code), string, actor, detail, lang)
+    add_soap_fault_opt(
+        vm,
+        target,
+        Some(code.as_bytes()),
+        string,
+        actor,
+        detail,
+        lang,
+    )
 }
 
 /// add_soap_fault_ex() with a possibly NULL fault code.
 pub fn add_soap_fault_opt(
     vm: &mut Vm,
     target: &Obj,
-    code: Option<&str>,
-    string: Option<&str>,
-    actor: Option<&str>,
+    code: Option<&[u8]>,
+    string: Option<&[u8]>,
+    actor: Option<&[u8]>,
     detail: Option<&Value>,
-    lang: &str,
+    lang: &[u8],
 ) -> Obj {
     let f = set_soap_fault(vm, None, None, code, string, actor, detail, None, lang);
     if instance_of(vm, target, "SoapClient") {
@@ -602,5 +634,5 @@ pub fn add_soap_fault_opt(
 }
 
 pub fn add_soap_fault(vm: &mut Vm, target: &Obj, code: &str, string: &str) {
-    add_soap_fault_ex(vm, target, code, Some(string), None, None, "en");
+    add_soap_fault_ex(vm, target, code, Some(string.as_bytes()), None, None, b"en");
 }

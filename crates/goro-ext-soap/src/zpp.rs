@@ -87,14 +87,25 @@ pub struct Func {
 impl Func {
     pub fn new(full: &str) -> Func {
         let (class, method) = full.split_once("::").unwrap_or(("", full));
-        let params =
-            goro_core::stubs::find_method(class.to_ascii_lowercase().as_bytes(), method.as_bytes())
+        let params = goro_core::stubs::find_self_declared_class(class.as_bytes())
+            .and_then(|c| {
+                c.methods
+                    .iter()
+                    .find(|m| m.name.eq_ignore_ascii_case(method))
+            })
+            .map(|m| m.args.iter().map(|a| a.name).collect())
+            .or_else(|| {
+                goro_core::stubs::find_method(
+                    class.to_ascii_lowercase().as_bytes(),
+                    method.as_bytes(),
+                )
                 .map(|(_, m)| m.args.iter().map(|a| a.name).collect())
-                .or_else(|| {
-                    goro_core::stubs::find_function(full.as_bytes())
-                        .map(|f| f.args.iter().map(|a| a.name).collect())
-                })
-                .unwrap_or_default();
+            })
+            .or_else(|| {
+                goro_core::stubs::find_function(full.as_bytes())
+                    .map(|f| f.args.iter().map(|a| a.name).collect())
+            })
+            .unwrap_or_default();
         Func {
             name: full.to_string(),
             params,

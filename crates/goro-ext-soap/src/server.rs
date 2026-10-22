@@ -140,12 +140,12 @@ pub fn soap_server_fault_ex(
 #[allow(clippy::too_many_arguments)]
 pub fn soap_server_fault(
     vm: &mut Vm,
-    code: &str,
-    string: &str,
-    actor: Option<&str>,
+    code: &[u8],
+    string: &[u8],
+    actor: Option<&[u8]>,
     details: Option<&Value>,
-    name: Option<&str>,
-    lang: &str,
+    name: Option<&[u8]>,
+    lang: &[u8],
 ) -> Bail {
     let f = set_soap_fault(
         vm,
@@ -164,7 +164,15 @@ pub fn soap_server_fault(
 }
 
 pub fn soap_server_fault_en(vm: &mut Vm, code: &str, string: &str) -> Bail {
-    soap_server_fault(vm, code, string, None, None, None, "en")
+    soap_server_fault(
+        vm,
+        code.as_bytes(),
+        string.as_bytes(),
+        None,
+        None,
+        None,
+        b"en",
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -577,11 +585,11 @@ fn server_exception(vm: &mut Vm, service: &ServiceRef, function: Option<&FuncRef
         let send = service.borrow().send_errors;
         let msg = if send {
             let m = prop(eo, "message");
-            String::from_utf8_lossy(&zval_get_string(vm, &m).unwrap_or_default()).into_owned()
+            zval_get_string(vm, &m).unwrap_or_default()
         } else {
-            "Internal Error".to_string()
+            b"Internal Error".to_vec()
         };
-        let fault = add_soap_fault_ex(vm, this, "Server", Some(&msg), None, None, "en");
+        let fault = add_soap_fault_ex(vm, this, "Server", Some(&msg), None, None, b"en");
         soap_server_fault_ex(vm, function, &fault, None);
     }
 }
@@ -1047,12 +1055,15 @@ fn set_session_object(vm: &mut Vm, o: &Value) {
 
 pub fn fault(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> SR<Value> {
     let a = zpp::parse(vm, f, "ss|szSP", &[], args)?;
-    let code = a[0].string().unwrap_or_default();
-    let string = a[1].string().unwrap_or_default();
-    let actor = a.get(2).and_then(|x| x.string());
+    let code = a[0].str().unwrap_or_default().to_vec();
+    let string = a[1].str().unwrap_or_default().to_vec();
+    let actor = a.get(2).and_then(|x| x.str().map(|s| s.to_vec()));
     let details = a.get(3).and_then(|x| x.any());
-    let name = a.get(4).and_then(|x| x.string()).filter(|_| true);
-    let lang = a.get(5).and_then(|x| x.string()).unwrap_or_default();
+    let name = a.get(4).and_then(|x| x.str().map(|s| s.to_vec()));
+    let lang = a
+        .get(5)
+        .and_then(|x| x.str().map(|s| s.to_vec()))
+        .unwrap_or_default();
     let guard = begin_code(this, "Server");
     let service = match service_of(this) {
         Some(s) => s,
@@ -1064,7 +1075,6 @@ pub fn fault(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> SR<Value> {
     let old_enc = g(|g| g.encoding.clone());
     let enc = service.borrow().encoding.clone();
     g(|g| g.encoding = enc);
-    let name = name.filter(|n| !n.is_empty());
     let r = soap_server_fault(
         vm,
         &code,

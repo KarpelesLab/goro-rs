@@ -792,7 +792,10 @@ fn master_to_xml_int(
     let mut add_type = false;
     if check_class_map {
         let cm = g(|g| g.class_map.clone());
-        if let (Some(cm), Some(Value::Object(o))) = (cm, data.map(|d| d.deref())) {
+        let dv = data.map(|d| d.deref());
+        if let (Some(cm), Some(Value::Object(o))) =
+            (cm, dv.as_ref().filter(|d| !is_recursive(d)).cloned())
+        {
             let ce_name = o.borrow().class_name.clone();
             let entries: Vec<(ArrayKey, Value)> = cm
                 .borrow()
@@ -1661,10 +1664,52 @@ fn set_zval_property(vm: &mut Vm, object: &Value, name: &str, val: Value) {
     }
 }
 
+thread_local! {
+    /// Property guards of the magic methods (zend_get_property_guard()).
+    static GUARDS: RefCell<HashSet<(usize, String, u8)>> = RefCell::new(HashSet::new());
+}
+
+/// Call magic method `m` (`__get`/`__set`/`__unset`) for a missing
+/// property, unless already inside it for that property.
+fn magic_call(
+    vm: &mut Vm,
+    o: &Obj,
+    m: &str,
+    kind: u8,
+    name: &str,
+    extra: Option<Value>,
+) -> Option<Value> {
+    let cl = lower(&o.borrow().class_name);
+    if !class_method_exists(vm, &cl, m.as_bytes()) {
+        return None;
+    }
+    let key = (Rc::as_ptr(o) as *const u8 as usize, name.to_string(), kind);
+    if !GUARDS.with(|g| g.borrow_mut().insert(key.clone())) {
+        return None;
+    }
+    let mut args = vec![vstr(name)];
+    if let Some(e) = extra {
+        args.push(e);
+    }
+    let r = call_method(vm, o, m, &args);
+    GUARDS.with(|g| g.borrow_mut().remove(&key));
+    r.ok().map(|v| v.deref())
+}
+
+fn has_storage(o: &Obj, key: &[u8]) -> bool {
+    o.borrow()
+        .properties
+        .iter()
+        .any(|(k, _)| k.as_slice() == key)
+}
+
 /// zend_update_property() from the object's class scope.
 fn write_property(vm: &mut Vm, o: &Obj, name: &str, val: Value) {
     let val = coerce_typed_prop(vm, o, name, val);
     let key = own_prop_key(o, name);
+    if !has_storage(o, &key) && magic_call(vm, o, "__set", 1, name, Some(val.clone())).is_some() {
+        return;
+    }
     let mut b = o.borrow_mut();
     if let Some(e) = b.properties.iter_mut().find(|(k, _)| *k == key) {
         match &e.1 {
@@ -1753,32 +1798,38 @@ fn coerce_typed_prop(vm: &mut Vm, o: &Obj, name: &str, val: Value) -> Value {
     }
 }
 
-/// get_zval_property(): the (deref'd) property of an object or the string
+/// get_zval_property(vm, ): the (deref'd) property of an object or the string
 /// key of an array; None when not set.
-fn get_zval_property(object: &Value, name: &str) -> Option<Value> {
+fn get_zval_property(vm: &mut Vm, object: &Value, name: &str) -> Option<Value> {
     match object {
         Value::Object(o) => {
             let key = own_prop_key(o, name);
-            let b = o.borrow();
-            let v = b
-                .properties
-                .iter()
-                .find(|(k, _)| *k == key)
-                .map(|(_, v)| v.deref())?;
-            if matches!(v, Value::Undef) {
-                return None;
+            let v = {
+                let b = o.borrow();
+                b.properties
+                    .iter()
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| v.deref())
+            };
+            match v {
+                None => magic_call(vm, o, "__get", 0, name, None),
+                Some(Value::Undef) => None,
+                Some(v) => Some(v),
             }
-            Some(v)
         }
         Value::Array(a) => a.borrow().get_str(name.as_bytes()).map(|v| v.deref()),
         _ => None,
     }
 }
 
-fn unset_zval_property(object: &Value, name: &str) {
+fn unset_zval_property(vm: &mut Vm, object: &Value, name: &str) {
     match object {
         Value::Object(o) => {
             let key = own_prop_key(o, name);
+            if !has_storage(o, &key) {
+                magic_call(vm, o, "__unset", 2, name, None);
+                return;
+            }
             o.borrow_mut().properties.retain(|(k, _)| *k != key);
         }
         Value::Array(a) => {
@@ -1794,7 +1845,7 @@ fn model_to_zval_any(vm: &mut Vm, ret: &Value, node: Option<Node>) -> SR<()> {
     let mut name: Option<String> = None;
     let mut node = node;
     while let Some(n) = node {
-        if get_zval_property(ret, &xml::name(n)).is_none() {
+        if get_zval_property(vm, ret, &xml::name(n)).is_none() {
             let val = master_to_zval(vm, Some(&conv(XSD_ANYXML)), n)?;
             if let Some(a) = &any {
                 if !matches!(a, Value::Array(_)) {
@@ -2098,7 +2149,7 @@ fn to_zval_object_ex(
                     master_to_zval_int(vm, &senc, d)?
                 };
                 soap_add_xml_ref(&r, d);
-                redo_any = get_zval_property(&r, "any").is_some();
+                redo_any = get_zval_property(vm, &r, "any").is_some();
                 if let Value::Object(o) = &r {
                     if !is_std {
                         let name = vm
@@ -2141,11 +2192,11 @@ fn to_zval_object_ex(
         if let Some(m) = model {
             model_to_zval_object(vm, &ret, &m, d)?;
             if redo_any {
-                if get_zval_property(&ret, "any").is_none() {
+                if get_zval_property(vm, &ret, "any").is_none() {
                     model_to_zval_any(vm, &ret, xml::children(d))?;
                     soap_add_xml_ref(&ret, d);
                 } else {
-                    unset_zval_property(&ret, "any");
+                    unset_zval_property(vm, &ret, "any");
                 }
             }
         }
@@ -2204,7 +2255,7 @@ fn to_zval_object_ex(
         if xml::is_element(tr) {
             let tmp = master_to_zval(vm, None, tr)?;
             let tname = xml::name(tr);
-            match get_zval_property(&ret, &tname) {
+            match get_zval_property(vm, &ret, &tname) {
                 None => {
                     if xml::next(tr).is_none() || xml::get_node(xml::next(tr), &tname).is_none() {
                         set_zval_property(vm, &ret, &tname, tmp);
@@ -2292,7 +2343,7 @@ fn model_to_xml_object(
                     e.encode.clone(),
                 )
             };
-            let data = get_zval_property(object, &ename);
+            let data = get_zval_property(vm, object, &ename);
             if let Some(d) = &data {
                 if matches!(d, Value::Null) && !nillable && min_occurs > 0 && !strict {
                     return Ok(0);
@@ -2349,7 +2400,7 @@ fn model_to_xml_object(
             }
         }
         XSD_CONTENT_ANY => {
-            let data = get_zval_property(object, "any");
+            let data = get_zval_property(vm, object, "any");
             if let Some(d) = data {
                 let enc = conv(XSD_ANYXML);
                 let is_list_arr = matches!(&d, Value::Array(a) if is_list(&a.borrow()));
@@ -2502,7 +2553,7 @@ fn to_xml_object(
         if kind == XSD_TYPEKIND_RESTRICTION && senc.is_some() && !senc_is_self {
             let enc = simple_base(senc.clone());
             if let Some(enc) = enc {
-                if let Some(tmp) = get_zval_property(&dv, "_") {
+                if let Some(tmp) = get_zval_property(vm, &dv, "_") {
                     x_param = master_to_xml(vm, Some(&enc), Some(&tmp), style, parent)?;
                 } else if !has_prop {
                     x_param = master_to_xml(vm, Some(&enc), Some(data), style, parent)?;
@@ -2519,20 +2570,15 @@ fn to_xml_object(
                 .as_ref()
                 .is_some_and(|b| !is_simple_kind(type_kind(b)))
             {
+                // GC_TRY_PROTECT_RECURSION(prop): the class map is not
+                // consulted again for this value.
                 let guard = recursion_enter(&dv);
-                if guard == Some(false) {
-                    return Err(crate::zpp::throw(
-                        vm,
-                        b"ValueError",
-                        "Recursive array cannot be encoded",
-                    ));
-                }
                 let r = master_to_xml(vm, Some(&senc), Some(data), style, parent);
                 if guard == Some(true) {
                     recursion_leave(&dv);
                 }
                 x_param = r?;
-            } else if let Some(tmp) = get_zval_property(&dv, "_") {
+            } else if let Some(tmp) = get_zval_property(vm, &dv, "_") {
                 x_param = master_to_xml(vm, Some(&senc), Some(&tmp), style, parent)?;
             } else if !has_prop {
                 x_param = master_to_xml(vm, Some(&senc), Some(data), style, parent)?;
@@ -2595,7 +2641,7 @@ fn to_xml_object(
                             )
                         };
                         let Some(aname) = aname else { continue };
-                        let Some(zattr) = get_zval_property(&dv, &aname) else {
+                        let Some(zattr) = get_zval_property(vm, &dv, &aname) else {
                             continue;
                         };
                         let dummy =
@@ -2684,18 +2730,30 @@ thread_local! {
 
 /// GC_TRY_PROTECT_RECURSION(): Some(true) when protected now, Some(false)
 /// when already being encoded, None for non-arrays.
+fn recursion_key(v: &Value) -> Option<usize> {
+    match v {
+        Value::Array(a) => Some(Rc::as_ptr(a) as *const u8 as usize),
+        Value::Object(o) => Some(Rc::as_ptr(o) as *const u8 as usize),
+        _ => None,
+    }
+}
+
 fn recursion_enter(v: &Value) -> Option<bool> {
-    let p = match v {
-        Value::Array(a) => Rc::as_ptr(a) as *const u8 as usize,
-        _ => return None,
-    };
+    let p = recursion_key(v)?;
     Some(RECURSION.with(|r| r.borrow_mut().insert(p)))
 }
 
 fn recursion_leave(v: &Value) {
-    if let Value::Array(a) = v {
-        let p = Rc::as_ptr(a) as *const u8 as usize;
+    if let Some(p) = recursion_key(v) {
         RECURSION.with(|r| r.borrow_mut().remove(&p));
+    }
+}
+
+/// GC_IS_RECURSIVE()
+fn is_recursive(v: &Value) -> bool {
+    match recursion_key(v) {
+        Some(p) => RECURSION.with(|r| r.borrow().contains(&p)),
+        None => false,
     }
 }
 
@@ -2971,7 +3029,9 @@ fn traversable_to_array(vm: &mut Vm, o: &Obj) -> SR<Value> {
                 Ok(v)
             }
             Err(e) => {
-                PENDING_FATAL.with(|p| *p.borrow_mut() = Some(e));
+                if vm.current_exception.is_none() {
+                    PENDING_FATAL.with(|p| *p.borrow_mut() = Some(e));
+                }
                 Err(Bail)
             }
         },

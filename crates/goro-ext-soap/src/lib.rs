@@ -493,10 +493,13 @@ fn soap_fault_construct(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> SR
     if has_code && fault_code.as_deref().is_none_or(|c| c.is_empty()) {
         return Err(f.value_error(vm, 1, "is not a valid fault code"));
     }
-    let fault_string = a[1].string().unwrap_or_default();
-    let actor = a.get(2).and_then(|x| x.string());
+    let fault_string = a[1].str().unwrap_or_default().to_vec();
+    let actor = a.get(2).and_then(|x| x.str().map(|s| s.to_vec()));
     let details = a.get(3).and_then(|x| x.any());
-    let name = a.get(4).and_then(|x| x.string()).filter(|n| !n.is_empty());
+    let name = a
+        .get(4)
+        .and_then(|x| x.str().map(|s| s.to_vec()))
+        .filter(|n| !n.is_empty());
     let headerfault = a.get(5).and_then(|x| x.any());
     // soap_fault_dtor_properties()
     set_prop(this, "faultstring", vstr(""));
@@ -514,13 +517,13 @@ fn soap_fault_construct(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> SR
     set_soap_fault(
         vm,
         Some(this),
-        fault_code_ns.as_deref(),
-        fault_code.as_deref(),
+        fault_code_ns.as_deref().map(str::as_bytes),
+        fault_code.as_deref().map(str::as_bytes),
         Some(&fault_string),
         actor.as_deref(),
         details.as_ref(),
         name.as_deref(),
-        "en",
+        b"en",
     );
     if let Some(h) = headerfault {
         set_prop(this, "headerfault", copy_value(&h.deref()));

@@ -166,8 +166,8 @@ pub fn parse_packet_soap(
     // <Fault>
     if let Some(f) = xml::get_node_ex(xml::children(body), "Fault", Some(envelope_ns)) {
         let mut faultcode: Option<String> = None;
-        let mut faultstring: Option<String> = None;
-        let mut faultactor: Option<String> = None;
+        let mut faultstring: Option<Vec<u8>> = None;
+        let mut faultactor: Option<Vec<u8>> = None;
         let mut lang = String::new();
         let mut details = Value::Undef;
         let string_conv = conv(IS_STRING);
@@ -180,13 +180,13 @@ pub fn parse_packet_soap(
             if let Some(t) = xml::get_node(xml::children(f), "faultstring") {
                 if xml::children(t).is_some() {
                     let zv = master_to_zval(vm, Some(&string_conv), t)?;
-                    faultstring = Some(to_string_value(vm, &zv)?);
+                    faultstring = Some(crate::encoding::zval_get_string(vm, &zv)?);
                 }
             }
             if let Some(t) = xml::get_node(xml::children(f), "faultactor") {
                 if xml::children(t).is_some() {
                     let zv = master_to_zval(vm, Some(&string_conv), t)?;
-                    faultactor = Some(to_string_value(vm, &zv)?);
+                    faultactor = Some(crate::encoding::zval_get_string(vm, &zv)?);
                 }
             }
             if let Some(t) = xml::get_node(xml::children(f), "detail") {
@@ -207,7 +207,7 @@ pub fn parse_packet_soap(
                     if let Some(tx) = xml::get_node(xml::children(t), "Text") {
                         if xml::children(tx).is_some() {
                             let zv = master_to_zval(vm, Some(&string_conv), tx)?;
-                            faultstring = Some(to_string_value(vm, &zv)?);
+                            faultstring = Some(crate::encoding::zval_get_string(vm, &zv)?);
                             if let Some(la) = xml::get_attribute_ex(
                                 xml::properties(tx),
                                 "lang",
@@ -228,11 +228,11 @@ pub fn parse_packet_soap(
         add_soap_fault_ex_code(
             vm,
             this,
-            faultcode.as_deref(),
+            faultcode.as_deref().map(str::as_bytes),
             faultstring.as_deref(),
             faultactor.as_deref(),
             &details,
-            &lang,
+            lang.as_bytes(),
         );
         xml::free_doc(response);
         return Ok(false);
@@ -376,20 +376,15 @@ pub fn parse_packet_soap(
     Ok(true)
 }
 
-fn to_string_value(vm: &mut Vm, v: &Value) -> SR<String> {
-    let b = crate::encoding::zval_get_string(vm, v)?;
-    Ok(String::from_utf8_lossy(&b).into_owned())
-}
-
 /// add_soap_fault() with a possibly empty fault code and an UNDEF detail.
 fn add_soap_fault_ex_code(
     vm: &mut Vm,
     this: &Obj,
-    code: Option<&str>,
-    string: Option<&str>,
-    actor: Option<&str>,
+    code: Option<&[u8]>,
+    string: Option<&[u8]>,
+    actor: Option<&[u8]>,
     details: &Value,
-    lang: &str,
+    lang: &[u8],
 ) {
     let d = if matches!(details, Value::Undef) {
         None
