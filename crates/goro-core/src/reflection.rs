@@ -10229,12 +10229,21 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
             "BadFunctionCallException",
             "DomainException",
         ],
+        "bcmath" => &["BcMath\\Number"],
+        "filter" => &["Filter\\FilterException", "Filter\\FilterFailedException"],
         _ => &[],
     }
 }
 
 fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
     match ext {
+        "bcmath" => &["bcmath.scale"],
+        "filter" => &["filter.default", "filter.default_flags"],
+        "iconv" => &[
+            "iconv.input_encoding",
+            "iconv.output_encoding",
+            "iconv.internal_encoding",
+        ],
         "standard" => &[
             "user_agent",
             "default_socket_timeout",
