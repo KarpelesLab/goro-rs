@@ -1057,8 +1057,14 @@ impl crate::vm::Vm {
         let OperandType::Cv(ci) = op.op1 else {
             return Fast::No;
         };
-        let Some(Value::Object(obj)) = cvs.get(ci as usize) else {
-            return Fast::No;
+        // (a variable bound to a symbol table holds a reference)
+        let obj = match cvs.get(ci as usize) {
+            Some(Value::Object(obj)) => obj.clone(),
+            Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+                Ok(Value::Object(obj)) => obj.clone(),
+                _ => return Fast::No,
+            },
+            _ => return Fast::No,
         };
         let write = op.opcode == OpCode::PropertySet;
         let name_op = if write { &op.result } else { &op.op2 };
@@ -1082,6 +1088,13 @@ impl crate::vm::Vm {
             };
             match src {
                 Some(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => Some(v.clone()),
+                // (the value of a variable bound to a symbol table)
+                Some(Value::Reference(r)) if matches!(op.op2, OperandType::Cv(_)) => {
+                    match r.try_borrow().as_deref() {
+                        Ok(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => Some(v.clone()),
+                        _ => return Fast::No,
+                    }
+                }
                 _ => return Fast::No,
             }
         } else {
@@ -1090,7 +1103,6 @@ impl crate::vm::Vm {
             }
             None
         };
-        let obj = obj.clone();
         let Ok(ob) = obj.try_borrow() else {
             return Fast::No;
         };
