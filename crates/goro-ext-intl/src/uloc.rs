@@ -1019,8 +1019,18 @@ pub fn to_bcp_type(legacy_key: &str, ty: &str) -> String {
         }
     }
     if legacy_key == "timezone" {
-        if let Some((b, _)) = data::TIME_ZONES.iter().find(|(_, l)| l.eq_ignore_ascii_case(ty)) {
-            return b.to_string();
+        // A zone with several BCP 47 IDs ("est5edt", "usnyc"): the
+        // deprecated POSIX-style ones lose.
+        let mut found = data::TIME_ZONES
+            .iter()
+            .filter(|(_, l)| l.eq_ignore_ascii_case(ty))
+            .map(|(b, _)| *b);
+        if let Some(first) = found.next() {
+            let best = std::iter::once(first)
+                .chain(found)
+                .find(|b| !b.bytes().any(|c| c.is_ascii_digit()))
+                .unwrap_or(first);
+            return best.to_string();
         }
     }
     TYPE_MAP
