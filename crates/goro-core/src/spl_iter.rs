@@ -1605,6 +1605,14 @@ impl Vm {
         if self.exc() {
             return Value::Null;
         }
+        // A user subclass's destructor runs when the new iterator dies.
+        if self
+            .classes
+            .get(&cl)
+            .is_some_and(|c| c.methods.contains_key(b"__destruct".as_slice()))
+        {
+            self.list_destructible(Value::Object(new_obj.clone()));
+        }
         Value::Object(new_obj)
     }
 
@@ -1998,6 +2006,9 @@ impl Vm {
                         }
                         if Self::rii_level(obj) > 0 {
                             Self::rii_pop(obj);
+                            // The finished sub-iterator is destroyed now.
+                            drop(it);
+                            self.run_pending_destructors_pub();
                         }
                         continue 'outer;
                     } else {
@@ -2120,6 +2131,7 @@ impl Vm {
         }
         while Self::rii_level(obj) > 0 {
             Self::rii_pop(obj);
+            self.run_pending_destructors_pub();
             if !self.exc() && Self::rii_hook(obj, H_END_CH) {
                 self.rii_call_hook(obj, b"endchildren");
             }
