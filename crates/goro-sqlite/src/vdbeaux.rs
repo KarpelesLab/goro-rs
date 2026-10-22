@@ -313,7 +313,7 @@ pub fn sqlite3VdbeJumpHereOrPopInst(p: &mut Vdbe, addr: i32) {
 }
 
 /// C: `void sqlite3VdbeLinkSubProgram(Vdbe *pVdbe, SubProgram *p)`
-pub fn sqlite3VdbeLinkSubProgram(pVdbe: &mut Vdbe, p: &Rc<SubProgram>) {
+pub fn sqlite3VdbeLinkSubProgram(pVdbe: &mut Vdbe, p: &SubProgramRef) {
     todo!("sqlite3VdbeLinkSubProgram")
 }
 
