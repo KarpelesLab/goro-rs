@@ -1678,10 +1678,19 @@ impl<'a> Lexer<'a> {
 
             // Not the closing label, add the indent back and scan the line
             content.extend_from_slice(&indent);
+            // A line ends at "\n", "\r\n" or a bare "\r" ({NEWLINE}).
             loop {
                 match self.advance() {
                     Some(b'\n') => {
                         content.push(b'\n');
+                        break;
+                    }
+                    Some(b'\r') => {
+                        content.push(b'\r');
+                        if self.peek() == Some(b'\n') {
+                            self.advance();
+                            content.push(b'\n');
+                        }
                         break;
                     }
                     Some(ch) => content.push(ch),
@@ -1696,12 +1705,14 @@ impl<'a> Lexer<'a> {
         if !found_closing && label_newline {
             crate::push_lexer_error("syntax error, unexpected end of file, expecting variable or heredoc end or \"${\" or \"{$\"".into(), self.line);
         }
-        // Remove trailing newline from content
+        // Remove the newline before the closing label from content
         if content.last() == Some(&b'\n') {
             content.pop();
             if content.last() == Some(&b'\r') {
                 content.pop();
             }
+        } else if found_closing && content.last() == Some(&b'\r') {
+            content.pop();
         }
 
         // PHP 7.3+ flexible heredoc: strip closing label's indentation from each
@@ -1711,11 +1722,33 @@ impl<'a> Lexer<'a> {
             let using_spaces = closing_indent[0] == b' ';
             let closing_line = self.line;
             let mut stripped = Vec::new();
-            let lines: Vec<&[u8]> = if content.is_empty() {
-                Vec::new()
-            } else {
-                content.split(|&b| b == b'\n').collect()
-            };
+            // Lines with their terminators ("\n", "\r\n" or "\r").
+            let mut lines: Vec<(&[u8], &[u8])> = Vec::new();
+            if !content.is_empty() {
+                let mut st = 0;
+                let mut k = 0;
+                while k < content.len() {
+                    match content[k] {
+                        b'\n' => {
+                            lines.push((&content[st..k], &content[k..k + 1]));
+                            k += 1;
+                            st = k;
+                        }
+                        b'\r' => {
+                            let nl = if content.get(k + 1) == Some(&b'\n') {
+                                2
+                            } else {
+                                1
+                            };
+                            lines.push((&content[st..k], &content[k..k + nl]));
+                            k += nl;
+                            st = k;
+                        }
+                        _ => k += 1,
+                    }
+                }
+                lines.push((&content[st..], &[]));
+            }
             let first_line = closing_line.saturating_sub(lines.len() as u32);
             // Found while scanning the body, before its newlines are counted.
             if closing_indent.iter().any(|&c| c != closing_indent[0]) {
@@ -1724,8 +1757,8 @@ impl<'a> Lexer<'a> {
                     first_line,
                 );
             }
-            for (i, line) in lines.iter().enumerate() {
-                let body = line.strip_suffix(b"\r").unwrap_or(line);
+            for (i, &(line, newline)) in lines.iter().enumerate() {
+                let body = line;
                 let mut skip = 0;
                 while skip < indent_len && skip < body.len() {
                     let c = body[skip];
@@ -1750,9 +1783,7 @@ impl<'a> Lexer<'a> {
                 }
                 // Whitespace-only lines need not be fully indented.
                 stripped.extend_from_slice(&line[skip.min(line.len())..]);
-                if i < lines.len() - 1 {
-                    stripped.push(b'\n');
-                }
+                stripped.extend_from_slice(newline);
             }
             content = stripped;
         }
