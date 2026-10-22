@@ -2705,12 +2705,17 @@ impl Vm {
                 // Pass 2: any non-private match
                 for prop in &class.properties {
                     if prop.name == prop_name && prop.visibility != Visibility::Private {
+                        // Public readonly properties are implicitly protected(set).
+                        let set_vis = prop
+                            .set_visibility
+                            .or((prop.is_readonly && prop.visibility == Visibility::Public)
+                                .then_some(Visibility::Protected));
                         return Some((
                             prop.visibility,
                             prop.declaring_class.clone(),
                             prop.is_readonly,
                             prop.property_type.clone(),
-                            prop.set_visibility,
+                            set_vis,
                         ));
                     }
                 }
@@ -38711,7 +38716,14 @@ impl Vm {
                                 caller_scope_u.as_deref(),
                             )
                         {
+                            // zend_std_unset_property(): only an initialized
+                            // readonly property cannot be unset.
                             if prop_is_readonly
+                                && has_prop
+                                && !matches!(
+                                    obj.borrow().get_property(prop_name.as_bytes()),
+                                    Value::Undef
+                                )
                                 && !matches!(
                                     obj.borrow().get_property(b"__clone_window"),
                                     Value::True
@@ -38742,7 +38754,7 @@ impl Vm {
                         }
                         // Check asymmetric visibility for unset (same as set) - check against class def, not instance
                         let mut avis_error: Option<String> = None;
-                        if let Some((_vis, declaring_class, _ro, _pt, set_vis)) = self
+                        if let Some((_vis, declaring_class, unset_ro, _pt, set_vis)) = self
                             .find_property_def_for_scope(
                                 &class_lower_u,
                                 prop_name.as_bytes(),
@@ -38765,6 +38777,9 @@ impl Vm {
                                     if raw_error.is_some() {
                                         let vis_str = match sv {
                                             Visibility::Private => "private(set)",
+                                            Visibility::Protected if unset_ro => {
+                                                "protected(set) readonly"
+                                            }
                                             Visibility::Protected => "protected(set)",
                                             Visibility::Public => "public(set)",
                                         };
@@ -49444,6 +49459,9 @@ impl Vm {
                                     if set_vis.is_some() {
                                         let vis_str = match effective_write_vis {
                                             Visibility::Private => "private(set)",
+                                            Visibility::Protected if prop_is_readonly => {
+                                                "protected(set) readonly"
+                                            }
                                             Visibility::Protected => "protected(set)",
                                             Visibility::Public => "public(set)",
                                         };
@@ -49513,30 +49531,12 @@ impl Vm {
                                         let prop_display =
                                             String::from_utf8_lossy(prop_name.as_bytes())
                                                 .to_string();
-                                        // If property has asymmetric set visibility, include it in the error
-                                        if set_vis.is_some() && visibility_error.is_some() {
-                                            let vis_str = match effective_write_vis {
-                                                Visibility::Private => "private(set)",
-                                                Visibility::Protected => "protected(set)",
-                                                Visibility::Public => "public(set)",
-                                            };
-                                            let caller_scope = self.current_class_scope();
-                                            let scope_str =
-                                                if let Some(cs) = caller_scope.as_deref() {
-                                                    format!("scope {}", String::from_utf8_lossy(cs))
-                                                } else {
-                                                    "global scope".to_string()
-                                                };
-                                            readonly_error = Some(format!(
-                                                "Cannot modify {} readonly property {}::${} from {}",
-                                                vis_str, class_display, prop_display, scope_str
-                                            ));
-                                        } else {
-                                            readonly_error = Some(format!(
-                                                "Cannot modify readonly property {}::${}",
-                                                class_display, prop_display
-                                            ));
-                                        }
+                                        // zend_readonly_property_modification_error()
+                                        // comes before the set-visibility check.
+                                        readonly_error = Some(format!(
+                                            "Cannot modify readonly property {}::${}",
+                                            class_display, prop_display
+                                        ));
                                     }
                                 }
                             }

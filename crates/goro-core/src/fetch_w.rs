@@ -536,6 +536,11 @@ impl Vm {
         if sv == crate::object::Visibility::Public {
             return None;
         }
+        // zend_std_read_property(W): a readonly property reports the
+        // readonly error before its set visibility.
+        if is_readonly && operation == "indirectly modify" {
+            return None;
+        }
         let prop_str = String::from_utf8_lossy(prop).to_string();
         let caller_scope = self.current_class_scope();
         self.check_visibility(
