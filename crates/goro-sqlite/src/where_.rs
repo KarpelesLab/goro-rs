@@ -1533,6 +1533,9 @@ fn constructAutomaticIndex(
             if p.azColl.len() < nc {
                 p.azColl.resize(nc, Vec::new());
             }
+            if p.azCollDflt.len() < nc {
+                p.azCollDflt.resize(nc, false);
+            }
         }
         let mut n: usize = 0;
         idxCols = 0;
@@ -1558,6 +1561,7 @@ fn constructAutomaticIndex(
                         useBloomFilter = false;
                     }
                     pIdx.borrow_mut().azColl[n] = coll_name(&pColl);
+                    pIdx.borrow_mut().azCollDflt[n] = pColl.is_none();
                     n += 1;
                 }
             }
@@ -1571,6 +1575,7 @@ fn constructAutomaticIndex(
                 let mut p = pIdx.borrow_mut();
                 p.aiColumn[n] = i as i16;
                 p.azColl[n] = sqlite3StrBINARY.to_vec();
+                p.azCollDflt[n] = true;
                 n += 1;
             }
         }
@@ -1579,6 +1584,7 @@ fn constructAutomaticIndex(
                 let mut p = pIdx.borrow_mut();
                 p.aiColumn[n] = i as i16;
                 p.azColl[n] = sqlite3StrBINARY.to_vec();
+                p.azCollDflt[n] = true;
                 n += 1;
             }
         }
@@ -1587,6 +1593,7 @@ fn constructAutomaticIndex(
             let mut p = pIdx.borrow_mut();
             p.aiColumn[n] = XN_ROWID;
             p.azColl[n] = sqlite3StrBINARY.to_vec();
+            p.azCollDflt[n] = true;
         }
 
         // Create the automatic index

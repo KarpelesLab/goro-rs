@@ -338,6 +338,10 @@ pub struct Index {
     pub aSortOrder: Vec<u8>,
     /// Collation names (C azColl).
     pub azColl: Vec<ZStr>,
+    /// azCollDflt[i]: C `azColl[i]==sqlite3StrBINARY` (the entry is the
+    /// static default name, not a copy of a declared/derived "BINARY";
+    /// the C code tests that pointer identity in a few places)
+    pub azCollDflt: Vec<bool>,
     pub pPartIdxWhere: Tree<ExprId>,
     pub aColExpr: Tree<ExprListId>,
     pub tnum: Pgno,

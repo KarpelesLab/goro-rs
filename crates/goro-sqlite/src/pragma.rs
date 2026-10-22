@@ -13,7 +13,7 @@ use crate::build::{
     sqlite3FindIndex, sqlite3FindTable, sqlite3LocateTable, sqlite3NameFromToken,
     sqlite3PrimaryKeyIndex, sqlite3ResetAllSchemasOfConnection, sqlite3TableLock,
 };
-use crate::global::{sqlite3Isdigit, sqlite3StdType, sqlite3StrBINARY, sqlite3Tolower};
+use crate::global::{sqlite3Isdigit, sqlite3StdType, sqlite3Tolower};
 use crate::int::*;
 use crate::printf::PfArg;
 use crate::util::{sqlite3Atoi, sqlite3DecOrHexToI64, sqlite3GetInt32, sqlite3StrICmp};
@@ -3248,7 +3248,7 @@ fn pragmaIntegrityCheck(
                         r1,
                     );
                     pPrior = Some(pIdx.clone());
-                    let (nColumn, nKeyCol, zIdxName, isUnique, aiColumn, azColl) = {
+                    let (nColumn, nKeyCol, zIdxName, isUnique, aiColumn, azCollDflt) = {
                         let x = pIdx.borrow();
                         (
                             x.nColumn as i32,
@@ -3256,7 +3256,7 @@ fn pragmaIntegrityCheck(
                             x.zName.clone(),
                             x.IsUniqueIndex(),
                             x.aiColumn.clone(),
-                            x.azColl.clone(),
+                            x.azCollDflt.clone(),
                         )
                     };
                     sqlite3VdbeAddOp2(db.v(), OP_AddImm, 8 + j, 1); // increment entry count
@@ -3303,7 +3303,7 @@ fn pragmaIntegrityCheck(
                     let mut label6 = 0;
                     for kk in 0..nKeyCol {
                         // C compares the pointer with sqlite3StrBINARY.
-                        if azColl[kk as usize].as_slice() == sqlite3StrBINARY {
+                        if azCollDflt[kk as usize] {
                             continue;
                         }
                         if label6 == 0 {

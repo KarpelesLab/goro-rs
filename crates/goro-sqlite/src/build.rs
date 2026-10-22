@@ -2219,6 +2219,7 @@ pub fn sqlite3AddCollateType(db: &mut Sqlite3, pToken: &Token) {
             debug_assert!(x.nKeyCol == 1);
             if x.aiColumn[0] as usize == i {
                 x.azColl[0] = c.clone();
+                x.azCollDflt[0] = false;
             }
         }
     }
@@ -2429,6 +2430,9 @@ fn resizeIndexObject(pIdx: &mut Index, N: i32) -> i32 {
     let n = N as usize;
     if pIdx.azColl.len() < n {
         pIdx.azColl.resize(n, Vec::new());
+    }
+    if pIdx.azCollDflt.len() < n {
+        pIdx.azCollDflt.resize(n, false);
     }
     if pIdx.aiRowLogEst.len() < n {
         pIdx.aiRowLogEst.resize(n, 0);
@@ -2662,6 +2666,7 @@ fn convertToWithoutRowidTable(db: &mut Sqlite3, pTab: &TableRef) {
             } else {
                 let (i, ju) = (i as usize, j as usize);
                 pk.azColl[ju] = pk.azColl[i].clone();
+                pk.azCollDflt[ju] = pk.azCollDflt[i];
                 pk.aSortOrder[ju] = pk.aSortOrder[i];
                 pk.aiColumn[ju] = pk.aiColumn[i];
                 j += 1;
@@ -2728,6 +2733,7 @@ fn convertToWithoutRowidTable(db: &mut Sqlite3, pTab: &TableRef) {
                 if !isDupColumn(&x, nKeyCol, &pk, i) {
                     x.aiColumn[j] = pk.aiColumn[i as usize];
                     x.azColl[j] = pk.azColl[i as usize].clone();
+                    x.azCollDflt[j] = pk.azCollDflt[i as usize];
                     if pk.aSortOrder[i as usize] != 0 {
                         // See ticket https://sqlite.org/src/info/bba7b69f9849b5bf
                         x.bAscKeyBug = 1;
@@ -2758,6 +2764,7 @@ fn convertToWithoutRowidTable(db: &mut Sqlite3, pTab: &TableRef) {
             let zColl = sqlite3ColumnColl(&t.aCol[i as usize]);
             debug_assert!(j < pk.nColumn as i32);
             pk.aiColumn[j as usize] = i as i16;
+            pk.azCollDflt[j as usize] = zColl.is_none();
             pk.azColl[j as usize] = zColl.unwrap_or_else(|| sqlite3StrBINARY.to_vec());
             j += 1;
         }
@@ -4206,6 +4213,7 @@ pub fn sqlite3AllocateIndexObject(
     let n = nCol.max(0) as usize;
     Some(Rc::new(RefCell::new(Index {
         azColl: vec![Vec::new(); n],
+        azCollDflt: vec![false; n],
         aiRowLogEst: vec![0; n + 1],
         aiColumn: vec![0; n],
         aSortOrder: vec![0; n],
@@ -4604,6 +4612,7 @@ pub fn sqlite3CreateIndex(
             if zColl.is_none() && j >= 0 {
                 zColl = sqlite3ColumnColl(&pTabR.borrow().aCol[j as usize]);
             }
+            let bDflt = zColl.is_none();
             let zColl = zColl.unwrap_or_else(|| sqlite3StrBINARY.to_vec());
             if db.init.busy == 0
                 && crate::callback::sqlite3LocateCollSeq(db, Some(&zColl)).is_none()
@@ -4613,6 +4622,7 @@ pub fn sqlite3CreateIndex(
             let sf = db.el(pListItems).a[i].fg.sortFlags;
             let mut x = idx.borrow_mut();
             x.azColl[i] = zColl;
+            x.azCollDflt[i] = bDflt;
             x.aSortOrder[i] = sf & sortOrderMask;
             i += 1;
         }
@@ -4632,6 +4642,7 @@ pub fn sqlite3CreateIndex(
                 } else {
                     x.aiColumn[i] = c;
                     x.azColl[i] = pk.azColl[j as usize].clone();
+                    x.azCollDflt[i] = pk.azCollDflt[j as usize];
                     x.aSortOrder[i] = pk.aSortOrder[j as usize];
                     i += 1;
                 }
@@ -4641,6 +4652,7 @@ pub fn sqlite3CreateIndex(
             let mut x = idx.borrow_mut();
             x.aiColumn[i] = XN_ROWID;
             x.azColl[i] = sqlite3StrBINARY.to_vec();
+            x.azCollDflt[i] = true;
         }
         sqlite3DefaultRowEst(&idx);
         if db.ppr().pNewTable.is_none() {
@@ -6064,15 +6076,16 @@ pub fn sqlite3Reindex(db: &mut Sqlite3, pName1: Option<&Token>, pName2: Option<&
 /// when it has finished using it.
 ///
 /// Rust: C tests `zColl==sqlite3StrBINARY` (pointer identity with the
-/// static default name); the port compares with the exact bytes "BINARY".
+/// static default name); the port keeps that bit in `Index::azCollDflt`.
 pub fn sqlite3KeyInfoOfIndex(db: &mut Sqlite3, pIdx: &IndexRef) -> Option<KeyInfoRef> {
-    let (nCol, nKey, uniqNotNull, azColl, aSortOrder) = {
+    let (nCol, nKey, uniqNotNull, azColl, azCollDflt, aSortOrder) = {
         let x = pIdx.borrow();
         (
             x.nColumn as i32,
             x.nKeyCol as i32,
             x.uniqNotNull,
             x.azColl.clone(),
+            x.azCollDflt.clone(),
             x.aSortOrder.clone(),
         )
     };
@@ -6087,7 +6100,7 @@ pub fn sqlite3KeyInfoOfIndex(db: &mut Sqlite3, pIdx: &IndexRef) -> Option<KeyInf
     let pKey = pKey?;
     for i in 0..nCol as usize {
         let zColl = &azColl[i];
-        let c = if zColl.as_slice() == sqlite3StrBINARY {
+        let c = if azCollDflt[i] {
             None
         } else {
             crate::callback::sqlite3LocateCollSeq(db, Some(zColl))
