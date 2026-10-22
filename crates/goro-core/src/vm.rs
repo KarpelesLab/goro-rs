@@ -11789,12 +11789,8 @@ impl Vm {
             match class {
                 b"phptoken" => match method {
                     b"is" => {
-                        let kind = args.get(1)?;
-                        let ob = obj.borrow();
-                        let id = ob.get_property(b"id").to_long();
-                        let text = ob.get_property(b"text").to_php_string();
-                        drop(ob);
-                        Some(phptoken_is_match(kind, id, text.as_bytes()))
+                        let kind = args.get(1)?.clone();
+                        Some(crate::tokenizer::phptoken_is(self, obj, &kind).unwrap_or(Value::Null))
                     }
                     _ => None,
                 },
@@ -54725,36 +54721,6 @@ pub fn is_prop_skipped(obj: &Rc<RefCell<PhpObject>>, prop_name: &[u8]) -> bool {
     match ob.get_property(b"__lazy_skipped") {
         Value::String(s) => s.as_bytes().split(|b| *b == 0).any(|n| n == prop_name),
         _ => false,
-    }
-}
-
-/// PhpToken::is() matches against an int (token id), string (token text),
-/// or an array whose entries are any of those.
-fn phptoken_is_match(kind: &Value, id: i64, text: &[u8]) -> Value {
-    fn match_one(kind: &Value, id: i64, text: &[u8]) -> bool {
-        match kind {
-            Value::Long(k) => *k == id,
-            Value::String(s) => s.as_bytes() == text,
-            Value::Reference(r) => match_one(&r.borrow(), id, text),
-            _ => false,
-        }
-    }
-    match kind {
-        Value::Array(arr) => {
-            for (_, v) in arr.borrow().iter() {
-                if match_one(v, id, text) {
-                    return Value::True;
-                }
-            }
-            Value::False
-        }
-        other => {
-            if match_one(other, id, text) {
-                Value::True
-            } else {
-                Value::False
-            }
-        }
     }
 }
 

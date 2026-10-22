@@ -1673,12 +1673,6 @@ impl<'a> Lexer<'a> {
             let indent_len = closing_indent.len();
             let using_spaces = closing_indent[0] == b' ';
             let closing_line = self.line;
-            if closing_indent.iter().any(|&c| c != closing_indent[0]) {
-                crate::push_lexer_error(
-                    "Invalid indentation - tabs and spaces cannot be mixed".into(),
-                    closing_line,
-                );
-            }
             let mut stripped = Vec::new();
             let lines: Vec<&[u8]> = if content.is_empty() {
                 Vec::new()
@@ -1686,6 +1680,18 @@ impl<'a> Lexer<'a> {
                 content.split(|&b| b == b'\n').collect()
             };
             let first_line = closing_line.saturating_sub(lines.len() as u32);
+            if closing_indent.iter().any(|&c| c != closing_indent[0]) {
+                // Raised while scanning the body (its first line), or the
+                // `<<<` line of an empty heredoc.
+                crate::push_lexer_error(
+                    "Invalid indentation - tabs and spaces cannot be mixed".into(),
+                    if lines.is_empty() {
+                        closing_line.saturating_sub(1)
+                    } else {
+                        first_line
+                    },
+                );
+            }
             for (i, line) in lines.iter().enumerate() {
                 let body = line.strip_suffix(b"\r").unwrap_or(line);
                 let mut skip = 0;

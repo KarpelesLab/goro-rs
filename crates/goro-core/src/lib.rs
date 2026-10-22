@@ -44,6 +44,7 @@ pub mod string;
 pub mod stub_sigs;
 pub mod stubs;
 pub mod symtab;
+pub mod tokenizer;
 pub mod uncaught;
 pub mod uri;
 pub mod value;
