@@ -90,7 +90,9 @@ Highlights beyond the core language:
   pcntl (fork, signals with async dispatch), ftp (with FTPS), shmop/sysvsem/sysvshm/sysvmsg,
   gettext (libintl emulation reading .mo catalogs), sodium (libsodium API on purecrypto,
   argon2i/argon2id `password_hash()`), soap (WSDL/XML Schema, SoapClient over HTTP/HTTPS with
-  keep-alive, proxies, Basic/Digest auth, compression; SoapServer), zend_test.
+  keep-alive, proxies, Basic/Digest auth, compression; SoapServer), phar (phar/tar/zip archives, phar:// wrapper, signatures), zip (libzip port, zip://),
+  exif, fileinfo (libmagic 5.46 port with the bundled magic database), uri (RFC 3986 + WHATWG URL),
+  intl (on the [intl](https://crates.io/crates/intl) crate), zend_test.
 
 ### Not Yet Implemented
 - pdo_sqlite/…, ffi, ldap, sqlite3, dba, tidy, odbc, snmp, enchant, readline (in progress: gd, xsl)
