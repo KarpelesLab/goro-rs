@@ -4400,6 +4400,12 @@ impl Vm {
             let Value::Array(arr) = &args_val else {
                 return Some(String::new());
             };
+            // With arguments, the NoDiscard object is constructed
+            // (zend_get_attribute_object()): its internal constructor runs.
+            if self.observer.is_some() && !arr.borrow().is_empty() {
+                self.observe_internal_begin("NoDiscard::__construct");
+                self.observe_internal_end("NoDiscard::__construct", Some(&Value::Null));
+            }
             let msg_val = {
                 let arr = arr.borrow();
                 arr.get(&crate::array::ArrayKey::String(PhpString::from_bytes(
