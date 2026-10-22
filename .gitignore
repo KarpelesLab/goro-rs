@@ -62,3 +62,6 @@ expectf_match.py
 run_tests.sh
 run_tests_v2.sh
 .test-runs/
+
+# test-leftover patterns above must never hide Rust sources
+!*.rs
