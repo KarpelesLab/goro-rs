@@ -1,0 +1,12 @@
+[package]
+name = "goro-ext-opcache"
+version = "0.1.0"
+edition = "2024"
+description = "PHP opcache extension (Zend OPcache: script cache, opcache_* API, preloading) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+libc = "0.2"

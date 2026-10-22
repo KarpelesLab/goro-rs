@@ -50,6 +50,7 @@ members = [
     "crates/goro-ext-readline",
     "crates/goro-tidy",
     "crates/goro-ext-tidy",
+    "crates/goro-ext-opcache",
 ]
 resolver = "2"
 
@@ -120,6 +121,7 @@ goro-ext-xsl = { path = "crates/goro-ext-xsl" }
 goro-ext-dba = { path = "crates/goro-ext-dba" }
 goro-ext-readline = { path = "crates/goro-ext-readline" }
 goro-ext-tidy = { path = "crates/goro-ext-tidy" }
+goro-ext-opcache = { path = "crates/goro-ext-opcache" }
 
 [features]
 default = ["ext-standard"]

@@ -425,6 +425,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_dba::register(&mut vm);
                 goro_ext_readline::register(&mut vm);
                 goro_ext_tidy::register(&mut vm);
+                goro_ext_opcache::register(&mut vm);
                 // Loadable on request (see run_test_inner).
                 vm.register_extension(goro_ext_zend_test::NAME);
                 vm.register_extension(b"simplexml");
@@ -435,6 +436,13 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
             let loaded = exts.as_ref().unwrap();
             for ext in extensions.lines() {
                 let ext = ext.trim().to_lowercase();
+                // get_loaded_extensions() names it "Zend OPcache"
+                // (run-tests.php maps it to "opcache").
+                let ext = if ext == "opcache" {
+                    "zend opcache".to_string()
+                } else {
+                    ext
+                };
                 if !ext.is_empty() && !loaded.contains(ext.as_bytes()) {
                     return Some(format!("Required extension {} not available", ext));
                 }
@@ -701,6 +709,21 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
 ///
 /// Be conservative: better to skip too few than too many. Never skip a test
 /// that could actually pass.
+/// run-tests.php's $ini_overwrites for opcache.
+const RUN_TESTS_OPCACHE_INI: &[(&str, &str)] = &[
+    ("opcache.fast_shutdown", "0"),
+    ("opcache.file_update_protection", "0"),
+    ("opcache.revalidate_freq", "0"),
+    ("opcache.jit_hot_loop", "1"),
+    ("opcache.jit_hot_func", "1"),
+    ("opcache.jit_hot_return", "1"),
+    ("opcache.jit_hot_side_exit", "1"),
+    ("opcache.jit_max_root_traces", "100000"),
+    ("opcache.jit_max_side_traces", "100000"),
+    ("opcache.jit_max_exit_counters", "100000"),
+    ("opcache.protect_memory", "1"),
+];
+
 pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
     let file_section = test.file_section().unwrap_or("");
     let test_name = &test.name;
@@ -1721,6 +1744,7 @@ fn execute_php_inner_impl(
     goro_ext_dba::register(&mut vm);
     goro_ext_readline::register(&mut vm);
     goro_ext_tidy::register(&mut vm);
+    goro_ext_opcache::register(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }
@@ -1738,6 +1762,12 @@ fn execute_php_inner_impl(
         b"docref_ext".to_vec(),
         Value::String(PhpString::from_bytes(b".html")),
     );
+    for (k, v) in RUN_TESTS_OPCACHE_INI {
+        vm.constants.insert(
+            k.as_bytes().to_vec(),
+            Value::String(PhpString::from_bytes(v.as_bytes())),
+        );
+    }
     // Apply all INI settings (the INI section's values may be
     // error-level expressions, which the INI scanner resolves).
     let resolved: Vec<(String, String)> = ini_settings

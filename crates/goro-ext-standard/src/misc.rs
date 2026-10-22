@@ -17958,6 +17958,7 @@ const MODULE_ORDER: &[&str] = &[
     "mbstring",
     "standard",
     "mysqlnd",
+    "Zend OPcache",
     "pcntl",
     "pgsql",
     "exif",
@@ -17991,8 +17992,12 @@ const MODULE_ORDER: &[&str] = &[
 
 fn get_loaded_extensions_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
-    // zend_extensions: true lists Zend extensions; goro has none.
+    // zend_extensions: true lists the Zend extensions (OPcache registers
+    // itself as one besides its module).
     if args.first().is_some_and(|v| v.is_truthy()) {
+        if vm.loaded_extensions.contains(b"zend opcache".as_slice()) {
+            result.push(Value::String(PhpString::from_bytes(b"Zend OPcache")));
+        }
         return Ok(Value::Array(Rc::new(RefCell::new(result))));
     }
     let always = [

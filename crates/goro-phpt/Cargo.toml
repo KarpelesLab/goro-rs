@@ -41,6 +41,7 @@ goro-ext-xsl = { path = "../goro-ext-xsl" }
 goro-ext-dba = { path = "../goro-ext-dba" }
 goro-ext-readline = { path = "../goro-ext-readline" }
 goro-ext-tidy = { path = "../goro-ext-tidy" }
+goro-ext-opcache = { path = "../goro-ext-opcache" }
 goro-ext-sysvipc = { path = "../goro-ext-sysvipc" }
 goro-ext-ftp = { path = "../goro-ext-ftp" }
 goro-ext-pcntl = { path = "../goro-ext-pcntl" }

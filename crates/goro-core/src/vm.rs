@@ -39544,12 +39544,22 @@ impl Vm {
 
                     let old_file = self.current_file.clone();
                     let plain_file = hooked_source.is_none();
-                    let result = match hooked_source
-                        .map(Ok)
-                        .unwrap_or_else(|| std::fs::read(&abs_path))
-                    {
+                    // opcache: the file's cached compilation, if any.
+                    let cached = if plain_file && !is_stream_path {
+                        crate::script_cache::lookup(&abs_path)
+                    } else {
+                        None
+                    };
+                    let source_or_cached = match cached {
+                        Some(c) => Ok(Err(c)),
+                        None => hooked_source
+                            .map(Ok)
+                            .unwrap_or_else(|| std::fs::read(&abs_path))
+                            .map(Ok),
+                    };
+                    let result = match source_or_cached {
                         Ok(source) => {
-                            if plain_file {
+                            if plain_file && source.is_ok() {
                                 // php_stream_open_for_zend(): the file is
                                 // opened as a stream resource.
                                 crate::value::alloc_resource_id();
@@ -39558,28 +39568,45 @@ impl Vm {
                             if self.included_files.insert(abs_path.clone()) {
                                 self.included_files_list.push(abs_path.clone());
                             }
-                            // Compile and execute (the CLI sets CG(skip_shebang)
-                            // for every file it compiles)
-                            // (through the zend.multibyte filters)
-                            let script = goro_parser::multibyte::lex_script(&source, true);
-                            let mut parser =
-                                goro_parser::Parser::new(script.tokens).with_source(&script.source);
-                            let parsed = parser.parse();
-                            let lex_diags = goro_parser::order_lexer_diagnostics(
-                                &goro_parser::take_lexer_deprecations(),
-                                &goro_parser::take_lexer_warnings(),
-                            );
+                            let (parsed, lex_diags) = match source {
+                                Err(c) => (Ok(Err(c)), Vec::new()),
+                                Ok(source) => {
+                                    // Compile and execute (the CLI sets
+                                    // CG(skip_shebang) for every file it
+                                    // compiles) (through the zend.multibyte
+                                    // filters)
+                                    let script = goro_parser::multibyte::lex_script(&source, true);
+                                    let mut parser = goro_parser::Parser::new(script.tokens)
+                                        .with_source(&script.source);
+                                    let parsed = parser.parse().map(Ok);
+                                    let lex_diags = goro_parser::order_lexer_diagnostics(
+                                        &goro_parser::take_lexer_deprecations(),
+                                        &goro_parser::take_lexer_warnings(),
+                                    );
+                                    (parsed, lex_diags)
+                                }
+                            };
                             match parsed {
                                 Ok(program) => {
-                                    let mut compiler = crate::compiler::Compiler::new();
-                                    compiler.source_file = abs_path.as_bytes().to_vec();
                                     self.current_file = abs_path.clone();
-                                    match compiler.compile(&program) {
+                                    let fresh = program.is_ok();
+                                    let compiled = match program {
+                                        Err(c) => {
+                                            self.replay_cached_diags(&c.diags);
+                                            Ok((c.op_array.clone(), c.classes.clone(), Vec::new()))
+                                        }
+                                        Ok(program) => {
+                                            let mut compiler = crate::compiler::Compiler::new();
+                                            compiler.source_file = abs_path.as_bytes().to_vec();
+                                            compiler.compile(&program)
+                                        }
+                                    };
+                                    match compiled {
                                         Ok((mut inc_op_array, inc_classes, inc_warnings)) => {
                                             // A file that does not `return` yields 1
                                             // (zend_emit_final_return(1)).
-                                            let implicit_ret =
-                                                inc_op_array.ops.last().is_some_and(|l| {
+                                            let implicit_ret = fresh
+                                                && inc_op_array.ops.last().is_some_and(|l| {
                                                     l.opcode == OpCode::Return && l.line == 0
                                                 });
                                             if implicit_ret {
@@ -39587,6 +39614,15 @@ impl Vm {
                                                 if let Some(l) = inc_op_array.ops.last_mut() {
                                                     l.op1 = OperandType::Const(one);
                                                 }
+                                            }
+                                            if fresh && plain_file && !is_stream_path {
+                                                self.cache_compiled_script(
+                                                    &abs_path,
+                                                    &inc_op_array,
+                                                    &inc_classes,
+                                                    &lex_diags,
+                                                    &inc_warnings,
+                                                );
                                             }
                                             // The scanner's diagnostics, then the compiler's
                                             for (deprecation, msg, wline) in lex_diags {
@@ -57813,7 +57849,7 @@ fn commutative_swap(op1: &OperandType, op2: &OperandType) -> bool {
 
 /// Whether a parser message is one php-src's scanner/parser produces (others
 /// are reported as a bare "syntax error").
-fn is_php_parse_message(msg: &str) -> bool {
+pub(crate) fn is_php_parse_message(msg: &str) -> bool {
     goro_parser::is_php_parse_error(msg)
         || msg.contains("unexpected")
         || msg.contains("syntax error")
