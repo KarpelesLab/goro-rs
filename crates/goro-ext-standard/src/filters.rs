@@ -1797,9 +1797,7 @@ impl BzDecompress {
                     total += buf.len();
                     break;
                 }
-                // The whole bucket at once (php feeds BZ_BUF bytes at a
-                // time): compcol re-parses a partial block on each call.
-                let desired = buf.len() - bin;
+                let desired = (buf.len() - bin).min(BZ_BUF);
                 let dec = self.dec.as_mut().unwrap();
                 let mut obuf = vec![0u8; BZ_BUF];
                 let before_in = dec.total_in();
