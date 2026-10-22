@@ -3518,6 +3518,7 @@ impl Compiler {
                                 | ExprKind::MethodCall { .. }
                                 | ExprKind::StaticMethodCall { .. }
                                 | ExprKind::DynamicStaticMethodCall { .. }
+                                | ExprKind::Pipe { .. }
                         ),
                         None => true,
                     };
@@ -10601,12 +10602,14 @@ impl Compiler {
     }
 
     fn is_call_expr(e: &Expr) -> bool {
+        // (a pipe is a call: zend_is_call())
         matches!(
             e.kind,
             ExprKind::FunctionCall { .. }
                 | ExprKind::MethodCall { .. }
                 | ExprKind::StaticMethodCall { .. }
                 | ExprKind::DynamicStaticMethodCall { .. }
+                | ExprKind::Pipe { .. }
         )
     }
 
@@ -11226,6 +11229,7 @@ impl Compiler {
                     | ExprKind::FunctionCall { .. }
                     | ExprKind::MethodCall { .. }
                     | ExprKind::StaticMethodCall { .. }
+                    | ExprKind::Pipe { .. }
                     | ExprKind::DynamicStaticPropertyAccess { .. }
                     | ExprKind::DynamicVariable(_)
                     | ExprKind::Assign { .. }
