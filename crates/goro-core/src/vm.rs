@@ -888,7 +888,9 @@ pub struct Vm {
     /// Object unary operator handler (e.g., GMP ~, -, +)
     pub object_do_unary: Option<fn(&mut Vm, &str, &Value) -> Option<Value>>,
     /// Object comparison handler (e.g., GMP ==, <, >)
-    pub object_compare: Option<fn(&Value, &Value) -> Option<std::cmp::Ordering>>,
+    /// compare handler of operator-overloading objects; may throw (then
+    /// returns None with the exception pending).
+    pub object_compare: Option<fn(&mut Vm, &Value, &Value) -> Option<std::cmp::Ordering>>,
     /// Object to string handler (e.g., GMP __toString)
     pub object_to_string: Option<fn(&Value) -> Option<String>>,
     /// Object to long handler (e.g., GMP (int) cast)
@@ -3579,16 +3581,6 @@ impl Vm {
         }
     }
 
-    /// A GMP object (the GMP-specific comparison errors of the operator
-    /// hooks).
-    fn is_gmp_obj(v: &Value) -> bool {
-        match v {
-            Value::Object(o) => o.borrow().class_name.eq_ignore_ascii_case(b"GMP"),
-            Value::Reference(r) => Self::is_gmp_obj(&r.borrow()),
-            _ => false,
-        }
-    }
-
     fn emit_object_comparison_notice(&mut self, a: &Value, b: &Value, line: u32) {
         let a_inner = match a {
             Value::Reference(r) => r.borrow().clone(),
@@ -4674,6 +4666,13 @@ impl Vm {
     /// Throw the appropriate exception for an object operator hook error.
     /// Sets current_exception and returns the (class_name, message).
     pub fn throw_object_op_error(&mut self, msg: &str) -> (&'static [u8], String) {
+        // An empty message: the handler's exception is already pending.
+        if msg.is_empty() {
+            if let Some(Value::Object(o)) = &self.current_exception {
+                let m = o.borrow().get_property(b"message").to_php_string();
+                return (b"Exception", m.to_string_lossy());
+            }
+        }
         let (class, clean_msg) = Self::classify_object_op_error(msg);
         let exc = self.create_exception(class, &clean_msg, self.current_line);
         self.current_exception = Some(exc);
@@ -18301,6 +18300,45 @@ impl Vm {
                 },
                 OpCode::UnaryPlus => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // `+$a` / `-$a` compile to ZEND_MUL by 1 / -1: the
+                    // do_operation handler of operator-overloading objects.
+                    if let (Some(handler), Some(is_type)) =
+                        (self.object_do_operation, self.object_is_operator_type)
+                    {
+                        if is_type(&a) {
+                            match handler(self, "*", &a, &Value::Long(1)) {
+                                Some(Ok(result)) => {
+                                    self.write_operand(
+                                        &op.result,
+                                        result,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    return Ok(Flow::Next);
+                                }
+                                Some(Err(msg)) => {
+                                    let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: format!(
+                                            "Uncaught {}: {}",
+                                            String::from_utf8_lossy(class_bytes),
+                                            clean_msg
+                                        ),
+                                        line: op.line,
+                                    });
+                                }
+                                None => {}
+                            }
+                        }
+                    }
                     let val = match &a {
                         Value::Long(_) | Value::Double(_) => a,
                         Value::True => Value::Long(1),
@@ -18337,6 +18375,45 @@ impl Vm {
 
                 OpCode::Negate => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // `+$a` / `-$a` compile to ZEND_MUL by 1 / -1: the
+                    // do_operation handler of operator-overloading objects.
+                    if let (Some(handler), Some(is_type)) =
+                        (self.object_do_operation, self.object_is_operator_type)
+                    {
+                        if is_type(&a) {
+                            match handler(self, "*", &a, &Value::Long(-1)) {
+                                Some(Ok(result)) => {
+                                    self.write_operand(
+                                        &op.result,
+                                        result,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    return Ok(Flow::Next);
+                                }
+                                Some(Err(msg)) => {
+                                    let (class_bytes, clean_msg) = self.throw_object_op_error(&msg);
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: format!(
+                                            "Uncaught {}: {}",
+                                            String::from_utf8_lossy(class_bytes),
+                                            clean_msg
+                                        ),
+                                        line: op.line,
+                                    });
+                                }
+                                None => {}
+                            }
+                        }
+                    }
                     if matches!(a.deref(), Value::String(_) | Value::Array(_)) {
                         if let Some(err) =
                             Self::check_unsupported_operand_types(&a, &Value::Long(-1), "*")
@@ -19093,33 +19170,21 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                // GMP == non-GMP-object: throw TypeError
-                                if (Self::is_gmp_obj(&a)
-                                    && matches!(b.deref(), Value::Object(_))
-                                    && !is_type(&b))
-                                    || (Self::is_gmp_obj(&b)
-                                        && matches!(a.deref(), Value::Object(_))
-                                        && !is_type(&a))
-                                {
-                                    let msg =
-                                        "Number must be of type GMP|string|int, stdClass given"
-                                            .to_string();
-                                    let exc_val = self.throw_type_error(msg.clone());
-                                    self.current_exception = Some(exc_val);
+                                let cmp = cmp_fn(self, &a, &b);
+                                if cmp.is_none() && self.current_exception.is_some() {
                                     if let Some((catch_target, _, _, _, saved_pc)) =
                                         exception_handlers.pop()
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
-                                    } else {
-                                        return Err(VmError {
-                                            message: msg,
-                                            line: op.line,
-                                        });
                                     }
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line: op.line,
+                                    });
                                 }
-                                if let Some(ord) = cmp_fn(&a, &b) {
+                                if let Some(ord) = cmp {
                                     self.write_operand(
                                         &op.result,
                                         if ord == std::cmp::Ordering::Equal {
@@ -19215,32 +19280,21 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                if (Self::is_gmp_obj(&a)
-                                    && matches!(b.deref(), Value::Object(_))
-                                    && !is_type(&b))
-                                    || (Self::is_gmp_obj(&b)
-                                        && matches!(a.deref(), Value::Object(_))
-                                        && !is_type(&a))
-                                {
-                                    let msg =
-                                        "Number must be of type GMP|string|int, stdClass given"
-                                            .to_string();
-                                    let exc_val = self.throw_type_error(msg.clone());
-                                    self.current_exception = Some(exc_val);
+                                let cmp = cmp_fn(self, &a, &b);
+                                if cmp.is_none() && self.current_exception.is_some() {
                                     if let Some((catch_target, _, _, _, saved_pc)) =
                                         exception_handlers.pop()
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
-                                    } else {
-                                        return Err(VmError {
-                                            message: msg,
-                                            line: op.line,
-                                        });
                                     }
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line: op.line,
+                                    });
                                 }
-                                if let Some(ord) = cmp_fn(&a, &b) {
+                                if let Some(ord) = cmp {
                                     self.write_operand(
                                         &op.result,
                                         if ord != std::cmp::Ordering::Equal {
@@ -19443,7 +19497,21 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                if let Some(ord) = cmp_fn(&a, &b) {
+                                let cmp = cmp_fn(self, &a, &b);
+                                if cmp.is_none() && self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line: op.line,
+                                    });
+                                }
+                                if let Some(ord) = cmp {
                                     self.write_operand(
                                         &op.result,
                                         if ord == std::cmp::Ordering::Less {
@@ -19540,7 +19608,21 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                if let Some(ord) = cmp_fn(&a, &b) {
+                                let cmp = cmp_fn(self, &a, &b);
+                                if cmp.is_none() && self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line: op.line,
+                                    });
+                                }
+                                if let Some(ord) = cmp {
                                     self.write_operand(
                                         &op.result,
                                         if ord != std::cmp::Ordering::Greater {
@@ -19637,7 +19719,21 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                if let Some(ord) = cmp_fn(&a, &b) {
+                                let cmp = cmp_fn(self, &a, &b);
+                                if cmp.is_none() && self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line: op.line,
+                                    });
+                                }
+                                if let Some(ord) = cmp {
                                     self.write_operand(
                                         &op.result,
                                         if ord == std::cmp::Ordering::Greater {
@@ -19735,7 +19831,21 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                if let Some(ord) = cmp_fn(&a, &b) {
+                                let cmp = cmp_fn(self, &a, &b);
+                                if cmp.is_none() && self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line: op.line,
+                                    });
+                                }
+                                if let Some(ord) = cmp {
                                     self.write_operand(
                                         &op.result,
                                         if ord != std::cmp::Ordering::Less {
@@ -19833,7 +19943,21 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                if let Some(ord) = cmp_fn(&a, &b) {
+                                let cmp = cmp_fn(self, &a, &b);
+                                if cmp.is_none() && self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line: op.line,
+                                    });
+                                }
+                                if let Some(ord) = cmp {
                                     let r = match ord {
                                         std::cmp::Ordering::Less => -1,
                                         std::cmp::Ordering::Equal => 0,

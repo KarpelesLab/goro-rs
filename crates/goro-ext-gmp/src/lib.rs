@@ -170,188 +170,161 @@ fn dze(msg: &str) -> String {
     format!("\x01D\x01{}", msg)
 }
 
-/// Convert a non-GMP scalar to BigInt for operator overloading; returns an error
-/// kind classifier ("type" or "value") with a message ready to be wrapped.
-fn operand_to_bigint_for_op(val: &Value) -> Result<BigInt, String> {
+/// gmp_zend_parse_arg_into_mpz_ex() with `is_operator`: Ok(number), or
+/// Err(message) when the operand is not usable (a ValueError message is
+/// prefixed; None as message means the conversion threw already).
+fn op_arg(vm: &mut Vm, val: &Value) -> Result<BigInt, Option<String>> {
     match val {
+        Value::Reference(r) => {
+            let v = r.borrow().clone();
+            op_arg(vm, &v)
+        }
+        // Only GMP objects are accepted.
+        Value::Object(_) if is_gmp_object(val) => get_gmp_value(val).ok_or(None),
+        Value::Object(_) => Err(None),
+        // convert_zstr_to_gmp(..., base 0, arg_num 0)
+        Value::String(s) => parse_bigint_str_strict(&s.to_string_lossy(), 0)
+            .map_err(|_| Some(ve("Number is not an integer string"))),
         Value::Long(n) => Ok(BigInt::from(*n)),
+        // zend_parse_arg_long_weak(); null is rejected for operators
         Value::Double(d) => {
-            // Whole-number finite floats are accepted (matching PHP 8.x semantics
-            // for GMP operator overloading). Fractional floats are rejected as a
-            // TypeError; the caller can handle the deprecation case via a
-            // higher-level hook if needed.
-            if d.fract() == 0.0 && d.is_finite() {
-                if *d >= i64::MIN as f64 && *d <= i64::MAX as f64 {
-                    Ok(BigInt::from(*d as i64))
-                } else {
-                    // Out-of-i64 finite whole float: route through string parse.
-                    let s = format!("{}", *d as i128);
-                    parse_bigint_str_strict(&s, 10)
-                        .map_err(|_| ve("Number is not an integer string"))
+            let d = *d;
+            if d.is_nan() || !(d >= -9.223_372_036_854_776e18 && d < 9.223_372_036_854_776e18) {
+                return Err(None);
+            }
+            let l = d as i64;
+            if l as f64 != d {
+                vm.emit_deprecated(&format!(
+                    "Implicit conversion from float {} to int loses precision",
+                    goro_core::value::format_php_float_shortest_pub(d)
+                ));
+                if vm.current_exception.is_some() {
+                    return Err(Some(String::new()));
                 }
-            } else {
-                Err("Number must be of type GMP|string|int, float given".to_string())
             }
+            Ok(BigInt::from(l))
         }
-        Value::String(s) => {
-            // For operator overloading, strings must be integer strings (autodetect base).
-            parse_bigint_str_strict(&s.to_string_lossy(), 0)
-                .map_err(|_| ve("Number is not an integer string"))
-        }
-        Value::Reference(r) => operand_to_bigint_for_op(&r.borrow()),
-        _ => {
-            let type_name = value_type_display_for_gmp(val);
-            Err(format!(
+        Value::False => Ok(BigInt::zero()),
+        Value::True => Ok(BigInt::one()),
+        _ => Err(None),
+    }
+}
+
+/// binop_operator_helper()'s operand conversion with its TypeError.
+fn op_arg_or_type_error(vm: &mut Vm, val: &Value) -> Result<BigInt, String> {
+    op_arg(vm, val).map_err(|e| {
+        e.unwrap_or_else(|| {
+            format!(
                 "Number must be of type GMP|string|int, {} given",
-                type_name
-            ))
-        }
+                value_type_display_for_gmp(val)
+            )
+        })
+    })
+}
+
+/// zend_zval_type_name()
+fn zval_type_name(val: &Value) -> String {
+    match val {
+        Value::Reference(r) => zval_type_name(&r.borrow()),
+        Value::Object(o) => String::from_utf8_lossy(&o.borrow().class_name).into_owned(),
+        Value::True | Value::False => "bool".to_string(),
+        other => value_type_name_for_gmp(other).to_string(),
     }
 }
 
-/// Convert b to i64 for `<<`, `>>`, `**` (shift / pow). Returns the result
-/// classifier prefixed string on failure, matching PHP's `shift_operator_helper`.
-fn shift_operand_to_long(op_sigil: &str, b: &Value) -> Result<i64, String> {
-    let v = match b {
-        Value::Reference(r) => r.borrow().clone(),
-        _ => b.clone(),
+/// shift_operator_helper(): `**`, `<<` and `>>`.
+fn shift_operator_helper(vm: &mut Vm, op: &str, a: &Value, b: &Value) -> Result<Value, String> {
+    let typeof_failure = || {
+        format!(
+            "Unsupported operand types: {} {} {}",
+            zval_type_name(a),
+            op,
+            zval_type_name(b)
+        )
     };
-    if is_gmp_object(&v) {
-        // PHP casts GMP to int here (legacy behavior).
-        return Ok(get_gmp_value(&v).and_then(|n| n.to_i64()).unwrap_or(0));
+    let shift: i64 = match b.deref() {
+        Value::Long(n) => n,
+        v if is_gmp_object(&v) => gmp_to_long(&v).unwrap_or(0),
+        // zval_get_long()
+        Value::Double(d) => goro_core::value::Value::Double(d).to_long(),
+        Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
+            Some((goro_core::value::NumStr::Long(n), _)) => n,
+            _ => return Err(ve("Number is not an integer string")),
+        },
+        _ => return Err(typeof_failure()),
+    };
+    if shift < 0 {
+        return Err(ve(&format!(
+            "{} must be greater than or equal to 0",
+            if op == "**" { "Exponent" } else { "Shift" }
+        )));
     }
-    match v {
-        Value::Long(n) => Ok(n),
-        Value::Double(d) => Ok(d as i64),
-        Value::String(s) => {
-            // Must be a numeric integer string.
-            match parse_bigint_str_strict(&s.to_string_lossy(), 0) {
-                Ok(n) => Ok(n.to_i64().unwrap_or(0)),
-                Err(_) => Err(ve("Number is not an integer string")),
-            }
-        }
-        other => {
-            // Unsupported operand type: returns TypeError with specific format.
-            let type_name = value_type_display_for_gmp(&other);
-            Err(format!(
-                "Unsupported operand types: GMP {} {}",
-                op_sigil, type_name
-            ))
-        }
-    }
+    let n = match op_arg(vm, a) {
+        Ok(n) => n,
+        // A deprecation handler threw: that exception stays.
+        Err(_) if vm.current_exception.is_some() => return Err(String::new()),
+        Err(_) => return Err(typeof_failure()),
+    };
+    Ok(bigint_to_gmp_value(
+        vm,
+        match op {
+            "**" => n.pow(shift as u32),
+            "<<" => n << shift as u64,
+            // mpz_fdiv_q_2exp
+            _ => n >> shift as u64,
+        },
+    ))
 }
 
-/// Perform a GMP arithmetic operation and return the result as a GMP Value.
+/// gmp_do_operation(): the do_operation object handler.
 /// `op` is one of: "+", "-", "*", "/", "%", "**", "|", "&", "^", "<<", ">>"
-/// Returns None if the operation can't be performed (e.g., invalid types).
+/// Returns None if neither operand is a GMP object.
 pub fn gmp_do_operation(
     vm: &mut Vm,
     op: &str,
     a: &Value,
     b: &Value,
 ) -> Option<Result<Value, String>> {
-    let a_is_gmp = is_gmp_object(a);
-    let b_is_gmp = is_gmp_object(b);
-
-    if !a_is_gmp && !b_is_gmp {
+    if !is_gmp_object(a) && !is_gmp_object(b) {
         return None; // Not a GMP operation
     }
-
-    // For shift/pow operators, `b` must be an integer-like scalar (not a GMP
-    // on its own except via legacy cast). Use the shift helper.
-    if op == "**" || op == "<<" || op == ">>" {
-        // a must be GMP for these to make sense via the handler.
-        if !a_is_gmp {
-            // PHP only invokes do_operation when GMP is on the LHS for these
-            // ops; falling through preserves engine-level behavior.
-            return None;
-        }
-        let a_bi = match get_gmp_value(a) {
-            Some(v) => v,
-            None => return Some(Err(ve("Number is not an integer string"))),
-        };
-        let shift = match shift_operand_to_long(op, b) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(e)),
-        };
-        return Some(match op {
-            "**" => {
-                if shift < 0 {
-                    Err(ve("Exponent must be greater than or equal to 0"))
-                } else {
-                    Ok(bigint_to_gmp_value(vm, a_bi.pow(shift as u32)))
-                }
-            }
-            "<<" => {
-                if shift < 0 {
-                    Err(ve("Shift cannot be negative"))
-                } else {
-                    Ok(bigint_to_gmp_value(vm, &a_bi << shift as u64))
-                }
-            }
-            ">>" => {
-                if shift < 0 {
-                    Err(ve("Shift cannot be negative"))
-                } else {
-                    Ok(bigint_to_gmp_value(vm, &a_bi >> shift as u64))
-                }
-            }
-            _ => unreachable!(),
-        });
+    if matches!(op, "**" | "<<" | ">>") {
+        return Some(shift_operator_helper(vm, op, a, b));
     }
-
-    // Convert both operands to BigInt
-    let a_bi = if a_is_gmp {
-        match get_gmp_value(a) {
-            Some(v) => v,
-            None => return Some(Err(ve("Number is not an integer string"))),
-        }
-    } else {
-        match operand_to_bigint_for_op(a) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(e)),
-        }
+    if !matches!(op, "+" | "-" | "*" | "/" | "%" | "|" | "&" | "^") {
+        return None;
+    }
+    let x = match op_arg_or_type_error(vm, a) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
     };
-
-    let b_bi = if b_is_gmp {
-        match get_gmp_value(b) {
-            Some(v) => v,
-            None => return Some(Err(ve("Number is not an integer string"))),
-        }
-    } else {
-        match operand_to_bigint_for_op(b) {
-            Ok(v) => v,
-            Err(e) => return Some(Err(e)),
-        }
+    let y = match op_arg_or_type_error(vm, b) {
+        Ok(v) => v,
+        Err(e) => return Some(Err(e)),
     };
-
-    let result = match op {
-        "+" => Ok(&a_bi + &b_bi),
-        "-" => Ok(&a_bi - &b_bi),
-        "*" => Ok(&a_bi * &b_bi),
+    let r = match op {
+        "+" => x + y,
+        "-" => x - y,
+        "*" => x * y,
+        // mpz_tdiv_q
         "/" => {
-            if b_bi.is_zero() {
+            if y.is_zero() {
                 return Some(Err(dze("Division by zero")));
             }
-            // GMP division truncates toward zero
-            Ok(a_bi.div_floor(&b_bi))
+            x / y
         }
+        // mpz_mod: the result is never negative
         "%" => {
-            if b_bi.is_zero() {
+            if y.is_zero() {
                 return Some(Err(dze("Modulo by zero")));
             }
-            Ok(&a_bi % &b_bi)
+            x.mod_floor(&y.abs())
         }
-        "|" => Ok(&a_bi | &b_bi),
-        "&" => Ok(&a_bi & &b_bi),
-        "^" => Ok(&a_bi ^ &b_bi),
-        _ => return None,
+        "|" => x | y,
+        "&" => x & y,
+        _ => x ^ y,
     };
-
-    match result {
-        Ok(n) => Some(Ok(bigint_to_gmp_value(vm, n))),
-        Err(e) => Some(Err(e)),
-    }
+    Some(Ok(bigint_to_gmp_value(vm, r)))
 }
 
 /// Perform GMP unary operation: "~" (complement), "-" (negation), "+" (identity)
@@ -368,28 +341,33 @@ pub fn gmp_do_unary(vm: &mut Vm, op: &str, a: &Value) -> Option<Value> {
     }
 }
 
-/// Compare two values where at least one is GMP.
-/// Returns Some(ordering) if comparison is possible, None otherwise.
-pub fn gmp_compare(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    let a_gmp = is_gmp_object(a);
-    let b_gmp = is_gmp_object(b);
-    if !a_gmp && !b_gmp {
+/// gmp_compare(): None (ZEND_UNCOMPARABLE) after throwing when an operand
+/// is not usable.
+pub fn gmp_compare(vm: &mut Vm, a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    if !is_gmp_object(a) && !is_gmp_object(b) {
         return None;
     }
-    let a_bi = if a_gmp {
-        get_gmp_value(a)
-    } else {
-        operand_to_bigint(a)
-    };
-    let b_bi = if b_gmp {
-        get_gmp_value(b)
-    } else {
-        operand_to_bigint(b)
-    };
-    match (a_bi, b_bi) {
-        (Some(a), Some(b)) => Some(a.cmp(&b)),
-        _ => None,
+    // zend_compare(): (object, null) pairs never reach the handler.
+    if matches!(b.deref(), Value::Null | Value::Undef) {
+        return Some(std::cmp::Ordering::Greater);
     }
+    if matches!(a.deref(), Value::Null | Value::Undef) {
+        return Some(std::cmp::Ordering::Less);
+    }
+    let get = |vm: &mut Vm, v: &Value| match op_arg_or_type_error(vm, v) {
+        Ok(n) => Some(n),
+        Err(e) => {
+            if vm.current_exception.is_none() && !e.is_empty() {
+                let (class, msg) = Vm::classify_object_op_error(&e);
+                let exc = vm.create_exception(class, &msg, vm.current_line);
+                vm.current_exception = Some(exc);
+            }
+            None
+        }
+    };
+    let x = get(vm, a)?;
+    let y = get(vm, b)?;
+    Some(x.cmp(&y))
 }
 
 /// Convert a GMP object to its string representation (for __toString / concatenation)
@@ -423,25 +401,6 @@ pub fn gmp_to_double(val: &Value) -> Option<f64> {
         return None;
     }
     get_gmp_value(val).map(|n| n.to_f64().unwrap_or(0.0))
-}
-
-/// Convert a non-GMP operand to BigInt for operator overloading.
-/// Only accepts int and int-strings. Rejects float, array, object, etc.
-fn operand_to_bigint(val: &Value) -> Option<BigInt> {
-    match val {
-        Value::Long(n) => Some(BigInt::from(*n)),
-        Value::String(s) => {
-            let s_str = s.to_string_lossy();
-            let trimmed = s_str.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            // Must be a valid integer string
-            parse_bigint_str(trimmed, 10).ok()
-        }
-        Value::Reference(r) => operand_to_bigint(&r.borrow()),
-        _ => None,
-    }
 }
 
 fn value_type_name_for_gmp(val: &Value) -> &'static str {
@@ -562,89 +521,6 @@ fn parse_bigint_str_strict(s: &str, base: u32) -> Result<BigInt, String> {
                 b'a'..=b'z' => (ch - b'a' + 10) as u32,
                 b'A'..=b'Z' => (ch - b'A' + 36) as u32,
                 _ => return Err("invalid digit".to_string()),
-            };
-            result = result * &base_bi + BigInt::from(digit);
-        }
-        result
-    };
-
-    if negative { Ok(-n) } else { Ok(n) }
-}
-
-/// Parse a string to BigInt, supporting optional sign and base prefixes (0x, 0b, 0o).
-fn parse_bigint_str(s: &str, base: u32) -> Result<BigInt, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("empty string".to_string());
-    }
-
-    let bytes = s.as_bytes();
-    let (negative, start) = match bytes[0] {
-        b'-' => (true, 1),
-        b'+' => (false, 1),
-        _ => (false, 0),
-    };
-
-    if start >= bytes.len() {
-        return Err("empty string after sign".to_string());
-    }
-
-    // Handle "0x", "0b", "0o" prefixes
-    let (actual_base, digit_start) = if base == 0 || base == 16 || base == 2 || base == 8 {
-        if bytes.len() > start + 1 && bytes[start] == b'0' {
-            match bytes[start + 1] {
-                b'x' | b'X' if base == 0 || base == 16 => (16u32, start + 2),
-                b'b' | b'B' if base == 0 || base == 2 => (2u32, start + 2),
-                b'o' | b'O' if base == 0 || base == 8 => (8u32, start + 2),
-                _ if base == 0 => (10u32, start),
-                _ => (base, start),
-            }
-        } else if base == 0 {
-            (10u32, start)
-        } else {
-            (base, start)
-        }
-    } else {
-        (base, start)
-    };
-
-    let digit_str = &s[digit_start..];
-    if digit_str.is_empty() {
-        return Err("no digits after prefix".to_string());
-    }
-
-    // Validate all characters are valid for the base
-    for &ch in digit_str.as_bytes() {
-        let valid = if actual_base <= 10 {
-            ch >= b'0' && ch < b'0' + actual_base as u8
-        } else if actual_base <= 36 {
-            ch.is_ascii_digit()
-                || (ch >= b'a' && ch < b'a' + (actual_base - 10) as u8)
-                || (ch >= b'A' && ch < b'A' + (actual_base - 10) as u8)
-        } else {
-            // bases 37..=62: 0-9, a-z (10-35), A-Z (36-61)
-            ch.is_ascii_digit()
-                || ch.is_ascii_lowercase()
-                || (ch >= b'A' && ch < b'A' + (actual_base - 36) as u8)
-        };
-        if !valid {
-            return Err(format!("Invalid digit for base {}", actual_base));
-        }
-    }
-
-    let n = if actual_base <= 36 {
-        BigInt::parse_bytes(digit_str.as_bytes(), actual_base)
-            .ok_or_else(|| format!("Invalid number string: {}", s))?
-    } else {
-        // Manual parsing for bases 37..=62 (uppercase 10-35, lowercase 36-61)
-        let mut result = BigInt::zero();
-        let base_bi = BigInt::from(actual_base);
-        for &ch in digit_str.as_bytes() {
-            let digit = match ch {
-                b'0'..=b'9' => (ch - b'0') as u32,
-                b'A'..=b'Z' => (ch - b'A' + 10) as u32,
-                b'a'..=b'z' => (ch - b'a' + 36) as u32,
-                _ => return Err(format!("Invalid digit for base {}", actual_base)),
             };
             result = result * &base_bi + BigInt::from(digit);
         }
