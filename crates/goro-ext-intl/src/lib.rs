@@ -30,6 +30,8 @@ pub mod obj;
 pub mod zpp;
 // NumberFormatter / MessageFormatter internals
 pub mod decfmt;
+pub mod msgdate;
+pub mod msgpattern;
 pub mod numdata;
 mod numdata_tables;
 pub mod rbnf;
@@ -313,6 +315,9 @@ pub fn call_function(vm: &mut Vm, name: &str, imp: Imp, args: &[Value]) -> Resul
         owned = v;
         &owned[..]
     };
+    if msgformat::RESET_BEFORE_ZPP.contains(&name) {
+        error::reset_global();
+    }
     let Some(mut a) = zpp::parse(vm, name, stub, args) else {
         return Ok(Value::Null);
     };
@@ -402,6 +407,9 @@ fn run_method(
     let file = vm.current_file.clone();
     vm.call_stack
         .push((frame, file, line, args.to_vec(), this.is_some()));
+    if msgformat::RESET_BEFORE_ZPP.contains(&name.as_str()) {
+        error::reset_global();
+    }
     let r = match zpp::parse(vm, &name, stub, args) {
         Some(a) => {
             let mut call = Call {

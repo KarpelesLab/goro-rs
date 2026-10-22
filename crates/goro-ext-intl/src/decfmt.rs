@@ -1727,6 +1727,30 @@ impl DecimalFormat {
         self.format_dq(Dq::from_f64(v), None)
     }
 
+    /// The quantity as formatting rounds it (scale and precision; not in
+    /// scientific notation), with the fraction digits shown: what plural
+    /// rules select on (formatToDecimalQuantity()).
+    pub fn rounded(&self, mut q: Dq) -> (Dq, i32) {
+        let m = self.macros();
+        if !q.is_finite() {
+            return (q, 0);
+        }
+        if m.mag_mult != 0 {
+            q.shift(m.mag_mult);
+        }
+        if m.mult != 1 {
+            q.mul_int(m.mult);
+        }
+        if m.sci.is_some() {
+            return (q, 0);
+        }
+        let mfd = apply_prec(&mut q, &m.prec, m.mode).unwrap_or(0);
+        if m.max_int >= 0 {
+            q.truncate_int(m.max_int);
+        }
+        (q, mfd)
+    }
+
     pub fn format_i64(&self, v: i64) -> Result<String, i32> {
         self.format_dq(Dq::from_i64(v), None)
     }
@@ -2533,4 +2557,196 @@ fn apply_prec(q: &mut Dq, p: &Prec, mode: i32) -> Result<i32, i32> {
             Ok(*min_frac)
         }
     }
+}
+
+/// U_NUMBER_SKELETON_SYNTAX_ERROR
+pub const U_NUMBER_SKELETON_SYNTAX_ERROR: i32 = 65811;
+
+/// What a number skeleton asks for beyond the DecimalFormat properties.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SkeletonExtra {
+    /// compact notation: Some(long)
+    pub compact: Option<bool>,
+}
+
+/// Apply ICU number skeleton tokens (NumberFormatter::forSkeleton()) over
+/// a formatter opened with the locale's decimal pattern; the unit tokens
+/// switch to the locale's percent / currency patterns (`percent`,
+/// `currency` from LocaleData).
+pub fn apply_skeleton(
+    df: &mut DecimalFormat,
+    data: &numdata::LocaleData,
+    skeleton: &str,
+) -> Result<SkeletonExtra, i32> {
+    let mut extra = SkeletonExtra::default();
+    let bad = Err(U_NUMBER_SKELETON_SYNTAX_ERROR);
+    // the NumberFormatter defaults: maximum 6 fraction digits
+    df.props.min_frac = -1;
+    df.props.max_frac = -1;
+    let mut sign: Option<&str> = None;
+    for tok in skeleton.split_whitespace() {
+        let (stem, opt) = match tok.split_once('/') {
+            Some((a, b)) => (a, Some(b)),
+            None => (tok, None),
+        };
+        match stem {
+            // (a unit: the value is not scaled, unlike %x100)
+            "percent" | "%" | "%x100" | "permille" => {
+                let p = if stem == "permille" {
+                    "#,##0‰"
+                } else {
+                    &data.percent
+                };
+                apply_pattern(&mut df.props, p, 2)?;
+                if stem != "%x100" {
+                    df.props.magnitude_multiplier = 0;
+                }
+                df.props.min_frac = -1;
+                df.props.max_frac = -1;
+            }
+            "base-unit" => {}
+            "currency" => {
+                let Some(code) = opt.filter(|c| c.len() == 3) else {
+                    return bad;
+                };
+                apply_pattern(&mut df.props, &data.currency, 1)?;
+                df.set_currency(code);
+            }
+            "measure-unit"
+            | "unit"
+            | "per-measure-unit"
+            | "unit-width-narrow"
+            | "unit-width-short"
+            | "unit-width-full-name"
+            | "unit-width-iso-code"
+            | "unit-width-hidden"
+            | "numbering-system"
+            | "latin"
+            | "usage" => {}
+            "group-off" | ",_" => df.props.grouping_used = false,
+            "group-min2" | ",?" | "group-auto" | "group-on-aligned" | ",!" | "group-thousands"
+            | ",=" => df.props.grouping_used = true,
+            "sign-always" | "+!" => sign = Some("+"),
+            "sign-except-zero" | "+?" => sign = Some("+"),
+            "sign-auto" | "sign-never" | "+_" | "sign-negative" | "+-" => {}
+            "sign-accounting" | "()" => {
+                let pre = df.props.pos_prefix_pat.clone().unwrap_or_default();
+                let suf = df.props.pos_suffix_pat.clone().unwrap_or_default();
+                df.props.neg_prefix_pat = Some(format!("({}", pre));
+                df.props.neg_suffix_pat = Some(format!("{})", suf));
+            }
+            "decimal-always" => df.props.decimal_always = true,
+            "decimal-auto" => df.props.decimal_always = false,
+            "compact-short" | "K" => extra.compact = Some(false),
+            "compact-long" | "KK" => extra.compact = Some(true),
+            "notation-simple" => {}
+            "scientific" | "engineering" | "E0" | "EE0" => {
+                df.props.min_exp_digits = 1;
+                df.props.min_int = 1;
+                df.props.max_int = if stem.starts_with("engineering") || stem == "EE0" {
+                    3
+                } else {
+                    1
+                };
+            }
+            "precision-integer" | "." => {
+                df.props.min_frac = 0;
+                df.props.max_frac = 0;
+            }
+            "precision-unlimited" => {
+                df.props.min_frac = 0;
+                df.props.max_frac = -1;
+            }
+            "precision-currency-standard" | "precision-currency-cash" => {}
+            "precision-increment" => {
+                let Some(v) = opt.and_then(|o| o.parse::<f64>().ok()) else {
+                    return bad;
+                };
+                df.props.rounding_increment = v;
+                let fd = opt
+                    .unwrap_or("")
+                    .split('.')
+                    .nth(1)
+                    .map(|f| f.len())
+                    .unwrap_or(0) as i32;
+                df.props.min_frac = fd;
+                df.props.max_frac = fd;
+            }
+            "scale" => {
+                let Some(v) = opt.and_then(|o| o.parse::<f64>().ok()) else {
+                    return bad;
+                };
+                if v.fract() == 0.0 {
+                    df.set_attribute(9, v as i64);
+                }
+            }
+            "integer-width" | "integer-width-trunc" => {
+                let o = opt.unwrap_or("");
+                let (plus, body) = match o.strip_prefix(['+', '*']) {
+                    Some(b) => (true, b),
+                    None => (false, o),
+                };
+                let zeros = body.chars().filter(|&c| c == '0').count() as i32;
+                let hashes = body.chars().filter(|&c| c == '#').count() as i32;
+                df.props.min_int = zeros;
+                df.props.max_int = if plus { -1 } else { zeros + hashes };
+            }
+            s if s.starts_with("rounding-mode-") => {
+                let m = match &s[14..] {
+                    "ceiling" => ROUND_CEILING,
+                    "floor" => ROUND_FLOOR,
+                    "down" => ROUND_DOWN,
+                    "up" => ROUND_UP,
+                    "half-even" => ROUND_HALFEVEN,
+                    "half-down" => ROUND_HALFDOWN,
+                    "half-up" => ROUND_HALFUP,
+                    "unnecessary" => ROUND_UNNECESSARY,
+                    "half-odd" => ROUND_HALF_ODD,
+                    "half-ceiling" => ROUND_HALF_CEILING,
+                    "half-floor" => ROUND_HALF_FLOOR,
+                    _ => return bad,
+                };
+                df.props.rounding_mode = Some(m);
+            }
+            s if s.starts_with('.') => {
+                // fraction precision: .00, .0#, .##, .00*, .00+
+                let body = &s[1..];
+                let (body, unlimited) = match body.strip_suffix(['*', '+']) {
+                    Some(b) => (b, true),
+                    None => (body, false),
+                };
+                if !body.chars().all(|c| c == '0' || c == '#') {
+                    return bad;
+                }
+                let zeros = body.chars().take_while(|&c| c == '0').count() as i32;
+                df.props.min_frac = zeros;
+                df.props.max_frac = if unlimited { -1 } else { body.len() as i32 };
+            }
+            s if s.starts_with('@') => {
+                let (body, unlimited) = match s.strip_suffix(['*', '+']) {
+                    Some(b) => (b, true),
+                    None => (s, false),
+                };
+                if !body.chars().all(|c| c == '@' || c == '#') {
+                    return bad;
+                }
+                let at = body.chars().take_while(|&c| c == '@').count() as i32;
+                df.props.min_sig = at;
+                df.props.max_sig = if unlimited { -1 } else { body.len() as i32 };
+            }
+            s if s.starts_with('0') && s.chars().all(|c| c == '0') => {
+                df.props.min_int = s.len() as i32;
+            }
+            _ => return bad,
+        }
+    }
+    if let Some(sg) = sign {
+        let pre = df.props.pos_prefix_pat.clone().unwrap_or_default();
+        df.props.pos_prefix_pat = Some(format!("{}{}", sg, pre));
+        if df.props.neg_prefix_pat.is_none() {
+            df.props.neg_prefix_pat = Some(format!("-{}", pre));
+            df.props.neg_suffix_pat = df.props.pos_suffix_pat.clone();
+        }
+    }
+    Ok(extra)
 }

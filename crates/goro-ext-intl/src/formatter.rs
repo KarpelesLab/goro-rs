@@ -290,7 +290,7 @@ fn spellout(tag: &str, q: &Dq, df: &DecimalFormat) -> String {
 /// %duration (English RBNF): seconds as h:mm:ss.
 fn duration(q: &Dq, df: &DecimalFormat) -> String {
     let mut t = q.clone();
-    let _ = t.round_at(0, crate::decfmt::ROUND_DOWN);
+    let _ = t.round_at(0, crate::decfmt::ROUND_HALFEVEN);
     let neg = t.neg && !t.is_zero();
     t.neg = false;
     let v = t.to_i64().unwrap_or(0);
