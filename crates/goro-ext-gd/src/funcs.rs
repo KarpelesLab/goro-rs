@@ -12,7 +12,6 @@ use crate::zpp::{self, Arg, Func, Img, err};
 use crate::*;
 
 const INT_MAX: i64 = i32::MAX as i64;
-const INT_MIN: i64 = i32::MIN as i64;
 
 fn args(
     vm: &mut Vm,
@@ -1225,9 +1224,4 @@ fn imageresolution(vm: &mut Vm, a: &[Value]) -> R {
             Ok(long_list(&[im.res_x as i64, im.res_y as i64]))
         }
     }
-}
-
-#[allow(dead_code)]
-fn unused(_: i64) -> i64 {
-    INT_MIN
 }

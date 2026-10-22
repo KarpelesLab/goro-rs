@@ -7,7 +7,7 @@ use goro_core::vm::Vm;
 use goro_ext_standard::ext_io;
 use goro_gd::{Font, Image};
 
-use crate::zpp::{self, Arg, Func, err};
+use crate::zpp::{self, Arg, Func};
 use crate::*;
 
 fn args(
@@ -657,9 +657,4 @@ fn load_font(vm: &mut Vm, f: &Func, id: i64) -> Option<Font> {
         h,
         data,
     })
-}
-
-#[allow(dead_code)]
-fn unused(vm: &Vm) -> goro_core::vm::VmError {
-    err(vm)
 }
