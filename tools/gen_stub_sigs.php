@@ -37,6 +37,8 @@ $dirs = [
     'ext/curl' => 'curl',
     'ext/sockets' => 'sockets',
     'ext/mysqli' => 'mysqli',
+    'ext/pdo' => 'PDO',
+    'ext/pdo_mysql' => 'pdo_mysql',
     'ext/uri' => 'uri',
     'ext/bcmath' => 'bcmath',
     'ext/filter' => 'filter',
@@ -88,8 +90,22 @@ function parse_file(string $path, string $ext): void {
     global $classes, $functions, $constants;
     $toks = token_get_all(file_get_contents($path));
     // Drop whitespace but keep comments (doc comments carry tags).
+    // Preprocessor conditions are kept, except the blocks a mysqlnd build
+    // (PDO_USE_MYSQLND) leaves out.
     $t = [];
+    $skip = 0;
     foreach ($toks as $tok) {
+        if (is_array($tok) && $tok[0] === T_COMMENT && $tok[1][0] === '#') {
+            $dir = trim($tok[1]);
+            if ($skip > 0) {
+                if (preg_match('/^#\s*if/', $dir)) $skip++;
+                elseif (preg_match('/^#\s*endif/', $dir)) $skip--;
+                continue;
+            }
+            if (preg_match('/^#\s*ifndef\s+PDO_USE_MYSQLND\b/', $dir)) $skip = 1;
+            continue;
+        }
+        if ($skip > 0) continue;
         if (is_array($tok)) {
             if ($tok[0] === T_WHITESPACE || $tok[0] === T_OPEN_TAG) {
                 $t[] = [T_WHITESPACE, ' '];
