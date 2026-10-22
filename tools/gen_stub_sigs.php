@@ -61,10 +61,15 @@ $dirs = [
     'ext/fileinfo' => 'fileinfo',
     'ext/sodium' => 'sodium',
     'ext/soap' => 'soap',
+    'ext/intl' => 'intl',
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',
     'ext/dom' => 'dom',
 ];
+
+// U_ICU_VERSION_MAJOR_NUM goro-ext-intl reports (its data: intl crate,
+// CLDR 48, ICU 78).
+const ICU_VERSION_MAJOR = 78;
 
 const F_PUBLIC = 1;
 const F_PROTECTED = 2;
@@ -109,21 +114,31 @@ function parse_file(string $path, string $ext): void {
     $toks = token_get_all(file_get_contents($path));
     // Drop whitespace but keep comments (doc comments carry tags).
     // Preprocessor conditions are kept, except the blocks a mysqlnd build
-    // (PDO_USE_MYSQLND) leaves out.
+    // (PDO_USE_MYSQLND) leaves out and the ICU version checks, evaluated
+    // for the ICU version ext/intl reports (INTL_ICU_VERSION).
     $t = [];
-    $skip = 0;
+    // One entry per open #if: [whether the enclosing code is kept, whether
+    // the condition held, whether the current branch is kept].
+    $stack = [];
+    $keep = true;
     foreach ($toks as $tok) {
         if (is_array($tok) && $tok[0] === T_COMMENT && $tok[1][0] === '#') {
             $dir = trim($tok[1]);
-            if ($skip > 0) {
-                if (preg_match('/^#\s*if/', $dir)) $skip++;
-                elseif (preg_match('/^#\s*endif/', $dir)) $skip--;
-                continue;
+            if (preg_match('/^#\s*if/', $dir)) {
+                $cond = true;
+                if (preg_match('/^#\s*ifndef\s+PDO_USE_MYSQLND\b/', $dir)) $cond = false;
+                elseif (preg_match('/^#\s*if\s+U_ICU_VERSION_MAJOR_NUM\s*>=\s*(\d+)/', $dir, $m)) $cond = ICU_VERSION_MAJOR >= (int)$m[1];
+                $stack[] = [$keep, $cond];
+                $keep = $keep && $cond;
+            } elseif (preg_match('/^#\s*else/', $dir) && $stack) {
+                [$outer, $cond] = $stack[count($stack) - 1];
+                $keep = $outer && !$cond;
+            } elseif (preg_match('/^#\s*endif/', $dir) && $stack) {
+                [$keep] = array_pop($stack);
             }
-            if (preg_match('/^#\s*ifndef\s+PDO_USE_MYSQLND\b/', $dir)) $skip = 1;
             continue;
         }
-        if ($skip > 0) continue;
+        if (!$keep) continue;
         if (is_array($tok)) {
             if ($tok[0] === T_WHITESPACE || $tok[0] === T_OPEN_TAG) {
                 $t[] = [T_WHITESPACE, ' '];

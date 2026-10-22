@@ -42,6 +42,7 @@ members = [
     "crates/goro-ext-fileinfo",
     "crates/goro-ext-sodium",
     "crates/goro-ext-soap",
+    "crates/goro-ext-intl",
 ]
 resolver = "2"
 
@@ -106,6 +107,7 @@ goro-ext-exif = { path = "crates/goro-ext-exif" }
 goro-ext-zip = { path = "crates/goro-ext-zip" }
 goro-ext-fileinfo = { path = "crates/goro-ext-fileinfo" }
 goro-ext-sodium = { path = "crates/goro-ext-sodium" }
+goro-ext-intl = { path = "crates/goro-ext-intl" }
 
 [features]
 default = ["ext-standard"]

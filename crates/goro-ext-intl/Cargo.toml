@@ -1,0 +1,19 @@
+[package]
+name = "goro-ext-intl"
+version = "0.1.0"
+edition = "2024"
+description = "PHP intl extension for goro-rs, over the pure-Rust intl crate"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ext-date = { path = "../goro-ext-date" }
+# The ICU analog everything is built on (KarpelesLab/intlrs).
+intl = "=0.6.4"
+# ICU4X, for what intl lacks: collation tailorings combined with the
+# collator attributes, raw (one-level) decomposition mappings.
+icu_normalizer = "2.3"
+icu_collator = "2.3"
+icu_locale_core = "2.3"

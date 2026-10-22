@@ -467,7 +467,14 @@ impl Compiler {
                     // mysqli_stmt::bind_result method form: (&$var1, &$var2, ...)
                     (b"__mysqli_stmt_bind_result_method", _) => true,
                     (b"__ziparchive_getexternalattributes_method", 1..=2) => true,
-                    _ => false,
+                    // ext/intl: as its stubs declare (collator_sort(),
+                    // numfmt_parse(), grapheme_extract(), idn_to_ascii()...)
+                    (name, p) => crate::stubs::find_function(name).is_some_and(|f| {
+                        f.ext == "intl"
+                            && f.args
+                                .get(p)
+                                .is_some_and(|a| a.flags & crate::stubs::A_BY_REF != 0)
+                    }),
                 }
             }
             None => false,

@@ -177,6 +177,27 @@ fn identical_scalar(a: &Value, b: &Value) -> bool {
 }
 
 impl Vm {
+    /// ZEND_TRY_ASSIGN_REF_*() of an internal function: store `value`
+    /// through the by-reference argument `r`, coerced to the typed
+    /// properties the reference is bound to (in the caller's strict_types
+    /// mode). On a type mismatch the TypeError is thrown (left in
+    /// current_exception) and the reference is unchanged: Err(()).
+    #[allow(clippy::result_unit_err)]
+    pub fn try_assign_ref(&mut self, r: &Rc<RefCell<Value>>, value: Value) -> Result<(), ()> {
+        let mut value = value;
+        if is_typed(r) {
+            let strict = self.caller_strict_types;
+            if let Err(msg) = self.typed_ref_verify(r, &mut value, strict) {
+                let line = self.current_line;
+                let e = self.create_exception(b"TypeError", &msg, line);
+                self.current_exception = Some(e);
+                return Err(());
+            }
+        }
+        *r.borrow_mut() = value;
+        Ok(())
+    }
+
     /// The type source a typed property slot contributes (None: untyped).
     pub(crate) fn typed_ref_source_for(
         &self,

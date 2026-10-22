@@ -47,6 +47,7 @@ pub fn register_extensions(vm: &mut Vm) {
     goro_ext_zip::register(vm);
     goro_ext_fileinfo::register(vm);
     goro_ext_sodium::register(vm);
+    goro_ext_intl::register(vm);
     vm.register_extension(b"simplexml");
     vm.register_extension(b"tokenizer");
     vm.register_extension(b"pcre");
