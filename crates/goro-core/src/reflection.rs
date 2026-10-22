@@ -10334,6 +10334,7 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         "sysvshm" => &["SysvSharedMemory"],
         "sysvmsg" => &["SysvMessageQueue"],
         "zip" => &["ZipArchive"],
+        "gd" => &["GdImage", "GdFont"],
         "fileinfo" => &["finfo"],
         "filter" => &["Filter\\FilterException", "Filter\\FilterFailedException"],
         "sodium" => &["SodiumException"],
@@ -10368,6 +10369,7 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
 fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
     match ext {
         "bcmath" => &["bcmath.scale"],
+        "gd" => &["gd.jpeg_ignore_warning"],
         "filter" => &["filter.default", "filter.default_flags"],
         "exif" => &[
             "exif.encode_unicode",
@@ -12895,7 +12897,7 @@ pub fn reflection_attribute_method(
 fn get_function_extension(func_name: &str) -> Option<&'static str> {
     // Extensions whose functions are only known from their stubs.
     if let Some(f) = crate::stubs::find_function(func_name.as_bytes()) {
-        if matches!(f.ext, "exif" | "zip" | "fileinfo") {
+        if matches!(f.ext, "exif" | "zip" | "fileinfo" | "gd") {
             return Some(f.ext);
         }
     }

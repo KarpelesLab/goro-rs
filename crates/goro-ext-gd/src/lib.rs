@@ -33,7 +33,7 @@ pub const PHP_GD_VERSION_STRING: &str = "bundled (2.1.0 compatible)";
 pub type R = Result<Value, VmError>;
 
 /// The image format support compiled in.
-pub const HAVE_JPG: bool = false;
+pub const HAVE_JPG: bool = true;
 pub const HAVE_WEBP: bool = false;
 pub const HAVE_AVIF: bool = false;
 pub const HAVE_XPM: bool = true;
@@ -126,18 +126,35 @@ fn h_clone(vm: &mut Vm, src: &Obj, _dst: &Obj) {
 }
 
 /// zend_objects_not_comparable
-fn h_compare(_a: &Value, _b: &Value) -> Option<i64> {
-    Some(2)
+fn h_compare(a: &Value, b: &Value) -> Option<i64> {
+    // zend_compare() treats an object as equal to itself first
+    match (a.deref(), b.deref()) {
+        (Value::Object(x), Value::Object(y)) if Rc::ptr_eq(&x, &y) => Some(0),
+        _ => Some(2),
+    }
+}
+
+/// @strict-properties: no dynamic properties
+fn h_write_property(vm: &mut Vm, o: &Obj, name: &[u8], _v: &Value) -> bool {
+    let m = format!(
+        "Cannot create dynamic property {}::${}",
+        goro_core::value::display_class_name(&o.borrow().class_name),
+        String::from_utf8_lossy(name)
+    );
+    zpp::throw(vm, b"Error", &m);
+    true
 }
 
 static IMAGE_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
     clone_obj: Some(h_clone),
     compare: Some(h_compare),
+    write_property: Some(h_write_property),
     ..NativeObjectHandlers::EMPTY
 };
 
 static FONT_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
     clone_obj: Some(h_clone),
+    write_property: Some(h_write_property),
     ..NativeObjectHandlers::EMPTY
 };
 
@@ -157,11 +174,6 @@ pub fn font_of(o: &Obj) -> Option<Rc<Font>> {
     Some(d.font.clone())
 }
 
-thread_local! {
-    /// Set while the extension itself instantiates its classes.
-    static CREATING: RefCell<bool> = const { RefCell::new(false) };
-}
-
 fn new_native_object(
     vm: &mut Vm,
     class: &[u8],
@@ -173,9 +185,6 @@ fn new_native_object(
     o.native = Some(NativeData { data, handlers });
     let o = Rc::new(RefCell::new(o));
     goro_core::gc::track_object(&o);
-    CREATING.with(|c| *c.borrow_mut() = true);
-    vm.run_object_create_hook(&o);
-    CREATING.with(|c| *c.borrow_mut() = false);
     Value::Object(o)
 }
 
@@ -201,16 +210,27 @@ pub fn wrap_font(vm: &mut Vm, font: Font) -> Value {
 }
 
 /// get_constructor(): the classes cannot be instantiated with `new`.
-fn create_object(vm: &mut Vm, o: &Obj) {
-    if CREATING.with(|c| *c.borrow()) {
-        return;
+fn ctor_call(
+    vm: &mut Vm,
+    class: &[u8],
+    method: &[u8],
+    _called: &[u8],
+    _this: Option<&Value>,
+    _args: &[Value],
+) -> Value {
+    if method.eq_ignore_ascii_case(b"__construct") {
+        let name = if class.eq_ignore_ascii_case(b"gdfont") {
+            "GdFont"
+        } else {
+            "GdImage"
+        };
+        let m = format!(
+            "You cannot initialize a {} object except through helper functions",
+            name
+        );
+        zpp::throw(vm, b"Error", &m);
     }
-    let class = goro_core::value::display_class_name(&o.borrow().class_name).to_string();
-    let m = format!(
-        "You cannot initialize a {} object except through helper functions",
-        class
-    );
-    zpp::throw(vm, b"Error", &m);
+    Value::Null
 }
 
 // ---------------------------------------------------------------------------
@@ -337,11 +357,25 @@ pub fn register(vm: &mut Vm) {
     }
     vm.register_extension(NAME);
     for class in [&b"GdImage"[..], b"GdFont"] {
-        let mut ce = ClassEntry::new(class.to_vec());
+        let mut ce = match goro_core::stubs::class_entry(vm, class) {
+            Some(stub) => stub.clone(),
+            None => ClassEntry::new(class.to_vec()),
+        };
         ce.is_final = true;
         let lower = class.to_ascii_lowercase();
         vm.classes.insert(lower.clone(), ce);
-        vm.object_create_handlers.insert(lower, create_object);
+        vm.native_class_handlers.insert(
+            lower,
+            goro_core::vm::NativeClassHandler {
+                has_method: |_c, m, _s| m.eq_ignore_ascii_case(b"__construct"),
+                call: ctor_call,
+                prop_added: None,
+                prop_write: None,
+                compare_check: None,
+                prop_read: None,
+                param_names: None,
+            },
+        );
     }
     let mut names = Vec::new();
     for (k, v) in long_consts() {

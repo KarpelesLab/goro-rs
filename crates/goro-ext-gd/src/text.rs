@@ -83,7 +83,11 @@ fn common(vm: &mut Vm, name: &'static str, a: &[Value], draw: bool) -> R {
     let mut strex = ft::FtStringExtra::default();
     let have_ext = matches!(ext, Arg::Arr(_));
     if let Arg::Arr(arr) = &ext {
-        let entries: Vec<(ArrayKey, Value)> = arr.borrow().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         // (a packed array has no string keys)
         for (k, v) in &entries {
             if let ArrayKey::String(s) = k {

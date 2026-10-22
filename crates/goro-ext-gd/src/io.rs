@@ -40,9 +40,14 @@ pub enum Kind {
 }
 
 /// The ...Ctx() decoder of a format; None when it is not compiled in.
-fn decode(kind: Kind, data: &[u8], part: (i32, i32, i32, i32), vm: &Vm) -> Option<Option<Image>> {
+fn decode(
+    kind: Kind,
+    data: &[u8],
+    part: (i32, i32, i32, i32),
+    jpeg_ignore: bool,
+) -> Option<Option<Image>> {
     use goro_gd::*;
-    let _ = vm;
+
     Some(match kind {
         Kind::Png => png::create_from_png(data),
         Kind::Gif => gif_in::create_from_gif(data),
@@ -54,7 +59,8 @@ fn decode(kind: Kind, data: &[u8], part: (i32, i32, i32, i32), vm: &Vm) -> Optio
         Kind::Gd2Part => gd2::create_from_gd2_part(data, part.0, part.1, part.2, part.3),
         Kind::Bmp => bmp::create_from_bmp(data),
         Kind::Tga => tga::create_from_tga(data),
-        Kind::Jpg | Kind::Webp | Kind::Avif => return None,
+        Kind::Jpg => jpeg::create_from_jpeg(data, jpeg_ignore),
+        Kind::Webp | Kind::Avif => return None,
     })
 }
 
@@ -80,6 +86,8 @@ const FUNCTIONS: &[(&str, goro_core::vm::BuiltinFn)] = &[
     ("imagecreatefrompng", imagecreatefrompng),
     ("imagepng", imagepng),
     ("imagecreatefromgif", imagecreatefromgif),
+    ("imagecreatefromjpeg", imagecreatefromjpeg),
+    ("imagejpeg", imagejpeg),
     ("imagecreatefromxbm", imagecreatefromxbm),
     ("imagecreatefromxpm", imagecreatefromxpm),
     ("imagecreatefromwbmp", imagecreatefromwbmp),
@@ -132,6 +140,7 @@ fn create_from(vm: &mut Vm, name: &'static str, a: &[Value], kind: Kind) -> R {
         return Ok(Value::False);
     };
     let data = ext_io::read_all(vm, id);
+    let jpeg_ignore = !ext_io::meta(vm, id).is_stdio() || jpeg_ignore_warning(vm);
     if data.len() > i32::MAX as usize {
         f.warn(
             vm,
@@ -140,7 +149,7 @@ fn create_from(vm: &mut Vm, name: &'static str, a: &[Value], kind: Kind) -> R {
         ext_io::close(vm, id);
         return Ok(Value::False);
     }
-    let im = decode(kind, &data, part, vm).flatten();
+    let im = decode(kind, &data, part, jpeg_ignore).flatten();
     flush_errors(vm, &f);
     ext_io::close(vm, id);
     match im {
@@ -161,6 +170,44 @@ fn create_from(vm: &mut Vm, name: &'static str, a: &[Value], kind: Kind) -> R {
 
 fn imagecreatefrompng(vm: &mut Vm, a: &[Value]) -> R {
     create_from(vm, "imagecreatefrompng", a, Kind::Png)
+}
+
+/// INI_INT("gd.jpeg_ignore_warning")
+fn jpeg_ignore_warning(vm: &Vm) -> bool {
+    let v = vm
+        .constants
+        .get(&b"gd.jpeg_ignore_warning"[..])
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
+    // ZEND_ATOL()
+    let s = String::from_utf8_lossy(&v);
+    let t = s.trim_start();
+    let end = t
+        .char_indices()
+        .take_while(|&(i, c)| c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+')))
+        .map(|(i, c)| i + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    t[..end].parse::<i64>().unwrap_or(0) != 0
+}
+
+fn imagecreatefromjpeg(vm: &mut Vm, a: &[Value]) -> R {
+    create_from(vm, "imagecreatefromjpeg", a, Kind::Jpg)
+}
+
+fn imagejpeg(vm: &mut Vm, a: &[Value]) -> R {
+    let (f, a) = args(vm, "imagejpeg", "O|z!l", a)?;
+    let im = a[0].img();
+    let quality = a[2].long_or(-1);
+    let Some(sink) = output_context(vm, &f, &a[1], 2)? else {
+        return Ok(Value::False);
+    };
+    if !(-1..=100).contains(&quality) {
+        sink.finish(vm);
+        return Err(f.value_error(vm, 3, "must be at between -1 and 100"));
+    }
+    let data = goro_gd::jpeg::image_jpeg(&im.borrow(), quality as i32);
+    emit(vm, &f, sink, data)
 }
 
 fn imagecreatefromgif(vm: &mut Vm, a: &[Value]) -> R {
@@ -241,7 +288,7 @@ fn imagecreatefromstring(vm: &mut Vm, a: &[Value]) -> R {
         f.warn(vm, "Data is not in a recognized format");
         return Ok(Value::False);
     };
-    let Some(im) = decode(kind, &data, (0, 0, 0, 0), vm) else {
+    let Some(im) = decode(kind, &data, (0, 0, 0, 0), true) else {
         f.warn(
             vm,
             &format!("No {} support in this PHP build", kind_name(kind)),
