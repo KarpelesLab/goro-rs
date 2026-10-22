@@ -612,6 +612,7 @@ pub static MYSQL_STMT_METHODS: StmtMethods = StmtMethods {
     fetcher: stmt_fetch,
     describer: stmt_describe,
     get_col: stmt_get_col,
+    get_col_typed: None,
     param_hook: Some(stmt_param_hook),
     set_attribute: None,
     get_attribute: None,

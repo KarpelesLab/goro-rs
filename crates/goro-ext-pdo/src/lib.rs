@@ -10,6 +10,7 @@ pub mod lob;
 pub mod mysql;
 pub mod objects;
 pub mod parser;
+pub mod pgsql;
 #[rustfmt::skip]
 pub mod scanner;
 pub mod sqlstate;
@@ -23,7 +24,7 @@ use goro_core::value::Value;
 use goro_core::vm::{NativeClassHandler, Vm, VmError};
 use goro_ext_mysqli::zpp::Func;
 
-pub use parser::{EOI, T_BIND, T_BIND_POS, T_TEXT};
+pub use parser::{EOI, T_BIND, T_BIND_POS, T_CUSTOM_QUOTE, T_ESCAPED_QUESTION, T_TEXT};
 
 use crate::core::*;
 
@@ -127,12 +128,34 @@ const METHODS: &[(&str, &str, Impl, bool)] = &[
         mysql::get_warning_count,
         false,
     ),
+    (
+        "Pdo\\Pgsql",
+        "escapeIdentifier",
+        pgsql::escape_identifier,
+        false,
+    ),
+    ("Pdo\\Pgsql", "copyFromArray", pgsql::copy_from_array, false),
+    ("Pdo\\Pgsql", "copyFromFile", pgsql::copy_from_file, false),
+    ("Pdo\\Pgsql", "copyToArray", pgsql::copy_to_array, false),
+    ("Pdo\\Pgsql", "copyToFile", pgsql::copy_to_file, false),
+    ("Pdo\\Pgsql", "lobCreate", pgsql::lob_create, false),
+    ("Pdo\\Pgsql", "lobOpen", pgsql::lob_open, false),
+    ("Pdo\\Pgsql", "lobUnlink", pgsql::lob_unlink, false),
+    ("Pdo\\Pgsql", "getNotify", pgsql::get_notify, false),
+    ("Pdo\\Pgsql", "getPid", pgsql::get_pid, false),
+    (
+        "Pdo\\Pgsql",
+        "setNoticeCallback",
+        pgsql::set_notice_callback,
+        false,
+    ),
 ];
 
 /// The internal ancestors of a native class, nearest first
 fn native_chain(class_lower: &[u8]) -> &'static [&'static str] {
     match class_lower {
         b"pdo\\mysql" => &["Pdo\\Mysql", "PDO"],
+        b"pdo\\pgsql" => &["Pdo\\Pgsql", "PDO"],
         b"pdo" => &["PDO"],
         b"pdostatement" => &["PDOStatement"],
         _ => &[],
@@ -169,7 +192,16 @@ fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
     if m == b"__construct" {
         return false;
     }
-    if is_connect(&m) && matches!(class, b"pdo" | b"pdo\\mysql") {
+    if is_connect(&m) && matches!(class, b"pdo" | b"pdo\\mysql" | b"pdo\\pgsql") {
+        return true;
+    }
+    // the driver methods (dbh_method_get): resolved against the handle
+    if !is_static
+        && matches!(class, b"pdo" | b"pdo\\mysql" | b"pdo\\pgsql")
+        && pgsql::EXT_METHODS
+            .iter()
+            .any(|(n, _)| n.as_bytes().eq_ignore_ascii_case(&m))
+    {
         return true;
     }
     match find_method(class, &m) {
@@ -256,6 +288,28 @@ fn call_method(
             args,
             |vm, f, a| dbh::pdo_connect(vm, f, a, &called),
         );
+    }
+    if pgsql::EXT_METHODS
+        .iter()
+        .any(|(n, _)| n.as_bytes().eq_ignore_ascii_case(&ml))
+        && find_method(class, &ml).is_none()
+    {
+        let this_o = this_obj(this);
+        if let Some(r) = pgsql::call_ext_method(vm, &ml, this_o.as_ref(), args) {
+            return r;
+        }
+        let cname = match &this_o {
+            Some(o) => goro_core::value::display_class_name(&o.borrow().class_name),
+            None => "PDO".to_string(),
+        };
+        let name = pgsql::EXT_METHODS
+            .iter()
+            .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(&ml))
+            .map(|(n, _)| *n)
+            .unwrap_or("");
+        let msg = format!("Call to undefined method {}::{}()", cname, name);
+        throw(vm, b"Error", &msg);
+        return Value::Null;
     }
     let m = match find_method(class, &ml) {
         Some(m) => m,
@@ -443,7 +497,10 @@ fn register_constants(vm: &mut Vm) {
         );
         list.push((old.into_bytes(), Value::Long(*v), Some(msg)));
     }
+    list.extend(pgsql::pdo_constants());
     vm.ext_class_constants.insert(b"pdo".to_vec(), list);
+    vm.ext_class_constants
+        .insert(b"pdo\\pgsql".to_vec(), pgsql::class_constants());
     let my: Vec<(Vec<u8>, Value, Option<String>)> = mysql::CONSTANTS
         .iter()
         .map(|(n, v)| (n.as_bytes().to_vec(), Value::Long(*v), None))
@@ -525,7 +582,13 @@ pub fn register(vm: &mut Vm) {
         prop_read: None,
         param_names: Some(param_names),
     };
-    for c in [&b"pdo"[..], b"pdostatement", b"pdorow", b"pdo\\mysql"] {
+    for c in [
+        &b"pdo"[..],
+        b"pdostatement",
+        b"pdorow",
+        b"pdo\\mysql",
+        b"pdo\\pgsql",
+    ] {
         vm.native_class_handlers.insert(c.to_vec(), h);
     }
     let prev = vm
@@ -550,15 +613,20 @@ pub fn register(vm: &mut Vm) {
     vm.object_create_handlers
         .insert(b"pdo\\mysql".to_vec(), create_dbh);
     vm.object_create_handlers
+        .insert(b"pdo\\pgsql".to_vec(), create_dbh);
+    vm.object_create_handlers
         .insert(b"pdostatement".to_vec(), create_stmt);
     vm.object_construct_handlers
         .insert(b"pdo".to_vec(), construct_pdo);
     vm.object_construct_handlers
         .insert(b"pdo\\mysql".to_vec(), construct_pdo);
     vm.object_construct_handlers
+        .insert(b"pdo\\pgsql".to_vec(), construct_pdo);
+    vm.object_construct_handlers
         .insert(b"pdorow".to_vec(), construct_row);
 
     mysql::register(vm);
+    pgsql::register(vm);
     vm.ini_set_hooks
         .insert(b"pdo_mysql.default_socket".to_vec(), ini_readonly);
     register_constants(vm);

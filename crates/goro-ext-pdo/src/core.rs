@@ -155,6 +155,9 @@ pub struct StmtMethods {
     pub describer: fn(&mut Vm, &StmtRef, usize) -> bool,
     /// The column's value (NULL when the driver has none).
     pub get_col: fn(&mut Vm, &StmtRef, usize) -> Value,
+    /// get_col with the type the column is fetched as (bound columns),
+    /// for drivers that look at it
+    pub get_col_typed: Option<fn(&mut Vm, &StmtRef, usize, Option<i64>) -> Value>,
     pub param_hook: Option<fn(&mut Vm, &StmtRef, &mut BoundParam, u8) -> bool>,
     pub set_attribute: Option<fn(&mut Vm, &StmtRef, i64, &Value) -> bool>,
     pub get_attribute: Option<fn(&mut Vm, &StmtRef, i64) -> AttrResult>,
@@ -754,6 +757,8 @@ pub fn docref_deprecated(vm: &mut Vm, msg: &str) {
 /// Emit the diagnostics mysqlnd queued.
 pub fn flush_mysqlnd(vm: &mut Vm) {
     use goro_ext_mysqli::mysqlnd::{E_DEPRECATED, E_NOTICE};
+    // (and what libpq queued for the pgsql driver)
+    crate::pgsql::flush(vm);
     for w in goro_ext_mysqli::mysqlnd::take_warnings() {
         let msg = if w.docref {
             format!(

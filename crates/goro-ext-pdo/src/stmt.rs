@@ -456,8 +456,11 @@ pub fn fetch_value(vm: &mut Vm, stmt: &StmtRef, colno: i64, type_override: Optio
         throw(vm, b"ValueError", "Invalid column index");
         return Value::Null;
     }
-    let get_col = methods(stmt).get_col;
-    let mut dest = get_col(vm, stmt, colno as usize);
+    let m = methods(stmt);
+    let mut dest = match m.get_col_typed {
+        Some(g) => g(vm, stmt, colno as usize, type_override),
+        None => (m.get_col)(vm, stmt, colno as usize),
+    };
     let dbh = dbh_of_stmt(stmt);
     let (oracle_nulls, stringify) = {
         let d = dbh.borrow();
