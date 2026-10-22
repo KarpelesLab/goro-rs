@@ -642,6 +642,32 @@ impl Vm {
             let v = inner.borrow().clone();
             *value = v;
         }
+        // zend_verify_weak_scalar_type_hint(): a Stringable object fits a
+        // string type through __toString() (unless some type takes it).
+        if !strict && matches!(value, Value::Object(_)) {
+            let takes_object = srcs
+                .iter()
+                .any(|s| self.value_matches_type_mode(value, &s.ty, true));
+            let wants_string = srcs
+                .iter()
+                .any(|s| TypeView::from_param_type(&s.ty).mask & T_STRING != 0);
+            let stringable = match &*value {
+                Value::Object(o) => {
+                    let cl = o.borrow().class_name.to_ascii_lowercase();
+                    self.classes
+                        .get(&cl)
+                        .is_some_and(|c| c.get_method(b"__tostring").is_some())
+                }
+                _ => false,
+            };
+            if !takes_object && wants_string && stringable {
+                let sv = self.value_to_string(value);
+                if self.current_exception.is_some() {
+                    return Ok(());
+                }
+                *value = Value::String(sv);
+            }
+        }
         self.typed_ref_verify_sources(&srcs, value, strict)
     }
 

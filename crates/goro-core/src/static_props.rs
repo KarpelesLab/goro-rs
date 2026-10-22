@@ -1005,6 +1005,44 @@ impl Vm {
         self.update_class_constants(class_lower).is_ok()
     }
 
+    /// zend_update_class_constants(): an evaluated property default must
+    /// satisfy the property's type (strictly).
+    fn verify_default_type(
+        &mut self,
+        class_lower: &[u8],
+        idx: usize,
+        v: &mut Value,
+    ) -> Result<(), ()> {
+        let Some((pt, name, decl)) = self.classes.get(class_lower).and_then(|c| {
+            c.properties.get(idx).and_then(|p| {
+                p.property_type
+                    .clone()
+                    .map(|t| (t, p.name.clone(), p.declaring_class.clone()))
+            })
+        }) else {
+            return Ok(());
+        };
+        Self::coerce_value_to_type(v, &pt, true);
+        if self.value_matches_type_mode(v, &pt, true) {
+            return Ok(());
+        }
+        let decl_disp = self
+            .classes
+            .get(&decl.to_ascii_lowercase())
+            .map(|c| c.name.clone())
+            .unwrap_or(decl);
+        let msg = format!(
+            "Cannot assign {} to property {}::${} of type {}",
+            Self::value_type_name(v),
+            crate::value::display_class_name(&decl_disp),
+            String::from_utf8_lossy(&name),
+            self.param_type_name(&pt)
+        );
+        let exc = self.create_exception(b"TypeError", &msg, self.current_line);
+        self.current_exception = Some(exc);
+        Err(())
+    }
+
     pub(crate) fn update_class_constants(&mut self, class_lower: &[u8]) -> Result<(), ()> {
         if self.consts_updated.contains(class_lower) {
             return Ok(());
@@ -1078,7 +1116,8 @@ impl Vm {
             None => return Ok(()),
         };
         for (i, thunk, pname, decl) in pending {
-            let v = self.eval_const_thunk(&thunk, Some(&decl), "")?;
+            let mut v = self.eval_const_thunk(&thunk, Some(&decl), "")?;
+            self.verify_default_type(class_lower, i, &mut v)?;
             if let Some(p) = self
                 .classes
                 .get_mut(class_lower)
@@ -1133,10 +1172,11 @@ impl Vm {
                 self.current_exception = Some(exc);
                 return Err(());
             }
-            let v = self.resolve_deferred_value(&marker);
+            let mut v = self.resolve_deferred_value(&marker);
             if self.current_exception.is_some() {
                 return Err(());
             }
+            self.verify_default_type(class_lower, i, &mut v)?;
             if let Some(p) = self
                 .classes
                 .get_mut(class_lower)
