@@ -788,9 +788,33 @@ fn error_reporting(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         goro_core::errdisplay::ER_SILENT => 0,
         er => er,
     };
-    if let Some(level) = args.first() {
-        if !matches!(level, Value::Null) {
-            vm.error_reporting = level.to_long();
+    if let Some(level) = args.first().map(|v| v.deref()) {
+        if !matches!(level, Value::Null | Value::Undef) {
+            let strict = vm.caller_strict_types;
+            let line = vm.current_line;
+            match vm.zpp_coerce_scalar(
+                goro_core::arginfo::T_INT | goro_core::arginfo::T_NULL,
+                &level,
+                strict,
+                line,
+            ) {
+                Ok(Some(v)) => vm.error_reporting = v.to_long(),
+                Ok(None) => {
+                    return Err(throw_type_error_msg(
+                        vm,
+                        format!(
+                            "error_reporting(): Argument #1 ($error_level) must be of type ?int, {} given",
+                            Vm::value_type_name(&level)
+                        ),
+                    ));
+                }
+                Err(()) => {
+                    return Err(VmError {
+                        message: vm.uncaught_exception_message(),
+                        line,
+                    });
+                }
+            }
         }
     }
     Ok(Value::Long(old))

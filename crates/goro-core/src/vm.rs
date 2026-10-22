@@ -42,6 +42,18 @@ thread_local! {
         RefCell::new(Default::default());
 }
 
+/// How many leading CVs of `f` positional call arguments bind to: its
+/// parameters (counting $this / closure use-vars it receives as leading
+/// arguments). Extra arguments are only reachable through func_get_args().
+/// (A closure may also receive a bound $this it does not count.)
+fn arg_cv_bound(f: &OpArray, ncvs: usize) -> usize {
+    if crate::closure::is_closure_fn_name(&f.name) {
+        ncvs
+    } else {
+        (f.param_count as usize).min(ncvs)
+    }
+}
+
 /// EG(objects_store) holds a pointer per object handle; it starts with
 /// room for 1024 and doubles when a new handle does not fit
 /// (zend_objects_store_put()).
@@ -6878,10 +6890,12 @@ impl Vm {
     }
 
     /// Leave the `@` levels entered above `depth` of error_reporting_stack.
+    /// Each is a live SILENCE range the exception left: like END_SILENCE,
+    /// a level silenced code changed to something not only-fatal is kept.
     pub(crate) fn restore_error_reporting_to(&mut self, depth: usize) {
         while self.error_reporting_stack.len() > depth {
             if let Some(saved) = self.error_reporting_stack.pop() {
-                self.error_reporting = saved;
+                self.error_reporting = crate::errdisplay::end_silence(self.error_reporting, saved);
             }
         }
     }
@@ -24557,7 +24571,12 @@ impl Vm {
                             }
                         }
                         let mut func_cvs = self.take_values(user_fn.cv_names.len());
-                        for (slot, arg) in func_cvs.iter_mut().zip(call.args.iter()) {
+                        // Extra arguments are only reachable through func_get_args().
+                        for (slot, arg) in func_cvs
+                            .iter_mut()
+                            .zip(call.args.iter())
+                            .take(user_fn.param_count as usize)
+                        {
                             *slot = arg.clone();
                         }
                         // By-value array parameters get their own copy so writes in
@@ -24652,11 +24671,7 @@ impl Vm {
                                         // (with the frames of the calls the exception left)
                                         self.call_stack.truncate(call_frame_depth);
                                         self.pending_calls.truncate(saved_pending_calls);
-                                        while self.error_reporting_stack.len() > saved_depth {
-                                            if let Some(saved) = self.error_reporting_stack.pop() {
-                                                self.error_reporting = saved;
-                                            }
-                                        }
+                                        self.restore_error_reporting_to(saved_depth);
                                         self.current_exception = Some(exc);
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
@@ -25434,13 +25449,7 @@ impl Vm {
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         self.pending_calls.truncate(saved_pc);
-                                        while self.error_reporting_stack.len() > saved_depth {
-                                            if let Some(saved) =
-                                                self.error_reporting_stack.pop()
-                                            {
-                                                self.error_reporting = saved;
-                                            }
-                                        }
+                                        self.restore_error_reporting_to(saved_depth);
                                         ip = if catch_target > 0 {
                                             catch_target
                                         } else {
@@ -28290,7 +28299,7 @@ impl Vm {
                                 }
                             } else {
                                 for (i, arg) in call.args.iter().enumerate() {
-                                    if i < func_cvs.len() {
+                                    if i < arg_cv_bound(&user_fn, func_cvs.len()) {
                                         func_cvs[i] = arg.clone();
                                     }
                                 }
@@ -28654,7 +28663,7 @@ impl Vm {
                             }
                         } else {
                             for (i, arg) in call.args.iter().enumerate() {
-                                if i < func_cvs.len() {
+                                if i < arg_cv_bound(&user_fn, func_cvs.len()) {
                                     func_cvs[i] = arg.clone();
                                 }
                             }
@@ -28760,13 +28769,7 @@ impl Vm {
                                         // Restore pending_calls to the depth at TryBegin
                                         self.pending_calls.truncate(saved_pending_calls);
                                         // Restore error_reporting to the depth when the try/catch was set up
-                                        while self.error_reporting_stack.len() > saved_depth {
-                                            if let Some(saved) =
-                                                self.error_reporting_stack.pop()
-                                            {
-                                                self.error_reporting = saved;
-                                            }
-                                        }
+                                        self.restore_error_reporting_to(saved_depth);
                                         self.current_exception = Some(exc);
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
@@ -28792,13 +28795,7 @@ impl Vm {
                                         // Restore pending_calls to the depth at TryBegin
                                         self.pending_calls.truncate(saved_pending_calls);
                                         // Restore error_reporting to the depth when the try/catch was set up
-                                        while self.error_reporting_stack.len() > saved_depth {
-                                            if let Some(saved) =
-                                                self.error_reporting_stack.pop()
-                                            {
-                                                self.error_reporting = saved;
-                                            }
-                                        }
+                                        self.restore_error_reporting_to(saved_depth);
                                         ip = catch_target as usize;
                                         return Ok(Flow::Continue);
                                     } else {
@@ -37450,21 +37447,8 @@ impl Vm {
                         op.line,
                     );
 
-                    // Restore error_reporting to the depth it was at when the nearest
-                    // exception handler was registered. This handles the case where
-                    // an exception is thrown inside nested @ expressions - all @ levels
-                    // between the throw and the catch need to be unwound.
-                    if let Some(&(_, _, _, saved_depth, _)) = exception_handlers.last() {
-                        while self.error_reporting_stack.len() > saved_depth {
-                            if let Some(saved) = self.error_reporting_stack.pop() {
-                                self.error_reporting = saved;
-                            }
-                        }
-                    } else if let Some(saved) = self.error_reporting_stack.pop() {
-                        // No exception handler - just restore one level
-                        self.error_reporting = saved;
-                    }
-
+                    // (the `@` levels the exception leaves are restored where
+                    // it is caught)
                     if let Some(err_msg) = self.throw_operand_error(&exc_val) {
                         // ZVAL_UNDEFINED_OP1(): its warning may throw instead.
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
@@ -47209,6 +47193,17 @@ impl Vm {
                                         }
                                         continue;
                                     }
+                                    if class.is_readonly && !prop.is_readonly {
+                                        return Err(VmError {
+                                            message: format!(
+                                                "Readonly class {} cannot use trait with a non-readonly property {}::${}",
+                                                String::from_utf8_lossy(&class.name),
+                                                String::from_utf8_lossy(&trait_def.name),
+                                                String::from_utf8_lossy(&prop.name)
+                                            ),
+                                            line: op.line,
+                                        });
+                                    }
                                     // Check if enum - enums cannot include properties from traits
                                     if class.is_enum {
                                         let class_display =
@@ -49372,6 +49367,24 @@ impl Vm {
                                         message: format!(
                                             "Cannot specify default value for virtual hooked property {}::${}",
                                             cls_display, prop_display
+                                        ),
+                                        line: op.line,
+                                    });
+                                }
+                                if prop.is_virtual
+                                    && prop.set_visibility.is_some()
+                                    && !(prop.has_get_hook && prop.has_set_hook)
+                                {
+                                    return Err(VmError {
+                                        message: format!(
+                                            "{} virtual property {}::${} must not specify asymmetric visibility",
+                                            if prop.has_get_hook {
+                                                "Read-only"
+                                            } else {
+                                                "Write-only"
+                                            },
+                                            String::from_utf8_lossy(&class.name),
+                                            String::from_utf8_lossy(&prop.name)
                                         ),
                                         line: op.line,
                                     });
@@ -55374,7 +55387,7 @@ impl Vm {
             if user_fn.is_generator {
                 let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
                 for (i, arg) in call.args.iter().enumerate() {
-                    if i < func_cvs.len() {
+                    if i < arg_cv_bound(&user_fn, func_cvs.len()) {
                         func_cvs[i] = arg.clone();
                     }
                 }
@@ -55407,7 +55420,7 @@ impl Vm {
                     }
                 } else {
                     for (i, arg) in call.args.iter().enumerate() {
-                        if i < func_cvs.len() {
+                        if i < arg_cv_bound(&user_fn, func_cvs.len()) {
                             func_cvs[i] = arg.clone();
                         }
                     }
