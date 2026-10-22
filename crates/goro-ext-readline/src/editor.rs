@@ -229,7 +229,11 @@ fn dispatch(vm: &mut Vm, c: Option<u8>) -> Step {
             Step::Accept
         };
     };
-    let was_complete = with(|r| std::mem::replace(&mut r.last_was_complete, false));
+    let was_complete = with(|r| {
+        // (readline_info() may have shortened the line under the point)
+        r.point = r.point.min(r.line.len());
+        std::mem::replace(&mut r.last_was_complete, false)
+    });
     match c {
         b'\n' | b'\r' => return Step::Accept,
         b'\t' => {

@@ -232,12 +232,8 @@ fn readline_info(vm: &mut Vm, args: &[Value]) -> R {
                 let Some(s) = to_str(vm, &v) else {
                     return Ok(Value::Null);
                 };
-                editor::with(|r| {
-                    r.line = s;
-                    if r.point > r.line.len() {
-                        r.point = r.line.len();
-                    }
-                });
+                // (rl_end follows, rl_point is left as it is)
+                editor::with(|r| r.line = s);
             }
             sval(&old)
         }
