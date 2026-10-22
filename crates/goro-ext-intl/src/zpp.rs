@@ -180,7 +180,7 @@ pub fn parse(vm: &mut Vm, name: &str, stub: &StubFunc, args: &[Value]) -> Option
             name,
             i,
             p.name,
-            p.ty,
+            override_type(name, p.name).unwrap_or(p.ty),
             &raw.deref(),
             strict,
             line,
@@ -321,4 +321,41 @@ pub fn value_error(vm: &mut Vm, name: &str, n: usize, pname: &str, msg: &str) {
 pub fn arg_type_error(vm: &mut Vm, name: &str, n: usize, pname: &str, msg: &str) {
     let m = format!("{}(): Argument #{} (${}) {}", name, n, pname, msg);
     throw(vm, b"TypeError", &m);
+}
+
+/// Parameters whose C parsing differs from their stub type (the stub
+/// documents what the function accepts, ZPP takes more and rejects later):
+/// (function, parameter, type ZPP checks).
+const TYPE_OVERRIDES: &[(&str, &str, &str)] = &[
+    // Z_PARAM_OBJ_OR_STR_OR_NULL
+    ("datefmt_create", "timezone", "object|string|null"),
+    (
+        "IntlDateFormatter::create",
+        "timezone",
+        "object|string|null",
+    ),
+    (
+        "IntlDateFormatter::__construct",
+        "timezone",
+        "object|string|null",
+    ),
+    ("datefmt_set_timezone", "timezone", "object|string|null"),
+    (
+        "IntlDateFormatter::setTimeZone",
+        "timezone",
+        "object|string|null",
+    ),
+    // Z_PARAM_OBJ_OF_CLASS_OR_LONG_OR_NULL (untyped in the stub)
+    (
+        "IntlDateFormatter::__construct",
+        "calendar",
+        "IntlCalendar|int|null",
+    ),
+];
+
+fn override_type(name: &str, pname: &str) -> Option<&'static str> {
+    TYPE_OVERRIDES
+        .iter()
+        .find(|(f, p, _)| *f == name && *p == pname)
+        .map(|(_, _, t)| *t)
 }
