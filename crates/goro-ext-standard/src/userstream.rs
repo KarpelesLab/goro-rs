@@ -347,7 +347,14 @@ fn invoke_method_inner(
             q,
             required
         );
-        return Err(throw(vm, b"ArgumentCountError", &msg));
+        // (thrown by the callee's RECV, inside its frame)
+        let frame = method_frame_name(vm, &declaring, &class_name, &mname, is_static);
+        let framed = vm.push_callee_frame(frame, &args, !is_static);
+        let e = throw(vm, b"ArgumentCountError", &msg);
+        if framed {
+            vm.call_stack.pop();
+        }
+        return Err(e);
     }
     // Pass references only to by-ref parameters; drop surplus arguments
     // unless the method is variadic.
@@ -366,12 +373,35 @@ fn invoke_method_inner(
         }
     }
     let this = if is_static { None } else { Some(obj.clone()) };
+    // (execute_fn_with_named_args() gives the method its frame)
     vm.called_class_stack.push(class_name);
     vm.push_class_scope(declaring);
     let r = vm.execute_fn_with_named_args(&op, call_args, vec![], this);
     vm.pop_class_scope();
     vm.called_class_stack.pop();
     r
+}
+
+/// "Class->method" (or "Class::method") naming the declaring class.
+fn method_frame_name(
+    vm: &Vm,
+    declaring: &[u8],
+    class_name: &[u8],
+    method: &[u8],
+    is_static: bool,
+) -> String {
+    let decl_lower: Vec<u8> = declaring.iter().map(|b| b.to_ascii_lowercase()).collect();
+    let decl = vm
+        .classes
+        .get(&decl_lower)
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| class_name.to_vec());
+    format!(
+        "{}{}{}",
+        goro_core::value::display_class_name(&decl),
+        if is_static { "::" } else { "->" },
+        lossy(method)
+    )
 }
 
 /// Take the unread data of a user stream's read buffer.

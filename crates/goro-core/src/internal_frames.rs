@@ -161,6 +161,61 @@ impl Vm {
         }
     }
 
+    /// Whether the code running now is internal code called from the
+    /// innermost running user code (a frame was pushed above it), rather
+    /// than that user code itself (the VM calling a magic method, foreach
+    /// calling Iterator methods, ...).
+    pub fn caller_is_internal(&mut self) -> bool {
+        self.sync_builtin_frames();
+        self.call_stack.len() > self.exec_frame_len
+    }
+
+    /// Internal code is about to run user method `name` ("Class->method" or
+    /// "Class::method"; zend_call_method()): give it a frame, located at
+    /// "[internal function]" when called from internal code, or at the
+    /// current line when the VM itself calls it. No frame is pushed when the
+    /// caller already pushed one for this call. Returns whether a frame was
+    /// pushed (for the caller to pop).
+    pub fn push_callee_frame(&mut self, name: String, args: &[Value], is_instance: bool) -> bool {
+        let internal = self.caller_is_internal();
+        if internal {
+            if let Some(top) = self.call_stack.last() {
+                if same_frame_name(&top.0, &name) {
+                    return false;
+                }
+            }
+        }
+        let (file, line) = if internal {
+            (String::new(), 0)
+        } else {
+            (self.current_file.clone(), self.current_line)
+        };
+        let args = args.iter().map(|v| v.deref()).collect();
+        self.call_stack.push((name, file, line, args, is_instance));
+        true
+    }
+
+    /// The frame name ("Class->method", naming the declaring class) of
+    /// internal method `method_lower` of an object of class `class_lower`.
+    pub fn internal_method_frame_name(
+        &self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) -> Option<String> {
+        let mut cur = class_lower.to_vec();
+        for _ in 0..64 {
+            if crate::stubs::find_class_lower(&cur).is_some() {
+                let (c, m) = crate::stubs::find_method(&cur, method_lower)?;
+                return Some(format!("{}->{}", c.name, m.name));
+            }
+            cur = match self.classes.get(&cur).and_then(|c| c.parent.as_ref()) {
+                Some(p) => p.to_ascii_lowercase(),
+                None => crate::vm::get_builtin_parent(&cur)?.to_ascii_lowercase(),
+            };
+        }
+        None
+    }
+
     /// Materialize pending builtin frames if there are any (cheap check).
     #[inline]
     pub fn sync_builtin_frames(&mut self) {
@@ -912,4 +967,11 @@ fn frame_is_for(name: &str, op_array: &crate::opcode::OpArray) -> bool {
     let n = name.as_bytes();
     let o = &op_array.name;
     n[last(n)..].eq_ignore_ascii_case(&o[last(o)..])
+}
+
+/// Whether two call_stack frame names name the same function ("A->f" and
+/// "A::f" alike, case-insensitively).
+fn same_frame_name(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.replace("->", "::").to_ascii_lowercase();
+    a.len() == b.len() && norm(a) == norm(b)
 }

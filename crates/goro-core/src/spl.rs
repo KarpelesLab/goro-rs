@@ -804,8 +804,8 @@ impl Vm {
             self.spl_internal_frames.pop();
         }
         match (self.spl_internal_frames.last(), self.call_stack.last()) {
-            (Some((n, name)), Some(top)) => *n == len && *name == top.0,
-            _ => false,
+            (Some((n, name)), Some(top)) if *n == len && *name == top.0 => true,
+            _ => self.caller_is_internal(),
         }
     }
 

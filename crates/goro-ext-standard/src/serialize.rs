@@ -1169,7 +1169,14 @@ impl<'a> Parser<'a> {
     }
 
     fn warn(&self, vm: &mut Vm, msg: &str) {
-        vm.emit_warning_at(&format!("unserialize(): {}", msg), self.line);
+        // php_error_docref() names the active function: unserialize(), or
+        // the internal Serializable::unserialize() (ArrayObject,
+        // SplObjectStorage, ...) whose payload is being decoded.
+        let func = match vm.call_stack.last() {
+            Some(f) if f.0.ends_with("->unserialize") => f.0.replace("->", "::"),
+            _ => "unserialize".to_string(),
+        };
+        vm.emit_warning_at(&format!("{}(): {}", func, msg), self.line);
     }
 
     fn warn_raw(&self, vm: &mut Vm, msg: &str) {

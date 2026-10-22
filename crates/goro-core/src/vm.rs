@@ -941,6 +941,10 @@ pub struct Vm {
     /// call_stack depths (and frame names) of frames pushed for built-in
     /// SPL methods, so user methods they call show "[internal function]".
     pub(crate) spl_internal_frames: Vec<(usize, String)>,
+    /// `call_stack.len()` when the innermost running user code (function
+    /// body, generator body, script) started: frames above it were pushed
+    /// by internal code that is running on its behalf.
+    pub(crate) exec_frame_len: usize,
     /// unserialize() one value at a byte position (set by ext/standard).
     pub unserialize_value_hook: Option<fn(&mut Vm, &[u8], &mut usize) -> Option<Value>>,
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
@@ -2145,6 +2149,7 @@ impl Vm {
             ini_validators: std::collections::HashMap::new(),
             warning_capture: None,
             spl_internal_frames: Vec::new(),
+            exec_frame_len: 0,
             unserialize_value_hook: None,
             loaded_extensions: {
                 let mut s = std::collections::HashSet::new();
@@ -15052,16 +15057,31 @@ impl Vm {
                         self.watch_generator_finally(&gen_rc);
                         return Some(Value::Generator(gen_rc));
                     }
+                    let frame_name = format!(
+                        "{}{}{}",
+                        self.classes
+                            .get(&method.declaring_class)
+                            .map(|c| crate::value::display_class_name(&c.name))
+                            .unwrap_or_else(|| crate::value::display_class_name(&class_def.name)),
+                        if method.is_static { "::" } else { "->" },
+                        String::from_utf8_lossy(&method.name)
+                    );
+                    let is_static = method.is_static;
+                    let declaring = method.declaring_class.clone();
                     self.called_class_stack.push(class_lower.clone());
-                    self.class_scope_stack.push(method.declaring_class.clone());
+                    self.class_scope_stack.push(declaring);
                     // Diagnostics raised by the caller after the call report
                     // the caller's line, not the callee's last line.
                     let saved_line = self.current_line;
+                    let framed = self.push_callee_frame(frame_name, args, !is_static);
                     // A method body never runs in the global scope (otherwise
                     // its CVs, including $this, get mirrored into the global
                     // symbol table and outlive the call).
                     let was_global = std::mem::replace(&mut self.is_global_scope, false);
                     let result = self.execute_op_array(&method_op, fn_cvs).ok();
+                    if framed {
+                        self.call_stack.pop();
+                    }
                     self.is_global_scope = was_global;
                     self.current_line = saved_line;
                     self.called_class_stack.pop();
@@ -15227,7 +15247,18 @@ impl Vm {
             if let Some(n) = &observed {
                 self.observe_internal_begin(n);
             }
+            // Called from internal code (zend_call_method()): the method
+            // gets a frame. (The VM itself mostly uses object handlers
+            // instead of calling the methods.)
+            let framed = self.caller_is_internal()
+                && match self.internal_method_frame_name(&class_lower, &method_lower) {
+                    Some(name) => self.push_callee_frame(name, args, true),
+                    None => false,
+                };
             let r = self.call_internal_method(obj, obj_val, &class_lower, &method_lower, args);
+            if framed {
+                self.call_stack.pop();
+            }
             if let Some(n) = &observed {
                 self.observe_internal_end(n, r.as_ref());
             }
@@ -16629,6 +16660,7 @@ impl Vm {
             }
         };
         self.call_depth += 1;
+        let outer_exec = std::mem::replace(&mut self.exec_frame_len, self.call_stack.len());
         // Backtraces show the current values of the parameters.
         let cv_frame = self.register_cv_frame(op_array);
         let prev_global = self.is_global_scope;
@@ -16664,6 +16696,7 @@ impl Vm {
             self.cv_frames.pop();
         }
         self.call_depth -= 1;
+        self.exec_frame_len = outer_exec;
         self.last_call_by_ref = op_array.returns_by_ref;
         if self.exit_requested {
             return result.map(|_| Value::Null);
@@ -41653,6 +41686,18 @@ impl Vm {
                                 || self.class_implements_interface(&class_lower, b"arrayaccess")
                             {
                                 let args = vec![arr_val.clone(), key_val.clone()];
+                                // isset() itself silences nothing: the
+                                // offset conversion's diagnostics show.
+                                let saved_er = self.error_reporting;
+                                if saved_er == crate::errdisplay::ER_SILENT {
+                                    self.error_reporting = self
+                                        .error_reporting_stack
+                                        .iter()
+                                        .rev()
+                                        .copied()
+                                        .find(|&e| e != crate::errdisplay::ER_SILENT)
+                                        .unwrap_or(crate::errdisplay::E_ALL);
+                                }
                                 let exists_result = self
                                     .handle_spl_docall(&class_lower, b"offsetexists", &args)
                                     .unwrap_or_else(|| {
@@ -41663,6 +41708,7 @@ impl Vm {
                                         )
                                         .unwrap_or(Value::False)
                                     });
+                                self.error_reporting = saved_er;
                                 if self.current_exception.is_some() {
                                     if let Some((catch_target, _, _, _, saved_pc)) =
                                         exception_handlers.pop()
@@ -51231,7 +51277,16 @@ impl Vm {
                                 }
                                 b"__construct" => {
                                     let msg = "Direct instantiation of WeakReference is not allowed, use WeakReference::create instead";
+                                    // (thrown by the constructor, inside its frame)
+                                    self.call_stack.push((
+                                        "WeakReference->__construct".to_string(),
+                                        self.current_file.clone(),
+                                        op.line,
+                                        Vec::new(),
+                                        true,
+                                    ));
                                     let exc = self.create_exception(b"Error", msg, op.line);
+                                    self.call_stack.pop();
                                     self.current_exception = Some(exc);
                                     if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                         exception_handlers.last()
@@ -53783,8 +53838,10 @@ impl Vm {
         let caller_file = self.current_file.clone();
         let fiber_id = obj_rc.borrow().object_id;
         self.fiber_bases.push((fiber_id, fiber_stack_base));
+        let outer_exec = self.exec_frame_len;
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
         self.fiber_bases.pop();
+        self.fiber_leave_exec_frame(&mut fiber, bases.0, outer_exec, result.is_ok());
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
         self.fiber_switch_out(&obj_rc, switched_from, &result);
 
@@ -54590,6 +54647,21 @@ impl Vm {
             .append(&mut fiber.saved_property_hook_stack);
     }
 
+    /// Control left the fiber: keep its innermost running frame for its
+    /// next resumption if it suspended; the resumer's code runs again.
+    fn fiber_leave_exec_frame(
+        &mut self,
+        fiber: &mut crate::fiber::PhpFiber,
+        base: usize,
+        outer: usize,
+        suspended: bool,
+    ) {
+        if suspended {
+            fiber.saved_exec_frame_len = Some(self.exec_frame_len.saturating_sub(base));
+        }
+        self.exec_frame_len = outer;
+    }
+
     /// Control left the fiber: if it suspended, move the frames it pushed
     /// off the shared stacks (so the resumer sees its own frames only).
     fn fiber_leave_stacks(
@@ -54695,8 +54767,13 @@ impl Vm {
             None => self.current_file.clone(),
         };
         self.fiber_bases.push((fiber_id, bases.0));
+        let outer_exec = self.exec_frame_len;
+        if let Some(rel) = fiber.saved_exec_frame_len.take() {
+            self.exec_frame_len = bases.0 + rel;
+        }
         let result = fiber.resume(input);
         self.fiber_bases.pop();
+        self.fiber_leave_exec_frame(&mut fiber, bases.0, outer_exec, result.is_ok());
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
         self.fiber_switch_out(&obj_rc, switched_from, &result);
         let fiber_susp_pos = (

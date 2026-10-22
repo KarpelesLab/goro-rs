@@ -750,7 +750,9 @@ impl PhpGenerator {
             vm.set_cv_frame_vars(&self.cvs);
         }
         let saved_file = vm.enter_op_array_file(&self.op_array);
+        let outer_exec = std::mem::replace(&mut vm.exec_frame_len, vm.call_stack.len());
         let result = self.resume_inner_observed(vm);
+        vm.exec_frame_len = outer_exec;
         vm.leave_op_array_file(saved_file);
         if let Ok(true) = result {
             self.last_value = self.current_value.clone();
@@ -2287,7 +2289,9 @@ impl PhpGenerator {
             vm.set_cv_frame_vars(&self.cvs);
         }
         let saved_file = vm.enter_op_array_file(&self.op_array);
+        let outer_exec = std::mem::replace(&mut vm.exec_frame_len, vm.call_stack.len());
         let result = self.resume_inner_observed(vm);
+        vm.exec_frame_len = outer_exec;
         vm.leave_op_array_file(saved_file);
         if let Ok(true) = result {
             self.last_value = self.current_value.clone();
