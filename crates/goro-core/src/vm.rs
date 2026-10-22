@@ -3406,6 +3406,15 @@ impl Vm {
         }
     }
 
+    /// A diagnostic from the compile warning list: a warning, or an
+    /// E_DEPRECATED when tagged with `COMPILE_DEPRECATED_TAG`.
+    pub fn emit_compile_diagnostic(&mut self, msg: &str, line: u32) {
+        match msg.strip_prefix(crate::compiler::COMPILE_DEPRECATED_TAG) {
+            Some(m) => self.emit_deprecated_at(m, line),
+            None => self.emit_warning_at(msg, line),
+        }
+    }
+
     pub fn emit_fatal_at(&mut self, msg: &str, line: u32) -> VmError {
         let file = self.current_file.clone();
         self.fatal_error_cb(crate::errdisplay::E_ERROR, msg, &file, line);
@@ -36996,7 +37005,7 @@ impl Vm {
                                             }
                                             // Emit compile warnings
                                             for (msg, wline) in &inc_warnings {
-                                                self.emit_warning_at(msg, *wline);
+                                                self.emit_compile_diagnostic(msg, *wline);
                                             }
                                             // Swap pending_classes so DeclareClass indices from this
                                             // compilation are relative to 0 (not the global list)
@@ -37257,7 +37266,7 @@ impl Vm {
                                                     .into_owned(),
                                             );
                                             for (msg, wline) in &eval_warnings {
-                                                self.emit_warning_at(msg, *wline);
+                                                self.emit_compile_diagnostic(msg, *wline);
                                             }
                                             self.current_file = saved;
                                         }

@@ -277,7 +277,7 @@ pub fn load(vm: &mut Vm, compiled: &mut Compiled) {
         vm.emit_warning_at(msg, *line);
     }
     for (msg, line) in &compiled.compile_warnings {
-        vm.emit_warning_at(msg, *line);
+        vm.emit_compile_diagnostic(msg, *line);
     }
     for class in std::mem::take(&mut compiled.classes) {
         vm.register_class(class);

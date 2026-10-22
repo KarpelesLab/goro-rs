@@ -47,6 +47,15 @@ fn push_pending_compile_warning(msg: String, line: u32) {
     PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow_mut().push(("Warning", msg, line)));
 }
 
+/// Marks a compile-time diagnostic of the returned warning list as
+/// E_DEPRECATED (see `Vm::emit_compile_diagnostic`).
+pub const COMPILE_DEPRECATED_TAG: &str = "\u{1}Deprecated:";
+
+/// A compile-time deprecation reported with the compile warnings.
+fn push_compile_deprecated(msg: String, line: u32) {
+    push_compile_warning(format!("{}{}", COMPILE_DEPRECATED_TAG, msg), line);
+}
+
 fn push_pending_compile_deprecated(msg: String, line: u32) {
     PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow_mut().push(("Deprecated", msg, line)));
 }
@@ -230,6 +239,8 @@ pub struct Compiler {
     is_discarding_result: bool,
     /// The assignment being compiled is an expression statement (its value is unused).
     assign_result_discarded: bool,
+    /// CG(context).has_assigned_to_http_response_header
+    hrh_assigned: bool,
     /// True when compiling inside a function/method/closure body (reserved for future use).
     pub is_in_function_body: bool,
     /// True when compiling inside the body of a *class method* (not a plain function or
@@ -462,6 +473,7 @@ impl Compiler {
             is_discarding_result: false,
             in_const_expr: false,
             assign_result_discarded: false,
+            hrh_assigned: false,
             is_in_function_body: false,
             is_in_class_method: false,
             this_always_bound: false,
@@ -11196,6 +11208,18 @@ impl Compiler {
                     }
                 }
                 let cv = self.op_array.get_or_create_cv(name);
+                // zend_try_compile_cv(): reading the variable the http://
+                // wrapper used to set is deprecated (unless assigned first
+                // or a parameter).
+                if name == b"http_response_header"
+                    && !self.hrh_assigned
+                    && cv >= self.op_array.param_count
+                {
+                    push_compile_deprecated(
+                        "The predefined locally scoped $http_response_header variable is deprecated, call http_get_last_response_headers() instead".to_string(),
+                        expr.span.line,
+                    );
+                }
                 if name == b"this" && !self.this_always_bound && !self.quiet_this {
                     // "Using $this when not in object context" unless bound.
                     self.op_array.emit(Op {
@@ -11213,6 +11237,9 @@ impl Compiler {
                 self.compile_assign_dynvar(expr, target, value)
             }
             ExprKind::Assign { target, value } => {
+                if matches!(&target.kind, ExprKind::Variable(n) if n == b"http_response_header") {
+                    self.hrh_assigned = true;
+                }
                 let result_discarded = std::mem::take(&mut self.assign_result_discarded);
                 // Check for nullsafe in write context
                 if expr_is_in_nullsafe_chain(target) {

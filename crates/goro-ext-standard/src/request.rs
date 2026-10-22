@@ -38,6 +38,123 @@ pub struct RequestInfo {
 
 thread_local! {
     static UPLOADED_FILES: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+    /// SG(request_info) of the current request, for request_parse_body().
+    static REQUEST: RefCell<Option<RequestInfo>> = const { RefCell::new(None) };
+}
+
+/// request_parse_body() $options (REQUEST_PARSE_BODY_OPTION_*).
+#[derive(Default)]
+pub struct ParseBodyOptions {
+    pub max_file_uploads: Option<i64>,
+    pub max_input_vars: Option<i64>,
+    pub max_multipart_body_parts: Option<i64>,
+    pub post_max_size: Option<i64>,
+    pub upload_max_filesize: Option<i64>,
+}
+
+/// The parse failure of request_parse_body(): the message of the
+/// RequestParseBodyException to throw.
+pub type ParseBodyError = String;
+
+/// request_parse_body(): parse the request body like a POST request,
+/// returning [$_POST, $_FILES] without touching the superglobals.
+pub fn request_parse_body(
+    vm: &mut Vm,
+    opts: &ParseBodyOptions,
+) -> Result<(Rc<RefCell<PhpArray>>, Rc<RefCell<PhpArray>>), ParseBodyError> {
+    let req = REQUEST.with(|r| r.borrow().clone()).unwrap_or_default();
+    let Some(ct) = req.content_type.clone() else {
+        return Err("Request does not provide a content type".to_string());
+    };
+    let ini = |vm: &Vm, k: &str| -> Option<String> {
+        vm.constants
+            .get(k.as_bytes())
+            .map(|v| v.to_php_string().to_string_lossy())
+    };
+    let end = ct
+        .iter()
+        .position(|&c| c == b';' || c == b',' || c == b' ')
+        .unwrap_or(ct.len());
+    let base = ct[..end].to_ascii_lowercase();
+    let max_vars = opts.max_input_vars.unwrap_or_else(|| {
+        ini(vm, "max_input_vars")
+            .map(|v| parse_quantity(&v))
+            .unwrap_or(1000)
+    });
+    let post_max_size = opts.post_max_size.unwrap_or_else(|| {
+        ini(vm, "post_max_size")
+            .map(|v| parse_quantity(&v))
+            .unwrap_or(8 * 1024 * 1024)
+    });
+    let max_nesting = ini(vm, "max_input_nesting_level")
+        .map(|v| parse_quantity(&v))
+        .unwrap_or(64);
+    let display_errors = ini_bool(ini(vm, "display_errors"), true);
+    let cfg = UploadCfg {
+        max_file_uploads: opts.max_file_uploads.unwrap_or_else(|| {
+            ini(vm, "max_file_uploads")
+                .map(|v| parse_quantity(&v))
+                .unwrap_or(20)
+        }),
+        max_body_parts: opts.max_multipart_body_parts.unwrap_or_else(|| {
+            ini(vm, "max_multipart_body_parts")
+                .map(|v| parse_quantity(&v))
+                .unwrap_or(-1)
+        }),
+        post_max_size,
+        max_input_vars: max_vars,
+        upload_max_filesize: opts.upload_max_filesize.unwrap_or_else(|| {
+            ini(vm, "upload_max_filesize")
+                .map(|v| parse_quantity(&v))
+                .unwrap_or(2 * 1024 * 1024)
+        }),
+        file_uploads: ini_bool(ini(vm, "file_uploads"), true),
+        upload_tmp_dir: ini(vm, "upload_tmp_dir"),
+        query_string: req.query_string.clone(),
+        cookie: req.cookie_data.clone().unwrap_or_default(),
+    };
+    let post = new_arr();
+    let files = new_arr();
+    let mut ctx = Ctx {
+        max_nesting,
+        display_errors,
+        vm,
+        parse_body: true,
+        exception: None,
+    };
+    if base == b"application/x-www-form-urlencoded" {
+        // sapi_read_standard_form_data()
+        if post_max_size > 0 && req.content_length > post_max_size {
+            ctx_docref_warning(
+                &mut ctx,
+                &format!(
+                    "POST Content-Length of {} bytes exceeds the limit of {} bytes",
+                    req.content_length, post_max_size
+                ),
+            );
+        } else {
+            std_post_handler(&mut ctx, &req.body, max_vars, &post);
+        }
+    } else if base == b"multipart/form-data" {
+        rfc1867_handler(
+            &mut ctx,
+            &ct,
+            &req.body,
+            req.content_length,
+            &cfg,
+            &post,
+            &files,
+        );
+    } else {
+        return Err(format!(
+            "Content-Type \"{}\" is not supported",
+            String::from_utf8_lossy(&ct)
+        ));
+    }
+    match ctx.exception {
+        Some(e) => Err(e),
+        None => Ok((post, files)),
+    }
 }
 
 type Ini<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -127,6 +244,31 @@ struct Ctx<'a> {
     max_nesting: i64,
     display_errors: bool,
     vm: &'a mut Vm,
+    /// Parsing for request_parse_body(): diagnostics are runtime warnings
+    /// (or the RequestParseBodyException kept here) instead of startup ones.
+    parse_body: bool,
+    exception: Option<String>,
+}
+
+/// EMIT_WARNING_OR_ERROR() of rfc1867.c.
+fn ctx_warn(ctx: &mut Ctx, msg: &str) {
+    if ctx.parse_body {
+        if ctx.exception.is_none() {
+            ctx.exception = Some(msg.to_string());
+        }
+    } else {
+        emit_startup(ctx.vm, "Warning", &format!("PHP Request Startup: {}", msg));
+    }
+}
+
+/// php_error_docref(E_WARNING) while parsing the request body.
+fn ctx_docref_warning(ctx: &mut Ctx, msg: &str) {
+    if ctx.parse_body {
+        ctx.vm
+            .emit_warning(&format!("request_parse_body(): {}", msg));
+    } else {
+        emit_startup(ctx.vm, "Warning", &format!("PHP Request Startup: {}", msg));
+    }
 }
 
 /// php_register_variable_ex
@@ -406,11 +548,10 @@ fn std_post_handler(ctx: &mut Ctx, body: &[u8], max_vars: i64, arr: &Rc<RefCell<
         ptr = vsep + if vsep != body.len() { 1 } else { 0 };
         cnt += 1;
         if cnt > max_vars {
-            emit_startup(
-                ctx.vm,
-                "Warning",
+            ctx_docref_warning(
+                ctx,
                 &format!(
-                    "PHP Request Startup: Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
+                    "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
                     max_vars
                 ),
             );
@@ -795,11 +936,9 @@ fn rfc1867_handler(
     post: &Rc<RefCell<PhpArray>>,
     files: &Rc<RefCell<PhpArray>>,
 ) -> usize {
-    let warn =
-        |vm: &mut Vm, m: &str| emit_startup(vm, "Warning", &format!("PHP Request Startup: {}", m));
     if cfg.post_max_size > 0 && content_length > cfg.post_max_size {
-        warn(
-            ctx.vm,
+        ctx_warn(
+            ctx,
             &format!(
                 "POST Content-Length of {} bytes exceeds the limit of {} bytes",
                 content_length, cfg.post_max_size
@@ -817,14 +956,14 @@ fn rfc1867_handler(
     let bpos = match find(content_type, b"boundary").or_else(|| find(&lc, b"boundary")) {
         Some(p) => p,
         None => {
-            warn(ctx.vm, "Missing boundary in multipart/form-data POST data");
+            ctx_warn(ctx, "Missing boundary in multipart/form-data POST data");
             return 0;
         }
     };
     let eq = match content_type[bpos..].iter().position(|&c| c == b'=') {
         Some(p) => bpos + p,
         None => {
-            warn(ctx.vm, "Missing boundary in multipart/form-data POST data");
+            ctx_warn(ctx, "Missing boundary in multipart/form-data POST data");
             return 0;
         }
     };
@@ -834,7 +973,7 @@ fn rfc1867_handler(
         match boundary.iter().position(|&c| c == b'"') {
             Some(p) => boundary = &boundary[..p],
             None => {
-                warn(ctx.vm, "Invalid boundary in multipart/form-data POST data");
+                ctx_warn(ctx, "Invalid boundary in multipart/form-data POST data");
                 return 0;
             }
         }
@@ -842,10 +981,7 @@ fn rfc1867_handler(
         boundary = &boundary[..p];
     }
     if boundary.len() > FILLUNIT - 4 {
-        warn(
-            ctx.vm,
-            "Boundary too large in multipart/form-data POST data",
-        );
+        ctx_warn(ctx, "Boundary too large in multipart/form-data POST data");
         return 0;
     }
 
@@ -881,8 +1017,8 @@ fn rfc1867_handler(
         };
         body_parts_cnt -= 1;
         if body_parts_cnt < 0 {
-            warn(
-                ctx.vm,
+            ctx_warn(
+                ctx,
                 &format!(
                     "Multipart body parts limit exceeded {}. To increase the limit change max_multipart_body_parts in php.ini.",
                     body_parts_limit
@@ -939,8 +1075,8 @@ fn rfc1867_handler(
                     }
                 } else {
                     if count == cfg.max_input_vars + 1 {
-                        warn(
-                            ctx.vm,
+                        ctx_warn(
+                            ctx,
                             &format!(
                                 "Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
                                 cfg.max_input_vars
@@ -980,14 +1116,14 @@ fn rfc1867_handler(
             skip_upload = true;
             if upload_cnt == 0 {
                 upload_cnt -= 1;
-                warn(
-                    ctx.vm,
+                ctx_warn(
+                    ctx,
                     "Maximum number of allowable file uploads has been exceeded",
                 );
             }
         }
         if param.is_none() && filename.is_none() {
-            warn(ctx.vm, "File Upload Mime headers garbled");
+            ctx_warn(ctx, "File Upload Mime headers garbled");
             break;
         }
         let param = match param {
@@ -1060,10 +1196,7 @@ fn rfc1867_handler(
                     Err(_) => cancel_upload = 6,
                 },
                 Err(_) => {
-                    warn(
-                        ctx.vm,
-                        "File upload error - unable to create a temporary file",
-                    );
+                    ctx_warn(ctx, "File upload error - unable to create a temporary file");
                     cancel_upload = 6;
                 }
             }
@@ -1249,11 +1382,14 @@ pub fn parse_str_into(vm: &mut Vm, data: &[u8], arr: &Rc<RefCell<PhpArray>>) {
         max_nesting,
         display_errors,
         vm,
+        parse_body: false,
+        exception: None,
     };
     treat_data(&mut ctx, data, false, &arg_sep, max_vars, arr);
 }
 
 pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
+    REQUEST.with(|r| *r.borrow_mut() = Some(req.clone()));
     crate::info::set_web_sapi(req.cgi);
     // php_request_startup(): SAPI_PHP_VERSION_HEADER (the CLI SAPI has
     // no headers).
@@ -1297,6 +1433,8 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
             max_nesting,
             display_errors,
             vm,
+            parse_body: false,
+            exception: None,
         };
 
         // sapi_activate: read POST data

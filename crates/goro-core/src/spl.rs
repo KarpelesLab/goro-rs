@@ -516,7 +516,7 @@ impl Vm {
         let ok = match compiler.compile(&program) {
             Ok((op_array, classes, warnings)) => {
                 for (msg, wline) in &warnings {
-                    self.emit_warning_at(msg, *wline);
+                    self.emit_compile_diagnostic(msg, *wline);
                 }
                 let saved_pending = std::mem::replace(&mut self.pending_classes, classes);
                 let cvs = vec![Value::Undef; op_array.cv_names.len()];

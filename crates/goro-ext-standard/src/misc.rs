@@ -498,6 +498,30 @@ final class StreamBucket {
     vm.register_function(b"array_replace_recursive", array_replace_recursive_fn);
     vm.register_function(b"array_find", array_find_fn);
     vm.register_function(b"get_meta_tags", get_meta_tags_fn);
+    for (name, v) in [
+        (&b"STREAM_NOTIFY_RESOLVE"[..], 1),
+        (b"STREAM_NOTIFY_CONNECT", 2),
+        (b"STREAM_NOTIFY_AUTH_REQUIRED", 3),
+        (b"STREAM_NOTIFY_MIME_TYPE_IS", 4),
+        (b"STREAM_NOTIFY_FILE_SIZE_IS", 5),
+        (b"STREAM_NOTIFY_REDIRECTED", 6),
+        (b"STREAM_NOTIFY_PROGRESS", 7),
+        (b"STREAM_NOTIFY_COMPLETED", 8),
+        (b"STREAM_NOTIFY_FAILURE", 9),
+        (b"STREAM_NOTIFY_AUTH_RESULT", 10),
+        (b"STREAM_NOTIFY_SEVERITY_INFO", 0),
+        (b"STREAM_NOTIFY_SEVERITY_WARN", 1),
+        (b"STREAM_NOTIFY_SEVERITY_ERR", 2),
+    ] {
+        vm.constants.entry(name.to_vec()).or_insert(Value::Long(v));
+    }
+    vm.register_function(b"http_get_last_response_headers", |_vm, _args| {
+        Ok(http_wrapper::last_response_headers())
+    });
+    vm.register_function(b"http_clear_last_response_headers", |_vm, _args| {
+        http_wrapper::clear_last_response_headers();
+        Ok(Value::Null)
+    });
     vm.register_function(b"array_find_key", array_find_key_fn);
     vm.register_function(b"array_intersect_ukey", array_intersect_ukey_fn);
     vm.register_function(b"array_intersect_uassoc", array_intersect_uassoc_fn);
@@ -7100,6 +7124,30 @@ fn parse_url_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(out))))
 }
 
+thread_local! {
+    /// Arrays http_build_query() is currently encoding.
+    static HBQ_ACTIVE: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Nesting levels the stack allows for http_build_query().
+fn http_build_query_max_depth(vm: &Vm) -> usize {
+    let q = |k: &[u8]| -> i64 {
+        vm.constants
+            .get(k)
+            .map(|v| {
+                goro_core::ini_quantity::parse_quantity(v.to_php_string().as_bytes(), true).0 as i64
+            })
+            .unwrap_or(0)
+    };
+    let max = q(b"zend.max_allowed_stack_size");
+    if max < 0 {
+        return usize::MAX;
+    }
+    let max = if max == 0 { 8 * 1024 * 1024 } else { max };
+    let usable = (max - q(b"zend.reserved_stack_size")).max(0) as usize;
+    usable / 256
+}
+
 #[allow(clippy::only_used_in_recursion)] // build_query_recursive keeps `separator` for signature parity
 fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null);
@@ -7180,12 +7228,39 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         numeric_prefix: &Option<String>,
         depth: usize,
     ) {
-        // PHP's http_build_query bails out on deeply nested or recursive structures.
-        if depth > 128 {
+        // zend_call_stack_overflowed(): nesting deeper than the stack
+        // allows (zend.max_allowed_stack_size, ~256 bytes per level).
+        if depth > http_build_query_max_depth(vm) {
+            if vm.current_exception.is_none() {
+                let exc = vm.create_exception(
+                    b"Error",
+                    "Maximum call stack size reached.",
+                    vm.current_line,
+                );
+                vm.current_exception = Some(exc);
+            }
+            return;
+        }
+        if vm.current_exception.is_some() {
             return;
         }
         match val {
             Value::Array(arr) => {
+                // GC_IS_RECURSIVE: an array already being encoded is skipped.
+                let ptr = Rc::as_ptr(arr) as usize;
+                if HBQ_ACTIVE.with(|a| a.borrow().contains(&ptr)) {
+                    return;
+                }
+                HBQ_ACTIVE.with(|a| a.borrow_mut().push(ptr));
+                struct Pop;
+                impl Drop for Pop {
+                    fn drop(&mut self) {
+                        HBQ_ACTIVE.with(|a| {
+                            a.borrow_mut().pop();
+                        });
+                    }
+                }
+                let _pop = Pop;
                 let pairs: Vec<(goro_core::array::ArrayKey, Value)> = arr
                     .borrow()
                     .iter()
@@ -7224,6 +7299,20 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             Value::Object(obj) => {
+                let ptr = Rc::as_ptr(obj) as usize;
+                if HBQ_ACTIVE.with(|a| a.borrow().contains(&ptr)) {
+                    return;
+                }
+                HBQ_ACTIVE.with(|a| a.borrow_mut().push(ptr));
+                struct Pop;
+                impl Drop for Pop {
+                    fn drop(&mut self) {
+                        HBQ_ACTIVE.with(|a| {
+                            a.borrow_mut().pop();
+                        });
+                    }
+                }
+                let _pop = Pop;
                 // Handle enums specially:
                 //   - backed enum case → use its backing value
                 //   - unbacked enum   → ValueError
@@ -10686,7 +10775,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let _ = std::fs::remove_file(&tmp_path);
             let fid = alloc_file_handle(f, &mode);
             goro_core::value::register_resource(fid, b"stream");
-            return Ok(Value::Long(fid));
+            return Ok(Value::Resource(fid));
         }
         return Ok(Value::False);
     }
@@ -20230,104 +20319,92 @@ fn token_name_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn request_parse_body_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Validate $options (first argument) keys and value shapes. Real PHP only
-    // accepts specific string keys with int/string values.
-    let valid_keys: &[&[u8]] = &[
-        b"max_input_vars",
-        b"max_multipart_body_parts",
-        b"max_file_uploads",
-        b"upload_max_filesize",
-        b"post_max_size",
-    ];
-    let size_keys: &[&[u8]] = &[b"upload_max_filesize", b"post_max_size"];
-    if let Some(opts) = args.first() {
-        if let Value::Array(arr) = opts {
-            let pairs: Vec<(goro_core::array::ArrayKey, Value)> = arr
-                .borrow()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            for (k, v) in pairs {
-                match k {
-                    goro_core::array::ArrayKey::Int(_) => {
-                        let exc = vm.create_exception(
-                            b"ValueError",
-                            "Invalid integer key in $options argument",
-                            0,
-                        );
-                        vm.current_exception = Some(exc);
-                        return Err(VmError {
-                            message: "Uncaught ValueError".to_string(),
-                            line: 0,
-                        });
-                    }
-                    goro_core::array::ArrayKey::String(s) => {
-                        let bytes = s.as_bytes();
-                        if !valid_keys.contains(&bytes) {
-                            let exc = vm.create_exception(
-                                b"ValueError",
-                                &format!(
-                                    "Invalid key \"{}\" in $options argument",
-                                    s.to_string_lossy()
-                                ),
-                                0,
-                            );
-                            vm.current_exception = Some(exc);
-                            return Err(VmError {
-                                message: "Uncaught ValueError".to_string(),
-                                line: 0,
-                            });
-                        }
-                        // Check value type
-                        if let Value::Array(_) = v {
-                            let exc = vm.create_exception(
-                                b"ValueError",
-                                "Invalid array value in $options argument",
-                                0,
-                            );
-                            vm.current_exception = Some(exc);
-                            return Err(VmError {
-                                message: "Uncaught ValueError".to_string(),
-                                line: 0,
-                            });
-                        }
-                        // For *_max_filesize/post_max_size keys: validate suffix (K/M/G).
-                        if size_keys.contains(&bytes) {
-                            if let Value::String(strval) = &v {
-                                let raw = strval.as_bytes();
-                                if let Some(&last) = raw.last() {
-                                    if last.is_ascii_alphabetic()
-                                        && !matches!(last, b'K' | b'M' | b'G' | b'k' | b'm' | b'g')
-                                    {
-                                        let mult =
-                                            std::str::from_utf8(&[last]).unwrap_or("?").to_string();
-                                        vm.emit_warning(&format!(
-                                            "Invalid quantity \"{}\": unknown multiplier \"{}\", interpreting as \"1\" for backwards compatibility",
-                                            strval.to_string_lossy(),
-                                            mult
-                                        ));
-                                    }
-                                }
-                            }
-                        }
-                    }
+    let value_error = |vm: &mut Vm, msg: &str| -> VmError {
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        VmError {
+            message: format!("Uncaught ValueError: {}", msg),
+            line: vm.current_line,
+        }
+    };
+    // cache_request_parse_body_options()
+    let mut opts = crate::request::ParseBodyOptions::default();
+    if let Some(Value::Array(arr)) = args.first().map(|v| v.deref()) {
+        let pairs: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (k, v) in pairs {
+            let key = match k {
+                ArrayKey::Int(_) => {
+                    return Err(value_error(vm, "Invalid integer key in $options argument"));
                 }
+                ArrayKey::String(s) => s,
+            };
+            if key.is_empty() {
+                return Err(value_error(
+                    vm,
+                    "Invalid empty string key in $options argument",
+                ));
             }
+            let lower = key.as_bytes().to_ascii_lowercase();
+            let slot = match lower.as_slice() {
+                b"max_file_uploads" => &mut opts.max_file_uploads,
+                b"max_input_vars" => &mut opts.max_input_vars,
+                b"max_multipart_body_parts" => &mut opts.max_multipart_body_parts,
+                b"post_max_size" => &mut opts.post_max_size,
+                b"upload_max_filesize" => &mut opts.upload_max_filesize,
+                _ => {
+                    return Err(value_error(
+                        vm,
+                        &format!(
+                            "Invalid key \"{}\" in $options argument",
+                            key.to_string_lossy()
+                        ),
+                    ));
+                }
+            };
+            *slot = Some(match v.deref() {
+                Value::String(s) => {
+                    let (n, err) = goro_core::ini_quantity::parse_quantity(s.as_bytes(), true);
+                    if let Some(e) = err {
+                        vm.emit_warning(&e);
+                    }
+                    n as i64
+                }
+                Value::Long(n) => n,
+                other => {
+                    let tn = match other {
+                        Value::Null | Value::Undef => "null".to_string(),
+                        Value::True => "true".to_string(),
+                        Value::False => "false".to_string(),
+                        o => Vm::value_type_name(&o),
+                    };
+                    return Err(value_error(
+                        vm,
+                        &format!("Invalid {} value in $options argument", tn),
+                    ));
+                }
+            });
         }
     }
-
-    // After validation, request_parse_body fails with a RequestParseBodyException
-    // because we have no request context to parse.
-    let exc = vm.create_exception(
-        b"RequestParseBodyException",
-        "Request does not provide a content type",
-        0,
-    );
-    vm.current_exception = Some(exc);
-    Err(VmError {
-        message: "Uncaught RequestParseBodyException".to_string(),
-        line: 0,
-    })
+    match crate::request::request_parse_body(vm, &opts) {
+        Ok((post, files)) => {
+            let mut pair = PhpArray::new();
+            pair.push(Value::Array(post));
+            pair.push(Value::Array(files));
+            Ok(Value::Array(Rc::new(RefCell::new(pair))))
+        }
+        Err(msg) => {
+            let exc = vm.create_exception(b"RequestParseBodyException", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            Err(VmError {
+                message: format!("Uncaught RequestParseBodyException: {}", msg),
+                line: vm.current_line,
+            })
+        }
+    }
 }
 
 fn ignore_user_abort_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

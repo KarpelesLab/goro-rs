@@ -1562,7 +1562,7 @@ fn execute_php_inner_impl(
         vm.emit_warning_at(msg, *wline);
     }
     for (msg, wline) in &compile_warnings {
-        vm.emit_warning_at(msg, *wline);
+        vm.emit_compile_diagnostic(msg, *wline);
     }
     goro_ext_standard::register_standard_functions(&mut vm);
     goro_ext_date::register(&mut vm);
@@ -2742,8 +2742,18 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
             }
         }
     }
+    // run-tests.php: --ENV-- may preset these; the request sections only
+    // fill them when empty.
+    let env_get = |env: &Vec<(String, String)>, k: &str| {
+        env.iter()
+            .find(|(a, _)| a == k)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    let env_method = env_get(&env, "REQUEST_METHOD");
+    let env_content_length = env_get(&env, "CONTENT_LENGTH");
     let method: String;
-    let mut content_type = String::new();
+    let mut content_type = env_get(&env, "CONTENT_TYPE");
     let mut body: Vec<u8> = Vec::new();
     let mut content_length = String::new();
     let raw_request = |sec: &str, ct: &mut String| -> Vec<u8> {
@@ -2767,7 +2777,11 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
     if not_empty("POST_RAW") {
         body = raw_request("POST_RAW", &mut content_type);
         content_length = body.len().to_string();
-        method = "POST".into();
+        method = if env_method.is_empty() {
+            "POST".into()
+        } else {
+            env_method
+        };
     } else if not_empty("PUT") {
         body = raw_request("PUT", &mut content_type);
         content_length = body.len().to_string();
@@ -2775,10 +2789,17 @@ fn build_request(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> Ph
     } else if not_empty("POST") {
         body = test.bytes(php_trim(raw("POST").unwrap_or("")));
         method = "POST".into();
-        content_type = "application/x-www-form-urlencoded".into();
-        content_length = body.len().to_string();
+        if content_type.is_empty() {
+            content_type = "application/x-www-form-urlencoded".into();
+        }
+        content_length = if env_content_length.is_empty() {
+            body.len().to_string()
+        } else {
+            env_content_length
+        };
     } else {
         method = "GET".into();
+        content_type.clear();
     }
     set(&mut env, "REQUEST_METHOD", method.clone());
     set(&mut env, "CONTENT_TYPE", content_type.clone());
