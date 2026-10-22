@@ -806,6 +806,29 @@ impl Vm {
     ) -> FccResult {
         let o = match &obj {
             Value::Object(o) => o.clone(),
+            // Generator methods: the forwarding closure calls them.
+            Value::Generator(_) => {
+                const GEN_METHODS: [&[u8]; 8] = [
+                    b"current",
+                    b"key",
+                    b"next",
+                    b"rewind",
+                    b"send",
+                    b"throw",
+                    b"valid",
+                    b"getreturn",
+                ];
+                if GEN_METHODS.contains(&lower(m).as_slice()) {
+                    return Ok(self.make_closure_object(wrapper));
+                }
+                return Err((
+                    b"Error",
+                    format!(
+                        "Call to undefined method Generator::{}()",
+                        String::from_utf8_lossy(m)
+                    ),
+                ));
+            }
             other => {
                 return Err((
                     b"Error",
