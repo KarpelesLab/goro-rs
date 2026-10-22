@@ -552,6 +552,10 @@ pub struct OpArray {
     /// For closures without a bound $this: the called class (static::)
     /// captured when the closure was created.
     pub closure_called_class: Option<Vec<u8>>,
+    /// What the plain function calls of this code's INIT_FCALLs resolved
+    /// to, by opcode index (see Vm::plain_call_target).
+    pub(crate) call_targets:
+        std::cell::RefCell<crate::fxhash::FxHashMap<u32, crate::vm::CachedCallTarget>>,
 }
 
 impl OpArray {
@@ -593,6 +597,7 @@ impl OpArray {
             closure_params: Vec::new(),
             fcc_desc: None,
             closure_called_class: None,
+            call_targets: Default::default(),
         }
     }
 

@@ -11,6 +11,8 @@ use crate::opcode::{OpArray, OpCode, OperandType, ParamType};
 use crate::string::PhpString;
 use crate::value::Value;
 
+#[path = "fastcall.rs"]
+mod fastcall;
 #[path = "internal_static.rs"]
 pub mod internal_static;
 #[path = "static_props.rs"]
@@ -456,6 +458,34 @@ pub(crate) struct ForeachState {
     pub(crate) ref_arrays: crate::fxhash::FxHashMap<u32, Rc<RefCell<PhpArray>>>,
 }
 
+impl ForeachState {
+    /// Release what the state holds, as dropping it would (field by field,
+    /// each map in its iteration order). A map that was used is replaced by
+    /// a new one: the next frame's maps start out as fresh ones (their
+    /// iteration orders depend on their capacities).
+    pub(crate) fn clear(&mut self) {
+        macro_rules! clear {
+            ($($f:ident),*) => {
+                $(if self.$f.capacity() != 0 {
+                    self.$f = Default::default();
+                })*
+            };
+        }
+        clear!(
+            positions,
+            iter_handles,
+            snap,
+            cur_key,
+            cur_ref,
+            obj,
+            obj_cur,
+            gen_keys,
+            weakmap_iter_keys,
+            ref_arrays
+        );
+    }
+}
+
 /// Pending function call being assembled
 #[derive(Debug, Clone)]
 pub(crate) struct PendingCall {
@@ -479,10 +509,30 @@ pub(crate) struct CallTarget {
     pub(crate) builtin: Option<(BuiltinFn, Option<(&'static crate::arginfo::FuncInfo, u8)>)>,
     /// A builtin of that name exists (even when `builtin` is not recorded).
     pub(crate) has_builtin: bool,
+    /// For a method call set up by INIT_METHOD_CALL's fast path (see
+    /// init_method_call_fast): where "::" is in the name, and whether the
+    /// method is static. `user` is the method, a public method of a user
+    /// class, registered under the name.
+    pub(crate) method: Option<(usize, bool)>,
+    /// The `new` of a user class without a constructor (all user code; see
+    /// init_method_call_fast): the call only arms the object's destructor.
+    pub(crate) no_ctor: bool,
     /// `user_functions.len() + 1` when resolved (0: not resolved): a
     /// function declared since then (while the arguments were evaluated)
     /// makes the lookup run again.
     pub(crate) fn_gen: usize,
+}
+
+/// A call site's CallTarget (see Vm::plain_call_target), for the name it
+/// was resolved for. The user function is held weakly: a function calling
+/// itself must not keep itself alive.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedCallTarget {
+    name: Vec<u8>,
+    user: Option<Weak<OpArray>>,
+    builtin: Option<(BuiltinFn, Option<(&'static crate::arginfo::FuncInfo, u8)>)>,
+    has_builtin: bool,
+    fn_gen: usize,
 }
 
 impl CallTarget {
@@ -490,6 +540,8 @@ impl CallTarget {
         user: None,
         builtin: None,
         has_builtin: false,
+        method: None,
+        no_ctor: false,
         fn_gen: 0,
     };
 }
@@ -772,6 +824,9 @@ pub struct Vm {
     /// Emptied buffers of finished calls (locals, temporaries, backtrace
     /// frames), reused by the next ones.
     value_pool: Vec<Vec<Value>>,
+    /// Emptied foreach states of finished frames (see execute_op_array_inner).
+    #[allow(clippy::vec_box)] // (the boxes are handed to frames)
+    foreach_pool: Vec<Box<ForeachState>>,
     string_pool: Vec<String>,
     /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
     pub call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
@@ -844,7 +899,7 @@ pub struct Vm {
     /// Get hook result of a PropertyIsset immediately followed (through its
     /// JmpZ) by the PropertyGet of the same property: the pair is one
     /// FETCH_OBJ_IS, which runs the hook once. `(object id, value)`.
-    isset_get_cache: Option<(u64, Value)>,
+    pub(crate) isset_get_cache: Option<(u64, Value)>,
     /// EG(record_errors): non-fatal errors raised while linking a class are
     /// recorded here (type, message, line) instead of being raised.
     pub(crate) recorded_errors: Option<Vec<(i64, String, u32)>>,
@@ -1203,6 +1258,7 @@ impl Vm {
             fast_fcall_fn: None,
             fast_fcall_sep: None,
             value_pool: Vec::new(),
+            foreach_pool: Vec::new(),
             string_pool: Vec::new(),
             call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
@@ -13964,11 +14020,45 @@ fn param_type_accepts_array(pt: &ParamType) -> bool {
     }
 }
 
+/// Append `b` to `dst` as String::from_utf8_lossy() renders it.
+#[inline]
+fn push_lossy(dst: &mut String, b: &[u8]) {
+    match std::str::from_utf8(b) {
+        Ok(s) => dst.push_str(s),
+        Err(_) => dst.push_str(&String::from_utf8_lossy(b)),
+    }
+}
+
+/// Vec::clear() of values (released in order), without calling into the
+/// drop glue for the ones that hold nothing to release.
+#[inline]
+pub(crate) fn clear_values(v: &mut Vec<Value>) {
+    for x in v.drain(..) {
+        if matches!(
+            x,
+            Value::Undef
+                | Value::Null
+                | Value::False
+                | Value::True
+                | Value::Long(_)
+                | Value::Double(_)
+                | Value::Resource(_)
+        ) {
+            std::mem::forget(x);
+        } else {
+            drop(x);
+        }
+    }
+}
+
 /// The function name of an INIT_FCALL by a constant name that is a plain
 /// function name (not a method, a closure or one of the engine's internal
 /// `__` call names), at most 64 bytes long.
 #[inline]
-fn plain_fcall_name<'a>(op: &crate::opcode::Op, literals: &'a [Value]) -> Option<&'a PhpString> {
+pub(crate) fn plain_fcall_name<'a>(
+    op: &crate::opcode::Op,
+    literals: &'a [Value],
+) -> Option<&'a PhpString> {
     let OperandType::Const(i) = op.op1 else {
         return None;
     };
@@ -16391,7 +16481,8 @@ impl Vm {
         if !call.named_args.is_empty() || name.is_empty() || name.len() > 128 || name[0] == b'_' {
             return false;
         }
-        // A plain function name resolved when the call was set up.
+        // A plain function name, or a public method of a user class,
+        // resolved when the call was set up.
         if call.target.fn_gen == self.user_functions.len() + 1 {
             if call.target.has_builtin {
                 return false;
@@ -16399,9 +16490,22 @@ impl Vm {
             let Some(f) = call.target.user.as_ref() else {
                 return false;
             };
-            if Self::fast_fcall_simple(f, call, false, false) {
+            let sep = match call.target.method {
+                None => None,
+                Some((p, is_static)) => {
+                    // An object first argument is $this (a static method
+                    // then takes the general path).
+                    let has_this = matches!(call.args.first(), Some(Value::Object(_)));
+                    if is_static == has_this {
+                        return false;
+                    }
+                    Some((p, has_this))
+                }
+            };
+            let has_this = sep.is_some_and(|(_, t)| t);
+            if Self::fast_fcall_simple(f, call, sep.is_some(), has_this) {
                 self.fast_fcall_fn = Some(Rc::clone(f));
-                self.fast_fcall_sep = None;
+                self.fast_fcall_sep = sep;
                 return true;
             }
             return false;
@@ -16418,9 +16522,11 @@ impl Vm {
                     return false;
                 }
                 let method = &lower[p + 2..];
+                // (a constructor is called like any method; its object's
+                // destructor is armed once it completed)
                 if method.is_empty()
                     || method.contains(&b':')
-                    || method.starts_with(b"__")
+                    || (method.starts_with(b"__") && method != b"__construct")
                     || method == b"tokenize"
                     || lower.starts_with(b"static::")
                     || lower.starts_with(b"self::")
@@ -16476,6 +16582,20 @@ impl Vm {
                 .is_some_and(|c| c.target.builtin.is_some() && c.named_args.is_empty())
     }
 
+    /// Whether the call DO_FCALL is about to make is the constructor call
+    /// of a `new` of a user class without a constructor (see
+    /// CallTarget::no_ctor), without named arguments.
+    #[inline]
+    fn fast_noctor_target(&self) -> bool {
+        self.observer.is_none()
+            && self.pending_calls.last().is_some_and(|c| {
+                c.target.no_ctor
+                    && c.target.fn_gen == self.user_functions.len() + 1
+                    && c.named_args.is_empty()
+                    && matches!(c.args.first(), Some(Value::Object(_)))
+            })
+    }
+
     /// fast_fcall_target(): user function `f` takes the call as is.
     #[inline]
     fn fast_fcall_simple(f: &OpArray, call: &PendingCall, method: bool, has_this: bool) -> bool {
@@ -16516,7 +16636,7 @@ impl Vm {
     #[inline]
     fn recycle_args(&mut self, call: &mut PendingCall) {
         let mut args = std::mem::take(&mut call.args);
-        args.clear();
+        clear_values(&mut args);
         self.recycle_values(args);
     }
 
@@ -16524,7 +16644,7 @@ impl Vm {
     #[inline]
     fn recycle_frame(&mut self, frame: (String, String, u32, Vec<Value>, bool)) {
         let (mut name, mut file, _, mut args, _) = frame;
-        args.clear();
+        clear_values(&mut args);
         self.recycle_values(args);
         for s in [&mut name, &mut file] {
             if s.capacity() != 0 && s.capacity() <= 1024 && self.string_pool.len() < 64 {
@@ -16755,8 +16875,193 @@ impl Vm {
             user,
             builtin,
             has_builtin: found.is_some(),
+            method: None,
+            no_ctor: false,
             fn_gen: self.user_functions.len() + 1,
         }
+    }
+
+    /// A new object of class `name_lower` gets its declared instance
+    /// properties, with their defaults (NEW: object_properties_init()).
+    pub(crate) fn init_declared_props(&mut self, name_lower: &[u8], obj: &mut PhpObject) {
+        if let Some(class) = self.classes.get(name_lower) {
+            // Detect names declared more than once across the hierarchy
+            // (a private property redeclared by a subclass). Such private
+            // slots must be stored under a mangled key so parent and child
+            // versions coexist.
+            // (A pairwise scan for the usual handful of properties;
+            // a map only for large classes.)
+            let instance_props = || class.properties.iter().filter(|p| !p.is_static);
+            let name_counts: Option<crate::fxhash::FxHashMap<&[u8], usize>> =
+                if class.properties.len() > 32 {
+                    let mut m: crate::fxhash::FxHashMap<&[u8], usize> = Default::default();
+                    for p in instance_props() {
+                        *m.entry(p.name.as_slice()).or_insert(0) += 1;
+                    }
+                    Some(m)
+                } else {
+                    None
+                };
+            let declared_twice = |name: &[u8]| match &name_counts {
+                Some(m) => m.get(name).copied().unwrap_or(0) > 1,
+                None => instance_props().filter(|q| q.name == name).nth(1).is_some(),
+            };
+            let props: Vec<_> = instance_props()
+                .map(|p| {
+                    let conflicted = declared_twice(p.name.as_slice());
+                    let key = if conflicted && p.visibility == Visibility::Private {
+                        let decl_lower: Vec<u8> = p
+                            .declaring_class
+                            .iter()
+                            .map(|b| b.to_ascii_lowercase())
+                            .collect();
+                        let decl_display = self
+                            .classes
+                            .get(decl_lower.as_slice())
+                            .map(|c| c.name.clone())
+                            .unwrap_or_else(|| p.declaring_class.clone());
+                        let mut k = Vec::with_capacity(2 + decl_display.len() + p.name.len());
+                        k.push(0);
+                        k.extend_from_slice(&decl_display);
+                        k.push(0);
+                        k.extend_from_slice(&p.name);
+                        k
+                    } else {
+                        p.name.clone()
+                    };
+                    (key, p.default.clone(), p.is_readonly, p.is_virtual)
+                })
+                .collect();
+            obj.properties.reserve(props.len());
+            for (name, default, is_readonly, is_virtual) in props {
+                // Virtual properties have no backing store and should not be initialized
+                if is_virtual {
+                    continue;
+                }
+                if is_readonly || matches!(default, Value::Undef) {
+                    // Readonly properties and typed properties without defaults
+                    // stay Undef until explicitly assigned
+                    obj.set_property(name, Value::Undef);
+                } else {
+                    let resolved = self.resolve_deferred_value(&default);
+                    // Each instance gets its own copy of an array
+                    // default (the class entry's Rc must not be shared).
+                    let resolved = match resolved {
+                        Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
+                        other => other,
+                    };
+                    obj.set_property(name, resolved);
+                }
+            }
+        }
+    }
+
+    /// INIT_FCALL at `ip` of `op_array` by plain function name `name` (see
+    /// plain_fcall_name): the general handler's pending call, with its
+    /// target resolved.
+    #[inline(never)]
+    pub(crate) fn push_plain_call(&mut self, op_array: &OpArray, ip: usize, name: PhpString) {
+        let target = self.plain_call_target(op_array, ip, name.as_bytes());
+        let args = self.take_values(0);
+        self.pending_calls.push(PendingCall {
+            name,
+            args,
+            named_args: Vec::new(),
+            target,
+        });
+    }
+
+    /// SEND_VAL of a plain value (not an undefined variable) to a call
+    /// whose target was resolved (see call_user_fn) and does not take the
+    /// argument by reference: what the general handler does then. Returns
+    /// false, doing nothing, otherwise.
+    #[inline(never)]
+    pub(crate) fn send_val_fast(
+        &mut self,
+        op: &crate::opcode::Op,
+        cvs: &[Value],
+        tmps: &mut [Value],
+        literals: &[Value],
+    ) -> bool {
+        let fn_gen = self.user_functions.len() + 1;
+        let Some(call) = self.pending_calls.last_mut() else {
+            return false;
+        };
+        if call.target.fn_gen != fn_gen
+            || call.target.user.as_ref().is_some_and(|f| {
+                f.by_ref_params
+                    .get(call.args.len())
+                    .copied()
+                    .unwrap_or(false)
+            })
+        {
+            return false;
+        }
+        let v = match op.op1 {
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                None | Some(Value::Undef) => return false,
+                Some(Value::Reference(r)) => match r.try_borrow() {
+                    Ok(b) if !matches!(*b, Value::Undef) => b.clone(),
+                    _ => return false,
+                },
+                Some(v) => v.clone(),
+            },
+            // (read_operand(): an empty temporary reads as null; the
+            // temporary is released once consumed)
+            OperandType::Tmp(i) => match tmps.get_mut(i as usize) {
+                Some(slot) => match std::mem::replace(slot, Value::Undef) {
+                    Value::Undef => Value::Null,
+                    v => v,
+                },
+                None => Value::Null,
+            },
+            OperandType::Const(i) => literals.get(i as usize).cloned().unwrap_or(Value::Null),
+            _ => Value::Null,
+        };
+        call.args.push(v);
+        true
+    }
+
+    /// resolve_call_target() for the INIT_FCALL at `ip` of `op_array`,
+    /// remembered by the call site while no function is declared (and the
+    /// user function it found is alive).
+    pub(crate) fn plain_call_target(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        name: &[u8],
+    ) -> CallTarget {
+        let fn_gen = self.user_functions.len() + 1;
+        if let Some(c) = op_array.call_targets.borrow().get(&(ip as u32)) {
+            if c.fn_gen == fn_gen && c.name == name {
+                let user = match &c.user {
+                    Some(w) => w.upgrade(),
+                    None => None,
+                };
+                if user.is_some() == c.user.is_some() {
+                    return CallTarget {
+                        user,
+                        builtin: c.builtin,
+                        has_builtin: c.has_builtin,
+                        method: None,
+                        no_ctor: false,
+                        fn_gen,
+                    };
+                }
+            }
+        }
+        let t = self.resolve_call_target(name);
+        op_array.call_targets.borrow_mut().insert(
+            ip as u32,
+            CachedCallTarget {
+                name: name.to_vec(),
+                user: t.user.as_ref().map(Rc::downgrade),
+                builtin: t.builtin,
+                has_builtin: t.has_builtin,
+                fn_gen: t.fn_gen,
+            },
+        );
+        t
     }
 
     /// The user function a pending call names (as user_fn_lookup() finds
@@ -16955,119 +17260,12 @@ impl Vm {
         // PHP don't verify their return values, like ZEND_INTERNAL_FUNCTIONs
         // in release builds)
         if let Ok(ref mut val) = result {
-            if let Some(ref ret_type) = op_array
+            if let Some(ret_type) = op_array
                 .return_type
                 .as_ref()
                 .filter(|_| op_array.internal_sig.is_none())
             {
-                // Note: implicit float-to-int deprecation is emitted at the
-                // OpCode::Return site (before finally blocks run), not here.
-                // (strict mode only widens int to float)
-                let was_nan =
-                    !op_array.strict_types && matches!(val, Value::Double(d) if d.is_nan());
-                Self::coerce_value_to_type(val, ret_type, op_array.strict_types);
-                if was_nan {
-                    let target = match val {
-                        Value::String(_) => Some("string"),
-                        Value::True | Value::False => Some("bool"),
-                        _ => None,
-                    };
-                    if let Some(t) = target {
-                        let line = if self.last_return_line > 0 {
-                            self.last_return_line
-                        } else {
-                            self.current_line
-                        };
-                        self.emit_warning_at(
-                            &format!("unexpected NAN value was coerced to {}", t),
-                            line,
-                        );
-                    }
-                }
-                // Weak mode: a Stringable object returned for a string type.
-                if !op_array.strict_types
-                    && matches!(val, Value::Object(_))
-                    && variance::TypeView::from_param_type(ret_type).mask & variance::T_STRING != 0
-                    && !self.object_matches_class_part(val, ret_type)
-                {
-                    let has_tostring = match &*val {
-                        Value::Object(o) => {
-                            let cl = o.borrow().class_name.to_ascii_lowercase();
-                            self.classes
-                                .get(&cl)
-                                .is_some_and(|c| c.get_method(b"__tostring").is_some())
-                        }
-                        _ => false,
-                    };
-                    if has_tostring {
-                        let obj = val.clone();
-                        if let Ok(s) = self.value_to_string_checked(&obj) {
-                            *val = Value::String(s);
-                        }
-                    }
-                }
-                // For mixed return type, implicit return (no explicit return statement) is an error
-                // because mixed means "must return a value" even though it accepts any type
-                // zend_verify_missing_return_type: falling off the end is
-                // "none returned" for any type but void (even a nullable one).
-                let mixed_implicit_mismatch = implicit_return
-                    && !op_array.is_generator
-                    && !matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"));
-                let ret_mismatch = mixed_implicit_mismatch
-                    || !self.value_matches_return_type(val, ret_type, op_array.strict_types);
-                self.flush_callable_deprecations();
-                if ret_mismatch {
-                    let raw_name = String::from_utf8_lossy(&op_array.name);
-                    // Include class name in the function display name for methods.
-                    // For closures, prefer the canonical PHP display name.
-                    let func_name = if let Some(n) = self.closure_scoped_display(op_array) {
-                        n
-                    } else if !op_array.display_name.is_empty() {
-                        String::from_utf8_lossy(&op_array.display_name).to_string()
-                    } else if let Some(ref scope) = op_array.scope_class {
-                        let class_display = self
-                            .classes
-                            .get(scope)
-                            .map(|c| crate::value::display_class_name(&c.name))
-                            .unwrap_or_else(|| crate::value::display_class_name(scope));
-                        format!("{}::{}", class_display, raw_name)
-                    } else {
-                        raw_name.to_string()
-                    };
-                    // Use "none" when a function implicitly returns (no explicit return statement)
-                    let actual_type = if implicit_return {
-                        "none".to_string()
-                    } else {
-                        Self::value_type_name(val)
-                    };
-                    let expected_type = self.param_type_name(ret_type);
-                    // Special message for never return type
-                    let is_never = matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"never"));
-                    let msg = if is_never && implicit_return {
-                        format!(
-                            "{}(): never-returning function must not implicitly return",
-                            func_name
-                        )
-                    } else {
-                        format!(
-                            "{}(): Return value must be of type {}, {} returned",
-                            func_name, expected_type, actual_type
-                        )
-                    };
-                    let ret_line = if self.last_return_line > 0 {
-                        self.last_return_line
-                    } else if op_array.decl_line > 0 {
-                        op_array.decl_line
-                    } else {
-                        self.current_line
-                    };
-                    let exc_val = self.create_exception(b"TypeError", &msg, ret_line);
-                    self.current_exception = Some(exc_val);
-                    return Err(VmError {
-                        message: msg,
-                        line: ret_line,
-                    });
-                }
+                self.verify_return_value(op_array, ret_type, val, implicit_return)?;
             }
         }
 
@@ -17081,6 +17279,125 @@ impl Vm {
             }
             (result, _) => result,
         }
+    }
+
+    /// The value a function with a declared return type returns is checked
+    /// against it (and coerced in weak mode) as its frame is left. (Out of
+    /// line: the frame of every call does not carry what this needs.)
+    #[inline(never)]
+    fn verify_return_value(
+        &mut self,
+        op_array: &OpArray,
+        ret_type: &ParamType,
+        val: &mut Value,
+        implicit_return: bool,
+    ) -> Result<(), VmError> {
+        // Note: implicit float-to-int deprecation is emitted at the
+        // OpCode::Return site (before finally blocks run), not here.
+        // (strict mode only widens int to float)
+        let was_nan = !op_array.strict_types && matches!(val, Value::Double(d) if d.is_nan());
+        Self::coerce_value_to_type(val, ret_type, op_array.strict_types);
+        if was_nan {
+            let target = match val {
+                Value::String(_) => Some("string"),
+                Value::True | Value::False => Some("bool"),
+                _ => None,
+            };
+            if let Some(t) = target {
+                let line = if self.last_return_line > 0 {
+                    self.last_return_line
+                } else {
+                    self.current_line
+                };
+                self.emit_warning_at(&format!("unexpected NAN value was coerced to {}", t), line);
+            }
+        }
+        // Weak mode: a Stringable object returned for a string type.
+        if !op_array.strict_types
+            && matches!(val, Value::Object(_))
+            && variance::TypeView::from_param_type(ret_type).mask & variance::T_STRING != 0
+            && !self.object_matches_class_part(val, ret_type)
+        {
+            let has_tostring = match &*val {
+                Value::Object(o) => {
+                    let cl = o.borrow().class_name.to_ascii_lowercase();
+                    self.classes
+                        .get(&cl)
+                        .is_some_and(|c| c.get_method(b"__tostring").is_some())
+                }
+                _ => false,
+            };
+            if has_tostring {
+                let obj = val.clone();
+                if let Ok(s) = self.value_to_string_checked(&obj) {
+                    *val = Value::String(s);
+                }
+            }
+        }
+        // For mixed return type, implicit return (no explicit return statement) is an error
+        // because mixed means "must return a value" even though it accepts any type
+        // zend_verify_missing_return_type: falling off the end is
+        // "none returned" for any type but void (even a nullable one).
+        let mixed_implicit_mismatch = implicit_return
+            && !op_array.is_generator
+            && !matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"));
+        let ret_mismatch = mixed_implicit_mismatch
+            || !self.value_matches_return_type(val, ret_type, op_array.strict_types);
+        self.flush_callable_deprecations();
+        if ret_mismatch {
+            let raw_name = String::from_utf8_lossy(&op_array.name);
+            // Include class name in the function display name for methods.
+            // For closures, prefer the canonical PHP display name.
+            let func_name = if let Some(n) = self.closure_scoped_display(op_array) {
+                n
+            } else if !op_array.display_name.is_empty() {
+                String::from_utf8_lossy(&op_array.display_name).to_string()
+            } else if let Some(ref scope) = op_array.scope_class {
+                let class_display = self
+                    .classes
+                    .get(scope)
+                    .map(|c| crate::value::display_class_name(&c.name))
+                    .unwrap_or_else(|| crate::value::display_class_name(scope));
+                format!("{}::{}", class_display, raw_name)
+            } else {
+                raw_name.to_string()
+            };
+            // Use "none" when a function implicitly returns (no explicit return statement)
+            let actual_type = if implicit_return {
+                "none".to_string()
+            } else {
+                Self::value_type_name(val)
+            };
+            let expected_type = self.param_type_name(ret_type);
+            // Special message for never return type
+            let is_never =
+                matches!(ret_type, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"never"));
+            let msg = if is_never && implicit_return {
+                format!(
+                    "{}(): never-returning function must not implicitly return",
+                    func_name
+                )
+            } else {
+                format!(
+                    "{}(): Return value must be of type {}, {} returned",
+                    func_name, expected_type, actual_type
+                )
+            };
+            let ret_line = if self.last_return_line > 0 {
+                self.last_return_line
+            } else if op_array.decl_line > 0 {
+                op_array.decl_line
+            } else {
+                self.current_line
+            };
+            let exc_val = self.create_exception(b"TypeError", &msg, ret_line);
+            self.current_exception = Some(exc_val);
+            return Err(VmError {
+                message: msg,
+                line: ret_line,
+            });
+        }
+        Ok(())
     }
 
     /// Entering a function: the file it was compiled from becomes the
@@ -17118,16 +17435,18 @@ impl Vm {
             .push(crate::gc::GcFrame::new(&cvs, &tmps, has_this));
         // The frame's symbol table, if it gets one.
         let mut sym = None;
+        // (boxed, from the states of finished frames: kept off the native
+        // stack, and empty)
+        let mut fe = self.foreach_pool.pop().unwrap_or_default();
         let r = self.execute_frame(
-            op_array,
-            &mut cvs,
-            &mut tmps,
-            None,
-            cv_frame,
-            &mut fin,
-            &mut sym,
-            &mut ForeachState::default(),
+            op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin, &mut sym, &mut fe,
         );
+        // (released as the temporary state of a frame used to be, right
+        // after its execution)
+        fe.clear();
+        if self.foreach_pool.len() < 16 {
+            self.foreach_pool.push(fe);
+        }
         self.gc_frames.pop();
         if let Some(fs) = sym.as_mut() {
             self.symtab_release_local(&mut cvs, &op_array.cv_names, fs);
@@ -17150,8 +17469,8 @@ impl Vm {
         // The CVs are released before the symbol table's other variables
         // (zend_leave_helper); the vectors' buffers are kept for the next
         // calls.
-        tmps.clear();
-        cvs.clear();
+        clear_values(&mut tmps);
+        clear_values(&mut cvs);
         self.recycle_values(tmps);
         self.recycle_values(cvs);
         drop(sym);
@@ -17419,6 +17738,45 @@ impl Vm {
                 // Implicit return - use Undef to signal "none returned" for return type checks
                 return Ok(Value::Undef);
             }
+            // Runs of opcodes on plain values (see run_fast_ops); the first
+            // one it does not handle takes the general path below.
+            let mut fast_tried = false;
+            if !track
+                && single_step.is_none()
+                && self.current_exception.is_none()
+                && !self.error_handler_threw
+                && !typed_ref::any()
+            {
+                if !crate::fastpath::runs_fast(op_array.ops[ip].opcode) {
+                    fast_tried = true;
+                }
+            }
+            if !fast_tried
+                && !track
+                && single_step.is_none()
+                && self.current_exception.is_none()
+                && !self.error_handler_threw
+                && !typed_ref::any()
+            {
+                let no_release = !self.has_release_work();
+                let next = self.run_fast_ops(
+                    op_array,
+                    ip,
+                    cvs.as_mut_slice(),
+                    tmps.as_mut_slice(),
+                    internal_code,
+                    true,
+                    no_release,
+                    foreach_snap.is_empty()
+                        && foreach_obj.is_empty()
+                        && foreach_iter_handles.is_empty(),
+                );
+                if next != ip {
+                    ip = next;
+                    continue 'exec;
+                }
+                fast_tried = true;
+            }
 
             if track {
                 if let Some(p) = prev_op {
@@ -17497,7 +17855,7 @@ impl Vm {
             // unusual falls through to the general handlers below.  A pending
             // exception (left by a builtin that called back into user code)
             // is dispatched by the general handlers, so it disables this.
-            if typed_ref_watch.is_none() && self.current_exception.is_none() {
+            if !fast_tried && typed_ref_watch.is_none() && self.current_exception.is_none() {
                 let fast = if matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertySet)
                     && self.isset_get_cache.is_none()
                 {
@@ -21912,14 +22270,7 @@ impl Vm {
                     let name = plain_fcall_name(op, &op_array.literals)
                         .cloned()
                         .unwrap_or_else(PhpString::empty);
-                    let target = self.resolve_call_target(name.as_bytes());
-                    let args = self.take_values(0);
-                    self.pending_calls.push(PendingCall {
-                        name,
-                        args,
-                        named_args: Vec::new(),
-                        target,
-                    });
+                    self.push_plain_call(op_array, ip - 1, name);
                 }
                 OpCode::InitFCall => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -23260,22 +23611,19 @@ impl Vm {
                         // (in the buffers of a finished call's frame)
                         let mut display = self.string_pool.pop().unwrap_or_default();
                         if !user_fn.display_name.is_empty() {
-                            display.push_str(&String::from_utf8_lossy(&user_fn.display_name));
+                            push_lossy(&mut display, &user_fn.display_name);
                         } else if let (Some((sep, _)), Some(scope)) =
                             (method_sep, &user_fn.scope_class)
                         {
                             // The method's declaring class, as written
-                            let class_display = match self.classes.get(scope) {
-                                Some(c) => String::from_utf8_lossy(&c.name),
-                                None => String::from_utf8_lossy(scope),
-                            };
-                            display.push_str(&class_display);
+                            match self.classes.get(scope) {
+                                Some(c) => push_lossy(&mut display, &c.name),
+                                None => push_lossy(&mut display, scope),
+                            }
                             display.push_str("::");
-                            display.push_str(&String::from_utf8_lossy(
-                                &call.name.as_bytes()[sep + 2..],
-                            ));
+                            push_lossy(&mut display, &call.name.as_bytes()[sep + 2..]);
                         } else {
-                            display.push_str(&String::from_utf8_lossy(call.name.as_bytes()));
+                            push_lossy(&mut display, call.name.as_bytes());
                         }
                         let is_method = method_sep.is_some();
                         // (an instance method: $this is not an argument)
@@ -23401,6 +23749,20 @@ impl Vm {
                             if let Some(frame) = self.call_stack.pop() {
                                 self.recycle_frame(frame);
                             }
+                            // A constructor that completed: the object's
+                            // destructor runs at shutdown.
+                            if let Some((sep, true)) = method_sep {
+                                if call.name.as_bytes()[sep + 2..]
+                                    .eq_ignore_ascii_case(b"__construct")
+                                {
+                                    if let Some(Value::Object(obj_rc)) = call.args.first() {
+                                        obj_rc
+                                            .borrow_mut()
+                                            .properties
+                                            .retain(|(k, _)| k != b"__ctor_pending");
+                                    }
+                                }
+                            }
                         }
                         if is_method {
                             self.called_class_stack.pop();
@@ -23469,6 +23831,29 @@ impl Vm {
                         Flow::Continue => continue 'exec,
                         Flow::Return(v) => return Ok(v),
                     }
+                }
+                // The constructor call of a user class without one (see
+                // fast_noctor_target): what the general handler does then.
+                OpCode::DoFCall if self.fast_noctor_target() => {
+                    self.last_call_by_ref = false;
+                    let mut call = self.pending_calls.pop().expect("pending call");
+                    while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
+                    {
+                        self.closure_pending_calls.pop();
+                    }
+                    if self.closure_pending_calls.last() == Some(&self.pending_calls.len()) {
+                        self.closure_pending_calls.pop();
+                    }
+                    if let Some(Value::Object(obj_rc)) = call.args.first() {
+                        if obj_rc.borrow().has_property(b"__ctor_pending") {
+                            obj_rc
+                                .borrow_mut()
+                                .properties
+                                .retain(|(k, _)| k != b"__ctor_pending");
+                        }
+                    }
+                    self.write_operand(&op.result, Value::Null, cvs, tmps, &static_cv_keys);
+                    self.recycle_args(&mut call);
                 }
                 // A call of a builtin by its plain name, without named
                 // arguments (see resolve_call_target): the builtin branch of
@@ -47973,6 +48358,33 @@ impl Vm {
                 },
 
                 OpCode::NewObject => match outlined(|| -> Result<Flow, VmError> {
+                    // A user class (see new_object_fast)
+                    match self.new_object_fast(op, &op_array.literals, &tmps) {
+                        fastcall::NewFast::No => {}
+                        fastcall::NewFast::Obj(obj_value) => {
+                            self.write_operand(
+                                &op.result,
+                                obj_value,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                            return Ok(Flow::Next);
+                        }
+                        fastcall::NewFast::Failed => {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: "Uncaught exception".into(),
+                                line: op.line,
+                            });
+                        }
+                    }
                     let class_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // ZEND_FETCH_CLASS of a dynamic class name.
                     if !matches!(
@@ -48273,80 +48685,7 @@ impl Vm {
                     }
 
                     // Initialize properties from class definition
-                    if let Some(class) = self.classes.get(&name_lower) {
-                        // Detect names declared more than once across the hierarchy
-                        // (a private property redeclared by a subclass). Such private
-                        // slots must be stored under a mangled key so parent and child
-                        // versions coexist.
-                        // (A pairwise scan for the usual handful of properties;
-                        // a map only for large classes.)
-                        let instance_props = || class.properties.iter().filter(|p| !p.is_static);
-                        let name_counts: Option<crate::fxhash::FxHashMap<&[u8], usize>> =
-                            if class.properties.len() > 32 {
-                                let mut m: crate::fxhash::FxHashMap<&[u8], usize> =
-                                    Default::default();
-                                for p in instance_props() {
-                                    *m.entry(p.name.as_slice()).or_insert(0) += 1;
-                                }
-                                Some(m)
-                            } else {
-                                None
-                            };
-                        let declared_twice = |name: &[u8]| match &name_counts {
-                            Some(m) => m.get(name).copied().unwrap_or(0) > 1,
-                            None => instance_props().filter(|q| q.name == name).nth(1).is_some(),
-                        };
-                        let props: Vec<_> = instance_props()
-                            .map(|p| {
-                                let conflicted = declared_twice(p.name.as_slice());
-                                let key = if conflicted && p.visibility == Visibility::Private {
-                                    let decl_lower: Vec<u8> = p
-                                        .declaring_class
-                                        .iter()
-                                        .map(|b| b.to_ascii_lowercase())
-                                        .collect();
-                                    let decl_display = self
-                                        .classes
-                                        .get(decl_lower.as_slice())
-                                        .map(|c| c.name.clone())
-                                        .unwrap_or_else(|| p.declaring_class.clone());
-                                    let mut k =
-                                        Vec::with_capacity(2 + decl_display.len() + p.name.len());
-                                    k.push(0);
-                                    k.extend_from_slice(&decl_display);
-                                    k.push(0);
-                                    k.extend_from_slice(&p.name);
-                                    k
-                                } else {
-                                    p.name.clone()
-                                };
-                                (key, p.default.clone(), p.is_readonly, p.is_virtual)
-                            })
-                            .collect();
-                        obj.properties.reserve(props.len());
-                        for (name, default, is_readonly, is_virtual) in props {
-                            // Virtual properties have no backing store and should not be initialized
-                            if is_virtual {
-                                continue;
-                            }
-                            if is_readonly || matches!(default, Value::Undef) {
-                                // Readonly properties and typed properties without defaults
-                                // stay Undef until explicitly assigned
-                                obj.set_property(name, Value::Undef);
-                            } else {
-                                let resolved = self.resolve_deferred_value(&default);
-                                // Each instance gets its own copy of an array
-                                // default (the class entry's Rc must not be shared).
-                                let resolved = match resolved {
-                                    Value::Array(a) => {
-                                        Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
-                                    }
-                                    other => other,
-                                };
-                                obj.set_property(name, resolved);
-                            }
-                        }
-                    }
+                    self.init_declared_props(&name_lower, &mut obj);
 
                     // Initialize SPL class internal arrays at creation time
                     match name_lower.as_slice() {
@@ -51476,6 +51815,10 @@ impl Vm {
                 },
 
                 OpCode::InitMethodCall => match outlined(|| -> Result<Flow, VmError> {
+                    // A public method of a user class (see init_method_call_fast)
+                    if self.init_method_call_fast(op, &cvs, &mut tmps, &op_array.literals) {
+                        return Ok(Flow::Next);
+                    }
                     let method_name = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();

@@ -25,7 +25,7 @@ pub(crate) enum Num {
 }
 
 impl Num {
-    #[inline]
+    #[inline(always)]
     pub(crate) fn of(v: &Value) -> Option<Num> {
         match v {
             Value::Long(n) => Some(Num::L(*n)),
@@ -34,7 +34,7 @@ impl Num {
         }
     }
 
-    #[inline]
+    #[inline(always)]
     pub(crate) fn value(self) -> Value {
         match self {
             Num::L(n) => Value::Long(n),
@@ -45,7 +45,7 @@ impl Num {
 
 /// Read an int/float operand (through a CV's reference if it has one).
 /// Undefined variables, strings, objects... give None.
-#[inline]
+#[inline(always)]
 pub(crate) fn num_operand(
     operand: &OperandType,
     cvs: &[Value],
@@ -65,7 +65,7 @@ pub(crate) fn num_operand(
 
 /// Whether a value can be overwritten without any side effect (no
 /// destructor, GC root or object-id bookkeeping is involved).
-#[inline]
+#[inline(always)]
 pub(crate) fn is_plain_scalar(v: &Value) -> bool {
     matches!(
         v,
@@ -81,7 +81,7 @@ pub(crate) fn is_plain_scalar(v: &Value) -> bool {
 
 /// Store into a temporary result slot whose current content is a plain
 /// scalar.  Returns false (and stores nothing) otherwise.
-#[inline]
+#[inline(always)]
 pub(crate) fn store_tmp(result: &OperandType, v: Value, tmps: &mut [Value]) -> bool {
     match result {
         OperandType::Tmp(i) => match tmps.get_mut(*i as usize) {
@@ -97,7 +97,7 @@ pub(crate) fn store_tmp(result: &OperandType, v: Value, tmps: &mut [Value]) -> b
 }
 
 /// Whether `result` is a slot store_tmp() can write.
-#[inline]
+#[inline(always)]
 pub(crate) fn tmp_writable(result: &OperandType, tmps: &[Value]) -> bool {
     match result {
         OperandType::Tmp(i) => tmps.get(*i as usize).is_some_and(is_plain_scalar),
@@ -109,7 +109,7 @@ pub(crate) fn tmp_writable(result: &OperandType, tmps: &[Value]) -> bool {
 /// Overwrite the int/float held by CV `i` (directly or, when `refs_ok`,
 /// through a reference).  Only called after num_operand() read a number
 /// from that same CV, so the old value needs no cleanup.
-#[inline]
+#[inline(always)]
 pub(crate) fn store_num_cv(i: u32, v: Value, cvs: &mut [Value], refs_ok: bool) -> bool {
     match cvs.get_mut(i as usize) {
         Some(Value::Reference(r)) if refs_ok => match r.try_borrow_mut() {
@@ -128,7 +128,7 @@ pub(crate) fn store_num_cv(i: u32, v: Value, cvs: &mut [Value], refs_ok: bool) -
 }
 
 /// Whether CV `i` holds a number that store_num_cv() can overwrite.
-#[inline]
+#[inline(always)]
 pub(crate) fn cv_num_writable(i: u32, cvs: &[Value], refs_ok: bool) -> bool {
     match cvs.get(i as usize) {
         Some(Value::Reference(r)) if refs_ok => r
@@ -141,19 +141,45 @@ pub(crate) fn cv_num_writable(i: u32, cvs: &[Value], refs_ok: bool) -> bool {
 
 /// `a + b`, `a - b`, `a * b` on numbers (Value's own arithmetic, so the
 /// int overflow to float behaviour is the general handler's).
-#[inline]
+/// (Spelled out on the numbers: the same results as Value::add / sub /
+/// mul, without their reference and type juggling checks.)
+#[inline(always)]
 pub(crate) fn arith(opc: u8, a: Num, b: Num) -> Value {
-    let (a, b) = (a.value(), b.value());
-    match opc {
-        b'+' => a.add(&b),
-        b'-' => a.sub(&b),
-        _ => a.mul(&b),
+    match (a, b) {
+        (Num::L(x), Num::L(y)) => {
+            let r = match opc {
+                b'+' => x.checked_add(y),
+                b'-' => x.checked_sub(y),
+                _ => x.checked_mul(y),
+            };
+            match r {
+                Some(r) => Value::Long(r),
+                None => Value::Double(match opc {
+                    b'+' => x as f64 + y as f64,
+                    b'-' => x as f64 - y as f64,
+                    _ => x as f64 * y as f64,
+                }),
+            }
+        }
+        _ => {
+            let (x, y) = match (a, b) {
+                (Num::D(x), Num::D(y)) => (x, y),
+                (Num::L(x), Num::D(y)) => (x as f64, y),
+                (Num::D(x), Num::L(y)) => (x, y as f64),
+                (Num::L(x), Num::L(y)) => (x as f64, y as f64),
+            };
+            Value::Double(match opc {
+                b'+' => x + y,
+                b'-' => x - y,
+                _ => x * y,
+            })
+        }
     }
 }
 
 /// `a < b` (and friends, with swapped operands) on numbers: compare like
 /// Value::compare, which the general handlers use.
-#[inline]
+#[inline(always)]
 pub(crate) fn num_cmp(a: Num, b: Num) -> i64 {
     match (a, b) {
         (Num::L(x), Num::L(y)) => (x > y) as i64 - (x < y) as i64,
@@ -242,7 +268,7 @@ pub(crate) fn assign_concat_in_place(
     }
 }
 
-#[inline]
+#[inline(always)]
 fn bool_val(b: bool) -> Value {
     if b { Value::True } else { Value::False }
 }
@@ -280,7 +306,7 @@ pub(crate) enum Fast {
 /// by reference may be written through.  `no_release`: no object is
 /// waiting for its destructor (the general Assign handler is a release
 /// point; it is only bypassed when that cannot matter).
-#[inline]
+#[inline(always)]
 pub(crate) fn fast_op(
     op: &Op,
     cvs: &mut [Value],
@@ -520,7 +546,144 @@ fn dim_key(
     }
 }
 
+/// Whether run_fast_ops() may handle an opcode (a superset of what the
+/// dispatch loop's own fast attempt handles).
+#[inline(always)]
+pub(crate) fn runs_fast(opc: OpCode) -> bool {
+    matches!(
+        opc,
+        OpCode::Add
+            | OpCode::Sub
+            | OpCode::Mul
+            | OpCode::Less
+            | OpCode::LessEqual
+            | OpCode::Greater
+            | OpCode::GreaterEqual
+            | OpCode::Equal
+            | OpCode::NotEqual
+            | OpCode::Identical
+            | OpCode::NotIdentical
+            | OpCode::AssignAdd
+            | OpCode::AssignSub
+            | OpCode::AssignMul
+            | OpCode::PreIncrement
+            | OpCode::PreDecrement
+            | OpCode::PostIncrement
+            | OpCode::PostDecrement
+            | OpCode::JmpZ
+            | OpCode::JmpNz
+            | OpCode::Assign
+            | OpCode::QmAssign
+            | OpCode::AssignConcat
+            | OpCode::PropertyGet
+            | OpCode::PropertySet
+            | OpCode::ArrayGet
+            | OpCode::ArraySet
+            | OpCode::ArrayAppend
+            | OpCode::Jmp
+            | OpCode::FreeTmps
+            | OpCode::InitFCall
+            | OpCode::SendVal
+    )
+}
+
 impl crate::vm::Vm {
+    /// Run the opcodes from `ip` on while fast_op(), fast_dim_op() and
+    /// fast_prop_op() handle them, as the dispatch loop would one at a time
+    /// (they only touch plain values: nothing the loop checks between two
+    /// opcodes changes, but for memory_limit and max_execution_time, which
+    /// hand control back to it). Returns the index of the first opcode not
+    /// handled (or of the next one to run when the loop has to look).
+    /// `refs_ok` / `no_release`: see fast_op(); `foreach_idle`: the frame
+    /// has no foreach iteration state (see FreeTmps).
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_fast_ops(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        mut ip: usize,
+        cvs: &mut [Value],
+        tmps: &mut [Value],
+        internal_code: bool,
+        refs_ok: bool,
+        no_release: bool,
+        foreach_idle: bool,
+    ) -> usize {
+        let ops = &op_array.ops;
+        let literals = &op_array.literals;
+        loop {
+            let Some(op) = ops.get(ip) else {
+                return ip;
+            };
+            let fast = match op.opcode {
+                // A call by a constant plain function name (see the
+                // INIT_FCALL arm of the dispatch loop).
+                OpCode::InitFCall => {
+                    let Some(name) = crate::vm::plain_fcall_name(op, literals) else {
+                        return ip;
+                    };
+                    self.push_plain_call(op_array, ip, name.clone());
+                    Fast::Done
+                }
+                // A by-value argument of a call resolved when it was set up
+                // (see the SEND_VAL handler).
+                OpCode::SendVal => {
+                    if self.send_val_fast(op, cvs, tmps, literals) {
+                        Fast::Done
+                    } else {
+                        return ip;
+                    }
+                }
+                OpCode::PropertyGet | OpCode::PropertySet => {
+                    if self.isset_get_cache.is_some() {
+                        return ip;
+                    }
+                    self.fast_prop_op(op, cvs, tmps, literals)
+                }
+                OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
+                    self.fast_dim_op(op, cvs, tmps, literals)
+                }
+                OpCode::Jmp => match op.op1 {
+                    OperandType::JmpTarget(t) => Fast::Jump(t as usize),
+                    _ => return ip,
+                },
+                // A statement's temporaries that hold plain values, with no
+                // foreach state and nothing to destroy: the general handler
+                // just empties them.
+                OpCode::FreeTmps if foreach_idle && no_release => {
+                    let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) else {
+                        return ip;
+                    };
+                    let end = (b as usize).min(tmps.len());
+                    let range = &mut tmps[(a as usize).min(end)..end];
+                    if range.iter().any(|v| {
+                        matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_))
+                    }) {
+                        return ip;
+                    }
+                    for slot in range {
+                        *slot = Value::Undef;
+                    }
+                    Fast::Done
+                }
+                _ => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+            };
+            ip = match fast {
+                Fast::No => return ip,
+                Fast::Done => ip + 1,
+                Fast::Jump(t) => t,
+            };
+            if !internal_code {
+                self.current_line = op.line;
+            }
+            if crate::value::memory_exhausted() != 0
+                || crate::value::TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed)
+            {
+                return ip;
+            }
+        }
+    }
+
     /// `$a[k]` read, `$cv[k] = <scalar>` write and `$cv[] = <scalar>` append
     /// on a real array with an int / string key, where the element (for a
     /// read) exists or (for a write) is absent or a plain scalar that is not
