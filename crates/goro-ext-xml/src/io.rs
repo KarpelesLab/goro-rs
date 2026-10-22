@@ -114,7 +114,10 @@ pub fn sniff_charset_from_string(s: &[u8]) -> Option<Vec<u8>> {
     let token = |c: u8| {
         c == 0x21
             || (0x23..=0x27).contains(&c)
-            || matches!(c, 0x2A | 0x2B | 0x2D | 0x2E | 0x5E | 0x5F | 0x60 | 0x7C | 0x7E)
+            || matches!(
+                c,
+                0x2A | 0x2B | 0x2D | 0x2E | 0x5E | 0x5F | 0x60 | 0x7C | 0x7E
+            )
             || c.is_ascii_alphanumeric()
     };
     let mut start = 0;
@@ -199,7 +202,11 @@ pub fn sniff_charset_from_string(s: &[u8]) -> Option<Vec<u8>> {
             }
             v
         };
-        if name.eq_ignore_ascii_case(b"charset") && value.iter().all(|&c| c == 0x09 || (0x20..0x7F).contains(&c) || c > 0x7F) {
+        if name.eq_ignore_ascii_case(b"charset")
+            && value
+                .iter()
+                .all(|&c| c == 0x09 || (0x20..0x7F).contains(&c) || c > 0x7F)
+        {
             return Some(value);
         }
     }

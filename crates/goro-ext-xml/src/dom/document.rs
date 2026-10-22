@@ -862,7 +862,8 @@ fn load_common(vm: &mut Vm, o: &Obj, a: &[Value], file: bool) -> R<Value> {
     }
     let dir = if url.is_none() { cwd_url() } else { None };
     crate::parser::sync_open_basedir(vm);
-    let out = crate::sax2::parse_doc_enc(&data, url.as_deref(), opts, dir.as_deref(), enc.as_deref());
+    let out =
+        crate::sax2::parse_doc_enc(&data, url.as_deref(), opts, dir.as_deref(), enc.as_deref());
     crate::libxml::report(vm, &fname, &out.errors, crate::libxml::Style::Ctx);
     if recover {
         vm.error_reporting = saved_er;
