@@ -593,9 +593,6 @@ pub fn xml_load(vm: &mut Vm, a: &[Value], file: bool) -> R<Value> {
             }
         }
     });
-    if options & XML_PARSE_DTDVALID != 0 {
-        crate::dom::document::validate_doc(vm, d, &fname);
-    }
     if options & XML_PARSE_XINCLUDE != 0 {
         crate::xinclude::process(
             vm,

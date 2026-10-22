@@ -285,6 +285,32 @@ impl Vm {
         Ok(())
     }
 
+    /// The arguments of a call to the native method `class_lower::method`
+    /// as its frame shows them: the gaps named arguments left get the
+    /// stub's defaults.
+    pub(crate) fn native_frame_args(
+        &mut self,
+        class_lower: &[u8],
+        method: &[u8],
+        args: &[Value],
+    ) -> Vec<Value> {
+        if !args.iter().any(|a| matches!(a, Value::Undef)) {
+            return args.to_vec();
+        }
+        let stub = crate::stubs::find_method(class_lower, method).map(|(_, m)| m);
+        args.iter()
+            .enumerate()
+            .map(|(i, a)| match a {
+                Value::Undef => stub
+                    .and_then(|m| m.args.get(i))
+                    .and_then(|p| p.default)
+                    .and_then(|d| self.arginfo_default_value(d))
+                    .unwrap_or(Value::Undef),
+                a => a.clone(),
+            })
+            .collect()
+    }
+
     /// Run the native property read handler for `obj`, if any.
     pub fn native_prop_read(
         &mut self,
@@ -22703,23 +22729,32 @@ impl Vm {
                                     // A forwarded instance call gets its frame from the
                                     // native method dispatch itself.
                                     let own_frame = fwd_this.is_none();
-                                    if own_frame {
-                                        self.call_stack.push((
-                                            frame_name,
-                                            self.current_file.clone(),
-                                            op.line,
-                                            call.args.clone(),
-                                            false,
-                                        ));
-                                    }
                                     let mut args = call.args.clone();
-                                    let result = match self.merge_native_named_args(
+                                    let merged = self.merge_native_named_args(
                                         &native,
                                         &method_part,
                                         &mut args,
                                         0,
                                         &call.named_args,
-                                    ) {
+                                    );
+                                    // The frame shows the arguments the method
+                                    // receives: named ones in place, skipped ones
+                                    // with their defaults.
+                                    if own_frame {
+                                        let shown = self.native_frame_args(
+                                            &class_part,
+                                            &method_part,
+                                            &args,
+                                        );
+                                        self.call_stack.push((
+                                            frame_name,
+                                            self.current_file.clone(),
+                                            op.line,
+                                            shown,
+                                            false,
+                                        ));
+                                    }
+                                    let result = match merged {
                                         Ok(()) => (h.call)(
                                             self,
                                             &native,
