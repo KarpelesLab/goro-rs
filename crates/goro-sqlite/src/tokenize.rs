@@ -242,31 +242,40 @@ fn getToken(z: &[u8], pz: &mut usize) -> i32 {
 **   * the previous token was TK_RP, and
 **   * the next token is TK_LP.
 */
-fn analyzeWindowKeyword(z: &[u8]) -> i32 {
+/// Rust: `*pn` receives the number of bytes of z examined.
+fn analyzeWindowKeyword(z: &[u8], pn: &mut usize) -> i32 {
     let mut p = 0usize;
     let t = getToken(z, &mut p);
+    *pn = p;
     if t != TK_ID as i32 {
         return TK_ID as i32;
     }
     let t = getToken(z, &mut p);
+    *pn = p;
     if t != TK_AS as i32 {
         return TK_ID as i32;
     }
     TK_WINDOW as i32
 }
-fn analyzeOverKeyword(z: &[u8], lastToken: i32) -> i32 {
+fn analyzeOverKeyword(z: &[u8], lastToken: i32, pn: &mut usize) -> i32 {
     if lastToken == TK_RP as i32 {
         let mut p = 0usize;
         let t = getToken(z, &mut p);
+        *pn = p;
         if t == TK_LP as i32 || t == TK_ID as i32 {
             return TK_OVER as i32;
         }
     }
     TK_ID as i32
 }
-fn analyzeFilterKeyword(z: &[u8], lastToken: i32) -> i32 {
+fn analyzeFilterKeyword(z: &[u8], lastToken: i32, pn: &mut usize) -> i32 {
     let mut p = 0usize;
-    if lastToken == TK_RP as i32 && getToken(z, &mut p) == TK_LP as i32 {
+    if lastToken == TK_RP as i32 && {
+        let t = getToken(z, &mut p);
+        *pn = p;
+        t
+    } == TK_LP as i32
+    {
         return TK_FILTER as i32;
     }
     TK_ID as i32
@@ -276,12 +285,13 @@ fn analyzeFilterKeyword(z: &[u8], lastToken: i32) -> i32 {
 /// `t` is TK_WINDOW, TK_OVER or TK_FILTER, `z` the text after the keyword.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn analyze_keyword(t: i32, z: &[u8], lastToken: i32) -> i32 {
+    let mut n = 0;
     if t == TK_WINDOW as i32 {
-        analyzeWindowKeyword(z)
+        analyzeWindowKeyword(z, &mut n)
     } else if t == TK_OVER as i32 {
-        analyzeOverKeyword(z, lastToken)
+        analyzeOverKeyword(z, lastToken, &mut n)
     } else {
-        analyzeFilterKeyword(z, lastToken)
+        analyzeFilterKeyword(z, lastToken, &mut n)
     }
 }
 
@@ -694,6 +704,9 @@ pub fn sqlite3RunParser(db: &mut Sqlite3, zSql: &Rc<[u8]>, start: usize) -> i32 
     let mut mxSqlLen: i64; /* Max length of an SQL string */
     let z: &[u8] = zSql;
     let mut pos = start; /* C: zSql (current position) */
+    // Rust: one past the furthest byte looked at (one byte of lookahead
+    // after each token is assumed)
+    let mut nExamined = start;
 
     mxSqlLen = db.aLimit[SQLITE_LIMIT_SQL_LENGTH as usize] as i64;
     if db.nVdbeActive == 0 {
@@ -717,6 +730,7 @@ pub fn sqlite3RunParser(db: &mut Sqlite3, zSql: &Rc<[u8]>, start: usize) -> i32 
             &z[z.len()..]
         };
         n = sqlite3GetToken(rest, &mut tokenType);
+        nExamined = nExamined.max(pos + n as usize + 1);
         mxSqlLen -= n;
         if mxSqlLen < 0 {
             let p = db.pp();
@@ -757,13 +771,19 @@ pub fn sqlite3RunParser(db: &mut Sqlite3, zSql: &Rc<[u8]>, start: usize) -> i32 
                 n = 0;
             } else if tokenType == TK_WINDOW as i32 {
                 debug_assert!(n == 6);
-                tokenType = analyzeWindowKeyword(&rest[6..]);
+                let mut k = 0;
+                tokenType = analyzeWindowKeyword(&rest[6..], &mut k);
+                nExamined = nExamined.max(pos + 6 + k + 1);
             } else if tokenType == TK_OVER as i32 {
                 debug_assert!(n == 4);
-                tokenType = analyzeOverKeyword(&rest[4..], lastTokenParsed);
+                let mut k = 0;
+                tokenType = analyzeOverKeyword(&rest[4..], lastTokenParsed, &mut k);
+                nExamined = nExamined.max(pos + 4 + k + 1);
             } else if tokenType == TK_FILTER as i32 {
                 debug_assert!(n == 6);
-                tokenType = analyzeFilterKeyword(&rest[6..], lastTokenParsed);
+                let mut k = 0;
+                tokenType = analyzeFilterKeyword(&rest[6..], lastTokenParsed, &mut k);
+                nExamined = nExamined.max(pos + 6 + k + 1);
             } else if tokenType == TK_COMMENT as i32
                 && (db.init.busy != 0 || (db.flags & SQLITE_Comments) != 0)
             {
@@ -795,6 +815,7 @@ pub fn sqlite3RunParser(db: &mut Sqlite3, zSql: &Rc<[u8]>, start: usize) -> i32 
         }
     }
     debug_assert!(nErr == 0);
+    db.pp().nSqlExamined = nExamined;
     engine.finalize(db);
     if db.mallocFailed != 0 {
         db.pp().rc = SQLITE_NOMEM;

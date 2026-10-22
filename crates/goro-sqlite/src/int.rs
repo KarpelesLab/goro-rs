@@ -1480,6 +1480,10 @@ pub struct Parse {
     /// The SQL text being parsed and the offset of the unparsed tail.
     pub zSql: Option<Rc<[u8]>>,
     pub zTail: usize,
+    /// Rust: one past the last byte of the SQL text that the tokenizer
+    /// examined (sqlite3Prepare() parses a window of the input and uses
+    /// this to know whether the rest of the text could have mattered).
+    pub nSqlExamined: usize,
     pub pNewTable: Option<TableRef>,
     pub pNewIndex: Option<IndexRef>,
     pub pNewTrigger: Option<TriggerRef>,

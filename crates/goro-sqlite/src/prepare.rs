@@ -669,6 +669,13 @@ fn sqlText(zSql: &[u8], nBytes: i32) -> &[u8] {
 ///
 /// Rust: returns (rc, the prepared statement (not yet registered in
 /// db.aVdbe), byte offset of the unparsed tail in zSql).
+///
+/// The tokens of the parse share one copy of the SQL text.  C parses the
+/// caller's buffer in place and only reads up to the end of the first
+/// statement; copying (and scanning for a NUL) the whole remaining input
+/// for every statement would make a loop over a long script quadratic.  So
+/// a window of the text is copied, and the parse is redone with a larger
+/// window in the rare case where the tokenizer reached the window's end.
 fn sqlite3Prepare(
     db: &mut Sqlite3,
     zSql: &[u8],
@@ -676,7 +683,45 @@ fn sqlite3Prepare(
     prepFlags: u32,
     pReprepare: Option<StmtId>,
 ) -> (i32, Option<Box<Vdbe>>, usize) {
+    let full = if nBytes >= 0 && (nBytes as usize) < zSql.len() {
+        &zSql[..nBytes as usize]
+    } else {
+        zSql
+    };
+    let mut nWin = 1usize << 16;
+    loop {
+        let wend = nWin.min(full.len());
+        let (zText, partial) = match full[..wend].iter().position(|&c| c == 0) {
+            Some(k) => (&full[..k], false),
+            None => (&full[..wend], wend < full.len()),
+        };
+        let (rc, pStmt, zTail, nExamined) =
+            sqlite3PrepareText(db, zSql, nBytes, zText, prepFlags, pReprepare);
+        if partial && nExamined >= zText.len() {
+            // The rest of the input may matter: discard and redo.
+            if let Some(mut v) = pStmt {
+                crate::vdbeaux::sqlite3VdbeFinalize(db, &mut v);
+            }
+            nWin = nWin.saturating_mul(16);
+            continue;
+        }
+        return (rc, pStmt, zTail);
+    }
+}
+
+/// The body of sqlite3Prepare(): parse zText (a prefix of the SQL text,
+/// already cut at a NUL); also returns how much of it the tokenizer
+/// examined.
+fn sqlite3PrepareText(
+    db: &mut Sqlite3,
+    zSql: &[u8],
+    nBytes: i32,
+    zText: &[u8],
+    prepFlags: u32,
+    pReprepare: Option<StmtId>,
+) -> (i32, Option<Box<Vdbe>>, usize, usize) {
     let mut rc: i32;
+    let mut nExamined = 0usize;
     let mut ppStmt: Option<Box<Vdbe>> = None;
     let mut zTail: usize = 0;
 
@@ -752,9 +797,10 @@ fn sqlite3Prepare(
                 break 'end_prepare;
             }
         }
-        let zText: Rc<[u8]> = Rc::from(sqlText(zSql, nBytes));
+        let zText: Rc<[u8]> = Rc::from(zText);
         crate::tokenize::sqlite3RunParser(db, &zText, 0);
         zTail = db.ppr().zTail.min(zText.len());
+        nExamined = db.ppr().nSqlExamined;
         debug_assert!(0 == db.ppr().nQueryLoop);
 
         if db.init.busy == 0 {
@@ -801,7 +847,7 @@ fn sqlite3Prepare(
 
     // end_prepare:
     sqlite3ParseObjectReset(db);
-    (rc, ppStmt, zTail)
+    (rc, ppStmt, zTail, nExamined)
 }
 
 /// sqlite3ParseObjectInit() without the "out of memory" check (the
