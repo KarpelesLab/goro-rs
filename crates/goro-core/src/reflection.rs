@@ -10321,6 +10321,7 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
             "DomainException",
         ],
         "bcmath" => &["BcMath\\Number"],
+        "ftp" => &["FTP\\Connection"],
         "filter" => &["Filter\\FilterException", "Filter\\FilterFailedException"],
         _ => &[],
     }

@@ -88,6 +88,7 @@ impl Vm {
                     || class_lower == b"inflatecontext"
                     || class_lower == b"socket"
                     || class_lower == b"addressinfo"
+                    || class_lower == b"ftp\\connection"
                     || class_lower == b"fiber"
                     || class_lower == b"random\\engine\\secure"
                     || class_lower == b"random\\randomizer"

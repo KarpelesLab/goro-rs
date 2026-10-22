@@ -29,6 +29,7 @@ members = [
     "crates/goro-ext-bcmath",
     "crates/goro-ext-filter",
     "crates/goro-ext-iconv",
+    "crates/goro-ext-ftp",
     "crates/goro-ext-pcntl",
     "crates/goro-ext-posix",
     "crates/goro-ext-calendar",
@@ -83,6 +84,7 @@ goro-ext-zend-test = { path = "crates/goro-ext-zend-test" }
 goro-ext-bcmath = { path = "crates/goro-ext-bcmath" }
 goro-ext-filter = { path = "crates/goro-ext-filter" }
 goro-ext-iconv = { path = "crates/goro-ext-iconv" }
+goro-ext-ftp = { path = "crates/goro-ext-ftp" }
 goro-ext-pcntl = { path = "crates/goro-ext-pcntl" }
 goro-ext-posix = { path = "crates/goro-ext-posix" }
 goro-ext-calendar = { path = "crates/goro-ext-calendar" }

@@ -34,6 +34,7 @@ pub fn register_extensions(vm: &mut Vm) {
     goro_ext_bcmath::register(vm);
     goro_ext_filter::register(vm);
     goro_ext_iconv::register(vm);
+    goro_ext_ftp::register(vm);
     goro_ext_pcntl::register(vm);
     goro_ext_posix::register(vm);
     goro_ext_calendar::register(vm);

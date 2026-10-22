@@ -44,6 +44,7 @@ $dirs = [
     'ext/bcmath' => 'bcmath',
     'ext/filter' => 'filter',
     'ext/iconv' => 'iconv',
+    'ext/ftp' => 'ftp',
     'ext/pcntl' => 'pcntl',
     'ext/posix' => 'posix',
     'ext/calendar' => 'calendar',
