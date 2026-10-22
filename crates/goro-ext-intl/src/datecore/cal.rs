@@ -1937,7 +1937,7 @@ impl Calendar {
             if dow != on {
                 return Ok(0);
             }
-            return Ok(if onms == 0 { 2 } else { 3 });
+            return Ok(if onms == 0 { 1 } else { 2 });
         }
         if on < ce {
             if dow < on || dow > ce {

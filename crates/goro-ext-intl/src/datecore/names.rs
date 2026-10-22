@@ -101,13 +101,18 @@ fn now_local(z: &Zone) -> DateTime {
 
 /// The CLDR zone name in `style` from intl, None when intl fell back to
 /// the GMT format.
-fn cldr_name(z: &Zone, lang: &str, style: TimeZoneNameStyle, daylight: bool) -> Option<String> {
+fn cldr_name(
+    z: &Zone,
+    lang: &str,
+    style: TimeZoneNameStyle,
+    daylight: Option<bool>,
+) -> Option<String> {
     let idx = zone::system_index(&z.id)?;
     let canon: &'static str = zone::canonical_of(idx);
     let mut o = DateTimeFormatOptions::default();
     o.time_zone = Some(canon);
     o.time_zone_name = Some(style);
-    o.tz_is_dst = Some(daylight);
+    o.tz_is_dst = daylight;
     let dt = now_local(z);
     let parts = intl::datetime::format_to_parts(lang, &dt, &o).ok()?;
     let name: String = parts
@@ -129,8 +134,19 @@ fn cldr_name(z: &Zone, lang: &str, style: TimeZoneNameStyle, daylight: bool) -> 
     Some(name)
 }
 
-/// The region format ("{0} Time") of a locale.
-fn region_format(lang: &str) -> &'static str {
+/// The region format ("{0} Time") of a locale: derived from intl's
+/// generic location name of Europe/Lisbon (named after its country), or
+/// a fallback table.
+fn region_format(lang: &str) -> String {
+    if let (Some(n), Some(country)) = (
+        zone::create("Europe/Lisbon")
+            .and_then(|lz| cldr_name(&lz, lang, TimeZoneNameStyle::ShortGeneric, None)),
+        intl::display::region_name(lang, "PT"),
+    ) {
+        if n.contains(country) {
+            return n.replacen(country, "{0}", 1);
+        }
+    }
     match lang.split('-').next().unwrap_or("") {
         "en" => "{0} Time",
         "de" => "{0} (Ortszeit)",
@@ -138,13 +154,19 @@ fn region_format(lang: &str) -> &'static str {
         "es" => "hora de {0}",
         "it" => "Ora {0}",
         "pt" => "Horário {0}",
-        "nl" => "{0}-tijd",
+        "nl" => "tijd in {0}",
         "ja" => "{0}時間",
         "zh" => "{0}时间",
-        "ko" => "{0} 시간",
-        "ru" => "{0}",
         _ => "{0}",
     }
+    .to_string()
+}
+
+/// Whether a name is an abbreviation ("PT", "CET").
+fn is_abbreviation(n: &str) -> bool {
+    n.len() <= 5
+        && n.chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 const PRIMARY_ZONES: &[(&str, &str)] = &[
@@ -178,6 +200,15 @@ pub fn generic_location(z: &Zone, lang: &str) -> Option<String> {
         || PRIMARY_ZONES
             .iter()
             .any(|(r, zid)| *r == region && *zid == canon);
+    // intl's short generic name falls back to the generic location
+    if let Some(n) = cldr_name(z, lang, TimeZoneNameStyle::ShortGeneric, None) {
+        if !is_abbreviation(&n)
+            && cldr_name(z, lang, TimeZoneNameStyle::LongGeneric, None).as_deref()
+                != Some(n.as_str())
+        {
+            return Some(n);
+        }
+    }
     let fmt = region_format(lang);
     if single {
         if let Some(country) = intl::display::region_name(lang, region) {
@@ -196,13 +227,38 @@ pub fn display_name(z: &Zone, daylight: bool, style: i64, locale: &str) -> Strin
         GENERIC_LOCATION | LONG_GENERIC | SHORT_GENERIC => {
             let name = match style {
                 GENERIC_LOCATION => generic_location(z, &lang),
-                LONG_GENERIC => cldr_name(z, &lang, TimeZoneNameStyle::LongGeneric, daylight),
-                _ => cldr_name(z, &lang, TimeZoneNameStyle::ShortGeneric, daylight),
+                _ => {
+                    let long = style == LONG_GENERIC;
+                    // no DST around now: the standard name
+                    // (zones without a metazone, Etc/*, have no such name)
+                    let etc = zone::system_index(&z.id)
+                        .is_none_or(|i| zone::canonical_of(i).starts_with("Etc/"));
+                    let std = if etc || z.dst_near(zone::now_millis()) {
+                        None
+                    } else {
+                        let st = if long {
+                            TimeZoneNameStyle::Long
+                        } else {
+                            TimeZoneNameStyle::Short
+                        };
+                        cldr_name(z, &lang, st, Some(false))
+                    };
+                    let gs = if long {
+                        TimeZoneNameStyle::LongGeneric
+                    } else {
+                        TimeZoneNameStyle::ShortGeneric
+                    };
+                    std.or_else(|| cldr_name(z, &lang, gs, None))
+                }
             };
             match name {
                 Some(n) => n,
                 None => {
-                    let off = if daylight { raw + z.dst_savings() } else { raw };
+                    let off = if daylight && !z.is_unknown() {
+                        raw + z.dst_savings()
+                    } else {
+                        raw
+                    };
                     if style == SHORT_GENERIC {
                         short_gmt(&lang, off)
                     } else {
@@ -229,7 +285,7 @@ pub fn display_name(z: &Zone, daylight: bool, style: i64, locale: &str) -> Strin
             } else {
                 TimeZoneNameStyle::Short
             };
-            match cldr_name(z, &lang, st, daylight) {
+            match cldr_name(z, &lang, st, Some(daylight)) {
                 Some(n) => n,
                 None => {
                     let off = if daylight && z.use_daylight_time() {

@@ -448,28 +448,32 @@ pub fn week_data(locale: &str) -> WeekData {
 /// for `locale`.
 pub fn calendar_locales(locale: &str) -> (String, String) {
     let base = locale_base(locale);
-    let lang = base.split('_').next().unwrap_or("").to_string();
-    let known = data::AVAILABLE_LOCALES.contains(&lang.as_str());
-    if lang.is_empty() || !known {
-        return ("en".to_string(), "en_US_POSIX".to_string());
-    }
-    let has_region = base.split('_').skip(1).any(|p| {
-        p.len() == 2 && p.chars().all(|c| c.is_ascii_alphabetic())
-            || p.len() == 3 && p.chars().all(|c| c.is_ascii_digit())
-    });
-    let valid = if has_region {
-        base.clone()
-    } else {
-        let r = locale_region(locale);
-        if r == "001" {
-            base.clone()
-        } else {
-            format!("{}_{}", base, r)
+    let of = |l: &str| -> Option<(String, String)> {
+        if let Some(r) = data::CAL_LOCALES.iter().find(|r| r.0 == l) {
+            return Some((r.1.to_string(), r.2.to_string()));
         }
+        if data::AVAILABLE_LOCALES.contains(&l) {
+            let lang = l.split('_').next().unwrap_or("").to_string();
+            return Some((lang, l.to_string()));
+        }
+        None
     };
-    // ICU's calendar data mostly lives in the language bundle
-    let actual = lang;
-    (actual, valid)
+    if let Some(r) = of(&base) {
+        return r;
+    }
+    // the longest available parent
+    let mut cur = base.as_str();
+    while let Some(p) = cur.rfind('_') {
+        cur = &cur[..p];
+        if let Some((actual, valid)) = of(cur) {
+            let has_region = base.split('_').skip(1).any(|p| {
+                p.len() == 2 && p.chars().all(|c| c.is_ascii_alphabetic())
+                    || p.len() == 3 && p.chars().all(|c| c.is_ascii_digit())
+            });
+            return (actual, if has_region { base.clone() } else { valid });
+        }
+    }
+    ("en".to_string(), "en_US".to_string())
 }
 
 /// A calendar of type `cal_type` (a CLDR calendar name) for `locale` in

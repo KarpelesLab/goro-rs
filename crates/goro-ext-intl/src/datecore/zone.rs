@@ -38,6 +38,9 @@ pub struct Zone {
     pub rules: Option<Rc<Rules>>,
     /// The raw offset (ms) of a fixed zone.
     pub fixed: i32,
+    /// A SimpleTimeZone (getGMT(), getUnknown(), custom IDs) rather than
+    /// a system (Olson) zone.
+    pub simple: bool,
 }
 
 pub const UNKNOWN_ID: &str = "Etc/Unknown";
@@ -55,6 +58,7 @@ impl Zone {
             id: id.to_string(),
             rules: None,
             fixed: raw,
+            simple: true,
         }
     }
 
@@ -158,8 +162,28 @@ impl Zone {
             .any(|p| p.dst != 0)
     }
 
+    /// Whether DST is in effect at `ms` or within 184 days of it (the
+    /// check ICU's generic names make).
+    pub fn dst_near(&self, ms: f64) -> bool {
+        let Some(r) = &self.rules else {
+            return false;
+        };
+        let range = 184.0 * 86_400_000.0;
+        let lo = ((ms - range) / 1000.0).floor() as i64;
+        let hi = ((ms + range) / 1000.0).floor() as i64;
+        let first = Self::period_at(r, lo);
+        r.periods[first..]
+            .iter()
+            .take_while(|p| p.start <= hi)
+            .any(|p| p.dst != 0)
+    }
+
     /// getDSTSavings()
     pub fn dst_savings(&self) -> i32 {
+        if self.simple {
+            // SimpleTimeZone's default savings
+            return 3_600_000;
+        }
         if let Some(r) = &self.rules {
             if let Some(s) = r.final_save {
                 return s;
@@ -183,7 +207,7 @@ impl Zone {
 
     /// operator==: same class, same ID, same rules.
     pub fn equals(&self, other: &Zone) -> bool {
-        self.id == other.id && self.has_same_rules(other)
+        self.id == other.id && self.simple == other.simple && self.has_same_rules(other)
     }
 
     /// BasicTimeZone::getPreviousTransition(base, inclusive): the start
@@ -616,6 +640,7 @@ fn system_zone(id: &str, i: usize) -> Zone {
         id: id.to_string(),
         rules,
         fixed,
+        simple: false,
     }
 }
 
