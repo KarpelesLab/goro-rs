@@ -290,6 +290,8 @@ pub struct Sheet {
     pub ext_functions: HashMap<(String, String), NodeId>,
     /// the stylesheet module declaring each of ext_functions
     pub ext_function_style: HashMap<(String, String), usize>,
+    /// profiler data of the templates (setProfiling())
+    pub prof: std::cell::RefCell<Vec<crate::profile::ProfStat>>,
 }
 
 impl Sheet {

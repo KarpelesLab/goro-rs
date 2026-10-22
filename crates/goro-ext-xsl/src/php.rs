@@ -760,10 +760,13 @@ fn apply_stylesheet(
         );
         return Err(());
     };
+    // the profile output: php_check_open_basedir() + VCWD_FOPEN(..., "w")
     let profiling = st.borrow().profiling.clone();
+    let mut prof_file: Option<std::fs::File> = None;
     if let Some(p) = &profiling {
-        // the profile is written by libxslt; create the file
-        let _ = goro_ext_xml::io::write_resource(vm, p, b"");
+        if goro_core::basedir::check_open_basedir_ex(vm, "", p, true) {
+            prof_file = std::fs::File::create(p).ok();
+        }
     }
     let has_keys = st.borrow().has_keys;
     if has_keys {
@@ -796,6 +799,7 @@ fn apply_stylesheet(
         t.max_template_vars = max_vars.min(i32::MAX as i64) as i32;
         t.sec_prefs = sec_prefs;
         t.main_doc = doc;
+        t.profile = prof_file.is_some();
         let hp: *mut dyn PhpHost = &mut host;
         t.php = Some(hp);
         let r = t.apply_stylesheet(doc, &params);
@@ -803,6 +807,10 @@ fn apply_stylesheet(
         r
     };
     drop(host);
+    if let Some(mut f) = prof_file {
+        use std::io::Write;
+        let _ = f.write_all(crate::profile::save_profiling(&sheet).as_bytes());
+    }
     Ok(res.map(|r| (r, sheet)))
 }
 

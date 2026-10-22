@@ -116,6 +116,9 @@ pub struct Transform<'v> {
     pub func_result: Option<XObj>,
     pub func_error: bool,
     pub func_ctxt_var: Option<Elem>,
+    /// profiling (ctxt->profile, ctxt->profTab)
+    pub profile: bool,
+    pub prof_tab: Vec<i64>,
     /// nodes created in RTFs (result value trees), for cleanup bookkeeping
     pub rtfs: Vec<NodeId>,
     /// the user parameters (name, value) set from PHP
@@ -171,6 +174,8 @@ impl<'v> Transform<'v> {
             func_result: None,
             func_error: false,
             func_ctxt_var: None,
+            profile: false,
+            prof_tab: Vec::new(),
             rtfs: Vec::new(),
             contextual_var: None,
         }
@@ -1294,6 +1299,14 @@ impl<'v> Transform<'v> {
         let old_vars_base = self.vars_base;
         self.vars_base = self.vars.len();
         self.node = context_node;
+        let mut prof_start = 0;
+        if self.profile {
+            let sheet = self.sheet.clone();
+            crate::profile::with_stat(&sheet, templ, |s| s.nb_calls += 1);
+            prof_start = crate::profile::timestamp();
+            self.prof_tab.push(0);
+            crate::profile::callgraph_add(&sheet, templ, self.templ());
+        }
         self.templ_push(templ);
         // xsl:param handling
         let mut body = Some(list);
@@ -1326,6 +1339,21 @@ impl<'v> Transform<'v> {
         }
         self.vars_base = old_vars_base;
         self.templ_pop();
+        if self.profile {
+            let end = crate::profile::timestamp();
+            let child = self.prof_tab.pop().unwrap_or(0);
+            let total = end - prof_start;
+            let mut spent = total - child;
+            if spent <= 0 {
+                crate::profile::calibrate_adjust(spent);
+                spent = 0;
+            }
+            let sheet = self.sheet.clone();
+            crate::profile::with_stat(&sheet, templ, |s| s.time += spent);
+            if let Some(last) = self.prof_tab.last_mut() {
+                *last += total;
+            }
+        }
     }
 
     fn push_param_or_withparam(&mut self, c: NodeId, pc: &Rc<PreComp>, with_params: &[Elem]) {

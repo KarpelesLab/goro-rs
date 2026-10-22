@@ -24,6 +24,7 @@ pub mod numbers;
 pub mod output;
 pub mod pattern;
 pub mod php;
+pub mod profile;
 pub mod security;
 pub mod sort;
 pub mod style;
