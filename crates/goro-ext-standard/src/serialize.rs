@@ -759,7 +759,9 @@ impl Serializer {
                 }
             };
             let names: Vec<Value> = names.borrow().values().map(|v| v.deref()).collect();
-            let props = mangled_props(vm, &obj.borrow());
+            // __sleep() may have initialized a lazy proxy: its instance holds
+            // the properties.
+            let props = mangled_props(vm, &vm.proxy_redirect(&obj).borrow());
             let mut chosen: Vec<(Vec<u8>, Value)> = Vec::new();
             for name_val in &names {
                 if !matches!(name_val, Value::String(_)) {

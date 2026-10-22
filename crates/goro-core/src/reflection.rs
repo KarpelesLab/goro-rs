@@ -4327,6 +4327,11 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         return Some(Value::Null);
                     }
                 }
+                // zend_object_make_lazy(): the class's constants and default
+                // values are evaluated first.
+                if vm.update_class_constants(&class_lower).is_err() {
+                    return Some(Value::Null);
+                }
                 // Validate options: only SKIP_INITIALIZATION_ON_SERIALIZE (1)
                 // is allowed for newLazyGhost/newLazyProxy. SKIP_DESTRUCTOR (2)
                 // is only allowed on resetAsLazyProxy.

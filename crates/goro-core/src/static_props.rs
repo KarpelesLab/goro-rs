@@ -1087,7 +1087,8 @@ impl Vm {
                 }
             }
         }
-        // Defaults that are a bare global constant, once it is defined.
+        // Defaults that are a bare global constant, once it is defined; an
+        // undefined one throws on first use like any constant expression.
         const GC: &[u8] = b"__deferred_global_const__::";
         let globals: Vec<(usize, Value)> = self
             .classes
@@ -1097,7 +1098,8 @@ impl Vm {
                     .iter()
                     .enumerate()
                     .filter(|(_, p)| {
-                        matches!(&p.default, Value::String(s) if s.as_bytes().starts_with(GC))
+                        !p.is_static
+                            && matches!(&p.default, Value::String(s) if s.as_bytes().starts_with(GC))
                     })
                     .map(|(i, p)| (i, p.default.clone()))
                     .collect()
@@ -1114,7 +1116,13 @@ impl Vm {
                 .unwrap_or(&name)
                 .to_vec();
             if !self.constants.contains_key(&name) && !self.constants.contains_key(&short) {
-                continue;
+                if crate::stubs::find_constant(&short).is_some() {
+                    continue;
+                }
+                let msg = format!("Undefined constant \"{}\"", String::from_utf8_lossy(&name));
+                let exc = self.create_exception(b"Error", &msg, self.current_line);
+                self.current_exception = Some(exc);
+                return Err(());
             }
             let v = self.resolve_deferred_value(&marker);
             if self.current_exception.is_some() {
