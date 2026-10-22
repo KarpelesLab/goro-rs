@@ -33746,9 +33746,14 @@ impl Vm {
                                 op.line,
                             );
                         }
-                        let mut arr = PhpArray::new();
-                        arr.push(val);
-                        let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
+                        let new_rc = Rc::new(RefCell::new(PhpArray::new()));
+                        let val = if Self::cvs_share_reference(&cvs, &op.op1, &op.op2) {
+                            Value::Array(new_rc.clone())
+                        } else {
+                            val
+                        };
+                        new_rc.borrow_mut().push(val);
+                        let new_arr = Value::Array(new_rc);
                         if let OperandType::Cv(cv_idx) = &op.op1 {
                             let i = *cv_idx as usize;
                             if let Some(cv_val) = cvs.get_mut(i) {
@@ -34113,15 +34118,25 @@ impl Vm {
                                 }
                                 _ => None,
                             };
+                            let mut self_key = None;
                             if let Some(t) = &illegal {
                                 let msg = format!("Cannot access offset of type {} on array", t);
                                 let exc = self.create_exception(b"TypeError", &msg, op.line);
                                 self.current_exception = Some(exc);
                             } else {
                                 let key = self.value_to_array_key_checked(&key_val, op.line);
-                                arr.set(key, val);
+                                if Self::cvs_share_reference(&cvs, &op.op1, &op.op2) {
+                                    self_key = Some(key);
+                                } else {
+                                    arr.set(key, val);
+                                }
                             }
-                            let new_arr = Value::Array(Rc::new(RefCell::new(arr)));
+                            let new_rc = Rc::new(RefCell::new(arr));
+                            if let Some(key) = self_key {
+                                let me = Value::Array(new_rc.clone());
+                                new_rc.borrow_mut().set(key, me);
+                            }
+                            let new_arr = Value::Array(new_rc);
                             // Write back to the CV or reference
                             if let OperandType::Cv(cv_idx) = &op.op1 {
                                 let i = *cv_idx as usize;
@@ -55009,6 +55024,19 @@ impl Vm {
         matches!(opcode, OpCode::Extract | OpCode::VarVarSet)
     }
 
+    /// Whether two CV operands are bound to the same reference: the
+    /// value of `$a[] = $r` (with `$r =& $a`) is fetched after the container
+    /// was auto-vivified, so it is the new array itself.
+    fn cvs_share_reference(cvs: &[Value], a: &OperandType, b: &OperandType) -> bool {
+        match (a, b) {
+            (OperandType::Cv(x), OperandType::Cv(y)) if x != y => matches!(
+                (cvs.get(*x as usize), cvs.get(*y as usize)),
+                (Some(Value::Reference(p)), Some(Value::Reference(q))) if Rc::ptr_eq(p, q)
+            ),
+            _ => false,
+        }
+    }
+
     fn read_operand_raw(cvs: &[Value], operand: &OperandType) -> Value {
         match operand {
             OperandType::Cv(idx) => cvs.get(*idx as usize).cloned().unwrap_or(Value::Null),
@@ -55126,6 +55154,7 @@ impl Vm {
                 // cells that bind them to global-scope CVs (table + CV +
                 // frame binding + this copy).
                 let max_rc = if Rc::ptr_eq(arr, &self.globals) { 4 } else { 2 };
+                let ident = copy.identity();
                 for (_, v) in copy.iter_mut().filter(|_| !is_closure) {
                     let single = matches!(v, Value::Reference(r) if Rc::strong_count(r) <= max_rc);
                     if single {
@@ -55135,6 +55164,7 @@ impl Vm {
                         }
                     }
                 }
+                copy.set_identity(ident);
                 Value::Array(Rc::new(RefCell::new(copy)))
             }
             _ => value,

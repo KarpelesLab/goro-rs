@@ -67,6 +67,12 @@ pub struct PhpArray {
     zpacked: bool,
     /// Not accounted (the global symbol table, preallocated by the engine).
     untracked: bool,
+    /// The zend_array this array stands for (0 = not assigned yet): goro
+    /// copies arrays eagerly where PHP shares one refcounted zend_array
+    /// until a write separates it, so a copy keeps its source's identity
+    /// until either is modified. Recursion guards (var_dump(), print_r(),
+    /// ...) key on it. See `identity`.
+    ident: std::cell::Cell<u64>,
 }
 
 /// Size of a zend_array (56-byte header) whose data block holds `cap`
@@ -126,6 +132,10 @@ fn dup_nested_array(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> Option<Val
     Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
         inner.clone(),
     ))))
+}
+
+thread_local! {
+    static NEXT_IDENT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl Clone for PhpArray {
@@ -193,6 +203,7 @@ impl Clone for PhpArray {
             zcap,
             zpacked,
             untracked: false,
+            ident: std::cell::Cell::new(self.identity()),
         };
         if self.head == 0 {
             copy.index = self.index.clone();
@@ -216,6 +227,7 @@ impl PhpArray {
             zcap: 0,
             zpacked: true,
             untracked: false,
+            ident: std::cell::Cell::new(0),
         }
     }
 
@@ -231,7 +243,36 @@ impl PhpArray {
             zcap: 0,
             zpacked: true,
             untracked: false,
+            ident: std::cell::Cell::new(0),
         }
+    }
+
+    /// The identity of the zend_array this array stands for: shared by
+    /// unmodified copies (see `ident`), never 0.
+    pub fn identity(&self) -> u64 {
+        let v = self.ident.get();
+        if v != 0 {
+            return v;
+        }
+        let v = NEXT_IDENT.with(|n| {
+            let v = n.get() + 1;
+            n.set(v);
+            v
+        });
+        self.ident.set(v);
+        v
+    }
+
+    /// Give this array the identity `id` (a copy fixed up after cloning
+    /// that still stands for the same zend_array).
+    pub(crate) fn set_identity(&mut self, id: u64) {
+        *self.ident.get_mut() = id;
+    }
+
+    /// A write separates this array from its copies.
+    #[inline(always)]
+    fn separate(&mut self) {
+        *self.ident.get_mut() = 0;
     }
 
     #[inline]
@@ -512,6 +553,7 @@ impl PhpArray {
 
     /// Get a mutable reference by ArrayKey
     pub fn get_mut(&mut self, key: &ArrayKey) -> Option<&mut Value> {
+        self.separate();
         match self.find(key) {
             Some(p) => Some(&mut self.entries[p].1),
             None => None,
@@ -520,6 +562,7 @@ impl PhpArray {
 
     /// Set a value with a specific key
     pub fn set(&mut self, key: ArrayKey, value: Value) {
+        self.separate();
         // Check if key already exists
         if let Some(p) = self.find(&key) {
             let old = std::mem::replace(&mut self.entries[p].1, value);
@@ -549,6 +592,7 @@ impl PhpArray {
     /// Append a value with the next integer key ($arr[] = value).
     /// Silently ignores if memory limit is exceeded. Ignores key conflicts.
     pub fn push(&mut self, value: Value) {
+        self.separate();
         // nNextFreeElement == ZEND_LONG_MIN means no integer key used yet
         let key = if self.next_int_key == i64::MIN {
             0
@@ -567,6 +611,7 @@ impl PhpArray {
     /// Append a value with the next integer key ($arr[] = value).
     /// Returns Err("Cannot add element...") if the key is already occupied (PHP_INT_MAX overflow).
     pub fn try_push(&mut self, value: Value) -> Result<(), &'static str> {
+        self.separate();
         // Check if next_int_key is already occupied (happens after PHP_INT_MAX was used)
         let key = if self.next_int_key == i64::MIN {
             0
@@ -593,6 +638,7 @@ impl PhpArray {
     }
 
     fn pop_entry_raw(&mut self) -> Option<(ArrayKey, Value)> {
+        self.separate();
         if self.is_empty() {
             return None;
         }
@@ -680,6 +726,7 @@ impl PhpArray {
     /// Insert an entry before the first one (the key must not exist yet).
     /// O(1) amortized. Silently ignored when memory_limit forbids it.
     pub fn push_front(&mut self, key: ArrayKey, value: Value) {
+        self.separate();
         if !self.reserve_one() {
             return;
         }
@@ -728,6 +775,7 @@ impl PhpArray {
     /// Insert an entry at insertion-order position `pos` (the key must not
     /// exist yet). O(n). Silently ignored when memory_limit forbids it.
     pub fn insert_at(&mut self, pos: usize, key: ArrayKey, value: Value) {
+        self.separate();
         if pos == 0 {
             return self.push_front(key, value);
         }
@@ -778,6 +826,7 @@ impl PhpArray {
 
     /// Remove and return the first element (like array_shift)
     pub fn shift(&mut self) -> Option<Value> {
+        self.separate();
         self.compact();
         if self.entries.is_empty() {
             None
@@ -794,6 +843,7 @@ impl PhpArray {
     /// the rest move down and are renumbered, the internal pointer is
     /// reset. None (array untouched) when the array is empty or not packed.
     pub fn shift_packed(&mut self) -> Option<Value> {
+        self.separate();
         if !self.packed || self.entries.is_empty() {
             return None;
         }
@@ -812,6 +862,7 @@ impl PhpArray {
 
     /// Insert a value at the beginning with key 0 (like array_unshift)
     pub fn unshift(&mut self, value: Value) {
+        self.separate();
         if !self.reserve_one() {
             return;
         }
@@ -847,6 +898,7 @@ impl PhpArray {
     }
 
     fn remove_inner(&mut self, key: &ArrayKey) -> Option<Value> {
+        self.separate();
         if let Some(pos) = self.find(key) {
             // The internal pointer keeps designating the same element (or,
             // past the end, the slot the next append fills): entries after
@@ -908,6 +960,7 @@ impl PhpArray {
 
     /// Iterate over entries mutably
     pub fn iter_mut(&mut self) -> impl Iterator<Item = (&ArrayKey, &mut Value)> {
+        self.separate();
         self.live_mut().iter_mut().map(|(k, v)| (k as &ArrayKey, v))
     }
 
@@ -933,6 +986,7 @@ impl PhpArray {
 
     /// Mutable value of the entry at insertion-order position `pos`.
     pub fn value_at_mut(&mut self, pos: usize) -> Option<&mut Value> {
+        self.separate();
         self.live_mut().get_mut(pos).map(|(_, v)| v)
     }
 

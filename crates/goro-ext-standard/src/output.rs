@@ -233,7 +233,7 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
         }
         Value::Array(arr) => {
-            let akey = (Rc::as_ptr(arr) as usize as u64) | (1u64 << 63);
+            let akey = arr.borrow().identity() | (1u64 << 63);
             if !seen.insert(akey) {
                 vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
                 return;
@@ -630,7 +630,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
             }
         }
         Value::Array(arr) => {
-            let akey = (std::rc::Rc::as_ptr(arr) as usize as u64) | (1u64 << 63);
+            let akey = arr.borrow().identity() | (1u64 << 63);
             if !seen.insert(akey) {
                 vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
                 return;
@@ -1646,7 +1646,7 @@ fn print_r_value(
     closure_info_table: &std::collections::HashMap<Vec<u8>, ClosurePrintInfo>,
 ) {
     let key = match val {
-        Value::Array(a) => Some(std::rc::Rc::as_ptr(a) as *const u8 as usize),
+        Value::Array(a) => Some((a.borrow().identity() | (1u64 << 63)) as usize),
         Value::Object(o) => {
             if o.try_borrow()
                 .map(|b| b.has_property(b"__enum_case"))
@@ -2157,7 +2157,7 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
             var_export_value(vm, &inner, buf, level);
         }
         Value::Array(arr) => {
-            let ptr = Rc::as_ptr(arr) as *const u8 as usize;
+            let ptr = (arr.borrow().identity() | (1u64 << 63)) as usize;
             if VAR_EXPORT_STACK.with(|st| st.borrow().contains(&ptr)) {
                 buf.extend_from_slice(b"NULL");
                 vm.emit_warning("var_export does not handle circular references");
