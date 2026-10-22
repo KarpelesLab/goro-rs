@@ -2807,7 +2807,8 @@ pub(crate) fn tls_roundtrip(
     addr: &[u8],
     ssl_opts: Option<PhpArray>,
     request: &[u8],
-) -> Option<Vec<u8>> {
+    tunnel: Option<(&[u8], &[u8])>,
+) -> Result<Vec<u8>, Option<&'static str>> {
     thread_local! {
         static NEXT_TMP_CTX: std::cell::Cell<i64> = const { std::cell::Cell::new(-1_000_000) };
     }
@@ -2817,18 +2818,30 @@ pub(crate) fn tls_roundtrip(
         v
     });
     let mut ctx = StreamContext::default();
-    if let Some(o) = ssl_opts {
+    {
         let m = ctx.options.entry(b"ssl".to_vec()).or_default();
-        for (k, v) in o.iter() {
-            let k = match k {
-                ArrayKey::String(s) => s.as_bytes().to_vec(),
-                ArrayKey::Int(i) => i.to_string().into_bytes(),
-            };
-            m.insert(k, v.clone());
+        if let Some(o) = ssl_opts {
+            for (k, v) in o.iter() {
+                let k = match k {
+                    ArrayKey::String(s) => s.as_bytes().to_vec(),
+                    ArrayKey::Int(i) => i.to_string().into_bytes(),
+                };
+                m.insert(k, v.clone());
+            }
+        }
+        // Through a proxy, set peer_name or name verification would try
+        // to use the proxy server name.
+        if let Some((_, target)) = tunnel {
+            m.entry(b"peer_name".to_vec())
+                .or_insert_with(|| Value::String(PhpString::from_bytes(target)));
         }
     }
     STREAM_CONTEXTS.with(|c| c.borrow_mut().insert(ctx_id, ctx));
-    let mut name = b"ssl://".to_vec();
+    let mut name = if tunnel.is_some() {
+        b"tcp://".to_vec()
+    } else {
+        b"ssl://".to_vec()
+    };
     name.extend_from_slice(addr);
     let timeout = default_socket_timeout(vm);
     let r = xport_create(
@@ -2841,9 +2854,56 @@ pub(crate) fn tls_roundtrip(
         timeout_from_double(timeout as f64),
         Some(ctx_id),
     );
-    STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&ctx_id));
-    let fid = r.ok()?;
-    let mut out = None;
+    let Ok(fid) = r else {
+        STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&ctx_id));
+        return Err(None);
+    };
+    let discard = |fid: i64| {
+        FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
+        STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&fid));
+        goro_core::value::close_resource(fid);
+    };
+    if let Some((connect, _)) = tunnel {
+        let mut ok = sock_write(vm, func, fid, connect) == connect.len() as isize;
+        if ok {
+            // Read and discard the response header up to a blank line.
+            let mut line = Vec::new();
+            loop {
+                let mut b = [0u8; 1];
+                let n = FILE_HANDLES.with(|h| {
+                    h.borrow_mut()
+                        .get_mut(&fid)
+                        .map(|fh| fh.read_raw(&mut b, false))
+                });
+                match n {
+                    Some(Ok(1)) => {
+                        if b[0] == b'\n' {
+                            if line.is_empty() || line == b"\r" {
+                                break;
+                            }
+                            line.clear();
+                        } else {
+                            line.push(b[0]);
+                        }
+                    }
+                    Some(Err(e)) if e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                    _ => break,
+                }
+            }
+            const STREAM_CRYPTO_METHOD_SSLV23_CLIENT: i64 = 57;
+            ok = crypto_setup(vm, func, fid, STREAM_CRYPTO_METHOD_SSLV23_CLIENT, None) >= 0
+                && crypto_enable(vm, func, fid, true) >= 0;
+        }
+        STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&ctx_id));
+        if !ok {
+            flush_crypto_warnings(vm, func);
+            discard(fid);
+            return Err(Some("Cannot connect to HTTPS server through proxy"));
+        }
+    } else {
+        STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&ctx_id));
+    }
+    let mut out = Err(None);
     if sock_write(vm, func, fid, request) == request.len() as isize {
         let mut buf = Vec::new();
         loop {
@@ -2860,12 +2920,10 @@ pub(crate) fn tls_roundtrip(
                 Some(Err(_)) => break,
             }
         }
-        out = Some(buf);
+        out = Ok(buf);
     }
     flush_crypto_warnings(vm, func);
-    FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
-    STREAM_CONTEXTS.with(|c| c.borrow_mut().remove(&fid));
-    goro_core::value::close_resource(fid);
+    discard(fid);
     out
 }
 
@@ -2944,4 +3002,51 @@ pub fn ext_stream_from_fd(fd: i32, mode: &str) -> i64 {
     let fid = alloc_file_handle(file, mode);
     goro_core::value::register_resource(fid, b"stream");
     fid
+}
+
+// ---------------------------------------------------------------------------
+// Transport services for the ftp:// wrapper
+// ---------------------------------------------------------------------------
+
+/// php_stream_xport_create(`name`, REPORT_ERRORS, CLIENT | CONNECT,
+/// context): the stream, or Err(error text). With `want_error` the text is
+/// handed back (error_string != NULL); otherwise it is reported as
+/// "connect() failed: ..." like ERR_RETURN does.
+pub(crate) fn xport_connect(
+    vm: &mut Vm,
+    func: &str,
+    name: &[u8],
+    ctx: Option<i64>,
+    want_error: bool,
+) -> Result<i64, String> {
+    let timeout = default_socket_timeout(vm);
+    match xport_create(
+        vm,
+        func,
+        name,
+        XportOp::Connect {
+            asynchronous: false,
+        },
+        timeout_from_double(timeout as f64),
+        ctx,
+    ) {
+        Ok(fid) => Ok(fid),
+        Err(e) => {
+            let text = e.text.unwrap_or_default();
+            if !want_error && !text.is_empty() {
+                vm.emit_warning(&format!("{}(): connect() failed: {}", func, text));
+            }
+            Err(text)
+        }
+    }
+}
+
+/// php_stream_xport_crypto_setup(SSLv23_CLIENT) + crypto_enable(1): false
+/// on failure.
+pub(crate) fn enable_client_crypto(vm: &mut Vm, func: &str, fid: i64) -> bool {
+    const STREAM_CRYPTO_METHOD_SSLV23_CLIENT: i64 = 57;
+    let ok = crypto_setup(vm, func, fid, STREAM_CRYPTO_METHOD_SSLV23_CLIENT, None) >= 0
+        && crypto_enable(vm, func, fid, true) >= 0;
+    flush_crypto_warnings(vm, func);
+    ok
 }

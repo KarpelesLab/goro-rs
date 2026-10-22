@@ -131,7 +131,8 @@ fn has_header(headers: &str, header: &str) -> bool {
     let mut start = 0;
     while let Some(p) = headers[start..].find(header) {
         let at = start + p;
-        if at == 0 || headers.as_bytes()[at - 1] == b'\n' {
+        // at the start, or after a "\r\n" (a bare "\n" does not count)
+        if at == 0 || (at >= 2 && headers.as_bytes()[at - 2..at] == *b"\r\n") {
             return true;
         }
         start = at + 1;
@@ -457,10 +458,25 @@ fn exchange(
     ssl: Option<PhpArray>,
     req: &[u8],
     timeout: f64,
+    tunnel: Option<(Vec<u8>, String)>,
 ) -> Option<Vec<u8>> {
     let addr = format!("{}:{}", host, port);
-    if tls {
-        return xp_socket::tls_roundtrip(vm, func, addr.as_bytes(), ssl, req);
+    if tls || tunnel.is_some() {
+        return match xp_socket::tls_roundtrip(
+            vm,
+            func,
+            addr.as_bytes(),
+            ssl,
+            req,
+            tunnel.as_ref().map(|(c, t)| (c.as_slice(), t.as_bytes())),
+        ) {
+            Ok(r) => Some(r),
+            Err(Some(msg)) => {
+                fail(vm, func, orig_url, msg);
+                None
+            }
+            Err(None) => None,
+        };
     }
     use std::io::{Read, Write};
     use std::net::ToSocketAddrs;
@@ -519,6 +535,40 @@ fn exchange(
         }
     }
     Some(buf)
+}
+
+/// php_stream_handle_proxy_authorization_header(): the
+/// "Proxy-Authorization: ..." line of user headers `s`, if any.
+fn proxy_authorization_header(s: &[u8]) -> Option<Vec<u8>> {
+    const NAME: &[u8] = b"Proxy-Authorization:";
+    let mut i = 0;
+    loop {
+        while i < s.len() && (s[i] == b' ' || s[i] == b'\t') {
+            i += 1;
+        }
+        let start = i;
+        let mut p = i;
+        while p < s.len() && !matches!(s[p], 0 | b':' | b'\r' | b'\n') {
+            p += 1;
+        }
+        if p < s.len() && s[p] == b':' {
+            p += 1;
+            let is_auth = s[start..p].eq_ignore_ascii_case(NAME);
+            while p < s.len() && !matches!(s[p], 0 | b'\r' | b'\n') {
+                p += 1;
+            }
+            if is_auth {
+                return Some(s[start..p].to_vec());
+            }
+        }
+        i = p;
+        while i < s.len() && (s[i] == b'\r' || s[i] == b'\n') {
+            i += 1;
+        }
+        if i >= s.len() || s[i] == 0 {
+            return None;
+        }
+    }
 }
 
 /// strip_header(): remove a header (and its line) from the user headers.
@@ -832,6 +882,26 @@ fn http_wrap_ex(
                 out.extend_from_slice(req.as_bytes());
             }
         }
+        // https through a proxy: a CONNECT tunnel, then TLS to the server.
+        let tunnel = if proxy.is_some() && url.https {
+            let mut connect = format!("CONNECT {}:{} HTTP/1.0\r\n", url.host, port).into_bytes();
+            let auth = match opt(&http, "header").map(|v| v.deref()) {
+                Some(Value::Array(a)) => a.borrow().values().find_map(|v| match v.deref() {
+                    Value::String(s) => proxy_authorization_header(s.as_bytes()),
+                    _ => None,
+                }),
+                Some(Value::String(s)) => proxy_authorization_header(s.as_bytes()),
+                _ => None,
+            };
+            if let Some(a) = auth {
+                connect.extend_from_slice(&a);
+                connect.extend_from_slice(b"\r\n");
+            }
+            connect.extend_from_slice(b"\r\n");
+            Some((connect, url.host.clone()))
+        } else {
+            None
+        };
         let raw = exchange(
             vm,
             func,
@@ -842,6 +912,7 @@ fn http_wrap_ex(
             ssl.clone(),
             &out,
             timeout,
+            tunnel,
         )?;
         let headers = response_header.get_or_insert_with(PhpArray::new);
         let mut resp = Resp { data: &raw, pos: 0 };
