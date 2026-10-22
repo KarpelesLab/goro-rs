@@ -15630,6 +15630,22 @@ impl Vm {
         })
     }
 
+    /// Whether the ArrayIsset op before `ip` is the existence probe of
+    /// `empty($c[k])` (compiled as ArrayIsset; JmpZ; ArrayGet of the same
+    /// dimension; ErrorRestore).
+    fn is_empty_dim_probe(op_array: &OpArray, ip: usize, op: &crate::opcode::Op) -> bool {
+        matches!(
+            (op_array.ops.get(ip), op_array.ops.get(ip + 1), op_array.ops.get(ip + 2)),
+            (Some(j), Some(g), Some(r))
+                if j.opcode == OpCode::JmpZ
+                    && j.op1 == op.result
+                    && g.opcode == OpCode::ArrayGet
+                    && g.op1 == op.op1
+                    && g.op2 == op.op2
+                    && r.opcode == OpCode::ErrorRestore
+        )
+    }
+
     /// Call a method on an object by looking up the class method and executing it
     pub fn call_object_method(
         &mut self,
@@ -43864,6 +43880,7 @@ impl Vm {
                                 }
                             }
                         }
+                        let mut empty_skip_get = false;
                         let result = if let Value::Array(arr) = &arr_val {
                             let kd = key_val.deref();
                             if matches!(kd, Value::Array(_) | Value::Object(_)) {
@@ -44112,6 +44129,19 @@ impl Vm {
                                     });
                                 }
                                 if exists_result.is_truthy() {
+                                    // empty() on an SplFixedArray overriding
+                                    // offsetExists(): its result alone
+                                    // (spl_fixedarray_object_has_dimension()
+                                    // calls no offsetGet()).
+                                    if has_user_offset
+                                        && op.opcode == OpCode::ArrayIsset
+                                        && Self::is_empty_dim_probe(op_array, ip, &op)
+                                        && self
+                                            .spl_find_base(&class_lower, &[b"splfixedarray"])
+                                            .is_some()
+                                    {
+                                        empty_skip_get = true;
+                                    }
                                     Value::True
                                 } else {
                                     Value::False
@@ -44283,6 +44313,19 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
+                        if empty_skip_get {
+                            // The value tested is the existence itself.
+                            let get_result = op_array.ops[ip + 1].result;
+                            self.write_operand(
+                                &get_result,
+                                Value::True,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
+                            ip += 2;
+                            return Ok(Flow::Continue);
+                        }
                         Ok(Flow::Next)
                     })? {
                         Flow::Next => {}
