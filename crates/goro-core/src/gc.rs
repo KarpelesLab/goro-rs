@@ -671,10 +671,16 @@ pub fn purge_weakmaps(vm: &mut crate::vm::Vm) {
 /// Recycle the handles of dead weak targets whose entries were released
 /// (after the destructors this triggered ran, as in Zend where those run
 /// nested inside the key's own release).
+#[inline]
 pub fn flush_weak_ids() {
     if DEFERRED_IDS.with(|m| m.borrow().is_empty()) || weak_dirty() {
         return;
     }
+    flush_weak_ids_slow();
+}
+
+#[inline(never)]
+fn flush_weak_ids_slow() {
     // (not from inside the destructors a target's release called)
     let depth = DTOR_DEPTH.with(|d| d.get());
     let ids: Vec<u64> = DEFERRED_IDS.with(|m| {
