@@ -42175,6 +42175,10 @@ impl Vm {
                                 })
                             })
                             .unwrap_or(false)
+                            // a by-reference parameter of an extension's method
+                            || self.pending_calls.last().is_some_and(|call| {
+                                self.native_method_arg_by_ref(call, call.args.len())
+                            })
                     };
                     if by_ref {
                         if let OperandType::JmpTarget(t) = op.op1 {
