@@ -598,6 +598,7 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::AssignConcat
             | OpCode::PropertyGet
             | OpCode::PropertySet
+            | OpCode::PropertyGetIncDec
             | OpCode::ArrayGet
             | OpCode::ArraySet
             | OpCode::ArrayAppend
@@ -654,7 +655,8 @@ impl crate::vm::Vm {
                         return ip;
                     }
                 }
-                OpCode::PropertyGet | OpCode::PropertySet => {
+                // (the read of `$o->p++` is one of an object's property)
+                OpCode::PropertyGet | OpCode::PropertySet | OpCode::PropertyGetIncDec => {
                     if self.isset_get_cache.is_some() {
                         return ip;
                     }

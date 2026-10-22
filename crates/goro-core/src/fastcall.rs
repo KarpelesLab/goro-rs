@@ -129,6 +129,11 @@ impl Vm {
         if !self.user_class_chain(name_lower) {
             return NewFast::No;
         }
+        // Constant-expression defaults are evaluated on first use, before
+        // the object is allocated.
+        if self.update_class_constants(name_lower).is_err() {
+            return NewFast::Failed;
+        }
         // Recycle the old object ID from the result slot before allocating
         // a new one.
         if let OperandType::Tmp(idx) = &op.result {
@@ -142,10 +147,6 @@ impl Vm {
             None => name.to_vec(),
         };
         let mut obj = PhpObject::new(canonical_name, obj_id);
-        // Constant-expression defaults are evaluated on first use.
-        if self.update_class_constants(name_lower).is_err() {
-            return NewFast::Failed;
-        }
         self.init_declared_props(name_lower, &mut obj);
         // Properties added from here on are dynamic ones.
         obj.mark_declared();

@@ -16617,6 +16617,23 @@ impl Vm {
                 .is_some_and(|c| c.target.builtin.is_some() && c.named_args.is_empty())
     }
 
+    /// !USED_RET() of the call DO_FCALL `op` makes to `lower` (see
+    /// call_result_unused), as the general handler records it.
+    #[inline]
+    fn note_call_result(&mut self, op: &crate::opcode::Op, lower: &[u8]) {
+        if matches!(op.op1, OperandType::Const(_)) {
+            match &mut self.call_result_unused {
+                Some(v) => {
+                    v.clear();
+                    v.extend_from_slice(lower);
+                }
+                None => self.call_result_unused = Some(lower.to_vec()),
+            }
+        } else {
+            self.call_result_unused = None;
+        }
+    }
+
     /// Whether the call DO_FCALL is about to make is the constructor call
     /// of a `new` of a user class without a constructor (see
     /// CallTarget::no_ctor), without named arguments.
@@ -17093,8 +17110,10 @@ impl Vm {
                 Some(v) => v.clone(),
             },
             // (read_operand(): an empty temporary reads as null; the
-            // temporary is released once consumed)
+            // temporary is released once consumed; a reference returned by
+            // a call takes the general path)
             OperandType::Tmp(i) => match tmps.get_mut(i as usize) {
+                Some(Value::Reference(_)) => return false,
                 Some(slot) => match std::mem::replace(slot, Value::Undef) {
                     Value::Undef => Value::Null,
                     v => v,
@@ -23936,6 +23955,12 @@ impl Vm {
                     if self.closure_pending_calls.last() == Some(&self.pending_calls.len()) {
                         self.closure_pending_calls.pop();
                     }
+                    if matches!(op.op1, OperandType::Const(_)) {
+                        let lower = call.name.as_bytes().to_ascii_lowercase();
+                        self.note_call_result(op, &lower);
+                    } else {
+                        self.call_result_unused = None;
+                    }
                     if let Some(Value::Object(obj_rc)) = call.args.first() {
                         if obj_rc.borrow().has_property(b"__ctor_pending") {
                             obj_rc
@@ -23970,6 +23995,7 @@ impl Vm {
                             *d = s.to_ascii_lowercase();
                         }
                         let func_name_lower = &buf[..name.len()];
+                        self.note_call_result(op, func_name_lower);
                         // Compiled to an opcode by php-src: no frame of its own
                         let special = !via_closure
                             && crate::internal_frames::compiled_special(
