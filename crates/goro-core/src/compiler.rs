@@ -1652,7 +1652,12 @@ impl Compiler {
                 {
                     // f(g()) with f's parameter by reference: g()'s returned
                     // reference is passed; a by-value result raises a notice.
+                    // g() is compiled once (keeping a returned reference) and
+                    // the by-value send drops the reference: compiling it per
+                    // path would be exponential in the nesting of such calls.
                     let pos_idx = self.op_array.add_literal(Value::Long(i as i64));
+                    let v = self.compile_expr(&arg.value)?;
+                    self.mark_ref_call(&v);
                     let jmp_ref = self.op_array.emit(Op {
                         opcode: OpCode::JmpIfArgByRef,
                         op1: OperandType::JmpTarget(0),
@@ -1660,12 +1665,14 @@ impl Compiler {
                         result: OperandType::Unused,
                         line,
                     });
-                    let v = self.compile_expr(&arg.value)?;
+                    let deref_flag = self.op_array.add_literal(Value::True);
                     self.op_array.emit(Op {
                         opcode: OpCode::SendVal,
                         op1: v,
                         op2: OperandType::Const(pos_idx),
-                        result: OperandType::Unused,
+                        // SendVal with a result operand: pass the value, not
+                        // a reference the call may have returned.
+                        result: OperandType::Const(deref_flag),
                         line,
                     });
                     let jmp_end = self.op_array.emit(Op {
@@ -1677,8 +1684,6 @@ impl Compiler {
                     });
                     let ref_start = self.op_array.current_offset();
                     self.op_array.patch_jump(jmp_ref, ref_start);
-                    let v = self.compile_expr(&arg.value)?;
-                    self.mark_ref_call(&v);
                     let msg_idx = self
                         .op_array
                         .add_literal(Value::String(PhpString::from_bytes(

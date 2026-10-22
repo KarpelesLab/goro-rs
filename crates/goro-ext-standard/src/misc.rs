@@ -4656,6 +4656,18 @@ fn key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 // === Misc ===
 
 fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.len() != 2 {
+        let msg = format!(
+            "ini_set() expects exactly 2 arguments, {} given",
+            args.len()
+        );
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
+    }
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
     let value = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
     if matches!(

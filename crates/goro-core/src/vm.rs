@@ -21228,6 +21228,15 @@ impl Vm {
                                 op_array,
                                 op.line,
                             );
+                            // A SendVal given a result operand sends the value of
+                            // a reference returned by the call it passes on.
+                            let val = if matches!(op.opcode, OpCode::SendVal)
+                                && matches!(op.result, OperandType::Const(_))
+                            {
+                                val.deref()
+                            } else {
+                                val
+                            };
                             if let Some(call) = self.pending_calls.last_mut() {
                                 call.args.push(val);
                             }
@@ -48440,6 +48449,33 @@ impl Vm {
                         &mut tmps,
                         &static_cv_keys,
                     );
+                    // FETCH_OBJ_R frees its temporary object operand now: a
+                    // destructor that throws aborts the enclosing expression.
+                    if matches!(op.opcode, OpCode::PropertyGet)
+                        && matches!(op.op1, OperandType::Tmp(_))
+                        && matches!(obj_val_raw, Value::Object(_))
+                    {
+                        drop(result);
+                        drop(obj_val);
+                        drop(obj_val_raw);
+                        if self.has_release_work() {
+                            let had_exc = self.current_exception.is_some();
+                            self.run_pending_destructors();
+                            if !had_exc && self.current_exception.is_some() {
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: self.uncaught_exception_message(),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                    }
                     Ok(Flow::Next)
                 })? {
                     Flow::Next => {}
