@@ -171,6 +171,21 @@ fn spl_classes_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
+/// TypeError for a non-object `$object` argument.
+fn object_arg_error(vm: &mut Vm, fname: &str, args: &[Value]) -> VmError {
+    let given = Vm::value_type_name(args.first().unwrap_or(&Value::Null));
+    let msg = format!(
+        "{}(): Argument #1 ($object) must be of type object, {} given",
+        fname, given
+    );
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
+}
+
 fn spl_object_hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let gen_id = match args.first() {
         Some(Value::Generator(g)) => Some(vm.generator_handle(g)),
@@ -189,10 +204,7 @@ fn spl_object_hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             id
         ))))
     } else {
-        Err(VmError {
-            message: "spl_object_hash() expects an object".into(),
-            line: 0,
-        })
+        Err(object_arg_error(vm, "spl_object_hash", args))
     }
 }
 
@@ -203,10 +215,7 @@ fn spl_object_id_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Object(obj)) = args.first() {
         Ok(Value::Long(obj.borrow().object_id as i64))
     } else {
-        Err(VmError {
-            message: "spl_object_id() expects an object".into(),
-            line: 0,
-        })
+        Err(object_arg_error(vm, "spl_object_id", args))
     }
 }
 
