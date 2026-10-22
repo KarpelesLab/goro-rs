@@ -25,6 +25,7 @@ pub mod image_handlers;
 pub mod include_path;
 pub mod ini_quantity;
 pub mod internal_frames;
+pub mod internal_iterator;
 pub mod ob;
 pub mod object;
 pub mod opcode;

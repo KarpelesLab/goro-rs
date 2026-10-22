@@ -45,14 +45,9 @@ fn with<R>(id: u64, f: impl FnOnce(&mut TestFiber) -> R) -> Option<R> {
 
 pub(crate) fn register(vm: &mut Vm) {
     FIBERS.with(|m| m.borrow_mut().clear());
-    let mut ce = match goro_core::stubs::class_entry(vm, CLASS) {
-        Some(stub) => {
-            let mut ce = stub.clone();
-            ce.methods.clear();
-            ce
-        }
-        None => ClassEntry::new(CLASS.to_vec()),
-    };
+    let mut ce = goro_core::stubs::self_declared_class_entry(vm, CLASS)
+        .unwrap_or_else(|| ClassEntry::new(CLASS.to_vec()));
+    // (methods kept for Reflection; calls go to the native handler)
     ce.name = CLASS.to_vec();
     vm.classes.insert(CLASS_LOWER.to_vec(), ce);
     vm.native_class_handlers.insert(

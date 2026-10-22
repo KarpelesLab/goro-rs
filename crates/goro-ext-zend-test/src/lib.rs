@@ -18,6 +18,7 @@ mod fiber;
 mod functions;
 mod handlers;
 mod ini;
+mod iterators;
 mod mm;
 mod observer;
 mod support;
@@ -52,6 +53,7 @@ pub fn register(vm: &mut Vm) {
     register_constants(vm);
     classes::register(vm);
     fiber::register(vm);
+    iterators::register(vm);
     handlers::register(vm);
     observer::register(vm);
 }

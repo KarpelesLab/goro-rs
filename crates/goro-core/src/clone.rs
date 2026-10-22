@@ -98,6 +98,7 @@ impl Vm {
                     || class_lower == b"sysvsharedmemory"
                     || class_lower == b"sysvmessagequeue"
                     || class_lower == b"fiber"
+                    || class_lower == b"internaliterator"
                     || class_lower == b"random\\engine\\secure"
                     || class_lower == b"random\\randomizer"
                     || obj_borrow.has_property(b"__enum_case")

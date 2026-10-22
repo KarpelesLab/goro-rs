@@ -976,6 +976,8 @@ pub struct Vm {
     /// Custom fiber contexts (extension fibers, see custom_fiber.rs) by
     /// object id, while not running.
     pub(crate) custom_fibers: HashMap<u64, crate::custom_fiber::CustomFiber>,
+    /// InternalIterator objects over an extension's iterators, by object id.
+    pub(crate) ext_iterators: HashMap<u64, crate::internal_iterator::ExtIterator>,
     /// The custom fiber context running, if any.
     pub(crate) custom_active: Option<crate::custom_fiber::CustomActive>,
     /// Frame stacks of the contexts that resumed the running custom fibers.
@@ -1365,6 +1367,7 @@ impl Vm {
             current_fiber: None,
             fiber_stack: Vec::new(),
             custom_fibers: HashMap::new(),
+            ext_iterators: HashMap::new(),
             custom_active: None,
             custom_parked: Vec::new(),
             fiber_custom_marks: Vec::new(),
@@ -7259,6 +7262,9 @@ impl Vm {
             if !self.custom_fibers.is_empty() && self.custom_fiber_released(obj_rc) {
                 return;
             }
+            if !self.ext_iterators.is_empty() && self.ext_iterator_released(obj_rc) {
+                return;
+            }
             // zend_objects_destroy_object(): lazy objects (uninitialized
             // ghosts, and proxies even once initialized) are not destructed.
             if matches!(
@@ -10211,6 +10217,11 @@ impl Vm {
         obj: &Rc<RefCell<PhpObject>>,
     ) -> Option<Value> {
         if class_lower == b"internaliterator" {
+            if !self.ext_iterators.is_empty() {
+                if let Some(r) = self.ext_iterator_call(method_lower, obj) {
+                    return Some(r);
+                }
+            }
             // SPL's own iterators (SplDoublyLinkedList, SplFixedArray) share
             // the InternalIterator class with extension-provided ones.
             if let Some(r) = self.dll_iterator_call(method_lower, obj) {
@@ -16851,6 +16862,9 @@ impl Vm {
                 return;
             }
             if !self.custom_fibers.is_empty() && self.custom_fiber_released(obj_rc) {
+                return;
+            }
+            if !self.ext_iterators.is_empty() && self.ext_iterator_released(obj_rc) {
                 return;
             }
             // zend_objects_destroy_object(): lazy objects (uninitialized

@@ -182,6 +182,12 @@ pub fn find_self_declared_class(name: &[u8]) -> Option<&'static StubClass> {
         .find(|c| c.name.as_bytes().eq_ignore_ascii_case(n))
 }
 
+/// A `ClassEntry` built from the stub of a class an extension declares
+/// itself (see class_entry()).
+pub fn self_declared_class_entry(vm: &crate::vm::Vm, name: &[u8]) -> Option<ClassEntry> {
+    find_self_declared_class(name).map(|c| build_entry(vm, c))
+}
+
 /// Hierarchy of an internal class, precomputed from the stubs.
 pub struct StubHierarchy {
     /// Declared name of the parent class.

@@ -255,15 +255,7 @@ class Foo {
 
 }
 
-namespace ZendTest\Iterators {
-
-final class TraversableTest implements \IteratorAggregate
-{
-    public function __construct() {}
-    public function getIterator(): \Iterator {}
-}
-
-}
+// ZendTest\Iterators\TraversableTest is native (iterators.rs).
 
 // Declarations of the extension's functions carrying what their stubs
 // declare besides arginfo (attributes, exposed doc comments). The functions
