@@ -14,6 +14,24 @@ pub fn tw<R>(f: impl FnOnce(&mut Tree) -> R) -> R {
     tree::with(f)
 }
 
+/// xmlSetNsProp: an empty value still gets a (empty) text child, which
+/// the HTML serializer prints as `name=""`.
+pub fn set_ns_prop_text(
+    t: &mut Tree,
+    node: NodeId,
+    ns: Option<NsId>,
+    name: &str,
+    value: &str,
+) -> NodeId {
+    let a = t.set_ns_prop(node, ns, name, value);
+    if value.is_empty() && t.nodes[a].children.is_none() {
+        let doc = t.nodes[a].doc;
+        let tx = t.new_text(doc, "");
+        t.link_child_raw(a, tx);
+    }
+    a
+}
+
 // ---------------------------------------------------------------------------
 // Error output
 

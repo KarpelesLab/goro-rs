@@ -851,7 +851,7 @@ impl<'v> Transform<'v> {
             }
             None => None,
         };
-        Some(tw(|t| t.set_ns_prop(target, ns, &name, &value)))
+        Some(tw(|t| set_ns_prop_text(t, target, ns, &name, &value)))
     }
 
     /// xsltCopyAttrListNoOverwrite
@@ -887,6 +887,11 @@ impl<'v> Transform<'v> {
             let out = self.output;
             tw(|t| {
                 let a = t.new_attr_node(Some(out), copy_ns, &name, Some(&value));
+                // xmlNewNsProp() with "" still creates an (empty) text child
+                if value.is_empty() && t.nodes[attr].children.is_some() {
+                    let tx = t.new_text(Some(out), "");
+                    t.link_child_raw(a, tx);
+                }
                 t.link_child_raw(target, a);
             });
         }
@@ -2652,7 +2657,7 @@ impl<'v> Transform<'v> {
         });
         let ins = self.insert.unwrap();
         if children.is_none() {
-            tw(|t| t.set_ns_prop(ins, ns, &name, ""));
+            tw(|t| set_ns_prop_text(t, ins, ns, &name, ""));
         } else if let Some((text, noenc)) = single_text {
             tw(|t| {
                 let a = t.set_ns_prop(ins, ns, &name, "");
@@ -2674,7 +2679,7 @@ impl<'v> Transform<'v> {
         } else {
             let value = self.eval_template_string(context_node, inst);
             let v = value.unwrap_or_default();
-            tw(|t| t.set_ns_prop(ins, ns, &name, &v));
+            tw(|t| set_ns_prop_text(t, ins, ns, &name, &v));
         }
     }
 

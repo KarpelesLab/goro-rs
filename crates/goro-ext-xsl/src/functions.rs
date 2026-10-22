@@ -969,8 +969,22 @@ fn system_property_function(t: &mut Transform, p: &mut PCtx, nargs: usize) {
             (local, u)
         }
     };
+    // DOCBOOK_XSL_HACK: a template's xsl:variable in a stylesheet whose
+    // URL contains "chunk" sees a Saxon 6.2 compatible vendor
+    let docbook_hack = name == "vendor" && {
+        let principal = t.sheet.styles[0].doc;
+        tw(|tr| {
+            t.inst.is_some_and(|i| {
+                tr.nodes[i].name == "variable"
+                    && tr.nodes[i]
+                        .parent
+                        .is_some_and(|p| tr.nodes[p].name == "template")
+            }) && tr.doc_url(principal).is_some_and(|u| u.contains("chunk"))
+        })
+    };
     let r = if ns_uri.as_deref() == Some(XSLT_NAMESPACE) {
         match name.as_str() {
+            "vendor" if docbook_hack => "libxslt (SAXON 6.2 compatible)",
             "vendor" => XSLT_DEFAULT_VENDOR,
             "version" => XSLT_DEFAULT_VERSION,
             "vendor-url" => XSLT_DEFAULT_URL,
