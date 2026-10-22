@@ -45,3 +45,4 @@ goro-ext-exif = { path = "../goro-ext-exif" }
 libc = "0.2"
 tempfile = "3"
 regex = "1"
+goro-pcre = { path = "../goro-pcre" }

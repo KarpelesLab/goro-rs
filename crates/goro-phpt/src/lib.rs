@@ -2070,14 +2070,40 @@ fn pcre_to_rust_regex(p: &str) -> String {
     out
 }
 
+/// preg_match("/^{pattern}$/s", actual) with the bundled PCRE2 port.
+fn pcre_full_match(pattern: &str, actual: &str) -> Option<bool> {
+    use goro_pcre::constants::{PCRE2_DOTALL, PCRE2_ERROR_NOMATCH};
+    let full = format!("^(?:{})$", pattern);
+    let ctx = goro_pcre::CompileContext::default();
+    let re = goro_pcre::Code::compile(full.as_bytes(), PCRE2_DOTALL, &ctx).ok()?;
+    let mut md = goro_pcre::MatchData::new(1);
+    let mctx = goro_pcre::MatchContext::default();
+    let rc = re.match_at(actual.as_bytes(), 0, 0, &mut md, &mctx);
+    if rc >= 0 {
+        Some(true)
+    } else if rc == PCRE2_ERROR_NOMATCH {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 fn matches_expect_regex(pattern: &str, actual: &str) -> bool {
     // EXPECTREGEX uses raw regex patterns. Each line of the pattern is a regex for
     // matching the corresponding line of output.
     // First try matching the entire output as one regex (run-tests uses /s).
     let full_pattern = format!("(?s)^(?:{})$", pcre_to_rust_regex(pattern));
-    if let Ok(re) = regex::Regex::new(&full_pattern) {
-        if re.is_match(actual) {
-            return true;
+    match regex::Regex::new(&full_pattern) {
+        Ok(re) => {
+            if re.is_match(actual) {
+                return true;
+            }
+        }
+        Err(_) => {
+            // lookarounds, backreferences...: run-tests.php's preg_match()
+            if let Some(m) = pcre_full_match(pattern, actual) {
+                return m;
+            }
         }
     }
     let full_pattern = format!("^(?:{})$", pattern);
