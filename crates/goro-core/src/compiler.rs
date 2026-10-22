@@ -221,6 +221,8 @@ struct LoopContext {
     finally_depth: usize,
     /// Number of enclosing try-with-finally bodies when the loop started
     try_finally_depth: usize,
+    /// Number of enclosing exception-handler regions when the loop started
+    handler_depth: usize,
     /// Temporaries live during the loop (foreach iterator/value), released
     /// when `return` / `break N` / `continue N` leaves it (FE_FREE).
     free_tmps: Vec<u32>,
@@ -380,6 +382,16 @@ pub struct Compiler {
     /// (label, ids of the loops/switches enclosing the goto, line)
     goto_loop_paths: Vec<(Vec<u8>, Vec<u32>, u32)>,
     goto_finally_paths: Vec<(Vec<u8>, Vec<u32>, u32)>,
+    /// The regions with an active exception handler enclosing the code
+    /// being compiled (innermost last): the offset of the TryBegin that
+    /// pushes it, and whether it leads to a finally block.
+    handler_regions: Vec<(u32, bool)>,
+    /// label -> handler regions enclosing it
+    label_handler_paths: HashMap<Vec<u8>, Vec<(u32, bool)>>,
+    /// Forward gotos: (Jmp offset, label, handler regions at the goto),
+    /// given a landing pad by check_pending_gotos() when they leave or
+    /// enter handler regions.
+    goto_handler_paths: Vec<(u32, Vec<u8>, Vec<(u32, bool)>)>,
     /// Unique id of this compilation's top-level op_array, keying its
     /// static variables (each file / eval'd string has its own).
     main_static_id: u64,
@@ -651,6 +663,9 @@ impl Compiler {
             label_loop_paths: HashMap::new(),
             goto_loop_paths: Vec::new(),
             goto_finally_paths: Vec::new(),
+            handler_regions: Vec::new(),
+            label_handler_paths: HashMap::new(),
+            goto_handler_paths: Vec::new(),
             main_static_id: 0,
         }
     }
@@ -670,7 +685,7 @@ impl Compiler {
     /// each function/method/closure/script body so that an unmatched goto becomes
     /// a clean compile-time fatal error instead of a placeholder Jmp to ip=0 that
     /// would otherwise spin forever at runtime.
-    fn check_pending_gotos(&self) -> CompileResult<()> {
+    fn check_pending_gotos(&mut self) -> CompileResult<()> {
         // (Also run at the end of every function body:) zend_mark_function_as_generator:
         // a generator's declared return type must be a supertype of Generator.
         if self.op_array.is_generator {
@@ -734,7 +749,91 @@ impl Compiler {
                 }
             }
         }
+        self.emit_goto_pads();
         Ok(())
+    }
+
+    /// The handler stack changes of a goto from handler regions `from` to
+    /// a label in `to`: how many handlers to pop, and the TryBegin offsets
+    /// of the regions entered (outermost first). None when it leaves a
+    /// region leading to a finally block (the finally path pops those).
+    fn goto_handler_change(from: &[(u32, bool)], to: &[(u32, bool)]) -> Option<(usize, Vec<u32>)> {
+        let common = from
+            .iter()
+            .zip(to.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        if from[common..].iter().any(|r| r.1) {
+            return None;
+        }
+        Some((
+            from.len() - common,
+            to[common..].iter().map(|r| r.0).collect(),
+        ))
+    }
+
+    /// Emit the handler stack changes of a goto (see goto_handler_change).
+    fn emit_handler_change(&mut self, pops: usize, enter: &[u32], line: u32) {
+        for _ in 0..pops {
+            self.op_array.emit(Op {
+                opcode: OpCode::TryEnd,
+                op1: OperandType::Unused,
+                op2: OperandType::Unused,
+                result: OperandType::Unused,
+                line,
+            });
+        }
+        for &tb in enter {
+            let mut op = self.op_array.ops[tb as usize].clone();
+            op.line = line;
+            self.op_array.emit(op);
+        }
+    }
+
+    /// Forward gotos that leave or enter try blocks jump through a landing
+    /// pad that pops or pushes their exception handlers (php-src looks the
+    /// try blocks up by opline: a goto into a try is covered by its catch).
+    fn emit_goto_pads(&mut self) {
+        let gotos = std::mem::take(&mut self.goto_handler_paths);
+        let mut over = None;
+        for (jmp, label, from) in gotos {
+            let (Some(to), Some(&target)) = (
+                self.label_handler_paths.get(&label).cloned(),
+                self.label_offsets.get(&label),
+            ) else {
+                continue;
+            };
+            let Some((pops, enter)) = Self::goto_handler_change(&from, &to) else {
+                continue;
+            };
+            if pops == 0 && enter.is_empty() {
+                continue;
+            }
+            let line = self.op_array.ops[jmp as usize].line;
+            if over.is_none() {
+                over = Some(self.op_array.emit(Op {
+                    opcode: OpCode::Jmp,
+                    op1: OperandType::JmpTarget(0),
+                    op2: OperandType::Unused,
+                    result: OperandType::Unused,
+                    line,
+                }));
+            }
+            let pad = self.op_array.current_offset();
+            self.emit_handler_change(pops, &enter, line);
+            self.op_array.emit(Op {
+                opcode: OpCode::Jmp,
+                op1: OperandType::JmpTarget(target),
+                op2: OperandType::Unused,
+                result: OperandType::Unused,
+                line,
+            });
+            self.op_array.patch_jump(jmp, pad);
+        }
+        if let Some(over) = over {
+            let end = self.op_array.current_offset();
+            self.op_array.patch_jump(over, end);
+        }
     }
 
     /// Compute the canonical PHP closure display name `{closure:<context>:<line>}`
@@ -2902,6 +3001,14 @@ impl Compiler {
     /// between (zend_handle_loops_and_finally()).
     fn emit_loop_exit(&mut self, target_index: usize, is_continue: bool, line: u32) {
         self.emit_loop_frees(target_index + 1, OperandType::Unused, line);
+        // The try blocks it leaves (up to one leading to a finally block,
+        // whose finally path pops it) drop their exception handlers.
+        let pops = self.handler_regions[self.loop_stack[target_index].handler_depth..]
+            .iter()
+            .rev()
+            .take_while(|r| !r.1)
+            .count();
+        self.emit_handler_change(pops, &[], line);
         // Check if we're inside a try-with-finally block that the
         // jump leaves (the target loop started outside of it)
         let leaves_try_finally =
@@ -3556,6 +3663,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    handler_depth: self.handler_regions.len(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -3609,6 +3717,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    handler_depth: self.handler_regions.len(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -3658,6 +3767,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    handler_depth: self.handler_regions.len(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -3828,6 +3938,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    handler_depth: self.handler_regions.len(),
                 });
 
                 let loop_start = self.op_array.current_offset();
@@ -4093,6 +4204,7 @@ impl Compiler {
                     free_tmps: Vec::new(),
                     depth_nop: None,
                     depth_tmp: None,
+                    handler_depth: self.handler_regions.len(),
                 });
 
                 // Switch compilation strategy:
@@ -5306,9 +5418,14 @@ impl Compiler {
 
                 // Compile try body
                 let try_tmp_start = self.op_array.temp_count;
+                self.handler_regions.push((try_begin, has_finally));
                 for s in try_body {
-                    self.compile_stmt(s)?;
+                    if let Err(e) = self.compile_stmt(s) {
+                        self.handler_regions.pop();
+                        return Err(e);
+                    }
                 }
+                self.handler_regions.pop();
                 let try_tmp_end = self.op_array.temp_count;
 
                 // End of try: clear exception handler and jump to finally/end
@@ -5344,6 +5461,9 @@ impl Compiler {
                 } else {
                     None
                 };
+                if let Some(g) = finally_guard {
+                    self.handler_regions.push((g, true));
+                }
 
                 // Store exception in a temp for type checking
                 let exc_tmp = self.op_array.alloc_temp();
@@ -5505,6 +5625,7 @@ impl Compiler {
                 });
                 // End the finally guard before the rethrow
                 if finally_guard.is_some() {
+                    self.handler_regions.pop();
                     self.op_array.emit(Op {
                         opcode: OpCode::TryEnd,
                         op1: OperandType::Unused,
@@ -10224,6 +10345,8 @@ impl Compiler {
                 self.label_loop_paths.insert(name.clone(), loop_path);
                 self.label_try_finally
                     .insert(name.clone(), self.try_finally_ids.clone());
+                self.label_handler_paths
+                    .insert(name.clone(), self.handler_regions.clone());
                 // Forward gotos that may leave try/finally regions.
                 let mut fin_jmps = Vec::new();
                 let pending = std::mem::take(&mut self.jumps.pending_finally_gotos);
@@ -10325,13 +10448,41 @@ impl Compiler {
                     }
                 } else if let Some(target) = backward {
                     // Label already seen - emit jump
-                    self.op_array.emit(Op {
-                        opcode: OpCode::Jmp,
-                        op1: OperandType::JmpTarget(target),
-                        op2: OperandType::Unused,
-                        result: OperandType::Unused,
-                        line: stmt.span.line,
-                    });
+                    let to = self
+                        .label_handler_paths
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_default();
+                    match Self::goto_handler_change(&self.handler_regions, &to) {
+                        // (the try blocks it enters may not have their catch
+                        // targets yet: a landing pad at the end pushes them)
+                        Some((_, enter)) if !enter.is_empty() => {
+                            let jmp = self.op_array.emit(Op {
+                                opcode: OpCode::Jmp,
+                                op1: OperandType::JmpTarget(target),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line: stmt.span.line,
+                            });
+                            self.goto_handler_paths.push((
+                                jmp,
+                                name.clone(),
+                                self.handler_regions.clone(),
+                            ));
+                        }
+                        change => {
+                            if let Some((pops, _)) = change {
+                                self.emit_handler_change(pops, &[], stmt.span.line);
+                            }
+                            self.op_array.emit(Op {
+                                opcode: OpCode::Jmp,
+                                op1: OperandType::JmpTarget(target),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line: stmt.span.line,
+                            });
+                        }
+                    }
                 } else {
                     // Label not yet seen - emit placeholder jump
                     let jmp = self.op_array.emit(Op {
@@ -10341,6 +10492,8 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: stmt.span.line,
                     });
+                    self.goto_handler_paths
+                        .push((jmp, name.clone(), self.handler_regions.clone()));
                     self.jumps
                         .pending_gotos
                         .entry(name.clone())
