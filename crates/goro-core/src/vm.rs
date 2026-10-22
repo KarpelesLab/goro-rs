@@ -8475,7 +8475,11 @@ impl Vm {
         let saved_pending = std::mem::replace(&mut self.pending_classes, classes);
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
         self.observe_code = true;
+        // (Extensions run this at registration, before the INI settings
+        // are applied: the emulated stack is sized at the first real run.)
+        let stack_configured = self.stack_configured;
         let r = self.execute_op_array(op_array, cvs);
+        self.stack_configured = stack_configured;
         self.pending_classes = saved_pending;
         r
     }
