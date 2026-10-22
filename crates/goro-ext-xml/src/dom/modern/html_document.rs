@@ -660,7 +660,9 @@ fn convert_attrs(t: &mut Tree, p: &Parser, n: usize, el: NodeId, doc: NodeId) {
         t.link_child_raw(at, tx);
         t.link_child_raw(el, at);
         if local_s == "id" && a.ns == html5::NS_HTML {
+            // (an ID already defined still marks the attribute an ID)
             t.add_id_safe(at, &value);
+            t.nodes[at].atype = 2;
         }
     }
 }

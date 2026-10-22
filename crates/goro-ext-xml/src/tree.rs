@@ -972,12 +972,14 @@ impl Tree {
     ) -> NodeId {
         let href = ns.map(|n| self.nss[n].href.clone());
         if let Some(a) = self.has_ns_prop(node, name, href.as_deref()) {
-            let id = self.is_id(node, a);
+            // An ID stays one (its new value registered if free).
+            let id = self.nodes[a].atype == 2;
             self.remove_id_for_attr(a);
             self.nodes[a].ns = ns;
             self.set_children_text(a, value);
             if id {
                 self.add_id_safe(a, value);
+                self.nodes[a].atype = 2;
             }
             return a;
         }
@@ -1033,13 +1035,21 @@ impl Tree {
 
     /// xmlAddIDSafe: mark the attribute as an ID and register it (an
     /// existing registration of the same value wins).
-    pub fn add_id_safe(&mut self, at: NodeId, value: &str) {
-        self.nodes[at].atype = 2;
-        if let Some(d) = self.nodes[at].doc {
-            if let Some(di) = self.doc_info_mut(d) {
-                di.ids.entry(value.to_string()).or_insert(at);
-            }
+    /// xmlAddIDSafe: registers `value` as the ID of attribute `at` and marks
+    /// it an ID; an ID already defined in the document is left alone (false).
+    pub fn add_id_safe(&mut self, at: NodeId, value: &str) -> bool {
+        let Some(d) = self.nodes[at].doc else {
+            return false;
+        };
+        let Some(di) = self.doc_info_mut(d) else {
+            return false;
+        };
+        if di.ids.contains_key(value) {
+            return false;
         }
+        di.ids.insert(value.to_string(), at);
+        self.nodes[at].atype = 2;
+        true
     }
 
     /// xmlNewProp + link (does not replace existing)
