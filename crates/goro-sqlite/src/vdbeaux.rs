@@ -2683,12 +2683,11 @@ fn sqlite3VdbeClearObject(db: &mut Sqlite3, p: &mut Vdbe) {
         p.aColName = Vec::new();
     }
     for pSub in std::mem::take(&mut p.pProgram) {
-        /* Rust: the op arrays of sub-programs are released when the last
-         ** reference to the SubProgram goes away; give back TABLEREF
-         ** references when this was the last one. */
-        if let Ok(sub) = Rc::try_unwrap(pSub) {
-            vdbeFreeOpArray(db, sub.into_inner().aOp);
-        }
+        /* Rust: other references to the SubProgram (P4_SUBPROGRAM operands)
+         ** may still exist; the op array is taken out and freed here, as C
+         ** does, so that TABLEREF/VTAB references are given back. */
+        let aOp = std::mem::take(&mut pSub.borrow_mut().aOp);
+        vdbeFreeOpArray(db, aOp);
     }
     if p.eVdbeState != VDBE_INIT_STATE {
         releaseMemArray(&mut p.aVar);
