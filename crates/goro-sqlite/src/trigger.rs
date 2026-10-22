@@ -416,6 +416,10 @@ pub fn sqlite3BeginTrigger(
 /// in order to complete the process of building the trigger.
 pub fn sqlite3FinishTrigger(db: &mut Sqlite3, pStepList: TriggerStepId, pAll: &Token) {
     let mut pTrig = db.pp().pNewTrigger.take(); /* Trigger being finished */
+    // C walks its pStepList parameter to the end of the list once it is
+    // attached to the trigger, so the final sqlite3DeleteTriggerStep() only
+    // deletes a list that was never attached.
+    let mut bAttached = false;
 
     'cleanup: {
         if db.ppr().nErr != 0 || pTrig.is_none() {
@@ -429,6 +433,7 @@ pub fn sqlite3FinishTrigger(db: &mut Sqlite3, pStepList: TriggerStepId, pAll: &T
         let iDb = db.schema_index(pSchema);
         debug_assert!(iDb >= 0 && iDb < db.nDb());
         trig.borrow_mut().step_list = Tree::from_id(pStepList);
+        bAttached = true;
         let mut n: i64 = 0;
         let mut p = pStepList;
         while p.nn() {
@@ -549,7 +554,9 @@ pub fn sqlite3FinishTrigger(db: &mut Sqlite3, pStepList: TriggerStepId, pAll: &T
         sqlite3DeleteTrigger(db, t);
     }
     debug_assert!(db.ppr().IN_RENAME_OBJECT() || db.ppr().pNewTrigger.is_none());
-    sqlite3DeleteTriggerStep(db, pStepList);
+    if !bAttached {
+        sqlite3DeleteTriggerStep(db, pStepList);
+    }
 }
 
 /// Duplicate a range of text from an SQL statement, then convert all

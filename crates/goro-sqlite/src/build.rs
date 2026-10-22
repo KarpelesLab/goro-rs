@@ -5160,6 +5160,20 @@ pub fn sqlite3SrcListEnlarge(
             },
         );
     }
+    // C memmove()s the items, and with them the zName pointers that serve
+    // as rename-token keys: follow the move.
+    if db.ppr().IN_RENAME_OBJECT() {
+        for i in (iStart..nSrc).rev() {
+            crate::alter::sqlite3RenameTokenRemap(
+                db,
+                Some(rename_key_srcitem_name(SrcItemId(
+                    pSrc,
+                    (i + nExtra) as u32,
+                ))),
+                rename_key_srcitem_name(SrcItemId(pSrc, i as u32)),
+            );
+        }
+    }
     pSrc
 }
 
@@ -5523,6 +5537,16 @@ pub fn sqlite3SrcListAppendList(db: &mut Sqlite3, mut p1: SrcListId, p2: SrcList
                 l.a[nOld as usize + k] = it;
             }
             l.a[0].fg.jointype |= JT_LTORJ & jt0;
+            // The moved zName pointers are rename-token keys in C.
+            if db.ppr().IN_RENAME_OBJECT() {
+                for k in 0..n2 {
+                    crate::alter::sqlite3RenameTokenRemap(
+                        db,
+                        Some(rename_key_srcitem_name(SrcItemId(p1, (nOld + k) as u32))),
+                        rename_key_srcitem_name(SrcItemId(p2, k as u32)),
+                    );
+                }
+            }
         }
     }
     p1
