@@ -1318,6 +1318,9 @@ pub struct Vm {
     pub closure_invoke_call: bool,
     /// The call being type-checked is made by Closure::__invoke().
     pub(crate) pending_call_via_invoke: bool,
+    /// The exception a `return` in a finally block discarded (see
+    /// OpCode::Return), for the return type check.
+    pub(crate) return_discarded_exc: Option<Value>,
     /// INI on-modify handlers registered by extensions (key -> handler).
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
@@ -2549,6 +2552,7 @@ impl Vm {
             ucf_call_line: None,
             closure_invoke_call: false,
             pending_call_via_invoke: false,
+            return_discarded_exc: None,
             ini_set_hooks: HashMap::new(),
             treat_data_hook: None,
             phpinfo_hooks: Vec::new(),
@@ -19347,12 +19351,16 @@ impl Vm {
                 self.current_line
             };
             let exc_val = self.create_exception(b"TypeError", &msg, ret_line);
+            if let Some(prev) = self.return_discarded_exc.take() {
+                Self::exception_set_previous(&exc_val, prev);
+            }
             self.current_exception = Some(exc_val);
             return Err(VmError {
                 message: msg,
                 line: ret_line,
             });
         }
+        self.return_discarded_exc = None;
         Ok(())
     }
 
@@ -34449,6 +34457,14 @@ impl Vm {
 
                 OpCode::Return => match outlined(|| -> Result<Flow, VmError> {
                     let had_exc = self.current_exception.is_some();
+                    // A return from a finally block entered by an exception
+                    // discards it, unless the return type check throws (the
+                    // exception is then the TypeError's previous).
+                    self.return_discarded_exc = if op_array.return_type.is_some() && !op_array.is_generator {
+                        fin.iter().rev().find_map(|(_, e)| e.clone())
+                    } else {
+                        None
+                    };
                     // By-ref returns fetch the operand for writing (no warning).
                     let val = if op_array.returns_by_ref {
                         // Keep the reference the compiler fetched for the
