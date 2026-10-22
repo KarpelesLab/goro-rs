@@ -11598,6 +11598,14 @@ impl Compiler {
     /// deep expressions do not recurse through compile_expr.
     #[inline(never)]
     fn compile_binary_chain(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        // zend_try_ct_eval_binary_op(): a concatenation of literals is a
+        // literal (an interned string).
+        if let Some(bytes) = Self::fold_concat_chain(expr) {
+            let idx = self
+                .op_array
+                .add_literal(Value::String(PhpString::from_vec(bytes)));
+            return Ok(OperandType::Const(idx));
+        }
         let mut spine: Vec<&Expr> = vec![expr];
         if self.memoize_mode == 0 {
             loop {
@@ -11629,6 +11637,48 @@ impl Compiler {
             acc = Some(self.emit_binary_op(opcode, left, right, l, r, line));
         }
         Ok(acc.expect("binary operator"))
+    }
+
+    /// The value of a (left-deep) chain of `.` over string and integer
+    /// literals, if it is one.
+    fn fold_concat_chain(expr: &Expr) -> Option<Vec<u8>> {
+        fn leaf(e: &Expr) -> Option<Vec<u8>> {
+            match &e.kind {
+                ExprKind::String(s) => Some(s.clone()),
+                ExprKind::Int(n) => Some(n.to_string().into_bytes()),
+                ExprKind::BinaryOp {
+                    op: BinaryOp::Concat,
+                    ..
+                } => Compiler::fold_concat_chain(e),
+                _ => None,
+            }
+        }
+        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let mut cur = expr;
+        loop {
+            match &cur.kind {
+                ExprKind::BinaryOp {
+                    op: BinaryOp::Concat,
+                    left,
+                    right,
+                } => {
+                    parts.push(leaf(right)?);
+                    cur = left;
+                }
+                _ => {
+                    parts.push(leaf(cur)?);
+                    break;
+                }
+            }
+        }
+        if parts.len() < 2 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(parts.iter().map(|p| p.len()).sum());
+        for p in parts.iter().rev() {
+            out.extend_from_slice(p);
+        }
+        Some(out)
     }
 
     /// Emit binary operator `opcode` into a new temporary. (Out of line:

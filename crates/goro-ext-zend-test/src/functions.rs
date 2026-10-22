@@ -359,13 +359,35 @@ fn zend_test_is_pcre_bundled(_vm: &mut Vm, _args: &[Value]) -> R {
     Ok(Value::True)
 }
 
-fn zend_test_is_string_marked_as_valid_utf8(_vm: &mut Vm, args: &[Value]) -> R {
+fn zend_test_is_string_marked_as_valid_utf8(vm: &mut Vm, args: &[Value]) -> R {
     // goro strings do not carry php-src's IS_STR_VALID_UTF8 flag; the flag
     // is only ever set on strings that are valid UTF-8, which is what the
     // tests probe for. (Strings that are valid but not flagged by php-src
     // can't be told apart.)
     let s = arg(args, 0).to_php_string();
+    // An interned literal is replaced by the permanent interned string of the
+    // same contents, if any: the names internal code registered (classes,
+    // their members, functions), which are not flagged.
+    if s.is_interned() && s.len() > 1 && is_permanent_name(vm, s.as_bytes()) {
+        return Ok(Value::False);
+    }
     Ok(bool_val(std::str::from_utf8(s.as_bytes()).is_ok()))
+}
+
+/// Whether `name` is one of the names internal code registers as permanent
+/// interned strings: an internal function, class, or a member of an internal
+/// class.
+fn is_permanent_name(vm: &Vm, name: &[u8]) -> bool {
+    if vm.functions.contains_key(name) {
+        return true;
+    }
+    vm.classes.iter().any(|(lower, c)| {
+        c.filename.is_none()
+            && (lower.as_slice() == name
+                || c.name == name
+                || c.properties.iter().any(|p| p.name == name)
+                || c.methods.keys().any(|m| m.as_slice() == name))
+    })
 }
 
 fn zend_test_gh19792(vm: &mut Vm, _args: &[Value]) -> R {
