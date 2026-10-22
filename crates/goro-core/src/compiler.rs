@@ -4500,7 +4500,7 @@ impl Compiler {
                 directives,
                 body,
                 attributes,
-                ..
+                is_const,
             } => {
                 // If attributes are present and there's more than one directive,
                 // this is `#[Attr] const A=1, B=2;` which is a fatal error.
@@ -4596,6 +4596,14 @@ impl Compiler {
                                 line: stmt.span.line,
                             });
                         }
+                        continue;
+                    }
+                    if !*is_const {
+                        // zend_compile_declare(): E_COMPILE_WARNING
+                        let msg =
+                            format!("Unsupported declare '{}'", String::from_utf8_lossy(name));
+                        push_compile_warning_tuple((msg.clone(), stmt.span.line));
+                        push_pending_compile_warning(msg, stmt.span.line);
                         continue;
                     }
                     // This is a const declaration: const FOO = value;
