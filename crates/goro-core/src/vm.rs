@@ -15630,6 +15630,28 @@ impl Vm {
         })
     }
 
+    /// The name of a user function in its argument errors: "Class::m",
+    /// "f" or a closure's "{closure:...}".
+    #[inline(never)]
+    fn callee_error_name(&self, f: &OpArray) -> String {
+        if f.display_name.starts_with(b"{closure") {
+            let d = String::from_utf8_lossy(&f.display_name).into_owned();
+            return self.closure_scoped_display(f).unwrap_or(d);
+        }
+        let mut fname = String::from_utf8_lossy(f.effective_name()).to_string();
+        if f.display_name.is_empty() && !fname.contains("::") {
+            if let Some(sc) = &f.scope_class {
+                let cname = self
+                    .classes
+                    .get(&sc.to_ascii_lowercase())
+                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                    .unwrap_or_else(|| String::from_utf8_lossy(sc).to_string());
+                fname = format!("{}::{}", cname, fname);
+            }
+        }
+        fname
+    }
+
     /// Whether the ArrayIsset op before `ip` is the existence probe of
     /// `empty($c[k])` (compiled as ArrayIsset; JmpZ; ArrayGet of the same
     /// dimension; ErrorRestore).
@@ -28457,28 +28479,22 @@ impl Vm {
                                     .map(|v| v as usize)
                                     .unwrap_or(usize::MAX);
                                 let mut missing_param_err: Option<String> = None;
-                                for param_idx in
-                                    implicit_args..(implicit_args + required as usize)
-                                {
+                                // (after $this or a closure's captured values)
+                                let lead = implicit_args + captures as usize;
+                                for param_idx in lead..(lead + required as usize) {
                                     if param_idx >= variadic_start {
                                         break;
                                     }
                                     if param_idx < call.args.len()
                                         && matches!(call.args[param_idx], Value::Undef)
                                     {
-                                        let display_name = call.name.to_string_lossy();
-                                        let fn_display =
-                                            if let Some(pos) = display_name.rfind("::") {
-                                                &display_name[pos + 2..]
-                                            } else {
-                                                &display_name
-                                            };
+                                        let fn_display = self.callee_error_name(&user_fn);
                                         let param_name = user_fn
                                             .cv_names
                                             .get(param_idx)
                                             .map(|n| String::from_utf8_lossy(n).into_owned())
                                             .unwrap_or_else(|| format!("param{}", param_idx));
-                                        let arg_num = param_idx - implicit_args + 1;
+                                        let arg_num = param_idx - lead + 1;
                                         missing_param_err = Some(format!(
                                             "{}(): Argument #{} (${}) not passed",
                                             fn_display, arg_num, param_name
