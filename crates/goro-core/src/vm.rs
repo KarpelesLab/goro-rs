@@ -1060,6 +1060,10 @@ impl Vm {
                     Value::String(PhpString::from_bytes(b"1")),
                 );
                 c.insert(
+                    b"zend.exception_string_param_max_len".to_vec(),
+                    Value::String(PhpString::from_bytes(b"15")),
+                );
+                c.insert(
                     b"default_charset".to_vec(),
                     Value::String(PhpString::from_bytes(b"UTF-8")),
                 );
@@ -49411,7 +49415,10 @@ impl Vm {
                                                         let formatted: Vec<String> = args_arr
                                                             .iter()
                                                             .map(|(_k, v)| {
-                                                                Self::format_trace_arg(v)
+                                                                Self::format_trace_arg_with_limit(
+                                                                    v,
+                                                                    self.exception_string_param_max_len,
+                                                                )
                                                             })
                                                             .collect();
                                                         formatted.join(", ")
@@ -50457,7 +50464,12 @@ impl Vm {
                             let args_arr = args_arr.borrow();
                             let formatted: Vec<String> = args_arr
                                 .iter()
-                                .map(|(_k, v)| Self::format_trace_arg(v))
+                                .map(|(_k, v)| {
+                                    Self::format_trace_arg_with_limit(
+                                        v,
+                                        self.exception_string_param_max_len,
+                                    )
+                                })
                                 .collect();
                             formatted.join(", ")
                         } else {

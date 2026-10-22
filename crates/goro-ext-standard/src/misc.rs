@@ -492,6 +492,10 @@ final class StreamBucket {
     vm.register_function(b"phpcredits", crate::info::phpcredits);
     vm.register_function(b"get_cfg_var", get_cfg_var_fn);
     vm.register_function(b"php_ini_loaded_file", php_ini_loaded_file_fn);
+    vm.ini_validators.insert(
+        b"zend.exception_string_param_max_len".to_vec(),
+        on_update_exception_string_param_max_len,
+    );
     vm.register_function(b"php_ini_scanned_files", php_ini_scanned_files_fn);
     vm.register_function(b"getmypid", getmypid_fn);
     vm.register_function(b"getmyuid", getmyuid_fn);
@@ -13635,6 +13639,7 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     let options = args.first().map(|v| v.to_long()).unwrap_or(0);
     let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2
+    let max_len = vm.exception_string_param_max_len;
 
     let stack_len = vm.call_stack.len();
     let max_frames = if limit > 0 { limit as usize } else { stack_len };
@@ -13650,7 +13655,7 @@ fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         let args_str = if ignore_args {
             String::new()
         } else {
-            goro_core::vm::format_trace_args(frame_args)
+            goro_core::vm::format_trace_args_with_limit(frame_args, max_len)
         };
         // For instance methods, replace :: with ->
         let display_name = if *is_instance {
@@ -15775,6 +15780,146 @@ fn php_sapi_name_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 thread_local! {
     /// Startup configuration directives (php.ini / -d / phpt --INI--).
     static CFG_VARS: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
+    /// The php.ini file that was loaded (php_ini_opened_path).
+    static INI_OPENED_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+/// Record the php.ini file the SAPI loaded (php_ini_loaded_file(),
+/// get_cfg_var("cfg_file_path")).
+pub fn set_ini_opened_path(path: Option<String>) {
+    INI_OPENED_PATH.with(|p| *p.borrow_mut() = path);
+}
+
+/// The INI entries in effect at startup: every directive from php.ini, the
+/// SAPI's built-in settings and `-d` (or a phpt --INI-- section), in the
+/// order they apply, goes through the same handling (php_init_config() then
+/// zend_register_ini_entries() reading the configuration hash): the
+/// directive's on-modify handler (validators, the values the engine caches)
+/// and its value for ini_get(). Returns the "PHP Startup" messages to show
+/// before the request's output.
+pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
+    let mut startup_deprecations: Vec<String> = Vec::new();
+    for (key, value) in ini {
+        register_cfg_var(key, value);
+        match key.as_str() {
+            "precision" => {
+                if let Ok(p) = value.trim().parse::<i32>() {
+                    goro_core::value::set_php_precision(p);
+                }
+            }
+            "serialize_precision" => {
+                if let Ok(p) = value.trim().parse::<i32>() {
+                    goro_core::value::set_php_serialize_precision(p);
+                }
+            }
+            "memory_limit" => {
+                let (v, _) = goro_core::ini_quantity::parse_quantity(value.as_bytes(), false);
+                goro_core::value::set_memory_limit(if v == u64::MAX { -1 } else { v as i64 });
+            }
+            "disable_functions" => {
+                for func_name in value.split(',') {
+                    let func_name = func_name.trim();
+                    if !func_name.is_empty() {
+                        let lower: Vec<u8> =
+                            func_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
+                        vm.functions.remove(&lower);
+                        vm.disabled_functions.insert(lower);
+                    }
+                }
+                continue;
+            }
+            // Directives of extension features goro does not build (PCRE
+            // JIT): PHP ignores unknown directives, so ini_get() keeps
+            // returning false.
+            "pcre.jit" => continue,
+            "hard_timeout" => {
+                if let Ok(n) = value.trim().parse::<i64>() {
+                    goro_core::value::HARD_TIMEOUT.store(n, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            "max_execution_time" => {
+                // php_request_startup(): arm the max_execution_time timer.
+                if let Ok(n) = value.trim().parse::<i64>() {
+                    set_execution_timeout(n);
+                }
+            }
+            _ => {}
+        }
+        let val = match value.parse::<i64>() {
+            Ok(n) => Value::Long(n),
+            Err(_) => Value::String(PhpString::from_string(value.clone())),
+        };
+        if key == "error_reporting" {
+            vm.error_reporting = val.to_long();
+        }
+        if let Some(msg) = assert_ini_deprecation(key.as_bytes(), &val) {
+            startup_deprecations.push(msg);
+        }
+        if let Some(validate) = vm.ini_validators.get(key.as_bytes()).copied() {
+            if !validate(vm, value.as_bytes(), true) {
+                continue;
+            }
+        }
+        vm.constants.insert(key.as_bytes().to_vec(), val);
+    }
+    // php_error_cb() output, with error_prepend_string / error_append_string
+    let ini_str = |vm: &Vm, k: &[u8]| {
+        vm.constants
+            .get(k)
+            .map(|v| v.to_php_string().as_bytes().to_vec())
+            .unwrap_or_default()
+    };
+    let (prepend, append) = (
+        ini_str(vm, b"error_prepend_string"),
+        ini_str(vm, b"error_append_string"),
+    );
+    let mut startup_messages: Vec<u8> = Vec::new();
+    for msg in startup_deprecations {
+        startup_messages.extend_from_slice(&prepend);
+        startup_messages.extend_from_slice(
+            format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes(),
+        );
+        startup_messages.extend_from_slice(&append);
+    }
+    // OnChangeMemoryLimit at startup: memory_limit above max_memory_limit is
+    // clamped with a startup warning.
+    if let (Some(ml), Some(mx)) = (
+        vm.constants
+            .get(b"memory_limit".as_ref())
+            .map(|v| v.to_php_string()),
+        vm.constants
+            .get(b"max_memory_limit".as_ref())
+            .map(|v| v.to_php_string()),
+    ) {
+        let (v, _) = goro_core::ini_quantity::parse_quantity(ml.as_bytes(), false);
+        let (max, _) = goro_core::ini_quantity::parse_quantity(mx.as_bytes(), false);
+        if v > max {
+            if v != u64::MAX {
+                vm.write_output(format!(
+                    "\nWarning: Failed to set memory_limit to {} bytes. Setting to max_memory_limit instead (currently: {} bytes) in Unknown on line 0\n",
+                    v as i64, max as i64
+                ).as_bytes());
+            }
+            goro_core::value::set_memory_limit(max as i64);
+            vm.constants
+                .insert(b"memory_limit".to_vec(), Value::String(mx));
+        }
+    }
+    startup_messages
+}
+
+/// OnSetExceptionStringParamMaxLen: 0..=1000000.
+fn on_update_exception_string_param_max_len(vm: &mut Vm, value: &[u8], _startup: bool) -> bool {
+    match std::str::from_utf8(value)
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok())
+    {
+        Some(n) if (0..=1_000_000).contains(&n) => {
+            vm.exception_string_param_max_len = n as usize;
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Record a startup configuration directive for get_cfg_var().
@@ -15789,7 +15934,10 @@ fn get_cfg_var_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .to_php_string()
         .to_string_lossy();
     if name == "cfg_file_path" {
-        return Ok(Value::String(PhpString::from_bytes(b"")));
+        let path = INI_OPENED_PATH
+            .with(|p| p.borrow().clone())
+            .unwrap_or_default();
+        return Ok(Value::String(PhpString::from_string(path)));
     }
     CFG_VARS.with(|c| {
         let vars = c.borrow();
@@ -15825,7 +15973,9 @@ fn get_cfg_var_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn php_ini_loaded_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::False)
+    Ok(INI_OPENED_PATH
+        .with(|p| p.borrow().clone())
+        .map_or(Value::False, |p| Value::String(PhpString::from_string(p))))
 }
 
 fn php_ini_scanned_files_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

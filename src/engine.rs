@@ -98,76 +98,7 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
         b"PHP_SAPI".to_vec(),
         Value::String(PhpString::from_string(sapi.to_string())),
     );
-    let mut startup_messages: Vec<u8> = Vec::new();
-    for (key, value) in ini {
-        goro_ext_standard::misc::register_cfg_var(key, value);
-        match key.as_str() {
-            "precision" => {
-                if let Ok(p) = value.trim().parse::<i32>() {
-                    set_php_precision(p);
-                }
-            }
-            "serialize_precision" => {
-                if let Ok(p) = value.trim().parse::<i32>() {
-                    set_php_serialize_precision(p);
-                }
-            }
-            "memory_limit" => {
-                let (v, _) = goro_core::ini_quantity::parse_quantity(value.as_bytes(), false);
-                set_memory_limit(if v == u64::MAX { -1 } else { v as i64 });
-            }
-            "disable_functions" => {
-                for func_name in value.split(',') {
-                    let func_name = func_name.trim();
-                    if !func_name.is_empty() {
-                        let lower: Vec<u8> =
-                            func_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
-                        vm.functions.remove(&lower);
-                        vm.disabled_functions.insert(lower);
-                    }
-                }
-                continue;
-            }
-            "pcre.jit" => continue,
-            "hard_timeout" => {
-                if let Ok(n) = value.trim().parse::<i64>() {
-                    goro_core::value::HARD_TIMEOUT.store(n, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
-            "max_execution_time" => {
-                // php_request_startup(): arm the max_execution_time timer.
-                if let Ok(n) = value.trim().parse::<i64>() {
-                    goro_ext_standard::misc::set_execution_timeout(n);
-                }
-            }
-            _ => {}
-        }
-        let val = match value.parse::<i64>() {
-            Ok(n) => Value::Long(n),
-            Err(_) => Value::String(PhpString::from_string(value.clone())),
-        };
-        if key == "error_reporting" {
-            vm.error_reporting = val.to_long();
-        }
-        if let Some(msg) = goro_ext_standard::misc::assert_ini_deprecation(key.as_bytes(), &val) {
-            startup_messages.extend_from_slice(
-                format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes(),
-            );
-        }
-        if key == "zend.exception_string_param_max_len" {
-            if let Value::Long(n) = &val {
-                if (0..=1_000_000).contains(n) {
-                    vm.exception_string_param_max_len = *n as usize;
-                }
-            }
-        }
-        if let Some(validate) = vm.ini_validators.get(key.as_bytes()).copied() {
-            if !validate(&mut vm, value.as_bytes(), true) {
-                continue;
-            }
-        }
-        vm.constants.insert(key.as_bytes().to_vec(), val);
-    }
+    let startup_messages = goro_ext_standard::misc::apply_startup_ini(&mut vm, ini);
     if !vm.startup_hooks.is_empty() {
         let prev = vm.take_output();
         for hook in vm.startup_hooks.clone() {

@@ -1580,86 +1580,20 @@ fn execute_php_inner_impl(
         b"fatal_error_backtraces".to_vec(),
         Value::String(PhpString::from_bytes(b"0")),
     );
-    // Apply all INI settings to the VM constants
-    let mut startup_messages: Vec<u8> = Vec::new();
-    for (key, value) in ini_settings {
-        goro_ext_standard::misc::register_cfg_var(key, value);
-        // Handle disable_functions: remove those functions from the VM
-        if key == "disable_functions" {
-            for func_name in value.split(',') {
-                let func_name = func_name.trim();
-                if !func_name.is_empty() {
-                    let lower: Vec<u8> =
-                        func_name.bytes().map(|b| b.to_ascii_lowercase()).collect();
-                    vm.functions.remove(&lower);
-                    vm.disabled_functions.insert(lower);
+    // Apply all INI settings (the INI section's values may be
+    // error-level expressions, which the INI scanner resolves).
+    let resolved: Vec<(String, String)> = ini_settings
+        .iter()
+        .map(|(k, v)| {
+            if v.parse::<i64>().is_err() {
+                if let Some(n) = parse_error_reporting_expr(v) {
+                    return (k.clone(), n.to_string());
                 }
             }
-            continue;
-        }
-        // Directives of extension features goro does not build (PCRE JIT):
-        // PHP ignores unknown directives, so ini_get() keeps returning false.
-        if key == "pcre.jit" {
-            continue;
-        }
-        let val = if let Ok(n) = value.parse::<i64>() {
-            Value::Long(n)
-        } else if let Some(resolved) = parse_error_reporting_expr(value) {
-            Value::Long(resolved)
-        } else {
-            Value::String(PhpString::from_string(value.clone()))
-        };
-        // Apply error_reporting to the VM
-        if key == "error_reporting" {
-            if let Value::Long(n) = &val {
-                vm.error_reporting = *n;
-            }
-        }
-        // INI handlers that emit "PHP Startup" deprecations.
-        if let Some(msg) = goro_ext_standard::misc::assert_ini_deprecation(key.as_bytes(), &val) {
-            startup_messages.extend_from_slice(
-                format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes(),
-            );
-        }
-        // Apply zend.exception_string_param_max_len to the VM (PHP rejects values outside [0,1_000_000])
-        if key == "zend.exception_string_param_max_len" {
-            if let Value::Long(n) = &val {
-                if *n >= 0 && *n <= 1_000_000 {
-                    vm.exception_string_param_max_len = *n as usize;
-                }
-            }
-        }
-        if let Some(validate) = vm.ini_validators.get(key.as_bytes()).copied() {
-            if !validate(&mut vm, value.as_bytes(), true) {
-                continue;
-            }
-        }
-        vm.constants.insert(key.as_bytes().to_vec(), val);
-    }
-    // OnChangeMemoryLimit at startup: memory_limit above max_memory_limit is
-    // clamped with a startup warning.
-    if let (Some(ml), Some(mx)) = (
-        vm.constants
-            .get(b"memory_limit".as_ref())
-            .map(|v| v.to_php_string()),
-        vm.constants
-            .get(b"max_memory_limit".as_ref())
-            .map(|v| v.to_php_string()),
-    ) {
-        let (v, _) = goro_core::ini_quantity::parse_quantity(ml.as_bytes(), false);
-        let (max, _) = goro_core::ini_quantity::parse_quantity(mx.as_bytes(), false);
-        if v > max {
-            if v != u64::MAX {
-                vm.write_output(format!(
-                    "\nWarning: Failed to set memory_limit to {} bytes. Setting to max_memory_limit instead (currently: {} bytes) in Unknown on line 0\n",
-                    v as i64, max as i64
-                ).as_bytes());
-            }
-            set_memory_limit(max as i64);
-            vm.constants
-                .insert(b"memory_limit".to_vec(), Value::String(mx));
-        }
-    }
+            (k.clone(), v.clone())
+        })
+        .collect();
+    let startup_messages = goro_ext_standard::misc::apply_startup_ini(&mut vm, &resolved);
     // Extension startup (MINIT/RINIT) now that INI settings are in place;
     // startup messages come before any compile-time diagnostics.
     if !vm.startup_hooks.is_empty() {

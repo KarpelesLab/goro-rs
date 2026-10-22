@@ -1433,21 +1433,25 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         s.set(sym_key(b"REQUEST_TIME_FLOAT"), Value::Double(now));
         s.set(sym_key(b"REQUEST_TIME"), Value::Long(now as i64));
     }
-    // argv / argc
+    // argv / argc (php_build_argv(), when register_argc_argv is on)
     if !req.cgi {
-        let argv = new_arr();
-        for a in &req.argv {
-            argv.borrow_mut().push(sval(a));
-        }
-        let argc = Value::Long(req.argv.len() as i64);
-        vm.set_global(b"argv".to_vec(), Value::Array(argv.clone()));
-        vm.set_global(b"argc".to_vec(), argc.clone());
-        if has('S') {
-            let copy = Rc::new(RefCell::new(argv.borrow().clone()));
-            server
-                .borrow_mut()
-                .set(sym_key(b"argv"), Value::Array(copy));
-            server.borrow_mut().set(sym_key(b"argc"), argc);
+        if !ini_bool(ini("register_argc_argv"), true) {
+            // (no $argv / $argc)
+        } else {
+            let argv = new_arr();
+            for a in &req.argv {
+                argv.borrow_mut().push(sval(a));
+            }
+            let argc = Value::Long(req.argv.len() as i64);
+            vm.set_global(b"argv".to_vec(), Value::Array(argv.clone()));
+            vm.set_global(b"argc".to_vec(), argc.clone());
+            if has('S') {
+                let copy = Rc::new(RefCell::new(argv.borrow().clone()));
+                server
+                    .borrow_mut()
+                    .set(sym_key(b"argv"), Value::Array(copy));
+                server.borrow_mut().set(sym_key(b"argc"), argc);
+            }
         }
     } else if has('S') && ini_bool(ini("register_argc_argv"), false) {
         emit_startup(
