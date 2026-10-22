@@ -7905,7 +7905,16 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     }
                     Some(val.deref())
                 } else if let Some(target) = args.get(1) {
-                    if let Value::Object(_) = target {
+                    if let Value::Object(o) = target {
+                        // SensitiveParameterValue keeps $value natively.
+                        if prop_name == "value"
+                            && o
+                                .borrow()
+                                .class_name
+                                .eq_ignore_ascii_case(b"SensitiveParameterValue")
+                        {
+                            return Some(o.borrow().get_property(b"__sensitive_value"));
+                        }
                         // zend_read_property_ex() in the declaring class's scope.
                         let decl = rprop(vm, &class_lower, prop_name.as_bytes())
                             .map(|p| p.declaring_class.to_ascii_lowercase())

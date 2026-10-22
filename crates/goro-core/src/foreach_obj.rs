@@ -40,6 +40,7 @@ pub(crate) fn is_internal_slot(name: &[u8]) -> bool {
         b"__pkey_id",
         b"__cert_id",
         b"__csr_id",
+        b"__sensitive_value",
     ];
     name.starts_with(b"__") && PREFIXES.iter().any(|p| name.starts_with(p))
 }

@@ -55703,8 +55703,12 @@ impl Vm {
                                     });
                                     return Ok(Flow::Continue);
                                 }
-                                b"getvalue" => {
-                                    let v = obj.borrow().get_property(b"__sensitive_value");
+                                b"getvalue" | b"__debuginfo" => {
+                                    let v = if method_name_lower.as_slice() == b"getvalue" {
+                                        obj.borrow().get_property(b"__sensitive_value")
+                                    } else {
+                                        Value::Array(Rc::new(RefCell::new(PhpArray::new())))
+                                    };
                                     let name = self.zpp_builtin_return_name(
                                         &class_name_lower,
                                         &method_name_lower,

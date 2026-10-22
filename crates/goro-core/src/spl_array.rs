@@ -63,6 +63,7 @@ pub(crate) fn is_hidden_prop(name: &[u8]) -> bool {
         || name.starts_with(b"__csr_id")
         || name.starts_with(b"__xml_")
         || name.starts_with(b"__regex_")
+        || name.starts_with(b"__sensitive_value")
 }
 
 /// The hash table an ArrayObject operates on.
