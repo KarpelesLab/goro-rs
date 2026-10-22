@@ -9370,6 +9370,11 @@ struct FileHandle {
     pub fatal_error: bool,
     /// data: streams: the RFC 2397 meta data (stream_get_meta_data()).
     pub data_meta: Option<Vec<(Vec<u8>, Value)>>,
+    /// stream->position of a stream that cannot seek (pipes, FIFOs, ttys):
+    /// counted from the bytes read and written. It starts at -1 for one
+    /// opened from a descriptor (_php_stream_fopen_from_fd()) and at 0 for
+    /// popen(). None: ftell() asks the descriptor.
+    pub pipe_pos: Option<i64>,
     /// Socket streams with the TLS layer set up (php_openssl_netstream_data_t).
     pub crypto: Option<Box<dyn goro_core::crypto::CryptoStream>>,
 }
@@ -9426,7 +9431,11 @@ impl FileHandle {
         if self.sock.is_some() {
             xp_socket::sock_read(self, buf, has_buffered)
         } else {
-            self.file.read(buf)
+            let n = self.file.read(buf)?;
+            if let Some(p) = self.pipe_pos.as_mut() {
+                *p += n as i64;
+            }
+            Ok(n)
         }
     }
 
@@ -9570,6 +9579,7 @@ fn register_std_streams() {
                     fatal_error: false,
                     data_meta: None,
                     crypto: None,
+                    pipe_pos: if seekable { None } else { Some(-1) },
                 },
             );
         }
@@ -9832,6 +9842,16 @@ fn require_open_stream(vm: &mut Vm, val: &Value, func_name: &str) -> Result<i64,
 fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialStream) -> i64 {
     {
         let fid = goro_core::value::alloc_resource_id();
+        // _php_stream_fopen_from_fd(): a descriptor that cannot seek starts
+        // at position -1.
+        let pipe_pos = {
+            use std::os::unix::io::AsRawFd;
+            if unsafe { libc::lseek(file.as_raw_fd(), 0, libc::SEEK_CUR) } < 0 {
+                Some(-1)
+            } else {
+                None
+            }
+        };
         FILE_HANDLES.with(|handles| {
             handles.borrow_mut().insert(
                 fid,
@@ -9853,6 +9873,7 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
                     fatal_error: false,
                     data_meta: None,
                     crypto: None,
+                    pipe_pos,
                 },
             );
         });
@@ -10483,6 +10504,20 @@ fn write_cli_stderr(vm: &mut Vm, bytes: &[u8]) -> usize {
 /// output for special streams). Used after the write filter chain has
 /// been applied.
 fn write_to_stream(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
+    let n = write_to_stream_inner(vm, fid, bytes);
+    FILE_HANDLES.with(|h| {
+        if let Some(p) = h
+            .borrow_mut()
+            .get_mut(&fid)
+            .and_then(|fh| fh.pipe_pos.as_mut())
+        {
+            *p += n as i64;
+        }
+    });
+    n
+}
+
+fn write_to_stream_inner(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
     // The PHP constants STDIN/STDOUT/STDERR are pre-registered at resource
     // ids 1/2/3 without a FILE_HANDLES entry. Route those directly.
     if fid == 3 && vm.cli_direct_output {
@@ -11360,6 +11395,15 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             let buffered = fh.filter_read_ready.len() as u64;
+            if let Some(p) = fh.pipe_pos {
+                // PHP_FUNCTION(ftell): a position of -1 is reported as false.
+                let pos = p - buffered as i64;
+                return Ok(if pos == -1 {
+                    Value::False
+                } else {
+                    Value::Long(pos)
+                });
+            }
             match fh.file.stream_position() {
                 Ok(pos) => Ok(Value::Long(pos.saturating_sub(buffered) as i64)),
                 Err(_) => Ok(Value::False),
@@ -18897,6 +18941,8 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if let Some(fh) = h.borrow_mut().get_mut(&fid) {
                         fh.wrapper_type = String::new();
                         fh.seekable = false;
+                        // php_stream_fopen_from_pipe() starts at position 0.
+                        fh.pipe_pos = Some(0);
                     }
                 });
                 goro_core::value::register_resource(fid, b"stream");
