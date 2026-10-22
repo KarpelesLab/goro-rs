@@ -1195,7 +1195,38 @@ impl Vm {
     /// class: overriding methods are checked against the stub signatures.
     /// A return type only incompatible with a tentative one is deprecated
     /// (unless #[\ReturnTypeWillChange]). Err((message, line, unresolved)).
+    ///
+    /// Like zend_do_link_class(), the errors raised meanwhile (deprecations)
+    /// are recorded: emitted once the checks pass (through the user error
+    /// handler), or before the fatal error without the handler.
     pub(crate) fn internal_parent_method_checks(
+        &mut self,
+        class: &crate::object::ClassEntry,
+        parent: &'static crate::object::ClassEntry,
+        decl_line: u32,
+    ) -> Result<(), (String, u32, bool)> {
+        let outer = self.recorded_errors.replace(Vec::new());
+        let r = self.internal_parent_method_checks_inner(class, parent, decl_line);
+        let recorded = std::mem::replace(&mut self.recorded_errors, outer).unwrap_or_default();
+        match &r {
+            Ok(()) => {
+                for (ty, msg, line) in recorded {
+                    self.raise_error(ty, &msg, line);
+                }
+            }
+            // Retried later: the errors will be raised again then.
+            Err((_, _, true)) => {}
+            Err(_) => {
+                let file = self.current_file.clone();
+                for (ty, msg, line) in recorded {
+                    self.error_cb(ty, &msg, &file, line);
+                }
+            }
+        }
+        r
+    }
+
+    fn internal_parent_method_checks_inner(
         &mut self,
         class: &crate::object::ClassEntry,
         parent: &'static crate::object::ClassEntry,

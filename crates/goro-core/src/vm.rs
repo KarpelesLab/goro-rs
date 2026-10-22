@@ -772,6 +772,9 @@ pub struct Vm {
     /// JmpZ) by the PropertyGet of the same property: the pair is one
     /// FETCH_OBJ_IS, which runs the hook once. `(object id, value)`.
     isset_get_cache: Option<(u64, Value)>,
+    /// EG(record_errors): non-fatal errors raised while linking a class are
+    /// recorded here (type, message, line) instead of being raised.
+    pub(crate) recorded_errors: Option<Vec<(i64, String, u32)>>,
     /// Set by ArrayGetIncDec on an ArrayAccess object whose offsetGet()
     /// returned by value: the matching ArraySetIncDec must not call
     /// offsetSet() (the increment only affected a temporary).
@@ -1115,6 +1118,7 @@ impl Vm {
             last_return_line: 0,
             last_call_by_ref: false,
             isset_get_cache: None,
+            recorded_errors: None,
             incdec_skip_set: false,
             current_line: 0,
             enum_case_cache: HashMap::new(),
@@ -54227,21 +54231,17 @@ fn php_increment(val: &Value) -> Value {
         Value::Double(f) => Value::Double(f + 1.0),
         Value::String(s) => {
             let bytes = s.as_bytes();
-            // Check if it's a numeric string first (before alphanumeric check)
-            if let Some(n) = crate::value::parse_numeric_string(bytes) {
-                // If the string contains '.', 'e', or 'E', it's a float string
-                let is_float_string = bytes.iter().any(|&b| b == b'.' || b == b'e' || b == b'E');
-                if !is_float_string
-                    && n.fract() == 0.0
-                    && n >= i64::MIN as f64
-                    && n <= i64::MAX as f64
-                {
-                    return match (n as i64).checked_add(1) {
+            // A numeric string is incremented as the int / float it holds
+            // (is_numeric_string(): integers keep their full precision).
+            match crate::value::parse_numeric_str(bytes, false) {
+                Some((crate::value::NumStr::Long(n), _)) => {
+                    return match n.checked_add(1) {
                         Some(r) => Value::Long(r),
-                        None => Value::Double(n + 1.0),
+                        None => Value::Double(n as f64 + 1.0),
                     };
                 }
-                return Value::Double(n + 1.0);
+                Some((crate::value::NumStr::Double(d), _)) => return Value::Double(d + 1.0),
+                None => {}
             }
             // Empty string: becomes "1" (PHP 8.3+ emits Deprecated)
             if bytes.is_empty() {
@@ -54324,20 +54324,16 @@ fn php_decrement(val: &Value) -> Value {
         Value::Double(f) => Value::Double(f - 1.0),
         Value::String(s) => {
             let bytes = s.as_bytes();
-            // Check if it's a numeric string
-            if let Some(n) = crate::value::parse_numeric_string(bytes) {
-                let is_float_string = bytes.iter().any(|&b| b == b'.' || b == b'e' || b == b'E');
-                if !is_float_string
-                    && n.fract() == 0.0
-                    && n >= i64::MIN as f64
-                    && n <= i64::MAX as f64
-                {
-                    match (n as i64).checked_sub(1) {
-                        Some(r) => return Value::Long(r),
-                        None => return Value::Double(n - 1.0),
-                    }
+            // A numeric string is decremented as the int / float it holds.
+            match crate::value::parse_numeric_str(bytes, false) {
+                Some((crate::value::NumStr::Long(n), _)) => {
+                    return match n.checked_sub(1) {
+                        Some(r) => Value::Long(r),
+                        None => Value::Double(n as f64 - 1.0),
+                    };
                 }
-                return Value::Double(n - 1.0);
+                Some((crate::value::NumStr::Double(d), _)) => return Value::Double(d - 1.0),
+                None => {}
             }
             // Empty string: decrement produces int(-1)
             if bytes.is_empty() {

@@ -169,6 +169,10 @@ impl Vm {
         if self.error_reporting == ER_SILENT {
             return;
         }
+        if let Some(rec) = self.recorded_errors.as_mut() {
+            rec.push((ty, msg.to_string(), line));
+            return;
+        }
         if self.call_user_error_handler(ty, msg, line) {
             return;
         }
