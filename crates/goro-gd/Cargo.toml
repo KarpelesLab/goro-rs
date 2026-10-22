@@ -9,7 +9,7 @@ workspace = true
 
 [dependencies]
 goro-zlib = { path = "../goro-zlib" }
-skrifa = "0.40.0"
-oxideav-webp = { version = "0.2.3", default-features = false }
-oxideav-vp8 = { version = "0.2.7", default-features = false }
-oxideav-avif = "0.0.13"
+skrifa = "=0.40.0"
+oxideav-webp = { version = "=0.2.3", default-features = false }
+oxideav-vp8 = { version = "=0.2.7", default-features = false }
+oxideav-avif = "=0.0.13"
