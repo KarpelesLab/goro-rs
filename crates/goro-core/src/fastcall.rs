@@ -33,6 +33,9 @@ pub(crate) enum NewFast {
 pub(crate) struct MethodSite {
     /// The object's class name.
     class_name: Vec<u8>,
+    /// The calling scope (class_scope_ref()) it was resolved from: its own
+    /// private method of that name may win (zend_get_parent_private_method()).
+    scope: Option<Vec<u8>>,
     /// The method (None: a constructor call of a class without one).
     method: Option<std::rc::Weak<OpArray>>,
     /// The fast path does not apply to the class: the general handler runs.
@@ -122,7 +125,8 @@ impl Vm {
         let name_lower: &[u8] = name_lower;
         match self.classes.get(name_lower) {
             Some(ce)
-                if ce.attributes.is_empty()
+                if ce.filename.is_some()
+                    && ce.attributes.is_empty()
                     && !(ce.is_abstract || ce.is_interface || ce.is_enum || ce.is_trait) => {}
             _ => return NewFast::No,
         }
@@ -221,13 +225,15 @@ impl Vm {
             if !is_ctor && ob.has_property(b"__spl_rii_its") {
                 return false;
             }
+            let scope = self.class_scope_ref();
             let sites = op_array.sites.borrow();
             match sites
                 .as_ref()
                 .and_then(|s| s.method_sites.get(&(ip as u32)))
+                .filter(|s| s.class_name == ob.class_name && s.scope.as_deref() == scope)
             {
-                Some(s) if s.class_name == ob.class_name && s.fallback => return false,
-                Some(s) if s.class_name == ob.class_name => match &s.method {
+                Some(s) if s.fallback => return false,
+                Some(s) => match &s.method {
                     Some(w) => w
                         .upgrade()
                         .map(|m| (Some(m), s.func_name.clone(), s.sep, s.is_static, s.reg_gen)),
@@ -289,8 +295,9 @@ impl Vm {
             };
             (l as &[u8], ob.class_name.clone())
         };
+        let scope = self.class_scope_ref().map(|s| s.to_vec());
         // (what the call site remembers when the general handler is to run)
-        let fallback = |class_name: Vec<u8>| {
+        let fallback = |class_name: Vec<u8>, scope: Option<Vec<u8>>| {
             op_array
                 .sites
                 .borrow_mut()
@@ -300,6 +307,7 @@ impl Vm {
                     ip as u32,
                     MethodSite {
                         class_name,
+                        scope,
                         method: None,
                         fallback: true,
                         func_name: Vec::new(),
@@ -311,13 +319,13 @@ impl Vm {
             false
         };
         let Some(class) = self.classes.get(class_lower) else {
-            return fallback(class_name_orig);
+            return fallback(class_name_orig, scope);
         };
         let Some(method) = class.methods.get(method_lower) else {
             // `new` of a class without a constructor: the call names
             // `Class::__construct`, and $this.
             if !is_ctor || !self.user_class_chain(class_lower) {
-                return fallback(class_name_orig);
+                return fallback(class_name_orig, scope);
             }
             let mut func_name = class_name_orig.clone();
             func_name.extend_from_slice(b"::__construct");
@@ -330,6 +338,7 @@ impl Vm {
                     ip as u32,
                     MethodSite {
                         class_name: class_name_orig,
+                        scope,
                         method: None,
                         fallback: false,
                         func_name: func_name.clone(),
@@ -341,12 +350,24 @@ impl Vm {
             self.push_noctor_call(func_name, obj);
             return true;
         };
+        // A private method of the calling scope that the class redeclares
+        // (or inherits) may be the one called: the general handler decides.
+        let scope_private = scope.as_deref().is_some_and(|caller| {
+            !method.declaring_class.eq_ignore_ascii_case(caller) && {
+                let caller_lower = caller.to_ascii_lowercase();
+                self.classes
+                    .get(&caller_lower)
+                    .and_then(|cc| cc.get_method(method_lower))
+                    .is_some_and(|cm| cm.visibility == Visibility::Private)
+            }
+        });
         if method.visibility != Visibility::Public
             || !method.attributes.is_empty()
             || !method.op_array.attributes.is_empty()
+            || scope_private
             || !self.user_class_chain(class_lower)
         {
-            return fallback(class_name_orig);
+            return fallback(class_name_orig, scope);
         }
         let is_static = method.is_static;
         let method_op_array = method.op_array.clone();
@@ -363,6 +384,7 @@ impl Vm {
                 ip as u32,
                 MethodSite {
                     class_name: class_name_orig,
+                    scope,
                     method: Some(Rc::downgrade(&method_op_array)),
                     fallback: false,
                     func_name: func_name.clone(),

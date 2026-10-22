@@ -17127,6 +17127,7 @@ impl Vm {
             // a call takes the general path)
             OperandType::Tmp(i) => match tmps.get_mut(i as usize) {
                 Some(Value::Reference(_)) => return false,
+                Some(Value::Array(a)) if Rc::ptr_eq(a, &self.globals) => return false,
                 Some(slot) => match std::mem::replace(slot, Value::Undef) {
                     Value::Undef => Value::Null,
                     v => v,
@@ -17135,6 +17136,13 @@ impl Vm {
             },
             OperandType::Const(i) => literals.get(i as usize).cloned().unwrap_or(Value::Null),
             _ => Value::Null,
+        };
+        // ($GLOBALS is sent as a copy: the general handler's)
+        if matches!(&v, Value::Array(a) if Rc::ptr_eq(a, &self.globals)) {
+            return false;
+        }
+        let Some(call) = self.pending_calls.last_mut() else {
+            return false;
         };
         call.args.push(v);
         true
@@ -24107,6 +24115,7 @@ impl Vm {
                             func(self, &call.args)
                         };
                         if own_frame {
+                            self.release_in_builtin_frame(&call.args);
                             self.pop_builtin_frame();
                         } else {
                             self.ucf_call_line = None;
