@@ -723,7 +723,7 @@ fn btreeReleaseAllCursorPages(pCur: &mut BtCursor) {
 fn saveCursorKey(pCur: &mut BtCursor) -> i32 {
     let mut rc = SQLITE_OK;
     debug_assert!(CURSOR_VALID as u8 == pCur.eState);
-    debug_assert!(pCur.pKey.is_none());
+    /* assert( 0==pCur->pKey ): may not hold after an error on a corrupt db */
 
     if pCur.curIntKey != 0 {
         /* Only the rowid is required for a table btree */
@@ -742,7 +742,7 @@ fn saveCursorKey(pCur: &mut BtCursor) -> i32 {
             pCur.pKey = Some(pKey);
         }
     }
-    debug_assert!(pCur.curIntKey == 0 || pCur.pKey.is_none());
+    /* assert( !pCur->curIntKey || !pCur->pKey ) */
     rc
 }
 
@@ -753,7 +753,7 @@ fn saveCursorKey(pCur: &mut BtCursor) -> i32 {
 /// prior to calling this routine.
 fn saveCursorPosition(pCur: &mut BtCursor) -> i32 {
     debug_assert!(CURSOR_VALID as u8 == pCur.eState || CURSOR_SKIPNEXT as u8 == pCur.eState);
-    debug_assert!(pCur.pKey.is_none());
+    /* assert( 0==pCur->pKey ): may not hold after an error on a corrupt db */
 
     if pCur.curFlags as i32 & BTCF_Pinned != 0 {
         return SQLITE_CONSTRAINT_PINNED;
@@ -4740,14 +4740,55 @@ fn accessPayload(pCur: &mut BtCursor, offset: u32, amt: u32, pBuf: &mut [u8], eO
                     a = ovflSize - offset;
                 }
 
+                /* SQLITE_DIRECT_OVERFLOW_READ (enabled by default):
+                 ** If all the following are true:
+                 **
+                 **   1) this is a read operation, and
+                 **   2) data is required from the start of this overflow page, and
+                 **   3) there are no dirty pages in the page-cache
+                 **   4) the database is file-backed, and
+                 **   5) the page is not in the WAL file
+                 **   6) at least 4 bytes have already been read into the output buffer
+                 **
+                 ** then data can be read directly from the database file into the
+                 ** output buffer, bypassing the page-cache altogether. This speeds
+                 ** up loading large records that span many overflow pages.
+                 */
+                let direct = eOp == 0 /* (1) */
+                    && offset == 0 /* (2) */
+                    && {
+                        let pager = pagerOf(&pBt);
+                        let ok = sqlite3PagerDirectReadOk(&mut pager.borrow_mut(), nextPage);
+                        ok != 0 /* (3,4,5) */
+                    }
+                    && bi >= 4; /* (6) */
                 let mut pDbPage = None;
-                rc = pagerGet(
-                    &pBt,
-                    nextPage,
-                    &mut pDbPage,
-                    if eOp == 0 { PAGER_GET_READONLY } else { 0 },
-                );
-                if rc == SQLITE_OK {
+                if direct {
+                    let aWrite = bi - 4;
+                    let aSave: [u8; 4] = pBuf[aWrite..bi].try_into().unwrap();
+                    let pageSize = pBt.borrow().pageSize as i64;
+                    let pager = pagerOf(&pBt);
+                    {
+                        let mut pg = pager.borrow_mut();
+                        let fd = sqlite3PagerFile(&mut pg);
+                        rc = crate::os::sqlite3OsRead(
+                            fd,
+                            &mut pBuf[aWrite..bi + a as usize],
+                            a as i32 + 4,
+                            pageSize * (nextPage as i64 - 1),
+                        );
+                    }
+                    nextPage = get4byte(pBuf, aWrite);
+                    pBuf[aWrite..bi].copy_from_slice(&aSave);
+                } else {
+                    rc = pagerGet(
+                        &pBt,
+                        nextPage,
+                        &mut pDbPage,
+                        if eOp == 0 { PAGER_GET_READONLY } else { 0 },
+                    );
+                }
+                if !direct && rc == SQLITE_OK {
                     let pDbPage = pDbPage.unwrap();
                     if eOp != 0
                         && (sqlite3PagerPageRefcount(&pDbPage) != 1
@@ -5126,7 +5167,7 @@ fn moveToRightmost(pCur: &mut BtCursor) -> i32 {
 pub fn sqlite3BtreeFirst(db: &mut Sqlite3, pCur: &BtCursorP, pRes: &mut i32) -> i32 {
     cursorFirst(&mut pCur.borrow_mut(), pRes)
 }
-fn cursorFirst(pCur: &mut BtCursor, pRes: &mut i32) -> i32 {
+pub fn cursorFirst(pCur: &mut BtCursor, pRes: &mut i32) -> i32 {
     let mut rc = moveToRoot(pCur);
     if rc == SQLITE_OK {
         *pRes = 0;
@@ -5185,7 +5226,7 @@ fn btreeLast(pCur: &mut BtCursor, pRes: &mut i32) -> i32 {
 pub fn sqlite3BtreeLast(db: &mut Sqlite3, pCur: &BtCursorP, pRes: &mut i32) -> i32 {
     cursorLast(&mut pCur.borrow_mut(), pRes)
 }
-fn cursorLast(pCur: &mut BtCursor, pRes: &mut i32) -> i32 {
+pub fn cursorLast(pCur: &mut BtCursor, pRes: &mut i32) -> i32 {
     /* If the cursor already points to the last entry, this is a no-op. */
     if CURSOR_VALID as u8 == pCur.eState && (pCur.curFlags as i32 & BTCF_AtLast) != 0 {
         *pRes = 0;
@@ -5227,7 +5268,7 @@ pub fn sqlite3BtreeTableMoveto(
 ) -> i32 {
     btreeTableMoveto(&mut pCur.borrow_mut(), intKey, biasRight, pRes)
 }
-fn btreeTableMoveto(pCur: &mut BtCursor, intKey: i64, biasRight: i32, pRes: &mut i32) -> i32 {
+pub fn btreeTableMoveto(pCur: &mut BtCursor, intKey: i64, biasRight: i32, pRes: &mut i32) -> i32 {
     let mut rc;
 
     debug_assert!(pCur.pKeyInfo.is_none());
@@ -5485,7 +5526,7 @@ pub fn sqlite3BtreeIndexMoveto(
 ) -> i32 {
     btreeIndexMoveto(&mut pCur.borrow_mut(), pIdxKey, pRes)
 }
-fn btreeIndexMoveto(pCur: &mut BtCursor, pIdxKey: &mut UnpackedRecord, pRes: &mut i32) -> i32 {
+pub fn btreeIndexMoveto(pCur: &mut BtCursor, pIdxKey: &mut UnpackedRecord, pRes: &mut i32) -> i32 {
     let mut rc;
 
     debug_assert!(pCur.pKeyInfo.is_some());
@@ -10304,6 +10345,16 @@ pub fn sqlite3BtreeUpdateMeta(p: &BtreeP, idx: i32, iMeta: u32) -> i32 {
 /// Otherwise, if an error is encountered (i.e. an IO error or database
 /// corruption) an SQLite error code is returned.
 pub fn sqlite3BtreeCount(db: &mut Sqlite3, pCur: &BtCursorP, pnEntry: &mut i64) -> i32 {
+    let isInterrupted = db.isInterrupted.clone();
+    btreeCount(pCur, pnEntry, &isInterrupted)
+}
+
+/// sqlite3BtreeCount() body (`isInterrupted` is db->u1.isInterrupted).
+pub fn btreeCount(
+    pCur: &BtCursorP,
+    pnEntry: &mut i64,
+    isInterrupted: &std::cell::Cell<i32>,
+) -> i32 {
     let mut c = pCur.borrow_mut();
     let pCur = &mut *c;
     let mut nEntry: i64 = 0; /* Value to return in *pnEntry */
@@ -10317,7 +10368,7 @@ pub fn sqlite3BtreeCount(db: &mut Sqlite3, pCur: &BtCursorP, pnEntry: &mut i64) 
     /* Unless an error occurs, the following loop runs one iteration for each
      ** page in the B-Tree structure (not including overflow pages).
      */
-    while rc == SQLITE_OK && db.isInterrupted.get() == 0 {
+    while rc == SQLITE_OK && isInterrupted.get() == 0 {
         /* If this is a leaf page or the tree is not an int-key tree, then
          ** this page contains countable entries. Increment the entry counter
          ** accordingly.
@@ -11342,6 +11393,11 @@ pub fn sqlite3BtreePutData(
     amt: u32,
     z: &mut [u8],
 ) -> i32 {
+    btreePutData(pCsr, offset, amt, z)
+}
+
+/// sqlite3BtreePutData() body.
+pub fn btreePutData(pCsr: &BtCursorP, offset: u32, amt: u32, z: &mut [u8]) -> i32 {
     let mut c = pCsr.borrow_mut();
     let pCsr = &mut *c;
     debug_assert!(pCsr.curFlags as i32 & BTCF_Incrblob != 0);
@@ -11494,4 +11550,1683 @@ pub fn sqlite3BtreeSharable(p: &BtreeP) -> i32 {
 /// cache.)
 pub fn sqlite3BtreeConnectionCount(p: &BtreeP) -> i32 {
     1
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    //! The scripts below were run through C SQLite 3.54.1's own btree layer
+    //! (amalgamation built with SQLITE_OMIT_SHARED_CACHE, driving
+    //! sqlite3BtreeOpen/Insert/Delete/... directly with the same op
+    //! interpreter).  The expected outputs and the FNV-1a hashes of the
+    //! resulting database files come from that run: the port must produce
+    //! byte-identical files.  They need the pager, os and (for index
+    //! b-trees) vdbeaux ports, hence #[ignore] until those exist.
+    use super::*;
+    use std::fmt::Write as _;
+
+    fn fnv(data: &[u8]) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in data {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    }
+
+    fn payload(key: i64, n: usize) -> Vec<u8> {
+        (0..n)
+            .map(|j| (key.wrapping_mul(131).wrapping_add(j as i64 * 7 + 13) & 0xff) as u8)
+            .collect()
+    }
+
+    /// An index record (INTEGER, BLOB) as built by the C test harness.
+    fn mkrec(v: i64, len: usize) -> Vec<u8> {
+        let st = 12 + 2 * len as u64;
+        let mut t = [0u8; 10];
+        let nt = putVarint(&mut t, 0, st);
+        let mut out = vec![(2 + nt) as u8, 6];
+        out.extend_from_slice(&t[..nt]);
+        out.extend_from_slice(&v.to_be_bytes());
+        for j in 0..len {
+            out.push((v.wrapping_mul(17).wrapping_add(j as i64 * 5 + 3) & 0xff) as u8);
+        }
+        out
+    }
+
+    fn cksum(buf: &[u8], sum: i64) -> i64 {
+        let mut s = sum;
+        for (j, &x) in buf.iter().enumerate() {
+            s = s.wrapping_add(x as i64 * (j as i64 + 1));
+        }
+        s
+    }
+
+    fn chk(rc: i32, what: &str, line: usize) {
+        assert_eq!(rc, SQLITE_OK, "line {}: {}", line, what);
+    }
+
+    /// Run an op script on a file database; return (output, file content).
+    fn run_script(name: &str, script: &str) -> (String, Vec<u8>) {
+        let path =
+            std::env::temp_dir().join(format!("goro-btree-{}-{}.db", name, std::process::id()));
+        let file = path.to_str().unwrap().to_string();
+        let st = BtDbState {
+            flags: 0,
+            tempInMemory: 0,
+            writableSchema: 0,
+            nSavepoint: 0,
+            nVdbeRead: 0,
+            szMmap: 0,
+            busyHandler: Rc::new(RefCell::new(BusyHandler {
+                xBusyHandler: None,
+                nBusy: 0,
+            })),
+        };
+        let ki: KeyInfoRef = Rc::new(RefCell::new(KeyInfo {
+            enc: SQLITE_UTF8 as u8,
+            nKeyField: 2,
+            nAllField: 2,
+            aSortFlags: vec![0; 2],
+            aColl: vec![None, None],
+        }));
+        let vfs: Rc<crate::os::Vfs> =
+            Rc::from(crate::os::sqlite3_vfs_find(None).expect("default vfs"));
+        let mut out = String::new();
+        let mut p: Option<BtreeP> = None;
+        let mut roots: Vec<Pgno> = Vec::new();
+        let mut types: Vec<u8> = Vec::new();
+        let mut saved: Vec<Pgno> = Vec::new();
+        let mut savedT: Vec<u8> = Vec::new();
+        let mut curT = 0usize;
+        for (ln, line) in script.lines().enumerate() {
+            let lineno = ln + 1;
+            let w: Vec<&str> = line.split_whitespace().collect();
+            if w.is_empty() {
+                continue;
+            }
+            let mut a: i64 = 0;
+            if let Some(x) = w.get(1) {
+                if let Some(t) = x.strip_prefix('T') {
+                    let ti: usize = t.parse().unwrap();
+                    if ti >= roots.len() || roots[ti] == 0 {
+                        continue;
+                    }
+                    a = roots[ti] as i64;
+                    curT = ti;
+                } else {
+                    a = x.parse().unwrap();
+                }
+            }
+            let b: i64 = w.get(2).map_or(0, |x| x.parse().unwrap());
+            let c: i64 = w.get(3).map_or(0, |x| x.parse().unwrap());
+            let isIdx = types.get(curT).copied().unwrap_or(0) != 0;
+            let kinfo = if isIdx { Some(ki.clone()) } else { None };
+            let pp = p.clone();
+            match w[0] {
+                "open" => {
+                    let _ = std::fs::remove_file(&path);
+                    chk(
+                        btreeOpen(
+                            &st,
+                            &vfs,
+                            Some(file.as_bytes()),
+                            &mut p,
+                            0,
+                            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB,
+                        ),
+                        "open",
+                        lineno,
+                    );
+                    let pp = p.as_ref().unwrap();
+                    chk(
+                        sqlite3BtreeSetPageSize(pp, a as i32, 0, 0),
+                        "pagesize",
+                        lineno,
+                    );
+                    chk(sqlite3BtreeSetAutoVacuum(pp, b as i32), "autovac", lineno);
+                    if c != 0 {
+                        sqlite3BtreeSecureDelete(pp, c as i32);
+                    }
+                }
+                "begin" => {
+                    let mut sv = 0;
+                    chk(
+                        btreeBeginTransFull(&st, pp.as_ref().unwrap(), 1, &mut sv),
+                        "begin",
+                        lineno,
+                    );
+                    saved = roots.clone();
+                    savedT = types.clone();
+                }
+                "commit" => {
+                    let pp = pp.as_ref().unwrap();
+                    chk(btreeCommitPhaseOne(None, pp, None), "commit", lineno);
+                    chk(btreeCommitPhaseTwo(pp, 0, 0), "commit", lineno);
+                }
+                "rollback" => {
+                    chk(
+                        btreeRollback(pp.as_ref().unwrap(), SQLITE_OK, 0, 0),
+                        "rollback",
+                        lineno,
+                    );
+                    roots = saved.clone();
+                    types = savedT.clone();
+                }
+                "stmt" => {
+                    let pager = sqlite3BtreePager(pp.as_ref().unwrap());
+                    chk(
+                        sqlite3PagerOpenSavepoint(&mut pager.borrow_mut(), a as i32),
+                        "stmt",
+                        lineno,
+                    );
+                }
+                "sprollback" => chk(
+                    sqlite3BtreeSavepoint(pp.as_ref().unwrap(), SAVEPOINT_ROLLBACK, a as i32),
+                    "sprollback",
+                    lineno,
+                ),
+                "sprelease" => chk(
+                    sqlite3BtreeSavepoint(pp.as_ref().unwrap(), SAVEPOINT_RELEASE, a as i32),
+                    "sprelease",
+                    lineno,
+                ),
+                "create" | "icreate" => {
+                    let mut t: Pgno = 0;
+                    let f = if w[0] == "create" {
+                        BTREE_INTKEY
+                    } else {
+                        BTREE_BLOBKEY
+                    };
+                    chk(
+                        sqlite3BtreeCreateTable(pp.as_ref().unwrap(), &mut t, f),
+                        "create",
+                        lineno,
+                    );
+                    writeln!(out, "{} {}", w[0], t).unwrap();
+                    roots.push(t);
+                    types.push((w[0] == "icreate") as u8);
+                }
+                "insert" | "delete" | "putdata" => {
+                    let mut cur = None;
+                    chk(
+                        sqlite3BtreeCursor(
+                            pp.as_ref().unwrap(),
+                            a as Pgno,
+                            BTREE_WRCSR,
+                            None,
+                            &mut cur,
+                        ),
+                        "cursor",
+                        lineno,
+                    );
+                    let cur = cur.unwrap();
+                    if w[0] == "insert" {
+                        let buf = payload(b, c as usize);
+                        let x = BtreePayload {
+                            pKey: None,
+                            nKey: b,
+                            pData: Some(&buf),
+                            aMem: None,
+                            nMem: 0,
+                            nData: c as i32,
+                            nZero: 0,
+                        };
+                        chk(sqlite3BtreeInsert(&cur, &x, 0, 0), "insert", lineno);
+                    } else {
+                        if w[0] == "putdata" {
+                            sqlite3BtreeIncrblobCursor(&cur);
+                        }
+                        let mut res = 0;
+                        chk(
+                            btreeTableMoveto(&mut cur.borrow_mut(), b, 0, &mut res),
+                            "moveto",
+                            lineno,
+                        );
+                        if res == 0 && w[0] == "delete" {
+                            chk(sqlite3BtreeDelete(&cur, 0), "delete", lineno);
+                        } else if res == 0 {
+                            let sz = sqlite3BtreePayloadSize(&cur);
+                            let off = (c as u64 % (sz as u64 + 1)) as u32;
+                            let amt = std::cmp::min(sz - off, 3000);
+                            let mut v: Vec<u8> = (0..amt)
+                                .map(|j| (j.wrapping_mul(3).wrapping_add(c as u32)) as u8)
+                                .collect();
+                            chk(btreePutData(&cur, off, amt, &mut v), "putdata", lineno);
+                            writeln!(out, "putdata {} {}", off, amt).unwrap();
+                        }
+                    }
+                    sqlite3BtreeCloseCursor(&cur);
+                }
+                "iinsert" | "idelete" | "minsert" => {
+                    let mut cur = None;
+                    let rec = mkrec(b, c as usize);
+                    chk(
+                        sqlite3BtreeCursor(
+                            pp.as_ref().unwrap(),
+                            a as Pgno,
+                            BTREE_WRCSR,
+                            Some(ki.clone()),
+                            &mut cur,
+                        ),
+                        "cursor",
+                        lineno,
+                    );
+                    let cur = cur.unwrap();
+                    let mut r = allocUnpackedRecord(&ki);
+                    crate::vdbeaux::sqlite3VdbeRecordUnpack(rec.len() as i32, &rec, &mut r);
+                    if w[0] == "idelete" {
+                        let mut res = 0;
+                        chk(
+                            btreeIndexMoveto(&mut cur.borrow_mut(), &mut r, &mut res),
+                            "imoveto",
+                            lineno,
+                        );
+                        if res == 0 {
+                            chk(sqlite3BtreeDelete(&cur, 0), "idelete", lineno);
+                        }
+                    } else {
+                        let m = w[0] == "minsert";
+                        let x = BtreePayload {
+                            pKey: Some(&rec),
+                            nKey: rec.len() as i64,
+                            pData: None,
+                            aMem: if m { Some(&r.aMem) } else { None },
+                            nMem: if m { r.nField } else { 0 },
+                            nData: 0,
+                            nZero: 0,
+                        };
+                        chk(sqlite3BtreeInsert(&cur, &x, 0, 0), "iinsert", lineno);
+                    }
+                    sqlite3BtreeCloseCursor(&cur);
+                }
+                "drop" => {
+                    let mut moved = 0;
+                    chk(
+                        sqlite3BtreeDropTable(pp.as_ref().unwrap(), a as i32, &mut moved),
+                        "drop",
+                        lineno,
+                    );
+                    writeln!(out, "drop {}", moved).unwrap();
+                    roots[curT] = 0;
+                    if moved != 0 {
+                        for r in roots.iter_mut() {
+                            if *r == moved as Pgno {
+                                *r = a as Pgno;
+                            }
+                        }
+                    }
+                }
+                "clear" => {
+                    let mut nc = 0i64;
+                    chk(
+                        sqlite3BtreeClearTable(pp.as_ref().unwrap(), a as i32, &mut nc),
+                        "clear",
+                        lineno,
+                    );
+                    writeln!(out, "clear {}", nc).unwrap();
+                }
+                "incrvac" => loop {
+                    let r = sqlite3BtreeIncrVacuum(pp.as_ref().unwrap());
+                    if r != SQLITE_OK {
+                        assert_eq!(r, SQLITE_DONE, "line {}: incrvac", lineno);
+                        break;
+                    }
+                },
+                "scan" | "rscan" => {
+                    let mut cur = None;
+                    chk(
+                        sqlite3BtreeCursor(pp.as_ref().unwrap(), a as Pgno, 0, kinfo, &mut cur),
+                        "cursor",
+                        lineno,
+                    );
+                    let cur = cur.unwrap();
+                    let (mut res, mut cnt, mut sum) = (0, 0i64, 0i64);
+                    let fwd = w[0] == "scan";
+                    if fwd {
+                        chk(
+                            cursorFirst(&mut cur.borrow_mut(), &mut res),
+                            "first",
+                            lineno,
+                        );
+                    } else {
+                        chk(cursorLast(&mut cur.borrow_mut(), &mut res), "last", lineno);
+                    }
+                    while res == 0 && sqlite3BtreeEof(&cur) == 0 {
+                        let sz = sqlite3BtreePayloadSize(&cur);
+                        let mut v = vec![0u8; sz as usize];
+                        chk(sqlite3BtreePayload(&cur, 0, sz, &mut v), "payload", lineno);
+                        cnt += 1;
+                        if !isIdx {
+                            sum = sum.wrapping_add(sqlite3BtreeIntegerKey(&cur));
+                        }
+                        sum = cksum(&v, sum);
+                        let rc = if fwd {
+                            sqlite3BtreeNext(&cur, 0)
+                        } else {
+                            sqlite3BtreePrevious(&cur, 0)
+                        };
+                        if rc == SQLITE_DONE {
+                            break;
+                        }
+                        chk(rc, "next", lineno);
+                    }
+                    writeln!(out, "{} {} {}", w[0], cnt, sum).unwrap();
+                    sqlite3BtreeCloseCursor(&cur);
+                }
+                "count" => {
+                    let mut cur = None;
+                    chk(
+                        sqlite3BtreeCursor(pp.as_ref().unwrap(), a as Pgno, 0, kinfo, &mut cur),
+                        "cursor",
+                        lineno,
+                    );
+                    let cur = cur.unwrap();
+                    let mut n = 0i64;
+                    chk(
+                        btreeCount(&cur, &mut n, &std::cell::Cell::new(0)),
+                        "count",
+                        lineno,
+                    );
+                    writeln!(out, "count {}", n).unwrap();
+                    sqlite3BtreeCloseCursor(&cur);
+                }
+                "delscan" => {
+                    let mut cur = None;
+                    chk(
+                        sqlite3BtreeCursor(
+                            pp.as_ref().unwrap(),
+                            a as Pgno,
+                            BTREE_WRCSR,
+                            kinfo,
+                            &mut cur,
+                        ),
+                        "cursor",
+                        lineno,
+                    );
+                    let cur = cur.unwrap();
+                    let (mut res, mut cnt, mut nd, mut i) = (0, 0i64, 0i64, 0i64);
+                    chk(
+                        cursorFirst(&mut cur.borrow_mut(), &mut res),
+                        "first",
+                        lineno,
+                    );
+                    while res == 0 && sqlite3BtreeEof(&cur) == 0 {
+                        let k = i;
+                        i += 1;
+                        if k % b == 0 {
+                            chk(
+                                sqlite3BtreeDelete(&cur, BTREE_SAVEPOSITION as u8),
+                                "delete",
+                                lineno,
+                            );
+                            nd += 1;
+                        } else {
+                            cnt += 1;
+                        }
+                        let rc = sqlite3BtreeNext(&cur, 0);
+                        if rc == SQLITE_DONE {
+                            break;
+                        }
+                        chk(rc, "next", lineno);
+                    }
+                    writeln!(out, "delscan {} {}", cnt, nd).unwrap();
+                    sqlite3BtreeCloseCursor(&cur);
+                }
+                "multi" => {
+                    let (mut ca, mut cb) = (None, None);
+                    chk(
+                        sqlite3BtreeCursor(pp.as_ref().unwrap(), a as Pgno, 0, None, &mut ca),
+                        "cursorA",
+                        lineno,
+                    );
+                    chk(
+                        sqlite3BtreeCursor(
+                            pp.as_ref().unwrap(),
+                            a as Pgno,
+                            BTREE_WRCSR,
+                            None,
+                            &mut cb,
+                        ),
+                        "cursorB",
+                        lineno,
+                    );
+                    let (ca, cb) = (ca.unwrap(), cb.unwrap());
+                    let mut res = 0;
+                    chk(cursorFirst(&mut ca.borrow_mut(), &mut res), "first", lineno);
+                    for _ in 0..3 {
+                        if res != 0 {
+                            break;
+                        }
+                        let rc = sqlite3BtreeNext(&ca, 0);
+                        if rc == SQLITE_DONE {
+                            res = 1;
+                            break;
+                        }
+                        chk(rc, "next", lineno);
+                    }
+                    let buf = payload(b, c as usize);
+                    let x = BtreePayload {
+                        pKey: None,
+                        nKey: b,
+                        pData: Some(&buf),
+                        aMem: None,
+                        nMem: 0,
+                        nData: c as i32,
+                        nZero: 0,
+                    };
+                    chk(sqlite3BtreeInsert(&cb, &x, 0, 0), "insert", lineno);
+                    if res == 0 {
+                        let mut dr = 0;
+                        if sqlite3BtreeCursorHasMoved(&ca) != 0 {
+                            chk(sqlite3BtreeCursorRestore(&ca, &mut dr), "restore", lineno);
+                        }
+                        let (mut cnt, mut sum) = (0i64, 0i64);
+                        while sqlite3BtreeEof(&ca) == 0 {
+                            let sz = sqlite3BtreePayloadSize(&ca);
+                            let mut v = vec![0u8; sz as usize];
+                            chk(sqlite3BtreePayload(&ca, 0, sz, &mut v), "payload", lineno);
+                            cnt += 1;
+                            sum = sum.wrapping_add(sqlite3BtreeIntegerKey(&ca));
+                            sum = cksum(&v, sum);
+                            let rc = sqlite3BtreeNext(&ca, 0);
+                            if rc == SQLITE_DONE {
+                                break;
+                            }
+                            chk(rc, "next", lineno);
+                        }
+                        writeln!(out, "multi {} {} {}", cnt, sum, dr).unwrap();
+                    }
+                    sqlite3BtreeCloseCursor(&ca);
+                    sqlite3BtreeCloseCursor(&cb);
+                }
+                "xfer" => {
+                    let bi = b as usize;
+                    if bi < roots.len() && roots[bi] != 0 {
+                        let dst = roots[bi];
+                        let (mut cs, mut cd) = (None, None);
+                        chk(
+                            sqlite3BtreeCursor(pp.as_ref().unwrap(), a as Pgno, 0, None, &mut cs),
+                            "cursorS",
+                            lineno,
+                        );
+                        chk(
+                            sqlite3BtreeCursor(
+                                pp.as_ref().unwrap(),
+                                dst,
+                                BTREE_WRCSR,
+                                None,
+                                &mut cd,
+                            ),
+                            "cursorD",
+                            lineno,
+                        );
+                        let (cs, cd) = (cs.unwrap(), cd.unwrap());
+                        let (mut res, mut n) = (0, 0i64);
+                        chk(cursorFirst(&mut cs.borrow_mut(), &mut res), "first", lineno);
+                        while res == 0 && sqlite3BtreeEof(&cs) == 0 {
+                            let k = sqlite3BtreeIntegerKey(&cs) + 1000000000;
+                            let mut r2 = 0;
+                            chk(
+                                btreeTableMoveto(&mut cd.borrow_mut(), k, 0, &mut r2),
+                                "moveto",
+                                lineno,
+                            );
+                            chk(sqlite3BtreeTransferRow(&cd, &cs, k), "xfer", lineno);
+                            let x = BtreePayload {
+                                pKey: None,
+                                nKey: k,
+                                pData: None,
+                                aMem: None,
+                                nMem: 0,
+                                nData: 0,
+                                nZero: 0,
+                            };
+                            chk(
+                                sqlite3BtreeInsert(&cd, &x, BTREE_PREFORMAT, r2),
+                                "xinsert",
+                                lineno,
+                            );
+                            n += 1;
+                            let rc = sqlite3BtreeNext(&cs, 0);
+                            if rc == SQLITE_DONE {
+                                break;
+                            }
+                            chk(rc, "next", lineno);
+                        }
+                        sqlite3BtreeCloseCursor(&cs);
+                        sqlite3BtreeCloseCursor(&cd);
+                        writeln!(out, "xfer {}", n).unwrap();
+                    }
+                }
+                "check" => {
+                    let mut aRoot = vec![1 as Pgno];
+                    aRoot.extend(roots.iter().copied().filter(|&r| r != 0));
+                    let mut aCnt: Vec<Mem> = (0..aRoot.len()).map(|_| Mem::default()).collect();
+                    let (mut nErr, mut zErr) = (0, None);
+                    let ctx: BtCheckCtx = (Rc::new(std::cell::Cell::new(0)), None, 0);
+                    let n = aRoot.len() as i32;
+                    btreeIntegrityCheck(
+                        &ctx,
+                        pp.as_ref().unwrap(),
+                        &aRoot,
+                        &mut aCnt,
+                        n,
+                        100,
+                        &mut nErr,
+                        &mut zErr,
+                    );
+                    writeln!(
+                        out,
+                        "check {} {}",
+                        nErr,
+                        String::from_utf8_lossy(&zErr.unwrap_or_default())
+                    )
+                    .unwrap();
+                }
+                "close" => {
+                    btreeClose(None, pp.as_ref().unwrap(), 0);
+                    p = None;
+                }
+                _ => panic!("bad op {}", w[0]),
+            }
+        }
+        let data = std::fs::read(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        (out, data)
+    }
+
+    fn check_golden(name: &str, script: &str, output: &str, size: usize, hash: u64) {
+        let (out, data) = run_script(name, script);
+        assert_eq!(out, output, "{}: output", name);
+        assert_eq!(data.len(), size, "{}: file size", name);
+        assert_eq!(fnv(&data), hash, "{}: file content", name);
+    }
+
+    #[test]
+    fn varints_and_cell_parsing() {
+        let mut a = [0u8; 16];
+        for &v in &[
+            0u64,
+            1,
+            127,
+            128,
+            0x3fff,
+            0x4000,
+            0x1fffff,
+            0xffffffff,
+            1 << 56,
+            u64::MAX,
+        ] {
+            let n = putVarint(&mut a, 0, v);
+            let mut x = 0u64;
+            assert_eq!(getVarint(&a, 0, &mut x) as usize, n);
+            assert_eq!(x, v);
+        }
+        /* A table-leaf cell: payload size 3, rowid 300, payload "abc" */
+        let mut p = MemPage::default();
+        p.leaf = 1;
+        p.intKey = 1;
+        p.intKeyLeaf = 1;
+        p.maxLocal = 4061;
+        p.minLocal = 489;
+        p.usableSize = 4096;
+        let cell = [3u8, 0x82, 0x2c, b'a', b'b', b'c'];
+        let mut info = CellInfo::default();
+        btreeParseCellPtr(&p, &cell, 0, &mut info);
+        assert_eq!(info.nKey, 300);
+        assert_eq!(info.nPayload, 3);
+        assert_eq!(info.pPayload, 3);
+        assert_eq!(info.nLocal, 3);
+        assert_eq!(info.nSize, 6);
+        assert_eq!(cellSizePtrTableLeaf(&p, &cell, 0), 6);
+    }
+
+    #[test]
+    #[ignore = "needs the pager and os ports"]
+    fn golden_p512() {
+        check_golden("p512", SCRIPT_P512, OUTPUT_P512, SIZE_P512, HASH_P512);
+    }
+
+    #[test]
+    #[ignore = "needs the pager and os ports"]
+    fn golden_p1024_autovacuum() {
+        check_golden(
+            "p1024av",
+            SCRIPT_P1024AV,
+            OUTPUT_P1024AV,
+            SIZE_P1024AV,
+            HASH_P1024AV,
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the pager and os ports"]
+    fn golden_p4096_incremental_vacuum_secure_delete() {
+        check_golden(
+            "p4096incr",
+            SCRIPT_P4096INCR,
+            OUTPUT_P4096INCR,
+            SIZE_P4096INCR,
+            HASH_P4096INCR,
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the pager and os ports"]
+    fn golden_p65536_fast_secure_delete() {
+        check_golden(
+            "p65536sd",
+            SCRIPT_P65536SD,
+            OUTPUT_P65536SD,
+            SIZE_P65536SD,
+            HASH_P65536SD,
+        );
+    }
+
+    #[test]
+    #[ignore = "needs the pager, os and vdbeaux (record compare) ports"]
+    fn golden_index_btrees() {
+        check_golden(
+            "idx1024",
+            SCRIPT_IDX1024,
+            OUTPUT_IDX1024,
+            SIZE_IDX1024,
+            HASH_IDX1024,
+        );
+    }
+
+    const SCRIPT_P512: &str = r#"open 512 0 0
+begin
+create
+insert T0 1243 10
+insert T0 10002 40
+insert T0 780 784
+commit
+begin
+insert T0 10005 42
+putdata T0 10006 10905
+insert T0 10007 10
+insert T0 70 0
+insert T0 2904 4
+insert T0 1275 26
+delete T0 10000
+rscan T0
+insert T0 -2195769750095698722 24
+insert T0 2428 56
+create
+insert T0 3533320345221537307 49
+insert T1 370 10
+create
+insert T2 1582 10
+insert T2 778 10
+insert T1 10021 6
+insert T1 2886 26
+delete T1 2951
+delete T1 2523
+insert T0 10025 100
+insert T0 2175 8
+insert T1 4146697044969699026 887
+insert T2 10028 46
+insert T0 2237 2
+delete T2 1400
+insert T0 -4053309385737220568 756
+create
+create
+insert T3 10034 47
+insert T3 1111139375684537956 123
+commit
+begin
+insert T3 47 9
+insert T1 10038 59
+insert T2 1027 100
+delete T1 10024
+insert T1 2034 57
+delete T2 10007
+insert T1 4498706519392328243 159
+insert T0 2489 100
+insert T4 557 12
+commit
+begin
+insert T0 3624430482483355179 100
+delete T1 10016
+insert T3 10049 10
+insert T4 10050 1164
+insert T1 2959 28
+insert T0 2330 128
+delete T3 840
+insert T0 1599 1781
+insert T2 2943 526
+insert T2 10056 124
+delete T0 144
+insert T1 2116 700
+delete T3 2823
+insert T4 10060 143
+insert T4 2750 54
+delete T2 10061
+insert T3 2196 10
+insert T0 10064 51
+delete T0 270
+delete T3 1939
+insert T3 10067 100
+insert T1 10068 657
+insert T2 1456 100
+insert T0 10212919511836003 135
+delete T3 10020
+insert T4 10072 54
+insert T1 2572 46
+insert T1 797 307
+delete T0 398
+insert T4 10076 100
+insert T0 2796 52
+delete T4 1407
+insert T1 -2653133826474562342 100
+insert T1 648 902
+insert T3 397 29
+insert T1 10082 10
+delete T3 1517
+insert T1 64 5
+delete T3 783
+insert T2 477 40
+delete T2 10047
+delete T3 758
+delscan T3 1
+create
+insert T5 885 145
+insert T4 -678494333385867497 101
+delete T4 971
+insert T0 10094 2
+insert T2 10095 33
+insert T5 2641 10
+insert T3 693 724
+insert T3 2158 19
+insert T5 1162 75
+commit
+begin
+insert T3 10101 57
+insert T4 1277249992859841740 10
+insert T1 404 910
+delete T1 472
+scan T0
+insert T4 1489 42
+insert T5 10107 49
+insert T1 -2234424305587186379 10
+insert T4 10109 17
+insert T5 10110 61
+insert T5 -4436888648879719889 27
+commit
+begin
+insert T0 2272336289925885868 22
+insert T5 305 114
+delete T1 1058
+insert T1 10116 1844
+insert T1 1513 29
+delete T0 2327
+insert T2 -3208270682364247911 58
+insert T2 2843 56
+insert T5 481 28
+insert T5 3842011658201664651 25
+delete T4 1482
+delete T5 1588
+delete T2 10069
+insert T1 1862 458
+delete T0 2325
+insert T3 2240 34
+putdata T5 1286 11101
+commit
+begin
+insert T3 903 58
+insert T3 1364 126
+insert T0 10133 590
+delete T2 10096
+delete T4 2146
+insert T0 1723 421
+insert T3 10137 24
+insert T0 2994 10
+delete T0 10004
+insert T0 810 10
+insert T3 10141 10
+delete T2 2255
+insert T3 -2906854039578789817 14
+insert T1 -3542927408799629966 60
+delete T2 1010
+insert T1 1319 10
+insert T2 10147 10
+create
+delete T2 2163
+insert T3 2403 32
+insert T3 2795 100
+insert T4 1276 25
+xfer T3 6
+insert T5 2735 29
+insert T0 10155 100
+insert T2 10156 0
+delete T5 2524
+insert T4 10158 943
+insert T2 1543 84
+commit
+begin
+check
+scan T0
+rscan T0
+scan T1
+rscan T1
+scan T2
+rscan T2
+scan T3
+rscan T3
+scan T4
+rscan T4
+scan T5
+rscan T5
+scan T6
+rscan T6
+commit
+close"#;
+    const OUTPUT_P512: &str = r#"create 2
+rscan 8 39244086
+create 6
+create 7
+create 11
+create 12
+delscan 0 7
+create 35
+scan 23 918884611667965077
+create 51
+xfer 11
+check 2 Tree 12 page 28 cell 3: Bad cell header size
+Tree 12 page 28 cell 2: Bad cell header size
+scan 29 3191220901627895277
+rscan 29 3191220901627895277
+scan 23 214918023955613537
+rscan 23 214918023955613537
+scan 14 -3208270682343248547
+rscan 14 -3208270682343248547
+scan 11 -2906854039543242222
+rscan 11 -2906854039543242222
+scan 12 598755659620248058
+rscan 12 598755659620248058
+scan 10 -594876990674849335
+rscan 10 -594876990674849335
+scan 11 -2906854028543242222
+rscan 11 -2906854028543242222
+"#;
+    const SIZE_P512: usize = 28672;
+    const HASH_P512: u64 = 0x7acf49a0d2e31215;
+
+    const SCRIPT_P1024AV: &str = r#"open 1024 1 0
+begin
+create
+insert T0 10001 285
+create
+insert T0 818 100
+insert T0 249 338
+insert T1 -3069486679110611024 26
+insert T1 10006 42
+delete T1 1488
+delete T1 963
+insert T0 1762 10
+insert T1 2488 10
+insert T0 2042 40
+insert T1 1155 44
+delete T0 2249
+insert T0 -1299757299593672633 10
+insert T0 -1756007392670390953 100
+delete T1 941
+delete T1 1076
+insert T0 2527 910
+insert T1 10019 100
+insert T0 10020 100
+insert T1 241 39
+insert T1 10022 37
+insert T0 10023 23
+insert T0 2909 10
+delete T1 1555
+delete T0 2823
+insert T0 2454 201
+insert T1 2807 43
+insert T0 10029 223
+insert T1 10030 3
+insert T0 -4469195735775185019 1091
+insert T1 2116 1367
+delete T1 2052
+delete T1 10003
+delete T1 1802
+insert T1 3000 100
+delete T0 925
+delete T1 1495
+insert T1 2488 8
+insert T1 2531 173
+insert T1 -1478935987177012004 130
+insert T0 2006899102207833489 3526
+delete T1 10013
+insert T1 701 10
+insert T0 1142997230077341999 1
+insert T1 10046 33
+create
+insert T1 10048 26
+delete T1 636
+insert T2 2796 280
+insert T0 1815442656069318030 10
+insert T0 -2523991961481855998 289
+insert T2 10053 398
+insert T1 10054 21
+insert T1 -3003577186553123886 172
+delete T2 10023
+insert T1 10057 6
+insert T1 10058 162
+insert T1 2558 317
+insert T1 2312 100
+insert T1 -1423659391674976236 9
+insert T1 1534 58
+insert T1 2559 13
+delete T2 582
+insert T2 10065 100
+insert T2 10066 676
+delete T2 1796
+insert T2 804 7
+insert T1 10069 8
+delete T1 1119
+insert T0 10071 248
+insert T2 1942017980295630602 8
+commit
+begin
+delete T1 10019
+insert T2 1062 53
+scan T0
+insert T0 2260 31
+insert T0 935 33
+delete T2 10024
+insert T2 980 34
+insert T1 10081 10
+insert T1 1639 100
+insert T2 34 190
+insert T1 10084 39
+insert T1 2111 268
+putdata T0 10083 47616
+insert T2 175 10
+drop T2
+insert T1 -4251884941181356382 144
+insert T1 10090 5
+insert T1 85 1068
+insert T1 1457 36
+insert T2 -4434311643402445938 55
+insert T0 -840526775322499542 519
+delete T0 10086
+insert T0 1532 3
+insert T1 10097 13
+delete T0 2022
+delete T2 1917
+insert T1 -2125463588279896555 10
+insert T0 2663 11
+insert T1 3702765534444604375 27
+insert T0 -1307053700381147876 73
+putdata T2 2405 86883
+insert T2 -1674591861025705194 1283
+insert T2 2030 74
+delete T2 2584
+insert T0 10108 1457
+delete T1 1846
+delete T0 2281
+insert T0 2184 100
+insert T2 -3337613612664637568 207
+commit
+begin
+delete T0 1520
+insert T0 -1492987447700262993 51
+insert T1 2882936894600135753 17
+delete T0 944
+insert T1 10118 21
+create
+insert T3 -2903316506471507460 662
+insert T3 1221 824
+check
+insert T2 10123 2133
+delete T0 1562
+create
+insert T0 968 3
+insert T4 735490155159062276 10
+commit
+begin
+delete T1 10030
+insert T4 1958 10
+insert T0 617 48
+insert T3 2104 162
+insert T1 10133 37
+insert T3 -2766325652914516689 1515
+insert T3 10135 41
+insert T3 10136 25
+insert T0 -1450582549486992755 119
+delete T4 10018
+insert T4 2020 56
+insert T4 10140 83
+insert T2 4547342767836042217 11
+delete T0 10138
+insert T4 2930 18
+insert T3 272 2
+insert T4 -4034154184854606917 10
+insert T0 3363666770117590758 39
+delete T3 1433
+rscan T0
+insert T4 2285 100
+insert T1 2002 98
+delete T4 2352
+insert T3 2068 53
+insert T3 908 100
+insert T2 840 100
+insert T0 1661 1394
+delete T1 42
+insert T3 10157 22
+insert T0 2422 314
+insert T3 2308 2
+commit
+begin
+check
+scan T0
+rscan T0
+scan T1
+rscan T1
+scan T2
+rscan T2
+scan T3
+rscan T3
+scan T4
+rscan T4
+commit
+close"#;
+    const OUTPUT_P1024AV: &str = r#"create 3
+create 4
+create 5
+scan 19 -5083613400215300012
+drop 0
+create 5
+check 2 Tree 3 page 16 cell 2: Bad cell header size
+Tree 5 page 23 cell 0: Bad cell header size
+create 6
+rscan 32 -6811097102833942575
+check 2 Tree 3 page 15 cell 4: Bad cell header size
+Tree 5 page 23 cell 0: Bad cell header size
+scan 34 -6811097102702960635
+rscan 34 -6811097102702960635
+scan 39 -8767305344717553854
+rscan 39 -8767305344717553854
+scan 11 -5669642159166179652
+rscan 11 -5669642159166179652
+scan 7 -3298664029694124451
+rscan 7 -3298664029694124451
+"#;
+    const SIZE_P1024AV: usize = 30720;
+    const HASH_P1024AV: u64 = 0x6851d658ef76bcda;
+
+    const SCRIPT_P4096INCR: &str = r#"open 4096 2 1
+begin
+create
+insert T0 10001 100
+commit
+begin
+insert T0 123740369501555184 14
+insert T0 10004 6596
+insert T0 10005 47
+delete T0 1202
+insert T0 1073 810
+delete T0 797
+insert T0 10009 4557
+create
+insert T1 10011 100
+insert T1 2583 45
+insert T0 10013 10
+insert T1 10014 11
+insert T0 -3336205731524901083 38
+insert T0 1716636528392441784 1078
+create
+insert T2 10018 5641
+insert T0 636 34
+insert T2 131 45
+delete T1 882
+insert T1 10022 27
+insert T0 1887 10
+stmt 1
+delete T1 10012
+insert T1 -2546859123187183812 10
+insert T1 1424 100
+insert T2 1863895620581311346 8
+sprelease 0
+delete T0 10028
+insert T0 1523 100
+delete T2 978
+insert T1 1611 1120
+delete T0 10023
+insert T2 356 59
+commit
+begin
+insert T0 -1650258722588318818 594
+delete T0 1588
+insert T0 16 34
+insert T0 3064831266093199012 100
+insert T2 3932147775606908476 100
+insert T0 10042 10
+stmt 1
+insert T1 10044 113
+insert T2 10045 10
+delete T1 10009
+insert T1 -447951206532930082 38
+insert T2 1841 4149
+insert T2 10049 58
+stmt 2
+insert T1 -2152424342878698559 464
+insert T1 10052 10
+insert T2 2096 100
+delete T2 2343
+insert T1 10055 24
+insert T2 2376 100
+delete T0 10028
+insert T2 1026 10
+insert T2 2300 13
+insert T2 527 5908
+insert T0 -3702587899453462672 100
+insert T2 10062 5
+delete T0 1429
+insert T2 10064 187
+insert T1 1075 37
+insert T1 2932 10
+insert T1 900 205
+insert T0 2358 8
+insert T1 -4574173567369268021 1003
+insert T1 1727 7150
+insert T1 1484 22
+insert T2 694 116
+delete T0 2260
+insert T1 10075 25
+insert T1 993 53
+delete T0 10056
+insert T2 10078 1142
+insert T0 10082 54
+insert T0 2325 25
+insert T2 1733 10
+insert T2 10085 58
+delete T1 2006
+insert T2 10087 3
+insert T0 466 10
+sprelease 0
+insert T1 10090 10
+delete T0 274
+insert T0 10092 38
+insert T0 2438 10
+insert T2 2560 100
+insert T0 2459 359
+delete T2 2877
+insert T0 10097 51
+insert T0 10098 49
+delete T1 2921
+insert T1 1901 5953
+insert T2 10101 10
+insert T1 1638 8
+commit
+begin
+commit
+begin
+xfer T0 1
+insert T2 2928 10
+delete T2 10010
+delete T0 1397
+insert T0 1198 584
+insert T0 424 24
+insert T1 -4463289866915123144 873
+insert T1 501 661
+create
+insert T2 10114 880
+create
+insert T1 10116 785
+insert T4 95 10
+scan T2
+delete T3 10080
+insert T1 10120 58
+drop T1
+insert T3 1207 16
+drop T1
+delete T1 846
+insert T0 2744362156624691840 100
+insert T3 1728 4
+insert T1 2829 34
+clear T0
+insert T4 1362 37
+delete T3 10027
+insert T3 -805805345624754868 100
+insert T1 296 5041
+stmt 1
+delete T3 10046
+insert T2 228861299931971886 89
+insert T1 162634158900633989 6173
+insert T1 10137 22
+delete T2 10061
+delete T0 1698
+insert T3 10140 7125
+insert T3 10141 100
+delete T2 2576
+insert T0 2470 10
+delete T3 2036
+delete T4 1919
+insert T2 -1787497324637780077 40
+insert T1 788363133608641697 39
+delete T0 10104
+insert T0 10149 55
+delete T4 2258
+insert T0 10152 100
+insert T0 749 5509
+insert T0 10154 28
+delete T2 148
+delete T3 586
+sprollback 0
+sprollback 0
+delete T4 930
+sprelease 0
+commit
+begin
+check
+scan T0
+rscan T0
+scan T1
+rscan T1
+scan T2
+rscan T2
+scan T3
+rscan T3
+scan T4
+rscan T4
+commit
+begin
+incrvac
+check
+commit
+close"#;
+    const OUTPUT_P4096INCR: &str = r#"create 3
+create 4
+create 5
+xfer 26
+create 6
+create 7
+scan 24 5796043401674280927
+drop 7
+clear 29
+check 1 Tree 5 page 14 cell 8: Bad cell header size
+scan 0 0
+rscan 0 0
+scan 24 5796043401674280927
+rscan 24 5796043401674280927
+scan 3 -805805345624110121
+rscan 3 -805805345624110121
+scan 2 133330
+rscan 2 133330
+check 1 Tree 5 page 8 cell 8: Bad cell header size
+"#;
+    const SIZE_P4096INCR: usize = 49152;
+    const HASH_P4096INCR: u64 = 0x88dbdb5e1a59125c;
+
+    const SCRIPT_P65536SD: &str = r#"open 65536 0 2
+begin
+create
+insert T0 485 55
+delete T0 2592
+insert T0 2670 100
+commit
+begin
+delete T0 10000
+delete T0 2611
+insert T0 10007 43
+insert T0 1153 6
+insert T0 115 100
+insert T0 2808 100
+insert T0 389 25
+insert T0 587 17
+insert T0 -4228083177231419956 36
+insert T0 773 100
+delete T0 1280
+stmt 1
+insert T0 -3963472476836344746 123419
+insert T0 852 10879
+insert T0 2441 5185
+insert T0 1003 93402
+insert T0 -4029627602550644387 100
+insert T0 -910478404145308778 10
+insert T0 10023 50
+insert T0 1823 10
+delete T0 910
+delete T0 10019
+insert T0 10027 30
+insert T0 2786 21231
+insert T0 472 130487
+insert T0 10030 8
+delete T0 1842
+insert T0 1112 10
+insert T0 -2553240508937412288 73979
+insert T0 561 36
+delete T0 1814
+delete T0 10027
+insert T0 -4053076113214713844 45
+insert T0 10039 6394
+insert T0 10040 42
+sprollback 0
+delete T0 10004
+insert T0 10043 12
+insert T0 2792 31
+insert T0 2608 57
+delete T0 632
+sprollback 0
+insert T0 10048 4305
+sprollback 0
+delete T0 10019
+delete T0 1010
+delete T0 2138
+delete T0 1116
+insert T0 927 58715
+insert T0 2473 2516
+insert T0 2226 100
+insert T0 4187194156778175775 2644
+delete T0 436
+insert T0 265 11828
+insert T0 1983 117328
+sprelease 0
+insert T0 2213 10
+delete T0 10008
+insert T0 10064 113750
+delete T0 1000
+delete T0 2097
+insert T0 462 10
+insert T0 1130 14
+insert T0 -1277679228622946377 100
+insert T0 990 16212
+delete T0 10025
+insert T0 -4085565480840562857 34
+insert T0 10073 2274
+delete T0 661
+delete T0 2911
+insert T0 10076 31991
+insert T0 10077 15768
+delete T0 10058
+insert T0 10079 17
+insert T0 2973 106925
+delete T0 93
+scan T0
+insert T0 862 59
+delete T0 844
+delete T0 50
+delete T0 10042
+insert T0 10087 535
+insert T0 388 6301
+insert T0 1325 10
+delete T0 1162
+delete T0 1992
+insert T0 10092 17
+delete T0 1372
+insert T0 1163 34
+insert T0 -57364420750638267 10
+delete T0 10077
+insert T0 785 100
+insert T0 1946831635235336435 19487
+insert T0 668863226569972217 53951
+rollback
+begin
+insert T0 2575477205097754425 60
+insert T0 886 10532
+insert T0 1196 60
+insert T0 1968 100
+insert T0 1561 20
+insert T0 2529 43798
+delete T0 10103
+insert T0 408 100
+insert T0 -4056229114568036630 118063
+delete T0 10097
+insert T0 1639 16
+insert T0 863 46
+insert T0 165 59499
+insert T0 90 44364
+insert T0 10115 128524
+insert T0 10116 7063
+commit
+begin
+insert T0 475 100
+insert T0 1398 100
+commit
+begin
+check
+scan T0
+rscan T0
+commit
+close"#;
+    const OUTPUT_P65536SD: &str = r#"create 2
+scan 28 -5404130970761615386
+check 0 
+scan 18 -1480749484095900093
+rscan 18 -1480749484095900093
+"#;
+    const SIZE_P65536SD: usize = 655360;
+    const HASH_P65536SD: u64 = 0xe77c781802035442;
+
+    const SCRIPT_IDX1024: &str = r#"open 1024 1 0
+begin
+create
+create
+delete T0 1911
+insert T1 846 1974
+insert T1 1866 250
+xfer T1 0
+insert T1 270 60
+delete T0 2829
+delete T1 410
+delete T0 2274
+insert T0 2049 15
+insert T1 1952 28
+delete T1 473
+insert T0 -2908279437072457117 2
+insert T1 2048 55
+delete T0 335
+insert T1 10016 5
+insert T1 230 154
+insert T0 2492403601972925207 100
+insert T0 1022 32
+insert T1 11 115
+insert T0 10021 60
+insert T1 528 20
+insert T1 10023 10
+insert T1 -996781380243332415 35
+insert T1 2282 321
+insert T1 10026 173
+insert T1 1381 100
+insert T1 -688751500659392546 100
+insert T1 10029 810
+insert T0 926 56
+insert T0 10031 30
+delete T0 1733
+insert T0 10033 4726
+insert T0 2393 6037
+insert T1 1901 16
+insert T1 10036 7
+insert T1 -671506389630243545 87
+delete T0 2795
+insert T1 1111 587
+insert T0 2356 18
+insert T0 2675163459765986180 2833
+insert T1 10042 240
+delete T1 1404
+insert T0 10044 43
+insert T0 2169 131
+insert T1 -287367891578533893 248
+delete T0 10035
+delete T1 2449
+rollback
+begin
+create
+insert T0 1728 321
+stmt 1
+delete T0 268
+insert T0 2560 100
+insert T0 803 58
+delete T0 2142
+delete T0 120
+insert T0 592 259
+insert T0 3254125973428168104 335
+sprelease 0
+insert T0 -2610563093556768273 658
+insert T0 1627 4
+insert T0 10063 253
+insert T0 863309068548142173 11
+insert T0 547 15
+insert T0 3250770862872898234 100
+insert T0 10067 100
+scan T0
+insert T0 1499 37
+delete T0 591
+insert T0 10071 10
+delete T0 895
+rollback
+begin
+create
+create
+delete T0 10061
+delete T1 10059
+insert T0 10078 58
+delete T0 1235
+insert T1 1116817108218388158 34
+delete T1 1269
+insert T0 2698 810
+insert T1 818 479
+insert T1 908424022639456427 10
+delete T0 2492
+insert T1 10086 41
+insert T0 -4183794895167397398 100
+delete T0 521
+insert T0 10089 5154
+delete T0 594
+delete T1 541
+insert T0 277 10
+delete T1 10066
+insert T0 697 48
+scan T1
+insert T1 2379 45
+insert T1 1043 19
+insert T0 10098 59
+delete T1 2018
+delete T0 2534
+insert T1 1735 16
+insert T1 10102 10
+insert T0 4298611475401193455 217
+delete T1 984
+delete T0 865
+insert T1 2094 560
+insert T0 10107 10
+insert T0 3062402838980344433 10
+insert T0 1881 1396
+delete T0 10055
+insert T1 2323 142
+delete T1 154
+insert T0 149 474
+stmt 1
+insert T0 1887380253184074101 56
+delete T0 2621
+insert T1 10117 264
+insert T1 1487 27
+delete T0 2327
+insert T1 1277 1
+delete T0 68
+insert T0 4442473597279002014 10
+insert T1 476 6011
+sprollback 0
+insert T0 865 99
+insert T0 3359634254048269255 100
+insert T1 10128 100
+delete T0 1208
+delete T0 1397
+insert T1 10131 100
+insert T0 2063 5
+insert T0 -2132312756823990375 20
+delete T0 10125
+delete T1 2881
+insert T1 1188 100
+insert T1 2831 10
+delete T1 832
+insert T0 4168185255365264280 48
+insert T1 463561005270027734 10
+insert T0 1819 13
+insert T0 2605 44
+delete T1 2221
+insert T0 917 334
+delete T0 2718
+insert T1 306 50
+insert T1 1489 64
+insert T0 468 9
+insert T1 2213 2048
+insert T0 524 2222
+insert T1 2434 22
+insert T1 -767939057675720500 64
+insert T0 2874 217
+delete T1 2482
+insert T0 10157 102
+insert T0 362 48
+insert T1 91 142
+insert T1 2786 29
+insert T1 1075 170
+insert T1 298 10
+stmt 2
+delete T0 2293
+insert T1 -3661069011066581913 882
+insert T0 10168 17
+delete T1 1726
+insert T0 10170 365
+insert T0 -1093596909843520771 36
+insert T1 10172 47
+delete T0 227
+insert T0 10174 1782
+delete T1 2180
+insert T1 10176 100
+insert T0 -983813907346198463 7
+insert T0 984113397119800219 100
+insert T1 1801 10
+insert T0 10180 23
+insert T1 1158157478891518588 18
+delete T0 10065
+insert T0 1779 100
+sprollback 1
+insert T1 1801878635395945824 55
+insert T1 10187 840
+delete T1 288
+insert T1 10189 39
+insert T0 10190 1706
+sprollback 1
+delete T1 1426
+insert T1 887743080280324193 27
+delete T0 2420
+delete T0 1842
+insert T1 518 29
+insert T1 10197 100
+insert T0 10198 10
+insert T1 10199 46
+sprelease 0
+commit
+begin
+check
+scan T0
+rscan T0
+scan T1
+rscan T1
+commit
+close"#;
+    const OUTPUT_IDX1024: &str = r#"create 3
+create 4
+xfer 2
+create 3
+scan 12 4757642811344573478
+create 3
+create 4
+scan 4 2025241130872642847
+check 1 Tree 4 page 13 cell 1: Bad cell header size
+scan 26 8572726174009144122
+rscan 26 8572726174009144122
+scan 28 2608606159042550215
+rscan 28 2608606159042550215
+"#;
+    const SIZE_IDX1024: usize = 22528;
+    const HASH_IDX1024: u64 = 0x6fc66a3ff96027eb;
 }

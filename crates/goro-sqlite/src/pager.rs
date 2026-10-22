@@ -307,7 +307,8 @@ pub fn sqlite3PagerVfs(pPager: &mut crate::pager::Pager) -> Option<Box<crate::os
 }
 
 /// C: `sqlite3_file * sqlite3PagerFile(Pager *pPager)`
-pub fn sqlite3PagerFile(pPager: &mut crate::pager::Pager) -> Option<Box<crate::os::SqliteFile>> {
+/// Rust: returns the pager's database file handle (C returns pPager->fd).
+pub fn sqlite3PagerFile(pPager: &mut crate::pager::Pager) -> &mut crate::os::SqliteFile {
     todo!("sqlite3PagerFile")
 }
 
