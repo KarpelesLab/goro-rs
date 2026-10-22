@@ -3852,7 +3852,7 @@ fn substExpr(db: &mut Sqlite3, pSubst: &mut SubstContext, mut pExpr: ExprId) -> 
                 e.iTable = pSubst.iNewTable;
             }
             if e.op == TK_AGG_FUNCTION && e.op2 as i32 >= pSubst.nSelDepth {
-                e.op2 -= 1;
+                e.op2 = e.op2.wrapping_sub(1); // C u8 arithmetic
             }
         }
         let l = db.ex(pExpr).pLeft;
