@@ -3469,6 +3469,27 @@ impl Vm {
         }
     }
 
+    /// Release the temporaries an instruction consumed (its TMP operands).
+    fn release_tmp_operands(op: &crate::opcode::Op, tmps: &mut [Value]) {
+        for o in [&op.op1, &op.op2] {
+            if let OperandType::Tmp(i) = o {
+                if let Some(slot) = tmps.get_mut(*i as usize) {
+                    *slot = Value::Undef;
+                }
+            }
+        }
+    }
+
+    /// A GMP object (the GMP-specific comparison errors of the operator
+    /// hooks).
+    fn is_gmp_obj(v: &Value) -> bool {
+        match v {
+            Value::Object(o) => o.borrow().class_name.eq_ignore_ascii_case(b"GMP"),
+            Value::Reference(r) => Self::is_gmp_obj(&r.borrow()),
+            _ => false,
+        }
+    }
+
     fn emit_object_comparison_notice(&mut self, a: &Value, b: &Value, line: u32) {
         let a_inner = match a {
             Value::Reference(r) => r.borrow().clone(),
@@ -3480,7 +3501,8 @@ impl Vm {
         };
         match (&a_inner, &b_inner) {
             (Value::Object(obj), Value::Long(_)) | (Value::Long(_), Value::Object(obj))
-                if crate::value::native_cast(obj, 1).is_none() =>
+                if crate::value::native_cast(obj, 1).is_none()
+                    && crate::value::native_compare(&a_inner, &b_inner).is_none() =>
             {
                 let class_name = crate::value::display_class_name(&obj.borrow().class_name);
                 self.emit_notice_at(
@@ -3492,7 +3514,8 @@ impl Vm {
                 );
             }
             (Value::Object(obj), Value::Double(_)) | (Value::Double(_), Value::Object(obj))
-                if crate::value::native_cast(obj, 2).is_none() =>
+                if crate::value::native_cast(obj, 2).is_none()
+                    && crate::value::native_compare(&a_inner, &b_inner).is_none() =>
             {
                 let class_name = crate::value::display_class_name(&obj.borrow().class_name);
                 self.emit_notice_at(
@@ -17412,8 +17435,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "+", &a, &b) {
+                                let hres = handler(self, "+", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -17491,8 +17519,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "-", &a, &b) {
+                                let hres = handler(self, "-", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -17570,8 +17603,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "*", &a, &b) {
+                                let hres = handler(self, "*", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -17649,8 +17687,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "/", &a, &b) {
+                                let hres = handler(self, "/", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -17759,8 +17802,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "%", &a, &b) {
+                                let hres = handler(self, "%", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -17880,8 +17928,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "**", &a, &b) {
+                                let hres = handler(self, "**", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -18123,8 +18176,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "&", &a, &b) {
+                                let hres = handler(self, "&", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -18217,8 +18275,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "|", &a, &b) {
+                                let hres = handler(self, "|", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -18317,8 +18380,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "^", &a, &b) {
+                                let hres = handler(self, "^", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -18512,8 +18580,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, "<<", &a, &b) {
+                                let hres = handler(self, "<<", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -18626,8 +18699,13 @@ impl Vm {
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                match handler(self, ">>", &a, &b) {
+                                let hres = handler(self, ">>", &a, &b);
+                                match hres {
                                     Some(Ok(result)) => {
+                                        // The operands are freed before
+                                        // the result is stored (FREE_OP).
+                                        drop((a, b));
+                                        Self::release_tmp_operands(op, &mut tmps);
                                         self.write_operand(
                                             &op.result,
                                             result,
@@ -18794,10 +18872,10 @@ impl Vm {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
                                 // GMP == non-GMP-object: throw TypeError
-                                if (is_type(&a)
+                                if (Self::is_gmp_obj(&a)
                                     && matches!(b.deref(), Value::Object(_))
                                     && !is_type(&b))
-                                    || (is_type(&b)
+                                    || (Self::is_gmp_obj(&b)
                                         && matches!(a.deref(), Value::Object(_))
                                         && !is_type(&a))
                                 {
@@ -18915,10 +18993,10 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                if (is_type(&a)
+                                if (Self::is_gmp_obj(&a)
                                     && matches!(b.deref(), Value::Object(_))
                                     && !is_type(&b))
-                                    || (is_type(&b)
+                                    || (Self::is_gmp_obj(&b)
                                         && matches!(a.deref(), Value::Object(_))
                                         && !is_type(&a))
                                 {
@@ -19842,6 +19920,45 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "/", &cv_val, &rhs) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(
+                                            &op.op1,
+                                            result,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        return Ok(Flow::Continue);
+                                    }
+                                    Some(Err(msg)) => {
+                                        let (class_bytes, clean_msg) =
+                                            self.throw_object_op_error(&msg);
+                                        if let Some((ct, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = ct as usize;
+                                            return Ok(Flow::Continue);
+                                        } else {
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Uncaught {}: {}",
+                                                    String::from_utf8_lossy(class_bytes),
+                                                    clean_msg
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "/")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -19904,6 +20021,45 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "%", &cv_val, &rhs) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(
+                                            &op.op1,
+                                            result,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        return Ok(Flow::Continue);
+                                    }
+                                    Some(Err(msg)) => {
+                                        let (class_bytes, clean_msg) =
+                                            self.throw_object_op_error(&msg);
+                                        if let Some((ct, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = ct as usize;
+                                            return Ok(Flow::Continue);
+                                        } else {
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Uncaught {}: {}",
+                                                    String::from_utf8_lossy(class_bytes),
+                                                    clean_msg
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) = Self::check_unsupported_operand_types(&cv_val, &rhs, "%")
                     {
                         let exc_val = self.throw_type_error(err_msg.clone());
@@ -19978,6 +20134,45 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&cv_val) || is_type(&rhs) {
+                                match handler(self, "**", &cv_val, &rhs) {
+                                    Some(Ok(result)) => {
+                                        self.write_operand(
+                                            &op.op1,
+                                            result,
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        return Ok(Flow::Continue);
+                                    }
+                                    Some(Err(msg)) => {
+                                        let (class_bytes, clean_msg) =
+                                            self.throw_object_op_error(&msg);
+                                        if let Some((ct, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = ct as usize;
+                                            return Ok(Flow::Continue);
+                                        } else {
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Uncaught {}: {}",
+                                                    String::from_utf8_lossy(class_bytes),
+                                                    clean_msg
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    None => {}
+                                }
+                            }
+                        }
+                    }
                     if let Some(err_msg) =
                         Self::check_unsupported_operand_types(&cv_val, &rhs, "**")
                     {
@@ -20637,6 +20832,30 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    if let Some(handler) = self.object_do_operation {
+                        if let Some(is_type) = self.object_is_operator_type {
+                            if is_type(&val) {
+                                if let Some(Ok(result)) = handler(self, "-", &val, &Value::Long(1))
+                                {
+                                    self.write_operand(
+                                        &op.result,
+                                        val,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    self.write_operand(
+                                        &op.op1,
+                                        result,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    return Ok(Flow::Continue);
+                                }
+                            }
+                        }
+                    }
                     if let Some(err) = check_inc_dec_type(&val, false) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);

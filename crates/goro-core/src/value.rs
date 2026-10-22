@@ -2477,7 +2477,16 @@ pub fn native_compare(a: &Value, b: &Value) -> Option<i64> {
             .or_else(|| hb.and_then(|h| h.compare))?;
         return f(a, b);
     }
-    // object vs scalar: cast the object to the scalar's type
+    // object vs scalar: the compare handler (zend_compare() calls it
+    // whenever an operand is an object), else the cast to the scalar's type
+    if let Some(f) = ha
+        .and_then(|h| h.compare)
+        .or_else(|| hb.and_then(|h| h.compare))
+    {
+        if let Some(r) = f(a, b) {
+            return Some(r);
+        }
+    }
     let (obj, other, swapped) = match (a, b) {
         (Value::Object(o), x) => (o, x, false),
         (x, Value::Object(o)) => (o, x, true),

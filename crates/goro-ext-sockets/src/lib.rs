@@ -75,7 +75,8 @@ pub struct AddrInfo {
 fn not_comparable(a: &Value, b: &Value) -> Option<i64> {
     match (a, b) {
         (Value::Object(x), Value::Object(y)) if Rc::ptr_eq(x, y) => Some(0),
-        _ => Some(1),
+        (Value::Object(_), Value::Object(_)) => Some(1),
+        _ => None,
     }
 }
 
