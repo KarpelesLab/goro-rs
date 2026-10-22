@@ -5123,10 +5123,14 @@ pub fn reflection_method_method(
         }
         b"getnumberofparameters" => {
             let method_def = rmethod(vm, &class_lower, method_lower.as_bytes());
+            // (internal methods declared from PHP source: their arginfo)
             let count = method_def
-                .map(|m| {
-                    let skip = if !m.is_static { 1u32 } else { 0u32 };
-                    m.op_array.param_count.saturating_sub(skip)
+                .map(|m| match m.op_array.internal_sig {
+                    Some(sig) => sig.args.len() as u32,
+                    None => {
+                        let skip = if !m.is_static { 1u32 } else { 0u32 };
+                        m.op_array.param_count.saturating_sub(skip)
+                    }
                 })
                 .unwrap_or(0);
             Some(Value::Long(count as i64))
@@ -5138,7 +5142,10 @@ pub fn reflection_method_method(
             // the implicit `$this` slot. So we should NOT subtract for
             // instance methods.
             let count = method_def
-                .map(|m| m.op_array.required_param_count)
+                .map(|m| match m.op_array.internal_sig {
+                    Some(sig) => sig.required_args() as u32,
+                    None => m.op_array.required_param_count,
+                })
                 .unwrap_or(0);
             Some(Value::Long(count as i64))
         }

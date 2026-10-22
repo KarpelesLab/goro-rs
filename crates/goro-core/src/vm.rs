@@ -15058,11 +15058,23 @@ impl Vm {
                         fn_cvs[0] = obj_val.clone();
                     }
                     // Fill in method arguments
+                    let variadic = method_op.variadic_param.map(|v| v as usize);
                     for (i, arg) in args.iter().enumerate() {
                         let cv_idx = i + 1; // offset by 1 for $this
+                        if variadic.is_some_and(|v| cv_idx >= v) {
+                            break;
+                        }
                         if cv_idx < fn_cvs.len() {
                             fn_cvs[cv_idx] = arg.clone();
                         }
+                    }
+                    // (...$rest collects the remaining arguments)
+                    if let Some(v) = variadic.filter(|&v| v < fn_cvs.len()) {
+                        let mut rest = crate::array::PhpArray::new();
+                        for arg in args.iter().skip(v - 1) {
+                            rest.push(arg.clone());
+                        }
+                        fn_cvs[v] = Value::Array(Rc::new(RefCell::new(rest)));
                     }
                     // If this is a generator function, create a Generator object instead of executing
                     if method_op.is_generator {

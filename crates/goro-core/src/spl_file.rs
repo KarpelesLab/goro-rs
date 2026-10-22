@@ -612,7 +612,19 @@ impl Vm {
         ctor: &str,
     ) -> bool {
         let fname_str = String::from_utf8_lossy(file_name).to_string();
-        if !fname_str.contains("://") && std::path::Path::new(&fname_str).is_dir() {
+        // php_stat(FS_IS_DIR): stream wrappers answer through url_stat
+        let is_dir = if fname_str.contains("://") {
+            let saved = self.warning_capture.replace(Vec::new());
+            let r = self.spl_call_builtin(
+                b"is_dir",
+                &[Value::String(PhpString::from_vec(file_name.to_vec()))],
+            );
+            self.warning_capture = saved;
+            matches!(r, Some(Value::True))
+        } else {
+            std::path::Path::new(&fname_str).is_dir()
+        };
+        if is_dir {
             self.spl_throw(
                 b"LogicException",
                 "Cannot use SplFileObject with directories",

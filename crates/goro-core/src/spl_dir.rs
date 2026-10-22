@@ -94,6 +94,30 @@ fn is_dot(name: &[u8]) -> bool {
     name == b"." || name == b".."
 }
 
+/// A URL served by a stream wrapper other than the plain files one (the
+/// directory and stat operations then go through the stream layer).
+fn is_wrapper_url(p: &[u8]) -> bool {
+    let n = p
+        .iter()
+        .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'-' | b'.'))
+        .count();
+    n > 1 && p[n..].starts_with(b"://") && !p[..n].eq_ignore_ascii_case(b"file")
+}
+
+/// The fields of a stat buffer the FileInfoFunction methods use.
+struct FsStat {
+    mode: i64,
+    ino: i64,
+    size: i64,
+    uid: i64,
+    gid: i64,
+    atime: i64,
+    mtime: i64,
+    ctime: i64,
+}
+
+const S_IFMT: i64 = 0o170000;
+
 /// strerror() text of an io::Error.
 fn strerror(e: &std::io::Error) -> String {
     let s = e.to_string();
@@ -272,6 +296,56 @@ impl Vm {
         }
     }
 
+    /// php_stream_opendir() + readdir of a stream wrapper URL: the entries,
+    /// or the reason the directory could not be opened.
+    fn fs_wrapper_listdir(&mut self, path: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        let saved = self.warning_capture.replace(Vec::new());
+        let r = self.spl_call_builtin(b"opendir", &[svec(path.to_vec())]);
+        let warnings = std::mem::replace(&mut self.warning_capture, saved).unwrap_or_default();
+        let Some(Value::Resource(id)) = r else {
+            const SEP: &str = ": Failed to open directory: ";
+            return Err(warnings
+                .iter()
+                .rev()
+                .find_map(|w| w.find(SEP).map(|i| w[i + SEP.len()..].to_string()))
+                .unwrap_or_else(|| "operation failed".to_string()));
+        };
+        let mut names = Vec::new();
+        while let Some(Value::String(n)) = self.spl_call_builtin(b"readdir", &[Value::Resource(id)])
+        {
+            names.push(n.as_bytes().to_vec());
+        }
+        self.spl_call_builtin(b"closedir", &[Value::Resource(id)]);
+        Ok(names)
+    }
+
+    /// php_stream_stat_path() of a stream wrapper URL (quiet).
+    fn fs_wrapper_stat(&mut self, path: &[u8], link: bool) -> Option<FsStat> {
+        let f: &[u8] = if link { b"lstat" } else { b"stat" };
+        let saved = self.warning_capture.replace(Vec::new());
+        let r = self.spl_call_builtin(f, &[svec(path.to_vec())]);
+        self.warning_capture = saved;
+        let Some(Value::Array(a)) = r else {
+            return None;
+        };
+        let a = a.borrow();
+        let g = |k: &[u8]| {
+            a.get(&ArrayKey::String(PhpString::from_bytes(k)))
+                .map(|v| v.to_long())
+                .unwrap_or(0)
+        };
+        Some(FsStat {
+            mode: g(b"mode"),
+            ino: g(b"ino"),
+            size: g(b"size"),
+            uid: g(b"uid"),
+            gid: g(b"gid"),
+            atime: g(b"atime"),
+            mtime: g(b"mtime"),
+            ctime: g(b"ctime"),
+        })
+    }
+
     /// spl_filesystem_dir_open()
     fn fs_dir_open_path(&mut self, obj: &Rc<RefCell<PhpObject>>, path: &[u8], func: &str) {
         let skip_dots = Self::fs_flags(obj) & SKIPDOTS != 0;
@@ -294,6 +368,22 @@ impl Vm {
             set_prop(obj, b"__spl_dir_names", val_arr(names));
             set_prop(obj, b"__spl_dir_glob", Value::True);
             opened = true;
+        } else if is_wrapper_url(path) {
+            match self.fs_wrapper_listdir(path) {
+                Ok(list) => {
+                    let mut names = PhpArray::new();
+                    let mut types = PhpArray::new();
+                    for n in list {
+                        names.push(svec(n));
+                        types.push(Value::Long(DT_UNKNOWN));
+                    }
+                    set_prop(obj, b"__spl_dir_names", val_arr(names));
+                    set_prop(obj, b"__spl_dir_types", val_arr(types));
+                    set_prop(obj, b"__spl_dir_glob", Value::False);
+                    opened = true;
+                }
+                Err(e) => error = Some(e),
+            }
         } else {
             let p = String::from_utf8_lossy(path).to_string();
             match std::fs::read_dir(&p) {
@@ -645,14 +735,28 @@ impl Vm {
             _ => {}
         }
         let p = String::from_utf8_lossy(fname).to_string();
-        let md = if link_op {
-            std::fs::symlink_metadata(&p)
+        let st = if is_wrapper_url(fname) {
+            self.fs_wrapper_stat(fname, link_op)
         } else {
-            std::fs::metadata(&p)
+            let md = if link_op {
+                std::fs::symlink_metadata(&p)
+            } else {
+                std::fs::metadata(&p)
+            };
+            md.ok().map(|m| FsStat {
+                mode: m.mode() as i64,
+                ino: m.ino() as i64,
+                size: m.size() as i64,
+                uid: m.uid() as i64,
+                gid: m.gid() as i64,
+                atime: m.atime(),
+                mtime: m.mtime(),
+                ctime: m.ctime(),
+            })
         };
-        let m = match md {
-            Ok(m) => m,
-            Err(_) => {
+        let m = match st {
+            Some(m) => m,
+            None => {
                 if !exists_check {
                     let msg = format!(
                         "SplFileInfo::{}(): {}stat failed for {}",
@@ -665,40 +769,32 @@ impl Vm {
                 return Value::False;
             }
         };
+        let fmt = m.mode & S_IFMT;
         match method {
-            b"getperms" => Value::Long(m.mode() as i64),
-            b"getinode" => Value::Long(m.ino() as i64),
-            b"getsize" => Value::Long(m.size() as i64),
-            b"getowner" => Value::Long(m.uid() as i64),
-            b"getgroup" => Value::Long(m.gid() as i64),
-            b"getatime" => Value::Long(m.atime()),
-            b"getmtime" => Value::Long(m.mtime()),
-            b"getctime" => Value::Long(m.ctime()),
+            b"getperms" => Value::Long(m.mode),
+            b"getinode" => Value::Long(m.ino),
+            b"getsize" => Value::Long(m.size),
+            b"getowner" => Value::Long(m.uid),
+            b"getgroup" => Value::Long(m.gid),
+            b"getatime" => Value::Long(m.atime),
+            b"getmtime" => Value::Long(m.mtime),
+            b"getctime" => Value::Long(m.ctime),
             b"gettype" => {
-                use std::os::unix::fs::FileTypeExt;
-                let ft = m.file_type();
-                let t: &[u8] = if ft.is_symlink() {
-                    b"link"
-                } else if ft.is_dir() {
-                    b"dir"
-                } else if ft.is_file() {
-                    b"file"
-                } else if ft.is_fifo() {
-                    b"fifo"
-                } else if ft.is_char_device() {
-                    b"char"
-                } else if ft.is_block_device() {
-                    b"block"
-                } else if ft.is_socket() {
-                    b"socket"
-                } else {
-                    b"unknown"
+                let t: &[u8] = match fmt {
+                    0o120000 => b"link",
+                    0o040000 => b"dir",
+                    0o100000 => b"file",
+                    0o010000 => b"fifo",
+                    0o020000 => b"char",
+                    0o060000 => b"block",
+                    0o140000 => b"socket",
+                    _ => b"unknown",
                 };
                 sv(t)
             }
-            b"isfile" => bool_v(m.is_file()),
-            b"isdir" => bool_v(m.is_dir()),
-            _ => bool_v(m.file_type().is_symlink()),
+            b"isfile" => bool_v(fmt == 0o100000),
+            b"isdir" => bool_v(fmt == 0o040000),
+            _ => bool_v(fmt == 0o120000),
         }
     }
 
@@ -1184,6 +1280,10 @@ impl Vm {
                     } else {
                         let f = self.fs_get_file_name(obj)?;
                         let p = String::from_utf8_lossy(&f).to_string();
+                        if is_wrapper_url(&f) {
+                            let st = self.fs_wrapper_stat(&f, false);
+                            return Some(bool_v(st.is_some_and(|st| st.mode & S_IFMT == 0o040000)));
+                        }
                         match std::fs::symlink_metadata(&p) {
                             Err(_) => Value::False,
                             Ok(m) if !m.file_type().is_symlink() => bool_v(m.is_dir()),
