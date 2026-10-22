@@ -51,6 +51,7 @@ members = [
     "crates/goro-tidy",
     "crates/goro-ext-tidy",
     "crates/goro-ext-opcache",
+    "crates/goro-sqlite",
 ]
 resolver = "2"
 

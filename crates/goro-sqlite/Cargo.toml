@@ -1,0 +1,12 @@
+[package]
+name = "goro-sqlite"
+version = "0.1.0"
+edition = "2024"
+description = "A pure-Rust port of the SQLite database engine (3.54.1) for goro-rs"
+license = "MIT"
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = "0.2"
