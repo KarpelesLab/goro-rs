@@ -1185,15 +1185,17 @@ impl Vm {
                         Value::Null
                     }
                     b"seek" => {
-                        let pos = match self.spl_arg_long(
-                            "DirectoryIterator::seek",
-                            1,
-                            "offset",
-                            &a[0],
-                        ) {
-                            Some(n) => n,
-                            None => return Some(Value::Null),
+                        let Some(arg) = a.first() else {
+                            return self.spl_throw(
+                                b"ArgumentCountError",
+                                "DirectoryIterator::seek() expects exactly 1 argument, 0 given",
+                            );
                         };
+                        let pos =
+                            match self.spl_arg_long("DirectoryIterator::seek", 1, "offset", arg) {
+                                Some(n) => n,
+                                None => return Some(Value::Null),
+                            };
                         let ov = Value::Object(obj.clone());
                         if lprop(obj, b"__spl_dir_index") > pos {
                             self.call_object_method(&ov, b"rewind", &[]);
@@ -1257,7 +1259,13 @@ impl Vm {
                 Value::Long(Self::fs_flags(obj) & (KEY_MODE_MASK | CURRENT_MODE_MASK | OTHERS_MASK))
             }
             (b"filesystemiterator", b"setflags") => {
-                let f = match self.spl_arg_long("FilesystemIterator::setFlags", 1, "flags", &a[0]) {
+                let Some(arg) = a.first() else {
+                    return self.spl_throw(
+                        b"ArgumentCountError",
+                        "FilesystemIterator::setFlags() expects exactly 1 argument, 0 given",
+                    );
+                };
+                let f = match self.spl_arg_long("FilesystemIterator::setFlags", 1, "flags", arg) {
                     Some(n) => n,
                     None => return Some(Value::Null),
                 };

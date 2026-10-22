@@ -171,14 +171,28 @@ fn spl_classes_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-/// TypeError for a non-object `$object` argument.
-fn object_arg_error(vm: &mut Vm, fname: &str, args: &[Value]) -> VmError {
-    let given = Vm::value_type_name(args.first().unwrap_or(&Value::Null));
-    let msg = format!(
-        "{}(): Argument #1 ($object) must be of type object, {} given",
-        fname, given
-    );
-    let exc = vm.throw_type_error(msg.clone());
+/// The zpp error of spl_object_id()/spl_object_hash()'s `object $object`.
+fn object_arg_error(vm: &mut Vm, name: &str, args: &[Value]) -> VmError {
+    let (class, msg): (&[u8], String) = if args.len() != 1 {
+        (
+            b"ArgumentCountError",
+            format!(
+                "{}() expects exactly 1 argument, {} given",
+                name,
+                args.len()
+            ),
+        )
+    } else {
+        (
+            b"TypeError",
+            format!(
+                "{}(): Argument #1 ($object) must be of type object, {} given",
+                name,
+                Vm::value_type_name(&args[0].deref())
+            ),
+        )
+    };
+    let exc = vm.create_exception(class, &msg, vm.current_line);
     vm.current_exception = Some(exc);
     VmError {
         message: msg,
@@ -187,24 +201,17 @@ fn object_arg_error(vm: &mut Vm, fname: &str, args: &[Value]) -> VmError {
 }
 
 fn spl_object_hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let gen_id = match args.first() {
+    let id = match args.first() {
         Some(Value::Generator(g)) => Some(vm.generator_handle(g)),
+        Some(Value::Object(obj)) => Some(obj.borrow().object_id),
         _ => None,
     };
-    if let Some(id) = gen_id {
-        return Ok(Value::String(PhpString::from_string(format!(
+    match id {
+        Some(id) => Ok(Value::String(PhpString::from_string(format!(
             "{:016x}0000000000000000",
             id
-        ))));
-    }
-    if let Some(Value::Object(obj)) = args.first() {
-        let id = obj.borrow().object_id;
-        Ok(Value::String(PhpString::from_string(format!(
-            "{:016x}0000000000000000",
-            id
-        ))))
-    } else {
-        Err(object_arg_error(vm, "spl_object_hash", args))
+        )))),
+        None => Err(object_arg_error(vm, "spl_object_hash", args)),
     }
 }
 

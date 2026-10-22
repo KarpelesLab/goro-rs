@@ -1423,12 +1423,32 @@ fn restore_raw_name(text: String, raw: &[u8]) -> Vec<u8> {
     }
 }
 
+/// zend_wrong_parameters_count_error(): an ArgumentCountError.
+fn arg_count_error(vm: &mut Vm, name: &str, min: usize, max: usize, given: usize) -> VmError {
+    let (which, n) = if given < min {
+        (if min == max { "exactly" } else { "at least" }, min)
+    } else {
+        (if min == max { "exactly" } else { "at most" }, max)
+    };
+    let msg = format!(
+        "{}() expects {} {} argument{}, {} given",
+        name,
+        which,
+        n,
+        if n == 1 { "" } else { "s" },
+        given
+    );
+    let exc = vm.create_exception(b"ArgumentCountError", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    VmError {
+        message: format!("Uncaught ArgumentCountError: {}", msg),
+        line: vm.current_line,
+    }
+}
+
 fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.is_empty() {
-        return Err(VmError {
-            message: "print_r() expects at least 1 argument".into(),
-            line: 0,
-        });
+    if args.is_empty() || args.len() > 2 {
+        return Err(arg_count_error(vm, "print_r", 1, 2, args.len()));
     }
 
     let return_output = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
@@ -1980,11 +2000,8 @@ fn print_r_value_inner(
 }
 
 fn var_export(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.is_empty() {
-        return Err(VmError {
-            message: "var_export() expects at least 1 argument".into(),
-            line: 0,
-        });
+    if args.is_empty() || args.len() > 2 {
+        return Err(arg_count_error(vm, "var_export", 1, 2, args.len()));
     }
     let return_output = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
     // For lazy objects, trigger init and redirect proxy to real first.
