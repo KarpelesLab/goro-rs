@@ -11705,14 +11705,20 @@ pub fn create_reflection_parameters_method(
                 b"__reflection_param_class".to_vec(),
                 Value::String(PhpString::from_vec(scope.clone())),
             );
+            // A property hook (`$prop::get`) is registered as `__property_get_prop`.
+            let n = &op_array.name;
+            let method: Vec<u8> = match n.strip_prefix(b"$").and_then(|r| {
+                r.strip_suffix(b"::get")
+                    .map(|p| (b"get", p))
+                    .or_else(|| r.strip_suffix(b"::set").map(|p| (b"set", p)))
+            }) {
+                Some((kind, prop)) => [b"__property_".as_slice(), kind, b"_", prop].concat(),
+                None => n.clone(),
+            };
             obj.set_property(
                 b"__reflection_param_method".to_vec(),
                 Value::String(PhpString::from_vec(
-                    op_array
-                        .name
-                        .iter()
-                        .map(|b| b.to_ascii_lowercase())
-                        .collect(),
+                    method.iter().map(|b| b.to_ascii_lowercase()).collect(),
                 )),
             );
         }
