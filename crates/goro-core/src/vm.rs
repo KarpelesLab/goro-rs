@@ -5758,6 +5758,44 @@ impl Vm {
         ))
     }
 
+    /// "Cannot modify readonly property C::$p" when `obj`'s property `name`
+    /// is readonly and initialized (outside a __clone() reinitialization).
+    fn readonly_incdec_error(&self, obj: &Value, name: &[u8]) -> Option<String> {
+        let Value::Object(o) = obj else {
+            return None;
+        };
+        let b = o.borrow();
+        if matches!(b.get_property(b"__clone_window"), Value::True) {
+            return None;
+        }
+        let class_lower = b.class_name.to_ascii_lowercase();
+        let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
+        let (_, decl, readonly, _, _) =
+            self.find_property_def_for_scope(&class_lower, name, scope.as_deref())?;
+        if !readonly || !b.has_property(name) || matches!(b.get_property(name), Value::Undef) {
+            return None;
+        }
+        let decl_name = self
+            .classes
+            .get(&decl.to_ascii_lowercase())
+            .map(|c| crate::value::display_class_name(&c.name))
+            .unwrap_or_else(|| crate::value::display_class_name(&decl));
+        Some(format!(
+            "Cannot modify readonly property {}::${}",
+            decl_name,
+            String::from_utf8_lossy(name)
+        ))
+    }
+
+    /// A string key of a Traversable unpacked into arguments: an integer
+    /// string is positional (GH-18581), any other names the parameter.
+    fn unpack_string_key(s: &PhpString, v: Value) -> (bool, Vec<u8>, Value) {
+        match Self::value_to_array_key(Value::String(s.clone())) {
+            ArrayKey::Int(_) => (false, Vec::new(), v),
+            ArrayKey::String(_) => (true, s.as_bytes().to_vec(), v),
+        }
+    }
+
     pub(crate) fn named_arg_by_ref(&self, call_name: &[u8], name: &[u8]) -> bool {
         let lower = call_name.to_ascii_lowercase();
         let user = self.user_functions.get(&lower).cloned().or_else(|| {
@@ -25292,7 +25330,7 @@ impl Vm {
                                             pairs.push((false, Vec::new(), yielded_val));
                                         }
                                         Value::String(s) => {
-                                            pairs.push((true, s.as_bytes().to_vec(), yielded_val));
+                                            pairs.push(Self::unpack_string_key(s, yielded_val));
                                         }
                                         _ => {
                                             gen_err = Some("Keys must be of type int|string during argument unpacking".to_string());
@@ -25398,11 +25436,7 @@ impl Vm {
                                                     pairs.push((false, Vec::new(), cur_val));
                                                 }
                                                 Value::String(s) => {
-                                                    pairs.push((
-                                                        true,
-                                                        s.as_bytes().to_vec(),
-                                                        cur_val,
-                                                    ));
+                                                    pairs.push(Self::unpack_string_key(s, cur_val));
                                                 }
                                                 _ => {
                                                     iter_err = Some("Keys must be of type int|string during argument unpacking".to_string());
@@ -25463,7 +25497,7 @@ impl Vm {
                                                 pairs.push((false, Vec::new(), cur_val));
                                             }
                                             Value::String(s) => {
-                                                pairs.push((true, s.as_bytes().to_vec(), cur_val));
+                                                pairs.push(Self::unpack_string_key(s, cur_val));
                                             }
                                             _ => {
                                                 iter_err = Some("Keys must be of type int|string during argument unpacking".to_string());
@@ -34972,6 +35006,12 @@ impl Vm {
                         };
                         let key_val = if let Some(before) = container_before {
                             let mut key_val = key_val;
+                            // (the array captured by the handler, which php-src
+                            // detects by its refcount, is not written to)
+                            let rc_before = match &arr_val {
+                                Value::Array(a) => Some(Rc::strong_count(a)),
+                                _ => None,
+                            };
                             for convert in [false, true] {
                                 if self.current_exception.is_some() {
                                     self.error_handler_threw = false;
@@ -34995,6 +35035,11 @@ impl Vm {
                                 )) != before
                                 {
                                     return Ok(Flow::Next);
+                                }
+                                if let (Some(b), Value::Array(a)) = (rc_before, &arr_val) {
+                                    if Rc::strong_count(a) > b {
+                                        return Ok(Flow::Next);
+                                    }
                                 }
                                 if convert || !matches!(arr_val, Value::Array(_)) {
                                     break;
@@ -35781,8 +35826,11 @@ impl Vm {
                     // then looked up in it (and reported undefined).
                     if is_rw && matches!(arr_val, Value::Null | Value::Undef) {
                         arr_val = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
-                        // (in the variable: an error handler sees it there)
-                        if let OperandType::Cv(i) = op.op1 {
+                        // (in the variable, where an error handler reporting
+                        // the undefined key sees it)
+                        if let (OperandType::Cv(i), false) =
+                            (op.op1, matches!(op.op2, OperandType::Unused))
+                        {
                             match cvs.get_mut(i as usize) {
                                 Some(Value::Reference(r)) => *r.borrow_mut() = arr_val.clone(),
                                 Some(slot) => *slot = arr_val.clone(),
@@ -52020,6 +52068,24 @@ impl Vm {
                             message: format!("Uncaught Error: {}", msg),
                             line: op.line,
                         });
+                    }
+                    // ++/-- of an initialized readonly property: the write is
+                    // refused before the value is incremented (the property
+                    // is not fetched for writing).
+                    if matches!(op.opcode, OpCode::PropertyGetIncDec) {
+                        if let Some(msg) = self.readonly_incdec_error(&obj_val_raw, prop_name.as_bytes()) {
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
                     }
                     // PHP refuses property names starting with NUL. When __get exists, dispatch
                     // first; the inner access will trigger this check again under magic_depth > 0.
