@@ -87,6 +87,101 @@ pub struct DtdInfo {
     /// Element declaration table (dtd->elements), including the
     /// XML_ELEMENT_TYPE_UNDEFINED placeholders created by ATTLIST.
     pub elements: Vec<ElemDecl>,
+    /// Lookup tables over attr_defaults (see find_attr_decl), built on
+    /// first use and again once declarations were added.
+    pub attr_cache: RefCell<AttrCache>,
+}
+
+/// Indexes of DtdInfo::attr_defaults by hashed names; entries are
+/// candidates (in declaration order) that the lookups check.
+#[derive(Clone, Debug, Default)]
+pub struct AttrCache {
+    /// attr_defaults.len() when built.
+    len: usize,
+    /// By (element, name, prefix).
+    by_name: HashMap<u64, Vec<usize>>,
+    /// The ID attributes, by (element, attribute qname).
+    ids: HashMap<u64, Vec<usize>>,
+}
+
+/// FNV-1a over the parts, each terminated (`None` hashes apart from "").
+fn names_hash(parts: &[Option<&str>]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for p in parts {
+        let (bytes, end): (&[u8], u8) = match p {
+            Some(s) => (s.as_bytes(), 0),
+            None => (b"", 1),
+        };
+        for &b in bytes.iter().chain(std::iter::once(&end)) {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    h
+}
+
+impl DtdInfo {
+    fn with_attr_cache<R>(&self, f: impl FnOnce(&AttrCache) -> R) -> R {
+        let mut c = self.attr_cache.borrow_mut();
+        if c.len > self.attr_defaults.len() {
+            *c = AttrCache::default();
+        }
+        for (i, a) in self.attr_defaults.iter().enumerate().skip(c.len) {
+            let k = names_hash(&[Some(&a.elem), Some(&a.name), a.prefix.as_deref()]);
+            c.by_name.entry(k).or_default().push(i);
+            if a.atype == "ID" {
+                let full = match &a.prefix {
+                    Some(p) => format!("{}:{}", p, a.name),
+                    None => a.name.clone(),
+                };
+                let k = names_hash(&[Some(&a.elem), Some(&full)]);
+                c.ids.entry(k).or_default().push(i);
+            }
+        }
+        c.len = self.attr_defaults.len();
+        f(&c)
+    }
+
+    /// The first declaration of attribute `name` (`prefix`) of element
+    /// `elem` (xmlGetDtdQAttrDesc).
+    pub fn find_attr_decl(&self, elem: &str, name: &str, prefix: Option<&str>) -> Option<usize> {
+        if self.attr_defaults.is_empty() {
+            return None;
+        }
+        let k = names_hash(&[Some(elem), Some(name), prefix]);
+        self.with_attr_cache(|c| {
+            c.by_name.get(&k)?.iter().copied().find(|&i| {
+                let a = &self.attr_defaults[i];
+                a.elem == elem && a.name == name && a.prefix.as_deref() == prefix
+            })
+        })
+    }
+
+    /// Whether attribute `attr_q` (its qualified name) of element `elem_q`
+    /// is declared of type ID.
+    pub fn is_id_decl(&self, elem_q: &str, attr_q: &str) -> bool {
+        if self.attr_defaults.is_empty() {
+            return false;
+        }
+        let k = names_hash(&[Some(elem_q), Some(attr_q)]);
+        self.with_attr_cache(|c| {
+            c.ids.get(&k).is_some_and(|v| {
+                v.iter().any(|&i| {
+                    let a = &self.attr_defaults[i];
+                    let full_eq = match &a.prefix {
+                        Some(p) => {
+                            attr_q.len() == p.len() + 1 + a.name.len()
+                                && attr_q.starts_with(p.as_str())
+                                && attr_q.as_bytes()[p.len()] == b':'
+                                && attr_q.ends_with(a.name.as_str())
+                        }
+                        None => a.name == attr_q,
+                    };
+                    a.elem == elem_q && full_eq && a.atype == "ID"
+                })
+            })
+        })
+    }
 }
 
 /// xmlElement: an element declaration as kept in the DTD hash table.
@@ -1019,14 +1114,8 @@ impl Tree {
         let attr_q = self.qname(at);
         for sub in [info.int_subset, info.ext_subset].into_iter().flatten() {
             if let Some(dd) = self.dtd_info(sub) {
-                for ad in &dd.attr_defaults {
-                    let full = match &ad.prefix {
-                        Some(p) => format!("{}:{}", p, ad.name),
-                        None => ad.name.clone(),
-                    };
-                    if ad.elem == elem_q && full == attr_q && ad.atype == "ID" {
-                        return true;
-                    }
+                if dd.is_id_decl(&elem_q, &attr_q) {
+                    return true;
                 }
             }
         }
@@ -1440,6 +1529,7 @@ impl Tree {
                         d.notations = notations;
                         d.attr_defaults = defs;
                         d.elements = elems;
+                        d.attr_cache = Default::default();
                     }
                 }
                 return n;

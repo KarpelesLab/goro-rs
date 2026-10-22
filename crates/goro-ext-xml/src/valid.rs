@@ -804,10 +804,7 @@ pub fn find_attr(
     name: &str,
     prefix: Option<&str>,
 ) -> Option<usize> {
-    let d = t.dtd_info(dtd?)?;
-    d.attr_defaults
-        .iter()
-        .position(|a| a.elem == elem && a.name == name && a.prefix.as_deref() == prefix)
+    t.dtd_info(dtd?)?.find_attr_decl(elem, name, prefix)
 }
 
 fn attr_decl(t: &Tree, dtd: NodeId, idx: usize) -> AttrDecl {

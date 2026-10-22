@@ -937,16 +937,11 @@ fn is_id_attr(t: &Tree, doc: Option<NodeId>, el: NodeId, at: NodeId, html: bool)
         None => return false,
     };
     let elem_q = t.qname(el);
+    let attr_q = t.qname(at);
     for sub in [info.int_subset, info.ext_subset].into_iter().flatten() {
         if let Some(dd) = t.dtd_info(sub) {
-            for ad in &dd.attr_defaults {
-                let full = match &ad.prefix {
-                    Some(p) => format!("{}:{}", p, ad.name),
-                    None => ad.name.clone(),
-                };
-                if ad.elem == elem_q && full == t.qname(at) && ad.atype == "ID" {
-                    return true;
-                }
+            if dd.is_id_decl(&elem_q, &attr_q) {
+                return true;
             }
         }
     }
