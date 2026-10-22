@@ -7974,6 +7974,29 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         return Some(Value::Null);
                     }
                 }
+                // A hookless virtual property of an internal class is served
+                // by its read handler (zend_read_property_ex()).
+                let internal_virtual = rprop(vm, &class_lower, prop_name.as_bytes())
+                    .map(|p| (p.is_virtual, p.declaring_class.to_ascii_lowercase()))
+                    .filter(|(v, d)| *v && is_internal_class(vm, d))
+                    .map(|(_, d)| d);
+                if let Some(decl) = internal_virtual {
+                    if matches!(target, Value::Object(_)) {
+                        let v = run_snippet_in_scope(
+                            vm,
+                            "return $__o->{$__n};",
+                            &[
+                                ("__o", target.clone()),
+                                (
+                                    "__n",
+                                    Value::String(PhpString::from_string(prop_name.clone())),
+                                ),
+                            ],
+                            &decl,
+                        );
+                        return Some(v.unwrap_or(Value::Null));
+                    }
+                }
                 if let Value::Object(target_obj) = &target {
                     let ob = target_obj.borrow();
                     Some(ob.get_property(prop_name.as_bytes()))

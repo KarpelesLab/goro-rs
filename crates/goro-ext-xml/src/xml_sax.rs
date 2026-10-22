@@ -413,7 +413,8 @@ impl CompatSink {
             let data = b.data.clone().unwrap();
             if let Some(arr) = separated_array(&data) {
                 let mut a = arr.borrow_mut();
-                let k = a.next_free_key();
+                // nNextFreeElement is ZEND_LONG_MIN until an integer key exists.
+                let k = a.next_free_key().max(0);
                 if a.try_push(Value::Array(Rc::new(RefCell::new(tag)))).is_ok() {
                     b.ctag_index = k;
                 }

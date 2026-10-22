@@ -33,6 +33,7 @@ $dirs = [
     'ext/xml' => 'xml',
     'ext/simplexml' => 'SimpleXML',
     'ext/libxml' => 'libxml',
+    'ext/xmlreader' => 'xmlreader',
     'ext/openssl' => 'openssl',
     'ext/curl' => 'curl',
     'ext/sockets' => 'sockets',
