@@ -88,16 +88,10 @@ pub fn tokenize(vm: &mut Vm, src: &[u8], flags: i64) -> Option<Vec<Tok>> {
     // error.
     let parsed = goro_parser::php_recognizer::tokenize(src, true);
     let err_line = parsed.as_ref().err().map(|e| e.line);
-    let mut diags: Vec<(bool, String, u32)> = goro_parser::take_lexer_deprecations()
-        .into_iter()
-        .map(|(m, l)| (true, m, l))
-        .chain(
-            goro_parser::take_lexer_warnings()
-                .into_iter()
-                .map(|(m, l)| (false, m, l)),
-        )
-        .collect();
-    diags.sort_by_key(|(_, _, l)| *l);
+    let diags = goro_parser::order_lexer_diagnostics(
+        &goro_parser::take_lexer_deprecations(),
+        &goro_parser::take_lexer_warnings(),
+    );
     for (deprecation, msg, line) in diags {
         if err_line.is_some_and(|el| line > el) {
             break;
