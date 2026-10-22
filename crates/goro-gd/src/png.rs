@@ -776,6 +776,28 @@ pub fn image_png(im: &Image, level: i32, basefilter: i32) -> Option<Vec<u8>> {
         gd_error("gd-png error: compression level must be 0 through 9");
         return None;
     }
+    // png_set_filter(png_ptr, PNG_FILTER_TYPE_BASE, basefilter): filter
+    // values 0-4 select one filter, 5-7 are an (app) error, anything else
+    // is a mask of PNG_FILTER_* bits.
+    let mut do_filter = 0i32;
+    if basefilter >= 0 {
+        do_filter = match basefilter & 0xff {
+            0 => PNG_FILTER_NONE,
+            1 => PNG_FILTER_SUB,
+            2 => PNG_FILTER_UP,
+            3 => PNG_FILTER_AVG,
+            4 => PNG_FILTER_PAETH,
+            5..=7 => {
+                gd_error_ex(
+                    GD_WARNING,
+                    "gd-png:  fatal libpng error: Unknown row filter for method 0",
+                );
+                gd_error("gd-png error: setjmp returns error condition");
+                return None;
+            }
+            f => f,
+        };
+    }
     if !im.true_color {
         if transparent >= im.colors_total
             || (transparent >= 0 && im.open[transparent as usize] != 0)
@@ -941,19 +963,17 @@ pub fn image_png(im: &Image, level: i32, basefilter: i32) -> Option<Vec<u8>> {
         }
         o
     };
-    // do_filter: libpng's default unless a filter set was given
-    let mut filters = if basefilter >= 0 {
-        basefilter & 0xff
-    } else {
-        0
-    };
-    if filters == 0 {
+    // png_write_IHDR(): the default filters when none were set
+    let mut filters = do_filter & PNG_ALL_FILTERS;
+    if do_filter == 0 {
         filters = if color_type == COLOR_PALETTE || bit_depth < 8 {
             PNG_FILTER_NONE
         } else {
             PNG_ALL_FILTERS
         };
+        do_filter = filters;
     }
+
     let mut filtered: Vec<Vec<u8>> = Vec::new();
     let w = width as u32;
     let h = height as u32;
@@ -1002,7 +1022,7 @@ pub fn image_png(im: &Image, level: i32, basefilter: i32) -> Option<Vec<u8>> {
     if window_bits == 8 {
         window_bits = 9;
     }
-    let strategy = if filters != PNG_FILTER_NONE {
+    let strategy = if do_filter != PNG_FILTER_NONE {
         goro_zlib::Z_FILTERED
     } else {
         goro_zlib::Z_DEFAULT_STRATEGY
