@@ -17,10 +17,29 @@
 //!   most recently opened first).
 //! * There is no shared cache (SQLITE_OMIT_SHARED_CACHE): table locks are
 //!   no-ops, a BtShared belongs to exactly one Btree.  No mmap.
-//! * The btree layer cannot reference the connection: functions that need
-//!   connection state take `db` (see the signature notes in the report).
-//!   `BtShared::dbFlags` mirrors `db->flags` (refreshed by BeginTrans) for
-//!   the PRAGMA cell_size_check test in btreeInitPage().
+//! * The btree layer cannot reference the connection: the public functions
+//!   that need connection state take `db` and gather what C reads through
+//!   `p->db` into `BtDbState` / `BtAutovac` / `BtCheckCtx`; the internal
+//!   variants (`btreeOpen`, `btreeBeginTransFull`, `btreeCommitPhaseOne`,
+//!   ...) work without a connection.  `BtShared::dbFlags` mirrors
+//!   `db->flags` (refreshed by BeginTrans) for the PRAGMA cell_size_check
+//!   test in btreeInitPage().
+//!
+//! What this layer expects from the pager (PgHdr contract):
+//!
+//! * `PgHdr::aData` holds exactly the page-size bytes of the page.
+//! * When the page cache (re)assigns a PgHdr to a page that is not cached,
+//!   `pExtra` is reset to `MemPage::default()` (C zeroes the first bytes of
+//!   the extra space: isInit, pgno).  Moving a page (sqlite3PagerMovepage,
+//!   sqlite3PagerRekey) keeps `pExtra`.
+//! * `PgHdr::flags` carries the PGHDR_* bits (balance_nonroot() passes them
+//!   to sqlite3PagerRekey()); `nRef` is the pager reference count reported
+//!   by sqlite3PagerPageRefcount().
+//! * A PAGER_GET_NOCONTENT fetch zeroes the page image even if the page is
+//!   already cached (as getPageNormal() does).
+//! * The btree never holds a RefCell borrow of a page or of the pager
+//!   across a pager call; xReinit (pageReinit) borrows the page and,
+//!   immutably, the BtShared.
 
 #![allow(unused_variables)]
 
@@ -1232,7 +1251,9 @@ fn btreeParseCellPtrNoPayload(pPage: &MemPage, a: &[u8], iCell: usize, pInfo: &m
     pInfo.nKey = k as i64;
     pInfo.nPayload = 0;
     pInfo.nLocal = 0;
-    pInfo.pPayload = 0;
+    /* C: pInfo->pPayload = 0 (a NULL pointer, which the bounds checks of
+     ** accessPayload() reject): represented by an offset past any page. */
+    pInfo.pPayload = usize::MAX;
 }
 
 /// Inlined getVarint32() loop used by the cell parsers: returns the value
@@ -7221,8 +7242,10 @@ impl CellArray {
     fn straddlesEnd(&self, N: usize, delta: isize, sz: usize) -> bool {
         let r = self.apCell[N];
         match r.src {
-            CellSrc::Page(k) => {
-                let end = mp(&self.pages[k]).aDataEnd() as isize;
+            CellSrc::Page(_) => {
+                /* All pages of the balance have the same size (aDataEnd);
+                 ** do not borrow the page: it may be the one being edited. */
+                let end = self.pRef.aDataEnd() as isize;
                 let off = r.off as isize + delta;
                 off < end && off + sz as isize > end
             }
