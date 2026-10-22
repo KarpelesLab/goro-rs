@@ -776,7 +776,7 @@ impl crate::vm::Vm {
             };
             line = Some(op.line);
             if crate::value::memory_exhausted() != 0
-                || crate::value::TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed)
+                || crate::value::VM_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed)
             {
                 break 'run ip;
             }
