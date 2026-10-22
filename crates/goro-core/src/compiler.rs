@@ -8485,6 +8485,11 @@ impl Compiler {
                                             method_compiler.has_never_return = true;
                                         }
                                     }
+                                } else if method_name.eq_ignore_ascii_case(b"__tostring") {
+                                    // __toString() implicitly returns string
+                                    // (zend_add_magic_method()'s arg_info).
+                                    method_compiler.op_array.return_type =
+                                        Some(crate::opcode::ParamType::Simple(b"string".to_vec()));
                                 }
                                 method_compiler.current_class = Some(qualified_name.clone());
                                 method_compiler.current_parent_class = class.parent.clone();

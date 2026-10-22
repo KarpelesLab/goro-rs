@@ -4119,6 +4119,45 @@ impl Vm {
         }
     }
 
+    /// The operands of a comparison of an object with a string, the
+    /// object cast to string by its __toString() (zend_std_compare_objects():
+    /// an object that cannot be cast is greater); the notices of comparing
+    /// an object with a number. An exception thrown by the cast is left
+    /// pending.
+    fn compare_operands(&mut self, a: Value, b: Value, line: u32) -> (Value, Value) {
+        self.emit_object_comparison_notice(&a, &b, line);
+        let cast = |vm: &mut Vm, o: &Value| -> Option<Value> {
+            let Value::Object(obj) = o else {
+                return None;
+            };
+            let cl = obj.borrow().class_name.to_ascii_lowercase();
+            if obj.borrow().native.is_some()
+                || !vm
+                    .classes
+                    .get(&cl)
+                    .is_some_and(|c| c.get_method(b"__tostring").is_some())
+            {
+                return None;
+            }
+            let s = vm.value_to_string(o);
+            if vm.current_exception.is_some() {
+                return None;
+            }
+            Some(Value::String(s))
+        };
+        match (a.deref(), b.deref()) {
+            (o @ Value::Object(_), Value::String(_)) => match cast(self, &o) {
+                Some(s) => (s, b),
+                None => (a, b),
+            },
+            (Value::String(_), o @ Value::Object(_)) => match cast(self, &o) {
+                Some(s) => (a, s),
+                None => (a, b),
+            },
+            _ => (a, b),
+        }
+    }
+
     fn emit_object_comparison_notice(&mut self, a: &Value, b: &Value, line: u32) {
         let a_inner = match a {
             Value::Reference(r) => r.borrow().clone(),
@@ -21780,7 +21819,7 @@ impl Vm {
                             }
                         }
                     }
-                    self.emit_object_comparison_notice(&a, &b, op.line);
+                    let (a, b) = self.compare_operands(a, b, op.line);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
@@ -21890,7 +21929,7 @@ impl Vm {
                             }
                         }
                     }
-                    self.emit_object_comparison_notice(&a, &b, op.line);
+                    let (a, b) = self.compare_operands(a, b, op.line);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
@@ -22107,7 +22146,7 @@ impl Vm {
                             }
                         }
                     }
-                    self.emit_object_comparison_notice(&a, &b, op.line);
+                    let (a, b) = self.compare_operands(a, b, op.line);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
@@ -22218,7 +22257,7 @@ impl Vm {
                             }
                         }
                     }
-                    self.emit_object_comparison_notice(&a, &b, op.line);
+                    let (a, b) = self.compare_operands(a, b, op.line);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
@@ -22329,7 +22368,7 @@ impl Vm {
                             }
                         }
                     }
-                    self.emit_object_comparison_notice(&a, &b, op.line);
+                    let (a, b) = self.compare_operands(a, b, op.line);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
@@ -22441,7 +22480,7 @@ impl Vm {
                             }
                         }
                     }
-                    self.emit_object_comparison_notice(&a, &b, op.line);
+                    let (a, b) = self.compare_operands(a, b, op.line);
                     if self.current_exception.is_some() {
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
@@ -35886,8 +35925,12 @@ impl Vm {
                                     self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
                                 }
                             }
+                            // (a handler writing to the array would have
+                            // separated it in php-src: the key it added means
+                            // that)
                             if Self::dim_container_identity(&Self::read_operand_raw(&cvs, &op.op1))
                                 != before
+                                || arr.borrow().get(&key).is_some()
                             {
                                 self.dim_rw_abort = Some(self.call_depth);
                                 self.write_operand(
