@@ -49,6 +49,7 @@ members = [
     "crates/goro-ext-dba",
     "crates/goro-ext-readline",
     "crates/goro-tidy",
+    "crates/goro-ext-tidy",
 ]
 resolver = "2"
 
@@ -118,6 +119,7 @@ goro-ext-intl = { path = "crates/goro-ext-intl" }
 goro-ext-xsl = { path = "crates/goro-ext-xsl" }
 goro-ext-dba = { path = "crates/goro-ext-dba" }
 goro-ext-readline = { path = "crates/goro-ext-readline" }
+goro-ext-tidy = { path = "crates/goro-ext-tidy" }
 
 [features]
 default = ["ext-standard"]

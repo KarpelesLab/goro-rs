@@ -17977,6 +17977,7 @@ const MODULE_ORDER: &[&str] = &[
     "sysvmsg",
     "sysvsem",
     "sysvshm",
+    "tidy",
     "tokenizer",
     "uri",
     "xml",

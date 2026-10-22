@@ -164,8 +164,25 @@ pub(crate) fn internal_class_known(vm: &Vm, lower: &[u8]) -> bool {
 /// An extension class registered as a bare entry (its methods are
 /// implemented natively, e.g. ext/dom's; it may still declare the stub's
 /// properties, as XSLTProcessor does for its typed properties).
+/// Non-public stub methods may be kept for the engine's visibility checks
+/// (tidyNode's private constructor): the entry is still a bare one.
 fn bare_entry(c: &crate::object::ClassEntry) -> bool {
-    c.filename.is_none() && c.start_line == 0 && c.methods.is_empty() && !c.is_enum
+    c.filename.is_none()
+        && c.start_line == 0
+        && !c.is_enum
+        && (c.methods.is_empty() || only_stub_nonpublic_methods(c))
+}
+
+fn only_stub_nonpublic_methods(c: &crate::object::ClassEntry) -> bool {
+    let Some(sc) = crate::stubs::find_class(&c.name.to_ascii_lowercase()) else {
+        return false;
+    };
+    c.methods.values().all(|m| {
+        m.visibility != Visibility::Public
+            && sc.methods.iter().any(|f| {
+                f.name.as_bytes().eq_ignore_ascii_case(&m.name) && f.visibility() == m.visibility
+            })
+    })
 }
 
 /// Reflection sees the class through its stub: an internal class, or one
@@ -10330,6 +10347,7 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         ],
         "bcmath" => &["BcMath\\Number"],
         "dba" => &["Dba\\Connection"],
+        "tidy" => &["tidy", "tidyNode"],
         "ftp" => &["FTP\\Connection"],
         "xsl" => &["XSLTProcessor"],
         "shmop" => &["Shmop"],
@@ -10387,6 +10405,7 @@ fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
         "gd" => &["gd.jpeg_ignore_warning"],
         "dba" => &["dba.default_handler"],
         "readline" => &["cli.pager", "cli.prompt"],
+        "tidy" => &["tidy.default_config", "tidy.clean_output"],
         "filter" => &["filter.default", "filter.default_flags"],
         "exif" => &[
             "exif.encode_unicode",

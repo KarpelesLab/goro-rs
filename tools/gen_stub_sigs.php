@@ -66,6 +66,7 @@ $dirs = [
     'ext/gd' => 'gd',
     'ext/dba' => 'dba',
     'ext/readline' => 'readline',
+    'ext/tidy' => 'tidy',
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',
     'ext/dom' => 'dom',

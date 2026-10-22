@@ -1,0 +1,13 @@
+[package]
+name = "goro-ext-tidy"
+version = "0.1.0"
+edition = "2024"
+description = "PHP tidy extension (over goro-tidy, a port of tidy-html5) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+goro-tidy = { path = "../goro-tidy" }
