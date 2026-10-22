@@ -3052,6 +3052,12 @@ impl Parser {
                     });
                 }
                 let name = name.unwrap();
+                if name.eq_ignore_ascii_case(b"class") {
+                    return Err(ParseError {
+                        message: "A class constant must not be called 'class'; it is reserved for class name fetching".into(),
+                        span: self.span(),
+                    });
+                }
 
                 self.expect(&TokenKind::Assign)?;
                 let value = self.parse_expression()?;

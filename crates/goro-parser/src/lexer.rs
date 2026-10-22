@@ -271,7 +271,7 @@ impl<'a> Lexer<'a> {
         // Check for 0x, 0b, 0o prefixes
         if self.peek() == Some(b'0') {
             match self.peek_at(1) {
-                Some(b'x' | b'X') => {
+                Some(b'x' | b'X') if self.peek_at(2).is_some_and(|c| c.is_ascii_hexdigit()) => {
                     self.advance();
                     self.advance();
                     while let Some(ch) = self.peek() {
@@ -301,7 +301,7 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
-                Some(b'b' | b'B') => {
+                Some(b'b' | b'B') if matches!(self.peek_at(2), Some(b'0' | b'1')) => {
                     self.advance();
                     self.advance();
                     while let Some(ch) = self.peek() {
@@ -334,7 +334,9 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
-                Some(b'o' | b'O') => {
+                Some(b'o' | b'O')
+                    if self.peek_at(2).is_some_and(|c| (b'0'..=b'7').contains(&c)) =>
+                {
                     self.advance();
                     self.advance();
                     while let Some(ch) = self.peek() {
