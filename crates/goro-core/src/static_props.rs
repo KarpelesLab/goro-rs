@@ -902,7 +902,16 @@ impl Vm {
                     c.const_closures
                         .iter()
                         .find(|op| op.name == name)
-                        .map(|op| (k.clone(), c.name.clone(), op.clone()))
+                        .map(|op| {
+                            // A trait's property default / constant runs in the
+                            // scope of the class using it (self:: is that class).
+                            match owner_hint.and_then(|o| self.classes.get(o).map(|oc| (o, oc))) {
+                                Some((o, oc)) if c.is_trait => {
+                                    (o.to_vec(), oc.name.clone(), op.clone())
+                                }
+                                _ => (k.clone(), c.name.clone(), op.clone()),
+                            }
+                        })
                 })
             });
         let Some((scope, scope_name, op)) = found else {

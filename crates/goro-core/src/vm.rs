@@ -4588,6 +4588,37 @@ impl Vm {
         }
     }
 
+    /// The source of the constant-expression thunk a deferred value names.
+    fn const_thunk_source(&self, v: &Value) -> Option<Vec<u8>> {
+        let Value::String(s) = v else {
+            return None;
+        };
+        let name = s.as_bytes().strip_prefix(b"__deferred_thunk__::")?;
+        self.classes.values().find_map(|c| {
+            c.const_closures
+                .iter()
+                .find(|op| op.name == name)
+                .map(|op| op.display_name.clone())
+        })
+    }
+
+    /// The static_vars key of a static variable: a method imported from a
+    /// trait has its own statics in each using class (its scope).
+    pub(crate) fn static_var_key(op_array: &OpArray, key: &[u8]) -> Vec<u8> {
+        if let Some(sc) = &op_array.scope_class {
+            if !op_array.name.starts_with(b"{closure") {
+                if let Some(pos) = key.windows(2).position(|w| w == b"::") {
+                    if &key[..pos] != sc.as_slice() {
+                        let mut k = sc.clone();
+                        k.extend_from_slice(&key[pos..]);
+                        return k;
+                    }
+                }
+            }
+        }
+        key.to_vec()
+    }
+
     /// `as final` in a trait alias (zend_traits_copy_functions): true when
     /// the method became private and final, which warns.
     fn trait_alias_make_final(m: &mut crate::object::MethodDef, name: &[u8]) -> bool {
@@ -34527,10 +34558,8 @@ impl Vm {
                     // Already initialized: skip the initializer; the
                     // StaticVarInit at the target binds the CV.
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
-                    if self
-                        .static_vars
-                        .contains_key(key_val.to_php_string().as_bytes())
-                    {
+                    let key = Self::static_var_key(op_array, key_val.to_php_string().as_bytes());
+                    if self.static_vars.contains_key(&key) {
                         if let OperandType::JmpTarget(target) = op.op2 {
                             ip = target as usize;
                         }
@@ -34538,7 +34567,7 @@ impl Vm {
                 }
                 OpCode::StaticVarInit => match outlined(|| -> Result<Flow, VmError> {
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
-                    let key = key_val.to_php_string().as_bytes().to_vec();
+                    let key = Self::static_var_key(op_array, key_val.to_php_string().as_bytes());
 
                     // Get (or initialize) the static value. We bypass write_operand's
                     // copy-on-write logic for arrays so that mutations through the CV
@@ -44406,9 +44435,23 @@ impl Vm {
                                                 }
                                                 _ => false,
                                             };
-                                            let d1 = self.resolve_deferred_value(&prop.default);
-                                            let d2 =
-                                                self.resolve_deferred_value(&class_prop.default);
+                                            // Two constant expressions (self:: of the class
+                                            // being composed) compare by their source.
+                                            let (d1, d2) = match (
+                                                self.const_thunk_source(&prop.default),
+                                                self.const_thunk_source(&class_prop.default),
+                                            ) {
+                                                (Some(a), Some(b)) => (
+                                                    Value::String(PhpString::from_vec(a)),
+                                                    Value::String(PhpString::from_vec(b)),
+                                                ),
+                                                _ => (
+                                                    self.resolve_deferred_value(&prop.default),
+                                                    self.resolve_deferred_value(
+                                                        &class_prop.default,
+                                                    ),
+                                                ),
+                                            };
                                             if prop.is_static != class_prop.is_static
                                                 || prop.visibility != class_prop.visibility
                                                 || prop.is_readonly != class_prop.is_readonly

@@ -2241,7 +2241,7 @@ impl PhpGenerator {
 
                 OpCode::StaticVarInit => {
                     let key_val = self.read_operand(&op.result, &op_array.literals);
-                    let key = key_val.to_php_string().as_bytes().to_vec();
+                    let key = Vm::static_var_key(&op_array, key_val.to_php_string().as_bytes());
                     let default = if vm.static_vars().contains_key(&key) {
                         Value::Null
                     } else {

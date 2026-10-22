@@ -997,6 +997,17 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         if let Some(class) = vm.classes.get(&class_lower).cloned() {
+            if class.is_trait && class.constants.contains_key(const_name.as_bytes()) {
+                let msg = format!(
+                    "Cannot access trait constant {}::{} directly",
+                    String::from_utf8_lossy(&class.name),
+                    const_name
+                );
+                let line = vm.current_line;
+                let exc = vm.create_exception(b"Error", &msg, line);
+                vm.current_exception = Some(exc);
+                return Err(VmError { message: msg, line });
+            }
             // Visibility check: constant() honours protected/private the same as
             // the compiler does for direct Class::CONST references. Caller scope
             // is the innermost class on the scope stack (or its hierarchy).
@@ -16110,6 +16121,10 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .map(|b| b.to_ascii_lowercase())
             .collect();
         if let Some(class) = vm.classes.get(&class_lower) {
+            // Trait constants cannot be accessed directly.
+            if class.is_trait {
+                return Ok(Value::False);
+            }
             if class.constants.contains_key(const_name.as_bytes()) {
                 // Constants not visible from the calling scope are "not defined"
                 if let Some(meta) = class.constants_meta.get(const_name.as_bytes()) {
