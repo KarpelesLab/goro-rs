@@ -56,6 +56,16 @@ fn arg_cv_bound(f: &OpArray, ncvs: usize) -> usize {
     }
 }
 
+/// Is the argument at `index` (counted like the CVs: $this and closure
+/// captures first) of a call to `f` passed by reference? Arguments past
+/// the declared parameters go to the variadic one.
+fn arg_by_ref(f: &OpArray, index: usize) -> bool {
+    match f.by_ref_params.get(index) {
+        Some(b) => *b,
+        None => f.variadic_param.is_some() && f.by_ref_params.last().copied().unwrap_or(false),
+    }
+}
+
 /// EG(objects_store) holds a pointer per object handle; it starts with
 /// room for 1024 and doubles when a new handle does not fit
 /// (zend_objects_store_put()).
@@ -18849,12 +18859,11 @@ impl Vm {
             return false;
         };
         if call.target.fn_gen != fn_gen
-            || call.target.user.as_ref().is_some_and(|f| {
-                f.by_ref_params
-                    .get(call.args.len())
-                    .copied()
-                    .unwrap_or(false)
-            })
+            || call
+                .target
+                .user
+                .as_ref()
+                .is_some_and(|f| arg_by_ref(f, call.args.len()))
         {
             return false;
         }
@@ -24967,8 +24976,7 @@ impl Vm {
                             .pending_calls
                             .last()
                             .and_then(|call| {
-                                self.call_user_fn(call)
-                                    .and_then(|f| f.by_ref_params.get(arg_index).copied())
+                                self.call_user_fn(call).map(|f| arg_by_ref(f, arg_index))
                             })
                             .unwrap_or(false)
                             || self
