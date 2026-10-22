@@ -29,6 +29,15 @@ const PRNG_INIT: sqlite3PrngType = sqlite3PrngType {
 };
 
 static sqlite3Prng: Mutex<sqlite3PrngType> = Mutex::new(PRNG_INIT);
+
+/// C `sqlite3Config.iPrngSeed` (set by SQLITE_TESTCTRL_PRNG_SEED); kept
+/// apart from the immutable global configuration so that it can change.
+pub static iPrngSeed: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Current value of sqlite3Config.iPrngSeed.
+pub fn prng_seed() -> u32 {
+    iPrngSeed.load(std::sync::atomic::Ordering::Relaxed)
+}
 static sqlite3SavedPrng: Mutex<sqlite3PrngType> = Mutex::new(PRNG_INIT);
 
 #[inline]
@@ -71,7 +80,7 @@ fn osRandomness(zBuf: &mut [u8]) {
     for b in zBuf.iter_mut() {
         *b = 0;
     }
-    let seed = crate::global::sqlite3GlobalConfig().iPrngSeed;
+    let seed = prng_seed();
     if seed != 0 {
         let s = seed.to_ne_bytes();
         let n = zBuf.len().min(s.len());

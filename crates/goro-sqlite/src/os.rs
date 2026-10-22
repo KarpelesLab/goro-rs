@@ -391,7 +391,7 @@ pub fn sqlite3OsDlClose(pVfs: &crate::os::Vfs, pHandle: &mut [u8]) {
 
 /// C: `int sqlite3OsRandomness(sqlite3_vfs *pVfs, int nByte, char *zBufOut)`
 pub fn sqlite3OsRandomness(pVfs: &crate::os::Vfs, nByte: i32, zBufOut: &mut [u8]) -> i32 {
-    let seed = crate::global::sqlite3Config.iPrngSeed;
+    let seed = crate::random::prng_seed();
     if seed != 0 {
         let n = nByte.max(0) as usize;
         for b in zBufOut[..n].iter_mut() {

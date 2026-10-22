@@ -6,6 +6,14 @@
 //! printed as `col|col|...` (NULL as an empty field, blobs as X'..' hex),
 //! errors as `Error: <code> <message>`.  A matching C program built from
 //! the amalgamation produces the same format.
+//!
+//! Optional environment variables (same in the C twin):
+//! * `SQLTEST_SEED=n`: seed the PRNG (SQLITE_TESTCTRL_PRNG_SEED) so that
+//!   random() & co are reproducible;
+//! * `SQLTEST_NAMES=1`: before stepping a statement that returns columns,
+//!   print `#name(decltype,db,table,origin)|...`;
+//! * `SQLTEST_CHANGES=1`: after each statement print
+//!   `#changes <changes> <total_changes> <autocommit>`.
 
 use goro_sqlite::int::*;
 use goro_sqlite::mainapi::*;
@@ -33,6 +41,16 @@ fn main() {
         println!("Error: open {}", rc);
         return;
     }
+    if let Ok(z) = std::env::var("SQLTEST_SEED") {
+        let x: i64 = z.trim().parse().unwrap_or(0);
+        goro_sqlite::mainapi::sqlite3_test_control(
+            &mut db,
+            SQLITE_TESTCTRL_PRNG_SEED,
+            &[goro_sqlite::printf::PfArg::Int(x)],
+        );
+    }
+    let b_names = std::env::var_os("SQLTEST_NAMES").is_some();
+    let b_changes = std::env::var_os("SQLTEST_CHANGES").is_some();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut off = 0usize;
@@ -61,6 +79,33 @@ fn main() {
         }
         off += tail;
         let Some(id) = stmt else { continue };
+        let nc = sqlite3_column_count(&mut db, id);
+        if b_names && nc > 0 {
+            let mut line = b"#".to_vec();
+            for i in 0..nc {
+                let v = [
+                    sqlite3_column_name(&mut db, id, i),
+                    sqlite3_column_decltype(&mut db, id, i),
+                    sqlite3_column_database_name(&mut db, id, i),
+                    sqlite3_column_table_name(&mut db, id, i),
+                    sqlite3_column_origin_name(&mut db, id, i),
+                ];
+                if i > 0 {
+                    line.push(b'|');
+                }
+                for (k, z) in v.iter().enumerate() {
+                    line.extend_from_slice(match k {
+                        0 => b"",
+                        1 => b"(",
+                        _ => b",",
+                    });
+                    line.extend_from_slice(z.as_deref().unwrap_or(b"<null>"));
+                }
+                line.push(b')');
+            }
+            line.push(b'\n');
+            out.write_all(&line).unwrap();
+        }
         loop {
             let rc = sqlite3_step(&mut db, id);
             if rc == SQLITE_ROW {
@@ -97,6 +142,13 @@ fn main() {
                 }
                 break;
             }
+        }
+        if b_changes {
+            let c = sqlite3_changes(&mut db);
+            let t = sqlite3_total_changes(&mut db);
+            let a = sqlite3_get_autocommit(&mut db);
+            out.write_all(format!("#changes {} {} {}\n", c, t, a).as_bytes())
+                .unwrap();
         }
         sqlite3_finalize(&mut db, id);
     }

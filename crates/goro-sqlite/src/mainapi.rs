@@ -3196,11 +3196,29 @@ pub fn sqlite3_file_control(
 
 /// C: `int sqlite3_test_control(int op, ...)`
 ///
-/// Interface to the testing logic.  Rust: this build is "untestable"
-/// (SQLITE_UNTESTABLE): always returns 0.
+/// Interface to the testing logic.  Rust: only the operations listed here
+/// are implemented; the others return 0.
+///
+/// SQLITE_TESTCTRL_PRNG_SEED: args = [Int(x)] (C db==0), or
+/// [Int(x), Int(1)] to use the `db` argument (C db!=0).
 pub fn sqlite3_test_control(db: &mut Sqlite3, op: i32, args: &[crate::printf::PfArg]) -> i32 {
-    let _ = (db, op, args);
-    0
+    use crate::printf::PfArg;
+    let rc = 0;
+    if op == SQLITE_TESTCTRL_PRNG_SEED {
+        let mut x = match args.first() {
+            Some(PfArg::Int(v)) => *v as i32,
+            _ => 0,
+        };
+        if let Some(PfArg::Int(1)) = args.get(1) {
+            let y = db.aDb[0].pSchema.schema_cookie;
+            if y != 0 {
+                x = y;
+            }
+        }
+        crate::random::iPrngSeed.store(x as u32, std::sync::atomic::Ordering::Relaxed);
+        crate::random::sqlite3_randomness(0, &mut []);
+    }
+    rc
 }
 
 /// C: `const char * sqlite3_create_filename( const char *zDatabase, const char *zJournal, const char *zWal, int nParam, const char **azParam )`
