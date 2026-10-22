@@ -727,7 +727,10 @@ impl PhpGenerator {
             vm.push_class_scope(scope.clone());
             true
         } else {
-            false
+            // The function's own scope (none for a function outside any
+            // class: the resumer's does not carry over).
+            vm.push_class_scope(self.op_array.scope_class.clone().unwrap_or_default());
+            true
         };
         let pushed_called = if let Some(ref called) = self.called_class {
             vm.called_class_stack.push(called.clone());
@@ -2263,7 +2266,10 @@ impl PhpGenerator {
             vm.push_class_scope(scope.clone());
             true
         } else {
-            false
+            // The function's own scope (none for a function outside any
+            // class: the resumer's does not carry over).
+            vm.push_class_scope(self.op_array.scope_class.clone().unwrap_or_default());
+            true
         };
         let pushed_called = if let Some(ref called) = self.called_class {
             vm.called_class_stack.push(called.clone());
