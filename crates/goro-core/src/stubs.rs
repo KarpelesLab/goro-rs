@@ -787,6 +787,13 @@ pub fn class_is_not_serializable(vm: &crate::vm::Vm, class_lower: &[u8]) -> bool
     let mut cur = class_lower.to_ascii_lowercase();
     for _ in 0..64 {
         if let Some(ce) = vm.classes.get(&cur) {
+            // Internal classes registered by extensions carry the flag in
+            // their stub.
+            if ce.filename.is_none()
+                && find_class(&cur).is_some_and(|c| c.flags & F_NOT_SERIALIZABLE != 0)
+            {
+                return true;
+            }
             match &ce.parent {
                 Some(p) => {
                     cur = p.to_ascii_lowercase();

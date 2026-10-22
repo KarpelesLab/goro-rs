@@ -46,6 +46,71 @@ pub struct GdImageData {
     pub img: Img,
 }
 
+/// The emalloc()ed size of a gdImage (struct, row pointers, rows): what
+/// the bundled libgd charges to memory_limit.
+pub fn image_bytes(im: &Image) -> usize {
+    use goro_core::value::zend_mm_size;
+    let row = if im.true_color {
+        im.sx as usize * 4
+    } else {
+        im.sx as usize
+    };
+    zend_mm_size(7232)
+        + zend_mm_size(8 * im.sy.max(0) as usize)
+        + im.sy.max(0) as usize * zend_mm_size(row)
+}
+
+/// emalloc() of `bytes` more for an image (reported as `row`-sized
+/// allocations): Err with the memory-limit fatal error when over the limit.
+pub fn charge(vm: &mut Vm, bytes: usize, row: usize) -> Result<(), VmError> {
+    if goro_core::value::memory_alloc_reporting(bytes, row) {
+        Ok(())
+    } else {
+        Err(vm.memory_limit_fatal())
+    }
+}
+
+impl Drop for GdImageData {
+    /// php_gd_image_object_free()
+    fn drop(&mut self) {
+        if let Ok(im) = self.img.try_borrow() {
+            goro_core::value::memory_free(image_bytes(&im));
+        }
+    }
+}
+
+/// zval_get_long(): objects that cannot be converted warn and give 1.
+pub fn zval_get_long(vm: &mut Vm, v: &Value) -> i64 {
+    let v = v.deref();
+    if let Value::Object(o) = &v {
+        if goro_core::value::native_cast(o, 1).is_none() {
+            let m = format!(
+                "Object of class {} could not be converted to int",
+                goro_core::value::display_class_name(&o.borrow().class_name)
+            );
+            vm.emit_warning(&m);
+            return 1;
+        }
+    }
+    v.to_long_coerced()
+}
+
+/// zval_get_double(): objects that cannot be converted warn and give 1.0.
+pub fn zval_get_double(vm: &mut Vm, v: &Value) -> f64 {
+    let v = v.deref();
+    if let Value::Object(o) = &v {
+        if goro_core::value::native_cast(o, 2).is_none() {
+            let m = format!(
+                "Object of class {} could not be converted to float",
+                goro_core::value::display_class_name(&o.borrow().class_name)
+            );
+            vm.emit_warning(&m);
+            return 1.0;
+        }
+    }
+    v.to_double()
+}
+
 /// php_gd_font_object
 pub struct GdFontData {
     pub font: Rc<Font>,
@@ -114,11 +179,17 @@ fn new_native_object(
 }
 
 /// php_gd_assign_libgdimageptr_as_extgdimage()
-pub fn wrap_image(vm: &mut Vm, im: Image) -> Value {
+pub fn wrap_image(vm: &mut Vm, im: Image) -> R {
+    let row = if im.true_color {
+        im.sx as usize * 4
+    } else {
+        im.sx as usize
+    };
+    charge(vm, image_bytes(&im), goro_core::value::zend_mm_size(row))?;
     let d = Rc::new(GdImageData {
         img: Rc::new(RefCell::new(im)),
     });
-    new_native_object(vm, b"GdImage", d, &IMAGE_HANDLERS)
+    Ok(new_native_object(vm, b"GdImage", d, &IMAGE_HANDLERS))
 }
 
 pub fn wrap_font(vm: &mut Vm, font: Font) -> Value {

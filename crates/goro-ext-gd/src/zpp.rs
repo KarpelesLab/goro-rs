@@ -95,7 +95,13 @@ pub struct Func {
 impl Func {
     pub fn new(name: &'static str) -> Func {
         let params = goro_core::stubs::find_function(name.as_bytes())
-            .map(|f| f.args.iter().map(|a| a.name).collect())
+            .map(|f| {
+                f.args
+                    .iter()
+                    .take_while(|a| a.flags & goro_core::stubs::A_VARIADIC == 0)
+                    .map(|a| a.name)
+                    .collect()
+            })
             .unwrap_or_default();
         Func { name, params }
     }

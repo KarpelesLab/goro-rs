@@ -157,14 +157,11 @@ fn imagesetstyle(vm: &mut Vm, a: &[Value]) -> R {
     let (f, a) = args(vm, "imagesetstyle", "Oa", a)?;
     let im = a[0].img();
     let styles = a[1].arr();
-    let styles = styles.borrow();
-    if styles.is_empty() {
+    let vals: Vec<Value> = styles.borrow().iter().map(|(_, v)| v.clone()).collect();
+    if vals.is_empty() {
         return Err(f.value_error(vm, 2, "must not be empty"));
     }
-    let v: Vec<i32> = styles
-        .iter()
-        .map(|(_, v)| v.deref().to_long_coerced() as i32)
-        .collect();
+    let v: Vec<i32> = vals.iter().map(|x| zval_get_long(vm, x) as i32).collect();
     im.borrow_mut().set_style(&v);
     Ok(Value::True)
 }
@@ -186,7 +183,7 @@ fn create_common(vm: &mut Vm, name: &'static str, a: &[Value], truecolor: bool) 
     };
     flush_errors(vm, &f);
     match im {
-        Some(im) => Ok(wrap_image(vm, im)),
+        Some(im) => wrap_image(vm, im),
         None => Ok(Value::False),
     }
 }
@@ -216,7 +213,14 @@ fn imagetruecolortopalette(vm: &mut Vm, a: &[Value]) -> R {
             &format!("must be greater than 0 and less than {}", i32::MAX),
         ));
     }
+    let before = image_bytes(&im.borrow());
     let ok = goro_gd::topal::true_color_to_palette(&mut im.borrow_mut(), dither, n as i32);
+    let after = image_bytes(&im.borrow());
+    if after > before {
+        charge(vm, after - before, after - before)?;
+    } else {
+        goro_core::value::memory_free(before - after);
+    }
     flush_errors(vm, &f);
     if ok {
         Ok(Value::True)
@@ -228,7 +232,20 @@ fn imagetruecolortopalette(vm: &mut Vm, a: &[Value]) -> R {
 
 fn imagepalettetotruecolor(vm: &mut Vm, a: &[Value]) -> R {
     let (_, a) = args(vm, "imagepalettetotruecolor", "O", a)?;
-    let ok = a[0].img().borrow_mut().palette_to_true_color();
+    let im = a[0].img();
+    let (tc, sx, sy) = {
+        let i = im.borrow();
+        (i.true_color, i.sx as usize, i.sy as usize)
+    };
+    if !tc {
+        // gdCalloc() of the row pointers and gdMalloc() of each row,
+        // before the palette rows are freed
+        use goro_core::value::zend_mm_size;
+        let row = zend_mm_size(sx * 4);
+        charge(vm, zend_mm_size(8 * sy) + sy * row, row)?;
+        goro_core::value::memory_free(zend_mm_size(8 * sy) + sy * zend_mm_size(sx));
+    }
+    let ok = im.borrow_mut().palette_to_true_color();
     Ok(vbool(ok))
 }
 
@@ -284,7 +301,7 @@ fn arc_angle(v: i64) -> i32 {
 }
 
 fn imagefilledarc(vm: &mut Vm, a: &[Value]) -> R {
-    let (_, a) = args(vm, "imagefilledarc", "Olllllllll", a)?;
+    let (_, a) = args(vm, "imagefilledarc", "Ollllllll", a)?;
     let e = arc_angle(a[6].long_or(0));
     let st = arc_angle(a[5].long_or(0));
     a[0].img().borrow_mut().filled_arc(
@@ -756,20 +773,20 @@ fn polygon_common(vm: &mut Vm, name: &'static str, a: &[Value], mode: i32) -> R 
         );
         return Err(f.plain_value_error(vm, &m));
     }
-    let pts = {
-        let p = points.borrow();
-        let get = |i: i64| -> i32 {
-            p.get(&ArrayKey::Int(i))
-                .map(|v| v.deref().to_long_coerced() as i32)
-                .unwrap_or(0)
-        };
-        (0..npoints as i64)
-            .map(|i| Point {
-                x: get(i * 2),
-                y: get(i * 2 + 1),
-            })
-            .collect::<Vec<_>>()
-    };
+    let mut pts = Vec::with_capacity(npoints as usize);
+    for i in 0..npoints as i64 {
+        let mut c = [0i32; 2];
+        for (k, slot) in c.iter_mut().enumerate() {
+            let v = points
+                .borrow()
+                .get(&ArrayKey::Int(i * 2 + k as i64))
+                .cloned();
+            if let Some(v) = v {
+                *slot = zval_get_long(vm, &v) as i32;
+            }
+        }
+        pts.push(Point { x: c[0], y: c[1] });
+    }
     let im = a[0].img();
     let mut im = im.borrow_mut();
     if im.aa != 0 {
@@ -1087,17 +1104,13 @@ fn imagefilter(vm: &mut Vm, av: &[Value]) -> R {
                 return Err(f.value_error(vm, 4, &format!("must be between 0 and {}", i32::MAX)));
             }
             let im = a[0].img();
-            let mut im = im.borrow_mut();
             match &a[4] {
                 Arg::Arr(colors) if !colors.borrow().is_empty() => {
-                    let c: Vec<i32> = colors
-                        .borrow()
-                        .iter()
-                        .map(|(_, v)| v.deref().to_long_coerced() as i32)
-                        .collect();
-                    gf::scatter_color(&mut im, sub as i32, plus as i32, &c)
+                    let vals: Vec<Value> = colors.borrow().iter().map(|(_, v)| v.clone()).collect();
+                    let c: Vec<i32> = vals.iter().map(|v| zval_get_long(vm, v) as i32).collect();
+                    gf::scatter_color(&mut im.borrow_mut(), sub as i32, plus as i32, &c)
                 }
-                _ => gf::scatter(&mut im, sub as i32, plus as i32),
+                _ => gf::scatter(&mut im.borrow_mut(), sub as i32, plus as i32),
             }
         }
     };
@@ -1130,8 +1143,8 @@ fn imageconvolution(vm: &mut Vm, a: &[Value]) -> R {
                     return Err(f.value_error(vm, 2, &msg));
                 }
                 for j in 0..3usize {
-                    match row.get(&ArrayKey::Int(j as i64)) {
-                        Some(v) => matrix[i][j] = v.deref().to_double() as f32,
+                    match row.get(&ArrayKey::Int(j as i64)).cloned() {
+                        Some(v) => matrix[i][j] = zval_get_double(vm, &v) as f32,
                         None => {
                             let msg = format!(
                                 "must be a 3x3 array, matrix[{}][{}] cannot be found (missing integer key)",

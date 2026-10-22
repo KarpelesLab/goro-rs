@@ -59,7 +59,7 @@ fn imagerotate(vm: &mut Vm, a: &[Value]) -> R {
     let r = gi::rotate_interpolated(&mut im.borrow_mut(), degrees as f32, a[2].long_or(0) as i32);
     flush_errors(vm, &f);
     match r {
-        Some(d) => Ok(wrap_image(vm, d)),
+        Some(d) => wrap_image(vm, d),
         None => Ok(Value::False),
     }
 }
@@ -95,7 +95,7 @@ fn rect_arg(vm: &mut Vm, f: &Func, n: usize, arr: &PhpArray) -> Result<Rect, VmE
         .enumerate()
     {
         match str_key(arr, k) {
-            Some(v) => r[i] = v.to_long_coerced() as i32,
+            Some(v) => r[i] = zval_get_long(vm, &v) as i32,
             None => return Err(f.value_error(vm, n, &format!("must have {} \"{}\" key", art, k))),
         }
     }
@@ -135,7 +135,7 @@ fn imagecrop(vm: &mut Vm, a: &[Value]) -> R {
     let r = goro_gd::crop::crop(&a[0].img().borrow(), &rect);
     flush_errors(vm, &f);
     match r {
-        Some(d) => Ok(wrap_image(vm, d)),
+        Some(d) => wrap_image(vm, d),
         None => Ok(Value::False),
     }
 }
@@ -166,7 +166,7 @@ fn imagecropauto(vm: &mut Vm, a: &[Value]) -> R {
     };
     flush_errors(vm, &f);
     match r {
-        Some(d) => Ok(wrap_image(vm, d)),
+        Some(d) => wrap_image(vm, d),
         None => Ok(Value::False),
     }
 }
@@ -230,7 +230,7 @@ fn imagescale(vm: &mut Vm, a: &[Value]) -> R {
     };
     flush_errors(vm, &f);
     match r {
-        Some(d) => Ok(wrap_image(vm, d)),
+        Some(d) => wrap_image(vm, d),
         None => Ok(Value::False),
     }
 }
@@ -294,7 +294,7 @@ fn imageaffine(vm: &mut Vm, a: &[Value]) -> R {
     let r = gi::transform_affine_get_image(&mut src.borrow_mut(), rect.as_mut(), &affine);
     flush_errors(vm, &f);
     match r {
-        Some(d) => Ok(wrap_image(vm, d)),
+        Some(d) => wrap_image(vm, d),
         None => Ok(Value::False),
     }
 }
@@ -325,11 +325,11 @@ fn imageaffinematrixget(vm: &mut Vm, a: &[Value]) -> R {
             };
             let arr = arr.borrow();
             let x = match str_key(&arr, "x") {
-                Some(v) => v.to_double(),
+                Some(v) => zval_get_double(vm, &v),
                 None => return Err(f.value_error(vm, 2, "must have an \"x\" key")),
             };
             let y = match str_key(&arr, "y") {
-                Some(v) => v.to_double(),
+                Some(v) => zval_get_double(vm, &v),
                 None => return Err(f.value_error(vm, 2, "must have a \"y\" key")),
             };
             if ty == 0 {
@@ -339,7 +339,7 @@ fn imageaffinematrixget(vm: &mut Vm, a: &[Value]) -> R {
             }
         }
         2..=4 => {
-            let angle = options.to_double();
+            let angle = zval_get_double(vm, &options);
             match ty {
                 3 => matrix::shear_horizontal(angle),
                 4 => matrix::shear_vertical(angle),

@@ -144,7 +144,7 @@ fn create_from(vm: &mut Vm, name: &'static str, a: &[Value], kind: Kind) -> R {
     flush_errors(vm, &f);
     ext_io::close(vm, id);
     match im {
-        Some(im) => Ok(wrap_image(vm, im)),
+        Some(im) => wrap_image(vm, im),
         None => {
             f.warn(
                 vm,
@@ -250,7 +250,7 @@ fn imagecreatefromstring(vm: &mut Vm, a: &[Value]) -> R {
     };
     flush_errors(vm, &f);
     match im {
-        Some(im) => Ok(wrap_image(vm, im)),
+        Some(im) => wrap_image(vm, im),
         None => {
             f.warn(
                 vm,
