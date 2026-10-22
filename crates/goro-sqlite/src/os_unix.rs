@@ -1531,7 +1531,7 @@ fn unixOpen(
     }
 
     if isDelete != 0 {
-        let _ = std::fs::remove_file(os_path(&zName));
+        let _ = std::fs::remove_file(os_path(crate::os::zpath_name(&zName)));
     }
 
     // Set up appropriate ctrlFlags

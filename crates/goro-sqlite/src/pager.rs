@@ -6841,3 +6841,92 @@ mod super_tests {
         assert!(!zSuper.exists());
     }
 }
+
+#[cfg(test)]
+mod interop_lock_tests {
+    use super::*;
+    use std::io::{BufRead, Write};
+    use std::os::unix::ffi::OsStrExt;
+    use std::process::{Command, Stdio};
+
+    /// The C library holds a lock; the Rust pager must see it.
+    #[test]
+    #[ignore]
+    fn interop_rust_sees_c_locks() {
+        let cli = std::env::var("SQLITE3REF").expect("SQLITE3REF");
+        let d =
+            std::env::temp_dir().join(format!("goro-sqlite-interop-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let db = d.join("x.db");
+        let st = Command::new(&cli)
+            .arg(&db)
+            .arg("pragma page_size=1024; create table t(a); insert into t values(1);")
+            .status()
+            .unwrap();
+        assert!(st.success());
+
+        let vfs = crate::os_unix::sqlite3UnixVfs();
+        let mut pp = None;
+        let vf = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_MAIN_DB;
+        let z = db.as_os_str().as_bytes().to_vec();
+        assert_eq!(
+            sqlite3PagerOpen(&vfs, &mut pp, Some(&z), 136, 0, vf, None),
+            SQLITE_OK
+        );
+        let p = pp.unwrap();
+        let mut sz = 1024u32;
+        sqlite3PagerSetPagesize(&mut p.borrow_mut(), &mut sz, -1);
+
+        for (stmt, shared_ok, reserved_ok) in [
+            ("begin immediate;", true, false),
+            ("begin exclusive;", false, false),
+        ] {
+            let mut c = Command::new(&cli)
+                .arg(&db)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = c.stdin.take().unwrap();
+            let mut out = std::io::BufReader::new(c.stdout.take().unwrap());
+            writeln!(stdin, "{} select 'ready';", stmt).unwrap();
+            stdin.flush().unwrap();
+            let mut line = String::new();
+            out.read_line(&mut line).unwrap();
+            assert_eq!(line.trim(), "ready");
+
+            let rc = sqlite3PagerSharedLock(&mut p.borrow_mut());
+            assert_eq!(rc == SQLITE_OK, shared_ok, "{}", stmt);
+            if rc == SQLITE_OK {
+                let mut p1 = None;
+                assert_eq!(
+                    sqlite3PagerGet(&mut p.borrow_mut(), 1, &mut p1, 0),
+                    SQLITE_OK
+                );
+                let p1 = p1.unwrap();
+                let rc = sqlite3PagerBegin(&mut p.borrow_mut(), 0, 0);
+                assert_eq!(rc == SQLITE_OK, reserved_ok, "{}", stmt);
+                assert_eq!(rc, SQLITE_BUSY);
+                sqlite3PagerUnrefPageOne(&p1);
+            } else {
+                assert_eq!(rc, SQLITE_BUSY);
+            }
+            writeln!(stdin, "commit;").unwrap();
+            drop(stdin);
+            assert!(c.wait().unwrap().success());
+        }
+        // Once the C connection is gone, everything works.
+        assert_eq!(sqlite3PagerSharedLock(&mut p.borrow_mut()), SQLITE_OK);
+        let mut p1 = None;
+        assert_eq!(
+            sqlite3PagerGet(&mut p.borrow_mut(), 1, &mut p1, 0),
+            SQLITE_OK
+        );
+        let p1 = p1.unwrap();
+        assert_eq!(sqlite3PagerBegin(&mut p.borrow_mut(), 1, 0), SQLITE_OK);
+        assert_eq!(sqlite3PagerRollback(&mut p.borrow_mut()), SQLITE_OK);
+        sqlite3PagerUnrefPageOne(&p1);
+        sqlite3PagerClose(None, &mut p.borrow_mut());
+    }
+}
