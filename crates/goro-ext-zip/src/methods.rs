@@ -1922,7 +1922,7 @@ fn get_stream(
         return Ok(Value::False);
     };
     let id = crate::stream::alloc(zf, None, &sb.name);
-    Ok(Value::Resource(id))
+    Ok(Value::resource(&id))
 }
 
 fn m_get_stream_index(vm: &mut Vm, f: &Func, o: &Obj, args: &[Value]) -> Mr {

@@ -84,7 +84,7 @@ pub(crate) fn is_plain_scalar(v: &Value) -> bool {
 #[inline(always)]
 pub(crate) fn set_plain(slot: &mut Value, v: Value) {
     let old = std::mem::replace(slot, v);
-    if matches!(old, Value::String(_)) {
+    if matches!(old, Value::String(_) | Value::Resource(_)) {
         drop(old);
     } else {
         debug_assert!(!matches!(
@@ -734,7 +734,13 @@ impl crate::vm::Vm {
                     let end = (b as usize).min(tmps.len());
                     let range = &mut tmps[(a as usize).min(end)..end];
                     if range.iter().any(|v| {
-                        matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_))
+                        matches!(
+                            v,
+                            Value::Object(_)
+                                | Value::Array(_)
+                                | Value::Reference(_)
+                                | Value::Resource(_)
+                        )
                     }) {
                         break 'run ip;
                     }

@@ -1018,7 +1018,7 @@ fn process_stdin(
             .constants
             .get(b"STDIN".as_slice())
             .cloned()
-            .unwrap_or(Value::Resource(1));
+            .unwrap_or(Value::resource(1));
         let fgets = Value::String(PhpString::from_bytes(b"fgets"));
         let mut index: i64 = 0;
         loop {

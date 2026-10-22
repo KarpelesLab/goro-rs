@@ -1523,7 +1523,7 @@ pub(crate) fn stream_socket_client(vm: &mut Vm, args: &[Value]) -> Result<Value,
     };
     if let Some(k) = &hashkey {
         if let Some(fid) = persistent_lookup(k) {
-            return Ok(Value::Resource(fid));
+            return Ok(Value::resource(&fid));
         }
     }
     let op = if flags & (PHP_STREAM_CLIENT_CONNECT | PHP_STREAM_CLIENT_ASYNC_CONNECT) != 0 {
@@ -1538,7 +1538,7 @@ pub(crate) fn stream_socket_client(vm: &mut Vm, args: &[Value]) -> Result<Value,
             if let Some(k) = hashkey {
                 persistent_store(k, fid);
             }
-            Ok(Value::Resource(fid))
+            Ok(Value::resource(&fid))
         }
         Err(e) => {
             let quoted = php_addslashes(&host);
@@ -1589,7 +1589,7 @@ pub(crate) fn stream_socket_server(vm: &mut Vm, args: &[Value]) -> Result<Value,
     set_ref(args.get(1), Value::Long(0));
     set_ref(args.get(2), str_val(""));
     match xport_create(vm, F, &host, XportOp::Server { flags }, None, ctx) {
-        Ok(fid) => Ok(Value::Resource(fid)),
+        Ok(fid) => Ok(Value::resource(&fid)),
         Err(e) => {
             // The host is printed as a C string.
             let shown: Vec<u8> = host.iter().take_while(|&&c| c != 0).copied().collect();
@@ -1687,7 +1687,7 @@ pub(crate) fn stream_socket_accept(vm: &mut Vm, args: &[Value]) -> Result<Value,
     if let (Some(p), Some(r)) = (peer, args.get(2)) {
         set_ref(Some(r), Value::String(PhpString::from_vec(p)));
     }
-    Ok(Value::Resource(cfid))
+    Ok(Value::resource(&cfid))
 }
 
 /// PHP_FUNCTION(stream_socket_get_name)
@@ -1738,8 +1738,8 @@ pub(crate) fn stream_socket_pair(vm: &mut Vm, args: &[Value]) -> Result<Value, V
     let a = stream_from_socket(vm, fds[0]);
     let b = stream_from_socket(vm, fds[1]);
     let mut arr = PhpArray::new();
-    arr.push(Value::Resource(a));
-    arr.push(Value::Resource(b));
+    arr.push(Value::resource(&a));
+    arr.push(Value::resource(&b));
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
@@ -2003,7 +2003,7 @@ pub(crate) fn fsockopen(vm: &mut Vm, args: &[Value], persistent: bool) -> Result
         if let Some(fid) = persistent_lookup(k) {
             set_ref(args.get(2), Value::Long(0));
             set_ref(args.get(3), str_val(""));
-            return Ok(Value::Resource(fid));
+            return Ok(Value::resource(&fid));
         }
     }
     match xport_create(
@@ -2022,7 +2022,7 @@ pub(crate) fn fsockopen(vm: &mut Vm, args: &[Value], persistent: bool) -> Result
             if let Some(k) = hashkey {
                 persistent_store(k, fid);
             }
-            Ok(Value::Resource(fid))
+            Ok(Value::resource(&fid))
         }
         Err(e) => {
             let shown: Vec<u8> = host.iter().take_while(|&&c| c != 0).copied().collect();
@@ -2046,7 +2046,7 @@ pub(crate) fn stream_set_blocking(vm: &mut Vm, args: &[Value]) -> Result<Value, 
     check_arity(vm, F, args, 2, 2)?;
     let raw = args[0].deref();
     let fid = match raw {
-        Value::Resource(1..=3) => raw.to_long(),
+        Value::Resource(ref r) if (1..=3).contains(&r.id()) => raw.to_long(),
         _ => require_open_stream(vm, &args[0], F)?,
     };
     let block = zpp_bool(vm, F, 2, "enable", &args[1])?;
@@ -2092,7 +2092,7 @@ pub(crate) type FdResolver<'a> = dyn FnMut(&mut Vm, i64) -> Result<Option<i32>, 
 
 fn element_stream_id(v: &Value) -> Option<i64> {
     match v.deref() {
-        Value::Resource(id) => Some(id),
+        Value::Resource(id) => Some(id.id()),
         _ => None,
     }
 }
@@ -2354,7 +2354,7 @@ pub(crate) fn stream_select(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
 fn hook_stream_socket_fd(vm: &mut Vm, v: &Value, func: &str) -> Result<Option<i32>, VmError> {
     let v = v.deref();
     let id = match v {
-        Value::Resource(id) => id,
+        Value::Resource(id) => id.id(),
         _ => {
             return Err(throw(
                 vm,
@@ -2442,7 +2442,7 @@ fn hook_stream_from_socket(vm: &mut Vm, fd: i32) -> i64 {
 
 fn hook_close_stream(vm: &mut Vm, id: i64) {
     if FILE_HANDLES.with(|h| h.borrow().contains_key(&id)) {
-        let _ = super::fclose_fn(vm, &[Value::Resource(id)]);
+        let _ = super::fclose_fn(vm, &[Value::resource(&id)]);
     }
 }
 
@@ -2695,7 +2695,7 @@ pub(crate) fn stream_socket_enable_crypto(vm: &mut Vm, args: &[Value]) -> Result
     };
     let session = match args.get(3).map(|v| v.deref()) {
         None | Some(Value::Null) => None,
-        Some(Value::Resource(id)) => Some(id),
+        Some(Value::Resource(id)) => Some(id.id()),
         Some(v) => {
             return Err(type_error(
                 vm,

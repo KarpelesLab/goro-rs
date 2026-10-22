@@ -367,7 +367,7 @@ fn magic_stream(vm: &mut Vm, func: &str, ms: &mut MagicSet, id: i64) -> Option<V
     if ms.reset(true).is_err() {
         return None;
     }
-    let (mode, size) = match ext_io::call(vm, b"fstat", &[Value::Resource(id)]) {
+    let (mode, size) = match ext_io::call(vm, b"fstat", &[Value::resource(&id)]) {
         Ok(Value::Array(a)) => {
             let a = a.borrow();
             let get = |k: &[u8]| match a.get(&goro_core::array::ArrayKey::String(
@@ -390,7 +390,7 @@ fn magic_stream(vm: &mut Vm, func: &str, ms: &mut MagicSet, id: i64) -> Option<V
         match ext_io::call(
             vm,
             b"fread",
-            &[Value::Resource(id), Value::Long(ms.bytes_max as i64)],
+            &[Value::resource(&id), Value::Long(ms.bytes_max as i64)],
         ) {
             Ok(Value::String(s)) => s.as_bytes().to_vec(),
             _ => Vec::new(),
@@ -438,14 +438,14 @@ fn from_path(
     let mut fargs = vec![vstr(path), vstr(b"rb")];
     if let Some(c) = ctx {
         fargs.push(Value::False);
-        fargs.push(Value::Resource(c));
+        fargs.push(Value::resource(&c));
     }
     let id = match as_caller(vm, func, |vm| ext_io::call_as(vm, func, b"fopen", &fargs)) {
         Ok(Value::Resource(id)) => id,
         _ => return None,
     };
     let mut ret = None;
-    if let Ok(Value::Array(a)) = ext_io::call(vm, b"fstat", &[Value::Resource(id)]) {
+    if let Ok(Value::Array(a)) = ext_io::call(vm, b"fstat", &[Value::resource(&id)]) {
         let mode = match a
             .borrow()
             .get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(
@@ -457,13 +457,13 @@ fn from_path(
         if mode & S_IFDIR != 0 {
             ret = Some(b"directory".to_vec());
         } else {
-            ret = magic_stream(vm, func, ms, id);
+            ret = magic_stream(vm, func, ms, id.id());
             if ret.is_none() {
                 identify_warning(vm, func, ms);
             }
         }
     }
-    ext_io::close(vm, id);
+    ext_io::close(vm, id.id());
     ret
 }
 
@@ -471,11 +471,11 @@ fn context_arg(vm: &mut Vm, f: &Func, v: &Arg) -> Result<Option<i64>, ()> {
     match v {
         Arg::Any(v) => match v.deref() {
             Value::Resource(id) => {
-                let t = goro_core::value::resource_type_of(id);
-                if goro_core::value::is_open_resource(id)
+                let t = goro_core::value::resource_type_of(id.id());
+                if goro_core::value::is_open_resource(id.id())
                     && t.as_deref() == Some(b"stream-context".as_slice())
                 {
-                    Ok(Some(id))
+                    Ok(Some(id.id()))
                 } else {
                     let m = format!(
                         "{}(): supplied resource is not a valid Stream-Context resource",
@@ -677,7 +677,7 @@ fn mime_content_type(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 zpp::throw(vm, b"TypeError", &m);
                 return Err(verr(vm));
             }
-            stream = Some(*id);
+            stream = Some(id.id());
         }
         other => {
             let m = format!(

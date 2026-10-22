@@ -20,7 +20,7 @@ fn context_options(ctx: Option<&Value>) -> (PhpArray, Option<PhpArray>) {
     let ctx = match ctx.map(|c| c.deref()) {
         None | Some(Value::Null) | Some(Value::Undef) => crate::misc::DEFAULT_STREAM_CTX
             .with(|d| d.get())
-            .map(Value::Resource),
+            .map(Value::resource),
         other => other,
     };
     match ctx {

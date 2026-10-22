@@ -1015,7 +1015,7 @@ pub fn pg_socket(vm: &mut Vm, f: &'static str, args: &[Value]) -> Value {
         return Value::False;
     }
     let id = (hooks.stream_from_socket)(vm, dup);
-    Value::Resource(id)
+    Value::resource(&id)
 }
 
 pub fn pg_consume_input(vm: &mut Vm, f: &'static str, args: &[Value]) -> Value {
@@ -1090,7 +1090,7 @@ pub fn pg_socket_poll(vm: &mut Vm, f: &'static str, args: &[Value]) -> Value {
     let Some(hooks) = vm.socket_stream_hooks else {
         return Value::Null;
     };
-    let v = Value::Resource(id);
+    let v = Value::resource(&id);
     // php_stream_cast(..., 0): no error reporting
     let saved = vm.warning_capture.replace(Vec::new());
     let r = (hooks.stream_socket_fd)(vm, &v, f);

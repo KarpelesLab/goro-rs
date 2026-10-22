@@ -311,11 +311,12 @@ impl Vm {
                 .unwrap_or_else(|| "operation failed".to_string()));
         };
         let mut names = Vec::new();
-        while let Some(Value::String(n)) = self.spl_call_builtin(b"readdir", &[Value::Resource(id)])
+        while let Some(Value::String(n)) =
+            self.spl_call_builtin(b"readdir", &[Value::resource(&id)])
         {
             names.push(n.as_bytes().to_vec());
         }
-        self.spl_call_builtin(b"closedir", &[Value::Resource(id)]);
+        self.spl_call_builtin(b"closedir", &[Value::resource(&id)]);
         Ok(names)
     }
 

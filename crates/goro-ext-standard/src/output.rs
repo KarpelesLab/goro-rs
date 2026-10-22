@@ -198,8 +198,8 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
             }
         }
         Value::Resource(id) => {
-            let t = if goro_core::value::is_open_resource(*id) {
-                goro_core::value::resource_type_of(*id)
+            let t = if goro_core::value::is_open_resource(id.id()) {
+                goro_core::value::resource_type_of(id.id())
                     .map(|v| String::from_utf8_lossy(&v).to_string())
                     .unwrap_or_else(|| "Unknown".to_string())
             } else {
@@ -391,12 +391,12 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
             vm.write_output(format!("{}int({})\n", prefix, n).as_bytes());
         }
         Value::Resource(id) => {
-            if goro_core::value::is_open_resource(*id) {
-                let t = goro_core::value::resource_type_of(*id)
+            if goro_core::value::is_open_resource(id.id()) {
+                let t = goro_core::value::resource_type_of(id.id())
                     .map(|v| String::from_utf8_lossy(&v).to_string())
                     .unwrap_or_else(|| "Unknown".to_string());
                 vm.write_output(format!("{}resource({}) of type ({})\n", prefix, id, t).as_bytes());
-            } else if goro_core::value::is_registered_resource(*id) {
+            } else if goro_core::value::is_registered_resource(id.id()) {
                 // Closed resource: PHP shows "resource(N) of type (Unknown)"
                 vm.write_output(
                     format!("{}resource({}) of type (Unknown)\n", prefix, id).as_bytes(),

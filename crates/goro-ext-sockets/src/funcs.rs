@@ -1303,7 +1303,7 @@ pub fn socket_import_stream(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
     let Some(hooks) = vm.socket_stream_hooks else {
         return Value::False;
     };
-    let fd = match (hooks.stream_socket_fd)(vm, &Value::Resource(sid), f) {
+    let fd = match (hooks.stream_socket_fd)(vm, &Value::resource(&sid), f) {
         Ok(Some(fd)) => fd,
         Ok(None) => return Value::False,
         Err(_) => return Value::Null,
@@ -1327,7 +1327,7 @@ pub fn socket_export_stream(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
         return Value::Null;
     };
     if let Some(sid) = sock.zstream.get() {
-        return Value::Resource(sid);
+        return Value::resource(&sid);
     }
     let Some(hooks) = vm.socket_stream_hooks else {
         vm.emit_warning(&format!("{}(): Failed to create stream", f));
@@ -1336,7 +1336,7 @@ pub fn socket_export_stream(vm: &mut Vm, f: &str, args: &[Value]) -> Value {
     let sid = (hooks.stream_from_socket)(vm, sock.fd.get());
     goro_ext_standard::sockets_streams::ext_set_blocking(sid, sock.blocking.get());
     sock.zstream.set(Some(sid));
-    Value::Resource(sid)
+    Value::resource(&sid)
 }
 
 const HINTS_KEYS_ERR: &str =

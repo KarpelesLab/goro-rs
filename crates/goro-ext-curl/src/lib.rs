@@ -214,7 +214,7 @@ fn new_state() -> CurlState {
 
 pub(crate) fn stream_id(v: &Option<Value>) -> Option<i64> {
     match v {
-        Some(Value::Resource(id)) => Some(*id),
+        Some(Value::Resource(id)) => Some(id.id()),
         _ => None,
     }
 }
@@ -1136,7 +1136,7 @@ fn callable_slot(h: &mut Handlers, option: i64) -> Option<(&mut Option<Value>, &
 /// The PHP stream behind a File-Handle option value.
 fn fetch_file_handle(vm: &mut Vm, v: &Value) -> Result<i64, ()> {
     match v {
-        Value::Resource(id) if streams::is_stream(*id) => Ok(*id),
+        Value::Resource(id) if streams::is_stream(id.id()) => Ok(id.id()),
         Value::Resource(_) => {
             let f = vm.current_builtin_name().unwrap_or_default();
             zpp::throw(
@@ -1340,7 +1340,7 @@ pub(crate) fn php_curl_setopt(
                         h.write.method = PHP_CURL_STDOUT;
                     }
                     Some(id) if writable_mode(id) => {
-                        h.write.stream = Some(Value::Resource(id));
+                        h.write.stream = Some(Value::resource(&id));
                         h.write.method = PHP_CURL_FILE;
                     }
                     Some(_) => {
@@ -1358,7 +1358,7 @@ pub(crate) fn php_curl_setopt(
                         h.write_header.method = PHP_CURL_IGNORE;
                     }
                     Some(id) if writable_mode(id) => {
-                        h.write_header.stream = Some(Value::Resource(id));
+                        h.write_header.stream = Some(Value::resource(&id));
                         h.write_header.method = PHP_CURL_FILE;
                     }
                     Some(_) => {
@@ -1371,11 +1371,11 @@ pub(crate) fn php_curl_setopt(
                     }
                 },
                 CURLOPT_INFILE => {
-                    h.read.stream = what.map(Value::Resource);
+                    h.read.stream = what.map(Value::resource);
                 }
                 _ => match what {
                     None => h.std_err = None,
-                    Some(id) if writable_mode(id) => h.std_err = Some(Value::Resource(id)),
+                    Some(id) if writable_mode(id) => h.std_err = Some(Value::resource(&id)),
                     Some(_) => {
                         drop(st);
                         zpp::plain_value_error(

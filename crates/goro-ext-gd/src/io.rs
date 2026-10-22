@@ -399,7 +399,7 @@ pub fn output_context(
         Value::Resource(id) => {
             if ext_io::is_stream(vm, &v) {
                 Ok(Some(Sink::Stream {
-                    id: *id,
+                    id: id.id(),
                     close: false,
                 }))
             } else {

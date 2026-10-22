@@ -560,7 +560,7 @@ fn posix_ttyname(vm: &mut Vm, args: &[Value]) -> R {
     let f = "posix_ttyname";
     let z = arg(args, 0);
     let fd = if let Value::Resource(id) = z {
-        match stream_get_fd(vm, f, id) {
+        match stream_get_fd(vm, f, id.id()) {
             Fd::Ok(fd) => fd,
             Fd::False => return Ok(Value::False),
             Fd::Throw => return Ok(Value::Null),
@@ -595,7 +595,7 @@ fn posix_isatty(vm: &mut Vm, args: &[Value]) -> R {
     let f = "posix_isatty";
     let z = arg(args, 0);
     let fd = if let Value::Resource(id) = z {
-        match stream_get_fd(vm, f, id) {
+        match stream_get_fd(vm, f, id.id()) {
             Fd::Ok(fd) => fd,
             Fd::False => return Ok(Value::False),
             Fd::Throw => return Ok(Value::Null),
@@ -966,7 +966,7 @@ fn posix_fpathconf(vm: &mut Vm, args: &[Value]) -> R {
         Err(()) => return Ok(Value::Null),
     };
     let fd = if let Value::Resource(id) = z {
-        match stream_get_fd(vm, f, id) {
+        match stream_get_fd(vm, f, id.id()) {
             Fd::Ok(fd) => fd,
             Fd::False => return Ok(Value::False),
             Fd::Throw => return Ok(Value::Null),

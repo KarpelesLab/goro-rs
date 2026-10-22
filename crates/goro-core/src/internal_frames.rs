@@ -404,10 +404,18 @@ impl Vm {
         lname: &[u8],
         args: &[Value],
     ) -> Result<Value, crate::vm::VmError> {
-        if self.observer.is_none() {
-            return f(self, args);
+        let first_res = crate::value::next_resource_id();
+        let r = if self.observer.is_none() {
+            f(self, args)
+        } else {
+            self.call_builtin_with_observer(f, lname, args)
+        };
+        if let Ok(Value::Resource(res)) = &r {
+            if res.id() >= first_res {
+                crate::value::adopt_new_resource(res.id());
+            }
         }
-        self.call_builtin_with_observer(f, lname, args)
+        r
     }
 
     #[cold]

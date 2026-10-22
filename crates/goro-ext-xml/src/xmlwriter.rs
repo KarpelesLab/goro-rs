@@ -167,8 +167,8 @@ fn close_writer(vm: &mut Vm, mut w: Box<PhpWriter>) {
     pump(Some(vm), &mut w, true);
     if let Sink::Stream { res, owned: true } = &w.sink {
         let res = res.clone();
-        if let Value::Resource(id) = res {
-            if goro_core::value::is_open_resource(id) {
+        if let Value::Resource(id) = &res {
+            if goro_core::value::is_open_resource(id.id()) {
                 call_builtin(vm, b"fclose", &[res]);
             }
         }
@@ -190,14 +190,14 @@ fn call_builtin(vm: &mut Vm, name: &[u8], args: &[Value]) -> Option<Value> {
 fn stream_is_valid(res: &Value) -> bool {
     match res {
         Value::Resource(id) => {
-            if goro_core::value::is_registered_resource(*id) {
-                goro_core::value::is_open_resource(*id)
-                    && goro_core::value::resource_type_of(*id)
+            if goro_core::value::is_registered_resource(id.id()) {
+                goro_core::value::is_open_resource(id.id())
+                    && goro_core::value::resource_type_of(id.id())
                         .map(|t| t == b"stream")
                         .unwrap_or(false)
             } else {
                 // STDIN/STDOUT/STDERR are not in the registry.
-                (1..=3).contains(id)
+                (1..=3).contains(&id.id())
             }
         }
         _ => false,

@@ -572,9 +572,9 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let r: DescResult = match item.deref() {
             Value::Resource(id) => {
                 let is_stream = matches!(
-                    goro_core::value::resource_type_of(id).as_deref(),
+                    goro_core::value::resource_type_of(id.id()).as_deref(),
                     Some(b"stream") | Some(b"persistent stream")
-                ) && goro_core::value::is_open_resource(id);
+                ) && goro_core::value::is_open_resource(id.id());
                 if !is_stream {
                     close_all(&descs);
                     return Err(throw(
@@ -583,7 +583,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         "proc_open(): supplied resource is not a valid stream resource",
                     ));
                 }
-                match stream_cast_fd(vm, id) {
+                match stream_cast_fd(vm, id.id()) {
                     Some(fd) => match dup_fd(vm, fd, descs.len()) {
                         Ok(nfd) => {
                             descs.push(Desc {
@@ -768,7 +768,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             DescType::Socket => xp_socket::stream_from_socket(vm, d.parentend),
             DescType::Std => continue,
         };
-        pipes_arr.set(ArrayKey::Int(d.index as i64), Value::Resource(fid));
+        pipes_arr.set(ArrayKey::Int(d.index as i64), Value::resource(&fid));
         pipe_ids.push(fid);
     }
     if let Some(Value::Reference(r)) = args.get(2) {
@@ -787,14 +787,14 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         )
     });
     goro_core::value::register_resource(id, b"process");
-    Ok(Value::Resource(id))
+    Ok(Value::resource(&id))
 }
 
 /// zend_fetch_resource(..., "process", le_proc_open)
 fn fetch_proc(vm: &mut Vm, func: &str, args: &[Value]) -> Result<i64, VmError> {
     let v = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
     let id = match v {
-        Value::Resource(id) => id,
+        Value::Resource(id) => id.id(),
         _ => {
             return Err(throw(
                 vm,
@@ -854,7 +854,7 @@ fn proc_dtor(vm: &mut Vm, id: i64, wait: bool) -> i64 {
     });
     for fid in pipes {
         if has_file_handle(fid) {
-            let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+            let _ = fclose_fn(vm, &[Value::resource(&fid)]);
         }
     }
     let opts = if wait { 0 } else { libc::WNOHANG };

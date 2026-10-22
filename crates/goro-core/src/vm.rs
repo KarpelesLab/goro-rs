@@ -1592,9 +1592,9 @@ impl Vm {
                     Value::String(PhpString::from_bytes(b"")),
                 );
                 // File handles - actual Resource values
-                c.insert(b"STDIN".to_vec(), Value::Resource(1));
-                c.insert(b"STDOUT".to_vec(), Value::Resource(2));
-                c.insert(b"STDERR".to_vec(), Value::Resource(3));
+                c.insert(b"STDIN".to_vec(), Value::resource(1));
+                c.insert(b"STDOUT".to_vec(), Value::resource(2));
+                c.insert(b"STDERR".to_vec(), Value::resource(3));
                 crate::value::register_resource(1, b"stream");
                 crate::value::register_resource(2, b"stream");
                 crate::value::register_resource(3, b"stream");
@@ -2342,9 +2342,9 @@ impl Vm {
                 c.insert(b"FALSE".to_vec(), Value::False);
                 c.insert(b"NULL".to_vec(), Value::Null);
                 // Additional type-checking constants
-                c.insert(b"STDIN".to_vec(), Value::Resource(1));
-                c.insert(b"STDOUT".to_vec(), Value::Resource(2));
-                c.insert(b"STDERR".to_vec(), Value::Resource(3));
+                c.insert(b"STDIN".to_vec(), Value::resource(1));
+                c.insert(b"STDOUT".to_vec(), Value::resource(2));
+                c.insert(b"STDERR".to_vec(), Value::resource(3));
                 crate::value::register_resource(1, b"stream");
                 crate::value::register_resource(2, b"stream");
                 crate::value::register_resource(3, b"stream");
@@ -7173,7 +7173,61 @@ impl Vm {
     /// Values released by the current opcode may need destruction work.
     #[inline]
     pub(crate) fn has_release_work(&self) -> bool {
-        !self.destructible_objects.is_empty() || !self.finally_generators.is_empty()
+        !self.destructible_objects.is_empty()
+            || !self.finally_generators.is_empty()
+            || crate::value::has_freed_resources()
+    }
+
+    /// zend_list_free(): run the destructors of the resources whose last
+    /// reference went away. An exception in flight is set aside while a
+    /// destructor runs and becomes the previous of one it throws.
+    #[inline(never)]
+    fn free_released_resources(&mut self) {
+        while crate::value::has_freed_resources() {
+            for (id, dtor) in crate::value::take_freed_resources() {
+                let old_exc = self.current_exception.take();
+                dtor(self, id);
+                if let Some(old) = old_exc {
+                    match self.current_exception.take() {
+                        Some(new) => {
+                            Self::exception_set_previous(&new, old);
+                            self.current_exception = Some(new);
+                        }
+                        None => self.current_exception = Some(old),
+                    }
+                }
+            }
+        }
+    }
+
+    /// zend_close_rsrc_list(): at shutdown, the resources still alive are
+    /// destroyed, most recent first. An exception a destructor throws goes
+    /// to the user exception handler, or is fatal.
+    #[inline(never)]
+    fn close_resource_list(&mut self) {
+        let list = crate::value::take_resource_dtors();
+        for (id, dtor) in list.into_iter().rev() {
+            dtor(self, id);
+            let Some(exc) = self.current_exception.take() else {
+                continue;
+            };
+            if let Some(handler) = self.exception_handler.take() {
+                let _ = self.call_callback(&handler, std::slice::from_ref(&exc));
+                if self.exception_handler.is_none() {
+                    self.exception_handler = Some(handler);
+                }
+            } else {
+                self.current_exception = Some(exc);
+            }
+            if self.current_exception.is_some() {
+                let line = self.current_line;
+                self.report_uncaught(&VmError {
+                    message: "Uncaught exception".into(),
+                    line,
+                });
+                return;
+            }
+        }
     }
 
     /// `gen_rc` is the last user reference to the generator.
@@ -7336,6 +7390,9 @@ impl Vm {
             crate::gc::purge_weakmaps(self);
         }
         loop {
+            if crate::value::has_freed_resources() {
+                self.free_released_resources();
+            }
             // Everything released so far is destroyed as one batch, each
             // object completely before the next (like php-src freeing the
             // elements of a destroyed array in order): taking the batch out
@@ -14626,7 +14683,6 @@ pub(crate) fn clear_values(v: &mut Vec<Value>) {
                 | Value::True
                 | Value::Long(_)
                 | Value::Double(_)
-                | Value::Resource(_)
         ) {
             std::mem::forget(x);
         } else {
@@ -16689,6 +16745,7 @@ impl Vm {
         for hook in std::mem::take(&mut self.resource_shutdown_hooks) {
             hook(self);
         }
+        self.close_resource_list();
 
         // Module request shutdown (RSHUTDOWN), e.g. session write. Output
         // buffers are flushed first (php_request_shutdown step 3).
@@ -55039,7 +55096,7 @@ impl Vm {
     pub fn value_to_array_key(val: Value) -> ArrayKey {
         match val {
             Value::Long(n) => ArrayKey::Int(n),
-            Value::Resource(n) => ArrayKey::Int(n),
+            Value::Resource(n) => ArrayKey::Int(n.id()),
             Value::String(s) => {
                 // PHP converts numeric strings to integer keys
                 // In PHP 8, only strings that are exactly integer representations

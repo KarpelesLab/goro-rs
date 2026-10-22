@@ -87,11 +87,11 @@ fn directory_call(
         Some(Value::Object(o)) => o.borrow().get_property(b"handle"),
         _ => Value::Undef,
     };
-    let Value::Resource(id) = handle.deref() else {
+    let Value::Resource(id) = handle.deref().clone() else {
         throw(vm, b"Error", "Internal directory stream has been altered");
         return Value::Null;
     };
-    if !goro_core::value::is_open_resource(id) {
+    if !goro_core::value::is_open_resource(id.id()) {
         let msg = format!(
             "Directory::{}(): cannot use Directory resource after it has been closed",
             name
@@ -100,14 +100,14 @@ fn directory_call(
         vm.current_exception = Some(exc);
         return Value::Null;
     }
-    if !is_dir_stream(id) {
+    if !is_dir_stream(id.id()) {
         throw(vm, b"Error", "Internal directory stream has been altered");
         return Value::Null;
     }
     let Some(f) = vm.functions.get(func).copied() else {
         return Value::Null;
     };
-    match f(vm, &[Value::Resource(id)]) {
+    match f(vm, &[Value::resource(id)]) {
         Ok(v) => v,
         Err(_) => Value::Null,
     }

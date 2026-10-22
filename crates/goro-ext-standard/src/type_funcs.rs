@@ -880,10 +880,10 @@ fn get_debug_type(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return get_debug_type(_vm, &args);
         }
         Value::Resource(id) => {
-            let t = goro_core::value::resource_type_of(*id)
+            let t = goro_core::value::resource_type_of(id.id())
                 .map(|v| String::from_utf8_lossy(&v).to_string())
                 .unwrap_or_else(|| "Unknown".to_string());
-            let s = if goro_core::value::is_open_resource(*id) {
+            let s = if goro_core::value::is_open_resource(id.id()) {
                 format!("resource ({})", t)
             } else {
                 "resource (closed)".to_string()

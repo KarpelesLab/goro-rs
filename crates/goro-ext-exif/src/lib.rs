@@ -321,7 +321,7 @@ fn read_from_arg(
                 ),
             ));
         }
-        return Ok(Some(read_from_stream(vm, *id, read_thumbnail, false)));
+        return Ok(Some(read_from_stream(vm, id.id(), read_thumbnail, false)));
     }
     // try_convert_to_string()
     let path = if let Value::Array(_) = file {

@@ -138,7 +138,7 @@ impl Vm {
                     r, r
                 );
                 self.emit_warning(&msg);
-                Some(r)
+                Some(r.id())
             }
             other => {
                 let t = match other {

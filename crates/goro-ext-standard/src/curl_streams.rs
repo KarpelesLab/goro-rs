@@ -24,7 +24,7 @@ pub fn write(vm: &mut Vm, fid: i64, data: &[u8]) -> usize {
         vm,
         b"fwrite",
         &[
-            Value::Resource(fid),
+            Value::resource(&fid),
             Value::String(PhpString::from_bytes(data)),
         ],
     ) {
@@ -38,7 +38,7 @@ pub fn read(vm: &mut Vm, fid: i64, max: usize) -> Option<Vec<u8>> {
     match call_builtin(
         vm,
         b"fread",
-        &[Value::Resource(fid), Value::Long(max as i64)],
+        &[Value::resource(&fid), Value::Long(max as i64)],
     ) {
         Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
         _ => None,
@@ -47,7 +47,7 @@ pub fn read(vm: &mut Vm, fid: i64, max: usize) -> Option<Vec<u8>> {
 
 /// fflush()
 pub fn flush(vm: &mut Vm, fid: i64) {
-    let _ = call_builtin(vm, b"fflush", &[Value::Resource(fid)]);
+    let _ = call_builtin(vm, b"fflush", &[Value::resource(&fid)]);
 }
 
 /// The whole contents of `path` through the stream wrappers

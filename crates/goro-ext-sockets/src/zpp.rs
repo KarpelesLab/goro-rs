@@ -221,7 +221,7 @@ pub fn parse(vm: &mut Vm, fname: &str, spec: &str, args: &[Value]) -> Result<Vec
                 }
             },
             'r' => match &raw {
-                Value::Resource(id) => out.push(Arg::Res(*id)),
+                Value::Resource(id) => out.push(Arg::Res(id.id())),
                 other => {
                     type_error(vm, fname, argn, "resource", other);
                     return Err(());

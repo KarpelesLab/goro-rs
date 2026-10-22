@@ -272,8 +272,8 @@ fn open_for_scanning(vm: &mut Vm, fname: &str, path: &str) -> Option<Vec<u8>> {
         ];
         let fp = crate::misc::fopen_fn(vm, &args).ok()?;
         let Value::Resource(id) = fp else { return None };
-        let data = crate::misc::stream_get_contents_fn(vm, &[Value::Resource(id)]).ok();
-        let _ = crate::misc::fclose_fn(vm, &[Value::Resource(id)]);
+        let data = crate::misc::stream_get_contents_fn(vm, &[Value::resource(&id)]).ok();
+        let _ = crate::misc::fclose_fn(vm, &[Value::resource(&id)]);
         return match data {
             Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
             _ => None,

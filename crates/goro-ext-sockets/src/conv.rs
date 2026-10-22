@@ -528,11 +528,13 @@ impl Ser<'_> {
                     }
                 }
                 Value::Resource(id) => {
-                    if !goro_ext_standard::sockets_streams::ext_is_stream(*id) {
+                    if !goro_ext_standard::sockets_streams::ext_is_stream(id.id()) {
                         self.err("resource is not a stream".to_string());
                     } else {
                         match goro_ext_standard::sockets_streams::ext_stream_fd(
-                            self.vm, *id, self.f,
+                            self.vm,
+                            id.id(),
+                            self.f,
                         ) {
                             Some(fd) => fds[i - 1] = fd,
                             None => self.err("cast stream to file descriptor failed".to_string()),
@@ -894,7 +896,7 @@ impl Res<'_> {
                 out.push(obj);
             } else {
                 let sid = goro_ext_standard::sockets_streams::ext_stream_from_fd(fd, "rw");
-                out.push(Value::Resource(sid));
+                out.push(Value::resource(&sid));
             }
         }
         new_arr(out)

@@ -1122,7 +1122,7 @@ fn user_filter_filter(
     let has_stream_prop = prop_exists(&obj, b"stream");
     if has_stream_prop {
         let sv = if stream != 0 {
-            Value::Resource(stream)
+            Value::resource(&stream)
         } else {
             Value::Null
         };
@@ -1143,8 +1143,8 @@ fn user_filter_filter(
         None => Value::Null,
     }));
     let args = vec![
-        Value::Resource(in_res),
-        Value::Resource(out_res),
+        Value::resource(&in_res),
+        Value::resource(&out_res),
         Value::Reference(consumed_rc.clone()),
         if flags & PSFS_FLAG_FLUSH_CLOSE != 0 {
             Value::True
@@ -1205,7 +1205,7 @@ fn arg_resource(
     name: &str,
 ) -> Result<i64, VmError> {
     match args.get(n - 1).map(|v| v.deref()) {
-        Some(Value::Resource(id)) => Ok(id),
+        Some(Value::Resource(id)) => Ok(id.id()),
         Some(v) => Err(throw(
             vm,
             b"TypeError",
@@ -1253,7 +1253,7 @@ fn bucket_object(vm: &mut Vm, b: &BucketRef) -> Value {
     vm.apply_class_property_defaults(&mut obj, b"streambucket");
     let data = b.borrow().buf.clone();
     let len = data.len() as i64;
-    obj.set_property(b"bucket".to_vec(), Value::Resource(rid));
+    obj.set_property(b"bucket".to_vec(), Value::resource(&rid));
     obj.set_property(b"data".to_vec(), Value::String(PhpString::from_vec(data)));
     obj.set_property(b"datalen".to_vec(), Value::Long(len));
     obj.set_property(b"dataLength".to_vec(), Value::Long(len));
@@ -1311,8 +1311,8 @@ fn bucket_attach(vm: &mut Vm, args: &[Value], append: bool) -> Result<Value, VmE
     let br = fetch_brigade(vm, f, id)?;
     let bucket_v = obj.borrow().get_property(b"bucket");
     let bucket = match bucket_v.deref() {
-        Value::Resource(rid) if goro_core::value::is_open_resource(rid) => {
-            BUCKET_RES.with(|m| m.borrow().get(&rid).cloned())
+        Value::Resource(rid) if goro_core::value::is_open_resource(rid.id()) => {
+            BUCKET_RES.with(|m| m.borrow().get(&rid.id()).cloned())
         }
         _ => None,
     };

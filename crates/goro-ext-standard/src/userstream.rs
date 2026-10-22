@@ -298,7 +298,7 @@ pub(crate) fn get_us(fid: i64) -> Option<Us> {
 
 fn fid_of(v: &Value) -> Option<i64> {
     match v {
-        Value::Resource(n) => Some(*n),
+        Value::Resource(n) => Some(n.id()),
         Value::Reference(r) => fid_of(&r.borrow()),
         _ => None,
     }
@@ -939,8 +939,8 @@ fn context_from_arg(
 ) -> Result<Option<i64>, VmError> {
     match v.map(|v| v.deref()) {
         Some(Value::Resource(id)) => {
-            let is_ctx = STREAM_CONTEXTS.with(|c| c.borrow().contains_key(&id))
-                && goro_core::value::resource_type_of(id).as_deref()
+            let is_ctx = STREAM_CONTEXTS.with(|c| c.borrow().contains_key(&id.id()))
+                && goro_core::value::resource_type_of(id.id()).as_deref()
                     == Some(b"stream-context".as_slice());
             if !is_ctx {
                 let msg = format!(
@@ -949,7 +949,7 @@ fn context_from_arg(
                 );
                 return Err(throw(vm, b"TypeError", &msg));
             }
-            Ok(Some(id))
+            Ok(Some(id.id()))
         }
         Some(Value::Null) | Some(Value::Undef) | None => {
             if no_default {
@@ -998,7 +998,7 @@ fn create_object(
     let mut obj = PhpObject::new(canonical.clone(), id);
     vm.apply_class_property_defaults(&mut obj, &cl);
     let ctx_val = match context {
-        Some(id) => Value::Resource(id),
+        Some(id) => Value::resource(&id),
         None => Value::Null,
     };
     // add_property_resource()/add_property_null() go through the regular
@@ -1644,11 +1644,12 @@ fn op_cast(
         return Ok(None);
     }
     let inner = match &ret {
-        Value::Resource(n)
-            if goro_core::value::is_open_resource(*n)
-                && (FILE_HANDLES.with(|h| h.borrow().contains_key(n)) || (1..=3).contains(n)) =>
+        Value::Resource(r)
+            if goro_core::value::is_open_resource(r.id())
+                && (FILE_HANDLES.with(|h| h.borrow().contains_key(&r.id()))
+                    || (1..=3).contains(&r.id())) =>
         {
-            *n
+            r.id()
         }
         _ => {
             if report_errors {
@@ -2223,6 +2224,16 @@ fn copy_to_mem(
     Ok(if out.is_empty() { None } else { Some(out) })
 }
 
+/// The resource destructor of a user-wrapper stream (or directory):
+/// _php_stream_free(PHP_STREAM_FREE_RSRC_DTOR). False if `fid` is not one.
+pub(crate) fn free_user_stream(vm: &mut Vm, fid: i64) -> bool {
+    let Some(us) = get_us(fid) else {
+        return false;
+    };
+    let _ = stream_free(vm, fid, &us);
+    true
+}
+
 /// _php_stream_free() with close semantics.
 fn stream_free(vm: &mut Vm, fid: i64, us: &Us) -> Result<(), VmError> {
     if us.borrow().in_free || us.borrow().closed {
@@ -2252,11 +2263,9 @@ fn stream_free(vm: &mut Vm, fid: i64, us: &Us) -> Result<(), VmError> {
         if let Err(e) = call_method(vm, &obj, b"dir_closedir", vec![]) {
             res = Err(e);
         }
-        CURRENT_DIR_RESOURCE.with(|c| {
-            if c.get() == Some(fid) {
-                c.set(None);
-            }
-        });
+        if CURRENT_DIR_RESOURCE.with(|c| c.get()) == Some(fid) {
+            crate::misc::set_current_dir(None);
+        }
     }
     {
         let mut b = us.borrow_mut();
@@ -2831,7 +2840,7 @@ fn any_read(vm: &mut Vm, fid: i64, n: usize) -> Result<Option<Vec<u8>>, VmError>
     if let Some(us) = get_us(fid) {
         return stream_read(vm, fid, &us, n);
     }
-    match call_orig(vm, "fread", &[Value::Resource(fid), Value::Long(n as i64)])? {
+    match call_orig(vm, "fread", &[Value::resource(&fid), Value::Long(n as i64)])? {
         Value::String(s) => Ok(Some(s.as_bytes().to_vec())),
         _ => Ok(None),
     }
@@ -2842,7 +2851,7 @@ fn any_write(vm: &mut Vm, fid: i64, data: &[u8]) -> Result<i64, VmError> {
     if let Some(us) = get_us(fid) {
         return stream_write(vm, fid, &us, data);
     }
-    match call_orig(vm, "fwrite", &[Value::Resource(fid), s(data)])? {
+    match call_orig(vm, "fwrite", &[Value::resource(&fid), s(data)])? {
         Value::Long(n) => Ok(n),
         _ => Ok(-1),
     }
@@ -2852,7 +2861,7 @@ fn any_close(vm: &mut Vm, fid: i64) -> Result<(), VmError> {
     if let Some(us) = get_us(fid) {
         return stream_free(vm, fid, &us);
     }
-    call_orig(vm, "fclose", &[Value::Resource(fid)])?;
+    call_orig(vm, "fclose", &[Value::resource(&fid)])?;
     Ok(())
 }
 
@@ -2864,7 +2873,7 @@ fn any_seek(vm: &mut Vm, fid: i64, offset: i64, whence: i64) -> Result<i32, VmEr
         vm,
         "fseek",
         &[
-            Value::Resource(fid),
+            Value::resource(&fid),
             Value::Long(offset),
             Value::Long(whence),
         ],
@@ -3516,7 +3525,7 @@ fn h_stream_isatty(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError
         Some(inner) => Ok(Some(call_orig(
             vm,
             "stream_isatty",
-            &[Value::Resource(inner)],
+            &[Value::resource(&inner)],
         )?)),
         None => Ok(Some(Value::False)),
     }
@@ -3716,12 +3725,12 @@ fn format_via_memory(
         Some(f) => f,
         None => return Ok(None),
     };
-    let mut a = vec![Value::Resource(mem)];
+    let mut a = vec![Value::resource(&mem)];
     a.extend_from_slice(rest);
     let r = call_orig(vm, name, &a);
-    call_orig(vm, "rewind", &[Value::Resource(mem)])?;
-    let out = call_orig(vm, "stream_get_contents", &[Value::Resource(mem)])?;
-    call_orig(vm, "fclose", &[Value::Resource(mem)])?;
+    call_orig(vm, "rewind", &[Value::resource(&mem)])?;
+    let out = call_orig(vm, "stream_get_contents", &[Value::resource(&mem)])?;
+    call_orig(vm, "fclose", &[Value::resource(&mem)])?;
     match r? {
         Value::False => Ok(None),
         _ => Ok(Some(out.to_php_string().as_bytes().to_vec())),
@@ -3758,7 +3767,7 @@ fn h_fscanf(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
 fn h_stream_is_local(_vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let v = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
     let is_url = match &v {
-        Value::Resource(fid) => match get_us(*fid) {
+        Value::Resource(fid) => match get_us(fid.id()) {
             Some(us) => us.borrow().is_url,
             None => return Ok(None),
         },
@@ -3865,7 +3874,7 @@ fn h_fopen(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
     let ctx = context_from_arg(vm, args.get(3), false)?;
     let options = if use_path { USE_PATH } else { 0 } | REPORT_ERRORS;
     match open_located(vm, &p, &mode, options, ctx)? {
-        Opened::Stream(fid, _) => Ok(Some(Value::Resource(fid))),
+        Opened::Stream(fid, _) => Ok(Some(Value::resource(&fid))),
         Opened::Failed => Ok(Some(Value::False)),
         Opened::Builtin(np) => {
             if np == p {
@@ -3909,14 +3918,14 @@ fn h_file_get_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
     let (fid, us) = if filter_inner {
         // php://filter over a user stream: the filter wrapper opens the
         // inner resource and stacks the filters on it.
-        let ctx_val = ctx.map(Value::Resource).unwrap_or(Value::Null);
+        let ctx_val = ctx.map(Value::resource).unwrap_or(Value::Null);
         let r = call_orig(vm, "fopen", &[s(&p), s(b"rb"), Value::False, ctx_val])?;
         match fid_of(&r).and_then(|f| get_us(f).map(|u| (f, u))) {
             Some(x) => x,
             None => {
                 if let Some(f) = fid_of(&r) {
-                    let c = call_orig(vm, "stream_get_contents", &[Value::Resource(f)])?;
-                    call_orig(vm, "fclose", &[Value::Resource(f)])?;
+                    let c = call_orig(vm, "stream_get_contents", &[Value::resource(&f)])?;
+                    call_orig(vm, "fclose", &[Value::resource(&f)])?;
                     return Ok(Some(c));
                 }
                 return Ok(Some(Value::False));
@@ -3976,7 +3985,7 @@ fn h_file_put_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
     let src_fid = fid_of(&data);
     let src_is_user = src_fid.and_then(get_us).is_some();
     let ctx_is_stream = matches!(args.get(3).map(|v| v.deref()), Some(Value::Resource(id))
-        if goro_core::value::resource_type_of(id).as_deref() != Some(b"stream-context".as_slice()));
+        if goro_core::value::resource_type_of(id.id()).as_deref() != Some(b"stream-context".as_slice()));
     let p = arg_str(args, 0).unwrap_or_default();
     let user = !p.is_empty() && needs_locate(&p);
     if !user && !src_is_user && !ctx_is_stream {
@@ -4036,7 +4045,7 @@ fn h_file_put_contents(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
     let mut numbytes: i64 = 0;
     match &data {
         Value::Resource(sfid) => {
-            let (ok, len) = copy_stream(vm, *sfid, fid, None)?;
+            let (ok, len) = copy_stream(vm, sfid.id(), fid, None)?;
             numbytes = if ok { len as i64 } else { -1 };
         }
         Value::Array(arr) => {
@@ -4737,15 +4746,15 @@ fn do_opendir(
         None => return Ok(Some(Value::False)),
     };
     us.borrow_mut().flags |= FLAG_NO_FCLOSE;
-    CURRENT_DIR_RESOURCE.with(|c| c.set(Some(fid)));
+    crate::misc::set_current_dir(Some(fid));
     if createobject {
         Ok(Some(super::dir_class::new_directory(
             vm,
             s(&p),
-            Value::Resource(fid),
+            Value::resource(fid),
         )))
     } else {
-        Ok(Some(Value::Resource(fid)))
+        Ok(Some(Value::resource(&fid)))
     }
 }
 
@@ -4855,7 +4864,7 @@ fn user_dir_arg(vm: &mut Vm, args: &[Value], name: &str) -> Option<(i64, Us)> {
             );
             cur
         }
-        Value::Resource(n) => *n,
+        Value::Resource(n) => n.id(),
         Value::Object(_) => dir_handle_resource_id(&v)?,
         _ => return None,
     };

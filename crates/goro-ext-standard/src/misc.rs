@@ -426,6 +426,7 @@ final class StreamBucket {
     vm.register_function(b"fopen", ctx_fopen_fn_entry);
     goro_core::value::set_default_context_hook(default_context);
     vm.register_function(b"fclose", fclose_fn);
+    goro_core::value::register_resource_type_dtor(b"stream", stream_resource_dtor);
     vm.register_function(b"fread", fread_fn);
     vm.register_function(b"fwrite", fwrite_fn);
     vm.register_function(b"fgets", fgets_fn);
@@ -8431,20 +8432,20 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ];
         let fp = fopen_fn(vm, &inner_args)?;
         let fid = match fp {
-            Value::Resource(n) => n,
+            Value::Resource(n) => n.id(),
             _ => return Ok(Value::False),
         };
         let get_args = if let Some(length) = length {
             vec![
-                Value::Resource(fid),
+                Value::resource(&fid),
                 Value::Long(length),
                 Value::Long(offset),
             ]
         } else {
-            vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
+            vec![Value::resource(&fid), Value::Long(-1), Value::Long(offset)]
         };
         let res = stream_get_contents_fn(vm, &get_args)?;
-        let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+        let _ = fclose_fn(vm, &[Value::resource(&fid)]);
         return Ok(res);
     }
     // php://filter routes through fopen so the filter chain is applied.
@@ -8468,17 +8469,17 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         let fp = call_registered(vm, b"fopen", fopen_fn, &inner_args)?;
         let fid = match fp {
-            Value::Resource(n) => n,
+            Value::Resource(n) => n.id(),
             _ => return Ok(Value::False),
         };
         let get_args = if let Some(length) = length {
             vec![
-                Value::Resource(fid),
+                Value::resource(&fid),
                 Value::Long(length),
                 Value::Long(offset),
             ]
         } else {
-            vec![Value::Resource(fid), Value::Long(-1), Value::Long(offset)]
+            vec![Value::resource(&fid), Value::Long(-1), Value::Long(offset)]
         };
         let res = call_registered(
             vm,
@@ -8486,7 +8487,7 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             stream_get_contents_fn,
             &get_args,
         )?;
-        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::Resource(fid)]);
+        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(&fid)]);
         return Ok(res);
     }
     // php://input - request body for HTTP requests served by the built-in CLI server.
@@ -8594,7 +8595,7 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ],
         )?;
         if let Value::Resource(fid) = fp {
-            let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+            let _ = fclose_fn(vm, &[Value::resource(&fid)]);
             let line = vm.current_line;
             vm.emit_notice_at("file_put_contents(): Stream is not writable", line);
         }
@@ -8603,8 +8604,8 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data_val = args.get(1).unwrap_or(&Value::Null);
     // If $data is a resource, it should be a stream resource.
     if let Value::Resource(rid) = data_val {
-        let is_open_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(rid));
-        let rtype = goro_core::value::resource_type_of(*rid);
+        let is_open_stream = FILE_HANDLES.with(|h| h.borrow().contains_key(&rid.id()));
+        let rtype = goro_core::value::resource_type_of(rid.id());
         let is_stream = is_open_stream || rtype.as_deref() == Some(b"stream".as_ref());
         if !is_stream {
             let msg =
@@ -8619,7 +8620,7 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // If $context (arg 3) is a resource, it should be a valid Stream-Context.
     if let Some(Value::Resource(rid)) = args.get(3) {
-        let bytes = goro_core::value::resource_type_of(*rid);
+        let bytes = goro_core::value::resource_type_of(rid.id());
         if bytes.as_deref() != Some(b"stream-context".as_ref()) {
             let msg =
                 "file_put_contents(): supplied resource is not a valid Stream-Context resource"
@@ -8699,11 +8700,11 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let r = fwrite_fn(
             vm,
             &[
-                Value::Resource(fid),
+                Value::resource(&fid),
                 Value::String(PhpString::from_vec(data_bytes)),
             ],
         );
-        let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+        let _ = fclose_fn(vm, &[Value::resource(&fid)]);
         return r;
     }
 
@@ -10631,6 +10632,9 @@ thread_local! {
     /// rewinddir are called with no argument or null. PHP keeps this state per
     /// request; opendir() updates it.
     static CURRENT_DIR_RESOURCE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+    /// DIRG(default_dir): the reference that keeps the last opened
+    /// directory alive.
+    static CURRENT_DIR_REF: RefCell<Option<Value>> = const { RefCell::new(None) };
     /// Stream contexts keyed by resource id. Each entry stores the options
     /// (wrapper => option_name => value) and params (notification, options).
     static STREAM_CONTEXTS: RefCell<StdHashMap<i64, StreamContext>> = RefCell::new(StdHashMap::new());
@@ -10731,7 +10735,7 @@ fn alloc_dir_handle_entries(path: String, mut names: Vec<String>) -> i64 {
         );
     });
     goro_core::value::register_resource(did, b"stream");
-    CURRENT_DIR_RESOURCE.with(|c| c.set(Some(did)));
+    set_current_dir(Some(did));
     did
 }
 
@@ -10749,7 +10753,7 @@ fn alloc_dir_handle(path: String) -> i64 {
             );
         });
         goro_core::value::register_resource(did, b"stream");
-        CURRENT_DIR_RESOURCE.with(|c| c.set(Some(did)));
+        set_current_dir(Some(did));
         did
     }
 }
@@ -10759,7 +10763,7 @@ fn alloc_dir_handle(path: String) -> i64 {
 /// the resource id, or a Reference wrapping either of those.
 fn dir_handle_resource_id(val: &Value) -> Option<i64> {
     match val {
-        Value::Resource(n) => Some(*n),
+        Value::Resource(n) => Some(n.id()),
         Value::Long(n) => Some(*n),
         Value::Reference(r) => dir_handle_resource_id(&r.borrow()),
         Value::Object(obj) => {
@@ -10767,7 +10771,7 @@ fn dir_handle_resource_id(val: &Value) -> Option<i64> {
             if ob.class_name.eq_ignore_ascii_case(b"Directory") {
                 let handle = ob.get_property(b"handle");
                 match handle {
-                    Value::Resource(n) => Some(n),
+                    Value::Resource(n) => Some(n.id()),
                     Value::Long(n) => Some(n),
                     _ => None,
                 }
@@ -11537,7 +11541,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if !matches!(headers, Value::Null) {
                 HTTP_WRAPPER_DATA.with(|w| w.borrow_mut().insert(fid, headers));
             }
-            return Ok(Value::Resource(fid));
+            return Ok(Value::resource(&fid));
         }
         return Ok(Value::False);
     }
@@ -11590,7 +11594,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         let inner = call_registered(vm, b"fopen", fopen_fn, &inner_args)?;
         let inner_fid = match inner {
-            Value::Resource(n) => n,
+            Value::Resource(n) => n.id(),
             _ => return Ok(Value::False),
         };
         for seg in chain_str.split('/').filter(|p| !p.is_empty()) {
@@ -11610,13 +11614,13 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         if vm.current_exception.is_some() {
-            let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::Resource(inner_fid)]);
+            let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(&inner_fid)]);
             return Err(VmError {
                 message: String::new(),
                 line: vm.current_line,
             });
         }
-        return Ok(Value::Resource(inner_fid));
+        return Ok(Value::resource(&inner_fid));
     }
 
     // data: URLs (php_stream_url_wrap_rfc2397).
@@ -11648,7 +11652,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 });
                 goro_core::value::register_resource(fid, b"stream");
-                return Ok(Value::Resource(fid));
+                return Ok(Value::resource(&fid));
             }
             Err(e) => {
                 vm.emit_warning(&format!(
@@ -11688,7 +11692,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if unsafe { libc::fstat(fd, &mut st) } == 0
                 && (st.st_mode & libc::S_IFMT) == libc::S_IFSOCK
             {
-                return Ok(Value::Resource(xp_socket::stream_from_socket(vm, fd)));
+                return Ok(Value::resource(xp_socket::stream_from_socket(vm, fd)));
             }
             use std::os::unix::io::FromRawFd;
             let file = unsafe { std::fs::File::from_raw_fd(fd) };
@@ -11700,7 +11704,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             });
             goro_core::value::register_resource(fid, b"stream");
-            return Ok(Value::Resource(fid));
+            return Ok(Value::resource(&fid));
         }
         let special = match lower.as_str() {
             "stdout" => Some(SpecialStream::Stdout),
@@ -11728,7 +11732,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         goro_core::value::alloc_resource_id();
                     }
                     goro_core::value::register_resource(fid, b"stream");
-                    return Ok(Value::Resource(fid));
+                    return Ok(Value::resource(&fid));
                 }
                 Err(_) => return Ok(Value::False),
             }
@@ -11801,7 +11805,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     });
                     goro_core::value::register_resource(fid, b"stream");
-                    return Ok(Value::Resource(fid));
+                    return Ok(Value::resource(&fid));
                 }
                 _ => {
                     vm.emit_warning(&format!(
@@ -11932,7 +11936,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // to fopen() (e.g. relative paths stay relative, file:// prefix is kept).
             let fid = alloc_file_handle_uri(f, &mode, &original_uri);
             goro_core::value::register_resource(fid, b"stream");
-            Ok(Value::Resource(fid))
+            Ok(Value::resource(&fid))
         }
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
@@ -11968,6 +11972,28 @@ pub(crate) fn called_as(vm: &Vm, name: &str) -> String {
         }
     }
     name.to_string()
+}
+
+/// Set the directory readdir()/closedir()/rewinddir() use by default
+/// (php_set_default_dir()); it holds a reference to it.
+pub(crate) fn set_current_dir(id: Option<i64>) {
+    CURRENT_DIR_RESOURCE.with(|c| c.set(id));
+    let old = CURRENT_DIR_REF.with(|r| r.replace(id.map(Value::resource)));
+    drop(old);
+}
+
+/// The stream list destructor (_php_stream_free(PHP_STREAM_FREE_RSRC_DTOR)):
+/// a stream handed to PHP code is closed when its last reference goes away,
+/// through the registered fclose()/closedir() (so wrappers see it).
+fn stream_resource_dtor(vm: &mut Vm, id: i64) {
+    if !goro_core::value::is_open_resource(id) || userstream::free_user_stream(vm, id) {
+        return;
+    }
+    let is_dir = DIR_HANDLES.with(|d| d.borrow().contains_key(&id));
+    let name: &[u8] = if is_dir { b"closedir" } else { b"fclose" };
+    if let Some(f) = vm.functions.get(name).copied() {
+        let _ = f(vm, &[Value::resource(id)]);
+    }
 }
 
 pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -12893,7 +12919,7 @@ fn rewind_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn is_dir_handle(v: &Value) -> bool {
-    matches!(v.deref(), Value::Resource(id) if DIR_HANDLES.with(|dh| dh.borrow().contains_key(&id)))
+    matches!(v.deref(), Value::Resource(id) if DIR_HANDLES.with(|dh| dh.borrow().contains_key(&id.id())))
 }
 
 fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -15019,7 +15045,7 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path_str = path.to_string_lossy();
     if let Some(pattern) = path_str.strip_prefix("glob://") {
         let names = glob_stream_entries(vm, pattern);
-        return Ok(Value::Resource(alloc_dir_handle_entries(
+        return Ok(Value::resource(alloc_dir_handle_entries(
             path_str.to_string(),
             names,
         )));
@@ -15029,7 +15055,7 @@ fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match std::fs::read_dir(dir_path) {
             Ok(_) => {
                 let did = alloc_dir_handle(path_str.to_string());
-                Ok(Value::Resource(did))
+                Ok(Value::resource(&did))
             }
             Err(e) => {
                 vm.emit_warning(&format!(
@@ -15100,10 +15126,10 @@ fn resolve_dir_handle(
             })
         }
         Value::Resource(n) => {
-            let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(&n));
+            let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(&n.id()));
             if is_dir {
-                Ok(Some(n))
-            } else if !goro_core::value::is_open_resource(n) {
+                Ok(Some(n.id()))
+            } else if !goro_core::value::is_open_resource(n.id()) {
                 let exc = vm.throw_type_error(format!(
                     "{}(): Argument #1 ($dir_handle) must be an open stream resource",
                     func_name
@@ -15215,11 +15241,9 @@ fn closedir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         dh.borrow_mut().remove(&id);
     });
     goro_core::value::close_resource(id);
-    CURRENT_DIR_RESOURCE.with(|c| {
-        if c.get() == Some(id) {
-            c.set(None);
-        }
-    });
+    if CURRENT_DIR_RESOURCE.with(|c| c.get()) == Some(id) {
+        set_current_dir(None);
+    }
     Ok(Value::Null)
 }
 
@@ -15404,7 +15428,7 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None
     };
 
-    if let Value::Resource(id) = key_deref {
+    if let Value::Resource(id) = &key_deref {
         vm.emit_warning(&format!(
             "Resource ID#{} used as offset, casting to integer ({})",
             id, id
@@ -15704,7 +15728,8 @@ fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     let val = args.first().unwrap_or(&Value::Null);
     // For closed resources, return "Unknown" (matches PHP behavior).
     if let Value::Resource(id) = val {
-        if goro_core::value::is_registered_resource(*id) && !goro_core::value::is_open_resource(*id)
+        if goro_core::value::is_registered_resource(id.id())
+            && !goro_core::value::is_open_resource(id.id())
         {
             return Ok(Value::String(PhpString::from_bytes(b"Unknown")));
         }
@@ -15806,11 +15831,11 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ],
         )?;
         let fid = match fp {
-            Value::Resource(n) => n,
+            Value::Resource(n) => n.id(),
             _ => return Ok(Value::False),
         };
-        let data = stream_get_contents_fn(vm, &[Value::Resource(fid)])?;
-        let _ = fclose_fn(vm, &[Value::Resource(fid)]);
+        let data = stream_get_contents_fn(vm, &[Value::resource(&fid)])?;
+        let _ = fclose_fn(vm, &[Value::resource(&fid)]);
         if !vm.check_open_basedir("copy", &to_str) {
             return Ok(Value::False);
         }
@@ -15973,16 +15998,16 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         let fp = call_registered(vm, b"fopen", fopen_fn, &oargs)?;
         let fid = match fp {
-            Value::Resource(n) => n,
+            Value::Resource(n) => n.id(),
             _ => return Ok(Value::False),
         };
         let r = call_registered(
             vm,
             b"stream_get_contents",
             stream_get_contents_fn,
-            &[Value::Resource(fid)],
+            &[Value::resource(&fid)],
         );
-        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::Resource(fid)]);
+        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(&fid)]);
         match r? {
             Value::String(s) => Ok(s.as_bytes().to_vec()),
             _ => Ok(Vec::new()),
@@ -16459,7 +16484,7 @@ fn php_array_binop(
                 }
             }
             Value::Resource(id) => {
-                acc = apply(&acc, &Value::Long(*id));
+                acc = apply(&acc, &Value::Long(id.id()));
                 vm.emit_warning(&format!(
                     "{}(): {} is not supported on type resource",
                     fname, op_name
@@ -17130,7 +17155,7 @@ fn tmpfile_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let file = unsafe { std::fs::File::from_raw_fd(fd) };
     let fid = alloc_file_handle(file, "w+b");
     goro_core::value::register_resource(fid, b"stream");
-    Ok(Value::Resource(fid))
+    Ok(Value::resource(&fid))
 }
 
 fn filemtime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -18630,8 +18655,8 @@ fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Allow dir-handle resources (Linux PHP flock on a dir returns false but
     // does not throw).
     let dir_fid = if let Value::Resource(rid) = &arg {
-        let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(rid));
-        if is_dir { Some(*rid) } else { None }
+        let is_dir = DIR_HANDLES.with(|dh| dh.borrow().contains_key(&rid.id()));
+        if is_dir { Some(rid.id()) } else { None }
     } else {
         None
     };
@@ -19904,7 +19929,7 @@ fn attach_filter_impl(vm: &mut Vm, args: &[Value], prepend: bool) -> Result<Valu
         }
     }
     match last {
-        Some(f) => Ok(Value::Resource(crate::stream_filters::register_resource(
+        Some(f) => Ok(Value::resource(crate::stream_filters::register_resource(
             &f,
         ))),
         None => Ok(Value::False),
@@ -19936,7 +19961,7 @@ fn stream_filter_remove_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
             });
         }
     };
-    let Some(f) = crate::stream_filters::filter_by_resource(res) else {
+    let Some(f) = crate::stream_filters::filter_by_resource(res.id()) else {
         let msg = "stream_filter_remove(): supplied resource is not a valid stream filter resource"
             .to_string();
         let exc = vm.throw_type_error(msg.clone());
@@ -20182,7 +20207,7 @@ fn stream_context_create_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         c.borrow_mut().insert(fid, ctx);
     });
     goro_core::value::register_resource(fid, b"stream-context");
-    Ok(Value::Resource(fid))
+    Ok(Value::resource(&fid))
 }
 
 /// PHP_FUNCTION(stream_context_set_options)
@@ -20527,11 +20552,11 @@ fn stream_context_get_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
                     }
                 }
             });
-            return Ok(Value::Resource(fid));
+            return Ok(Value::resource(&fid));
         }
     }
     let fid = default_context();
-    Ok(Value::Resource(fid))
+    Ok(Value::resource(&fid))
 }
 
 fn stream_context_set_default_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -21066,7 +21091,7 @@ fn dir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(dir_class::new_directory(
         vm,
         Value::String(path.clone()),
-        Value::Resource(did),
+        Value::resource(did),
     ))
 }
 
@@ -21162,7 +21187,7 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             match fid {
                 Some(fid) => {
                     POPEN_CHILDREN.with(|p| p.borrow_mut().insert(fid, (child, drain)));
-                    Ok(Value::Resource(fid))
+                    Ok(Value::resource(&fid))
                 }
                 None => Ok(Value::False),
             }

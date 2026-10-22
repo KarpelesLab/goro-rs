@@ -392,7 +392,7 @@ fn type_error(vm: &mut Vm, msg: String) -> VmError {
 fn stream_param(vm: &mut Vm, fname: &str, v: Option<&Value>) -> Result<i64, VmError> {
     let v = v.map(|v| v.deref()).unwrap_or(Value::Null);
     match v {
-        Value::Resource(id) if goro_core::value::is_open_resource(id) => Ok(id),
+        Value::Resource(id) if goro_core::value::is_open_resource(id.id()) => Ok(id.id()),
         Value::Resource(_) => Err(type_error(
             vm,
             format!(
@@ -443,13 +443,13 @@ pub(crate) fn h_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
             let ctx = default_context();
             Ok(Some(
                 match bz2open(vm, s.as_bytes(), &mode, REPORT_ERRORS, Some(ctx), false)? {
-                    Some((fid, _)) => Value::Resource(fid),
+                    Some((fid, _)) => Value::resource(&fid),
                     None => Value::False,
                 },
             ))
         }
         Value::Resource(id) => {
-            let fid = stream_param(vm, "bzopen", Some(&Value::Resource(id)))?;
+            let fid = stream_param(vm, "bzopen", Some(&Value::resource(&id)))?;
             let smode = stream_mode_of(fid);
             let sm = smode.as_bytes();
             let primary = match sm.len() {
@@ -481,7 +481,7 @@ pub(crate) fn h_bzopen(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
             };
             // The stream keeps its own handle: closing ours leaves it open.
             let (nfid, _) = from_bzfile(BzFile::open(f, &mode), &mode, 0, None);
-            Ok(Some(Value::Resource(nfid)))
+            Ok(Some(Value::resource(&nfid)))
         }
         other => Err(type_error(
             vm,
@@ -516,7 +516,7 @@ pub(crate) fn h_bzread(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
         None => Ok(Some(call_orig(
             vm,
             "fread",
-            &[Value::Resource(fid), Value::Long(len)],
+            &[Value::resource(&fid), Value::Long(len)],
         )?)),
     }
 }

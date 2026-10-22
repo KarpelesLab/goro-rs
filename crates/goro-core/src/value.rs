@@ -361,9 +361,219 @@ pub enum Value {
     Reference(Rc<RefCell<Value>>),
     /// A PHP Generator object
     Generator(Rc<RefCell<PhpGenerator>>),
-    /// A PHP resource (e.g. file handle, dir handle). Holds the resource id.
-    /// The resource_type/closed-state is looked up from RESOURCE_REGISTRY.
-    Resource(i64),
+    /// A PHP resource (e.g. file handle, dir handle): a counted reference
+    /// to the resource id. The resource_type/closed-state is looked up from
+    /// RESOURCE_REGISTRY; when the last reference goes away, a resource with
+    /// a registered destructor is queued for freeing (zend_list_free()).
+    Resource(ResourceRef),
+}
+
+/// A counted reference to a resource id (the zend_resource refcount). All
+/// live references to an id share one allocation (looked up through
+/// `LIVE_RESOURCES`), so the count is right however the value was built.
+#[derive(Clone)]
+pub struct ResourceRef(Rc<ResourceCell>);
+
+struct ResourceCell {
+    id: i64,
+}
+
+thread_local! {
+    /// id -> the shared cell of its live references.
+    static LIVE_RESOURCES: RefCell<std::collections::HashMap<i64, std::rc::Weak<ResourceCell>>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// Resources that are freed when their last reference goes away, with
+    /// their destructor (the list entry's rsrc_dtor).
+    static RESOURCE_DTORS: RefCell<std::collections::HashMap<i64, ResourceDtor>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// Released resources whose destructor is still to run.
+    static FREED_RESOURCES: RefCell<Vec<(i64, ResourceDtor)>> = const { RefCell::new(Vec::new()) };
+    static FREED_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+impl ResourceRef {
+    /// A reference to resource `id`.
+    pub fn new(id: i64) -> Self {
+        LIVE_RESOURCES
+            .try_with(|m| {
+                let mut m = m.borrow_mut();
+                if let Some(rc) = m.get(&id).and_then(|w| w.upgrade()) {
+                    return ResourceRef(rc);
+                }
+                let rc = Rc::new(ResourceCell { id });
+                m.insert(id, Rc::downgrade(&rc));
+                ResourceRef(rc)
+            })
+            .unwrap_or_else(|_| ResourceRef(Rc::new(ResourceCell { id })))
+    }
+
+    #[inline]
+    pub fn id(&self) -> i64 {
+        self.0.id
+    }
+
+    /// Number of live references to this resource.
+    pub fn refcount(&self) -> usize {
+        Rc::strong_count(&self.0)
+    }
+}
+
+impl Drop for ResourceCell {
+    fn drop(&mut self) {
+        let id = self.id;
+        let _ = LIVE_RESOURCES.try_with(|m| {
+            if let Ok(mut m) = m.try_borrow_mut() {
+                if m.get(&id).is_some_and(|w| w.strong_count() == 0) {
+                    m.remove(&id);
+                }
+            }
+        });
+        let dtor = RESOURCE_DTORS
+            .try_with(|d| d.try_borrow_mut().ok().and_then(|mut d| d.remove(&id)))
+            .ok()
+            .flatten();
+        if let Some(dtor) = dtor {
+            let _ = FREED_RESOURCES.try_with(|f| f.borrow_mut().push((id, dtor)));
+            let _ = FREED_PENDING.try_with(|p| p.set(true));
+        }
+    }
+}
+
+/// What `Value::resource()` accepts: a resource id or a reference to one.
+pub trait IntoResourceRef {
+    fn into_resource_ref(self) -> ResourceRef;
+}
+impl IntoResourceRef for i64 {
+    fn into_resource_ref(self) -> ResourceRef {
+        ResourceRef::new(self)
+    }
+}
+impl IntoResourceRef for &i64 {
+    fn into_resource_ref(self) -> ResourceRef {
+        ResourceRef::new(*self)
+    }
+}
+impl IntoResourceRef for ResourceRef {
+    fn into_resource_ref(self) -> ResourceRef {
+        self
+    }
+}
+impl IntoResourceRef for &ResourceRef {
+    fn into_resource_ref(self) -> ResourceRef {
+        self.clone()
+    }
+}
+
+impl std::fmt::Display for ResourceRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.id())
+    }
+}
+
+impl std::fmt::Debug for ResourceRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.id())
+    }
+}
+
+impl PartialEq for ResourceRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.id() == other.id()
+    }
+}
+impl Eq for ResourceRef {}
+
+impl std::hash::Hash for ResourceRef {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id().hash(state)
+    }
+}
+
+/// A resource destructor (zend_rsrc_list_dtors_entry.list_dtor_ex), run by
+/// the VM at the release point after the last reference went away.
+pub type ResourceDtor = fn(&mut crate::vm::Vm, i64);
+
+/// The resource `id` is freed by `dtor` when its last reference goes away
+/// (zend_list_free()), unless it was closed before.
+pub fn set_resource_dtor(id: i64, dtor: ResourceDtor) {
+    RESOURCE_DTORS.with(|d| d.borrow_mut().insert(id, dtor));
+}
+
+/// The resource `id` is no longer freed by its references (it was closed,
+/// zend_list_close()); returns the destructor it had.
+pub fn clear_resource_dtor(id: i64) -> Option<ResourceDtor> {
+    RESOURCE_DTORS
+        .try_with(|d| d.borrow_mut().remove(&id))
+        .ok()
+        .flatten()
+}
+
+/// The resources whose destructor has not run yet (zend_close_rsrc_list()
+/// at shutdown), most recent last.
+pub fn take_resource_dtors() -> Vec<(i64, ResourceDtor)> {
+    let mut v: Vec<(i64, ResourceDtor)> = RESOURCE_DTORS.with(|d| d.borrow_mut().drain().collect());
+    v.sort_by_key(|(id, _)| *id);
+    v
+}
+
+thread_local! {
+    /// Destructors by resource type, for the resources handed to PHP code
+    /// (see `adopt_new_resource`).
+    static TYPE_DTORS: RefCell<Vec<(&'static [u8], ResourceDtor)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Resources of type `ty` returned to PHP code by a builtin are freed by
+/// `dtor` when their last reference goes away.
+pub fn register_resource_type_dtor(ty: &'static [u8], dtor: ResourceDtor) {
+    TYPE_DTORS.with(|t| {
+        let mut t = t.borrow_mut();
+        t.retain(|(k, _)| *k != ty);
+        t.push((ty, dtor));
+    });
+}
+
+/// The id the next resource will get.
+#[inline]
+pub fn next_resource_id() -> i64 {
+    NEXT_RESOURCE_ID.with(|n| n.get())
+}
+
+/// A builtin called from PHP code created resource `id` and returned it:
+/// from now on its references own it (its type's destructor runs when the
+/// last one goes away). Resources the engine keeps by id internally are
+/// never handed over this way.
+#[cold]
+pub fn adopt_new_resource(id: i64) {
+    let ty = RESOURCE_REGISTRY.with(|r| {
+        r.borrow()
+            .get(&id)
+            .filter(|e| !e.closed)
+            .map(|e| e.resource_type.clone())
+    });
+    let Some(ty) = ty else { return };
+    let Some(dtor) = TYPE_DTORS.with(|t| {
+        t.borrow()
+            .iter()
+            .find(|(k, _)| *k == ty.as_slice())
+            .map(|(_, d)| *d)
+    }) else {
+        return;
+    };
+    RESOURCE_DTORS.with(|d| {
+        d.borrow_mut().entry(id).or_insert(dtor);
+    });
+}
+
+/// Whether released resources wait for their destructor.
+#[inline]
+pub fn has_freed_resources() -> bool {
+    FREED_PENDING.with(|p| p.get())
+}
+
+/// Take the released resources whose destructor is to run, in release order.
+pub fn take_freed_resources() -> Vec<(i64, ResourceDtor)> {
+    FREED_PENDING.with(|p| p.set(false));
+    FREED_RESOURCES.with(|f| std::mem::take(&mut *f.borrow_mut()))
 }
 
 thread_local! {
@@ -454,6 +664,7 @@ pub fn register_resource(id: i64, resource_type: &[u8]) {
 /// Mark a resource as closed (for fclose/curl_close semantics). Also invokes
 /// any registered close hook.
 pub fn close_resource(id: i64) {
+    clear_resource_dtor(id);
     run_close_hook(id);
     RESOURCE_REGISTRY.with(|r| {
         if let Some(entry) = r.borrow_mut().get_mut(&id) {
@@ -626,13 +837,19 @@ impl Value {
             Value::Object(_) | Value::Generator(_) => "object",
             Value::Reference(r) => r.borrow().type_name(),
             Value::Resource(id) => {
-                if is_open_resource(*id) {
+                if is_open_resource(id.id()) {
                     "resource"
                 } else {
                     "resource (closed)"
                 }
             }
         }
+    }
+
+    /// A (counted) reference to the resource `id`.
+    #[inline]
+    pub fn resource(id: impl IntoResourceRef) -> Value {
+        Value::Resource(id.into_resource_ref())
     }
 
     /// Returns true if this value is a resource (open or closed).
@@ -647,7 +864,7 @@ impl Value {
     /// Returns the resource id if this is a resource, or -1 otherwise.
     pub fn resource_id(&self) -> i64 {
         match self {
-            Value::Resource(n) => *n,
+            Value::Resource(n) => n.id(),
             Value::Reference(r) => r.borrow().resource_id(),
             _ => -1,
         }
@@ -656,7 +873,7 @@ impl Value {
     /// Returns the resource type name (e.g. "stream") if this is a resource.
     pub fn resource_type_name(&self) -> Option<Vec<u8>> {
         match self {
-            Value::Resource(n) => resource_type_of(*n),
+            Value::Resource(n) => resource_type_of(n.id()),
             Value::Reference(r) => r.borrow().resource_type_name(),
             _ => None,
         }
@@ -687,7 +904,7 @@ impl Value {
             Value::Undef | Value::Null | Value::False => 0,
             Value::True => 1,
             Value::Long(n) => *n,
-            Value::Resource(n) => *n,
+            Value::Resource(n) => n.id(),
             Value::Double(f) => php_dval_to_lval(*f),
             Value::String(s) => php_str_to_lval(s.as_bytes()),
             Value::Array(arr) => {
@@ -711,7 +928,7 @@ impl Value {
             Value::Undef | Value::Null | Value::False => 0.0,
             Value::True => 1.0,
             Value::Long(n) => *n as f64,
-            Value::Resource(n) => *n as f64,
+            Value::Resource(n) => n.id() as f64,
             Value::Double(f) => *f,
             Value::String(s) => {
                 let str = s.to_string_lossy();
@@ -971,7 +1188,7 @@ impl Value {
     fn to_numeric(&self) -> Value {
         match self {
             Value::Long(_) | Value::Double(_) => self.clone(),
-            Value::Resource(n) => Value::Long(*n),
+            Value::Resource(n) => Value::Long(n.id()),
             Value::True => Value::Long(1),
             Value::False | Value::Null | Value::Undef => Value::Long(0),
             Value::String(s) => match parse_numeric_str(s.as_bytes(), true) {
@@ -1205,13 +1422,15 @@ impl Value {
                 false
             }
             (Value::Resource(a), Value::Resource(b)) => a == b,
-            (Value::Resource(a), Value::Long(b)) | (Value::Long(b), Value::Resource(a)) => a == b,
+            (Value::Resource(a), Value::Long(b)) | (Value::Long(b), Value::Resource(a)) => {
+                a.id() == *b
+            }
             (Value::Resource(a), Value::Double(f)) | (Value::Double(f), Value::Resource(a)) => {
-                *a as f64 == *f
+                a.id() as f64 == *f
             }
             (Value::Resource(a), Value::String(s)) | (Value::String(s), Value::Resource(a)) => {
                 if let Some(num) = parse_numeric_string(s.as_bytes()) {
-                    num == *a as f64
+                    num == a.id() as f64
                 } else {
                     false
                 }
@@ -1303,6 +1522,7 @@ impl Value {
         }
         match (self, other) {
             (Value::Resource(a), Value::Resource(b)) => {
+                let (a, b) = (a.id(), b.id());
                 if a < b {
                     -1
                 } else if a > b {
@@ -1312,6 +1532,7 @@ impl Value {
                 }
             }
             (Value::Resource(a), Value::Long(b)) => {
+                let a = &a.id();
                 if a < b {
                     -1
                 } else if a > b {
@@ -1321,6 +1542,7 @@ impl Value {
                 }
             }
             (Value::Long(a), Value::Resource(b)) => {
+                let b = &b.id();
                 if a < b {
                     -1
                 } else if a > b {
@@ -1329,8 +1551,8 @@ impl Value {
                     0
                 }
             }
-            (Value::Resource(a), Value::Double(b)) => float_threeway(*a as f64, *b),
-            (Value::Double(a), Value::Resource(b)) => float_threeway(*a, *b as f64),
+            (Value::Resource(a), Value::Double(b)) => float_threeway(a.id() as f64, *b),
+            (Value::Double(a), Value::Resource(b)) => float_threeway(*a, b.id() as f64),
             (Value::Long(a), Value::Long(b)) => {
                 if a < b {
                     -1

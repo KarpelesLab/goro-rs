@@ -300,7 +300,7 @@ pub(crate) fn h_gzopen(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmE
     let ctx = default_context();
     Ok(Some(
         match gzopen(vm, &p, &mode, options, Some(ctx), false)? {
-            Some((fid, _)) => Value::Resource(fid),
+            Some((fid, _)) => Value::resource(&fid),
             None => Value::False,
         },
     ))

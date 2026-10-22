@@ -117,12 +117,12 @@ pub fn parse(vm: &mut Vm, fname: &str, spec: &str, args: &[Value]) -> Result<Vec
             'z' => out.push(Arg::Any(args[ai].clone())),
             'r' => match &raw {
                 Value::Resource(id) => {
-                    let ok = goro_core::value::is_open_resource(*id)
+                    let ok = goro_core::value::is_open_resource(id.id())
                         && matches!(
-                            goro_core::value::resource_type_of(*id).as_deref(),
+                            goro_core::value::resource_type_of(id.id()).as_deref(),
                             Some(b"stream") | Some(b"persistent stream")
                         );
-                    if !ok && !(1..=3).contains(id) {
+                    if !ok && !(1..=3).contains(&id.id()) {
                         throw(
                             vm,
                             b"TypeError",
@@ -133,7 +133,7 @@ pub fn parse(vm: &mut Vm, fname: &str, spec: &str, args: &[Value]) -> Result<Vec
                         );
                         return Err(());
                     }
-                    out.push(Arg::Res(*id));
+                    out.push(Arg::Res(id.id()));
                 }
                 other => {
                     type_mismatch(vm, fname, argn, "resource", other);

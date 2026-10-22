@@ -253,7 +253,7 @@ impl Vm {
                     r, r
                 );
                 self.emit_warning(&msg);
-                ArrayKey::Int(r)
+                ArrayKey::Int(r.id())
             }
             Value::Double(d) => {
                 if d.is_finite() && d.fract() != 0.0 {

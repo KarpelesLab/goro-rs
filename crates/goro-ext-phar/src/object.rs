@@ -687,7 +687,7 @@ pub(crate) fn build_item(vm: &mut Vm, args: &[Value]) -> R {
                 return Ok(Value::False);
             };
             str_key = k;
-            let data = call_builtin(vm, b"stream_get_contents", &[Value::Resource(*id)]);
+            let data = call_builtin(vm, b"stream_get_contents", &[Value::resource(id)]);
             let Some(Value::String(d)) = data else {
                 return throw(
                     vm,
@@ -697,7 +697,7 @@ pub(crate) fn build_item(vm: &mut Vm, args: &[Value]) -> R {
             };
             let contents = d.as_bytes().to_vec();
             opened = b"[stream]".to_vec();
-            if let Some(Value::Array(st)) = call_builtin(vm, b"fstat", &[Value::Resource(*id)]) {
+            if let Some(Value::Array(st)) = call_builtin(vm, b"fstat", &[Value::resource(id)]) {
                 stat_mode = st
                     .borrow()
                     .get(&ArrayKey::String(PhpString::from_bytes(b"mode")))

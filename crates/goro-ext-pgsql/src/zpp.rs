@@ -228,7 +228,7 @@ pub fn parse_ex(
                 }
             },
             'r' => match &raw {
-                Value::Resource(id) => out.push(Arg::Res(*id)),
+                Value::Resource(id) => out.push(Arg::Res(id.id())),
                 other => {
                     if !quiet {
                         type_mismatch(vm, fname, argn, "resource", other);

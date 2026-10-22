@@ -1902,7 +1902,8 @@ fn open_and_read(vm: &mut Vm, func: &str, path: &str) -> Option<Vec<u8>> {
             let fopen = f(vm, b"fopen", crate::misc::fopen_fn);
             let fp = fopen(vm, &fargs).ok()?;
             let fid = match fp {
-                Value::Resource(n) | Value::Long(n) => n,
+                Value::Resource(n) => n.id(),
+                Value::Long(n) => n,
                 _ => return None,
             };
             let get = f(
@@ -1910,9 +1911,9 @@ fn open_and_read(vm: &mut Vm, func: &str, path: &str) -> Option<Vec<u8>> {
                 b"stream_get_contents",
                 crate::misc::stream_get_contents_fn,
             );
-            let data = get(vm, &[Value::Resource(fid)]).ok();
+            let data = get(vm, &[Value::resource(fid)]).ok();
             let fclose = f(vm, b"fclose", crate::misc::fclose_fn);
-            let _ = fclose(vm, &[Value::Resource(fid)]);
+            let _ = fclose(vm, &[Value::resource(fid)]);
             match data {
                 Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
                 _ => Some(Vec::new()),

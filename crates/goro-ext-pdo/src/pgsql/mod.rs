@@ -647,7 +647,7 @@ pub fn lob_open(vm: &mut Vm, f: &Func, args: &[Value]) -> Value {
     flush(vm);
     if lfd >= 0 {
         if let Some(id) = create_lob_stream(vm, &o, lfd, oid) {
-            return Value::Resource(id);
+            return Value::resource(&id);
         }
     } else {
         pgsql_error(Some(vm), &dbh, None, PGRES_FATAL_ERROR, None, None);

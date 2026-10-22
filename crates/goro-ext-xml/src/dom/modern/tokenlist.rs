@@ -177,7 +177,7 @@ fn offset_to_long(vm: &mut Vm, v: &Value) -> Option<i64> {
                 "Resource ID#{} used as offset, casting to integer ({})",
                 id, id
             ));
-            Some(*id)
+            Some(id.id())
         }
         Value::String(s_) => {
             let b = s_.as_bytes();

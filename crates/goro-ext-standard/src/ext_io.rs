@@ -38,7 +38,7 @@ fn call_with(
 
 fn res_id(v: &Value) -> Option<i64> {
     match v {
-        Value::Resource(n) => Some(*n),
+        Value::Resource(n) => Some(n.id()),
         _ => None,
     }
 }
@@ -81,14 +81,14 @@ pub fn open_as(
 
 /// php_stream_close()
 pub fn close(vm: &mut Vm, id: i64) {
-    let _ = call(vm, b"fclose", &[Value::Resource(id)]);
+    let _ = call(vm, b"fclose", &[Value::resource(&id)]);
 }
 
 /// Whether `v` is an open stream resource.
 pub fn is_stream(vm: &mut Vm, v: &Value) -> bool {
     match v.deref() {
         Value::Resource(id) => {
-            let t = call(vm, b"get_resource_type", &[Value::Resource(id)]).ok();
+            let t = call(vm, b"get_resource_type", &[Value::resource(&id)]).ok();
             matches!(t, Some(Value::String(s)) if s.as_bytes() == b"stream")
         }
         _ => false,
@@ -113,7 +113,7 @@ impl Meta {
 
 pub fn meta(vm: &mut Vm, id: i64) -> Meta {
     let mut m = Meta::default();
-    if let Ok(Value::Array(a)) = call(vm, b"stream_get_meta_data", &[Value::Resource(id)]) {
+    if let Ok(Value::Array(a)) = call(vm, b"stream_get_meta_data", &[Value::resource(&id)]) {
         let a = a.borrow();
         let get = |k: &[u8]| {
             a.get(&goro_core::array::ArrayKey::String(PhpString::from_bytes(
@@ -137,7 +137,7 @@ pub fn meta(vm: &mut Vm, id: i64) -> Meta {
 
 /// php_stream_tell()
 pub fn tell(vm: &mut Vm, id: i64) -> i64 {
-    match call(vm, b"ftell", &[Value::Resource(id)]) {
+    match call(vm, b"ftell", &[Value::resource(&id)]) {
         Ok(Value::Long(n)) => n,
         _ => 0,
     }
@@ -150,7 +150,7 @@ pub fn seek(vm: &mut Vm, id: i64, offset: i64, whence: i64) -> bool {
             vm,
             b"fseek",
             &[
-                Value::Resource(id),
+                Value::resource(&id),
                 Value::Long(offset),
                 Value::Long(whence)
             ],
@@ -167,7 +167,7 @@ pub fn read(vm: &mut Vm, id: i64, n: usize) -> Vec<u8> {
         match call(
             vm,
             b"fread",
-            &[Value::Resource(id), Value::Long(want as i64)],
+            &[Value::resource(&id), Value::Long(want as i64)],
         ) {
             Ok(Value::String(s)) if !s.is_empty() => out.extend_from_slice(s.as_bytes()),
             _ => break,
@@ -178,7 +178,7 @@ pub fn read(vm: &mut Vm, id: i64, n: usize) -> Vec<u8> {
 
 /// The rest of the stream from the current position.
 pub fn read_all(vm: &mut Vm, id: i64) -> Vec<u8> {
-    match call(vm, b"stream_get_contents", &[Value::Resource(id)]) {
+    match call(vm, b"stream_get_contents", &[Value::resource(&id)]) {
         Ok(Value::String(s)) => s.as_bytes().to_vec(),
         _ => Vec::new(),
     }
@@ -190,7 +190,7 @@ pub fn write(vm: &mut Vm, id: i64, data: &[u8]) -> i64 {
         vm,
         b"fwrite",
         &[
-            Value::Resource(id),
+            Value::resource(&id),
             Value::String(PhpString::from_bytes(data)),
         ],
     ) {

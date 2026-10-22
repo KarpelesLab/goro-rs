@@ -444,7 +444,7 @@ fn param_hook(vm: &mut Vm, stmt: &StmtRef, param: &mut BoundParam, event: u8) ->
                 let mut value = param.value();
                 if ptype == PDO_PARAM_LOB && matches!(value, Value::Resource(_)) {
                     let id = match &value {
-                        Value::Resource(id) => *id,
+                        Value::Resource(id) => id.id(),
                         _ => 0,
                     };
                     if let Some(oid) = lob_stream_oid(id) {
@@ -744,7 +744,7 @@ fn stmt_get_col_typed(vm: &mut Vm, stmt: &StmtRef, colno: usize, ty: Option<i64>
                     let obj = stmt.borrow().database_object_handle.clone();
                     if let Some(obj) = obj {
                         if let Some(id) = create_lob_stream(vm, &obj, loid, oid) {
-                            return Value::Resource(id);
+                            return Value::resource(&id);
                         }
                     }
                 }

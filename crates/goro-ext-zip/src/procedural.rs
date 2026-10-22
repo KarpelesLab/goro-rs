@@ -116,8 +116,8 @@ fn fetch_res(vm: &mut Vm, f: &Func, args: &[Value], i: usize, le: &[u8]) -> Resu
         f.type_error(vm, i + 1, "resource", &v);
         return Err(err(vm));
     };
-    let ok = goro_core::value::is_open_resource(id)
-        && goro_core::value::resource_type_of(id).as_deref() == Some(le);
+    let ok = goro_core::value::is_open_resource(id.id())
+        && goro_core::value::resource_type_of(id.id()).as_deref() == Some(le);
     if !ok {
         let m = format!(
             "{}(): supplied resource is not a valid {} resource",
@@ -127,7 +127,7 @@ fn fetch_res(vm: &mut Vm, f: &Func, args: &[Value], i: usize, le: &[u8]) -> Resu
         zpp::throw(vm, b"TypeError", &m);
         return Err(err(vm));
     }
-    Ok(id)
+    Ok(id.id())
 }
 
 fn zip_open(vm: &mut Vm, args: &[Value]) -> R {
@@ -161,7 +161,7 @@ fn zip_open(vm: &mut Vm, args: &[Value]) -> R {
                     },
                 )
             });
-            Ok(Value::Resource(id))
+            Ok(Value::resource(&id))
         }
         Err(e) => Ok(Value::Long(e.zip_err as i64)),
     }
@@ -215,7 +215,7 @@ fn zip_read(vm: &mut Vm, args: &[Value]) -> R {
                     },
                 )
             });
-            Ok(Value::Resource(eid))
+            Ok(Value::resource(&eid))
         }
         None => Ok(Value::False),
     }
