@@ -43062,6 +43062,34 @@ impl Vm {
                                             return Err(VmError { message, line });
                                         }
                                     }
+                                    // A method of an internal (natively implemented)
+                                    // ancestor implements the interface method.
+                                    let internal_impl = class.methods.get(method_name).is_none()
+                                        && {
+                                            let mut cur = class.parent.clone();
+                                            let mut found = false;
+                                            for _ in 0..64 {
+                                                let Some(p) = cur else { break };
+                                                let pl = p.to_ascii_lowercase();
+                                                match self.classes.get(&pl) {
+                                                    Some(pc) => cur = pc.parent.clone(),
+                                                    None => {
+                                                        found = crate::stubs::find_method(
+                                                            &pl,
+                                                            method_name,
+                                                        )
+                                                        .is_some_and(|(_, m)| {
+                                                            m.flags & crate::stubs::F_ABSTRACT == 0
+                                                        });
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            found
+                                        };
+                                    if internal_impl {
+                                        continue;
+                                    }
                                     if class.methods.get(method_name).is_none() {
                                         class.methods.insert(method_name.clone(), method.clone());
                                     }
