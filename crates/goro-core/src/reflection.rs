@@ -6596,7 +6596,10 @@ pub fn reflection_function_method(
         }
         b"getnumberofparameters" => {
             if let Some(op_array) = rfunc(vm, &func_lower) {
-                Some(Value::Long(op_array.param_count as i64))
+                let hidden = closure_hidden_params(op_array);
+                Some(Value::Long(
+                    (op_array.param_count as usize).saturating_sub(hidden) as i64,
+                ))
             } else if vm.functions.contains_key(func_lower.as_slice()) {
                 // For built-in functions, check param names
                 let count = vm
@@ -11657,9 +11660,12 @@ pub fn create_reflection_parameters(vm: &mut Vm, op_array: &OpArray) -> Value {
         .iter()
         .map(|b| b.to_ascii_lowercase())
         .collect();
-    for i in 0..op_array.param_count as usize {
-        let param_name = if i < op_array.cv_names.len() {
-            String::from_utf8_lossy(&op_array.cv_names[i]).to_string()
+    // A closure's leading CVs ($this, the use variables) are not parameters.
+    let hidden = closure_hidden_params(op_array);
+    for i in 0..(op_array.param_count as usize).saturating_sub(hidden) {
+        let cv = i + hidden;
+        let param_name = if cv < op_array.cv_names.len() {
+            String::from_utf8_lossy(&op_array.cv_names[cv]).to_string()
         } else {
             format!("param{}", i)
         };
@@ -11674,9 +11680,25 @@ pub fn create_reflection_parameters(vm: &mut Vm, op_array: &OpArray) -> Value {
             Value::String(PhpString::from_vec(func_lower.clone())),
         );
         obj.set_property(b"__reflection_param_idx".to_vec(), Value::Long(i as i64));
+        if hidden > 0 {
+            obj.set_property(
+                b"__reflection_param_cv_offset".to_vec(),
+                Value::Long(hidden as i64),
+            );
+        }
         result.push(Value::Object(Rc::new(RefCell::new(obj))));
     }
     Value::Array(Rc::new(RefCell::new(result)))
+}
+
+/// The count of a closure's leading CVs that are not parameters ($this and
+/// the use variables); 0 for other functions.
+pub fn closure_hidden_params(op_array: &OpArray) -> usize {
+    if crate::closure::is_closure_fn_name(&op_array.name) {
+        (op_array.param_count as usize).saturating_sub(op_array.param_attributes.len())
+    } else {
+        0
+    }
 }
 
 /// Create ReflectionParameter objects for a method's parameters (skipping $this for non-static methods)

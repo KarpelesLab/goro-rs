@@ -8500,6 +8500,16 @@ impl Vm {
                         remap_cv_operand(&mut op_instr.op2, pos_u32);
                         remap_cv_operand(&mut op_instr.result, pos_u32);
                     }
+                    if !new_op.param_types.is_empty() {
+                        new_op.param_types.insert(0, None);
+                        new_op.param_types.truncate(new_op.cv_names.len());
+                    }
+                    if let Some(v) = new_op.variadic_param.as_mut() {
+                        if *v < pos_u32 {
+                            *v += 1;
+                        }
+                    }
+                    hide_this_param(&mut new_op);
                 }
                 // If pos == 0, it's already there, nothing to do
             } else {
@@ -8513,6 +8523,10 @@ impl Vm {
                 if !new_op.param_types.is_empty() {
                     new_op.param_types.insert(0, None);
                 }
+                if let Some(v) = new_op.variadic_param.as_mut() {
+                    *v += 1;
+                }
+                hide_this_param(&mut new_op);
             }
         };
 
@@ -56629,6 +56643,19 @@ pub fn builtin_parent_chain(class: &[u8]) -> Vec<Vec<u8>> {
     match crate::stubs::class_hierarchy(class) {
         Some((_, h)) => h.parents_lower.clone(),
         None => Vec::new(),
+    }
+}
+
+/// A bound closure's new leading `$this` CV is a hidden parameter slot, as
+/// in a closure compiled in a method: callers that bind the arguments by
+/// position (callbacks) must skip it.
+fn hide_this_param(op: &mut OpArray) {
+    op.param_count += 1;
+    if !op.by_ref_params.is_empty() {
+        op.by_ref_params.insert(0, false);
+    }
+    if !op.param_has_default.is_empty() {
+        op.param_has_default.insert(0, false);
     }
 }
 
