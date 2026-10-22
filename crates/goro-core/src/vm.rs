@@ -17996,7 +17996,7 @@ impl Vm {
                 } else {
                     let refs_ok = !typed_ref::any();
                     let no_release = !self.has_release_work();
-                    crate::fastpath::fast_op(
+                    crate::fastpath::fast_op_outlined(
                         op,
                         cvs.as_mut_slice(),
                         tmps.as_mut_slice(),
@@ -22385,10 +22385,12 @@ impl Vm {
                 // A call by a constant plain function name: what the general
                 // handler below does for one, with the function resolved once.
                 OpCode::InitFCall if plain_fcall_name(op, &op_array.literals).is_some() => {
-                    let name = plain_fcall_name(op, &op_array.literals)
-                        .cloned()
-                        .unwrap_or_else(PhpString::empty);
-                    self.push_plain_call(op_array, ip - 1, name);
+                    outlined(|| {
+                        let name = plain_fcall_name(op, &op_array.literals)
+                            .cloned()
+                            .unwrap_or_else(PhpString::empty);
+                        self.push_plain_call(op_array, ip - 1, name);
+                    })
                 }
                 OpCode::InitFCall => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -23961,7 +23963,7 @@ impl Vm {
                 }
                 // The constructor call of a user class without one (see
                 // fast_noctor_target): what the general handler does then.
-                OpCode::DoFCall if self.fast_noctor_target() => {
+                OpCode::DoFCall if self.fast_noctor_target() => outlined(|| {
                     self.last_call_by_ref = false;
                     let mut call = self.pending_calls.pop().expect("pending call");
                     while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
@@ -23987,7 +23989,7 @@ impl Vm {
                     }
                     self.write_operand(&op.result, Value::Null, cvs, tmps, &static_cv_keys);
                     self.recycle_args(&mut call);
-                }
+                }),
                 // A call of a builtin by its plain name, without named
                 // arguments (see resolve_call_target): the builtin branch of
                 // the general handler below, without the name dispatch.

@@ -79,6 +79,22 @@ pub(crate) fn is_plain_scalar(v: &Value) -> bool {
     )
 }
 
+/// `*slot = v` for a slot holding a plain value: only a string is
+/// released (the others hold nothing; no call into the drop glue).
+#[inline(always)]
+pub(crate) fn set_plain(slot: &mut Value, v: Value) {
+    let old = std::mem::replace(slot, v);
+    if matches!(old, Value::String(_)) {
+        drop(old);
+    } else {
+        debug_assert!(!matches!(
+            old,
+            Value::Array(_) | Value::Object(_) | Value::Reference(_) | Value::Generator(_)
+        ));
+        std::mem::forget(old);
+    }
+}
+
 /// Store into a temporary result slot whose current content is a plain
 /// scalar.  Returns false (and stores nothing) otherwise.
 #[inline(always)]
@@ -86,7 +102,7 @@ pub(crate) fn store_tmp(result: &OperandType, v: Value, tmps: &mut [Value]) -> b
     match result {
         OperandType::Tmp(i) => match tmps.get_mut(*i as usize) {
             Some(slot) if is_plain_scalar(slot) => {
-                *slot = v;
+                set_plain(slot, v);
                 true
             }
             _ => false,
@@ -114,13 +130,13 @@ pub(crate) fn store_num_cv(i: u32, v: Value, cvs: &mut [Value], refs_ok: bool) -
     match cvs.get_mut(i as usize) {
         Some(Value::Reference(r)) if refs_ok => match r.try_borrow_mut() {
             Ok(mut b) if matches!(*b, Value::Long(_) | Value::Double(_)) => {
-                *b = v;
+                set_plain(&mut b, v);
                 true
             }
             _ => false,
         },
         Some(slot @ (Value::Long(_) | Value::Double(_))) => {
-            *slot = v;
+            set_plain(slot, v);
             true
         }
         _ => false,
@@ -531,6 +547,20 @@ pub(crate) fn fast_op(
     }
 }
 
+/// fast_op() for the dispatch loop's own fast attempt (which runs when
+/// run_fast_ops() cannot: out of line, the loop's frame stays small).
+#[inline(never)]
+pub(crate) fn fast_op_outlined(
+    op: &Op,
+    cvs: &mut [Value],
+    tmps: &mut [Value],
+    literals: &[Value],
+    refs_ok: bool,
+    no_release: bool,
+) -> Fast {
+    fast_op(op, cvs, tmps, literals, refs_ok, no_release)
+}
+
 /// Lowercase `s` into `buf` (None when it does not fit: the caller then
 /// takes the general path).
 #[inline]
@@ -647,16 +677,19 @@ impl crate::vm::Vm {
     ) -> usize {
         let ops = &op_array.ops;
         let literals = &op_array.literals;
-        loop {
+        // (the line of the last opcode run: the dispatch loop's current line
+        // once control goes back to it; nothing here reads it)
+        let mut line = None;
+        let next = 'run: loop {
             let Some(op) = ops.get(ip) else {
-                return ip;
+                break 'run ip;
             };
             // A frame bound to a symbol table: only opcodes whose variables
             // are all bound (references), none of them $GLOBALS, run here
             // (the dispatch loop repairs bindings after the others).
             if let Some(globals) = bound {
                 if !cv_operands_bound(op, cvs, globals) {
-                    return ip;
+                    break 'run ip;
                 }
             }
             let fast = match op.opcode {
@@ -664,7 +697,7 @@ impl crate::vm::Vm {
                 // INIT_FCALL arm of the dispatch loop).
                 OpCode::InitFCall => {
                     if !self.init_fcall_fast(op_array, ip, cvs) {
-                        return ip;
+                        break 'run ip;
                     }
                     Fast::Done
                 }
@@ -674,13 +707,13 @@ impl crate::vm::Vm {
                     if self.send_val_fast(op, cvs, tmps, literals) {
                         Fast::Done
                     } else {
-                        return ip;
+                        break 'run ip;
                     }
                 }
                 // (the read of `$o->p++` is one of an object's property)
                 OpCode::PropertyGet | OpCode::PropertySet | OpCode::PropertyGetIncDec => {
                     if self.isset_get_cache.is_some() {
-                        return ip;
+                        break 'run ip;
                     }
                     self.fast_prop_op(op_array, ip, cvs, tmps)
                 }
@@ -696,36 +729,62 @@ impl crate::vm::Vm {
                 // just empties them.
                 OpCode::FreeTmps if foreach_idle && no_release => {
                     let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) else {
-                        return ip;
+                        break 'run ip;
                     };
                     let end = (b as usize).min(tmps.len());
                     let range = &mut tmps[(a as usize).min(end)..end];
                     if range.iter().any(|v| {
                         matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_))
                     }) {
-                        return ip;
+                        break 'run ip;
                     }
                     for slot in range {
                         *slot = Value::Undef;
                     }
                     Fast::Done
                 }
-                _ => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                // (one arm per opcode: each inlined fast_op() reduces to its own case)
+                OpCode::Add => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Sub => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Mul => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Less => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::LessEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Greater => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::GreaterEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Equal => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::NotEqual => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Identical => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::NotIdentical => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::AssignAdd => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::AssignSub => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::AssignMul => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::PreIncrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::PreDecrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::PostIncrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::PostDecrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::JmpZ => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::JmpNz => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Assign => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::QmAssign => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::AssignConcat => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                _ => return ip,
             };
             ip = match fast {
                 Fast::No => return ip,
                 Fast::Done => ip + 1,
                 Fast::Jump(t) => t,
             };
-            if !internal_code {
-                self.current_line = op.line;
-            }
+            line = Some(op.line);
             if crate::value::memory_exhausted() != 0
                 || crate::value::TIMED_OUT.load(std::sync::atomic::Ordering::Relaxed)
             {
-                return ip;
+                break 'run ip;
             }
+        };
+        if let (Some(l), false) = (line, internal_code) {
+            self.current_line = l;
         }
+        next
     }
 
     /// INIT_FCALL by a constant plain function name or static method name
