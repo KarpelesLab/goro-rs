@@ -557,7 +557,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
     // rows "for 5 seconds" on purpose.
     let uses_mysqli = test.sections.get("EXTENSIONS").is_some_and(|e| {
         e.split_whitespace()
-            .any(|x| matches!(x, "mysqli" | "pdo" | "pdo_mysql"))
+            .any(|x| matches!(x, "mysqli" | "pdo" | "pdo_mysql" | "pdo_sqlite"))
     });
     // The argon2 interoperability tests of ext/sodium hash with up to
     // 128 MiB / 8 passes a dozen times (purecrypto's portable Argon2 is about
@@ -1226,6 +1226,7 @@ fn execute_php_with_timeout_and_filename(
             }
 
             pgsql_test::child_env(filename);
+            sqlite_child_env(filename);
 
             // Like run-tests.php, a test runs from the directory the runner
             // was started in (its files are addressed by absolute paths).
@@ -2678,6 +2679,25 @@ impl TestCounts {
     }
 }
 
+thread_local! {
+    /// Whether the test being run is a generic PDO test run against sqlite
+    static SQLITE_PDO_VARIANT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// In the forked child of the sqlite run of a generic PDO test: the
+/// environment ext/pdo_sqlite/tests/common.phpt's --REDIRECTTEST-- sets.
+fn sqlite_child_env(filename: &str) {
+    if !SQLITE_PDO_VARIANT.with(|v| v.get()) || !filename.contains("/ext/pdo/tests/") {
+        return;
+    }
+    unsafe {
+        std::env::set_var("PDOTEST_DSN", "sqlite::memory:");
+        std::env::remove_var("PDOTEST_USER");
+        std::env::remove_var("PDOTEST_PASS");
+        std::env::remove_var("PDOTEST_ATTR");
+    }
+}
+
 /// Run all .phpt files in a directory (recursively)
 pub fn run_test_dir(dir: &Path) -> TestCounts {
     // Each test runs with its own directory as cwd, so a relative test path
@@ -2737,17 +2757,26 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
         collect_phpt_files(dir, &mut files);
     }
     files.sort();
-    // The generic PDO tests run a second time against the pgsql driver (as
-    // the --REDIRECTTEST-- of ext/pdo_pgsql/tests/common.phpt does) when a
-    // PostgreSQL server can be had: such a test is listed twice.
+    // The generic PDO tests run again against the pgsql driver (when a
+    // PostgreSQL server can be had) and the sqlite driver, as the
+    // --REDIRECTTEST-- of ext/pdo_{pgsql,sqlite}/tests/common.phpt do: such
+    // a test is listed once more per driver (the n-th listing is the run of
+    // pdo_variants[n - 1]).
+    let mut pdo_variants: Vec<&'static str> = Vec::new();
     if pgsql_test::can_start() {
+        pdo_variants.push("pgsql");
+    }
+    pdo_variants.push("sqlite");
+    {
         let extra: Vec<std::path::PathBuf> = files
             .iter()
             .filter(|f| f.to_string_lossy().contains("/ext/pdo/tests/"))
             .cloned()
             .collect();
         if !extra.is_empty() {
-            files.extend(extra);
+            for _ in &pdo_variants {
+                files.extend(extra.iter().cloned());
+            }
             files.sort();
         }
     }
@@ -2801,7 +2830,10 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
             }
         }
     }
-    let mut has_pgsql_tests = files.windows(2).any(|w| w[0] == w[1]);
+    let mut has_pgsql_tests = pdo_variants.contains(&"pgsql")
+        && files
+            .iter()
+            .any(|f| f.to_string_lossy().contains("/ext/pdo/tests/"));
     for p in files.iter_mut() {
         if let Ok(abs) = std::fs::canonicalize(&*p) {
             if pgsql_test::is_pgsql_test(&abs.to_string_lossy()) {
@@ -2844,14 +2876,24 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
         }
     }
 
-    let mut seen: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashMap<std::path::PathBuf, usize> =
+        std::collections::HashMap::new();
     for path in &files {
-        // the second listing of a generic PDO test: its pgsql run
-        let pgsql_variant = !seen.insert(path.clone());
+        // a further listing of a generic PDO test: its run against another
+        // driver
+        let nth = seen.entry(path.clone()).or_insert(0);
+        let variant = if *nth == 0 {
+            None
+        } else {
+            pdo_variants.get(*nth - 1).copied()
+        };
+        *nth += 1;
+        let pgsql_variant = variant == Some("pgsql");
         if pgsql_variant && !pgsql_test::is_available() {
             continue;
         }
         pgsql_test::set_pdo_variant(pgsql_variant);
+        SQLITE_PDO_VARIANT.with(|v| v.set(variant == Some("sqlite")));
         if let Ok(content) = std::fs::read(path) {
             if let Some(mut test) = PhptTest::parse_bytes(&content) {
                 let test_dir = path.parent();
@@ -2889,8 +2931,8 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                if pgsql_variant {
-                    _dbg_name.push_str(" (pgsql)");
+                if let Some(v) = variant {
+                    _dbg_name.push_str(&format!(" ({})", v));
                 }
                 match result {
                     Ok(TestResult::Pass) => {
