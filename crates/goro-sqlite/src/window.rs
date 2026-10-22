@@ -57,7 +57,7 @@ pub fn sqlite3WindowAssemble(
     pWin: WindowId,
     pPartition: ExprListId,
     pOrderBy: ExprListId,
-    pBase: &Token,
+    pBase: Option<&Token>,
 ) -> WindowId {
     todo!("sqlite3WindowAssemble")
 }

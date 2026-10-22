@@ -9,7 +9,7 @@ use crate::int::*;
 use std::rc::Rc;
 
 /// C: `void sqlite3Analyze(Parse *pParse, Token *pName1, Token *pName2)`
-pub fn sqlite3Analyze(db: &mut Sqlite3, pName1: &Token, pName2: &Token) {
+pub fn sqlite3Analyze(db: &mut Sqlite3, pName1: Option<&Token>, pName2: Option<&Token>) {
     todo!("sqlite3Analyze")
 }
 

@@ -19,7 +19,13 @@ pub fn sqlite3JournalModename(eMode: i32) -> Option<ZStr> {
 }
 
 /// C: `void sqlite3Pragma( Parse *pParse, Token *pId1, Token *pId2, Token *pValue, int minusFlag )`
-pub fn sqlite3Pragma(db: &mut Sqlite3, pId1: &Token, pId2: &Token, pValue: &Token, minusFlag: i32) {
+pub fn sqlite3Pragma(
+    db: &mut Sqlite3,
+    pId1: &Token,
+    pId2: &Token,
+    pValue: Option<&Token>,
+    minusFlag: i32,
+) {
     todo!("sqlite3Pragma")
 }
 

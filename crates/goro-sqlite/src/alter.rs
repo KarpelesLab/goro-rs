@@ -29,12 +29,12 @@ pub fn sqlite3AlterRenameColumn(db: &mut Sqlite3, pSrc: SrcListId, pOld: &Token,
 }
 
 /// C: `const void * sqlite3RenameTokenMap( Parse *pParse, const void *pPtr, const Token *pToken )`
-pub fn sqlite3RenameTokenMap(db: &mut Sqlite3, pPtr: &[u8], pToken: &Token) -> Option<Vec<u8>> {
+pub fn sqlite3RenameTokenMap(db: &mut Sqlite3, pPtr: RenameKey, pToken: &Token) {
     todo!("sqlite3RenameTokenMap")
 }
 
 /// C: `void sqlite3RenameTokenRemap(Parse *pParse, const void *pTo, const void *pFrom)`
-pub fn sqlite3RenameTokenRemap(db: &mut Sqlite3, pTo: &[u8], pFrom: &[u8]) {
+pub fn sqlite3RenameTokenRemap(db: &mut Sqlite3, pTo: Option<RenameKey>, pFrom: RenameKey) {
     todo!("sqlite3RenameTokenRemap")
 }
 
@@ -54,7 +54,12 @@ pub fn sqlite3AlterDropColumn(db: &mut Sqlite3, pSrc: SrcListId, pName: &Token) 
 }
 
 /// C: `void sqlite3AlterDropConstraint( Parse *pParse, SrcList *pSrc, Token *pCons, Token *pCol )`
-pub fn sqlite3AlterDropConstraint(db: &mut Sqlite3, pSrc: SrcListId, pCons: &Token, pCol: &Token) {
+pub fn sqlite3AlterDropConstraint(
+    db: &mut Sqlite3,
+    pSrc: SrcListId,
+    pCons: Option<&Token>,
+    pCol: Option<&Token>,
+) {
     todo!("sqlite3AlterDropConstraint")
 }
 
@@ -68,7 +73,7 @@ pub fn sqlite3AlterAddConstraint(
     db: &mut Sqlite3,
     pSrc: SrcListId,
     pFirst: &Token,
-    pName: &Token,
+    pName: Option<&Token>,
     zExpr: Option<&[u8]>,
     nExpr: i32,
     pExpr: ExprId,

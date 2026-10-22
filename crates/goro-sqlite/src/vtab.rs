@@ -90,7 +90,7 @@ pub fn sqlite3VtabBeginParse(
 }
 
 /// C: `void sqlite3VtabFinishParse(Parse *pParse, Token *pEnd)`
-pub fn sqlite3VtabFinishParse(db: &mut Sqlite3, pEnd: &Token) {
+pub fn sqlite3VtabFinishParse(db: &mut Sqlite3, pEnd: Option<&Token>) {
     todo!("sqlite3VtabFinishParse")
 }
 

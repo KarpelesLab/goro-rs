@@ -43,8 +43,8 @@ pub fn sqlite3FinishTrigger(db: &mut Sqlite3, pStepList: TriggerStepId, pAll: &T
 pub fn sqlite3TriggerSelectStep(
     db: &mut Sqlite3,
     pSelect: SelectId,
-    zStart: Option<&[u8]>,
-    zEnd: Option<&[u8]>,
+    zStart: usize,
+    zEnd: usize,
 ) -> TriggerStepId {
     todo!("sqlite3TriggerSelectStep")
 }
@@ -57,8 +57,8 @@ pub fn sqlite3TriggerInsertStep(
     pSelect: SelectId,
     orconf: u8,
     pUpsert: UpsertId,
-    zStart: Option<&[u8]>,
-    zEnd: Option<&[u8]>,
+    zStart: usize,
+    zEnd: usize,
 ) -> TriggerStepId {
     todo!("sqlite3TriggerInsertStep")
 }
@@ -71,8 +71,8 @@ pub fn sqlite3TriggerUpdateStep(
     pEList: ExprListId,
     pWhere: ExprId,
     orconf: u8,
-    zStart: Option<&[u8]>,
-    zEnd: Option<&[u8]>,
+    zStart: usize,
+    zEnd: usize,
 ) -> TriggerStepId {
     todo!("sqlite3TriggerUpdateStep")
 }
@@ -82,8 +82,8 @@ pub fn sqlite3TriggerDeleteStep(
     db: &mut Sqlite3,
     pTabList: SrcListId,
     pWhere: ExprId,
-    zStart: Option<&[u8]>,
-    zEnd: Option<&[u8]>,
+    zStart: usize,
+    zEnd: usize,
 ) -> TriggerStepId {
     todo!("sqlite3TriggerDeleteStep")
 }
