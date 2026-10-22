@@ -44947,6 +44947,50 @@ impl Vm {
 
                         // Check class methods (own, inherited or from traits) against the
                         // interface methods they implement.
+                        // Methods imported from traits against the parent's
+                        // (do_inheritance_check_on_method): static-ness.
+                        if let Some(parent) = &class.parent {
+                            let pl = parent.to_ascii_lowercase();
+                            for mn in method_from_trait.keys() {
+                                let (Some(m), Some(pm)) = (
+                                    class.methods.get(mn),
+                                    self.classes.get(&pl).and_then(|p| p.get_method(mn)),
+                                ) else {
+                                    continue;
+                                };
+                                if pm.visibility == Visibility::Private
+                                    || pm.is_static == m.is_static
+                                {
+                                    continue;
+                                }
+                                let pdecl = self
+                                    .classes
+                                    .get(&pm.declaring_class.to_ascii_lowercase())
+                                    .map(|c| crate::value::display_class_name(&c.name))
+                                    .unwrap_or_else(|| crate::value::display_class_name(parent));
+                                let mname = String::from_utf8_lossy(&m.name).to_string();
+                                let cname = crate::value::display_class_name(&class.name);
+                                let message = if m.is_static {
+                                    format!(
+                                        "Cannot make non static method {}::{}() static in class {}",
+                                        pdecl, mname, cname
+                                    )
+                                } else {
+                                    format!(
+                                        "Cannot make static method {}::{}() non static in class {}",
+                                        pdecl, mname, cname
+                                    )
+                                };
+                                return Err(VmError {
+                                    message,
+                                    line: if m.op_array.decl_line > 0 {
+                                        m.op_array.decl_line
+                                    } else {
+                                        op.line
+                                    },
+                                });
+                            }
+                        }
                         for (iface_name_c, iface_method) in &deferred_iface_checks {
                             let mn_lower: Vec<u8> = iface_method
                                 .name
@@ -44963,6 +45007,47 @@ impl Vm {
                                 && existing.op_array.decl_line == iface_method.op_array.decl_line
                             {
                                 continue;
+                            }
+                            // do_inheritance_check_on_method(): static-ness and
+                            // visibility before the signature (methods from traits).
+                            {
+                                let l = if existing.op_array.decl_line > 0 {
+                                    existing.op_array.decl_line
+                                } else {
+                                    op.line
+                                };
+                                let idecl = self
+                                    .classes
+                                    .get(&iface_method.declaring_class.to_ascii_lowercase())
+                                    .map(|c| crate::value::display_class_name(&c.name))
+                                    .unwrap_or_else(|| {
+                                        String::from_utf8_lossy(iface_name_c).to_string()
+                                    });
+                                let mname = String::from_utf8_lossy(&existing.name).to_string();
+                                let cname = crate::value::display_class_name(&class.name);
+                                if iface_method.is_static != existing.is_static {
+                                    let message = if existing.is_static {
+                                        format!(
+                                            "Cannot make non static method {}::{}() static in class {}",
+                                            idecl, mname, cname
+                                        )
+                                    } else {
+                                        format!(
+                                            "Cannot make static method {}::{}() non static in class {}",
+                                            idecl, mname, cname
+                                        )
+                                    };
+                                    return Err(VmError { message, line: l });
+                                }
+                                if existing.visibility != Visibility::Public {
+                                    return Err(VmError {
+                                        message: format!(
+                                            "Access level to {}::{}() must be public (as in class {})",
+                                            cname, mname, idecl
+                                        ),
+                                        line: l,
+                                    });
+                                }
                             }
                             if let Some((err_msg, unresolved)) = self.variance_check_method(
                                 &class,
