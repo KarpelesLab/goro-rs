@@ -463,6 +463,35 @@ pub(crate) struct PendingCall {
     pub(crate) args: Vec<Value>,
     /// Named arguments: (param_name, value) pairs to be reordered at call time
     pub(crate) named_args: Vec<(Vec<u8>, Value)>,
+    /// What `name` resolved to when the call was set up (plain function
+    /// calls only), so that the sends and the call itself do not look it
+    /// up again.
+    pub(crate) target: CallTarget,
+}
+
+/// The function a pending call by name resolved to (see
+/// Vm::resolve_call_target).
+#[derive(Debug, Clone)]
+pub(crate) struct CallTarget {
+    /// The user function of that name (as user_fn_lookup() finds it).
+    pub(crate) user: Option<Rc<OpArray>>,
+    /// The builtin of that name, and its generic zpp info.
+    pub(crate) builtin: Option<(BuiltinFn, Option<(&'static crate::arginfo::FuncInfo, u8)>)>,
+    /// A builtin of that name exists (even when `builtin` is not recorded).
+    pub(crate) has_builtin: bool,
+    /// `user_functions.len() + 1` when resolved (0: not resolved): a
+    /// function declared since then (while the arguments were evaluated)
+    /// makes the lookup run again.
+    pub(crate) fn_gen: usize,
+}
+
+impl CallTarget {
+    pub(crate) const NONE: CallTarget = CallTarget {
+        user: None,
+        builtin: None,
+        has_builtin: false,
+        fn_gen: 0,
+    };
 }
 
 impl PendingCall {
@@ -7011,6 +7040,7 @@ impl Vm {
                 positional_args
             },
             named_args,
+            target: CallTarget::NONE,
         };
 
         if !call.named_args.is_empty() {
@@ -7845,6 +7875,7 @@ impl Vm {
             name,
             args,
             named_args: Vec::new(),
+            target: CallTarget::NONE,
         });
         Ok(())
     }
@@ -13933,6 +13964,24 @@ fn param_type_accepts_array(pt: &ParamType) -> bool {
     }
 }
 
+/// The function name of an INIT_FCALL by a constant name that is a plain
+/// function name (not a method, a closure or one of the engine's internal
+/// `__` call names), at most 64 bytes long.
+#[inline]
+fn plain_fcall_name<'a>(op: &crate::opcode::Op, literals: &'a [Value]) -> Option<&'a PhpString> {
+    let OperandType::Const(i) = op.op1 else {
+        return None;
+    };
+    match literals.get(i as usize) {
+        Some(Value::String(s)) => {
+            let b = s.as_bytes();
+            (!b.is_empty() && b.len() <= 64 && !b.starts_with(b"__") && !b.contains(&b':'))
+                .then_some(s)
+        }
+        _ => None,
+    }
+}
+
 /// Auto-global variable names other than $GLOBALS.
 pub(crate) fn is_auto_global_name(name: &[u8]) -> bool {
     matches!(
@@ -16342,6 +16391,21 @@ impl Vm {
         if !call.named_args.is_empty() || name.is_empty() || name.len() > 128 || name[0] == b'_' {
             return false;
         }
+        // A plain function name resolved when the call was set up.
+        if call.target.fn_gen == self.user_functions.len() + 1 {
+            if call.target.has_builtin {
+                return false;
+            }
+            let Some(f) = call.target.user.as_ref() else {
+                return false;
+            };
+            if Self::fast_fcall_simple(f, call, false, false) {
+                self.fast_fcall_fn = Some(Rc::clone(f));
+                self.fast_fcall_sep = None;
+                return true;
+            }
+            return false;
+        }
         let mut buf = [0u8; 128];
         for (d, s) in buf.iter_mut().zip(name) {
             *d = s.to_ascii_lowercase();
@@ -16392,24 +16456,42 @@ impl Vm {
             return false;
         };
         let has_this = sep.is_some_and(|(_, t)| t);
+        let simple = Self::fast_fcall_simple(f, call, sep.is_some(), has_this);
+        if simple {
+            self.fast_fcall_fn = Some(f.clone());
+            self.fast_fcall_sep = sep;
+        }
+        simple
+    }
+
+    /// Whether the call DO_FCALL is about to make is one of a builtin by its
+    /// plain name, without named arguments, that the builtin fast path runs
+    /// (see resolve_call_target); not while an observer watches calls.
+    #[inline]
+    fn fast_builtin_target(&self) -> bool {
+        self.observer.is_none()
+            && self
+                .pending_calls
+                .last()
+                .is_some_and(|c| c.target.builtin.is_some() && c.named_args.is_empty())
+    }
+
+    /// fast_fcall_target(): user function `f` takes the call as is.
+    #[inline]
+    fn fast_fcall_simple(f: &OpArray, call: &PendingCall, method: bool, has_this: bool) -> bool {
         let implicit = usize::from(has_this);
         let nargs = call.args.len();
         let required = f.required_param_count as usize;
-        let simple = f.attributes.is_empty()
+        f.attributes.is_empty()
             && !f.is_generator
-            && (sep.is_some() || f.scope_class.is_none())
+            && (method || f.scope_class.is_none())
             && f.variadic_param.is_none()
             && (f.cv_names.first().map(|n| n.as_slice()) == Some(b"this")) == has_this
             && !crate::closure::is_closure_fn_name(&f.name)
             && nargs >= implicit + required
             && !call.args[implicit..implicit + required]
                 .iter()
-                .any(|a| matches!(a, Value::Undef));
-        if simple {
-            self.fast_fcall_fn = Some(f.clone());
-            self.fast_fcall_sep = sep;
-        }
-        simple
+                .any(|a| matches!(a, Value::Undef))
     }
 
     /// A vector of `n` undefined values, from the buffers of finished calls.
@@ -16427,6 +16509,15 @@ impl Vm {
         if v.capacity() != 0 && v.capacity() <= 256 && self.value_pool.len() < 64 {
             self.value_pool.push(v);
         }
+    }
+
+    /// A finished call's arguments are released (in order): keep the
+    /// buffer for the next call's.
+    #[inline]
+    fn recycle_args(&mut self, call: &mut PendingCall) {
+        let mut args = std::mem::take(&mut call.args);
+        args.clear();
+        self.recycle_values(args);
     }
 
     /// A call's backtrace frame is done with: keep its buffers.
@@ -16626,6 +16717,58 @@ impl Vm {
             }
         }
         Ok(())
+    }
+
+    /// What a call to plain function `name` (see plain_fcall_name()) runs:
+    /// the user function and the builtin of that name. A builtin is only
+    /// recorded for the calls DO_FCALL's builtin fast path takes (see
+    /// fast_builtin_target).
+    fn resolve_call_target(&mut self, name: &[u8]) -> CallTarget {
+        let mut buf = [0u8; 64];
+        for (d, s) in buf.iter_mut().zip(name) {
+            *d = s.to_ascii_lowercase();
+        }
+        let lower = &buf[..name.len()];
+        let user = self.user_functions.get(lower).cloned();
+        let found = self.functions.get(lower).copied();
+        let builtin = match found {
+            Some(f)
+                if !name.contains(&b'\\')
+                    && !name.starts_with(b"_")
+                    && !matches!(
+                        lower,
+                        b"call_user_func" | b"call_user_func_array" | b"assert"
+                    ) =>
+            {
+                let zpp = self.zpp_info(lower);
+                let zpp_types = matches!(zpp, Some((_, f)) if f & crate::arginfo::CHECK_TYPES != 0);
+                // (the legacy per-builtin type checks take the general path)
+                if zpp_types || !self.builtin_param_types.contains_key(lower) {
+                    Some((f, zpp))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        CallTarget {
+            user,
+            builtin,
+            has_builtin: found.is_some(),
+            fn_gen: self.user_functions.len() + 1,
+        }
+    }
+
+    /// The user function a pending call names (as user_fn_lookup() finds
+    /// it), from what the call resolved to when it was set up unless a
+    /// function was declared since.
+    #[inline]
+    pub(crate) fn call_user_fn<'a>(&'a self, call: &'a PendingCall) -> Option<&'a Rc<OpArray>> {
+        if call.target.fn_gen == self.user_functions.len() + 1 {
+            call.target.user.as_ref()
+        } else {
+            self.user_fn_lookup(call.name.as_bytes())
+        }
     }
 
     /// The user function called `name` (case-insensitively).
@@ -21763,6 +21906,21 @@ impl Vm {
                 }
 
                 // Function calls
+                // A call by a constant plain function name: what the general
+                // handler below does for one, with the function resolved once.
+                OpCode::InitFCall if plain_fcall_name(op, &op_array.literals).is_some() => {
+                    let name = plain_fcall_name(op, &op_array.literals)
+                        .cloned()
+                        .unwrap_or_else(PhpString::empty);
+                    let target = self.resolve_call_target(name.as_bytes());
+                    let args = self.take_values(0);
+                    self.pending_calls.push(PendingCall {
+                        name,
+                        args,
+                        named_args: Vec::new(),
+                        target,
+                    });
+                }
                 OpCode::InitFCall => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // INIT_DYNAMIC_CALL on an undefined CV warns first.
@@ -22064,6 +22222,7 @@ impl Vm {
                             name: PhpString::from_bytes(b"call_user_func"),
                             args: vec![name_val.clone()],
                             named_args: Vec::new(),
+                            target: CallTarget::NONE,
                         });
                         return Ok(Flow::Continue);
                     }
@@ -22081,12 +22240,14 @@ impl Vm {
                                 name,
                                 args: values, // use vars as initial args
                                 named_args: Vec::new(),
+                                target: CallTarget::NONE,
                             });
                         } else {
                             self.pending_calls.push(PendingCall {
                                 name: PhpString::empty(),
                                 args: Vec::new(),
                                 named_args: Vec::new(),
+                                target: CallTarget::NONE,
                             });
                         }
                     } else if let Value::Object(obj) = &name_val {
@@ -22124,6 +22285,7 @@ impl Vm {
                                 name: PhpString::from_vec(func_name),
                                 args: vec![name_val.clone()], // $this
                                 named_args: Vec::new(),
+                                target: CallTarget::NONE,
                             });
                         } else {
                             let name = name_val.to_php_string();
@@ -22131,6 +22293,7 @@ impl Vm {
                                 name,
                                 args: Vec::new(),
                                 named_args: Vec::new(),
+                                target: CallTarget::NONE,
                             });
                         }
                     } else {
@@ -22210,6 +22373,7 @@ impl Vm {
                             name,
                             args: init_args,
                             named_args: Vec::new(),
+                            target: CallTarget::NONE,
                         });
                     }
                     Ok(Flow::Next)
@@ -22332,6 +22496,7 @@ impl Vm {
                         name: PhpString::from_vec(func_name),
                         args: Vec::new(),
                         named_args: Vec::new(),
+                        target: CallTarget::NONE,
                     });
                     Ok(Flow::Next)
                 })? {
@@ -22348,7 +22513,7 @@ impl Vm {
                             .pending_calls
                             .last()
                             .and_then(|call| {
-                                self.user_fn_lookup(call.name.as_bytes())
+                                self.call_user_fn(call)
                                     .and_then(|f| f.by_ref_params.get(arg_index).copied())
                             })
                             .unwrap_or(false)
@@ -22670,7 +22835,7 @@ impl Vm {
                         .pending_calls
                         .last()
                         .and_then(|call| {
-                            self.user_fn_lookup(call.name.as_bytes()).map(|f| {
+                            self.call_user_fn(call).map(|f| {
                                 let var_is_ref = f.variadic_param.is_some()
                                     && f.by_ref_params.last().copied().unwrap_or(false);
                                 (f.by_ref_params.clone(), var_is_ref)
@@ -23216,7 +23381,7 @@ impl Vm {
                                 }
                             }
                         }
-                        let saved_pending_return = self.pending_return.take();
+                        let mut saved_pending_return = self.pending_return.take();
                         let saved_pending_jump = self.pending_finally_jump.take();
                         if !matches!(op.op2, OperandType::Unused) && user_fn.returns_by_ref {
                             // `$x = &f()` & co.: keep the returned reference.
@@ -23225,7 +23390,7 @@ impl Vm {
                         let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
                         self.keep_ref_depth = None;
                         if self.pending_return.is_none() {
-                            self.pending_return = saved_pending_return;
+                            self.pending_return = saved_pending_return.take();
                         }
                         if self.pending_finally_jump.is_none() {
                             self.pending_finally_jump = saved_pending_jump;
@@ -23295,6 +23460,228 @@ impl Vm {
                             &mut tmps,
                             &static_cv_keys,
                         );
+                        // (released in the order the end of the scope would)
+                        drop(saved_pending_return);
+                        self.recycle_args(&mut call);
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
+                    }
+                }
+                // A call of a builtin by its plain name, without named
+                // arguments (see resolve_call_target): the builtin branch of
+                // the general handler below, without the name dispatch.
+                OpCode::DoFCall if self.fast_builtin_target() => {
+                    match outlined(|| -> Result<Flow, VmError> {
+                        self.last_call_by_ref = false;
+                        let mut call = self.pending_calls.pop().expect("pending call");
+                        while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
+                        {
+                            self.closure_pending_calls.pop();
+                        }
+                        let via_closure =
+                            self.closure_pending_calls.last() == Some(&self.pending_calls.len());
+                        if via_closure {
+                            self.closure_pending_calls.pop();
+                        }
+                        let (func, zpp) = call.target.builtin.expect("builtin call target");
+                        let name = call.name.as_bytes();
+                        let mut buf = [0u8; 64];
+                        for (d, s) in buf.iter_mut().zip(name) {
+                            *d = s.to_ascii_lowercase();
+                        }
+                        let func_name_lower = &buf[..name.len()];
+                        // Compiled to an opcode by php-src: no frame of its own
+                        let special = !via_closure
+                            && crate::internal_frames::compiled_special(
+                                func_name_lower,
+                                &call.args,
+                            );
+                        // Generic zpp (verified stub arginfo)
+                        let mut zpp_orig: Option<Vec<Value>> = None;
+                        if let Some((info, flags)) = zpp {
+                            if let Err(e) = self.zpp_check(
+                                info,
+                                flags,
+                                &mut call.args,
+                                &mut zpp_orig,
+                                op_array.strict_types,
+                                op.line,
+                            ) {
+                                if let crate::arginfo::ZppError::Throw(cls, msg) = e {
+                                    // zpp errors are raised inside the function: its
+                                    // frame is in the trace
+                                    if !special {
+                                        self.push_builtin_frame(
+                                            func_name_lower,
+                                            zpp_orig.as_deref().unwrap_or(&call.args),
+                                            op.line,
+                                        );
+                                    }
+                                    let exc_val = self.create_exception(cls, &msg, op.line);
+                                    if !special {
+                                        self.pop_builtin_frame();
+                                    }
+                                    self.current_exception = Some(exc_val);
+                                }
+                                if let Some((catch_target, finally_target, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = if catch_target > 0 {
+                                        catch_target
+                                    } else {
+                                        finally_target
+                                    } as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: self.uncaught_exception_message(),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        // #[\Deprecated] / #[\NoDiscard] of builtins declaring
+                        // attributes.
+                        if !self.internal_function_decls.is_empty() && !special {
+                            self.internal_decl_call_checks(
+                                func_name_lower,
+                                matches!(op.op1, OperandType::Const(_)),
+                                op.line,
+                            );
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, finally_target, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = if catch_target > 0 {
+                                        catch_target
+                                    } else {
+                                        finally_target
+                                    } as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception".to_string(),
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        self.caller_strict_types = op_array.strict_types;
+                        self.builtin_named_skipped = Vec::new();
+                        let had_exception_before = self.current_exception.is_some();
+                        let own_frame = !special;
+                        if own_frame {
+                            self.push_builtin_frame(
+                                func_name_lower,
+                                zpp_orig.as_deref().unwrap_or(&call.args),
+                                op.line,
+                            );
+                        }
+                        let builtin_result = if own_frame {
+                            self.call_builtin_observed(func, func_name_lower, &call.args)
+                        } else {
+                            func(self, &call.args)
+                        };
+                        if own_frame {
+                            self.pop_builtin_frame();
+                        } else {
+                            self.ucf_call_line = None;
+                        }
+                        match builtin_result {
+                            Ok(result) => {
+                                if !had_exception_before && self.current_exception.is_some() {
+                                    if let Some((
+                                        catch_target,
+                                        finally_target,
+                                        _,
+                                        _,
+                                        saved_pc,
+                                    )) = exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        if catch_target > 0 {
+                                            ip = catch_target as usize;
+                                        } else if finally_target > 0 {
+                                            ip = finally_target as usize;
+                                        }
+                                        return Ok(Flow::Continue);
+                                    } else {
+                                        let msg = if let Some(Value::Object(exc_obj)) =
+                                            &self.current_exception
+                                        {
+                                            let exc = exc_obj.borrow();
+                                            let class = crate::value::display_class_name(
+                                                &exc.class_name,
+                                            );
+                                            let message = exc
+                                                .get_property(b"message")
+                                                .to_php_string()
+                                                .to_string_lossy();
+                                            format!("Uncaught {}: {}", class, message)
+                                        } else {
+                                            "Uncaught exception".to_string()
+                                        };
+                                        return Err(VmError {
+                                            message: msg,
+                                            line: op.line,
+                                        });
+                                    }
+                                }
+                                // zend_vm_stack_free_args(): the arguments are
+                                // released when the call returns.
+                                if self.has_release_work() && !call.args.is_empty() {
+                                    call.args.clear();
+                                    self.current_line = op.line;
+                                    release_point!(outlined);
+                                }
+                                self.write_operand(
+                                    &op.result,
+                                    result,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                            }
+                            Err(e) => {
+                                // The arguments are released before the exception
+                                // unwinds (a destructor's exception chains to it).
+                                if self.current_exception.is_some()
+                                    && self.has_release_work()
+                                    && !call.args.is_empty()
+                                {
+                                    call.args.clear();
+                                    self.current_line = op.line;
+                                    self.run_pending_destructors();
+                                }
+                                if self.current_exception.is_some() {
+                                    if let Some((
+                                        catch_target,
+                                        finally_target,
+                                        _,
+                                        _,
+                                        saved_pc,
+                                    )) = exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        if catch_target > 0 {
+                                            ip = catch_target as usize;
+                                        } else if finally_target > 0 {
+                                            ip = finally_target as usize;
+                                        }
+                                        return Ok(Flow::Continue);
+                                    }
+                                }
+                                return Err(VmError {
+                                    message: e.message,
+                                    line: op.line,
+                                });
+                            }
+                        }
+                        drop(zpp_orig);
+                        self.recycle_args(&mut call);
                         Ok(Flow::Next)
                     })? {
                         Flow::Next => {}
@@ -25064,6 +25451,7 @@ impl Vm {
                                     name,
                                     args: values,
                                     named_args: Vec::new(),
+                                    target: CallTarget::NONE,
                                 });
                                 ip -= 1;
                                 return Ok(Flow::Continue);
@@ -25075,6 +25463,7 @@ impl Vm {
                                 name: name.clone(),
                                 args,
                                 named_args: Vec::new(),
+                                target: CallTarget::NONE,
                             });
                             ip -= 1;
                             return Ok(Flow::Continue);
@@ -40927,7 +41316,7 @@ impl Vm {
                             .last()
                             .and_then(|call| {
                                 let idx = call.args.len();
-                                self.user_fn_lookup(call.name.as_bytes()).map(|f| {
+                                self.call_user_fn(call).map(|f| {
                                     match f.by_ref_params.get(idx) {
                                         Some(b) => *b,
                                         None => {
@@ -51225,6 +51614,7 @@ impl Vm {
                                             Value::False
                                         }],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51243,6 +51633,7 @@ impl Vm {
                                             Value::False
                                         }],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51261,6 +51652,7 @@ impl Vm {
                                             Value::False
                                         }],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51279,6 +51671,7 @@ impl Vm {
                                             Value::False
                                         }],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51356,6 +51749,7 @@ impl Vm {
                                         name,
                                         args: vec![ret_val],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51366,6 +51760,7 @@ impl Vm {
                                         name: PhpString::from_vec(fiber_name),
                                         args: vec![obj_val.clone()],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51383,6 +51778,7 @@ impl Vm {
                                         ),
                                         args: vec![obj_val.clone()],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51396,6 +51792,7 @@ impl Vm {
                                         name,
                                         args: vec![v],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51427,6 +51824,7 @@ impl Vm {
                                         name,
                                         args: vec![result],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51470,6 +51868,7 @@ impl Vm {
                                         name: PhpString::from_vec(wm_name),
                                         args: vec![obj_val.clone()],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                     return Ok(Flow::Continue);
                                 }
@@ -51488,6 +51887,7 @@ impl Vm {
                                 name: PhpString::from_vec(nm),
                                 args: vec![obj_val.clone()],
                                 named_args: Vec::new(),
+                                target: CallTarget::NONE,
                             });
                             return Ok(Flow::Continue);
                         }
@@ -51640,6 +52040,7 @@ impl Vm {
                                 name,
                                 args: vec![result],
                                 named_args: Vec::new(),
+                                target: CallTarget::NONE,
                             });
                         } else if !has_user_method && {
                             // Check SPL args method for class and parent chain
@@ -51726,6 +52127,7 @@ impl Vm {
                                 name: PhpString::from_vec(spl_name),
                                 args: vec![obj_val.clone()],
                                 named_args: Vec::new(),
+                                target: CallTarget::NONE,
                             });
                         } else
                         // Find the method in the class
@@ -51828,6 +52230,7 @@ impl Vm {
                                         name: call_name,
                                         args,
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                 } else if let Some(call_method) = class.get_method(b"__call") {
                                     // Method exists but is not accessible - fall through to __call
@@ -51849,6 +52252,7 @@ impl Vm {
                                         name: call_name,
                                         args: vec![obj_val.clone(), method_name_val],
                                         named_args: Vec::new(),
+                                        target: CallTarget::NONE,
                                     });
                                 } else {
                                     // Method not accessible and no __call - throw error
@@ -51879,6 +52283,7 @@ impl Vm {
                                     name: PhpString::from_vec(func_name),
                                     args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
+                                    target: CallTarget::NONE,
                                 });
                             } else if let Some(call_method) = class.get_method(b"__call") {
                                 // __call magic method fallback
@@ -51903,6 +52308,7 @@ impl Vm {
                                     name: call_name,
                                     args: vec![obj_val.clone(), method_name_val],
                                     named_args: Vec::new(),
+                                    target: CallTarget::NONE,
                                 });
                             } else {
                                 // Method not found - push call with class-qualified name
@@ -51913,6 +52319,7 @@ impl Vm {
                                     name: PhpString::from_vec(func_name),
                                     args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
+                                    target: CallTarget::NONE,
                                 });
                             }
                         } else {
@@ -51925,6 +52332,7 @@ impl Vm {
                                     name: PhpString::from_vec(func_name),
                                     args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
+                                    target: CallTarget::NONE,
                                 });
                             } else {
                                 // For other methods, try to push with class-qualified name
@@ -51935,6 +52343,7 @@ impl Vm {
                                     name: PhpString::from_vec(func_name),
                                     args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
+                                    target: CallTarget::NONE,
                                 });
                             }
                         }
@@ -51951,6 +52360,7 @@ impl Vm {
                             name: PhpString::from_vec(name),
                             args: vec![obj_val.clone()],
                             named_args: Vec::new(),
+                            target: CallTarget::NONE,
                         });
                     } else {
                         // Check for closure methods on string/array values
@@ -51966,6 +52376,7 @@ impl Vm {
                                     name: PhpString::from_bytes(b"__closure_bindto"),
                                     args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
+                                    target: CallTarget::NONE,
                                 });
                             }
                             b"call" => {
@@ -51974,6 +52385,7 @@ impl Vm {
                                     name: PhpString::from_bytes(b"__closure_call"),
                                     args: vec![obj_val.clone()],
                                     named_args: Vec::new(),
+                                    target: CallTarget::NONE,
                                 });
                             }
                             b"__invoke" => {
@@ -51986,6 +52398,7 @@ impl Vm {
                                             name: s.clone(),
                                             args: Vec::new(),
                                             named_args: Vec::new(),
+                                            target: CallTarget::NONE,
                                         });
                                     }
                                     Value::Array(arr) => {
@@ -52001,12 +52414,14 @@ impl Vm {
                                                 name,
                                                 args: values,
                                                 named_args: Vec::new(),
+                                                target: CallTarget::NONE,
                                             });
                                         } else {
                                             self.pending_calls.push(PendingCall {
                                                 name: PhpString::from_bytes(b"__builtin_return"),
                                                 args: vec![Value::Null],
                                                 named_args: Vec::new(),
+                                                target: CallTarget::NONE,
                                             });
                                         }
                                     }
@@ -52015,6 +52430,7 @@ impl Vm {
                                             name: PhpString::from_bytes(b"__builtin_return"),
                                             args: vec![Value::Null],
                                             named_args: Vec::new(),
+                                            target: CallTarget::NONE,
                                         });
                                     }
                                 }
@@ -52973,12 +53389,14 @@ impl Vm {
                     name,
                     args: values,
                     named_args: Vec::new(),
+                    target: CallTarget::NONE,
                 });
             } else {
                 self.pending_calls.push(PendingCall {
                     name: PhpString::empty(),
                     args: Vec::new(),
                     named_args: Vec::new(),
+                    target: CallTarget::NONE,
                 });
             }
         } else {
@@ -52987,6 +53405,7 @@ impl Vm {
                 name,
                 args: Vec::new(),
                 named_args: Vec::new(),
+                target: CallTarget::NONE,
             });
         }
     }
