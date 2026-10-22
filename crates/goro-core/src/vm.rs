@@ -13,6 +13,7 @@ use crate::value::Value;
 
 #[path = "fastcall.rs"]
 mod fastcall;
+pub(crate) use fastcall::MethodSite;
 #[path = "internal_static.rs"]
 pub mod internal_static;
 #[path = "static_props.rs"]
@@ -532,6 +533,7 @@ pub(crate) struct CachedCallTarget {
     user: Option<Weak<OpArray>>,
     builtin: Option<(BuiltinFn, Option<(&'static crate::arginfo::FuncInfo, u8)>)>,
     has_builtin: bool,
+    method: Option<(usize, bool)>,
     fn_gen: usize,
 }
 
@@ -14020,6 +14022,39 @@ fn param_type_accepts_array(pt: &ParamType) -> bool {
     }
 }
 
+/// The name of an INIT_FCALL by a constant name that is a static method
+/// call `Class::method` (not self::, parent:: or static::, not a magic
+/// method), at most 64 bytes long.
+#[inline]
+pub(crate) fn static_fcall_name<'a>(
+    op: &crate::opcode::Op,
+    literals: &'a [Value],
+) -> Option<&'a PhpString> {
+    let OperandType::Const(i) = op.op1 else {
+        return None;
+    };
+    let Some(Value::String(s)) = literals.get(i as usize) else {
+        return None;
+    };
+    let b = s.as_bytes();
+    if b.len() > 64 || b.first() == Some(&b'\\') {
+        return None;
+    }
+    let sep = b.windows(2).position(|w| w == b"::")?;
+    let (class, method) = (&b[..sep], &b[sep + 2..]);
+    if class.is_empty()
+        || method.is_empty()
+        || method.starts_with(b"__")
+        || method.contains(&b':')
+        || class.eq_ignore_ascii_case(b"self")
+        || class.eq_ignore_ascii_case(b"parent")
+        || class.eq_ignore_ascii_case(b"static")
+    {
+        return None;
+    }
+    Some(s)
+}
+
 /// Append `b` to `dst` as String::from_utf8_lossy() renders it.
 #[inline]
 fn push_lossy(dst: &mut String, b: &[u8]) {
@@ -16851,6 +16886,28 @@ impl Vm {
         let lower = &buf[..name.len()];
         let user = self.user_functions.get(lower).cloned();
         let found = self.functions.get(lower).copied();
+        // `Class::method` (see static_fcall_name): what fast_fcall_target()
+        // checks of the class and the method, which do not change once the
+        // class is declared.
+        if let Some(sep) = lower.windows(2).position(|w| w == b"::") {
+            let method = self.classes.get(&lower[..sep]).and_then(|class| {
+                let m = class.get_method(&lower[sep + 2..])?;
+                (class.filename.is_some()
+                    && !class.is_enum
+                    && !class.is_trait
+                    && m.visibility == Visibility::Public
+                    && !m.is_abstract)
+                    .then_some((sep, m.is_static))
+            });
+            return CallTarget {
+                user,
+                builtin: None,
+                has_builtin: found.is_some(),
+                method,
+                no_ctor: false,
+                fn_gen: self.user_functions.len() + 1,
+            };
+        }
         let builtin = match found {
             Some(f)
                 if !name.contains(&b'\\')
@@ -16959,7 +17016,7 @@ impl Vm {
     /// INIT_FCALL at `ip` of `op_array` by plain function name `name` (see
     /// plain_fcall_name): the general handler's pending call, with its
     /// target resolved.
-    #[inline(never)]
+    #[inline]
     pub(crate) fn push_plain_call(&mut self, op_array: &OpArray, ip: usize, name: PhpString) {
         let target = self.plain_call_target(op_array, ip, name.as_bytes());
         let args = self.take_values(0);
@@ -16969,6 +17026,35 @@ impl Vm {
             named_args: Vec::new(),
             target,
         });
+    }
+
+    /// INIT_FCALL at `ip` of `op_array` of a static call `Class::method`
+    /// (see static_fcall_name) of a public method of a user class:
+    /// the general handler's pending call, with its target resolved.
+    /// `frame_this`: the running frame has a `$this` (a non-static method
+    /// may then get it: the general handler runs). Returns false, doing
+    /// nothing, otherwise.
+    #[inline(never)]
+    pub(crate) fn push_static_call(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        name: &PhpString,
+        frame_this: bool,
+    ) -> bool {
+        let target = self.plain_call_target(op_array, ip, name.as_bytes());
+        match target.method {
+            Some((_, is_static)) if is_static || !frame_this => {}
+            _ => return false,
+        }
+        let args = self.take_values(0);
+        self.pending_calls.push(PendingCall {
+            name: name.clone(),
+            args,
+            named_args: Vec::new(),
+            target,
+        });
+        true
     }
 
     /// SEND_VAL of a plain value (not an undefined variable) to a call
@@ -17032,7 +17118,12 @@ impl Vm {
         name: &[u8],
     ) -> CallTarget {
         let fn_gen = self.user_functions.len() + 1;
-        if let Some(c) = op_array.call_targets.borrow().get(&(ip as u32)) {
+        if let Some(c) = op_array
+            .sites
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.call_targets.get(&(ip as u32)))
+        {
             if c.fn_gen == fn_gen && c.name == name {
                 let user = match &c.user {
                     Some(w) => w.upgrade(),
@@ -17043,7 +17134,7 @@ impl Vm {
                         user,
                         builtin: c.builtin,
                         has_builtin: c.has_builtin,
-                        method: None,
+                        method: c.method,
                         no_ctor: false,
                         fn_gen,
                     };
@@ -17051,16 +17142,22 @@ impl Vm {
             }
         }
         let t = self.resolve_call_target(name);
-        op_array.call_targets.borrow_mut().insert(
-            ip as u32,
-            CachedCallTarget {
-                name: name.to_vec(),
-                user: t.user.as_ref().map(Rc::downgrade),
-                builtin: t.builtin,
-                has_builtin: t.has_builtin,
-                fn_gen: t.fn_gen,
-            },
-        );
+        op_array
+            .sites
+            .borrow_mut()
+            .get_or_insert_with(Default::default)
+            .call_targets
+            .insert(
+                ip as u32,
+                CachedCallTarget {
+                    name: name.to_vec(),
+                    user: t.user.as_ref().map(Rc::downgrade),
+                    builtin: t.builtin,
+                    has_builtin: t.has_builtin,
+                    method: t.method,
+                    fn_gen: t.fn_gen,
+                },
+            );
         t
     }
 
@@ -17859,12 +17956,7 @@ impl Vm {
                 let fast = if matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertySet)
                     && self.isset_get_cache.is_none()
                 {
-                    self.fast_prop_op(
-                        op,
-                        cvs.as_mut_slice(),
-                        tmps.as_mut_slice(),
-                        &op_array.literals,
-                    )
+                    self.fast_prop_op(op_array, ip - 1, cvs.as_mut_slice(), tmps.as_mut_slice())
                 } else if matches!(
                     op.opcode,
                     OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend
@@ -51816,7 +51908,7 @@ impl Vm {
 
                 OpCode::InitMethodCall => match outlined(|| -> Result<Flow, VmError> {
                     // A public method of a user class (see init_method_call_fast)
-                    if self.init_method_call_fast(op, &cvs, &mut tmps, &op_array.literals) {
+                    if self.init_method_call_fast(op_array, ip - 1, &cvs, &mut tmps) {
                         return Ok(Flow::Next);
                     }
                     let method_name = self

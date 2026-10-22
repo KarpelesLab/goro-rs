@@ -268,6 +268,23 @@ pub(crate) fn assign_concat_in_place(
     }
 }
 
+/// php_increment / php_decrement on a number.
+#[inline(always)]
+fn inc_dec(old: Num, inc: bool) -> Value {
+    match (old, inc) {
+        (Num::L(n), true) => match n.checked_add(1) {
+            Some(r) => Value::Long(r),
+            None => Value::Double(n as f64 + 1.0),
+        },
+        (Num::L(n), false) => match n.checked_sub(1) {
+            Some(r) => Value::Long(r),
+            None => Value::Double(n as f64 - 1.0),
+        },
+        (Num::D(d), true) => Value::Double(d + 1.0),
+        (Num::D(d), false) => Value::Double(d - 1.0),
+    }
+}
+
 #[inline(always)]
 fn bool_val(b: bool) -> Value {
     if b { Value::True } else { Value::False }
@@ -392,6 +409,27 @@ pub(crate) fn fast_op(
         | OpCode::PreDecrement
         | OpCode::PostIncrement
         | OpCode::PostDecrement => {
+            let inc = matches!(op.opcode, OpCode::PreIncrement | OpCode::PostIncrement);
+            let pre = matches!(op.opcode, OpCode::PreIncrement | OpCode::PreDecrement);
+            // A temporary (`$o->p++` fetches the property into one): the
+            // result is written first, then the temporary.
+            if let OperandType::Tmp(ti) = op.op1 {
+                let old = match tmps.get(ti as usize) {
+                    Some(Value::Long(n)) => Num::L(*n),
+                    Some(Value::Double(d)) => Num::D(*d),
+                    _ => return Fast::No,
+                };
+                if !tmp_writable(&op.result, tmps) {
+                    return Fast::No;
+                }
+                let new = inc_dec(old, inc);
+                let res = if pre { new.clone() } else { old.value() };
+                store_tmp(&op.result, res, tmps);
+                if let Some(slot) = tmps.get_mut(ti as usize) {
+                    *slot = new;
+                }
+                return Fast::Done;
+            }
             let OperandType::Cv(ci) = op.op1 else {
                 return Fast::No;
             };
@@ -399,25 +437,8 @@ pub(crate) fn fast_op(
                 return Fast::No;
             }
             let old = num!(op.op1);
-            let inc = matches!(op.opcode, OpCode::PreIncrement | OpCode::PostIncrement);
-            // php_increment / php_decrement on numbers.
-            let new = match (old, inc) {
-                (Num::L(n), true) => match n.checked_add(1) {
-                    Some(r) => Value::Long(r),
-                    None => Value::Double(n as f64 + 1.0),
-                },
-                (Num::L(n), false) => match n.checked_sub(1) {
-                    Some(r) => Value::Long(r),
-                    None => Value::Double(n as f64 - 1.0),
-                },
-                (Num::D(d), true) => Value::Double(d + 1.0),
-                (Num::D(d), false) => Value::Double(d - 1.0),
-            };
-            let res = if matches!(op.opcode, OpCode::PreIncrement | OpCode::PreDecrement) {
-                new.clone()
-            } else {
-                old.value()
-            };
+            let new = inc_dec(old, inc);
+            let res = if pre { new.clone() } else { old.value() };
             if !store_num_cv(ci, new, cvs, refs_ok) {
                 return Fast::No;
             }
@@ -619,10 +640,9 @@ impl crate::vm::Vm {
                 // A call by a constant plain function name (see the
                 // INIT_FCALL arm of the dispatch loop).
                 OpCode::InitFCall => {
-                    let Some(name) = crate::vm::plain_fcall_name(op, literals) else {
+                    if !self.init_fcall_fast(op_array, ip, cvs) {
                         return ip;
-                    };
-                    self.push_plain_call(op_array, ip, name.clone());
+                    }
                     Fast::Done
                 }
                 // A by-value argument of a call resolved when it was set up
@@ -638,7 +658,7 @@ impl crate::vm::Vm {
                     if self.isset_get_cache.is_some() {
                         return ip;
                     }
-                    self.fast_prop_op(op, cvs, tmps, literals)
+                    self.fast_prop_op(op_array, ip, cvs, tmps)
                 }
                 OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
                     self.fast_dim_op(op, cvs, tmps, literals)
@@ -681,6 +701,29 @@ impl crate::vm::Vm {
             {
                 return ip;
             }
+        }
+    }
+
+    /// INIT_FCALL by a constant plain function name or static method name
+    /// (see push_plain_call / push_static_call). False: nothing was done.
+    #[inline(never)]
+    fn init_fcall_fast(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
+        cvs: &[Value],
+    ) -> bool {
+        let op = &op_array.ops[ip];
+        let literals = &op_array.literals;
+        if let Some(name) = crate::vm::plain_fcall_name(op, literals) {
+            self.push_plain_call(op_array, ip, name.clone());
+            true
+        } else if let Some(name) = crate::vm::static_fcall_name(op, literals) {
+            let frame_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                && matches!(cvs.first().map(|v| v.deref()), Some(Value::Object(_)));
+            self.push_static_call(op_array, ip, name, frame_this)
+        } else {
+            false
         }
     }
 
@@ -789,12 +832,20 @@ impl crate::vm::Vm {
     /// Whether `$obj->prop` on an instance of `class_name` is a plain slot
     /// access: the class and all its ancestors are user classes without
     /// extension handlers, `prop` is declared exactly once in the hierarchy
-    /// as a public, non-static instance property without hooks (for a
+    /// as a non-static instance property without hooks, accessible from
+    /// `scope` (public; private, declared by `class_name`, from that class;
+    /// protected, from its declaring class or from `class_name`) (for a
     /// write: also untyped, not readonly, no asymmetric set visibility, in
     /// a class that is not readonly).  Magic methods do not matter: they are
     /// only consulted for inaccessible or missing properties, and the
     /// caller checks the object holds an initialized slot for `prop`.
-    fn plain_public_prop(&self, class_name: &[u8], prop: &[u8], write: bool) -> bool {
+    fn plain_public_prop(
+        &self,
+        class_name: &[u8],
+        prop: &[u8],
+        write: bool,
+        scope: Option<&[u8]>,
+    ) -> bool {
         let mut buf = [0u8; 128];
         let Some(lower) = lower_into(class_name, &mut buf) else {
             return false;
@@ -817,8 +868,18 @@ impl crate::vm::Vm {
         let Some(p) = decl else {
             return false;
         };
+        let in_scope = |c: &[u8]| scope.is_some_and(|s| s.eq_ignore_ascii_case(c));
+        let accessible = match p.visibility {
+            crate::object::Visibility::Public => true,
+            crate::object::Visibility::Private => {
+                p.declaring_class.eq_ignore_ascii_case(class_name) && in_scope(&p.declaring_class)
+            }
+            crate::object::Visibility::Protected => {
+                in_scope(&p.declaring_class) || in_scope(class_name)
+            }
+        };
         if p.is_static
-            || p.visibility != crate::object::Visibility::Public
+            || !accessible
             || p.has_get_hook
             || p.has_set_hook
             || p.is_virtual
@@ -874,13 +935,17 @@ impl crate::vm::Vm {
     /// no internal state markers (lazy, cloning, enum case, destructed... are
     /// all stored as `__`-prefixed slots).  Everything else takes the
     /// general PropertyGet / PropertySet handlers.
+    /// (`ip`: the opcode's index in `op_array`, whose prop_sites remember
+    /// what plain_public_prop() answered for the class last seen there.)
     pub(crate) fn fast_prop_op(
         &self,
-        op: &Op,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
         cvs: &mut [Value],
         tmps: &mut [Value],
-        literals: &[Value],
     ) -> Fast {
+        let op = &op_array.ops[ip];
+        let literals = &op_array.literals;
         if !self.property_hook_stack.is_empty() {
             return Fast::No;
         }
@@ -950,7 +1015,47 @@ impl crate::vm::Vm {
                 _ => true,
             }
         };
-        if !ok || !self.plain_public_prop(&ob.class_name, name, write) {
+        if !ok {
+            return Fast::No;
+        }
+        // (a function of the class and the property: classes do not change
+        // once declared)
+        let scope = self.class_scope_ref();
+        let cached = match op_array
+            .sites
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.prop_sites.get(&(ip as u32)))
+        {
+            Some((class, site_scope, plain))
+                if *class == ob.class_name
+                    && match (site_scope, scope) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => a.as_slice() == b,
+                        _ => false,
+                    } =>
+            {
+                Some(*plain)
+            }
+            _ => None,
+        };
+        let plain = match cached {
+            Some(p) => p,
+            None => {
+                let p = self.plain_public_prop(&ob.class_name, name, write, scope);
+                op_array
+                    .sites
+                    .borrow_mut()
+                    .get_or_insert_with(Default::default)
+                    .prop_sites
+                    .insert(
+                        ip as u32,
+                        (ob.class_name.clone(), scope.map(|s| s.to_vec()), p),
+                    );
+                p
+            }
+        };
+        if !plain {
             return Fast::No;
         }
         if let Some(v) = new_val {

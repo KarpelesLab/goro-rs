@@ -552,10 +552,23 @@ pub struct OpArray {
     /// For closures without a bound $this: the called class (static::)
     /// captured when the closure was created.
     pub closure_called_class: Option<Vec<u8>>,
-    /// What the plain function calls of this code's INIT_FCALLs resolved
-    /// to, by opcode index (see Vm::plain_call_target).
-    pub(crate) call_targets:
-        std::cell::RefCell<crate::fxhash::FxHashMap<u32, crate::vm::CachedCallTarget>>,
+    /// What this code's call sites and property accesses found (allocated
+    /// on first use: an OpArray stays small, the compiler keeps some in
+    /// its recursive frames).
+    pub(crate) sites: std::cell::RefCell<Option<Box<SiteCaches>>>,
+}
+
+/// See OpArray::sites; entries are by opcode index.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SiteCaches {
+    /// What the plain function calls of the INIT_FCALLs resolved to (see
+    /// Vm::plain_call_target).
+    pub(crate) call_targets: crate::fxhash::FxHashMap<u32, crate::vm::CachedCallTarget>,
+    /// The plain property accesses' last class and scope, and whether the
+    /// property is a plain one of it there (see Vm::fast_prop_op).
+    pub(crate) prop_sites: crate::fxhash::FxHashMap<u32, (Vec<u8>, Option<Vec<u8>>, bool)>,
+    /// What the INIT_METHOD_CALLs found (see Vm::init_method_call_fast).
+    pub(crate) method_sites: crate::fxhash::FxHashMap<u32, crate::vm::MethodSite>,
 }
 
 impl OpArray {
@@ -597,7 +610,7 @@ impl OpArray {
             closure_params: Vec::new(),
             fcc_desc: None,
             closure_called_class: None,
-            call_targets: Default::default(),
+            sites: Default::default(),
         }
     }
 

@@ -12,7 +12,7 @@ use std::rc::Rc;
 
 use super::{CallTarget, PendingCall, Vm};
 use crate::object::{PhpObject, Visibility};
-use crate::opcode::{Op, OperandType};
+use crate::opcode::{Op, OpArray, OperandType};
 use crate::string::PhpString;
 use crate::value::Value;
 
@@ -24,6 +24,27 @@ pub(crate) enum NewFast {
     Obj(Value),
     /// Evaluating the class's constant expressions threw.
     Failed,
+}
+
+/// What an INIT_METHOD_CALL site found for the class of the object it saw
+/// last (see Vm::init_method_call_fast): classes do not change once
+/// declared.
+#[derive(Debug, Clone)]
+pub(crate) struct MethodSite {
+    /// The object's class name.
+    class_name: Vec<u8>,
+    /// The method (None: a constructor call of a class without one).
+    method: Option<std::rc::Weak<OpArray>>,
+    /// The fast path does not apply to the class: the general handler runs.
+    fallback: bool,
+    /// The pending call's name, `Class::method`.
+    func_name: Vec<u8>,
+    /// Where "::" is in it.
+    sep: usize,
+    is_static: bool,
+    /// `user_functions.len() + 1` when the method was last seen registered
+    /// under func_name (0: not checked).
+    reg_gen: usize,
 }
 
 /// Lowercase `s` into `buf` (None when it does not fit).
@@ -150,19 +171,21 @@ impl Vm {
     /// INIT_METHOD_CALL of a public user method named by a constant on an
     /// object of a class whose hierarchy is all user code: what the general
     /// handler does then (the method is registered as a user function and
-    /// the call is set up with `$this`). Returns false, doing nothing,
-    /// otherwise.
+    /// the call is set up with `$this`). The call site remembers what it
+    /// found for the class it saw last (see MethodSite). Returns false,
+    /// doing nothing, otherwise.
     pub(crate) fn init_method_call_fast(
         &mut self,
-        op: &Op,
+        op_array: &OpArray,
+        ip: usize,
         cvs: &[Value],
         tmps: &mut [Value],
-        literals: &[Value],
     ) -> bool {
+        let op = &op_array.ops[ip];
         let OperandType::Const(mi) = op.op2 else {
             return false;
         };
-        let Some(Value::String(method_name)) = literals.get(mi as usize) else {
+        let Some(Value::String(method_name)) = op_array.literals.get(mi as usize) else {
             return false;
         };
         let m = method_name.as_bytes();
@@ -170,11 +193,6 @@ impl Vm {
         if m.is_empty() || (m.starts_with(b"__") && !is_ctor) {
             return false;
         }
-        let mut mbuf = [0u8; 64];
-        let Some(method_lower) = lower_into(m, &mut mbuf) else {
-            return false;
-        };
-        let method_lower: &[u8] = method_lower;
         // The object operand (as read_operand() reads it).
         let obj = match op.op1 {
             OperandType::Cv(i) => match cvs.get(i as usize) {
@@ -191,8 +209,7 @@ impl Vm {
             },
             _ => return false,
         };
-        let mut cbuf = [0u8; 128];
-        let (class_lower, class_name_orig) = {
+        let site = {
             let Ok(ob) = obj.try_borrow() else {
                 return false;
             };
@@ -203,52 +220,206 @@ impl Vm {
             if !is_ctor && ob.has_property(b"__spl_rii_its") {
                 return false;
             }
+            let sites = op_array.sites.borrow();
+            match sites
+                .as_ref()
+                .and_then(|s| s.method_sites.get(&(ip as u32)))
+            {
+                Some(s) if s.class_name == ob.class_name && s.fallback => return false,
+                Some(s) if s.class_name == ob.class_name => match &s.method {
+                    Some(w) => w
+                        .upgrade()
+                        .map(|m| (Some(m), s.func_name.clone(), s.sep, s.is_static, s.reg_gen)),
+                    None => Some((None, s.func_name.clone(), 0, false, 0)),
+                },
+                _ => None,
+            }
+        };
+        let Some((method, func_name, sep, is_static, reg_gen)) = site else {
+            return self.init_method_call_resolve(op_array, ip, obj, tmps);
+        };
+        let Some(method_op_array) = method else {
+            // `new` of a class without a constructor.
+            self.push_noctor_call(func_name, obj);
+            return true;
+        };
+        self.push_method_call(
+            op_array,
+            ip,
+            obj,
+            tmps,
+            method_op_array,
+            func_name,
+            sep,
+            is_static,
+            reg_gen,
+        );
+        true
+    }
+
+    /// init_method_call_fast() for a class its call site has not seen last:
+    /// the checks, and what the call site remembers.
+    fn init_method_call_resolve(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        obj: Rc<RefCell<PhpObject>>,
+        tmps: &mut [Value],
+    ) -> bool {
+        let op = &op_array.ops[ip];
+        let OperandType::Const(mi) = op.op2 else {
+            return false;
+        };
+        let Some(Value::String(method_name)) = op_array.literals.get(mi as usize) else {
+            return false;
+        };
+        let m = method_name.as_bytes();
+        let is_ctor = m.eq_ignore_ascii_case(b"__construct");
+        let mut mbuf = [0u8; 64];
+        let Some(method_lower) = lower_into(m, &mut mbuf) else {
+            return false;
+        };
+        let method_lower: &[u8] = method_lower;
+        let mut cbuf = [0u8; 128];
+        let (class_lower, class_name_orig) = {
+            let ob = obj.borrow();
             let Some(l) = lower_into(&ob.class_name, &mut cbuf) else {
                 return false;
             };
             (l as &[u8], ob.class_name.clone())
         };
+        // (what the call site remembers when the general handler is to run)
+        let fallback = |class_name: Vec<u8>| {
+            op_array
+                .sites
+                .borrow_mut()
+                .get_or_insert_with(Default::default)
+                .method_sites
+                .insert(
+                    ip as u32,
+                    MethodSite {
+                        class_name,
+                        method: None,
+                        fallback: true,
+                        func_name: Vec::new(),
+                        sep: 0,
+                        is_static: false,
+                        reg_gen: 0,
+                    },
+                );
+            false
+        };
         let Some(class) = self.classes.get(class_lower) else {
-            return false;
+            return fallback(class_name_orig);
         };
         let Some(method) = class.methods.get(method_lower) else {
             // `new` of a class without a constructor: the call names
             // `Class::__construct`, and $this.
             if !is_ctor || !self.user_class_chain(class_lower) {
-                return false;
+                return fallback(class_name_orig);
             }
-            let mut func_name = class_name_orig;
+            let mut func_name = class_name_orig.clone();
             func_name.extend_from_slice(b"::__construct");
-            let mut args = self.take_values(0);
-            args.push(Value::Object(obj));
-            let fn_gen = self.user_functions.len() + 1;
-            self.pending_calls.push(PendingCall {
-                name: PhpString::from_vec(func_name),
-                args,
-                named_args: Vec::new(),
-                target: CallTarget {
-                    no_ctor: true,
-                    fn_gen,
-                    ..CallTarget::NONE
-                },
-            });
+            op_array
+                .sites
+                .borrow_mut()
+                .get_or_insert_with(Default::default)
+                .method_sites
+                .insert(
+                    ip as u32,
+                    MethodSite {
+                        class_name: class_name_orig,
+                        method: None,
+                        fallback: false,
+                        func_name: func_name.clone(),
+                        sep: 0,
+                        is_static: false,
+                        reg_gen: 0,
+                    },
+                );
+            self.push_noctor_call(func_name, obj);
             return true;
         };
         if method.visibility != Visibility::Public
             || !method.attributes.is_empty()
             || !method.op_array.attributes.is_empty()
+            || !self.user_class_chain(class_lower)
         {
-            return false;
-        }
-        if !self.user_class_chain(class_lower) {
-            return false;
+            return fallback(class_name_orig);
         }
         let is_static = method.is_static;
         let method_op_array = method.op_array.clone();
-        let mut func_name = class_name_orig;
+        let mut func_name = class_name_orig.clone();
         let sep = func_name.len();
         func_name.extend_from_slice(b"::");
         func_name.extend_from_slice(&method.name);
+        op_array
+            .sites
+            .borrow_mut()
+            .get_or_insert_with(Default::default)
+            .method_sites
+            .insert(
+                ip as u32,
+                MethodSite {
+                    class_name: class_name_orig,
+                    method: Some(Rc::downgrade(&method_op_array)),
+                    fallback: false,
+                    func_name: func_name.clone(),
+                    sep,
+                    is_static,
+                    reg_gen: 0,
+                },
+            );
+        self.push_method_call(
+            op_array,
+            ip,
+            obj,
+            tmps,
+            method_op_array,
+            func_name,
+            sep,
+            is_static,
+            0,
+        );
+        true
+    }
+
+    /// The pending call of a `new` of a user class without a constructor.
+    fn push_noctor_call(&mut self, func_name: Vec<u8>, obj: Rc<RefCell<PhpObject>>) {
+        let mut args = self.take_values(0);
+        args.push(Value::Object(obj));
+        let fn_gen = self.user_functions.len() + 1;
+        self.pending_calls.push(PendingCall {
+            name: PhpString::from_vec(func_name),
+            args,
+            named_args: Vec::new(),
+            target: CallTarget {
+                no_ctor: true,
+                fn_gen,
+                ..CallTarget::NONE
+            },
+        });
+    }
+
+    /// The pending call of public user method `method_op_array` (named
+    /// `func_name`, "::" at `sep`) on `obj`. `reg_gen`: the
+    /// `user_functions.len() + 1` at which the call site last saw the method
+    /// registered under its name.
+    #[allow(clippy::too_many_arguments)]
+    fn push_method_call(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        obj: Rc<RefCell<PhpObject>>,
+        tmps: &mut [Value],
+        method_op_array: Rc<OpArray>,
+        func_name: Vec<u8>,
+        sep: usize,
+        is_static: bool,
+        reg_gen: usize,
+    ) {
+        let op = &op_array.ops[ip];
+        let is_ctor = func_name[sep + 2..].eq_ignore_ascii_case(b"__construct");
         // INIT_METHOD_CALL consumes a temporary object operand (`new` keeps
         // its result for the constructor call).
         let obj_val = match op.op1 {
@@ -258,12 +429,24 @@ impl Vm {
             _ => Value::Object(obj),
         };
         // Register the method as a user function (usually it is already).
-        if !self
-            .user_fn_lookup(&func_name)
-            .is_some_and(|f| Rc::ptr_eq(f, &method_op_array))
-        {
-            self.user_functions
-                .insert(func_name.to_ascii_lowercase(), method_op_array.clone());
+        if reg_gen != self.user_functions.len() + 1 {
+            if !self
+                .user_fn_lookup(&func_name)
+                .is_some_and(|f| Rc::ptr_eq(f, &method_op_array))
+            {
+                self.user_functions
+                    .insert(func_name.to_ascii_lowercase(), method_op_array.clone());
+            }
+            let fn_gen = self.user_functions.len() + 1;
+            if let Some(s) = op_array
+                .sites
+                .borrow_mut()
+                .get_or_insert_with(Default::default)
+                .method_sites
+                .get_mut(&(ip as u32))
+            {
+                s.reg_gen = fn_gen;
+            }
         }
         let mut args = self.take_values(0);
         if !is_static {
@@ -271,24 +454,24 @@ impl Vm {
         }
         // What DO_FCALL's fast path looks up again (see fast_fcall_target;
         // it leaves PhpToken::tokenize() to the general path).
-        let target = if method_lower == b"tokenize" || func_name[0] == b'_' {
-            CallTarget::NONE
-        } else {
-            CallTarget {
-                user: Some(method_op_array),
-                builtin: None,
-                has_builtin: false,
-                method: Some((sep, is_static)),
-                no_ctor: false,
-                fn_gen: self.user_functions.len() + 1,
-            }
-        };
+        let target =
+            if func_name[sep + 2..].eq_ignore_ascii_case(b"tokenize") || func_name[0] == b'_' {
+                CallTarget::NONE
+            } else {
+                CallTarget {
+                    user: Some(method_op_array),
+                    builtin: None,
+                    has_builtin: false,
+                    method: Some((sep, is_static)),
+                    no_ctor: false,
+                    fn_gen: self.user_functions.len() + 1,
+                }
+            };
         self.pending_calls.push(PendingCall {
             name: PhpString::from_vec(func_name),
             args,
             named_args: Vec::new(),
             target,
         });
-        true
     }
 }
