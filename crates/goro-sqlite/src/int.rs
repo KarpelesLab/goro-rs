@@ -442,6 +442,12 @@ pub struct VdbeSlot {
     pub v: Option<Box<Vdbe>>,
     /// Bumped each time the slot is reused, so stale handles are detected.
     pub generation: u32,
+    /// Slot is in use (a statement exists, possibly taken out).
+    pub used: bool,
+    /// sqlite3ExpirePreparedStatements() value recorded while the
+    /// statement was taken out; the effective `expired` of a statement is
+    /// max(v.expired, slot.expired) and is merged back by stmt_put().
+    pub expired: u8,
 }
 
 /// Handle on a prepared statement: an index into Sqlite3::aVdbe.
@@ -660,6 +666,97 @@ impl Sqlite3 {
     /// The parse tree of a Tree<> field, imported into the arena if owned.
     pub fn tree<I: ArenaId>(&mut self, t: &Tree<I>) -> I {
         t.get(&mut self.arena)
+    }
+
+    // --- prepared statement slots (the C db->pVdbe list) ---
+
+    /// Register a new statement (sqlite3VdbeCreate links it into db->pVdbe).
+    pub fn stmt_new(&mut self, v: Box<Vdbe>) -> StmtId {
+        for (i, s) in self.aVdbe.iter_mut().enumerate() {
+            if !s.used {
+                s.used = true;
+                s.generation = s.generation.wrapping_add(1);
+                s.v = Some(v);
+                s.expired = 0;
+                return StmtId {
+                    idx: i as u32,
+                    generation: s.generation,
+                };
+            }
+        }
+        self.aVdbe.push(VdbeSlot {
+            v: Some(v),
+            generation: 1,
+            used: true,
+            expired: 0,
+        });
+        StmtId {
+            idx: (self.aVdbe.len() - 1) as u32,
+            generation: 1,
+        }
+    }
+    /// True if `id` designates a live statement.
+    pub fn stmt_valid(&self, id: StmtId) -> bool {
+        match self.aVdbe.get(id.idx as usize) {
+            Some(s) => s.used && s.generation == id.generation,
+            None => false,
+        }
+    }
+    /// Take a statement out of its slot to run it.
+    pub fn stmt_take(&mut self, id: StmtId) -> Option<Box<Vdbe>> {
+        if !self.stmt_valid(id) {
+            return None;
+        }
+        self.aVdbe[id.idx as usize].v.take()
+    }
+    /// Put back a statement taken with stmt_take().
+    pub fn stmt_put(&mut self, id: StmtId, mut v: Box<Vdbe>) {
+        if !self.stmt_valid(id) {
+            return;
+        }
+        let s = &mut self.aVdbe[id.idx as usize];
+        if s.expired > v.expired {
+            v.expired = s.expired;
+        }
+        s.expired = 0;
+        s.v = Some(v);
+    }
+    /// Remove a statement (finalize): the slot becomes free.
+    pub fn stmt_remove(&mut self, id: StmtId) -> Option<Box<Vdbe>> {
+        if !self.stmt_valid(id) {
+            return None;
+        }
+        let s = &mut self.aVdbe[id.idx as usize];
+        s.used = false;
+        s.expired = 0;
+        s.v.take()
+    }
+    /// Run `f` on statement `id` (taking it out of its slot meanwhile).
+    pub fn with_stmt<R>(
+        &mut self,
+        id: StmtId,
+        f: impl FnOnce(&mut Sqlite3, &mut Vdbe) -> R,
+    ) -> Option<R> {
+        let mut v = self.stmt_take(id)?;
+        let r = f(self, &mut v);
+        self.stmt_put(id, v);
+        Some(r)
+    }
+    /// Ids of all live statements, in creation-slot order.
+    pub fn stmt_ids(&self) -> Vec<StmtId> {
+        self.aVdbe
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.used)
+            .map(|(i, s)| StmtId {
+                idx: i as u32,
+                generation: s.generation,
+            })
+            .collect()
+    }
+    /// Number of live statements (C: db->pVdbe != 0 test).
+    pub fn stmt_count(&self) -> usize {
+        self.aVdbe.iter().filter(|s| s.used).count()
     }
 }
 

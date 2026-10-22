@@ -9,22 +9,22 @@ use crate::int::*;
 use std::rc::Rc;
 
 /// C: `int sqlite3_expired(sqlite3_stmt *pStmt)`
-pub fn sqlite3_expired(db: &mut Sqlite3, pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_expired(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_expired")
 }
 
 /// C: `int sqlite3_finalize(sqlite3_stmt *pStmt)`
-pub fn sqlite3_finalize(db: &mut Sqlite3, pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_finalize(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_finalize")
 }
 
 /// C: `int sqlite3_reset(sqlite3_stmt *pStmt)`
-pub fn sqlite3_reset(db: &mut Sqlite3, pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_reset(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_reset")
 }
 
 /// C: `int sqlite3_clear_bindings(sqlite3_stmt *pStmt)`
-pub fn sqlite3_clear_bindings(db: &mut Sqlite3, pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_clear_bindings(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_clear_bindings")
 }
 
@@ -237,7 +237,7 @@ pub fn sqlite3ResultIntReal(pCtx: &mut Context) {
 }
 
 /// C: `int sqlite3_step(sqlite3_stmt *pStmt)`
-pub fn sqlite3_step(db: &mut Sqlite3, pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_step(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_step")
 }
 
@@ -302,142 +302,148 @@ pub fn sqlite3_aggregate_count(p: &mut Context) -> i32 {
 }
 
 /// C: `int sqlite3_column_count(sqlite3_stmt *pStmt)`
-pub fn sqlite3_column_count(pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_column_count(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_column_count")
 }
 
 /// C: `int sqlite3_data_count(sqlite3_stmt *pStmt)`
-pub fn sqlite3_data_count(pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_data_count(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_data_count")
 }
 
 /// C: `const void * sqlite3_column_blob(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_blob(db: &mut Sqlite3, pStmt: &mut Vdbe, i: i32) -> Option<Vec<u8>> {
+pub fn sqlite3_column_blob(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> Option<Vec<u8>> {
     todo!("sqlite3_column_blob")
 }
 
 /// C: `int sqlite3_column_bytes(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_bytes(pStmt: &mut Vdbe, i: i32) -> i32 {
+pub fn sqlite3_column_bytes(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> i32 {
     todo!("sqlite3_column_bytes")
 }
 
 /// C: `int sqlite3_column_bytes16(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_bytes16(pStmt: &mut Vdbe, i: i32) -> i32 {
+pub fn sqlite3_column_bytes16(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> i32 {
     todo!("sqlite3_column_bytes16")
 }
 
 /// C: `double sqlite3_column_double(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_double(pStmt: &mut Vdbe, i: i32) -> f64 {
+pub fn sqlite3_column_double(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> f64 {
     todo!("sqlite3_column_double")
 }
 
 /// C: `int sqlite3_column_int(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_int(pStmt: &mut Vdbe, i: i32) -> i32 {
+pub fn sqlite3_column_int(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> i32 {
     todo!("sqlite3_column_int")
 }
 
 /// C: `sqlite_int64 sqlite3_column_int64(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_int64(pStmt: &mut Vdbe, i: i32) -> i64 {
+pub fn sqlite3_column_int64(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> i64 {
     todo!("sqlite3_column_int64")
 }
 
 /// C: `const unsigned char * sqlite3_column_text(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_text(db: &mut Sqlite3, pStmt: &mut Vdbe, i: i32) -> Option<Vec<u8>> {
+pub fn sqlite3_column_text(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> Option<Vec<u8>> {
     todo!("sqlite3_column_text")
 }
 
 /// C: `sqlite3_value * sqlite3_column_value(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_value(pStmt: &mut Vdbe, i: i32) -> Option<&mut Mem> {
+pub fn sqlite3_column_value(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> Option<&mut Mem> {
     todo!("sqlite3_column_value")
 }
 
 /// C: `const void * sqlite3_column_text16(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_text16(pStmt: &mut Vdbe, i: i32) -> Option<Vec<u8>> {
+pub fn sqlite3_column_text16(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> Option<Vec<u8>> {
     todo!("sqlite3_column_text16")
 }
 
 /// C: `int sqlite3_column_type(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_column_type(pStmt: &mut Vdbe, i: i32) -> i32 {
+pub fn sqlite3_column_type(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> i32 {
     todo!("sqlite3_column_type")
 }
 
 /// C: `const char * sqlite3_column_name(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_name(pStmt: &mut Vdbe, N: i32) -> Option<ZStr> {
+pub fn sqlite3_column_name(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<ZStr> {
     todo!("sqlite3_column_name")
 }
 
 /// C: `const void * sqlite3_column_name16(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_name16(pStmt: &mut Vdbe, N: i32) -> Option<Vec<u8>> {
+pub fn sqlite3_column_name16(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<Vec<u8>> {
     todo!("sqlite3_column_name16")
 }
 
 /// C: `const char * sqlite3_column_decltype(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_decltype(pStmt: &mut Vdbe, N: i32) -> Option<ZStr> {
+pub fn sqlite3_column_decltype(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<ZStr> {
     todo!("sqlite3_column_decltype")
 }
 
 /// C: `const void * sqlite3_column_decltype16(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_decltype16(pStmt: &mut Vdbe, N: i32) -> Option<Vec<u8>> {
+pub fn sqlite3_column_decltype16(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<Vec<u8>> {
     todo!("sqlite3_column_decltype16")
 }
 
 /// C: `const char * sqlite3_column_database_name(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_database_name(pStmt: &mut Vdbe, N: i32) -> Option<ZStr> {
+pub fn sqlite3_column_database_name(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<ZStr> {
     todo!("sqlite3_column_database_name")
 }
 
 /// C: `const void * sqlite3_column_database_name16(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_database_name16(pStmt: &mut Vdbe, N: i32) -> Option<Vec<u8>> {
+pub fn sqlite3_column_database_name16(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<Vec<u8>> {
     todo!("sqlite3_column_database_name16")
 }
 
 /// C: `const char * sqlite3_column_table_name(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_table_name(pStmt: &mut Vdbe, N: i32) -> Option<ZStr> {
+pub fn sqlite3_column_table_name(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<ZStr> {
     todo!("sqlite3_column_table_name")
 }
 
 /// C: `const void * sqlite3_column_table_name16(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_table_name16(pStmt: &mut Vdbe, N: i32) -> Option<Vec<u8>> {
+pub fn sqlite3_column_table_name16(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<Vec<u8>> {
     todo!("sqlite3_column_table_name16")
 }
 
 /// C: `const char * sqlite3_column_origin_name(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_origin_name(pStmt: &mut Vdbe, N: i32) -> Option<ZStr> {
+pub fn sqlite3_column_origin_name(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<ZStr> {
     todo!("sqlite3_column_origin_name")
 }
 
 /// C: `const void * sqlite3_column_origin_name16(sqlite3_stmt *pStmt, int N)`
-pub fn sqlite3_column_origin_name16(pStmt: &mut Vdbe, N: i32) -> Option<Vec<u8>> {
+pub fn sqlite3_column_origin_name16(db: &mut Sqlite3, pStmt: StmtId, N: i32) -> Option<Vec<u8>> {
     todo!("sqlite3_column_origin_name16")
 }
 
 /// C: `int sqlite3_bind_blob( sqlite3_stmt *pStmt, int i, const void *zData, int nData, void (*xDel)(void*) )`
-pub fn sqlite3_bind_blob(pStmt: &mut Vdbe, i: i32, zData: &[u8], nData: i32) -> i32 {
+pub fn sqlite3_bind_blob(db: &mut Sqlite3, pStmt: StmtId, i: i32, zData: &[u8], nData: i32) -> i32 {
     todo!("sqlite3_bind_blob")
 }
 
 /// C: `int sqlite3_bind_blob64( sqlite3_stmt *pStmt, int i, const void *zData, sqlite3_uint64 nData, void (*xDel)(void*) )`
-pub fn sqlite3_bind_blob64(pStmt: &mut Vdbe, i: i32, zData: &[u8], nData: u64) -> i32 {
+pub fn sqlite3_bind_blob64(
+    db: &mut Sqlite3,
+    pStmt: StmtId,
+    i: i32,
+    zData: &[u8],
+    nData: u64,
+) -> i32 {
     todo!("sqlite3_bind_blob64")
 }
 
 /// C: `int sqlite3_bind_double(sqlite3_stmt *pStmt, int i, double rValue)`
-pub fn sqlite3_bind_double(db: &mut Sqlite3, pStmt: &mut Vdbe, i: i32, rValue: f64) -> i32 {
+pub fn sqlite3_bind_double(db: &mut Sqlite3, pStmt: StmtId, i: i32, rValue: f64) -> i32 {
     todo!("sqlite3_bind_double")
 }
 
 /// C: `int sqlite3_bind_int(sqlite3_stmt *p, int i, int iValue)`
-pub fn sqlite3_bind_int(p: &mut Vdbe, i: i32, iValue: i32) -> i32 {
+pub fn sqlite3_bind_int(db: &mut Sqlite3, p: StmtId, i: i32, iValue: i32) -> i32 {
     todo!("sqlite3_bind_int")
 }
 
 /// C: `int sqlite3_bind_int64(sqlite3_stmt *pStmt, int i, sqlite_int64 iValue)`
-pub fn sqlite3_bind_int64(db: &mut Sqlite3, pStmt: &mut Vdbe, i: i32, iValue: i64) -> i32 {
+pub fn sqlite3_bind_int64(db: &mut Sqlite3, pStmt: StmtId, i: i32, iValue: i64) -> i32 {
     todo!("sqlite3_bind_int64")
 }
 
 /// C: `int sqlite3_bind_null(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_bind_null(db: &mut Sqlite3, pStmt: &mut Vdbe, i: i32) -> i32 {
+pub fn sqlite3_bind_null(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> i32 {
     todo!("sqlite3_bind_null")
 }
 
@@ -453,7 +459,13 @@ pub fn sqlite3_bind_pointer(
 }
 
 /// C: `int sqlite3_bind_text( sqlite3_stmt *pStmt, int i, const char *zData, int nData, void (*xDel)(void*) )`
-pub fn sqlite3_bind_text(pStmt: &mut Vdbe, i: i32, zData: Option<&[u8]>, nData: i32) -> i32 {
+pub fn sqlite3_bind_text(
+    db: &mut Sqlite3,
+    pStmt: StmtId,
+    i: i32,
+    zData: Option<&[u8]>,
+    nData: i32,
+) -> i32 {
     todo!("sqlite3_bind_text")
 }
 
@@ -469,32 +481,32 @@ pub fn sqlite3_bind_text64(
 }
 
 /// C: `int sqlite3_bind_text16( sqlite3_stmt *pStmt, int i, const void *zData, int n, void (*xDel)(void*) )`
-pub fn sqlite3_bind_text16(pStmt: &mut Vdbe, i: i32, zData: &[u8], n: i32) -> i32 {
+pub fn sqlite3_bind_text16(db: &mut Sqlite3, pStmt: StmtId, i: i32, zData: &[u8], n: i32) -> i32 {
     todo!("sqlite3_bind_text16")
 }
 
 /// C: `int sqlite3_bind_value(sqlite3_stmt *pStmt, int i, const sqlite3_value *pValue)`
-pub fn sqlite3_bind_value(pStmt: &mut Vdbe, i: i32, pValue: &Mem) -> i32 {
+pub fn sqlite3_bind_value(db: &mut Sqlite3, pStmt: StmtId, i: i32, pValue: &Mem) -> i32 {
     todo!("sqlite3_bind_value")
 }
 
 /// C: `int sqlite3_bind_zeroblob(sqlite3_stmt *pStmt, int i, int n)`
-pub fn sqlite3_bind_zeroblob(db: &mut Sqlite3, pStmt: &mut Vdbe, i: i32, n: i32) -> i32 {
+pub fn sqlite3_bind_zeroblob(db: &mut Sqlite3, pStmt: StmtId, i: i32, n: i32) -> i32 {
     todo!("sqlite3_bind_zeroblob")
 }
 
 /// C: `int sqlite3_bind_zeroblob64(sqlite3_stmt *pStmt, int i, sqlite3_uint64 n)`
-pub fn sqlite3_bind_zeroblob64(db: &mut Sqlite3, pStmt: &mut Vdbe, i: i32, n: u64) -> i32 {
+pub fn sqlite3_bind_zeroblob64(db: &mut Sqlite3, pStmt: StmtId, i: i32, n: u64) -> i32 {
     todo!("sqlite3_bind_zeroblob64")
 }
 
 /// C: `int sqlite3_bind_parameter_count(sqlite3_stmt *pStmt)`
-pub fn sqlite3_bind_parameter_count(pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_bind_parameter_count(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_bind_parameter_count")
 }
 
 /// C: `const char * sqlite3_bind_parameter_name(sqlite3_stmt *pStmt, int i)`
-pub fn sqlite3_bind_parameter_name(pStmt: &mut Vdbe, i: i32) -> Option<ZStr> {
+pub fn sqlite3_bind_parameter_name(db: &mut Sqlite3, pStmt: StmtId, i: i32) -> Option<ZStr> {
     todo!("sqlite3_bind_parameter_name")
 }
 
@@ -504,7 +516,7 @@ pub fn sqlite3VdbeParameterIndex(p: &mut Vdbe, zName: Option<&[u8]>, nName: i32)
 }
 
 /// C: `int sqlite3_bind_parameter_index(sqlite3_stmt *pStmt, const char *zName)`
-pub fn sqlite3_bind_parameter_index(pStmt: &mut Vdbe, zName: Option<&[u8]>) -> i32 {
+pub fn sqlite3_bind_parameter_index(db: &mut Sqlite3, pStmt: StmtId, zName: Option<&[u8]>) -> i32 {
     todo!("sqlite3_bind_parameter_index")
 }
 
@@ -514,57 +526,57 @@ pub fn sqlite3TransferBindings(db: &mut Sqlite3, pFromStmt: &mut Vdbe, pToStmt: 
 }
 
 /// C: `int sqlite3_transfer_bindings(sqlite3_stmt *pFromStmt, sqlite3_stmt *pToStmt)`
-pub fn sqlite3_transfer_bindings(pFromStmt: &mut Vdbe, pToStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_transfer_bindings(db: &mut Sqlite3, pFromStmt: StmtId, pToStmt: &mut Vdbe) -> i32 {
     todo!("sqlite3_transfer_bindings")
 }
 
 /// C: `sqlite3 * sqlite3_db_handle(sqlite3_stmt *pStmt)`
-pub fn sqlite3_db_handle(db: &mut Sqlite3, pStmt: &mut Vdbe) -> () {
+pub fn sqlite3_db_handle(db: &mut Sqlite3, pStmt: StmtId) -> () {
     todo!("sqlite3_db_handle")
 }
 
 /// C: `int sqlite3_stmt_readonly(sqlite3_stmt *pStmt)`
-pub fn sqlite3_stmt_readonly(pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_stmt_readonly(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_stmt_readonly")
 }
 
 /// C: `int sqlite3_stmt_isexplain(sqlite3_stmt *pStmt)`
-pub fn sqlite3_stmt_isexplain(pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_stmt_isexplain(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_stmt_isexplain")
 }
 
 /// C: `int sqlite3_stmt_explain(sqlite3_stmt *pStmt, int eMode)`
-pub fn sqlite3_stmt_explain(db: &mut Sqlite3, pStmt: &mut Vdbe, eMode: i32) -> i32 {
+pub fn sqlite3_stmt_explain(db: &mut Sqlite3, pStmt: StmtId, eMode: i32) -> i32 {
     todo!("sqlite3_stmt_explain")
 }
 
 /// C: `int sqlite3_stmt_busy(sqlite3_stmt *pStmt)`
-pub fn sqlite3_stmt_busy(pStmt: &mut Vdbe) -> i32 {
+pub fn sqlite3_stmt_busy(db: &mut Sqlite3, pStmt: StmtId) -> i32 {
     todo!("sqlite3_stmt_busy")
 }
 
 /// C: `sqlite3_stmt * sqlite3_next_stmt(sqlite3 *pDb, sqlite3_stmt *pStmt)`
-pub fn sqlite3_next_stmt(db: &mut Sqlite3, pStmt: &mut Vdbe) -> Option<Box<Vdbe>> {
+pub fn sqlite3_next_stmt(db: &mut Sqlite3, pStmt: StmtId) -> Option<Box<Vdbe>> {
     todo!("sqlite3_next_stmt")
 }
 
 /// C: `int sqlite3_stmt_status(sqlite3_stmt *pStmt, int op, int resetFlag)`
-pub fn sqlite3_stmt_status(db: &mut Sqlite3, pStmt: &mut Vdbe, op: i32, resetFlag: i32) -> i32 {
+pub fn sqlite3_stmt_status(db: &mut Sqlite3, pStmt: StmtId, op: i32, resetFlag: i32) -> i32 {
     todo!("sqlite3_stmt_status")
 }
 
 /// C: `const char * sqlite3_sql(sqlite3_stmt *pStmt)`
-pub fn sqlite3_sql(pStmt: &mut Vdbe) -> Option<ZStr> {
+pub fn sqlite3_sql(db: &mut Sqlite3, pStmt: StmtId) -> Option<ZStr> {
     todo!("sqlite3_sql")
 }
 
 /// C: `char * sqlite3_expanded_sql(sqlite3_stmt *pStmt)`
-pub fn sqlite3_expanded_sql(db: &mut Sqlite3, pStmt: &mut Vdbe) -> Option<ZStr> {
+pub fn sqlite3_expanded_sql(db: &mut Sqlite3, pStmt: StmtId) -> Option<ZStr> {
     todo!("sqlite3_expanded_sql")
 }
 
 /// C: `const char * sqlite3_normalized_sql(sqlite3_stmt *pStmt)`
-pub fn sqlite3_normalized_sql(db: &mut Sqlite3, pStmt: &mut Vdbe) -> Option<ZStr> {
+pub fn sqlite3_normalized_sql(db: &mut Sqlite3, pStmt: StmtId) -> Option<ZStr> {
     todo!("sqlite3_normalized_sql")
 }
 
@@ -615,6 +627,6 @@ pub fn sqlite3_stmt_scanstatus(
 }
 
 /// C: `void sqlite3_stmt_scanstatus_reset(sqlite3_stmt *pStmt)`
-pub fn sqlite3_stmt_scanstatus_reset(pStmt: &mut Vdbe) {
+pub fn sqlite3_stmt_scanstatus_reset(db: &mut Sqlite3, pStmt: StmtId) {
     todo!("sqlite3_stmt_scanstatus_reset")
 }

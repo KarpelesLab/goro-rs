@@ -73,8 +73,8 @@ pub fn sqlite3_prepare(
     db: &mut Sqlite3,
     zSql: Option<&[u8]>,
     nBytes: i32,
-    ppStmt: &mut Option<Box<Vdbe>>,
-    pzTail: &mut Option<ZStr>,
+    ppStmt: &mut Option<StmtId>,
+    pzTail: &mut usize,
 ) -> i32 {
     todo!("sqlite3_prepare")
 }
@@ -84,8 +84,8 @@ pub fn sqlite3_prepare_v2(
     db: &mut Sqlite3,
     zSql: Option<&[u8]>,
     nBytes: i32,
-    ppStmt: &mut Option<Box<Vdbe>>,
-    pzTail: &mut Option<ZStr>,
+    ppStmt: &mut Option<StmtId>,
+    pzTail: &mut usize,
 ) -> i32 {
     todo!("sqlite3_prepare_v2")
 }
@@ -96,8 +96,8 @@ pub fn sqlite3_prepare_v3(
     zSql: Option<&[u8]>,
     nBytes: i32,
     prepFlags: u32,
-    ppStmt: &mut Option<Box<Vdbe>>,
-    pzTail: &mut Option<ZStr>,
+    ppStmt: &mut Option<StmtId>,
+    pzTail: &mut usize,
 ) -> i32 {
     todo!("sqlite3_prepare_v3")
 }
@@ -107,7 +107,7 @@ pub fn sqlite3_prepare16(
     db: &mut Sqlite3,
     zSql: &[u8],
     nBytes: i32,
-    ppStmt: &mut Option<Box<Vdbe>>,
+    ppStmt: &mut Option<StmtId>,
     pzTail: /*void***/ (),
 ) -> i32 {
     todo!("sqlite3_prepare16")
@@ -118,7 +118,7 @@ pub fn sqlite3_prepare16_v2(
     db: &mut Sqlite3,
     zSql: &[u8],
     nBytes: i32,
-    ppStmt: &mut Option<Box<Vdbe>>,
+    ppStmt: &mut Option<StmtId>,
     pzTail: /*void***/ (),
 ) -> i32 {
     todo!("sqlite3_prepare16_v2")
@@ -130,7 +130,7 @@ pub fn sqlite3_prepare16_v3(
     zSql: &[u8],
     nBytes: i32,
     prepFlags: u32,
-    ppStmt: &mut Option<Box<Vdbe>>,
+    ppStmt: &mut Option<StmtId>,
     pzTail: /*void***/ (),
 ) -> i32 {
     todo!("sqlite3_prepare16_v3")
