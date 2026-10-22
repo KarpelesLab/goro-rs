@@ -4922,10 +4922,15 @@ fn fetchPayload(pCur: &mut BtCursor, pAmt: &mut u32) -> Vec<u8> {
         amt = std::cmp::max(0, end as i64 - p as i64);
     }
     *pAmt = amt as u32;
-    if amt == 0 {
-        return Vec::new();
-    }
-    g.aData[p..p + amt as usize].to_vec()
+    // Rust: C returns a pointer into the page, and the record decoder may
+    // read a few bytes past the local payload of a corrupt cell (see the
+    // comments in OP_Column).  Copy some of the following page bytes too,
+    // so that such overreads see the same data as in C.
+    const OVERREAD_SLACK: usize = 32;
+    let e = (p + amt as usize + OVERREAD_SLACK)
+        .min(g.aData.len())
+        .max(p);
+    g.aData[p.min(e)..e].to_vec()
 }
 
 /// C: `const void * sqlite3BtreePayloadFetch(BtCursor *pCur, u32 *pAmt)`
@@ -5480,7 +5485,7 @@ fn indexCellCompare(
         if pCell + nCell >= pPage.aDataEnd() {
             return 99;
         }
-        c = xRecordCompare(&data[pCell + 1..pCell + 1 + nCell], pIdxKey);
+        c = xRecordCompare(nCell as i32, &data[pCell + 1..], pIdxKey);
     } else if (at(data, pCell + 1) & 0x80) == 0 && {
         nCell = ((nCell & 0x7f) << 7) + at(data, pCell + 1) as usize;
         nCell <= pPage.maxLocal as usize
@@ -5490,7 +5495,7 @@ fn indexCellCompare(
         if pCell + nCell >= pPage.aDataEnd() {
             return 99;
         }
-        c = xRecordCompare(&data[pCell + 2..pCell + 2 + nCell], pIdxKey);
+        c = xRecordCompare(nCell as i32, &data[pCell + 2..], pIdxKey);
     } else {
         /* If the record extends into overflow pages, do not attempt
          ** the optimization. */
@@ -5650,7 +5655,7 @@ pub fn btreeIndexMoveto(pCur: &mut BtCursor, pIdxKey: &mut UnpackedRecord, pRes:
                     if pCell + nCell >= m.aDataEnd() {
                         Step::Corrupt
                     } else {
-                        Step::Cmp(xRecordCompare(&data[pCell + 1..pCell + 1 + nCell], pIdxKey))
+                        Step::Cmp(xRecordCompare(nCell as i32, &data[pCell + 1..], pIdxKey))
                     }
                 } else if (at(data, pCell + 1) & 0x80) == 0
                     && {
@@ -5661,7 +5666,7 @@ pub fn btreeIndexMoveto(pCur: &mut BtCursor, pIdxKey: &mut UnpackedRecord, pRes:
                 {
                     /* The record-size field is a 2 byte varint and the record
                      ** fits entirely on the main b-tree page.  */
-                    Step::Cmp(xRecordCompare(&data[pCell + 2..pCell + 2 + nCell], pIdxKey))
+                    Step::Cmp(xRecordCompare(nCell as i32, &data[pCell + 2..], pIdxKey))
                 } else {
                     Step::Overflow(pCell - m.childPtrSize as usize)
                 }

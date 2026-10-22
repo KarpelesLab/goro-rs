@@ -52,7 +52,10 @@ pub type BtCursorP = Rc<RefCell<crate::btree::BtCursor>>;
 
 /// Record comparison function (sqlite3VdbeFindCompare()): compares the
 /// record `aKey` with the unpacked record.
-pub type RecordCompare = fn(&[u8], &mut UnpackedRecord) -> i32;
+/// A record comparator: (nKey1, pKey1, pPKey2).  pKey1 may extend past
+/// the nKey1 bytes of the record (C passes a pointer into the page and a
+/// corrupt record can make the comparator read a few bytes beyond it).
+pub type RecordCompare = fn(i32, &[u8], &mut UnpackedRecord) -> i32;
 
 /// Error message / name strings are byte strings (SQLite is 8-bit clean).
 pub type ZStr = Vec<u8>;

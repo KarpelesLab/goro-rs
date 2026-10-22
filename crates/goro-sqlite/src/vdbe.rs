@@ -3380,7 +3380,8 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
                     nCellKey as u32,
                     &mut m
                 ));
-                res = sqlite3VdbeRecordCompareWithSkip(db, m.n, m.bytes(), &mut r, 0);
+                // m.z may extend past the record (see fetchPayload())
+                res = sqlite3VdbeRecordCompareWithSkip(db, m.n, &m.z, &mut r, 0);
                 sqlite3VdbeMemReleaseMalloc(&mut m);
             }
             // End of inlined sqlite3VdbeIdxKeyCompare()

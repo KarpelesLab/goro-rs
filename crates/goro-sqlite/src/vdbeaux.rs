@@ -3609,10 +3609,9 @@ pub fn sqlite3VdbeRecordCompare(nKey1: i32, pKey1: &[u8], pPKey2: &mut UnpackedR
     recordCompareWithSkip(nKey1, pKey1, pPKey2, 0)
 }
 
-/// sqlite3VdbeRecordCompare() as a RecordCompare (the record is the whole
-/// slice).
-fn vdbeRecordCompareDefault(pKey1: &[u8], pPKey2: &mut UnpackedRecord) -> i32 {
-    recordCompareWithSkip(pKey1.len() as i32, pKey1, pPKey2, 0)
+/// sqlite3VdbeRecordCompare() as a RecordCompare.
+fn vdbeRecordCompareDefault(nKey1: i32, pKey1: &[u8], pPKey2: &mut UnpackedRecord) -> i32 {
+    recordCompareWithSkip(nKey1, pKey1, pPKey2, 0)
 }
 
 /// vdbeRecordCompareInt()
@@ -3621,8 +3620,7 @@ fn vdbeRecordCompareDefault(pKey1: &[u8], pPKey2: &mut UnpackedRecord) -> i32 {
 /// that (a) the first field of pPKey2 is an integer, and (b) the
 /// size-of-header varint at the start of (pKey1/nKey1) fits in a single
 /// byte (i.e. is less than 128).
-fn vdbeRecordCompareInt(pKey1: &[u8], pPKey2: &mut UnpackedRecord) -> i32 {
-    let nKey1 = pKey1.len() as i32;
+fn vdbeRecordCompareInt(nKey1: i32, pKey1: &[u8], pPKey2: &mut UnpackedRecord) -> i32 {
     let off = (at(pKey1, 0) & 0x3F) as usize;
     let serial_type = at(pKey1, 1) as i32;
     let res: i32;
@@ -3666,8 +3664,7 @@ fn vdbeRecordCompareInt(pKey1: &[u8], pPKey2: &mut UnpackedRecord) -> i32 {
 /// field uses the collation sequence BINARY and (c) that the
 /// size-of-header varint at the start of (pKey1/nKey1) fits in a single
 /// byte.
-fn vdbeRecordCompareString(pKey1: &[u8], pPKey2: &mut UnpackedRecord) -> i32 {
-    let nKey1 = pKey1.len() as i32;
+fn vdbeRecordCompareString(nKey1: i32, pKey1: &[u8], pPKey2: &mut UnpackedRecord) -> i32 {
     let mut serial_type: i32 = (at(pKey1, 1) as i8) as i32;
     let mut res: i32;
 
