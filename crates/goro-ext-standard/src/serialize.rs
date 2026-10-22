@@ -2284,7 +2284,7 @@ impl<'a> Parser<'a> {
             Visibility,
             Vec<u8>,
         )> = {
-            match vm.classes.get(class_lower) {
+            match vm.class_view(class_lower) {
                 Some(ce) => {
                     let mut counts: HashMap<&[u8], usize> = HashMap::new();
                     for p in ce.properties.iter().filter(|p| !p.is_static) {
@@ -2428,7 +2428,7 @@ impl<'a> Parser<'a> {
         }
         let (readonly, allow_dynamic, is_enum, display) = {
             let chain = class_chain(vm, class_lower);
-            let ce = vm.classes.get(class_lower);
+            let ce = vm.class_view(class_lower);
             let allow = class_lower == b"stdclass"
                 || class_lower == lower(INCOMPLETE_CLASS)
                 || chain.iter().any(|c| {

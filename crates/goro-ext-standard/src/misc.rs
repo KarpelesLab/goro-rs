@@ -19074,23 +19074,7 @@ fn property_exists_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Helper: a property is "visible" on `class_lower` if declared on it OR
     // declared on an ancestor with non-private visibility.
     fn class_has_visible_prop(vm: &Vm, class_lower: &[u8], pname: &[u8]) -> bool {
-        if let Some(ce) = vm.get_class_def(class_lower) {
-            for prop in &ce.properties {
-                if prop.name != pname {
-                    continue;
-                }
-                let decl_lower: Vec<u8> = prop
-                    .declaring_class
-                    .iter()
-                    .map(|b| b.to_ascii_lowercase())
-                    .collect();
-                if prop.visibility == Visibility::Private && decl_lower != class_lower {
-                    continue;
-                }
-                return true;
-            }
-        }
-        false
+        vm.class_view_prop(class_lower, pname).is_some()
     }
 
     // Extension-provided property handlers (has_property with ZEND_PROPERTY_EXISTS)

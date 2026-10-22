@@ -674,6 +674,26 @@ pub(crate) fn rprops<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::Pro
             out.extend(ce.properties.iter());
             return out;
         }
+        if is_internal_class(vm, lower) && crate::stubs::find_class(lower).is_some() {
+            // An extension's internal class: it inherits its parent's
+            // properties when registered, then declares its own (a
+            // redeclared one keeps the inherited position).
+            if let Some(parent) = &ce.parent {
+                for pp in collect(vm, &parent.to_ascii_lowercase(), depth + 1) {
+                    if pp.visibility == Visibility::Private {
+                        continue;
+                    }
+                    let mine = ce.properties.iter().find(|x| x.name == pp.name);
+                    out.push(mine.unwrap_or(pp));
+                }
+            }
+            for p in &ce.properties {
+                if !out.iter().any(|x| x.name == p.name) {
+                    out.push(p);
+                }
+            }
+            return out;
+        }
         // Zend's properties_info order: the engine's enum props, the
         // class's own declarations, then inherited ones (parent's order).
         out.extend(enum_builtin_props(vm, lower).iter());
@@ -2782,78 +2802,34 @@ pub fn reflection_class_method(
             if vm.update_class_constants(&class_lower).is_err() {
                 return Some(Value::Null);
             }
-            // Order: this class's statics (own + inherited non-private), then
-            // this class's instance properties (own + inherited non-private).
+            // add_class_vars(ce, statics) then add_class_vars(ce, instance),
+            // over properties_info (an ancestor's private ones skipped).
             let mut result = PhpArray::new();
-            // Build the chain from this class up to root.
-            let mut chain: Vec<Vec<u8>> = Vec::new();
-            chain.push(class_lower.clone());
-            if let Some(ce) = rcls(vm, &class_lower) {
-                let mut parent = ce.parent.clone();
-                while let Some(ref p) = parent {
-                    let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    chain.push(p_lower.clone());
-                    if let Some(pce) = rcls(vm, &p_lower) {
-                        parent = pce.parent.clone();
+            let props: Vec<crate::object::PropertyDef> =
+                rprops(vm, &class_lower).into_iter().cloned().collect();
+            for statics in [true, false] {
+                for prop in &props {
+                    if prop.is_static != statics {
+                        continue;
+                    }
+                    if prop.visibility == Visibility::Private
+                        && !prop.declaring_class.eq_ignore_ascii_case(&class_lower)
+                    {
+                        continue;
+                    }
+                    let val = if statics {
+                        vm.static_prop_raw(&prop.declaring_class.to_ascii_lowercase(), &prop.name)
+                            .unwrap_or_else(|| prop.default.clone())
                     } else {
-                        break;
+                        prop.default.clone()
+                    };
+                    // Uninitialized typed properties have no default.
+                    if matches!(val, Value::Undef) || prop.is_virtual {
+                        continue;
                     }
-                }
-            }
-
-            // Static properties pass (child first, inherited non-private).
-            // Skip props whose declaring_class is an ancestor *and* are private —
-            // those are not visible to subclasses.
-            for (idx, link) in chain.iter().enumerate() {
-                if let Some(lce) = rcls(vm, link) {
-                    for prop in &lce.properties {
-                        if !prop.is_static {
-                            continue;
-                        }
-                        // properties_info order: each class's own
-                        // declarations, then its parent's (inherited slots
-                        // are visited at their declaring link).
-                        if !prop.declaring_class.eq_ignore_ascii_case(link) {
-                            continue;
-                        }
-                        if idx > 0 && prop.visibility == Visibility::Private {
-                            continue;
-                        }
-                        let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
-                        if result.get(&key).is_none() {
-                            // Lookup resolved value (static_properties is the
-                            // source of truth at runtime).
-                            let val = vm
-                                .static_prop_raw(link, &prop.name)
-                                .unwrap_or_else(|| prop.default.clone());
-                            result.set(key, val);
-                        }
-                    }
-                }
-            }
-
-            // Instance properties pass
-            for (idx, link) in chain.iter().enumerate() {
-                if let Some(lce) = rcls(vm, link) {
-                    for prop in &lce.properties {
-                        if prop.is_static {
-                            continue;
-                        }
-                        // Own declarations of this link (see above).
-                        if !prop.declaring_class.eq_ignore_ascii_case(link) {
-                            continue;
-                        }
-                        if idx > 0 && prop.visibility == Visibility::Private {
-                            continue;
-                        }
-                        // Uninitialized typed properties have no default.
-                        if matches!(prop.default, Value::Undef) {
-                            continue;
-                        }
-                        let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
-                        if result.get(&key).is_none() {
-                            result.set(key, prop.default.clone());
-                        }
+                    let key = ArrayKey::String(PhpString::from_vec(prop.name.clone()));
+                    if result.get(&key).is_none() {
+                        result.set(key, val);
                     }
                 }
             }

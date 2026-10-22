@@ -10766,6 +10766,32 @@ impl Vm {
         self.classes.get(class_name_lower)
     }
 
+    /// The declared shape of a class (lowercase name): a user class's
+    /// entry, or for an internal class one synthesized from its stub
+    /// (properties_info, methods, constants).
+    pub fn class_view(&self, class_name_lower: &[u8]) -> Option<&ClassEntry> {
+        crate::reflection::rcls(self, class_name_lower)
+    }
+
+    /// properties_info lookup: the property `name` as class `class_lower`
+    /// sees it (its own, or an ancestor's non-private one; an extension
+    /// class entry may not list what it inherits from an internal parent).
+    pub fn class_view_prop(&self, class_lower: &[u8], name: &[u8]) -> Option<&crate::object::PropertyDef> {
+        let mut cur = class_lower.to_vec();
+        for depth in 0..64 {
+            let ce = self.class_view(&cur)?;
+            if let Some(p) = ce.properties.iter().find(|p| {
+                p.name == name
+                    && (p.visibility != Visibility::Private
+                        || (depth == 0 && p.declaring_class.eq_ignore_ascii_case(class_lower)))
+            }) {
+                return Some(p);
+            }
+            cur = ce.parent.as_ref()?.to_ascii_lowercase();
+        }
+        None
+    }
+
     /// Check if class_a is a subclass of class_b (both lowercase)
     pub fn is_subclass_of(&self, class_a: &[u8], class_b: &[u8]) -> bool {
         self.class_extends(class_a, class_b)

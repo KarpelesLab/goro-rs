@@ -688,7 +688,10 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
             };
             let ty = parse_type(p.ty);
             let default = match p.default {
-                Some(d) => literal_value(d).unwrap_or(Value::Null),
+                // (a global constant: E_ERROR, ...)
+                Some(d) => literal_value(d)
+                    .or_else(|| vm.constants.get(d.as_bytes()).cloned())
+                    .unwrap_or(Value::Null),
                 None if ty.is_some() => Value::Undef,
                 None => Value::Null,
             };
