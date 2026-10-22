@@ -2697,7 +2697,7 @@ impl Vm {
     /// `class_name_lower` is the object's class. `caller_scope` is the lowercase
     /// name of the currently-executing method's class (if any). The result is the
     /// key to use when reading/writing the property on the instance.
-    pub(crate) fn property_storage_key(
+    fn property_storage_key(
         &self,
         class_name_lower: &[u8],
         prop_name: &[u8],

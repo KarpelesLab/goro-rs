@@ -315,7 +315,8 @@ impl Vm {
             {
                 continue;
             }
-            let storage = self.property_storage_key(&class_lower, &d.name, Some(&decl_lower));
+            // The slot this scope's access to the name refers to.
+            let storage = self.prop_key_for(&obj_val, &d.name).into_owned();
             let value = if d.has_get_hook || d.has_set_hook {
                 if d.is_virtual && !d.has_get_hook {
                     continue;
@@ -407,13 +408,20 @@ impl Vm {
             }));
         }
         // Dynamic properties.
-        let declared: Vec<Vec<u8>> = defs
-            .iter()
-            .map(|d| {
-                let decl_lower = d.declaring_class.to_ascii_lowercase();
-                self.property_storage_key(&class_lower, &d.name, Some(&decl_lower))
-            })
-            .collect();
+        // The slots of declared properties (a private one moved out of the
+        // way of a dynamic property of its name lives under its mangled key).
+        let declared: Vec<Vec<u8>> = {
+            let layout = self.class_layout_of(&class_name);
+            let ob = obj.borrow();
+            layout
+                .slots
+                .iter()
+                .map(|sl| match &sl.moved_key {
+                    Some(mk) if ob.has_property(mk) => mk.clone(),
+                    _ => sl.storage_key.clone(),
+                })
+                .collect()
+        };
         let mut j = {
             let ob = obj.borrow();
             let j = pos.saturating_sub(n);
@@ -449,6 +457,24 @@ impl Vm {
             else {
                 continue;
             };
+            // zend_check_property_access(): a dynamic property named like a
+            // non-public declared property the scope sees is not visited.
+            if name.first() != Some(&0)
+                && defs.iter().any(|d| {
+                    d.name == name
+                        && match d.visibility {
+                            Visibility::Public => false,
+                            Visibility::Protected => scope_lower
+                                .as_deref()
+                                .is_some_and(|s| self.scope_can_see_protected(s, &class_lower)),
+                            Visibility::Private => scope_lower
+                                .as_deref()
+                                .is_some_and(|s| s.eq_ignore_ascii_case(&d.declaring_class)),
+                        }
+                })
+            {
+                continue;
+            }
             let value = match value {
                 Value::Reference(r) if by_ref => Value::Reference(r),
                 other if by_ref => {
