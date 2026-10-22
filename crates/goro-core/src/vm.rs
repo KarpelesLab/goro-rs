@@ -2557,6 +2557,37 @@ impl Vm {
         }
     }
 
+    /// "Cannot call private X::__construct()": `name` is a resolved
+    /// `X::__construct` forwarding call made with `$this` (when `has_this`).
+    fn private_static_ctor_error(
+        &self,
+        name: &[u8],
+        has_this: bool,
+        this: Option<&Value>,
+    ) -> Option<String> {
+        let class = name.strip_suffix(b"::__construct").or_else(|| {
+            (name.len() > 13 && name[name.len() - 13..].eq_ignore_ascii_case(b"::__construct"))
+                .then(|| &name[..name.len() - 13])
+        })?;
+        let Some(Value::Object(this)) = this.filter(|_| has_this) else {
+            return None;
+        };
+        let ce = self.classes.get(&class.to_ascii_lowercase())?;
+        let ctor = ce.get_method(b"__construct")?;
+        if ctor.visibility != Visibility::Private
+            || this
+                .borrow()
+                .class_name
+                .eq_ignore_ascii_case(&ctor.declaring_class)
+        {
+            return None;
+        }
+        Some(format!(
+            "Cannot call private {}::__construct()",
+            String::from_utf8_lossy(&ce.name)
+        ))
+    }
+
     fn format_access_error(
         vis_str: &str,
         target_class_display: &[u8],
@@ -7044,7 +7075,12 @@ impl Vm {
                         fname, provided, qualifier, required
                     ),
                 };
-                let line = self.current_line;
+                // Raised by the callee's RECV.
+                let line = if op_array.decl_line > 0 {
+                    op_array.decl_line
+                } else {
+                    self.current_line
+                };
                 let is_instance =
                     this_cv == 1 && lead > 0 && matches!(call.args.first(), Some(Value::Object(_)));
                 let (file, fline) = match ucf_line {
@@ -7054,6 +7090,14 @@ impl Vm {
                 self.call_stack
                     .push((frame_display, file, fline, Vec::new(), is_instance));
                 let exc_val = self.create_exception(b"ArgumentCountError", &err_msg, line);
+                if op_array.decl_line > 0 && !op_array.filename.is_empty() {
+                    if let Value::Object(ref o) = exc_val {
+                        o.borrow_mut().set_property(
+                            b"file".to_vec(),
+                            Value::String(PhpString::from_vec(op_array.filename.clone())),
+                        );
+                    }
+                }
                 self.call_stack.pop();
                 self.current_exception = Some(exc_val);
                 return Err(VmError {
@@ -22730,6 +22774,31 @@ impl Vm {
                             is_forwarding_call = true;
                         }
                     }
+                    // ZEND_INIT_STATIC_METHOD_CALL for `parent::__construct()`
+                    // (and self::/static::): a private constructor can only be
+                    // called on an object of its own class.
+                    if is_forwarding_call {
+                        if let Some(msg) = self.private_static_ctor_error(
+                            call.name.as_bytes(),
+                            op_array.cv_names.first().map(|n| n.as_slice())
+                                == Some(b"this".as_slice()),
+                            cvs.first(),
+                        ) {
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                    }
 
                     let mut func_name_lower: Vec<u8> = call
                         .name
@@ -25665,11 +25734,20 @@ impl Vm {
                                                 op.line
                                             },
                                         ),
-                                        None => (b"ArgumentCountError", err_msg, op.line),
+                                        // zend_missing_arg_error() is raised by the
+                                        // callee's RECV.
+                                        None => (
+                                            b"ArgumentCountError",
+                                            err_msg,
+                                            if user_fn.decl_line > 0 {
+                                                user_fn.decl_line
+                                            } else {
+                                                op.line
+                                            },
+                                        ),
                                     };
-                                let exc_val =
-                                    self.create_exception(exc_class, &err_msg, exc_line);
-                                if exc_class == b"TypeError" && !user_fn.filename.is_empty() {
+                                let exc_val = self.create_exception(exc_class, &err_msg, exc_line);
+                                if user_fn.decl_line > 0 && !user_fn.filename.is_empty() {
                                     if let Value::Object(ref o) = exc_val {
                                         o.borrow_mut().set_property(
                                             b"file".to_vec(),
@@ -50781,68 +50859,34 @@ impl Vm {
                         } else
                         // Find the method in the class
                         if let Some(class) = self.classes.get(&class_name_lower) {
-                            // For private methods: PHP resolves them based on the calling scope,
-                            // not the runtime class. If the runtime class has a private method
-                            // with the same name but the caller's scope also has its own private
-                            // method with that name, use the caller's version.
+                            // zend_std_get_method(): when the calling scope is an
+                            // ancestor of the object's class with its own private
+                            // method of that name, that method wins over the one
+                            // the class (re)declares (zend_get_parent_private_method()).
                             let method_resolved = {
                                 let initial_method = class.get_method(&method_name_lower);
-                                if let Some(m) = initial_method {
-                                    if m.visibility == Visibility::Private {
-                                        let declaring_lower: Vec<u8> = m
-                                            .declaring_class
-                                            .iter()
-                                            .map(|b| b.to_ascii_lowercase())
-                                            .collect();
-                                        let caller_scope = self.current_class_scope();
-                                        if let Some(caller) = &caller_scope {
-                                            let caller_lower: Vec<u8> = caller
-                                                .iter()
-                                                .map(|b| b.to_ascii_lowercase())
-                                                .collect();
-                                            if caller_lower != declaring_lower {
-                                                // Caller is a different class - check if caller has its own private method
-                                                if let Some(caller_class) =
-                                                    self.classes.get(&caller_lower)
-                                                {
-                                                    if let Some(caller_method) =
-                                                        caller_class.get_method(&method_name_lower)
-                                                    {
-                                                        if caller_method.visibility
-                                                            == Visibility::Private
-                                                        {
-                                                            let cm_declaring_lower: Vec<u8> =
-                                                                caller_method
-                                                                    .declaring_class
-                                                                    .iter()
-                                                                    .map(|b| b.to_ascii_lowercase())
-                                                                    .collect();
-                                                            if cm_declaring_lower == caller_lower {
-                                                                // Use the caller's own private method instead
-                                                                Some(caller_method)
-                                                            } else {
-                                                                initial_method
-                                                            }
-                                                        } else {
-                                                            initial_method
-                                                        }
-                                                    } else {
-                                                        initial_method
-                                                    }
-                                                } else {
-                                                    initial_method
-                                                }
-                                            } else {
-                                                initial_method
-                                            }
-                                        } else {
-                                            initial_method
-                                        }
-                                    } else {
-                                        initial_method
+                                match (initial_method, self.class_scope_ref()) {
+                                    (Some(m), Some(caller))
+                                        if !m.declaring_class.eq_ignore_ascii_case(caller) =>
+                                    {
+                                        let caller_lower = caller.to_ascii_lowercase();
+                                        self.classes
+                                            .get(&caller_lower)
+                                            .and_then(|cc| cc.get_method(&method_name_lower))
+                                            .filter(|cm| {
+                                                cm.visibility == Visibility::Private
+                                                    && cm
+                                                        .declaring_class
+                                                        .eq_ignore_ascii_case(&caller_lower)
+                                                    && caller_lower != class_name_lower
+                                                    && self.class_extends(
+                                                        &class_name_lower,
+                                                        &caller_lower,
+                                                    )
+                                            })
+                                            .or(initial_method)
                                     }
-                                } else {
-                                    None
+                                    (m, _) => m,
                                 }
                             };
                             if let Some(method) = method_resolved {

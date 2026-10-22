@@ -271,6 +271,9 @@ pub struct Compiler {
     /// label -> enclosing finally path; gotos -> (label, path, line)
     label_finally_paths: HashMap<Vec<u8>, Vec<u32>>,
     goto_finally_paths: Vec<(Vec<u8>, Vec<u32>, u32)>,
+    /// Unique id of this compilation's top-level op_array, keying its
+    /// static variables (each file / eval'd string has its own).
+    main_static_id: u64,
     /// True for the compiler of a whole file/eval (via `compile()`); false for
     /// function/method/closure sub-compilers. Classes declared inside a
     /// sub-compiled body are stored on that body's op_array (`local_classes`).
@@ -491,6 +494,7 @@ impl Compiler {
             finally_id_counter: 0,
             label_finally_paths: HashMap::new(),
             goto_finally_paths: Vec::new(),
+            main_static_id: 0,
         }
     }
 
@@ -4672,6 +4676,17 @@ impl Compiler {
                     // ("class::method::varname" for methods: each declaring
                     // class has its own statics).
                     let mut key = Vec::new();
+                    if self.op_array.name.is_empty() {
+                        // Top-level code of a file or eval()'d string: its
+                        // own op_array, so its own statics.
+                        if self.main_static_id == 0 {
+                            static NEXT: std::sync::atomic::AtomicU64 =
+                                std::sync::atomic::AtomicU64::new(1);
+                            self.main_static_id =
+                                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        key.extend_from_slice(format!("\0main#{}", self.main_static_id).as_bytes());
+                    }
                     if let Some(sc) = &self.op_array.scope_class {
                         if !self.op_array.name.starts_with(b"{closure") {
                             key.extend_from_slice(sc);
@@ -4681,6 +4696,22 @@ impl Compiler {
                     key.extend_from_slice(&self.op_array.name);
                     key.extend_from_slice(b"::");
                     key.extend_from_slice(name);
+                    // zend_compile_static_var_common()
+                    let dup = self.op_array.ops.iter().any(|o| {
+                        o.opcode == OpCode::StaticVarInit
+                            && matches!(o.result, OperandType::Const(k)
+                                if matches!(self.op_array.literals.get(k as usize),
+                                    Some(Value::String(s)) if s.as_bytes() == key.as_slice()))
+                    });
+                    if dup {
+                        return Err(CompileError {
+                            message: format!(
+                                "Duplicate declaration of static variable ${}",
+                                String::from_utf8_lossy(name)
+                            ),
+                            line: stmt.span.line,
+                        });
+                    }
                     let key_idx = self
                         .op_array
                         .add_literal(Value::String(PhpString::from_vec(key)));
