@@ -573,7 +573,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
         15
     } else {
         5
-    };
+    } + literal_sleep_secs(source);
     // run-tests.php runs CLEAN with $orig_ini_settings: the extensions it
     // loads, not the test's --INI--.
     let clean_ini: Vec<(String, String)> = ini_settings
@@ -3060,6 +3060,22 @@ fn shell_split(s: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// Seconds the script spends in literal `sleep(N)` calls: added to the
+/// time limit (run-tests.php allows 60 seconds).
+fn literal_sleep_secs(source: &str) -> u64 {
+    let mut total = 0u64;
+    let mut rest = source;
+    while let Some(p) = rest.find("sleep(") {
+        let after = &rest[p + 6..];
+        let n: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if after[n.len()..].starts_with(')') && !rest[..p].ends_with('u') {
+            total += n.parse::<u64>().unwrap_or(0).min(60);
+        }
+        rest = after;
+    }
+    total.min(60)
 }
 
 #[allow(clippy::field_reassign_with_default)] // fields filled in step by step

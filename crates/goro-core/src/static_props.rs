@@ -890,6 +890,33 @@ impl Vm {
         }
     }
 
+    /// static_prop_put_raw(), but a reference held by typed properties
+    /// verifies the value (ZEND_TRY_ASSIGN_REF): Err(()) with the TypeError
+    /// pending when it does not fit.
+    #[allow(clippy::result_unit_err)]
+    pub fn static_prop_assign_typed(
+        &mut self,
+        class_key: &[u8],
+        name: &[u8],
+        value: Value,
+    ) -> Result<bool, ()> {
+        let Some(idx) = self.classes.get_index_of(class_key) else {
+            return Ok(false);
+        };
+        let Ok(slot) = self.locate_static_prop(idx, name, None) else {
+            return Ok(false);
+        };
+        let r = match self.sp_cell(&slot, name) {
+            Some(Value::Reference(r)) => r.clone(),
+            Some(c) => {
+                *c = value;
+                return Ok(true);
+            }
+            None => return Ok(false),
+        };
+        self.try_assign_ref(&r, value).map(|_| true)
+    }
+
     /// Build the PHP-level exception for a static property error and make it
     /// current. Returns the "Uncaught ..." message for the no-handler path.
     pub(crate) fn sp_raise(&mut self, err: SpErr, line: u32) -> String {
@@ -1445,7 +1472,7 @@ impl Vm {
     /// evaluated and cached, enum cases resolved and a typed constant
     /// verified. None if it does not exist; Some(Err) when an exception was
     /// thrown (left pending).
-    pub(crate) fn class_constant_value(
+    pub fn class_constant_value(
         &mut self,
         class_lower: &[u8],
         name: &[u8],

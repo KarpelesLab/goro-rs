@@ -466,7 +466,21 @@ pub fn reflection_property_construct(vm: &mut Vm, args: &[Value], line: u32) -> 
 }
 
 pub fn reflection_parameter_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
-    with_internal_ctor_frame(vm, args, line, reflection_parameter_construct_impl)
+    let ok = with_internal_ctor_frame(vm, args, line, reflection_parameter_construct_impl);
+    // [$closure, '__invoke']: a parameter of the Closure::__invoke trampoline.
+    let invoke = matches!(args.get(1).map(|v| v.deref()), Some(Value::Array(a)) if {
+        let a = a.borrow();
+        a.get_int(0).is_some_and(|c| c.is_closure_obj())
+            && a.get_int(1)
+                .is_some_and(|m| m.to_php_string().as_bytes().eq_ignore_ascii_case(b"__invoke"))
+    });
+    if ok && invoke {
+        if let Some(Value::Object(o)) = args.first() {
+            o.borrow_mut()
+                .set_property(b"__reflection_param_trampoline".to_vec(), Value::True);
+        }
+    }
+    ok
 }
 
 pub fn reflection_class_constant_construct(vm: &mut Vm, args: &[Value], line: u32) -> bool {
@@ -1399,6 +1413,96 @@ pub(crate) fn closure_legacy_arg(v: &Value) -> Value {
     }
 }
 
+/// The __call()/__callStatic() behind a ReflectionFunction of a trampoline.
+fn magic_target(obj: &Rc<RefCell<PhpObject>>) -> Option<Vec<u8>> {
+    match obj.borrow().get_property(b"__reflection_magic") {
+        Value::String(s) => Some(s.as_bytes().to_vec()),
+        _ => None,
+    }
+}
+
+/// For a closure created from a method that only exists through
+/// __call()/__callStatic() (zend_get_call_trampoline_func): the magic
+/// method ("class::__call", lowercase) and the called method's name.
+fn magic_call_trampoline(vm: &Vm, closure: &Value) -> Option<(Vec<u8>, Vec<u8>)> {
+    // A first-class-callable thunk names its target "Class::method"; an
+    // object among the captured values makes it an instance call.
+    let op = vm.closure_op_array(closure);
+    // `$obj->method(...)`: the thunk calls a literal method on the captured
+    // object.
+    let method_fcc = op.as_ref().and_then(|op| {
+        let call = op
+            .ops
+            .iter()
+            .find(|o| o.opcode == crate::opcode::OpCode::InitMethodCall)?;
+        let crate::opcode::OperandType::Const(i) = call.op2 else {
+            return None;
+        };
+        let m = op.literals.get(i as usize)?.to_php_string();
+        let obj = match closure.closure_inner()? {
+            Value::Array(a) => a.borrow().values().find_map(|v| match v.deref() {
+                Value::Object(o) => Some(o.borrow().class_name.clone()),
+                _ => None,
+            })?,
+            _ => return None,
+        };
+        let mut t = obj;
+        t.extend_from_slice(b"::");
+        t.extend_from_slice(m.as_bytes());
+        Some(t)
+    });
+    let target_name = match op.and_then(|op| op.fcc_target_name.clone()).or(method_fcc) {
+        Some(t) => t,
+        None => match closure.closure_inner()? {
+            Value::String(s) => s.as_bytes().to_vec(),
+            // [$object or "Class", "method"]
+            Value::Array(a) => {
+                let a = a.borrow();
+                let mut t = match a.get_int(0)?.deref() {
+                    Value::Object(o) => o.borrow().class_name.clone(),
+                    Value::String(s) => s.as_bytes().to_vec(),
+                    _ => return None,
+                };
+                t.extend_from_slice(b"::");
+                t.extend_from_slice(a.get_int(1)?.deref().to_php_string().as_bytes());
+                t
+            }
+            _ => return None,
+        },
+    };
+    let p = target_name.windows(2).position(|w| w == b"::")?;
+    let (class, method) = (target_name[..p].to_vec(), target_name[p + 2..].to_vec());
+    let is_static = !match closure.closure_inner() {
+        Some(Value::Array(a)) => a
+            .borrow()
+            .values()
+            .any(|v| matches!(v.deref(), Value::Object(_))),
+        _ => false,
+    };
+    let cl = class
+        .strip_prefix(b"\\")
+        .unwrap_or(&class)
+        .to_ascii_lowercase();
+    let ce = vm.classes.get(&cl)?;
+    if ce
+        .methods
+        .contains_key(method.to_ascii_lowercase().as_slice())
+    {
+        return None;
+    }
+    let magic: &[u8] = if !is_static && ce.methods.contains_key(b"__call".as_slice()) {
+        b"__call"
+    } else if ce.methods.contains_key(b"__callstatic".as_slice()) {
+        b"__callstatic"
+    } else {
+        return None;
+    };
+    let mut target = cl;
+    target.extend_from_slice(b"::");
+    target.extend_from_slice(magic);
+    Some((target, method))
+}
+
 /// ReflectionFunction constructor
 fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bool {
     let this = match args.first() {
@@ -1419,9 +1523,19 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
                             && !op.display_name.is_empty()
                     })
                     .map(|op| op.display_name.clone());
+                let magic = magic_call_trampoline(vm, &closure);
                 let mut obj = this.borrow_mut();
                 if let Some(d) = display {
                     obj.set_property(b"name".to_vec(), Value::String(PhpString::from_vec(d)));
+                }
+                if let Some((target, name)) = magic {
+                    // A closure of a __call()/__callStatic() trampoline: named
+                    // after the called method, attributes of the magic one.
+                    obj.set_property(b"name".to_vec(), Value::String(PhpString::from_vec(name)));
+                    obj.set_property(
+                        b"__reflection_magic".to_vec(),
+                        Value::String(PhpString::from_vec(target)),
+                    );
                 }
                 obj.set_property(b"__reflection_is_closure".to_vec(), Value::True);
                 obj.set_property(b"__reflection_closure_obj".to_vec(), closure);
@@ -4725,7 +4839,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                         return Some(Value::Null);
                     }
                 }
-                vm.static_prop_put_raw(&class_lower, prop_name.as_bytes(), coerced);
+                let _ = vm.static_prop_assign_typed(&class_lower, prop_name.as_bytes(), coerced);
                 Some(Value::Null)
             }
             b"getreflectionconstant" | b"getreflectionconstants" => {
@@ -6265,7 +6379,13 @@ pub(crate) fn rfunc<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a OpArray> {
         return Some(op);
     }
     if !vm.functions.contains_key(lower) {
-        return None;
+        // "class::method" (the __call/__callStatic behind a trampoline).
+        let p = lower.windows(2).position(|w| w == b"::")?;
+        return vm
+            .classes
+            .get(&lower[..p])
+            .and_then(|c| c.methods.get(&lower[p + 2..]))
+            .map(|m| &*m.op_array);
     }
     if let Some(v) = INTERNAL_FN_CACHE.with(|c| c.borrow().get(lower).copied()) {
         return v;
@@ -6401,7 +6521,8 @@ fn reflection_reference_from_array_element(vm: &mut Vm, args: &[Value], line: u3
         Value::Array(inner) => Rc::ptr_eq(inner, &arr),
         _ => false,
     };
-    if Rc::strong_count(&rc) <= 1 && !self_ref {
+    // (`rc` itself is one more holder than the array slot.)
+    if Rc::strong_count(&rc) <= 2 && !self_ref && !crate::vm::typed_ref::is_typed(&rc) {
         return Value::Null;
     }
     let id = Rc::as_ptr(&rc) as usize as u64;
@@ -6685,7 +6806,8 @@ pub fn reflection_function_method(
         }
         b"isdeprecated" => {
             // Check for the #[\Deprecated] attribute on the function.
-            let has_dep = rfunc(vm, &func_lower)
+            let fl = magic_target(obj).unwrap_or_else(|| func_lower.clone());
+            let has_dep = rfunc(vm, &fl)
                 .map(|op| {
                     op.attributes.iter().any(|a| {
                         let n = String::from_utf8_lossy(&a.name);
@@ -7202,7 +7324,8 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 }
             }
             b"getattributes" => {
-                let attrs = rfunc(vm, func_lower.as_slice())
+                let fl = magic_target(obj).unwrap_or_else(|| func_lower.clone());
+                let attrs = rfunc(vm, fl.as_slice())
                     .map(|op| op.attributes.clone())
                     .unwrap_or_default();
                 let filter_name = args.get(1).and_then(|v| {
@@ -7213,12 +7336,18 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     }
                 });
                 let filter_flags = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+                // A closure of a method validates against TARGET_METHOD.
+                let target = if fl.windows(2).any(|w| w == b"::") {
+                    4
+                } else {
+                    2
+                };
                 Some(create_reflection_attributes(
                     vm,
                     &attrs,
                     filter_name.as_deref(),
                     filter_flags,
-                    2,
+                    target,
                 ))
             }
             b"getclosure" => {
@@ -7932,7 +8061,11 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         }
                         value = coerced;
                     }
-                    vm.static_prop_put_raw(declaring.as_slice(), prop_name.as_bytes(), value);
+                    let _ = vm.static_prop_assign_typed(
+                        declaring.as_slice(),
+                        prop_name.as_bytes(),
+                        value,
+                    );
                 } else if args.len() >= 3 {
                     let target = args[1].clone();
                     let value = args[2].clone();
@@ -8039,6 +8172,16 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     }
                 }
                 if let Value::Object(target_obj) = &target {
+                    // A dynamic property the object lacks: zend_read_property_ex()
+                    // warns.
+                    if find_prop_decl(vm, &class_lower, prop_name.as_bytes()).is_none()
+                        && !target_obj.borrow().has_property(prop_name.as_bytes())
+                    {
+                        let cname =
+                            crate::value::display_class_name(&target_obj.borrow().class_name);
+                        vm.emit_warning(&format!("Undefined property: {}::${}", cname, prop_name));
+                        return Some(Value::Null);
+                    }
                     let ob = target_obj.borrow();
                     Some(ob.get_property(prop_name.as_bytes()))
                 } else {
@@ -8225,6 +8368,25 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 if is_static {
                     vm.static_prop_put_raw(&class_lower, prop_name.as_bytes(), value);
                 } else if let Value::Object(target_obj) = &target {
+                    // Creating a dynamic property (zend_update_property_ex()).
+                    if find_prop_decl(vm, &class_lower, prop_name.as_bytes()).is_none()
+                        && !target_obj.borrow().has_property(prop_name.as_bytes())
+                    {
+                        let cl = target_obj.borrow().class_name.to_ascii_lowercase();
+                        let allows = vm
+                            .classes
+                            .get(&cl)
+                            .is_some_and(|c| c.allow_dynamic_properties)
+                            || cl == b"stdclass";
+                        if !allows {
+                            let cname =
+                                crate::value::display_class_name(&target_obj.borrow().class_name);
+                            vm.emit_deprecated(&format!(
+                                "Creation of dynamic property {}::${} is deprecated",
+                                cname, prop_name
+                            ));
+                        }
+                    }
                     let mut ob = target_obj.borrow_mut();
                     ob.set_property(prop_name.as_bytes().to_vec(), value);
                 }
@@ -9077,6 +9239,49 @@ pub fn reflection_parameter_method(
                 return Some(Value::Object(Rc::new(RefCell::new(rm_obj))));
             }
 
+            // A closure's parameter: Closure::__invoke for the trampoline,
+            // a method of the scope for a closure bound to a class, else
+            // a function (reflection_method_factory / function_factory).
+            if crate::closure::is_closure_fn_name(func_target.as_bytes()) {
+                let trampoline = obj.borrow().has_property(b"__reflection_param_trampoline");
+                let scope = vm
+                    .user_functions
+                    .get(func_target.as_bytes().to_ascii_lowercase().as_slice())
+                    .map(|op| (op.scope_class.clone(), op.display_name.clone()));
+                let target = if trampoline {
+                    Some((b"Closure".to_vec(), b"__invoke".to_vec()))
+                } else if let Some((Some(sc), display)) = scope {
+                    let cname = rcls(vm, &sc.to_ascii_lowercase())
+                        .map(|c| c.name.clone())
+                        .unwrap_or(sc);
+                    Some((cname, display))
+                } else {
+                    None
+                };
+                if let Some((class, name)) = target {
+                    let obj_id = vm.alloc_object_id();
+                    let mut rm = PhpObject::new(b"ReflectionMethod".to_vec(), obj_id);
+                    rm.set_property(b"name".to_vec(), Value::String(PhpString::from_vec(name)));
+                    rm.set_property(
+                        b"class".to_vec(),
+                        Value::String(PhpString::from_vec(class.clone())),
+                    );
+                    rm.set_property(
+                        b"__reflection_class".to_vec(),
+                        Value::String(PhpString::from_vec(class)),
+                    );
+                    rm.set_property(
+                        b"__reflection_method".to_vec(),
+                        Value::String(PhpString::from_bytes(b"__invoke")),
+                    );
+                    rm.set_property(
+                        b"__reflection_closure_fn".to_vec(),
+                        Value::String(func_target.clone()),
+                    );
+                    return Some(Value::Object(Rc::new(RefCell::new(rm))));
+                }
+            }
+
             // Free function path. Resolve the canonical function name from
             // the user_functions table if available; otherwise fall back to
             // the stored lowercase name.
@@ -9084,7 +9289,16 @@ pub fn reflection_parameter_method(
             let canonical_func = if !lower.is_empty() {
                 vm.user_functions
                     .get(lower)
-                    .map(|op| String::from_utf8_lossy(&op.name).to_string())
+                    .map(|op| {
+                        // A closure is named {closure:file:line}.
+                        if crate::closure::is_closure_fn_name(&op.name)
+                            && !op.display_name.is_empty()
+                        {
+                            String::from_utf8_lossy(&op.display_name).to_string()
+                        } else {
+                            String::from_utf8_lossy(&op.name).to_string()
+                        }
+                    })
                     .unwrap_or_else(|| String::from_utf8_lossy(lower).to_string())
             } else {
                 String::new()
@@ -9691,6 +9905,68 @@ fn generator_exec_line(gb: &crate::generator::PhpGenerator) -> u32 {
 
 /// The chain of generators from `g` down to the innermost one it is
 /// delegating to via `yield from`.
+/// ReflectionGenerator methods on a generator that is running: the
+/// generators from it to the innermost running one are the top of the
+/// running stack (vm.running_generators, outermost first).
+fn reflection_running_generator(
+    vm: &mut Vm,
+    method: &[u8],
+    g: &Rc<RefCell<crate::generator::PhpGenerator>>,
+) -> Value {
+    let addr = RefCell::as_ptr(g) as usize;
+    let start = vm
+        .running_generators
+        .iter()
+        .rposition(|(a, _)| *a == addr)
+        .unwrap_or(vm.running_generators.len().saturating_sub(1));
+    let names: Vec<String> = vm.running_generators[start..]
+        .iter()
+        .map(|(_, n)| n.clone())
+        .collect();
+    match method {
+        b"getexecutingfile" => Value::String(PhpString::from_string(vm.current_file.clone())),
+        b"getexecutingline" => Value::Long(vm.current_line as i64),
+        b"getexecutinggenerator" => Value::Generator(g.clone()),
+        b"getthis" => Value::Null,
+        b"getfunction" => {
+            let name = names.first().cloned().unwrap_or_default();
+            let obj_id = vm.alloc_object_id();
+            let mut rf = PhpObject::new(b"ReflectionFunction".to_vec(), obj_id);
+            rf.set_property(
+                b"name".to_vec(),
+                Value::String(PhpString::from_string(name)),
+            );
+            rf.set_property(b"__reflection_is_closure".to_vec(), Value::True);
+            Value::Object(Rc::new(RefCell::new(rf)))
+        }
+        b"gettrace" => {
+            // Innermost first; each frame is located where its caller (the
+            // next outer generator) resumed it.
+            let mut frames: Vec<(String, String, u32, Vec<Value>, bool)> = Vec::new();
+            for (i, name) in names.iter().enumerate() {
+                let (file, line) = if i == 0 {
+                    (String::new(), 0)
+                } else {
+                    vm.call_stack
+                        .iter()
+                        .rev()
+                        .find(|f| f.0 == names[i - 1])
+                        .map(|f| (f.1.clone(), f.2))
+                        .unwrap_or_default()
+                };
+                frames.push((name.clone(), file, line, Vec::new(), false));
+            }
+            // build_exception_trace() walks the stack top-down.
+            let saved = std::mem::replace(&mut vm.call_stack, frames);
+            let trace = vm.build_exception_trace();
+            vm.call_stack = saved;
+            trace
+        }
+        b"isclosed" => Value::False,
+        _ => Value::Null,
+    }
+}
+
 fn generator_chain(
     g: &Rc<RefCell<crate::generator::PhpGenerator>>,
 ) -> Vec<Rc<RefCell<crate::generator::PhpGenerator>>> {
@@ -9723,6 +9999,13 @@ pub fn reflection_generator_method(
             }
         };
 
+    // A generator that is executing right now (ReflectionGenerator used from
+    // inside it): its state is in use, its frames are the running ones.
+    if let Some(g) = get_gen(obj) {
+        if g.try_borrow_mut().is_err() {
+            return Some(reflection_running_generator(vm, method, &g));
+        }
+    }
     match method {
         b"getexecutingfile" => {
             if let Some(g) = get_gen(obj) {

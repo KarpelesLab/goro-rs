@@ -341,6 +341,27 @@ impl Vm {
         f(self, obj, name)
     }
 
+    /// native_prop_read() from isset()/empty(): the handler's diagnostics
+    /// are not hidden by the silencing the compiler wraps isset() in (the
+    /// has_property handler of an internal class may warn).
+    #[inline(never)]
+    pub fn native_prop_read_unsilenced(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        name: &[u8],
+    ) -> Option<Option<Value>> {
+        if self.native_class_handlers.is_empty() {
+            return None;
+        }
+        let saved = self.error_reporting;
+        if let Some(&outer) = self.error_reporting_stack.last() {
+            self.error_reporting = outer;
+        }
+        let r = self.native_prop_read(obj, name);
+        self.error_reporting = saved;
+        r
+    }
+
     /// Run the native property write/unset guard for `obj`, if any.
     /// Returns false when the operation must be aborted (exception set).
     pub fn native_prop_write_allowed(
@@ -40765,7 +40786,7 @@ impl Vm {
                                 return Ok(Flow::Continue);
                             }
                         }
-                        if let Some(r) = self.native_prop_read(obj, prop_name.as_bytes()) {
+                        if let Some(r) = self.native_prop_read_unsilenced(obj, prop_name.as_bytes()) {
                             let set = matches!(r, Some(ref v) if !matches!(v, Value::Null | Value::Undef));
                             self.write_operand(
                                 &op.result,
@@ -53620,7 +53641,10 @@ impl Vm {
                                                         .native_class_handlers
                                                         .contains_key(&class_lower)
                                                     && !crate::spl::SPL_CLASSES
-                                                        .contains(&class_lower.as_slice()));
+                                                        .contains(&class_lower.as_slice())
+                                                    // Reflection objects take no dynamic
+                                                    // properties either.
+                                                    && !class_lower.starts_with(b"reflection"));
                                         let allows_dynamic = self
                                             .classes
                                             .get(&class_lower)

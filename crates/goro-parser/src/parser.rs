@@ -826,6 +826,19 @@ impl Parser {
             TokenKind::AttributeOpen => {
                 let doc = self.take_doc_comment();
                 let attributes = self.parse_attributes()?;
+                // A doc comment between the attributes and the declaration
+                // is the latest one: it wins (GH-20895).
+                let doc = match self.peek() {
+                    TokenKind::Function
+                    | TokenKind::Class
+                    | TokenKind::Abstract
+                    | TokenKind::Final
+                    | TokenKind::Interface
+                    | TokenKind::Trait
+                    | TokenKind::Enum
+                    | TokenKind::Readonly => self.take_doc_comment().or(doc),
+                    _ => doc,
+                };
                 let r = match self.peek() {
                     TokenKind::Function => self.parse_function_decl_with_attrs(attributes),
                     TokenKind::Class

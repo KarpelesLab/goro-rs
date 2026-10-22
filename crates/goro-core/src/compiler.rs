@@ -9761,6 +9761,29 @@ impl Compiler {
                                                     self,
                                                 )
                                             });
+                                            // Only numbers are folded here: other operands
+                                            // may warn or throw when the constant is
+                                            // evaluated (string % int, division by zero).
+                                            let foldable = |lv: &Value, rv: &Value| {
+                                                let num = |v: &Value| {
+                                                    matches!(v, Value::Long(_) | Value::Double(_))
+                                                };
+                                                if matches!(op, BinaryOp::Concat) {
+                                                    return true;
+                                                }
+                                                num(lv)
+                                                    && num(rv)
+                                                    && !(matches!(
+                                                        op,
+                                                        BinaryOp::Div | BinaryOp::Mod
+                                                    ) && rv.to_double() == 0.0)
+                                            };
+                                            let (l, r) = match (l, r) {
+                                                (Some(lv), Some(rv)) if foldable(&lv, &rv) => {
+                                                    (Some(lv), Some(rv))
+                                                }
+                                                _ => (None, None),
+                                            };
                                             if let (Some(lv), Some(rv)) = (l, r) {
                                                 match op {
                                                     BinaryOp::Add => lv.add(&rv),
@@ -19578,21 +19601,35 @@ impl Compiler {
                     marker.extend_from_slice(r_str.as_bytes());
                     Some(Value::String(crate::string::PhpString::from_vec(marker)))
                 } else {
-                    Some(match op {
-                        BinaryOp::Add => lv.add(&rv),
-                        BinaryOp::Sub => lv.sub(&rv),
-                        BinaryOp::Mul => lv.mul(&rv),
-                        BinaryOp::Concat => {
+                    // Only what cannot warn or throw is folded here; the
+                    // rest is evaluated (in a thunk) when the constant is.
+                    let num = |v: &Value| matches!(v, Value::Long(_) | Value::Double(_));
+                    let ints = matches!((&lv, &rv), (Value::Long(_), Value::Long(_)));
+                    match op {
+                        BinaryOp::Add if num(&lv) && num(&rv) => Some(lv.add(&rv)),
+                        BinaryOp::Sub if num(&lv) && num(&rv) => Some(lv.sub(&rv)),
+                        BinaryOp::Mul if num(&lv) && num(&rv) => Some(lv.mul(&rv)),
+                        BinaryOp::Concat
+                            if !matches!(lv, Value::Array(_)) && !matches!(rv, Value::Array(_)) =>
+                        {
                             let mut result = lv.to_php_string().as_bytes().to_vec();
                             result.extend_from_slice(rv.to_php_string().as_bytes());
-                            Value::String(crate::string::PhpString::from_vec(result))
+                            Some(Value::String(crate::string::PhpString::from_vec(result)))
                         }
-                        BinaryOp::BitwiseOr => Value::Long(lv.to_long() | rv.to_long()),
-                        BinaryOp::BitwiseAnd => Value::Long(lv.to_long() & rv.to_long()),
-                        BinaryOp::ShiftLeft => Value::Long(lv.to_long() << rv.to_long()),
-                        BinaryOp::ShiftRight => Value::Long(lv.to_long() >> rv.to_long()),
-                        _ => Value::Null,
-                    })
+                        BinaryOp::BitwiseOr if ints => {
+                            Some(Value::Long(lv.to_long() | rv.to_long()))
+                        }
+                        BinaryOp::BitwiseAnd if ints => {
+                            Some(Value::Long(lv.to_long() & rv.to_long()))
+                        }
+                        BinaryOp::ShiftLeft if ints && (0..64).contains(&rv.to_long()) => {
+                            Some(Value::Long(lv.to_long() << rv.to_long()))
+                        }
+                        BinaryOp::ShiftRight if ints && (0..64).contains(&rv.to_long()) => {
+                            Some(Value::Long(lv.to_long() >> rv.to_long()))
+                        }
+                        _ => None,
+                    }
                 }
             }
             _ => None,
@@ -20748,6 +20785,7 @@ fn expr_references_backing_store(expr: &Expr, prop_name: &[u8]) -> bool {
         | ExprKind::Clone(e)
         | ExprKind::Spread(e)
         | ExprKind::Print(e)
+        | ExprKind::ThrowExpr(e)
         | ExprKind::YieldFrom(e) => expr_references_backing_store(e, prop_name),
         ExprKind::Yield(k, v) => {
             k.as_ref()

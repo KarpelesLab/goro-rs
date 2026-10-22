@@ -2124,6 +2124,9 @@ fn iptcembed_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     };
+    let st_size = std::fs::metadata(crate::misc::normalize_path_lexical(&path))
+        .map(|m| m.len() as usize)
+        .unwrap_or(0);
     let mut iptc = iptcdata.as_bytes().to_vec();
     let mut iptcdata_len = iptc.len();
     let mut psheader: [u8; 28] = *b"\xFF\xED\0\0Photoshop 3.0\x008BIM\x04\x04\0\0\0\0";
@@ -2133,7 +2136,8 @@ fn iptcembed_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         fpos: 0,
         spool,
         spoolbuf: if use_buf { Some(Vec::new()) } else { None },
-        spool_cap: iptcdata_len + 29 + 1024 + 1 + file.len(),
+        // fstat()'s st_size: 0 for a pipe, whatever is read from it
+        spool_cap: iptcdata_len + 29 + 1024 + 1 + st_size,
         out: Vec::new(),
     };
     let sp = ctx.spool;

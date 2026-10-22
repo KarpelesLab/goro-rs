@@ -1158,6 +1158,17 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     }
                 }
+                // Constant expressions are evaluated, typed constants verified.
+                match vm.class_constant_value(&class_lower, const_name.as_bytes()) {
+                    Some(Ok(v)) => return Ok(v),
+                    Some(Err(())) => {
+                        return Err(VmError {
+                            message: String::new(),
+                            line: vm.current_line,
+                        });
+                    }
+                    None => {}
+                }
                 if let Value::String(ms) = val {
                     if let Some(case) = ms.as_bytes().strip_prefix(b"__enum_case__::") {
                         if let Some(v) = vm.get_enum_case(&class_lower, case) {

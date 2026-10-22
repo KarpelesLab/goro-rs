@@ -578,7 +578,8 @@ impl Vm {
             for (i, v) in caps.iter().enumerate() {
                 match op.closure_capture_names.get(i) {
                     Some(n) if n.as_slice() != b"this" && !matches!(v, Value::Undef) => {
-                        out.set(ArrayKey::String(PhpString::from_vec(n.clone())), v.deref());
+                        // by-reference uses stay references (Z_TRY_ADDREF)
+                        out.set(ArrayKey::String(PhpString::from_vec(n.clone())), v.clone());
                     }
                     _ => {}
                 }
