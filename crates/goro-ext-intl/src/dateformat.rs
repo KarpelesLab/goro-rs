@@ -275,11 +275,11 @@ pub fn with_exceptions<R>(vm: &mut Vm, f: impl FnOnce(&mut Vm) -> R) -> R {
     let r = f(vm);
     match ue {
         Some(v) => vm.constants.insert(b"intl.use_exceptions".to_vec(), v),
-        None => vm.constants.remove(b"intl.use_exceptions".as_slice()),
+        None => vm.constants.shift_remove(b"intl.use_exceptions".as_slice()),
     };
     match el {
         Some(v) => vm.constants.insert(b"intl.error_level".to_vec(), v),
-        None => vm.constants.remove(b"intl.error_level".as_slice()),
+        None => vm.constants.shift_remove(b"intl.error_level".as_slice()),
     };
     r
 }

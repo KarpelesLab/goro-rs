@@ -56,17 +56,29 @@ impl Vm {
             self.spl_fatal(&msg);
             return;
         }
+        // A resize requested by a destructor run by this resize is
+        // remembered and performed afterwards (cached_resize).
+        const CACHED: &[u8] = b"__spl_cached_resize";
+        let resizing = matches!(obj.borrow().get_property(CACHED), Value::Long(_));
+        if resizing {
+            obj.borrow_mut()
+                .set_property(CACHED.to_vec(), Value::Long(size));
+            return;
+        }
+        obj.borrow_mut()
+            .set_property(CACHED.to_vec(), Value::Long(size));
         if size > cur {
             let mut a = st.borrow_mut();
             for i in cur..size {
                 a.set(ArrayKey::Int(i), Value::Null);
             }
         } else {
-            // Release removed elements one by one (destructors may run).
+            // spl_fixedarray_dtor_range(): the size is set first, then the
+            // removed elements are released in order (destructors may run).
             let removed: Vec<Value> = {
                 let mut a = st.borrow_mut();
                 let mut out = Vec::new();
-                for i in (size..cur).rev() {
+                for i in size..cur {
                     if let Some(v) = a.remove(&ArrayKey::Int(i)) {
                         out.push(v);
                     }
@@ -75,10 +87,19 @@ impl Vm {
                 out
             };
             sync_size(obj);
-            drop(removed);
-            self.run_pending_destructors_pub();
+            for v in removed {
+                drop(v);
+                self.run_pending_destructors_pub();
+            }
         }
         sync_size(obj);
+        let cached = obj.borrow().get_property(CACHED);
+        obj.borrow_mut().remove_property(CACHED);
+        if let Value::Long(c) = cached {
+            if c != size {
+                self.fa_resize(obj, c);
+            }
+        }
     }
 
     /// spl_offset_convert_to_ulong(): Some(index) or None with an exception.

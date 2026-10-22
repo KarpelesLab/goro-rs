@@ -288,7 +288,7 @@ impl Vm {
         self.emit_deprecation_for_callback_at(&handler, &file, line);
         let args = vec![
             Value::Long(ty),
-            Value::String(PhpString::from_string(msg.to_string())),
+            Value::String(PhpString::from_vec(raw_error_bytes(msg).into_owned())),
             Value::String(PhpString::from_string(file)),
             Value::Long(line as i64),
         ];
@@ -465,14 +465,14 @@ impl Vm {
             let _ = mode;
             if let Ok(mut f) = opts.open(&dest) {
                 let stamp = self.log_timestamp();
-                let _ = f.write_all(format!("[{}] {}\n", stamp, msg).as_bytes());
+                let _ = f.write_all(&raw_error_bytes(&format!("[{}] {}\n", stamp, msg)));
                 self.in_error_log = false;
                 return;
             }
         }
         {
             use std::io::Write;
-            let _ = std::io::stderr().write_all(format!("{}\n", msg).as_bytes());
+            let _ = std::io::stderr().write_all(&raw_error_bytes(&format!("{}\n", msg)));
         }
         self.in_error_log = false;
     }

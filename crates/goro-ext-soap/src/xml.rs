@@ -387,7 +387,7 @@ pub fn read_file(vm: &mut Vm, filename: &str) -> Option<Vec<u8>> {
             vm.constants.insert(key.to_vec(), v);
         }
         None => {
-            vm.constants.remove(key);
+            vm.constants.shift_remove(key);
         }
     }
     r

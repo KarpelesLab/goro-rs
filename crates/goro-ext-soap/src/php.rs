@@ -487,7 +487,7 @@ fn with_display_off(vm: &mut Vm, f: impl FnOnce(&mut Vm)) {
             vm.constants.insert(key.to_vec(), v);
         }
         None => {
-            vm.constants.remove(key);
+            vm.constants.shift_remove(key);
         }
     }
 }

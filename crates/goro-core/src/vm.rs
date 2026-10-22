@@ -802,7 +802,7 @@ pub struct Vm {
     /// Whether we're executing the top-level script (vs a function)
     pub is_global_scope: bool,
     /// User-defined constants (from define())
-    pub constants: crate::fxhash::FxHashMap<Vec<u8>, Value>,
+    pub constants: crate::fxhash::FxIndexMap<Vec<u8>, Value>,
     /// Attributes attached to user-defined constants
     pub constant_attributes: HashMap<Vec<u8>, Vec<crate::object::RuntimeAttribute>>,
     /// Keys currently being evaluated for #[\Deprecated] — used to break
@@ -1435,7 +1435,7 @@ impl Vm {
             forbid_dynamic_call_methods: Vec::new(),
             shutdown_functions: Vec::new(),
             constants: {
-                let mut c = crate::fxhash::FxHashMap::default();
+                let mut c = crate::fxhash::FxIndexMap::default();
                 // Default ini values
                 c.insert(
                     b"arg_separator.output".to_vec(),

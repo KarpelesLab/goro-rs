@@ -929,11 +929,13 @@ fn get_exception_handler(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError>
 
 fn trigger_error(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use goro_core::errdisplay::{E_USER_DEPRECATED, E_USER_ERROR, E_USER_NOTICE, E_USER_WARNING};
-    let message = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
+    // (the message's bytes are displayed and passed on as they are)
+    let message = goro_core::errdisplay::raw_error_string(
+        args.first()
+            .unwrap_or(&Value::Null)
+            .to_php_string()
+            .as_bytes(),
+    );
     let error_type = args.get(1).map(|v| v.to_long()).unwrap_or(E_USER_NOTICE);
     let line = vm.current_line;
     match error_type {
@@ -5466,7 +5468,7 @@ fn ini_restore(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             vm.ini_originals.remove(&key);
         }
         Some(None) => {
-            vm.constants.remove(&key);
+            vm.constants.shift_remove(&key);
         }
         None => {}
     }

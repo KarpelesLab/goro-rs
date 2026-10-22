@@ -497,11 +497,11 @@ pub fn with_ctor_errors<T>(vm: &mut Vm, f: impl FnOnce(&mut Vm) -> T) -> T {
     let r = f(vm);
     match old_ue {
         Some(v) => vm.constants.insert(b"intl.use_exceptions".to_vec(), v),
-        None => vm.constants.remove(b"intl.use_exceptions".as_slice()),
+        None => vm.constants.shift_remove(b"intl.use_exceptions".as_slice()),
     };
     match old_el {
         Some(v) => vm.constants.insert(b"intl.error_level".to_vec(), v),
-        None => vm.constants.remove(b"intl.error_level".as_slice()),
+        None => vm.constants.shift_remove(b"intl.error_level".as_slice()),
     };
     r
 }

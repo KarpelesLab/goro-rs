@@ -430,7 +430,7 @@ pub fn with_ctor_errors<T>(vm: &mut Vm, f: impl FnOnce(&mut Vm) -> T) -> T {
     for (k, v) in [(b"intl.use_exceptions".as_slice(), ue), (b"intl.error_level".as_slice(), el)] {
         match v {
             Some(v) => vm.constants.insert(k.to_vec(), v),
-            None => vm.constants.remove(k),
+            None => vm.constants.shift_remove(k),
         };
     }
     r
