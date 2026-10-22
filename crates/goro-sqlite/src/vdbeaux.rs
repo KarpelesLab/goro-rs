@@ -601,7 +601,9 @@ pub fn sqlite3VdbeAllocUnpackedRecord(
 }
 
 /// C: `void sqlite3VdbeRecordUnpack( int nKey, const void *pKey, UnpackedRecord *p )`
-pub fn sqlite3VdbeRecordUnpack(db: &mut Sqlite3, nKey: i32, pKey: &[u8], p: &mut UnpackedRecord) {
+/// Rust: no `db` parameter (the C function takes none; the btree layer
+/// calls it from cursor restoration, where no connection is available).
+pub fn sqlite3VdbeRecordUnpack(nKey: i32, pKey: &[u8], p: &mut UnpackedRecord) {
     todo!("sqlite3VdbeRecordUnpack")
 }
 

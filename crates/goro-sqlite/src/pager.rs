@@ -118,7 +118,9 @@ pub fn sqlite3PagerTruncateImage(pPager: &mut crate::pager::Pager, nPage: Pgno) 
 }
 
 /// C: `int sqlite3PagerClose(Pager *pPager, sqlite3 *db)`
-pub fn sqlite3PagerClose(db: &mut Sqlite3, pPager: &mut crate::pager::Pager) -> i32 {
+/// Rust: `db` is None when C passes a NULL connection (btree open failure,
+/// ephemeral btree closed with its last cursor).
+pub fn sqlite3PagerClose(db: Option<&mut Sqlite3>, pPager: &mut crate::pager::Pager) -> i32 {
     todo!("sqlite3PagerClose")
 }
 
