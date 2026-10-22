@@ -515,7 +515,10 @@ impl Vm {
                     call.args.push(v);
                 }
             }
-            _ if !is_static => call.args.push(Value::Object(obj)),
+            // (made in place, see above)
+            _ if !is_static => call
+                .args
+                .extend(std::iter::once_with(move || Value::Object(obj))),
             _ => {}
         }
         // What DO_FCALL's fast path looks up again (see fast_fcall_target;
