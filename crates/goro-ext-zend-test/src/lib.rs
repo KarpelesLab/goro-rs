@@ -61,6 +61,7 @@ pub fn register(vm: &mut Vm) {
     fiber::register(vm);
     iterators::register(vm);
     handlers::register(vm);
+    handlers::register_dimension_handlers(vm);
     observer::register(vm);
     vm.module_shutdown_hooks.push(mshutdown);
 }

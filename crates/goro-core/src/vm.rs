@@ -238,6 +238,51 @@ impl NativeObjectHandlers {
     };
 }
 
+thread_local! {
+    /// The BP_VAR_* fetch type of the read_dimension() call in progress, when
+    /// its `mode` does not tell it (RW, UNSET); 255: none.
+    static DIM_FETCH_TYPE: std::cell::Cell<u8> = const { std::cell::Cell::new(255) };
+}
+
+/// BP_VAR_R / W / RW / IS / FUNC_ARG / UNSET
+pub const BP_VAR_R: u8 = 0;
+pub const BP_VAR_W: u8 = 1;
+pub const BP_VAR_RW: u8 = 2;
+pub const BP_VAR_IS: u8 = 3;
+pub const BP_VAR_UNSET: u8 = 5;
+
+thread_local! {
+    /// The element a quiet probe (FETCH_DIM_IS of `??` / isset() / empty())
+    /// already fetched from an extension object, for the ArrayGet that
+    /// follows it: (object address, value).
+    static DIM_IS_FETCHED: std::cell::RefCell<Option<(usize, Value)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Take the element a quiet probe fetched from `obj`, if any.
+#[inline]
+fn take_dim_is_fetched(obj: &Rc<RefCell<PhpObject>>) -> Option<Value> {
+    DIM_IS_FETCHED.with(|c| {
+        let mut c = c.borrow_mut();
+        match &*c {
+            Some((p, _)) if *p == Rc::as_ptr(obj) as usize => c.take().map(|(_, v)| v),
+            Some(_) => {
+                *c = None;
+                None
+            }
+            None => None,
+        }
+    })
+}
+
+/// Run `f` (a read_dimension() call) as a fetch of BP_VAR_* type `ty`.
+pub(crate) fn with_dim_fetch_type<R>(ty: u8, f: impl FnOnce() -> R) -> R {
+    let old = DIM_FETCH_TYPE.with(|c| c.replace(ty));
+    let r = f();
+    DIM_FETCH_TYPE.with(|c| c.set(old));
+    r
+}
+
 /// Handlers of an object carrying native data, if any.
 #[inline]
 pub fn native_handlers(obj: &Rc<RefCell<PhpObject>>) -> Option<&'static NativeObjectHandlers> {
@@ -245,6 +290,20 @@ pub fn native_handlers(obj: &Rc<RefCell<PhpObject>>) -> Option<&'static NativeOb
 }
 
 impl Vm {
+    /// The BP_VAR_* type of the read_dimension() call in progress, given the
+    /// handler's `mode` (0 read, 1 write fetch, 2 isset fetch, 3 reference).
+    pub fn dim_fetch_type(&self, mode: u8) -> u8 {
+        let t = DIM_FETCH_TYPE.with(|c| c.get());
+        if t != 255 {
+            return t;
+        }
+        match mode {
+            0 => BP_VAR_R,
+            2 => BP_VAR_IS,
+            _ => BP_VAR_W,
+        }
+    }
+
     /// Run the extension create_object hook for a freshly allocated object
     /// of a (subclass of a) built-in class.
     pub fn run_object_create_hook(&mut self, rc: &Rc<RefCell<PhpObject>>) {
@@ -35023,9 +35082,17 @@ impl Vm {
                     if let Value::Object(obj) = &arr_val.deref() {
                         if let Some(f) = native_handlers(obj).and_then(|h| h.read_dimension) {
                             let k = key_val.deref();
-                            if let Some(v) =
-                                f(self, obj, Some(&k), if is_rw || obj_w { 1 } else { 0 })
-                            {
+                            // A compound assignment reads (BP_VAR_R) before it
+                            // writes; an increment fetches for RW.
+                            let incdec = op.opcode == OpCode::ArrayGetIncDec;
+                            let r = if let Some(v) = take_dim_is_fetched(obj) {
+                                Some(v)
+                            } else if incdec {
+                                with_dim_fetch_type(BP_VAR_RW, || f(self, obj, Some(&k), 1))
+                            } else {
+                                f(self, obj, Some(&k), if obj_w { 1 } else { 0 })
+                            };
+                            if let Some(v) = r {
                                 native_exc_check!(
                                     self,
                                     exception_handlers,
@@ -43376,7 +43443,30 @@ impl Vm {
                                         .deref(),
                                 )
                             };
-                            if let Some(v) = f(self, obj, k.as_ref(), 1) {
+                            let bp = match mode {
+                                crate::fetch_w::DimFetch::Rw | crate::fetch_w::DimFetch::ObjRw => {
+                                    BP_VAR_RW
+                                }
+                                crate::fetch_w::DimFetch::Unset => BP_VAR_UNSET,
+                                _ => BP_VAR_W,
+                            };
+                            let r = with_dim_fetch_type(bp, || f(self, obj, k.as_ref(), 1));
+                            if let Some(v) = r {
+                                if self.current_exception.is_none()
+                                    && !matches!(v, Value::Object(_) | Value::Reference(_))
+                                {
+                                    // zend_fetch_dimension_address(): not a reference
+                                    let disp = crate::value::display_class_name(
+                                        &obj.borrow().class_name,
+                                    );
+                                    self.emit_notice_at(
+                                        &format!(
+                                            "Indirect modification of overloaded element of {} has no effect",
+                                            disp
+                                        ),
+                                        op.line,
+                                    );
+                                }
                                 native_exc_check!(
                                     self,
                                     exception_handlers,
@@ -44263,6 +44353,40 @@ impl Vm {
                             }
                         }
                         if let Value::Object(obj) = &arr_val.deref() {
+                            // FETCH_DIM_IS (`??`, the outer dimensions of
+                            // isset()/empty()): read_dimension(BP_VAR_IS).
+                            if op.opcode == OpCode::ArrayIssetFetch {
+                                DIM_IS_FETCHED.with(|c| *c.borrow_mut() = None);
+                                if let Some(f) = native_handlers(obj).and_then(|h| h.read_dimension)
+                                {
+                                    let k = key_val.deref();
+                                    let r =
+                                        with_dim_fetch_type(BP_VAR_IS, || f(self, obj, Some(&k), 2));
+                                    if let Some(v) = r {
+                                        native_exc_check!(
+                                            self,
+                                            exception_handlers,
+                                            pending_calls_catch_depth,
+                                            ip,
+                                            op.line
+                                        );
+                                        let exists = !matches!(v.deref(), Value::Null | Value::Undef);
+                                        if exists {
+                                            DIM_IS_FETCHED.with(|c| {
+                                                *c.borrow_mut() = Some((Rc::as_ptr(obj) as usize, v))
+                                            });
+                                        }
+                                        self.write_operand(
+                                            &op.result,
+                                            if exists { Value::True } else { Value::False },
+                                            &mut cvs,
+                                            &mut tmps,
+                                            &static_cv_keys,
+                                        );
+                                        return Ok(Flow::Continue);
+                                    }
+                                }
+                            }
                             if let Some(f) = native_handlers(obj).and_then(|h| h.has_dimension) {
                                 // The handler's diagnostics are not silenced by
                                 // isset()'s own suppression.
@@ -44272,9 +44396,19 @@ impl Vm {
                                         self.error_reporting = *outer;
                                     }
                                 }
-                                let r = f(self, obj, &key_val.deref(), 0);
+                                // empty(): has_dimension(check_empty=1) alone
+                                // decides (no read follows).
+                                let is_empty = op.opcode == OpCode::ArrayIsset
+                                    && Self::is_empty_dim_probe(op_array, ip, &op);
+                                let r = f(self, obj, &key_val.deref(), is_empty as u8);
                                 self.error_reporting = saved_er;
                                 if let Some(b) = r {
+                                    if is_empty && b {
+                                        DIM_IS_FETCHED.with(|c| {
+                                            *c.borrow_mut() =
+                                                Some((Rc::as_ptr(obj) as usize, Value::True))
+                                        });
+                                    }
                                     native_exc_check!(
                                         self,
                                         exception_handlers,

@@ -109,3 +109,72 @@ fn donc_create(vm: &mut Vm, l: i64) -> Value {
     o.set_property(b"val".to_vec(), Value::Long(l));
     Value::Object(Rc::new(std::cell::RefCell::new(o)))
 }
+
+// ---------------------------------------------------------------------------
+// DimensionHandlersNoArrayAccess: dimension handlers that record how they
+// were called (properties read, write, has, unset, readType, hasOffset,
+// checkEmpty, offset).
+
+static DIMENSION_HANDLERS: goro_core::vm::NativeObjectHandlers =
+    goro_core::vm::NativeObjectHandlers {
+        read_dimension: Some(dim_read),
+        write_dimension: Some(dim_write),
+        has_dimension: Some(dim_has),
+        unset_dimension: Some(dim_unset),
+        ..goro_core::vm::NativeObjectHandlers::EMPTY
+    };
+
+pub(crate) fn register_dimension_handlers(vm: &mut Vm) {
+    vm.object_create_handlers
+        .insert(b"dimensionhandlersnoarrayaccess".to_vec(), dim_create);
+}
+
+type Obj = Rc<std::cell::RefCell<PhpObject>>;
+
+/// dimension_handlers_no_ArrayAccess_object_create()
+fn dim_create(_vm: &mut Vm, o: &Obj) {
+    o.borrow_mut().native = Some(goro_core::object::NativeData {
+        data: Rc::new(()),
+        handlers: &DIMENSION_HANDLERS,
+    });
+}
+
+/// dimension_common_helper()
+fn dim_record(o: &Obj, offset: Option<&Value>, access: &[u8]) {
+    let mut ob = o.borrow_mut();
+    ob.set_property(access.to_vec(), Value::True);
+    let has = if offset.is_some() {
+        Value::True
+    } else {
+        Value::False
+    };
+    ob.set_property(b"hasOffset".to_vec(), has);
+    if let Some(k) = offset {
+        ob.set_property(b"offset".to_vec(), k.deref());
+    }
+}
+
+fn dim_read(vm: &mut Vm, o: &Obj, offset: Option<&Value>, mode: u8) -> Option<Value> {
+    dim_record(o, offset, b"read");
+    let ty = vm.dim_fetch_type(mode);
+    o.borrow_mut()
+        .set_property(b"readType".to_vec(), Value::Long(ty as i64));
+    Some(Value::True)
+}
+
+fn dim_write(_vm: &mut Vm, o: &Obj, offset: Option<&Value>, _value: &Value) -> bool {
+    dim_record(o, offset, b"write");
+    true
+}
+
+fn dim_has(_vm: &mut Vm, o: &Obj, offset: &Value, check_empty: u8) -> Option<bool> {
+    o.borrow_mut()
+        .set_property(b"checkEmpty".to_vec(), Value::Long(check_empty as i64));
+    dim_record(o, Some(offset), b"has");
+    Some(true)
+}
+
+fn dim_unset(_vm: &mut Vm, o: &Obj, offset: &Value) -> bool {
+    dim_record(o, Some(offset), b"unset");
+    true
+}

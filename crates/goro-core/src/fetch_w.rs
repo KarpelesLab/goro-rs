@@ -629,6 +629,9 @@ impl Vm {
                         )
                         .is_some()
                     || self.native_class_handlers.contains_key(&cl)
+                    || crate::vm::native_handlers(o).is_some_and(|h| {
+                        h.write_dimension.is_some() || h.unset_dimension.is_some()
+                    })
                     || Self::spl_iter_class(&cl)
                     || crate::vm::get_builtin_parent(&cl).is_some();
                 if array_access {
@@ -1043,10 +1046,16 @@ impl Vm {
         if class_lower == b"weakmap" {
             return self.weakmap_fetch_dim_w(obj, key, mode);
         }
-        // An extension object's read_dimension handler (BP_VAR_W)
+        // An extension object's read_dimension handler (BP_VAR_W / RW / UNSET)
         if let Some(f) = crate::vm::native_handlers(obj).and_then(|h| h.read_dimension) {
             let k = key.as_ref().map(|k| k.deref());
-            if let Some(v) = f(self, obj, k.as_ref(), 1) {
+            let bp = match mode {
+                DimFetch::Rw | DimFetch::ObjRw => crate::vm::BP_VAR_RW,
+                DimFetch::Unset => crate::vm::BP_VAR_UNSET,
+                DimFetch::W | DimFetch::Obj => crate::vm::BP_VAR_W,
+            };
+            let r = crate::vm::with_dim_fetch_type(bp, || f(self, obj, k.as_ref(), 1));
+            if let Some(v) = r {
                 if self.current_exception.is_some() {
                     return None;
                 }
