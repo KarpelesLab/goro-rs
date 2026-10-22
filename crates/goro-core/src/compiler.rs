@@ -6696,6 +6696,10 @@ impl Compiler {
                                         );
                                         closure_compiler.op_array.param_count =
                                             closure_params.len() as u32;
+                                        closure_compiler.op_array.closure_params = closure_params
+                                            .iter()
+                                            .map(|p| (p.name.clone(), p.by_ref))
+                                            .collect();
                                         closure_compiler.op_array.required_param_count = {
                                             let mut last_req: i64 = -1;
                                             for (i, p) in closure_params.iter().enumerate() {
@@ -9323,6 +9327,10 @@ impl Compiler {
                                         // Compile params and body
                                         closure_compiler.op_array.param_count =
                                             closure_params.len() as u32;
+                                        closure_compiler.op_array.closure_params = closure_params
+                                            .iter()
+                                            .map(|p| (p.name.clone(), p.by_ref))
+                                            .collect();
                                         closure_compiler.op_array.required_param_count = {
                                             let mut last_req: i64 = -1;
                                             for (i, p) in closure_params.iter().enumerate() {

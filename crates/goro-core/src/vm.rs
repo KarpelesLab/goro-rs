@@ -48,7 +48,9 @@ thread_local! {
 /// (A closure may also receive a bound $this it does not count.)
 fn arg_cv_bound(f: &OpArray, ncvs: usize) -> usize {
     if crate::closure::is_closure_fn_name(&f.name) {
-        ncvs
+        // A closure receives its captured values (a bound $this first) as
+        // leading arguments, then its declared parameters.
+        (f.closure_params.len() + f.closure_capture_names.len()).min(ncvs)
     } else {
         (f.param_count as usize).min(ncvs)
     }
