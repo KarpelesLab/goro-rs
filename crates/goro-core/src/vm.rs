@@ -39011,7 +39011,9 @@ impl Vm {
                         foreach_ref_arrays.insert(iter_idx, arr_rc.clone());
                     }
                     match &op.op1 {
-                        OperandType::Cv(idx) if !src_is_object => {
+                        OperandType::Cv(idx)
+                            if !src_is_object || foreach_obj.contains_key(&iter_idx) =>
+                        {
                             foreach_ref_src.insert(iter_idx, *idx);
                         }
                         _ => {
@@ -39149,14 +39151,36 @@ impl Vm {
                         return Ok(Flow::Continue);
                     }
 
-                    let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
-
                     // By-ref foreach walks the live array (appended elements are
                     // seen). The position follows the current element (by its
                     // reference, which survives renumbering): when elements before
                     // it were removed or inserted it is found again; when it was
                     // itself removed, the element that took its place comes next.
-                    if let Some(weak) = foreach_obj.get(&iter_idx).cloned() {
+                    if let Some(mut weak) = foreach_obj.get(&iter_idx).cloned() {
+                        // Another object assigned to the variable: the
+                        // iteration moves over to its properties (which a
+                        // lazy object is initialized for).
+                        if let Some(&src) = foreach_ref_src.get(&iter_idx) {
+                            if let Some(Value::Object(o2)) = cvs.get(src as usize).map(|v| v.deref())
+                            {
+                                if !std::ptr::eq(Rc::as_ptr(&o2), weak.as_ptr()) {
+                                    self.maybe_run_lazy_init(&o2);
+                                    native_exc_check!(
+                                        self,
+                                        exception_handlers,
+                                        pending_calls_catch_depth,
+                                        ip,
+                                        op.line
+                                    );
+                                    let target = self.proxy_redirect(&o2);
+                                    weak = Rc::downgrade(&target);
+                                    foreach_obj.insert(iter_idx, weak.clone());
+                                    foreach_obj_cur.remove(&iter_idx);
+                                    foreach_positions.insert(iter_idx, 0);
+                                }
+                            }
+                        }
+                        let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
                         let cur = foreach_obj_cur.get(&iter_idx).cloned();
                         let obj = weak.upgrade();
                         let step = match &obj {
@@ -53400,7 +53424,7 @@ impl Vm {
                                 {
                                     true
                                 } else if is_ghost {
-                                    has_get && !is_declared
+                                    has_get && !is_declared && !guard_active
                                 } else if is_proxy && !already_real {
                                     has_get && !is_declared && !guard_active
                                 } else {
