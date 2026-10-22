@@ -56,6 +56,9 @@ pub struct PhpArray {
     pub pointer: usize,
     /// True while every entry i has key Int(i)
     packed: bool,
+    /// zend_hash_real_init_mixed(): PHP holds the array as a hash even
+    /// while its keys would fit a packed one (see `looks_packed`).
+    mixed: bool,
     /// Hash index (slot -> entry position + 1, 0 = empty); empty when unused
     index: Vec<u32>,
     /// In the cycle collector's root buffer (Zend's GC_INFO); see gc.rs.
@@ -202,6 +205,7 @@ impl Clone for PhpArray {
             next_int_key: self.next_int_key,
             pointer: self.pointer,
             packed: self.packed,
+            mixed: self.mixed,
             index: Vec::new(),
             gc_buffered: std::cell::Cell::new(false),
             zcap,
@@ -226,6 +230,7 @@ impl PhpArray {
             next_int_key: i64::MIN,
             pointer: 0,
             packed: true,
+            mixed: false,
             index: Vec::new(),
             gc_buffered: std::cell::Cell::new(false),
             zcap: 0,
@@ -242,6 +247,7 @@ impl PhpArray {
             next_int_key: i64::MIN,
             pointer: 0,
             packed: true,
+            mixed: false,
             index: Vec::new(),
             gc_buffered: std::cell::Cell::new(false),
             zcap: 0,
@@ -446,6 +452,9 @@ impl PhpArray {
     /// order (holes allowed) that fit the packed table PHP would have
     /// allocated for that many elements. Only reported by debug_zval_dump().
     pub fn looks_packed(&self) -> bool {
+        if self.mixed {
+            return false;
+        }
         if self.packed {
             return true;
         }
@@ -458,6 +467,12 @@ impl PhpArray {
         }
         let table = self.len().next_power_of_two().max(8) as i64;
         prev < table
+    }
+
+    /// zend_hash_real_init_mixed(): the array is a hash table from now on
+    /// (unserialize() builds its arrays so).
+    pub fn init_mixed(&mut self) {
+        self.mixed = true;
     }
 
     fn recompute_packed(&mut self) {

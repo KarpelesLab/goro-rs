@@ -1517,7 +1517,13 @@ impl<'a> Parser<'a> {
                         self.line,
                     );
                 }
-                self.set(slot, Value::String(PhpString::from_vec(bytes)))
+                // (ZVAL_STRINGL_FAST(): a one-byte string is interned)
+                let s = if c0 == b's' && bytes.len() == 1 {
+                    PhpString::one_char(bytes[0])
+                } else {
+                    PhpString::from_vec(bytes)
+                };
+                self.set(slot, Value::String(s))
             }
             (b'a', b':') => {
                 let e = self.digits(start + 2)?;
@@ -1532,6 +1538,9 @@ impl<'a> Parser<'a> {
                     return None;
                 }
                 let arr = Rc::new(RefCell::new(PhpArray::new()));
+                if elements > 0 {
+                    arr.borrow_mut().init_mixed();
+                }
                 slot_set(&self.d, slot, Value::Array(arr.clone()));
                 if elements > 0 && !self.nested_array(vm, p, &arr, elements) {
                     return None;

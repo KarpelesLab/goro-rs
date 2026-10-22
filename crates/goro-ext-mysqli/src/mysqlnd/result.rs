@@ -666,6 +666,14 @@ fn s(v: Vec<u8>) -> Value {
     Value::String(PhpString::from_vec(v))
 }
 
+/// ZVAL_STRINGL_FAST(): a one-byte string is the interned ZSTR_CHAR.
+fn s_fast(v: Vec<u8>) -> Value {
+    if v.len() == 1 {
+        return Value::String(PhpString::one_char(v[0]));
+    }
+    s(v)
+}
+
 // ── Text protocol ─────────────────────────────────────────────────────
 
 fn text_stat(t: u8) -> usize {
@@ -883,7 +891,7 @@ pub fn decode_text_row(
         } else if as_int_or_float && php_type == PhpType::Double {
             Value::Double(zend_strtod(data))
         } else {
-            s(data.to_vec())
+            s_fast(data.to_vec())
         };
         out.push(v);
         p += len;
@@ -1181,7 +1189,7 @@ fn ps_fetch(f: &Field, pack_len: usize, row: &[u8], pos: &mut usize) -> Option<V
             let end = (*pos + length as usize).min(row.len());
             let v = row.get(*pos..end).unwrap_or(&[]).to_vec();
             *pos += length as usize;
-            Some(s(v))
+            Some(s_fast(v))
         }
     }
 }
