@@ -44,6 +44,7 @@ $dirs = [
     'ext/bcmath' => 'bcmath',
     'ext/filter' => 'filter',
     'ext/iconv' => 'iconv',
+    'ext/gettext' => 'gettext',
     'ext/shmop' => 'shmop',
     'ext/sysvsem' => 'sysvsem',
     'ext/sysvshm' => 'sysvshm',

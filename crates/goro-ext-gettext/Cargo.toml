@@ -1,0 +1,13 @@
+[package]
+name = "goro-ext-gettext"
+version = "0.1.0"
+edition = "2024"
+description = "PHP gettext extension (GNU libintl emulation, .mo catalogs) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ext-iconv = { path = "../goro-ext-iconv" }
+libc = "0.2"

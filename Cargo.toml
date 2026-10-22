@@ -29,6 +29,7 @@ members = [
     "crates/goro-ext-bcmath",
     "crates/goro-ext-filter",
     "crates/goro-ext-iconv",
+    "crates/goro-ext-gettext",
     "crates/goro-ext-sysvipc",
     "crates/goro-ext-ftp",
     "crates/goro-ext-pcntl",
@@ -85,6 +86,7 @@ goro-ext-zend-test = { path = "crates/goro-ext-zend-test" }
 goro-ext-bcmath = { path = "crates/goro-ext-bcmath" }
 goro-ext-filter = { path = "crates/goro-ext-filter" }
 goro-ext-iconv = { path = "crates/goro-ext-iconv" }
+goro-ext-gettext = { path = "crates/goro-ext-gettext" }
 goro-ext-sysvipc = { path = "crates/goro-ext-sysvipc" }
 goro-ext-ftp = { path = "crates/goro-ext-ftp" }
 goro-ext-pcntl = { path = "crates/goro-ext-pcntl" }

@@ -6,6 +6,18 @@ use crate::stubs::{StubArg, StubCase, StubClass, StubConst, StubFunc, StubProp};
 
 pub static FUNCTIONS: &[StubFunc] = &[
     StubFunc {
+        name: "_",
+        flags: 0x0,
+        args: &[StubArg {
+            name: "message",
+            ty: "string",
+            default: None,
+            flags: 0,
+        }],
+        ret: "string",
+        ext: "gettext",
+    },
+    StubFunc {
         name: "abs",
         flags: 0x0,
         args: &[StubArg {
@@ -1792,6 +1804,26 @@ pub static FUNCTIONS: &[StubFunc] = &[
         ext: "standard",
     },
     StubFunc {
+        name: "bind_textdomain_codeset",
+        flags: 0x0,
+        args: &[
+            StubArg {
+                name: "domain",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "codeset",
+                ty: "?string",
+                default: Some("null"),
+                flags: 0,
+            },
+        ],
+        ret: "string|false",
+        ext: "gettext",
+    },
+    StubFunc {
         name: "bindec",
         flags: 0x0,
         args: &[StubArg {
@@ -1802,6 +1834,26 @@ pub static FUNCTIONS: &[StubFunc] = &[
         }],
         ret: "int|float",
         ext: "standard",
+    },
+    StubFunc {
+        name: "bindtextdomain",
+        flags: 0x0,
+        args: &[
+            StubArg {
+                name: "domain",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "directory",
+                ty: "?string",
+                default: Some("null"),
+                flags: 0,
+            },
+        ],
+        ret: "string|false",
+        ext: "gettext",
     },
     StubFunc {
         name: "boolval",
@@ -3967,6 +4019,70 @@ pub static FUNCTIONS: &[StubFunc] = &[
         ext: "date",
     },
     StubFunc {
+        name: "dcgettext",
+        flags: 0x0,
+        args: &[
+            StubArg {
+                name: "domain",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "message",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "category",
+                ty: "int",
+                default: None,
+                flags: 0,
+            },
+        ],
+        ret: "string",
+        ext: "gettext",
+    },
+    StubFunc {
+        name: "dcngettext",
+        flags: 0x0,
+        args: &[
+            StubArg {
+                name: "domain",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "singular",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "plural",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "count",
+                ty: "int",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "category",
+                ty: "int",
+                default: None,
+                flags: 0,
+            },
+        ],
+        ret: "string",
+        ext: "gettext",
+    },
+    StubFunc {
         name: "debug_backtrace",
         flags: 0x0,
         args: &[
@@ -4159,6 +4275,26 @@ pub static FUNCTIONS: &[StubFunc] = &[
         ext: "standard",
     },
     StubFunc {
+        name: "dgettext",
+        flags: 0x0,
+        args: &[
+            StubArg {
+                name: "domain",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "message",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+        ],
+        ret: "string",
+        ext: "gettext",
+    },
+    StubFunc {
         name: "die",
         flags: 0x0,
         args: &[StubArg {
@@ -4257,6 +4393,38 @@ pub static FUNCTIONS: &[StubFunc] = &[
         }],
         ret: "bool",
         ext: "standard",
+    },
+    StubFunc {
+        name: "dngettext",
+        flags: 0x0,
+        args: &[
+            StubArg {
+                name: "domain",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "singular",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "plural",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "count",
+                ty: "int",
+                default: None,
+                flags: 0,
+            },
+        ],
+        ret: "string",
+        ext: "gettext",
     },
     StubFunc {
         name: "dns_check_record",
@@ -7305,6 +7473,18 @@ pub static FUNCTIONS: &[StubFunc] = &[
         ],
         ret: "string|false",
         ext: "standard",
+    },
+    StubFunc {
+        name: "gettext",
+        flags: 0x0,
+        args: &[StubArg {
+            name: "message",
+            ty: "string",
+            default: None,
+            flags: 0,
+        }],
+        ret: "string",
+        ext: "gettext",
     },
     StubFunc {
         name: "gettimeofday",
@@ -15212,6 +15392,32 @@ pub static FUNCTIONS: &[StubFunc] = &[
         }],
         ret: "mixed",
         ext: "standard",
+    },
+    StubFunc {
+        name: "ngettext",
+        flags: 0x0,
+        args: &[
+            StubArg {
+                name: "singular",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "plural",
+                ty: "string",
+                default: None,
+                flags: 0,
+            },
+            StubArg {
+                name: "count",
+                ty: "int",
+                default: None,
+                flags: 0,
+            },
+        ],
+        ret: "string",
+        ext: "gettext",
     },
     StubFunc {
         name: "nl2br",
@@ -24395,6 +24601,18 @@ pub static FUNCTIONS: &[StubFunc] = &[
         ],
         ret: "string|false",
         ext: "standard",
+    },
+    StubFunc {
+        name: "textdomain",
+        flags: 0x0,
+        args: &[StubArg {
+            name: "domain",
+            ty: "?string",
+            default: Some("null"),
+            flags: 0,
+        }],
+        ret: "string",
+        ext: "gettext",
     },
     StubFunc {
         name: "time",
@@ -67863,6 +68081,7 @@ pub static ALIASES: &[(&str, &str)] = &[
         "ZendTestNS2\\namespaced_deprecated_aliased_func",
         "zend_test_void_return",
     ),
+    ("_", "gettext"),
     ("bzclose", "fclose"),
     ("bzflush", "fflush"),
     ("bzwrite", "fwrite"),
