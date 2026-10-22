@@ -372,6 +372,8 @@ pub struct Compiler {
     /// Compile-time fatal errors collected during attribute validation that
     /// should be raised before the script executes. The first one wins.
     pub deferred_fatal_errors: Vec<String>,
+    /// The attributes being compiled are those of a property hook.
+    in_hook_attrs: bool,
     /// Ids of the finally blocks enclosing the code being compiled.
     finally_path: Vec<u32>,
     finally_id_counter: u32,
@@ -663,6 +665,7 @@ impl Compiler {
             in_hoisting_pass: false,
             hoisted_class_idx: HashMap::new(),
             deferred_fatal_errors: Vec::new(),
+            in_hook_attrs: false,
             finally_path: Vec::new(),
             finally_id_counter: 0,
             label_finally_paths: HashMap::new(),
@@ -1261,6 +1264,17 @@ impl Compiler {
             .collect()
     }
 
+    /// The attributes of a property hook (a method target).
+    fn compile_hook_attributes(
+        &mut self,
+        attrs: &[goro_parser::ast::Attribute],
+    ) -> Vec<crate::object::RuntimeAttribute> {
+        self.in_hook_attrs = true;
+        let r = self.compile_attributes_target(attrs, "method");
+        self.in_hook_attrs = false;
+        r
+    }
+
     fn compile_attributes(
         &mut self,
         attrs: &[goro_parser::ast::Attribute],
@@ -1481,9 +1495,20 @@ impl Compiler {
                         })
                     })
                     .collect();
+                // validate_nodiscard(): not on a property hook.
+                let validation_error = (self.in_hook_attrs
+                    && name
+                        .strip_prefix(b"\\")
+                        .unwrap_or(&name)
+                        .eq_ignore_ascii_case(b"NoDiscard"))
+                .then(|| "#[\\NoDiscard] is not supported for property hooks".to_string());
+                if let (Some(e), false) = (&validation_error, has_delayed) {
+                    self.deferred_fatal_errors.push(e.clone());
+                }
                 crate::object::RuntimeAttribute {
                     name,
                     args_op_array: ac.op_array,
+                    validation_error: validation_error.filter(|_| has_delayed),
                 }
             })
             .collect()
@@ -7308,7 +7333,7 @@ impl Compiler {
                                     .map(|b| b.to_ascii_lowercase())
                                     .collect();
                                 let get_attrs =
-                                    self.compile_attributes_target(&hook_attrs.get, "method");
+                                    self.compile_hook_attributes(&hook_attrs.get);
                                 class.methods.insert(
                                     lower_hook_name,
                                     MethodDef {
@@ -7374,7 +7399,21 @@ impl Compiler {
                                             implicitly_nullable: false,
                                         }),
                                     ];
+                                } else if let Some(pt) = prop_type.clone() {
+                                    // An implicit `$value` parameter has the
+                                    // property's type.
+                                    hook_compiler.op_array.param_types = vec![
+                                        None,
+                                        Some(ParamTypeInfo {
+                                            param_name: param_name.clone(),
+                                            param_type: pt,
+                                            implicitly_nullable: false,
+                                        }),
+                                    ];
                                 }
+                                // (a set hook returns void)
+                                hook_compiler.op_array.return_type =
+                                    Some(ParamType::Simple(b"void".to_vec()));
                                 hook_compiler.op_array.param_count = 2; // $this + $value
                                 hook_compiler.op_array.param_attributes =
                                     vec![self.compile_attributes_target(
@@ -7382,7 +7421,7 @@ impl Compiler {
                                         "parameter",
                                     )];
                                 let set_attrs =
-                                    self.compile_attributes_target(&hook_attrs.set, "method");
+                                    self.compile_hook_attributes(&hook_attrs.set);
                                 hook_compiler.op_array.required_param_count = 1; // $value is required
 
                                 for s in hook_body {
@@ -8258,9 +8297,8 @@ impl Compiler {
                                                     .bytes()
                                                     .map(|b| b.to_ascii_lowercase())
                                                     .collect();
-                                                let get_attrs = self.compile_attributes_target(
+                                                let get_attrs = self.compile_hook_attributes(
                                                     &param.hook_attrs.get,
-                                                    "method",
                                                 );
                                                 class.methods.insert(
                                                     lower_hook_name,
@@ -8330,9 +8368,8 @@ impl Compiler {
                                                         &param.hook_attrs.set_param,
                                                         "parameter",
                                                     )];
-                                                let set_attrs = self.compile_attributes_target(
+                                                let set_attrs = self.compile_hook_attributes(
                                                     &param.hook_attrs.set,
-                                                    "method",
                                                 );
                                                 hook_compiler.op_array.required_param_count = 1;
                                                 for s in hook_body.iter() {

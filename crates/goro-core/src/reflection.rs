@@ -5601,7 +5601,13 @@ pub fn reflection_method_method(
                 } else {
                     String::from_utf8_lossy(&m.op_array.filename).into_owned()
                 };
-                let display = String::from_utf8_lossy(&m.name).to_string();
+                // (a property hook is named `$prop::get` / `$prop::set`)
+                let display = if m.name.starts_with(b"__property_") && !m.op_array.name.is_empty()
+                {
+                    String::from_utf8_lossy(&m.op_array.name).to_string()
+                } else {
+                    String::from_utf8_lossy(&m.name).to_string()
+                };
                 let ctx = FnStrCtx {
                     op: &m.op_array,
                     method: Some(&m),
@@ -9764,6 +9770,7 @@ fn constant_attrs_or_internal(vm: &Vm, name: &[u8]) -> Vec<crate::object::Runtim
         return vec![crate::object::RuntimeAttribute {
             name: b"Deprecated".to_vec(),
             args_op_array: OpArray::new(),
+            validation_error: None,
         }];
     }
     Vec::new()
@@ -12860,6 +12867,12 @@ pub fn create_reflection_attributes(
                 Value::False
             },
         );
+        if let Some(e) = &attr.validation_error {
+            obj.set_property(
+                b"__reflection_attr_validation_error".to_vec(),
+                Value::String(PhpString::from_string(e.clone())),
+            );
+        }
         result.push(Value::Object(Rc::new(RefCell::new(obj))));
     }
     Value::Array(Rc::new(RefCell::new(result)))
@@ -13047,6 +13060,15 @@ pub fn reflection_attribute_method(
                     vm.current_exception = Some(exc);
                     return Some(Value::Null);
                 }
+            }
+            // A validator error delayed by #[\DelayedTargetValidation].
+            if let Value::String(e) = obj
+                .borrow()
+                .get_property(b"__reflection_attr_validation_error")
+            {
+                let exc = vm.create_exception(b"Error", &e.to_string_lossy(), call_site_line);
+                vm.current_exception = Some(exc);
+                return Some(Value::Null);
             }
             // Internal attribute classes (e.g. #[\Deprecated], #[\NoDiscard]).
             if vm

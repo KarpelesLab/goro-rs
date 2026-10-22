@@ -59765,12 +59765,20 @@ impl Vm {
         let decl = self.scope_top().cloned().unwrap_or_default();
         let class_name = self
             .class_name_for_display(&decl.to_ascii_lowercase())
-            .unwrap_or(decl);
+            .unwrap_or(decl.clone());
         let name = format!(
             "{}::{}",
             crate::value::display_class_name(&class_name),
             String::from_utf8_lossy(&hook.name)
         );
+        // A #[\Deprecated] hook (zend_deprecated_function()).
+        if let Some(attrs) = self.hook_method_attributes(&decl, &hook.name) {
+            if let Some(custom) = self.get_deprecated_message(&attrs) {
+                let msg = self.format_deprecated_message(&format!("Method {}()", name), &custom);
+                let line = self.current_line;
+                self.emit_deprecated_at(&msg, line);
+            }
+        }
         let argc = (hook.param_count as usize).saturating_sub(1);
         let args: Vec<Value> = cvs.iter().skip(1).take(argc).cloned().collect();
         self.call_stack.push((
@@ -59780,6 +59788,24 @@ impl Vm {
             args,
             true,
         ));
+    }
+
+    /// The attributes of the hook method named `$prop::get` / `$prop::set`
+    /// (an OpArray name) of class `decl`, when it has any.
+    fn hook_method_attributes(
+        &self,
+        decl: &[u8],
+        hook_name: &[u8],
+    ) -> Option<Vec<crate::object::RuntimeAttribute>> {
+        let rest = hook_name.strip_prefix(b"$")?;
+        let sep = rest.windows(2).rposition(|w| w == b"::")?;
+        let (prop, kind) = (&rest[..sep], &rest[sep + 2..]);
+        let mut m = b"__property_".to_vec();
+        m.extend_from_slice(kind);
+        m.push(b'_');
+        m.extend(prop.iter().map(|b| b.to_ascii_lowercase()));
+        let md = self.classes.get(&decl.to_ascii_lowercase())?.get_method(&m)?;
+        (!md.attributes.is_empty()).then(|| md.attributes.clone())
     }
 
     /// The object a by-reference property fetch / reference assignment on
