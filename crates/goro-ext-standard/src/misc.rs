@@ -9589,7 +9589,7 @@ fn alloc_file_handle_special_uri(
 
 /// php_stream_url_wrap_rfc2397(): parse a data: URL into its meta data
 /// (mediatype, parameters, base64) and decoded contents.
-fn parse_rfc2397(url: &[u8]) -> Result<(Vec<(Vec<u8>, Value)>, Vec<u8>), &'static str> {
+pub(crate) fn parse_rfc2397(url: &[u8]) -> Result<(Vec<(Vec<u8>, Value)>, Vec<u8>), &'static str> {
     let mut path = &url[5..];
     // C strings end at NUL.
     if let Some(p) = path.iter().position(|&c| c == 0) {

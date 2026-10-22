@@ -4745,6 +4745,9 @@ fn h_stream_get_wrappers(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, V
 /// failed (warnings / the require Error have been raised).
 pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<Vec<u8>, VmError>> {
     let p = path.as_bytes();
+    if is_data_url(p) {
+        return Some(include_data_url(vm, path, kind));
+    }
     if !needs_locate(p) {
         return None;
     }
@@ -4803,6 +4806,58 @@ pub(crate) fn include_hook(vm: &mut Vm, path: &str, kind: u8) -> Option<Result<V
         st.borrow_mut().pop();
     });
     res
+}
+
+/// A data: (RFC 2397) URL: the wrapper accepts both `data:` and `data://`.
+fn is_data_url(p: &[u8]) -> bool {
+    p.len() >= 5 && p[..5].eq_ignore_ascii_case(b"data:")
+}
+
+/// include/require of a data: URL (php_stream_url_wrap_rfc2397): a URL
+/// wrapper, so it needs allow_url_include.
+fn include_data_url(vm: &mut Vm, path: &str, kind: u8) -> Result<Vec<u8>, VmError> {
+    let name = match kind {
+        1 => "include_once",
+        2 => "require",
+        3 => "require_once",
+        _ => "include",
+    };
+    let failure = if !ini_bool(vm, b"allow_url_include", false) {
+        vm.emit_warning(&format!(
+            "{}(): data:// wrapper is disabled in the server configuration by allow_url_include=0",
+            name
+        ));
+        "no suitable wrapper could be found".to_string()
+    } else {
+        match crate::misc::parse_rfc2397(path.as_bytes()) {
+            Ok((_, bytes)) => return Ok(bytes),
+            Err(e) => e.to_string(),
+        }
+    };
+    vm.emit_warning(&format!(
+        "{}({}): Failed to open stream: {}",
+        name, path, failure
+    ));
+    if vm.current_exception.is_some() {
+        return Err(exc_err(vm));
+    }
+    let inc = include_path_value(vm);
+    if kind >= 2 {
+        let msg = format!(
+            "Failed opening required '{}' (include_path='{}')",
+            path, inc
+        );
+        Err(throw(vm, b"Error", &msg))
+    } else {
+        vm.emit_warning(&format!(
+            "{}(): Failed opening '{}' for inclusion (include_path='{}')",
+            name, path, inc
+        ));
+        Err(VmError {
+            message: String::new(),
+            line: vm.current_line,
+        })
+    }
 }
 
 fn include_path_value(vm: &Vm) -> String {
@@ -4895,6 +4950,9 @@ fn resolve_path_user(vm: &mut Vm, filename: &[u8]) -> Option<Result<Vec<u8>, VmE
 /// VM include resolver hook.
 pub(crate) fn include_resolve(vm: &mut Vm, path: &str) -> Option<Result<String, VmError>> {
     let p = path.as_bytes();
+    if is_data_url(p) {
+        return Some(Ok(path.to_string()));
+    }
     if USER_WRAPPERS.with(|w| w.borrow().is_empty()) {
         // compress.zlib:// URLs are served by this layer too.
         let zlib = scheme_len(p).is_some_and(|n| {
