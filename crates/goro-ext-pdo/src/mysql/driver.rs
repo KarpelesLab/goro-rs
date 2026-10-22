@@ -254,6 +254,7 @@ fn handle_preparer(
 
 /// mysql_handle_doer
 fn handle_doer(vm: &mut Vm, dbh: &DbhRef, sql: &[u8]) -> i64 {
+    goro_ext_mysqli::link::sync_globals(vm);
     doer(Some(vm), dbh, sql)
 }
 
