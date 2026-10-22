@@ -637,6 +637,12 @@ impl PhpArray {
 
     fn remove_inner(&mut self, key: &ArrayKey) -> Option<Value> {
         if let Some(pos) = self.find(key) {
+            // The internal pointer keeps designating the same element (or,
+            // past the end, the slot the next append fills): entries after
+            // the removed one move down.
+            if pos < self.pointer {
+                self.pointer -= 1;
+            }
             if pos + 1 == self.entries.len() {
                 return self.pop_entry_raw().map(|(_, v)| v);
             }

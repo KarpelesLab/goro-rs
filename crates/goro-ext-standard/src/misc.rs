@@ -2268,7 +2268,9 @@ fn array_pop(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let (_, last_val) = arr.pop_entry().unwrap();
         // Reset internal pointer
         arr.pointer = 0;
-        Ok(last_val)
+        drop(arr);
+        // RETVAL_COPY_DEREF()
+        Ok(last_val.deref())
     } else {
         Ok(Value::Null)
     }
@@ -2284,7 +2286,8 @@ fn array_shift(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let first_val = entries[0].1.clone();
+        // RETVAL_COPY_DEREF()
+        let first_val = entries[0].1.deref();
         // Re-index: rebuild array with sequential integer keys
         let mut new_arr = PhpArray::new();
         for (key, val) in entries.iter().skip(1) {
@@ -4783,13 +4786,87 @@ fn compact(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
-fn current(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+thread_local! {
+    /// Internal pointers of objects walked with current()/next()/...
+    /// (their property table's nInternalPointer), by object id.
+    static OBJ_POINTERS: RefCell<std::collections::HashMap<u64, usize>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// The property table slots of an object: (name, value), None for an
+/// uninitialized (UNDEF) typed property.
+fn obj_slots(obj: &Rc<RefCell<PhpObject>>) -> Vec<(Vec<u8>, Option<Value>)> {
+    obj.borrow()
+        .properties
+        .iter()
+        .filter(|(k, _)| {
+            !(k.starts_with(b"__spl_")
+                || k.starts_with(b"__reflection_")
+                || k.starts_with(b"__enum_")
+                || k.starts_with(b"__ctor_")
+                || k.starts_with(b"__clone_")
+                || k.starts_with(b"__destructed")
+                || k.starts_with(b"__fiber_")
+                || k.starts_with(b"__lazy_")
+                || k.starts_with(b"__uri_"))
+        })
+        .map(|(k, v)| {
+            (
+                k.clone(),
+                if matches!(v, Value::Undef) {
+                    None
+                } else {
+                    Some(v.deref())
+                },
+            )
+        })
+        .collect()
+}
+
+/// The array-pointer functions on an object (deprecated): `op` is the
+/// function name; the property table is walked skipping UNDEF slots.
+fn obj_pointer_op(vm: &mut Vm, obj: &Rc<RefCell<PhpObject>>, op: &str) -> Value {
+    vm.emit_deprecated(&format!(
+        "{}(): Calling {}() on an object is deprecated",
+        op, op
+    ));
+    let slots = obj_slots(obj);
+    let id = obj.borrow().object_id;
+    let mut ptr = OBJ_POINTERS.with(|p| p.borrow().get(&id).copied().unwrap_or(0));
+    let valid_from = |p: usize| (p..slots.len()).find(|&i| slots[i].1.is_some());
+    let valid_before = |p: usize| {
+        (0..p.min(slots.len()))
+            .rev()
+            .find(|&i| slots[i].1.is_some())
+    };
+    // _zend_hash_get_valid_pos(): the pointer settles on a valid slot (or
+    // past the end).
+    let cur = match op {
+        "reset" => valid_from(0),
+        "end" => valid_before(slots.len()),
+        "next" => valid_from(ptr).and_then(|c| valid_from(c + 1)),
+        "prev" => valid_from(ptr).and_then(valid_before),
+        _ => valid_from(ptr),
+    };
+    ptr = cur.unwrap_or(slots.len());
+    OBJ_POINTERS.with(|p| p.borrow_mut().insert(id, ptr));
+    match (op, cur) {
+        ("key", Some(i)) => Value::String(PhpString::from_vec(slots[i].0.clone())),
+        ("key", None) => Value::Null,
+        (_, Some(i)) => slots[i].1.clone().unwrap_or(Value::False),
+        (_, None) => Value::False,
+    }
+}
+
+fn current(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(o)) = args.first().map(|v| v.deref()) {
+        return Ok(obj_pointer_op(vm, &o, "current"));
+    }
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
         let pos = arr.pointer;
         Ok(arr
-            .iter()
-            .nth(pos)
+            .entry_at(pos)
             .map(|(_, v)| v.deref())
             .unwrap_or(Value::False))
     } else {
@@ -4797,14 +4874,17 @@ fn current(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn next_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn next_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(o)) = args.first().map(|v| v.deref()) {
+        return Ok(obj_pointer_op(vm, &o, "next"));
+    }
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
-        arr.pointer += 1;
+        // The pointer stops past the end (the next append's slot).
+        arr.pointer = (arr.pointer + 1).min(arr.len());
         let pos = arr.pointer;
         Ok(arr
-            .iter()
-            .nth(pos)
+            .entry_at(pos)
             .map(|(_, v)| v.deref())
             .unwrap_or(Value::False))
     } else {
@@ -4812,11 +4892,14 @@ fn next_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn prev_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn prev_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(o)) = args.first().map(|v| v.deref()) {
+        return Ok(obj_pointer_op(vm, &o, "prev"));
+    }
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
         let len = arr.len();
-        if arr.pointer == 0 || arr.pointer > len {
+        if arr.pointer == 0 || arr.pointer >= len {
             // Already at (or before) beginning or past end: return false
             // Move pointer past end so current() also returns false
             arr.pointer = len;
@@ -4825,8 +4908,7 @@ fn prev_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             arr.pointer -= 1;
             let pos = arr.pointer;
             Ok(arr
-                .iter()
-                .nth(pos)
+                .entry_at(pos)
                 .map(|(_, v)| v.deref())
                 .unwrap_or(Value::False))
         }
@@ -4835,7 +4917,10 @@ fn prev_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn reset_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn reset_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(o)) = args.first().map(|v| v.deref()) {
+        return Ok(obj_pointer_op(vm, &o, "reset"));
+    }
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
         arr.pointer = 0;
@@ -4849,7 +4934,10 @@ fn reset_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn end_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn end_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(o)) = args.first().map(|v| v.deref()) {
+        return Ok(obj_pointer_op(vm, &o, "end"));
+    }
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
         let len = arr.len();
@@ -4864,13 +4952,15 @@ fn end_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn key_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if let Some(Value::Object(o)) = args.first().map(|v| v.deref()) {
+        return Ok(obj_pointer_op(vm, &o, "key"));
+    }
     if let Some(Value::Array(arr)) = args.first() {
         let arr = arr.borrow();
         let pos = arr.pointer;
         Ok(arr
-            .iter()
-            .nth(pos)
+            .entry_at(pos)
             .map(|(k, _)| match k {
                 goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
                 goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),
