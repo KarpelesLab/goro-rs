@@ -10506,6 +10506,33 @@ impl Compiler {
         r
     }
 
+    /// The key of `$a[k] op= v` / `$a[k]++` (FETCH_DIM_RW reads it once):
+    /// literals the conversion warns about are put in a temporary, so that
+    /// the read leaves the converted key there for the write-back.
+    fn dim_rw_key(&mut self, k: OperandType, line: u32) -> OperandType {
+        // (A variable key is read once by the VM: see Vm::dim_rw_key.)
+        let copy = match k {
+            OperandType::Const(i) => matches!(
+                self.op_array.literals.get(i as usize),
+                Some(Value::Null | Value::Double(_) | Value::True | Value::False)
+            ),
+            _ => false,
+        };
+        if !copy {
+            return k;
+        }
+        let flag = self.op_array.add_literal(Value::True);
+        let t = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::QmAssign,
+            op1: k,
+            op2: OperandType::Const(flag),
+            result: OperandType::Tmp(t),
+            line,
+        });
+        OperandType::Tmp(t)
+    }
+
     /// A non-Unused op2 marking an opcode that reads its op1 quietly (no
     /// "Undefined variable" warning): BooleanNot of empty().
     fn quiet_operand_flag(&mut self) -> OperandType {
@@ -11344,7 +11371,8 @@ impl Compiler {
                         let arr =
                             self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::Rw)?;
                         let idx = if let Some(idx_expr) = index {
-                            self.compile_expr(idx_expr)?
+                            let k = self.compile_expr(idx_expr)?;
+                            self.dim_rw_key(k, expr.span.line)
                         } else {
                             // $arr[] op= val: the new element starts as null
                             // (offsetGet(null) on ArrayAccess objects), then
@@ -11791,7 +11819,8 @@ impl Compiler {
                         let arr_op =
                             self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::Rw)?;
                         let idx_op = if let Some(idx_expr) = index {
-                            self.compile_expr(idx_expr)?
+                            let k = self.compile_expr(idx_expr)?;
+                            self.dim_rw_key(k, expr.span.line)
                         } else {
                             // $arr[]++: append-then-modify makes no sense here;
                             // fall through to plain unary handler.

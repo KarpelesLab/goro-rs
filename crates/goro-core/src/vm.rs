@@ -779,6 +779,10 @@ pub struct Vm {
     /// returned by value: the matching ArraySetIncDec must not call
     /// offsetSet() (the increment only affected a temporary).
     incdec_skip_set: bool,
+    /// The converted key of `$a[$k] op= v` / `$a[$k]++` read by the RW
+    /// fetch at (call depth, op index): the write-back two ops later uses
+    /// it instead of reading (and warning about) `$k` again.
+    dim_rw_key: Option<(u32, usize, Value)>,
     /// Current executing line number (updated during execution for warning/error reporting)
     pub current_line: u32,
     /// Cached enum case singleton objects: key = "classname_lower::CaseName"
@@ -1120,6 +1124,7 @@ impl Vm {
             isset_get_cache: None,
             recorded_errors: None,
             incdec_skip_set: false,
+            dim_rw_key: None,
             current_line: 0,
             enum_case_cache: HashMap::new(),
             fiber_suspended: false,
@@ -4219,6 +4224,19 @@ impl Vm {
             }
         }
         true
+    }
+
+    /// What a dimension-write container slot holds, to tell whether an
+    /// error handler replaced it: the array's address, or its type.
+    fn dim_container_identity(v: &Value) -> (u8, usize) {
+        match v.deref() {
+            Value::Array(a) => (1, Rc::as_ptr(&a) as *const u8 as usize),
+            Value::Object(o) => (2, Rc::as_ptr(&o) as *const u8 as usize),
+            Value::Undef => (3, 0),
+            Value::Null => (4, 0),
+            Value::False => (5, 0),
+            _ => (6, 0),
+        }
     }
 
     /// zend_zval_type_name(): like zend_zval_value_name() but `bool` for
@@ -31282,14 +31300,56 @@ impl Vm {
                         {
                             return Ok(Flow::Continue);
                         }
-                        let key_val = self.read_operand_warn(
-                            &op.result,
-                            &cvs,
-                            &tmps,
-                            &op_array.literals,
-                            op_array,
-                            op.line,
-                        );
+                        // `$a[$k] op= v`: the key the RW fetch converted.
+                        let rw_key = match self.dim_rw_key.take() {
+                            Some((depth, at, k))
+                                if depth == self.call_depth
+                                    && at + 3 == ip
+                                    && matches!(op.result, OperandType::Cv(_)) =>
+                            {
+                                Some(k)
+                            }
+                            _ => None,
+                        };
+                        // An undefined key CV warns; the error handler may then
+                        // replace the container or throw, which abandons the
+                        // assignment (slow_index_convert_w()).
+                        let container_before =
+                            match Self::read_operand_raw(&cvs, &op.result).deref() {
+                                _ if rw_key.is_some() => None,
+                                Value::Undef => Some(Self::dim_container_identity(
+                                    &Self::read_operand_raw(&cvs, &op.op1),
+                                )),
+                                _ => None,
+                            };
+                        let key_val = match rw_key {
+                            Some(k) => k,
+                            None => self.read_operand_warn(
+                                &op.result,
+                                &cvs,
+                                &tmps,
+                                &op_array.literals,
+                                op_array,
+                                op.line,
+                            ),
+                        };
+                        if let Some(before) = container_before {
+                            if self.current_exception.is_some() {
+                                self.error_handler_threw = false;
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                            }
+                            if Self::dim_container_identity(&Self::read_operand_raw(&cvs, &op.op1))
+                                != before
+                            {
+                                return Ok(Flow::Next);
+                            }
+                        }
                         let val = self.read_operand_warn(
                             &op.op2,
                             &cvs,
@@ -31463,14 +31523,49 @@ impl Vm {
                                     });
                                 }
                             }
-                            // Auto-initialize null/undef/false to array
-                            if matches!(&arr_val, Value::False) {
-                                self.emit_deprecated_at(
-                                    "Automatic conversion of false to array is deprecated",
-                                    op.line,
-                                );
-                            }
+                            // Auto-initialize null/undef/false to array. `false` is
+                            // replaced by the new array before the deprecation is
+                            // raised (the error handler sees the array).
                             let mut arr = PhpArray::new();
+                            if matches!(&arr_val, Value::False) {
+                                if let OperandType::Cv(cv_idx) = &op.op1 {
+                                    let ht = Rc::new(RefCell::new(PhpArray::new()));
+                                    match cvs.get_mut(*cv_idx as usize) {
+                                        Some(Value::Reference(r)) => {
+                                            *r.borrow_mut() = Value::Array(ht.clone())
+                                        }
+                                        Some(slot) => *slot = Value::Array(ht.clone()),
+                                        None => {}
+                                    }
+                                    self.emit_deprecated_at(
+                                        "Automatic conversion of false to array is deprecated",
+                                        op.line,
+                                    );
+                                    let still = matches!(
+                                        Self::read_operand_raw(&cvs, &op.op1).deref(),
+                                        Value::Array(a) if Rc::ptr_eq(&a, &ht)
+                                    );
+                                    if !still {
+                                        // The handler replaced the container.
+                                        self.error_handler_threw = false;
+                                        native_exc_check!(
+                                            self,
+                                            exception_handlers,
+                                            pending_calls_catch_depth,
+                                            ip,
+                                            op.line
+                                        );
+                                        return Ok(Flow::Next);
+                                    }
+                                    // Shared by the handler meanwhile: write a copy.
+                                    arr = ht.borrow().clone();
+                                } else {
+                                    self.emit_deprecated_at(
+                                        "Automatic conversion of false to array is deprecated",
+                                        op.line,
+                                    );
+                                }
+                            }
                             // The new array rejects an illegal offset type
                             // (zend_illegal_array_offset_access); it stays empty.
                             let illegal = match key_val.deref() {
@@ -31938,7 +32033,7 @@ impl Vm {
                     {
                         self.warn_undefined_key_cv(&op.op2, &cvs, op_array, op.line);
                     }
-                    let key_val = if matches!(op.opcode, OpCode::ArrayGet) {
+                    let key_val = if matches!(op.opcode, OpCode::ArrayGet) || is_rw {
                         self.read_operand_warn(
                             &op.op2,
                             &cvs,
@@ -32098,6 +32193,24 @@ impl Vm {
                         // (ArraySet / ArraySetIncDec) does not report it again.
                         if is_rw {
                             self.rw_dim_set = Some((op_array as *const OpArray as usize, ip + 1));
+                            // The write-back uses the converted key: left in a
+                            // temporary operand, or kept aside for a variable one
+                            // (which is then neither read nor warned about again).
+                            let k = match &key {
+                                crate::array::ArrayKey::Int(n) => Value::Long(*n),
+                                crate::array::ArrayKey::String(s) => Value::String(s.clone()),
+                            };
+                            match op.op2 {
+                                OperandType::Tmp(t) => {
+                                    if let Some(slot) = tmps.get_mut(t as usize) {
+                                        *slot = k;
+                                    }
+                                }
+                                OperandType::Cv(_) => {
+                                    self.dim_rw_key = Some((self.call_depth, ip - 1, k));
+                                }
+                                _ => {}
+                            }
                         }
                         match arr.borrow().get(&key).cloned() {
                             Some(v) => {
