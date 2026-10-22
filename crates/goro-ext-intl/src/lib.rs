@@ -1,5 +1,6 @@
-//! php-src's ext/intl over ICU4X (pure Rust; the data is ICU4X's compiled
-//! CLDR 48 / Unicode 17 data, so the extension reports ICU 78.1).
+//! php-src's ext/intl over the pure-Rust `intl` crate (KarpelesLab/intlrs,
+//! CLDR 48 / Unicode 17 data, so the extension reports ICU 78.1), with
+//! ICU4X for the few services `intl` lacks.
 //!
 //! The classes are natively implemented internal classes described by the
 //! stubs (`goro_core::stub_sigs`): their methods and the procedural
@@ -7,6 +8,8 @@
 //! reached through the `@alias` links of the stubs. Arguments are parsed
 //! from the stub signatures ([`zpp`]); each module keeps its object state
 //! as native data on the PHP object ([`obj`]).
+
+#![allow(clippy::result_unit_err)]
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -21,6 +24,7 @@ use goro_core::vm::{BuiltinFn, NativeClassHandler, Vm, VmError};
 
 pub mod common;
 pub mod consts;
+pub mod datecore;
 pub mod error;
 pub mod obj;
 pub mod zpp;
