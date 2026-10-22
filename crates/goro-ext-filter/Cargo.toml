@@ -1,0 +1,13 @@
+[package]
+name = "goro-ext-filter"
+version = "0.1.0"
+edition = "2024"
+description = "PHP filter extension for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-parser = { path = "../goro-parser" }
+goro-ext-standard = { path = "../goro-ext-standard" }
