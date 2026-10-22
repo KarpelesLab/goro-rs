@@ -18922,11 +18922,51 @@ fn validate_type_hint(hint: &TypeHint, class_name: Option<&[u8]>) -> Option<Stri
     validate_type_hint_full(hint, class_name, None)
 }
 
+/// zend_compile_single_typename() / zend_resolve_class_name() on a fully
+/// qualified (`\\int`) or namespace-relative (`namespace\\self`) name.
+fn qualified_type_name_error(hint: &TypeHint) -> Option<String> {
+    match hint {
+        TypeHint::Simple(n) => {
+            let (rest, prefix): (&[u8], &str) = if let Some(r) = n.strip_prefix(b"\\") {
+                (r, "\\")
+            } else if n.len() > 10 && n[..10].eq_ignore_ascii_case(b"namespace\\") {
+                (&n[10..], "namespace\\")
+            } else {
+                return None;
+            };
+            if rest.contains(&b'\\') {
+                return None;
+            }
+            let lower = rest.to_ascii_lowercase();
+            match lower.as_slice() {
+                b"null" | b"true" | b"false" | b"int" | b"float" | b"string" | b"bool"
+                | b"void" | b"never" | b"iterable" | b"object" | b"mixed" => Some(format!(
+                    "Type declaration '{}' must be unqualified",
+                    String::from_utf8_lossy(&lower)
+                )),
+                b"self" | b"parent" | b"static" => Some(format!(
+                    "'{}{}' is an invalid class name",
+                    prefix,
+                    String::from_utf8_lossy(rest)
+                )),
+                _ => None,
+            }
+        }
+        TypeHint::Nullable(inner) => qualified_type_name_error(inner),
+        TypeHint::Union(ts) | TypeHint::Intersection(ts) => {
+            ts.iter().find_map(qualified_type_name_error)
+        }
+    }
+}
+
 fn validate_type_hint_full(
     hint: &TypeHint,
     class_name: Option<&[u8]>,
     parent_class_name: Option<&[u8]>,
 ) -> Option<String> {
+    if let Some(e) = qualified_type_name_error(hint) {
+        return Some(e);
+    }
     match hint {
         TypeHint::Nullable(inner) => {
             // ?null is invalid
