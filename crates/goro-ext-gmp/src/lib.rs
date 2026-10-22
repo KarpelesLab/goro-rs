@@ -189,7 +189,7 @@ fn op_arg(vm: &mut Vm, val: &Value) -> Result<BigInt, Option<String>> {
         // zend_parse_arg_long_weak(); null is rejected for operators
         Value::Double(d) => {
             let d = *d;
-            if d.is_nan() || !(d >= -9.223_372_036_854_776e18 && d < 9.223_372_036_854_776e18) {
+            if d.is_nan() || !(-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) {
                 return Err(None);
             }
             let l = d as i64;

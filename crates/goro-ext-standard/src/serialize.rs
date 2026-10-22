@@ -452,7 +452,7 @@ fn format_serialize_double_gcvt(f: f64) -> String {
             ""
         };
         let decpt = exp + 1;
-        if decpt > 0 || decpt < -3 {
+        if !(-3..=0).contains(&decpt) {
             format!(
                 "{}{}.0E{}{}",
                 sign,
