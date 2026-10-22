@@ -59,6 +59,7 @@ $dirs = [
     'ext/phar' => 'Phar',
     'ext/exif' => 'exif',
     'ext/zip' => 'zip',
+    'ext/sqlite3' => 'sqlite3',
     'ext/fileinfo' => 'fileinfo',
     'ext/sodium' => 'sodium',
     'ext/soap' => 'soap',

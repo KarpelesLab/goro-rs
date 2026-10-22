@@ -10405,7 +10405,11 @@ pub fn reflection_extension_method(
                 let v = vm
                     .constants
                     .get(entry.as_bytes())
-                    .map(|v| Value::String(v.to_php_string()))
+                    .map(|v| match v {
+                        // an entry without a value
+                        Value::Null => Value::Null,
+                        v => Value::String(v.to_php_string()),
+                    })
                     .unwrap_or_else(|| Value::String(PhpString::from_bytes(b"")));
                 result.set(
                     ArrayKey::String(PhpString::from_string(entry.to_string())),
@@ -10614,6 +10618,12 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         "sysvmsg" => &["SysvMessageQueue"],
         "zip" => &["ZipArchive"],
         "gd" => &["GdImage", "GdFont"],
+        "sqlite3" => &[
+            "SQLite3Exception",
+            "SQLite3",
+            "SQLite3Stmt",
+            "SQLite3Result",
+        ],
         "fileinfo" => &["finfo"],
         "filter" => &["Filter\\FilterException", "Filter\\FilterFailedException"],
         "sodium" => &["SodiumException"],
@@ -10742,6 +10752,7 @@ fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
         ],
         "readline" => &["cli.pager", "cli.prompt"],
         "tidy" => &["tidy.default_config", "tidy.clean_output"],
+        "sqlite3" => &["sqlite3.extension_dir", "sqlite3.defensive"],
         "filter" => &["filter.default", "filter.default_flags"],
         "exif" => &[
             "exif.encode_unicode",
