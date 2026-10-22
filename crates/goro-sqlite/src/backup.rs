@@ -70,20 +70,14 @@ pub struct Backup {
 // ---------------------------------------------------------------------------
 
 /// C `p->nBackup += delta` (Btree.nBackup, read by sqlite3BtreeIsInBackup()).
-///
-/// FIXME(integrator): btree.rs's Btree is still opaque in the skeleton; make
-/// this update the Btree::nBackup field.
 fn btree_nbackup_add(p: &BtreeP, delta: i32) {
-    let _ = (p, delta);
-    todo!("Btree::nBackup += delta")
+    p.borrow_mut().nBackup += delta;
 }
 
 /// C `pTo->pBt->btsFlags &= ~BTS_PAGESIZE_FIXED`.
-///
-/// FIXME(integrator): BtShared is still opaque in the skeleton.
 fn btree_clear_pagesize_fixed(p: &BtreeP) {
-    let _ = p;
-    todo!("pBt->btsFlags &= ~BTS_PAGESIZE_FIXED")
+    let pBt = p.borrow().pBt.clone();
+    pBt.borrow_mut().btsFlags &= !(BTS_PAGESIZE_FIXED as u16);
 }
 
 /// PENDING_BYTE_PAGE(pBt)
