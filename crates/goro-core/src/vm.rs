@@ -43565,6 +43565,32 @@ impl Vm {
                                     iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 let class_display =
                                     String::from_utf8_lossy(&class.name).to_string();
+                                // zend_implement_serializable() warns before the
+                                // enum's interface check rejects it, also through
+                                // an interface extending Serializable.
+                                if class.is_enum
+                                    && (iface_lower == b"serializable"
+                                        || self.class_implements_interface(
+                                            &iface_lower,
+                                            b"serializable",
+                                        ))
+                                {
+                                    if !class.methods.contains_key(b"__serialize".as_slice())
+                                        || !class.methods.contains_key(b"__unserialize".as_slice())
+                                    {
+                                        self.emit_deprecated_at(
+                                            &format!("{} implements the Serializable interface, which is deprecated. Implement __serialize() and __unserialize() instead (or in addition, if support for old PHP versions is necessary)", class_display),
+                                            op.line,
+                                        );
+                                    }
+                                    return Err(VmError {
+                                        message: format!(
+                                            "Enum {} cannot implement the Serializable interface",
+                                            class_display
+                                        ),
+                                        line: op.line,
+                                    });
+                                }
                                 match iface_lower.as_slice() {
                                     b"unitenum" => {
                                         if !class.is_enum {
@@ -43678,13 +43704,18 @@ impl Vm {
                                             && !class.is_interface
                                         {
                                             let kind = if class.is_enum { "Enum" } else { "Class" };
-                                            return Err(VmError {
-                                                message: format!(
-                                                    "{} {} must implement interface Traversable as part of either Iterator or IteratorAggregate",
-                                                    kind, class_display
-                                                ),
-                                                line: 0,
-                                            });
+                                            // zend_implement_traversable(): E_CORE_ERROR, in Unknown on line 0.
+                                            let msg = format!(
+                                                "{} {} must implement interface Traversable as part of either Iterator or IteratorAggregate",
+                                                kind, class_display
+                                            );
+                                            let saved_file = std::mem::replace(
+                                                &mut self.current_file,
+                                                "Unknown".to_string(),
+                                            );
+                                            let e = self.emit_fatal_at(&msg, 0);
+                                            self.current_file = saved_file;
+                                            return Err(e);
                                         }
                                     }
                                     _ => {}
@@ -43738,13 +43769,18 @@ impl Vm {
                                     let class_display =
                                         String::from_utf8_lossy(&class.name).to_string();
                                     let kind = if class.is_enum { "Enum" } else { "Class" };
-                                    return Err(VmError {
-                                        message: format!(
-                                            "{} {} must implement interface Traversable as part of either Iterator or IteratorAggregate",
-                                            kind, class_display
-                                        ),
-                                        line: 0,
-                                    });
+                                    // zend_implement_traversable(): E_CORE_ERROR, in Unknown on line 0.
+                                    let msg = format!(
+                                        "{} {} must implement interface Traversable as part of either Iterator or IteratorAggregate",
+                                        kind, class_display
+                                    );
+                                    let saved_file = std::mem::replace(
+                                        &mut self.current_file,
+                                        "Unknown".to_string(),
+                                    );
+                                    let e = self.emit_fatal_at(&msg, 0);
+                                    self.current_file = saved_file;
+                                    return Err(e);
                                 }
                             }
                         }
