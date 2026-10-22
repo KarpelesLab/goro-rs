@@ -1093,9 +1093,15 @@ pub fn sqlite3Pragma(
     // Rust: the built-in VFS does not implement SQLITE_FCNTL_PRAGMA (the C
     // unix VFS returns SQLITE_NOTFOUND for it), and the char** argument
     // cannot be passed through sqlite3_file_control(); the file control is
-    // therefore always "not found".
+    // therefore "not found" -- except that sqlite3_file_control() fails
+    // with SQLITE_ERROR when the database has no b-tree (a TEMP database
+    // that is not open yet, e.g. under EXPLAIN).
     db.busyHandler.borrow_mut().nBusy = 0;
-    let rc = SQLITE_NOTFOUND;
+    let rc = if crate::mainapi::sqlite3DbNameToBtree(db, zDb.as_deref()).is_some() {
+        SQLITE_NOTFOUND
+    } else {
+        SQLITE_ERROR
+    };
     if rc != SQLITE_NOTFOUND {
         let p = db.pp();
         p.nErr += 1;
