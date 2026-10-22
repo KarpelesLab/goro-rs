@@ -37,6 +37,12 @@ impl Drop for PhpStringInner {
 }
 
 impl PhpString {
+    /// Whether both are the same string (not just equal ones).
+    #[inline]
+    pub fn ptr_eq(&self, other: &PhpString) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+
     /// The empty string (interned: one shared instance, like
     /// ZSTR_EMPTY_ALLOC()).
     pub fn empty() -> Self {

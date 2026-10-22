@@ -668,8 +668,13 @@ pub(crate) struct CallTarget {
     /// For a method call set up by INIT_METHOD_CALL's fast path (see
     /// init_method_call_fast): where "::" is in the name, and whether the
     /// method is static. `user` is the method, a public method of a user
-    /// class, registered under the name.
-    pub(crate) method: Option<(usize, bool)>,
+    /// class, registered under the name. (u32: so that a PendingCall stays
+    /// within 128 bytes, see method_info)
+    pub(crate) method: Option<(u32, bool)>,
+    /// What the frame of a method call set up by INIT_METHOD_CALL's fast
+    /// path shows and the scope it runs in (see MethodCallInfo), when the
+    /// call still has the name it was set up with.
+    pub(crate) method_info: Option<Rc<MethodCallInfo>>,
     /// The `new` of a user class without a constructor (all user code; see
     /// init_method_call_fast): the call only arms the object's destructor.
     pub(crate) no_ctor: bool,
@@ -695,6 +700,20 @@ pub(crate) struct CallTarget {
     /// The call is made by Closure::__invoke() (`$closure->__invoke()`):
     /// its argument errors have no "called in" (the caller is internal).
     pub(crate) via_invoke: bool,
+}
+
+/// What the frame of a method call set up by INIT_METHOD_CALL's fast path
+/// shows and the scope it runs in, as DO_FCALL's fast path makes them
+/// (see Vm::method_call_info): the call site resolves them once, for the
+/// class it saw, rather than each call looking up the class and method.
+#[derive(Debug)]
+pub(crate) struct MethodCallInfo {
+    /// The call's name (`Class::method`) it is for.
+    pub(crate) name: PhpString,
+    /// The frame's name.
+    pub(crate) display: String,
+    /// The class scope the method runs in (lowercase).
+    pub(crate) scope: Vec<u8>,
 }
 
 /// What a forwarding call site (`self::m()`, `static::m()`,
@@ -723,7 +742,7 @@ pub(crate) struct CachedCallTarget {
     user: Option<Weak<OpArray>>,
     builtin: Option<(BuiltinFn, Option<(&'static crate::arginfo::FuncInfo, u8)>)>,
     has_builtin: bool,
-    method: Option<(usize, bool)>,
+    method: Option<(u32, bool)>,
     fn_gen: usize,
 }
 
@@ -743,6 +762,7 @@ impl CallTarget {
         closure: false,
         forward: None,
         forward_this: false,
+        method_info: None,
         fn_gen: 0,
         via_invoke: false,
     };
@@ -17712,7 +17732,7 @@ impl Vm {
         // push_forward_call): what fast_forward_target() does then.
         let with_this = &call.target.forward_this;
         if let (Some(fwd), Some(f), Some((sep, is_static))) =
-            (&call.target.forward, &call.target.user, call.target.method)
+            (&call.target.forward, &call.target.user, call.target.method.map(|(p, s)| (p as usize, s)))
         {
             if call.target.fn_gen != self.user_functions.len() + 1 {
                 return self.fast_forward_target();
@@ -17752,7 +17772,7 @@ impl Vm {
                     if is_static == has_this {
                         return false;
                     }
-                    Some((p, has_this))
+                    Some((p as usize, has_this))
                 }
             };
             let has_this = sep.is_some_and(|(_, t)| t);
@@ -18296,6 +18316,46 @@ impl Vm {
     /// the scope (the class declaring the method). (Out of line: off the
     /// native stack of every PHP call level.)
     #[inline(never)]
+    /// The frame name and scope DO_FCALL's fast path gives a call `name`
+    /// ("::" at `sep`) of method `f` (see MethodCallInfo): what its
+    /// frame-building code and push_fast_method_scopes() make of them.
+    pub(crate) fn method_call_info(
+        &self,
+        f: &OpArray,
+        name: &PhpString,
+        sep: usize,
+    ) -> MethodCallInfo {
+        let n = name.as_bytes();
+        let mut display = String::new();
+        if !f.display_name.is_empty() {
+            push_lossy(&mut display, &f.display_name);
+        } else if let Some(scope) = &f.scope_class {
+            match self.classes.get(scope) {
+                Some(c) => push_lossy(&mut display, &c.name),
+                None => push_lossy(&mut display, scope),
+            }
+            display.push_str("::");
+            push_lossy(&mut display, &n[sep + 2..]);
+        } else {
+            push_lossy(&mut display, n);
+        }
+        let lower = n.to_ascii_lowercase();
+        let class_lower = &lower[..sep];
+        let scope = match self
+            .classes
+            .get(class_lower)
+            .and_then(|c| c.get_method(&lower[sep + 2..]))
+        {
+            Some(m) => m.declaring_class.clone(),
+            None => class_lower.to_vec(),
+        };
+        MethodCallInfo {
+            name: name.clone(),
+            display,
+            scope,
+        }
+    }
+
     fn push_fast_method_scopes(
         &mut self,
         call: &PendingCall,
@@ -18303,6 +18363,7 @@ impl Vm {
         has_this: bool,
         forwarding: bool,
         caller_this: Option<&Rc<RefCell<PhpObject>>>,
+        scope: Option<&[u8]>,
     ) {
         // (in the buffers of finished calls' entries)
         let mut called_class = self.bytes_pool.pop().unwrap_or_default();
@@ -18320,6 +18381,12 @@ impl Vm {
             _ => called_class.extend_from_slice(&call.name.as_bytes()[..sep]),
         }
         self.called_class_stack.push(called_class);
+        if let Some(scope) = scope {
+            let mut defining_class = self.bytes_pool.pop().unwrap_or_default();
+            defining_class.extend_from_slice(scope);
+            self.class_scope_stack.push(defining_class);
+            return;
+        }
         let name = call.name.as_bytes();
         let mut buf = [0u8; 128];
         for (d, s) in buf.iter_mut().zip(name) {
@@ -18646,7 +18713,7 @@ impl Vm {
                     && !class.is_trait
                     && m.visibility == Visibility::Public
                     && !m.is_abstract)
-                    .then_some((sep, m.is_static))
+                    .then_some((sep as u32, m.is_static))
             });
             return CallTarget {
                 user,
@@ -18658,6 +18725,7 @@ impl Vm {
                 closure: false,
                 forward: None,
                 forward_this: false,
+                method_info: None,
                 fn_gen: self.user_functions.len() + 1,
                 via_invoke: false,
             };
@@ -18692,6 +18760,7 @@ impl Vm {
             closure: false,
             forward: None,
             forward_this: false,
+            method_info: None,
             fn_gen: self.user_functions.len() + 1,
             via_invoke: false,
         }
@@ -18932,7 +19001,7 @@ impl Vm {
         let target = match resolved {
             Some((f, new_name, sep, is_static)) => CallTarget {
                 user: Some(f),
-                method: Some((sep, is_static)),
+                method: Some((sep as u32, is_static)),
                 forward: Some(new_name),
                 forward_this: with_this,
                 fn_gen,
@@ -25928,9 +25997,17 @@ impl Vm {
                         // Push call stack frame early for proper error stack traces
                         // (in the buffers of a finished call's frame)
                         let mut display = self.string_pool.pop().unwrap_or_default();
+                        // (resolved by the call site, see MethodCallInfo)
+                        let method_info = call
+                            .target
+                            .method_info
+                            .take()
+                            .filter(|i| captures.is_none() && i.name.ptr_eq(&call.name));
                         // A closure's frame is qualified by its scope
                         // (Class::{closure:...}).
-                        if let (Some(_), Some(scope)) = (
+                        if let Some(info) = &method_info {
+                            display.push_str(&info.display);
+                        } else if let (Some(_), Some(scope)) = (
                             captures,
                             user_fn
                                 .scope_class
@@ -26062,6 +26139,7 @@ impl Vm {
                                 has_this,
                                 forwarding,
                                 caller_this,
+                                method_info.as_ref().map(|i| i.scope.as_slice()),
                             );
                         }
                         // A closure's scope, and its called class (its

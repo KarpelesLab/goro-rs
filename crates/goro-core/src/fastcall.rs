@@ -10,7 +10,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use super::{CallTarget, PendingCall, Vm};
+use super::{CallTarget, MethodCallInfo, PendingCall, Vm};
 use crate::object::{PhpObject, Visibility};
 use crate::opcode::{Op, OpArray, OperandType};
 use crate::string::PhpString;
@@ -42,6 +42,8 @@ pub(crate) struct MethodSite {
     fallback: bool,
     /// The pending call's name, `Class::method` (shared by the calls).
     func_name: PhpString,
+    /// The call's frame name and scope (for a method).
+    info: Option<Rc<MethodCallInfo>>,
     /// Where "::" is in it.
     sep: usize,
     is_static: bool,
@@ -234,15 +236,22 @@ impl Vm {
             {
                 Some(s) if s.fallback => return false,
                 Some(s) => match &s.method {
-                    Some(w) => w
-                        .upgrade()
-                        .map(|m| (Some(m), s.func_name.clone(), s.sep, s.is_static, s.reg_gen)),
-                    None => Some((None, s.func_name.clone(), 0, false, 0)),
+                    Some(w) => w.upgrade().map(|m| {
+                        (
+                            Some(m),
+                            s.func_name.clone(),
+                            s.sep,
+                            s.is_static,
+                            s.reg_gen,
+                            s.info.clone(),
+                        )
+                    }),
+                    None => Some((None, s.func_name.clone(), 0, false, 0, None)),
                 },
                 _ => None,
             }
         };
-        let Some((method, func_name, sep, is_static, reg_gen)) = site else {
+        let Some((method, func_name, sep, is_static, reg_gen, info)) = site else {
             return self.init_method_call_resolve(op_array, ip, obj, tmps);
         };
         let Some(method_op_array) = method else {
@@ -260,6 +269,7 @@ impl Vm {
             sep,
             is_static,
             reg_gen,
+            info,
         );
         true
     }
@@ -311,6 +321,7 @@ impl Vm {
                         method: None,
                         fallback: true,
                         func_name: PhpString::empty(),
+                        info: None,
                         sep: 0,
                         is_static: false,
                         reg_gen: 0,
@@ -343,6 +354,7 @@ impl Vm {
                         method: None,
                         fallback: false,
                         func_name: func_name.clone(),
+                        info: None,
                         sep: 0,
                         is_static: false,
                         reg_gen: 0,
@@ -377,6 +389,7 @@ impl Vm {
         func_name.extend_from_slice(b"::");
         func_name.extend_from_slice(&method.name);
         let func_name = PhpString::from_vec(func_name);
+        let info = Rc::new(self.method_call_info(&method_op_array, &func_name, sep));
         op_array
             .sites
             .borrow_mut()
@@ -390,6 +403,7 @@ impl Vm {
                     method: Some(Rc::downgrade(&method_op_array)),
                     fallback: false,
                     func_name: func_name.clone(),
+                    info: Some(info.clone()),
                     sep,
                     is_static,
                     reg_gen: 0,
@@ -405,6 +419,7 @@ impl Vm {
             sep,
             is_static,
             0,
+            Some(info),
         );
         true
     }
@@ -443,6 +458,7 @@ impl Vm {
         sep: usize,
         is_static: bool,
         reg_gen: usize,
+        info: Option<Rc<MethodCallInfo>>,
     ) {
         let op = &op_array.ops[ip];
         let fname = func_name.as_bytes();
@@ -506,8 +522,9 @@ impl Vm {
         // it leaves PhpToken::tokenize() to the general path).
         if plain {
             call.target.user = Some(method_op_array);
-            call.target.method = Some((sep, is_static));
+            call.target.method = Some((sep as u32, is_static));
             call.target.fn_gen = fn_gen;
+            call.target.method_info = info;
         }
     }
 }
