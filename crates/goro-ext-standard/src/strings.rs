@@ -622,8 +622,13 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let line = vm.current_line;
         return Err(vm.emit_fatal_at(&msg, line));
     }
-    for _ in 0..times {
+    if times > 0 && !s.is_empty() {
+        // Fill by doubling what is already there.
         repeated.extend_from_slice(s.as_bytes());
+        while repeated.len() < total_len {
+            let n = repeated.len().min(total_len - repeated.len());
+            repeated.extend_from_within(..n);
+        }
     }
     Ok(Value::String(PhpString::from_vec(repeated)))
 }

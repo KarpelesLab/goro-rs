@@ -16,7 +16,7 @@ pub enum Arg {
     Absent,
     Null,
     Obj(Obj),
-    Str(Vec<u8>),
+    Str(goro_core::string::PhpString),
     Long(i64),
     Double(f64),
     Bool(bool),
@@ -31,7 +31,14 @@ pub enum Arg {
 impl Arg {
     pub fn str(&self) -> Option<&[u8]> {
         match self {
-            Arg::Str(s) => Some(s),
+            Arg::Str(s) => Some(s.as_bytes()),
+            _ => None,
+        }
+    }
+    /// The string argument as a value (sharing the caller's string).
+    pub fn str_value(&self) -> Option<Value> {
+        match self {
+            Arg::Str(s) => Some(Value::String(s.clone())),
             _ => None,
         }
     }
@@ -373,7 +380,7 @@ pub fn parse(vm: &mut Vm, f: &Func, spec: &str, classes: &[&str], args: &[Value]
                         'l' => Arg::Long(0),
                         'b' => Arg::Bool(false),
                         'd' => Arg::Double(0.0),
-                        _ => Arg::Str(Vec::new()),
+                        _ => Arg::Str(goro_core::string::PhpString::from_bytes(b"")),
                     });
                     continue;
                 }
@@ -399,7 +406,7 @@ pub fn parse(vm: &mut Vm, f: &Func, spec: &str, classes: &[&str], args: &[Value]
                         if matches!(c, 'p' | 'P') && s.as_bytes().contains(&0) {
                             return Err(f.value_error(vm, argn, "must not contain any null bytes"));
                         }
-                        Arg::Str(s.as_bytes().to_vec())
+                        Arg::Str(s)
                     }
                     (_, v) => Arg::Any(v),
                 };

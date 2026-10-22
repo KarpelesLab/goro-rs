@@ -779,7 +779,10 @@ fn master_to_xml_int(
                 set_ns_and_type_ex(node, zns.as_deref(), st);
             }
         }
-        if let Some(n) = as_str(&prop(&var, "enc_name")) {
+        // xmlNodeSetName() ignores names longer than INT_MAX.
+        let name = prop(&var, "enc_name");
+        let too_long = matches!(name.deref(), Value::String(s) if s.len() > i32::MAX as usize);
+        if let Some(n) = (!too_long).then(|| as_str(&name)).flatten() {
             xml::set_name(node, &n);
         }
         if let Some(nsn) = as_str(&prop(&var, "enc_namens")) {

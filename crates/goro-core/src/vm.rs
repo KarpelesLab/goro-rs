@@ -19299,11 +19299,20 @@ impl Vm {
                             return Err(e);
                         }
                     };
-                    let mut result = a_str.as_bytes().to_vec();
-                    result.extend_from_slice(b_str.as_bytes());
+                    // concat_function(): an empty operand shares the other string.
+                    let result = if a_str.is_empty() {
+                        b_str
+                    } else if b_str.is_empty() {
+                        a_str
+                    } else {
+                        let mut r = Vec::with_capacity(a_str.len() + b_str.len());
+                        r.extend_from_slice(a_str.as_bytes());
+                        r.extend_from_slice(b_str.as_bytes());
+                        PhpString::from_vec(r)
+                    };
                     self.write_operand(
                         &op.result,
-                        Value::String(PhpString::from_vec(result)),
+                        Value::String(result),
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,

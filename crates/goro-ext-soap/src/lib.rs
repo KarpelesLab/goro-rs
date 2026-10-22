@@ -589,9 +589,9 @@ fn soap_var_construct(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> SR<V
         (4, "enc_name"),
         (5, "enc_namens"),
     ] {
-        if let Some(s) = a.get(i).and_then(|x| x.str()) {
-            if !s.is_empty() {
-                set_prop(this, p, vstr(s));
+        if let Some(s) = a.get(i).and_then(|x| x.str_value()) {
+            if !matches!(&s, Value::String(x) if x.is_empty()) {
+                set_prop(this, p, s);
             }
         }
     }
