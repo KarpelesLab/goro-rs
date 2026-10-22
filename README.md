@@ -16,7 +16,7 @@ extensions run the official php-src test suite.
 | Total tests | 21582 (the generic PDO tests run once per driver) |
 | Pass | 19449 (90.1% of all, **98.2% of runnable**) |
 | Fail / Error | 359 |
-| Skip / XFail | 1774 (mostly extensions not implemented yet: sqlite3, pdo_sqlite, ldap, ffi, odbc, snmp, enchant, …; plus Windows-only, root-only and huge-memory tests) |
+| Skip / XFail | 1774 (mostly extensions not implemented yet: ldap, ffi, odbc, snmp, enchant, …; plus Windows-only, root-only and huge-memory tests) |
 
 CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n`), plus
 `cargo fmt --check` and `cargo clippy -D warnings`.
@@ -42,7 +42,8 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/openssl (incl. TLS streams, on purecrypto) | 206 | 212 | 97.2% |
 | ext/sodium (on purecrypto) | 30 | 30 | 100% |
 | ext/mysqli (embedded MySQL fixture) | 402 | 420 | 95.7% |
-| ext/pdo (generic tests, run against MySQL and PostgreSQL) | 245 | 247 | 99.2% |
+| ext/pdo (generic tests, run against MySQL, PostgreSQL and SQLite) | 366 | 369 | 99.2% |
+| ext/sqlite3 / pdo_sqlite (goro-sqlite, a SQLite 3.54.1 port) | 174 | 175 | 99.4% |
 | ext/pdo_mysql / pdo_pgsql | 219 | 219 | 100% |
 | ext/pgsql (libpq port, embedded PostgreSQL fixture) | 96 | 96 | 100% |
 | ext/session | 256 | 256 | 100% |
@@ -104,10 +105,11 @@ Highlights beyond the core language:
   URL parser), tidy (a port of tidy-html5 5.8.0 matching libtidy's output and messages),
   Zend OPcache (an in-memory script cache with the opcache_*() API, preloading and the file
   cache's entries; no optimizer or JIT, the directives are reported as php-src does),
+  sqlite3 and pdo_sqlite (on goro-sqlite, a pure-Rust port of SQLite 3.54.1 incl. WAL, JSON and virtual tables),
   zend_test.
 
 ### Not Yet Implemented
-- sqlite3 and pdo_sqlite (in progress), ffi, ldap, odbc, snmp, enchant
+- ffi, ldap, odbc, snmp, enchant
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
 - The opcache optimizer and JIT (`opcache.opt_debug_level` opcode dumps)
 
@@ -154,6 +156,8 @@ Workspace crates:
 - `goro-ext-sysvipc` - shmop, sysvsem, sysvshm and sysvmsg
 - `goro-ext-dba` - ext/dba with the cdb, cdb_make, inifile and flatfile handlers
 - `goro-ext-readline` - ext/readline (a GNU readline emulation) and the CLI shell's completion
+- `goro-sqlite` - a pure Rust port of SQLite 3.54.1
+- `goro-ext-sqlite3` - ext/sqlite3 on `goro-sqlite` (pdo_sqlite lives in `goro-ext-pdo`)
 - `goro-tidy` - a pure Rust port of tidy-html5 5.8.0 (libtidy)
 - `goro-ext-tidy` - ext/tidy on `goro-tidy`
 - `goro-ext-opcache` - Zend OPcache (INI, opcache_*() API, preloading), over goro-core's script cache
