@@ -1847,19 +1847,6 @@ impl Compiler {
         }
     }
 
-    /// Check if an expression contains a nullsafe property/method access (?->)
-    fn expr_contains_nullsafe(expr: &Expr) -> bool {
-        match &expr.kind {
-            ExprKind::PropertyAccess {
-                nullsafe, object, ..
-            } => *nullsafe || Self::expr_contains_nullsafe(object),
-            ExprKind::MethodCall {
-                nullsafe, object, ..
-            } => *nullsafe || Self::expr_contains_nullsafe(object),
-            _ => false,
-        }
-    }
-
     fn extract_break_continue_level(level_expr: &Option<Expr>) -> (usize, bool) {
         match level_expr {
             Some(expr) => match &expr.kind {
@@ -2849,6 +2836,19 @@ impl Compiler {
                         line: stmt.span.line,
                     });
                 }
+                // zend_compile_return(): a by-reference return of a
+                // short-circuiting chain.
+                if let Some(ret_expr) = value {
+                    if self.op_array.returns_by_ref
+                        && !self.op_array.is_generator
+                        && expr_is_in_nullsafe_chain(ret_expr)
+                    {
+                        return Err(CompileError {
+                            message: "Cannot take reference of a nullsafe chain".into(),
+                            line: ret_expr.span.line,
+                        });
+                    }
+                }
                 // Check for `return expr;` (with value) in void function
                 if let Some(ret_expr) = value {
                     if let Some(ref ret_type) = self.op_array.return_type {
@@ -3256,6 +3256,14 @@ impl Compiler {
                     || matches!(&value.kind, ExprKind::Array(elems) if Self::list_writes_globals(elems))
                 {
                     return Err(CompileError { message: "$GLOBALS can only be modified using the $GLOBALS[$name] = $value syntax".to_string(), line: stmt.span.line });
+                }
+                if expr_is_in_nullsafe_chain(value)
+                    || key.as_ref().is_some_and(expr_is_in_nullsafe_chain)
+                {
+                    return Err(CompileError {
+                        message: "Can't use nullsafe operator in write context".into(),
+                        line: stmt.span.line,
+                    });
                 }
                 // Check for $this in foreach target variables
                 if self.check_foreach_this_assign(value, stmt.span.line)? {
@@ -4557,6 +4565,12 @@ impl Compiler {
 
             StmtKind::Unset(exprs) => {
                 for expr in exprs {
+                    if expr_is_in_nullsafe_chain(expr) {
+                        return Err(CompileError {
+                            message: "Can't use nullsafe operator in write context".into(),
+                            line: stmt.span.line,
+                        });
+                    }
                     // zend_compile_var_inner(): the base of an unset
                     // property/dimension chain must be writable.
                     let mut root = expr;
@@ -11012,10 +11026,7 @@ impl Compiler {
             ExprKind::Assign { target, value } => {
                 let result_discarded = std::mem::take(&mut self.assign_result_discarded);
                 // Check for nullsafe in write context
-                if matches!(
-                    &target.kind,
-                    ExprKind::PropertyAccess { nullsafe: true, .. }
-                ) {
+                if expr_is_in_nullsafe_chain(target) {
                     return Err(CompileError {
                         message: "Can't use nullsafe operator in write context".into(),
                         line: target.span.line,
@@ -11333,10 +11344,7 @@ impl Compiler {
 
             ExprKind::CompoundAssign { op, target, value } => {
                 // Check for nullsafe in write context
-                if matches!(
-                    &target.kind,
-                    ExprKind::PropertyAccess { nullsafe: true, .. }
-                ) {
+                if expr_is_in_nullsafe_chain(target) {
                     return Err(CompileError {
                         message: "Can't use nullsafe operator in write context".into(),
                         line: target.span.line,
@@ -11818,10 +11826,7 @@ impl Compiler {
                         | UnaryOp::PreIncrement
                         | UnaryOp::PreDecrement
                 ) {
-                    if matches!(
-                        &operand.kind,
-                        ExprKind::PropertyAccess { nullsafe: true, .. }
-                    ) {
+                    if expr_is_in_nullsafe_chain(operand) {
                         return Err(CompileError {
                             message: "Can't use nullsafe operator in write context".into(),
                             line: operand.span.line,
@@ -15067,6 +15072,12 @@ impl Compiler {
                 //     function declared as returns_by_ref
                 if self.op_array.returns_by_ref {
                     if let Some(val_expr) = value {
+                        if expr_is_in_nullsafe_chain(val_expr) {
+                            return Err(CompileError {
+                                message: "Cannot take reference of a nullsafe chain".into(),
+                                line: val_expr.span.line,
+                            });
+                        }
                         let mut emit_notice = false;
                         match &val_expr.kind {
                             ExprKind::Variable(_)
@@ -15988,7 +15999,13 @@ impl Compiler {
             ExprKind::AssignRef { target, value } => {
                 let result_discarded = std::mem::take(&mut self.assign_result_discarded);
                 // Check for nullsafe chain in reference context
-                if Self::expr_contains_nullsafe(value) {
+                if expr_is_in_nullsafe_chain(target) {
+                    return Err(CompileError {
+                        message: "Can't use nullsafe operator in write context".into(),
+                        line: expr.span.line,
+                    });
+                }
+                if expr_is_in_nullsafe_chain(value) {
                     return Err(CompileError {
                         message: "Cannot take reference of a nullsafe chain".into(),
                         line: expr.span.line,

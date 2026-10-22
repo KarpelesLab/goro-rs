@@ -22,7 +22,17 @@ impl std::error::Error for ParseError {}
 
 pub type ParseResult<T> = Result<T, ParseError>;
 
+const LIST_SYNTAX_LIST: u8 = 1;
+const LIST_SYNTAX_SHORT: u8 = 2;
+const LIST_SYNTAX_LONG: u8 = 3;
+
 pub struct Parser {
+    /// Syntax of array literals by (start, end) span: LIST_SYNTAX_*.
+    array_syntax: std::collections::HashMap<(u32, u32), u8>,
+    /// Nesting of `[...]` / `list(...)` literals being parsed.
+    array_literal_depth: u32,
+    /// Parsing a foreach target (destructuring without `=`).
+    in_foreach_target: bool,
     tokens: Vec<Token>,
     /// Doc comment attached to the token at the same index, if any. The
     /// comment immediately precedes the token in source (with only whitespace
@@ -195,6 +205,9 @@ impl Parser {
             class_name_stack: Vec::new(),
             is_interface_stack: Vec::new(),
             stmt_nesting: 0,
+            array_syntax: std::collections::HashMap::new(),
+            array_literal_depth: 0,
+            in_foreach_target: false,
         }
     }
 
@@ -1670,7 +1683,10 @@ impl Parser {
         self.expect(&TokenKind::As)?;
 
         let by_ref = self.eat(&TokenKind::Ampersand);
-        let first = self.parse_expression()?;
+        let prev_target = std::mem::replace(&mut self.in_foreach_target, true);
+        let first = self.parse_expression();
+        self.in_foreach_target = prev_target;
+        let first = first?;
 
         let (key, value, by_ref) = if self.eat(&TokenKind::DoubleArrow) {
             // Key was marked as by-ref - this is an error
@@ -1681,11 +1697,16 @@ impl Parser {
                 });
             }
             let by_ref_val = self.eat(&TokenKind::Ampersand);
-            let value = self.parse_expression()?;
-            (Some(first), value, by_ref_val)
+            let prev_target = std::mem::replace(&mut self.in_foreach_target, true);
+            let value = self.parse_expression();
+            self.in_foreach_target = prev_target;
+            (Some(first), value?, by_ref_val)
         } else {
             (None, first, by_ref)
         };
+        if let Some((elems, style)) = self.list_target_style(&value) {
+            self.verify_list_assign(elems, style)?;
+        }
 
         self.expect(&TokenKind::CloseParen)?;
         let body = if matches!(self.peek(), TokenKind::OpenBrace) {
@@ -3970,6 +3991,12 @@ impl Parser {
         let by_ref = compound_op.is_none() && self.eat(&TokenKind::Ampersand);
         let right = self.parse_assignment()?;
         let after_span = self.span();
+        // zend_verify_list_assign_target() for a destructuring target.
+        if compound_op.is_none() && !by_ref {
+            if let Some((elems, style)) = self.list_target_style(&left) {
+                self.verify_list_assign(elems, style)?;
+            }
+        }
         // In PHP's grammar an assignment is `variable '=' expr`: the operator
         // always binds to the variable right before it, however tightly the
         // operators to its left bind. `$a + !$b = $c` is `$a + !($b = $c)`,
@@ -4881,6 +4908,175 @@ impl Parser {
         })
     }
 
+    /// The elements and closing bracket of a `[...]` literal.
+    fn parse_short_array_body(&mut self, span: Span) -> ParseResult<Expr> {
+        let mut elements = Vec::new();
+        while !matches!(self.peek(), TokenKind::CloseBracket | TokenKind::Eof) {
+            // Handle empty elements (for list destructuring like [$a, , $c])
+            if matches!(self.peek(), TokenKind::Comma) {
+                // Zero-width span marks an empty placeholder element
+                // (distinguishable from a literal `null`).
+                let prev = self.tokens[self.pos.saturating_sub(1)].span;
+                elements.push(ArrayElement {
+                    key: None,
+                    value: Expr {
+                        span: Span::new(prev.end, prev.end, prev.line),
+                        kind: ExprKind::Null,
+                    },
+                    unpack: false,
+                    by_ref: false,
+                });
+                self.advance(); // consume comma
+                continue;
+            }
+            if self.eat(&TokenKind::Ellipsis) {
+                let value = self.parse_expression()?;
+                elements.push(ArrayElement {
+                    key: None,
+                    value,
+                    unpack: true,
+                    by_ref: false,
+                });
+            } else {
+                // Handle &$var (reference in array)
+                let is_ref = self.eat(&TokenKind::Ampersand);
+                let first = self.parse_expression()?;
+                if self.eat(&TokenKind::DoubleArrow) {
+                    let is_val_ref = self.eat(&TokenKind::Ampersand);
+                    let value = self.parse_expression()?;
+                    elements.push(ArrayElement {
+                        key: Some(first),
+                        value,
+                        unpack: false,
+                        by_ref: is_val_ref,
+                    });
+                } else {
+                    elements.push(ArrayElement {
+                        key: None,
+                        value: first,
+                        unpack: false,
+                        by_ref: is_ref,
+                    });
+                }
+            }
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        let end_span = self.span();
+        self.expect(&TokenKind::CloseBracket)?;
+        Ok(Expr {
+            span: span.merge(end_span),
+            kind: ExprKind::Array(elements),
+        })
+    }
+
+    /// Whether a (nested) array literal uses list() syntax.
+    fn contains_list_syntax(&self, elems: &[ArrayElement]) -> bool {
+        elems.iter().any(|e| match &e.value.kind {
+            ExprKind::Array(inner) => {
+                self.array_syntax
+                    .get(&(e.value.span.start, e.value.span.end))
+                    == Some(&LIST_SYNTAX_LIST)
+                    || self.contains_list_syntax(inner)
+            }
+            _ => false,
+        })
+    }
+
+    /// zend_verify_list_assign_target() for the elements of a
+    /// destructuring target written with `style`.
+    fn verify_list_assign(&self, elems: &[ArrayElement], style: u8) -> ParseResult<()> {
+        for e in elems {
+            let v = &e.value;
+            match &v.kind {
+                ExprKind::Array(inner) => {
+                    let st = self
+                        .array_syntax
+                        .get(&(v.span.start, v.span.end))
+                        .copied()
+                        .unwrap_or(LIST_SYNTAX_SHORT);
+                    if st == LIST_SYNTAX_LONG {
+                        return Err(ParseError {
+                            message: "Cannot assign to array(), use [] instead".into(),
+                            span: v.span,
+                        });
+                    }
+                    if st != style {
+                        return Err(ParseError {
+                            message: "Cannot mix [] and list()".into(),
+                            span: v.span,
+                        });
+                    }
+                    self.verify_list_assign(inner, style)?;
+                }
+                // An empty slot.
+                ExprKind::Null if v.span.start == v.span.end => {}
+                _ => {
+                    // zend_can_write_to_variable()
+                    let mut root = v;
+                    while let ExprKind::ArrayAccess { array: o, .. }
+                    | ExprKind::PropertyAccess {
+                        object: o,
+                        nullsafe: false,
+                        ..
+                    } = &root.kind
+                    {
+                        root = o;
+                    }
+                    let writable = matches!(
+                        root.kind,
+                        ExprKind::Variable(_)
+                            | ExprKind::DynamicVariable(_)
+                            | ExprKind::PropertyAccess { .. }
+                            | ExprKind::StaticPropertyAccess { .. }
+                            | ExprKind::DynamicStaticPropertyAccess { .. }
+                            | ExprKind::FunctionCall { .. }
+                            | ExprKind::MethodCall { .. }
+                            | ExprKind::StaticMethodCall { .. }
+                            | ExprKind::DynamicStaticMethodCall { .. }
+                    ) && !Self::is_short_circuited(root);
+                    if !writable {
+                        return Err(ParseError {
+                            message: "Assignments can only happen to writable values".into(),
+                            span: v.span,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The style of a destructuring target, when `e` is an array literal.
+    fn list_target_style<'a>(&self, e: &'a Expr) -> Option<(&'a [ArrayElement], u8)> {
+        match &e.kind {
+            ExprKind::Array(elems) => Some((
+                elems,
+                self.array_syntax
+                    .get(&(e.span.start, e.span.end))
+                    .copied()
+                    .unwrap_or(LIST_SYNTAX_SHORT),
+            )),
+            _ => None,
+        }
+    }
+
+    /// zend_ast_is_short_circuited()
+    fn is_short_circuited(e: &Expr) -> bool {
+        match &e.kind {
+            ExprKind::PropertyAccess { nullsafe: true, .. }
+            | ExprKind::MethodCall { nullsafe: true, .. } => true,
+            ExprKind::PropertyAccess { object, .. } | ExprKind::MethodCall { object, .. } => {
+                Self::is_short_circuited(object)
+            }
+            ExprKind::ArrayAccess { array, .. } => Self::is_short_circuited(array),
+            ExprKind::StaticPropertyAccess { class, .. }
+            | ExprKind::StaticMethodCall { class, .. } => Self::is_short_circuited(class),
+            _ => false,
+        }
+    }
+
     fn parse_postfix(&mut self) -> ParseResult<Expr> {
         let mut expr = self.parse_primary()?;
 
@@ -5624,65 +5820,26 @@ impl Parser {
             }
             TokenKind::OpenBracket => {
                 self.advance();
-                let mut elements = Vec::new();
-                while !matches!(self.peek(), TokenKind::CloseBracket | TokenKind::Eof) {
-                    // Handle empty elements (for list destructuring like [$a, , $c])
-                    if matches!(self.peek(), TokenKind::Comma) {
-                        // Zero-width span marks an empty placeholder element
-                        // (distinguishable from a literal `null`).
-                        let prev = self.tokens[self.pos.saturating_sub(1)].span;
-                        elements.push(ArrayElement {
-                            key: None,
-                            value: Expr {
-                                span: Span::new(prev.end, prev.end, prev.line),
-                                kind: ExprKind::Null,
-                            },
-                            unpack: false,
-                            by_ref: false,
-                        });
-                        self.advance(); // consume comma
-                        continue;
-                    }
-                    if self.eat(&TokenKind::Ellipsis) {
-                        let value = self.parse_expression()?;
-                        elements.push(ArrayElement {
-                            key: None,
-                            value,
-                            unpack: true,
-                            by_ref: false,
-                        });
-                    } else {
-                        // Handle &$var (reference in array)
-                        let is_ref = self.eat(&TokenKind::Ampersand);
-                        let first = self.parse_expression()?;
-                        if self.eat(&TokenKind::DoubleArrow) {
-                            let is_val_ref = self.eat(&TokenKind::Ampersand);
-                            let value = self.parse_expression()?;
-                            elements.push(ArrayElement {
-                                key: Some(first),
-                                value,
-                                unpack: false,
-                                by_ref: is_val_ref,
-                            });
-                        } else {
-                            elements.push(ArrayElement {
-                                key: None,
-                                value: first,
-                                unpack: false,
-                                by_ref: is_ref,
+                self.array_literal_depth += 1;
+                let r = self.parse_short_array_body(span);
+                self.array_literal_depth -= 1;
+                let e = r?;
+                self.array_syntax
+                    .insert((e.span.start, e.span.end), LIST_SYNTAX_SHORT);
+                if self.array_literal_depth == 0
+                    && !self.in_foreach_target
+                    && !matches!(self.peek(), TokenKind::Assign)
+                {
+                    if let ExprKind::Array(elems) = &e.kind {
+                        if self.contains_list_syntax(elems) {
+                            return Err(ParseError {
+                                message: "Cannot use list() as standalone expression".into(),
+                                span: e.span,
                             });
                         }
                     }
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
                 }
-                let end_span = self.span();
-                self.expect(&TokenKind::CloseBracket)?;
-                Ok(Expr {
-                    span: span.merge(end_span),
-                    kind: ExprKind::Array(elements),
-                })
+                Ok(e)
             }
             TokenKind::Array => {
                 self.advance();
@@ -5714,10 +5871,13 @@ impl Parser {
                 }
                 let end_span = self.span();
                 self.expect(&TokenKind::CloseParen)?;
-                Ok(Expr {
+                let e = Expr {
                     span: span.merge(end_span),
                     kind: ExprKind::Array(elements),
-                })
+                };
+                self.array_syntax
+                    .insert((e.span.start, e.span.end), LIST_SYNTAX_LONG);
+                Ok(e)
             }
             TokenKind::New => {
                 self.advance();
@@ -6632,13 +6792,32 @@ impl Parser {
                     self.advance();
                     if is_list {
                         // Parse list() as an Array expression (supports keyed and empty slots)
-                        let elements = self.parse_list_elements()?;
+                        self.array_literal_depth += 1;
+                        let elements = self.parse_list_elements();
+                        self.array_literal_depth -= 1;
+                        let elements = elements?;
                         let end_span = self.span();
                         self.expect(&TokenKind::CloseParen)?;
-                        Ok(Expr {
+                        let e = Expr {
                             span: span.merge(end_span),
                             kind: ExprKind::Array(elements),
-                        })
+                        };
+                        self.array_syntax
+                            .insert((e.span.start, e.span.end), LIST_SYNTAX_LIST);
+                        // list() only appears as an assignment target.
+                        if self.array_literal_depth == 0
+                            && !self.in_foreach_target
+                            && !matches!(self.peek(), TokenKind::Assign)
+                        {
+                            return Err(ParseError {
+                                message: format!(
+                                    "syntax error, unexpected {}, expecting \"=\"",
+                                    self.peek().to_php_unexpected()
+                                ),
+                                span: self.span(),
+                            });
+                        }
+                        Ok(e)
                     } else {
                         let args = self.parse_arguments()?;
                         let is_fcc = self.first_class_callable_flag;
@@ -6828,7 +7007,9 @@ impl Parser {
         loop {
             // Handle empty slots (commas without values)
             if matches!(self.peek(), TokenKind::Comma | TokenKind::CloseParen) {
-                let span = self.span();
+                let cur = self.span();
+                // Zero-width: an empty slot, not a literal `null`.
+                let span = Span::new(cur.start, cur.start, cur.line);
                 elements.push(ArrayElement {
                     key: None,
                     value: Expr {

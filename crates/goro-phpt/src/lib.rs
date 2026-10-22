@@ -1437,6 +1437,9 @@ fn execute_php_inner_impl(
             let err_msg = &e.message;
             let is_fatal = err_msg.contains("Match expressions")
                 || err_msg.starts_with("Unparenthesized `")
+                || err_msg.starts_with("Cannot mix [] and list()")
+                || err_msg.starts_with("Cannot assign to array(), use [] instead")
+                || err_msg.starts_with("Assignments can only happen to writable values")
                 || err_msg.contains("Cannot use")
                 || err_msg.starts_with("Cannot create Closure")
                 || err_msg.contains("cannot declare")
