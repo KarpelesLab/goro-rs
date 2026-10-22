@@ -1551,6 +1551,19 @@ impl Parser {
         let init = self.parse_expression_list(&TokenKind::Semicolon)?;
         self.expect(&TokenKind::Semicolon)?;
         let condition = self.parse_expression_list(&TokenKind::Semicolon)?;
+        // for_cond_exprs: the deciding (last) condition cannot be (void).
+        if matches!(
+            condition.last().map(|e| &e.kind),
+            Some(ExprKind::Cast(CastType::Void, _))
+        ) {
+            return Err(ParseError {
+                message: format!(
+                    "syntax error, unexpected {}, expecting \",\"",
+                    self.peek().to_php_unexpected()
+                ),
+                span: self.span(),
+            });
+        }
         self.expect(&TokenKind::Semicolon)?;
         let update = self.parse_expression_list(&TokenKind::CloseParen)?;
         self.expect(&TokenKind::CloseParen)?;

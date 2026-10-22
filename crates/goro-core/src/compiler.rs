@@ -3391,9 +3391,9 @@ impl Compiler {
                 update,
                 body,
             } => {
-                // Compile init expressions
+                // Compile init expressions (their results are discarded)
                 for expr in init {
-                    self.compile_expr(expr)?;
+                    self.compile_discarded_expr(expr)?;
                 }
 
                 self.loop_stack.push(LoopContext {
@@ -3415,7 +3415,7 @@ impl Compiler {
                 // last one decides.
                 let jmp_false = if let Some((last, rest)) = condition.split_last() {
                     for expr in rest {
-                        self.compile_expr(expr)?;
+                        self.compile_discarded_expr(expr)?;
                     }
                     let cond = self.compile_expr(last)?;
                     Some(self.op_array.emit(Op {
@@ -3439,7 +3439,7 @@ impl Compiler {
 
                 // Update
                 for expr in update {
-                    self.compile_expr(expr)?;
+                    self.compile_discarded_expr(expr)?;
                 }
 
                 // Jump back to condition check
@@ -11375,6 +11375,21 @@ impl Compiler {
             span: expr.span,
         });
         self.tmp_aliases.truncate(saved);
+        r
+    }
+
+    /// An expression whose value is unused (for-loop expression lists):
+    /// #[\NoDiscard] calls warn as in an expression statement.
+    fn compile_discarded_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        let prev = self.is_discarding_result;
+        self.is_discarding_result = matches!(
+            expr.kind,
+            ExprKind::FunctionCall { .. }
+                | ExprKind::MethodCall { .. }
+                | ExprKind::StaticMethodCall { .. }
+        );
+        let r = self.compile_expr(expr);
+        self.is_discarding_result = prev;
         r
     }
 
