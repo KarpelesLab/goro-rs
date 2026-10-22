@@ -177,6 +177,30 @@ fn find(name: &[u8]) -> Option<usize> {
     })
 }
 
+/// Whether an alias names several converters (U_AMBIGUOUS_ALIAS_WARNING).
+fn ambiguous(name: &[u8]) -> bool {
+    thread_local! {
+        static AMBIG: RefCell<Option<HashMap<Vec<u8>, usize>>> = const { RefCell::new(None) };
+    }
+    AMBIG.with(|a| {
+        let mut a = a.borrow_mut();
+        let map = a.get_or_insert_with(|| {
+            let mut m: HashMap<Vec<u8>, usize> = HashMap::new();
+            for e in tables::CONVERTERS.iter() {
+                let mut keys: Vec<Vec<u8>> = e.5.iter().map(|al| name_key(al.as_bytes())).collect();
+                keys.push(name_key(e.0.as_bytes()));
+                keys.sort();
+                keys.dedup();
+                for k in keys {
+                    *m.entry(k).or_insert(0) += 1;
+                }
+            }
+            m
+        });
+        map.get(&name_key(name)).is_some_and(|&n| n > 1)
+    })
+}
+
 /// ucnv_open(): Err(status).
 fn open(name: &[u8]) -> Result<Cnv, i32> {
     // ICU names are invariant characters
@@ -366,7 +390,31 @@ fn decode_step(be: Backend, s: &[u8], st: &mut DecState) -> Result<(Vec<u32>, us
             match d.decode(s) {
                 Dec::Char(c, n) => Ok((vec![c], n)),
                 Dec::Shift(n) => Ok((vec![], n)),
-                Dec::Illegal(n) => Err(ill(n.max(1))),
+                Dec::Illegal(n) => {
+                    // a well-formed but unmapped double-byte character
+                    let two = s.len() >= 2
+                        && match kind {
+                            charset::Kind::Mbfl(_, charset::Family::Sjis) => {
+                                matches!(s[0], 0x81..=0x9F | 0xE0..=0xFC)
+                                    && matches!(s[1], 0x40..=0x7E | 0x80..=0xFC)
+                            }
+                            charset::Kind::Mbfl(_, charset::Family::EucJp) => {
+                                matches!(s[0], 0xA1..=0xFE) && matches!(s[1], 0xA1..=0xFE)
+                            }
+                            charset::Kind::Mbfl(_, charset::Family::Dbcs) => {
+                                matches!(s[0], 0x81..=0xFE) && matches!(s[1], 0x40..=0xFE)
+                            }
+                            _ => false,
+                        };
+                    if two {
+                        return Err(Bad {
+                            reason: REASON_UNASSIGNED,
+                            code: U_INVALID_CHAR_FOUND,
+                            len: 2,
+                        });
+                    }
+                    Err(ill(n.max(1)))
+                }
                 Dec::Incomplete => Err(trunc(s.len())),
             }
         }
@@ -521,7 +569,8 @@ fn encode_cp(be: Backend, cp: u32, enc: &mut Option<charset::Encoder>, first: &m
             }
         }
         Backend::Utf16(endian, v2) => {
-            let big = endian.unwrap_or(!v2);
+            // with a BOM: the platform endianness (version=2: big endian)
+            let big = endian.unwrap_or(v2);
             if endian.is_none() && *first {
                 *first = false;
                 out.extend_from_slice(if big { &[0xFE, 0xFF] } else { &[0xFF, 0xFE] });
@@ -537,10 +586,10 @@ fn encode_cp(be: Backend, cp: u32, enc: &mut Option<charset::Encoder>, first: &m
             }
         }
         Backend::Utf32(endian) => {
-            let big = endian.unwrap_or(true);
+            let big = endian.unwrap_or(false);
             if endian.is_none() && *first {
                 *first = false;
-                out.extend_from_slice(&[0, 0, 0xFE, 0xFF]);
+                out.extend_from_slice(&[0xFF, 0xFE, 0, 0]);
             }
             if big {
                 out.extend_from_slice(&cp.to_be_bytes());
@@ -649,7 +698,17 @@ fn ufailure(vm: &mut Vm, c: &Call, st: Option<&Rc<RefCell<Conv>>>, code: i32) {
 /// php_converter_set_encoding()
 fn set_encoding(vm: &mut Vm, c: &Call, st: Option<&Rc<RefCell<Conv>>>, enc: &[u8]) -> Option<Cnv> {
     match open(enc) {
-        Ok(cnv) => Some(cnv),
+        Ok(cnv) => {
+            if ambiguous(enc) {
+                // U_AMBIGUOUS_ALIAS_WARNING
+                let msg = format!("Ambiguous encoding specified, using {}", cnv.name());
+                error::set_global(vm, &c.name, -122, &msg);
+                if vm.current_exception.is_some() {
+                    return None;
+                }
+            }
+            Some(cnv)
+        }
         Err(code) => {
             if st.is_some() {
                 ufailure(vm, c, st, code);
@@ -990,7 +1049,20 @@ fn to_unicode(
             }
         }
     }
-    Ok(out)
+    // UTF-16 code units: surrogate pairs (CESU-8) are one code point
+    let mut cps = Vec::with_capacity(out.len());
+    let mut k = 0;
+    while k < out.len() {
+        let u = out[k];
+        if (0xD800..0xDC00).contains(&u) && out.get(k + 1).is_some_and(|l| (0xDC00..0xE000).contains(l)) {
+            cps.push(0x10000 + ((u - 0xD800) << 10) + (out[k + 1] - 0xDC00));
+            k += 2;
+            continue;
+        }
+        cps.push(u);
+        k += 1;
+    }
+    Ok(cps)
 }
 
 /// ucnv_fromUChars()
@@ -1041,7 +1113,14 @@ fn from_unicode(
                         return Err(code);
                     }
                 }
-                None => out.extend_from_slice(&cnv.subst),
+                None => {
+                    // a stateful encoding shifts back to its initial state
+                    if let Some(e) = enc.as_mut() {
+                        out.extend_from_slice(e.reset_bytes());
+                        e.reset();
+                    }
+                    out.extend_from_slice(&cnv.subst)
+                }
             }
         }
     }
@@ -1178,22 +1257,17 @@ fn get_available(_vm: &mut Vm, _c: &mut Call) -> Value {
     crate::arr(a)
 }
 
-fn get_aliases(vm: &mut Vm, c: &mut Call) -> Value {
+fn get_aliases(_vm: &mut Vm, c: &mut Call) -> Value {
     let name = c.str(0);
     error::reset_global();
-    match find(&name).filter(|&i| supported(i).is_some()) {
-        Some(i) => {
-            let mut a = PhpArray::new();
-            for al in tables::CONVERTERS[i].5 {
-                a.push(s(*al));
-            }
-            crate::arr(a)
-        }
-        None => {
-            ufailure(vm, c, None, U_FILE_ACCESS_ERROR);
-            Value::False
+    // ucnv_countAliases(): an unknown name has no aliases
+    let mut a = PhpArray::new();
+    if let Some(i) = find(&name).filter(|&i| supported(i).is_some()) {
+        for al in tables::CONVERTERS[i].5 {
+            a.push(s(*al));
         }
     }
+    crate::arr(a)
 }
 
 fn get_standards(_vm: &mut Vm, _c: &mut Call) -> Value {
