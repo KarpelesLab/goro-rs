@@ -1285,8 +1285,6 @@ impl Vm {
                 b"gmp"
                     | b"simplexmlelement"
                     | b"phptoken"
-                    | b"uri\\whatwg\\url"
-                    | b"uri\\rfc3986\\uri"
             )
             || self.spl_has_builtin_tostring(&lower)
             // SimpleXMLIterator and user subclasses keep the cast handler

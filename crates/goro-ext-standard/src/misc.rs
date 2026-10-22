@@ -7127,6 +7127,21 @@ struct PhpUrl {
     fragment: Option<Vec<u8>>,
 }
 
+/// php_url_parse_ex2() as ext/uri's parse_url() parser uses it.
+pub(crate) fn uri_parse_url(b: &[u8]) -> Option<goro_core::uri::PhpUrl> {
+    let u = php_url_parse_ex2(b)?;
+    Some(goro_core::uri::PhpUrl {
+        scheme: u.scheme,
+        user: u.user,
+        pass: u.pass,
+        host: u.host,
+        port: if u.has_port { u.port } else { 0 },
+        path: u.path,
+        query: u.query,
+        fragment: u.fragment,
+    })
+}
+
 /// php_url_parse_ex2() (ext/standard/url.c)
 fn php_url_parse_ex2(b: &[u8]) -> Option<PhpUrl> {
     fn ctl(v: &[u8]) -> Vec<u8> {

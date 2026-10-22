@@ -87,8 +87,6 @@ impl Vm {
                         | (b"closure", b"bind")
                         | (b"closure", b"bindto")
                         | (b"splfixedarray", b"fromarray")
-                        | (b"uri\\whatwg\\url", b"parse")
-                        | (b"uri\\rfc3986\\uri", b"parse")
                 );
                 known.then(|| {
                     cur.extend_from_slice(b"::");
@@ -107,7 +105,7 @@ impl Vm {
         &mut self,
         name_lower: &[u8],
         args: &[Value],
-        named: &[(Vec<u8>, Value)],
+        _named: &[(Vec<u8>, Value)],
         this: Option<Value>,
         strict: bool,
         line: u32,
@@ -168,9 +166,6 @@ impl Vm {
                 self.bind_closure(&closure, new_this, scope, scope_provided)
             }
             b"splfixedarray::fromarray" => self.fa_from_array(args),
-            b"uri\\whatwg\\url::parse" | b"uri\\rfc3986\\uri::parse" => {
-                self.uri_parse_static(name_lower.starts_with(b"uri\\whatwg"), args, named)
-            }
             _ => {
                 let sep = name_lower
                     .windows(2)
@@ -234,58 +229,6 @@ impl Vm {
         self.weak_ref_cache
             .insert(target_oid, (weak_id, wr_val.clone()));
         wr_val
-    }
-
-    /// Uri\WhatWg\Url::parse() / Uri\Rfc3986\Uri::parse():
-    /// static parse(string $uri, ?string $baseUrl = null, mixed &$errors = null): ?static
-    fn uri_parse_static(
-        &mut self,
-        is_whatwg: bool,
-        args: &[Value],
-        named: &[(Vec<u8>, Value)],
-    ) -> Value {
-        let uri_str = args
-            .first()
-            .map(|v| v.deref())
-            .unwrap_or(Value::Null)
-            .to_php_string()
-            .to_string_lossy();
-        // The base URL may be a string or a Uri\WhatWg\Url / Uri\Rfc3986\Uri
-        // object (its stored serialized form).
-        let base_str = args.get(1).and_then(|v| match v.deref() {
-            Value::Null | Value::Undef => None,
-            Value::Object(o) => match o.borrow().get_property(b"__uri_serialized") {
-                Value::String(s) => Some(s.to_string_lossy()),
-                _ => None,
-            },
-            other => Some(other.to_php_string().to_string_lossy()),
-        });
-        let obj_id = self.next_object_id();
-        let class_name: Vec<u8> = if is_whatwg {
-            b"Uri\\WhatWg\\Url".to_vec()
-        } else {
-            b"Uri\\Rfc3986\\Uri".to_vec()
-        };
-        let mut new_obj = PhpObject::new(class_name, obj_id);
-        let ok = crate::uri::parse_into(&mut new_obj, &uri_str, base_str.as_deref(), !is_whatwg);
-        let result = if ok {
-            Value::Object(Rc::new(RefCell::new(new_obj)))
-        } else {
-            Value::Null
-        };
-        // $errors (positional or named) gets an array, empty on success.
-        let errors_val = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
-        if let Some(Value::Reference(r)) = args.get(2) {
-            *r.borrow_mut() = errors_val.clone();
-        }
-        for (name, val) in named {
-            if name.eq_ignore_ascii_case(b"errors") {
-                if let Value::Reference(r) = val {
-                    *r.borrow_mut() = errors_val.clone();
-                }
-            }
-        }
-        result
     }
 
     /// `from()` / `tryFrom()` of the backed enum `class_part` (lowercase).

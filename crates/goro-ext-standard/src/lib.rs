@@ -55,6 +55,7 @@ use goro_core::vm::Vm;
 
 /// Register all standard extension functions
 pub fn register_standard_functions(vm: &mut Vm) {
+    goro_core::uri::set_parse_url_impl(misc::uri_parse_url);
     vm.register_extension(b"standard");
     goro_core::sapi_headers::set_add_header_hook(misc::sapi_add_header);
     output::register(vm);

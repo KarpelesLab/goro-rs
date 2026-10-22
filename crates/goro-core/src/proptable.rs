@@ -133,7 +133,6 @@ pub fn is_internal_prop_name(name: &[u8]) -> bool {
         b"__weak_ref_id",
         b"__sxml_",
         b"__lazy_",
-        b"__uri_",
         b"__hash_",
         b"__hmac_",
         b"__pkey_id",

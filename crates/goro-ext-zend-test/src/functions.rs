@@ -20,6 +20,7 @@ const ALL: u8 = ARITY | TYPES;
 /// (name, implementation, zpp flags handled by the generic layer)
 const FUNCTIONS: &[(&str, BuiltinFn, u8)] = &[
     ("zend_trigger_bailout", zend_trigger_bailout, ALL),
+    ("zend_test_uri_parser", zend_test_uri_parser, ALL),
     ("zend_test_array_return", ret_null, ALL),
     ("zend_test_nullable_array_return", ret_null, ALL),
     ("zend_test_void_return", ret_null, ALL),
@@ -649,6 +650,65 @@ fn zend_test_fill_packed_array(vm: &mut Vm, args: &[Value]) -> R {
     }
     *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(a)));
     Ok(Value::Null)
+}
+
+/// zend_test_uri_parser(): the components of a URI as a parser gives them
+/// (normalized, raw, and through php_uri_parse_to_struct()).
+fn zend_test_uri_parser(vm: &mut Vm, args: &[Value]) -> R {
+    use goro_core::uri::{self, ReadMode};
+    let uri_str = arg(args, 0).to_php_string();
+    let name = arg(args, 1).to_php_string();
+    let Some(parser) = uri::get_parser(Some(name.as_bytes())) else {
+        return throw(
+            vm,
+            b"ValueError",
+            "zend_test_uri_parser(): Argument #1 ($uri) Unknown parser",
+        );
+    };
+    let keys = [
+        "scheme", "username", "password", "host", "port", "path", "query", "fragment",
+    ];
+    let to_arr = |vals: [Value; 8], st: bool| {
+        let mut a = PhpArray::new();
+        for (k, v) in keys.iter().zip(vals) {
+            // the struct keeps a missing port as 0
+            let v = if st && *k == "port" && matches!(v, Value::Null) {
+                Value::Long(0)
+            } else {
+                v
+            };
+            a.set(ArrayKey::String(PhpString::from_bytes(k.as_bytes())), v);
+        }
+        Value::Array(Rc::new(RefCell::new(a)))
+    };
+    let Some(norm) = uri::parse_components(
+        vm,
+        parser,
+        uri_str.as_bytes(),
+        ReadMode::NormalizedAscii,
+        false,
+    ) else {
+        return Ok(Value::Null);
+    };
+    let Some(raw) = uri::parse_components(vm, parser, uri_str.as_bytes(), ReadMode::Raw, false)
+    else {
+        return Ok(Value::Null);
+    };
+    let st = raw.clone();
+    let mut out = PhpArray::new();
+    out.set(
+        ArrayKey::String(PhpString::from_bytes(b"normalized")),
+        to_arr(norm, false),
+    );
+    out.set(
+        ArrayKey::String(PhpString::from_bytes(b"raw")),
+        to_arr(raw, false),
+    );
+    out.set(
+        ArrayKey::String(PhpString::from_bytes(b"struct")),
+        to_arr(st, true),
+    );
+    Ok(Value::Array(Rc::new(RefCell::new(out))))
 }
 
 // ---------------------------------------------------------------------------

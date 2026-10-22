@@ -54,7 +54,6 @@ pub(crate) fn is_hidden_prop(name: &[u8]) -> bool {
         || name.starts_with(b"__fiber_")
         || name.starts_with(b"__timestamp")
         || name.starts_with(b"__lazy_")
-        || name.starts_with(b"__uri_")
         || name.starts_with(b"__weak_ref_id")
         || name.starts_with(b"__sxml_")
         || name.starts_with(b"__hash_")

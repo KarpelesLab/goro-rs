@@ -2765,6 +2765,8 @@ pub fn reflection_class_method(
                 b"closure",
                 b"dom\\htmldocument",
                 b"dom\\xmldocument",
+                b"uri\\rfc3986\\uri",
+                b"uri\\whatwg\\url",
             ];
             if no_ctorless.contains(&class_lower.as_slice()) {
                 let canonical = rcls(vm, &class_lower)

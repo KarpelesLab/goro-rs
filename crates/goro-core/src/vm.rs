@@ -2495,6 +2495,7 @@ impl Vm {
             });
             vm.classes.insert(b"nodiscard".to_vec(), nd);
         }
+        crate::uri::register(&mut vm);
         vm
     }
 
@@ -5443,6 +5444,18 @@ impl Vm {
             return param.unwrap_or_else(|| {
                 op.variadic_param.is_some() && op.by_ref_params.last().copied().unwrap_or(false)
             });
+        }
+        // A method of an internal class ("Class::method", or
+        // "__spl::class::method" for a native method called on an object)
+        let stripped = lower.strip_prefix(b"__spl::").unwrap_or(&lower);
+        if let Some(sep) = stripped.windows(2).position(|w| w == b"::") {
+            if let Some((_, m)) = crate::stubs::find_method(&stripped[..sep], &stripped[sep + 2..])
+            {
+                return m
+                    .args
+                    .iter()
+                    .any(|a| a.flags & crate::stubs::A_BY_REF != 0 && a.name.as_bytes() == name);
+            }
         }
         crate::arginfo::lookup(&lower).is_some_and(|info| {
             info.params
@@ -10195,9 +10208,6 @@ impl Vm {
         }
         match class_lower {
             b"phptoken" => self.phptoken_method(method_lower, obj),
-            b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
-                crate::uri::uri_dispatch_noarg(class_lower, method_lower, obj)
-            }
             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
                 self.spl_array_call(class_lower, method_lower, obj, None)
             }
@@ -12047,9 +12057,19 @@ impl Vm {
         let name = call.name.as_bytes();
         // "Class::method" / "parent::method" (a static-form call: no $this
         // in the arguments) or "__spl::class::method".
+        // `new Class(...)` pushes "Class::__construct" led by the new object.
+        let new_ctor = name.len() > 13
+            && name[name.len() - 13..].eq_ignore_ascii_case(b"::__construct")
+            && matches!(call.args.first(), Some(Value::Object(_)));
         let (rest, this_arg) = match name.strip_prefix(b"__spl::") {
             Some(r) if arg_index > 0 => (r, 1),
             Some(_) => return false,
+            None if new_ctor => {
+                if arg_index == 0 {
+                    return false;
+                }
+                (name, 1)
+            }
             None => (name, 0),
         };
         let sep = match rest.windows(2).position(|w| w == b"::") {
@@ -12111,7 +12131,6 @@ impl Vm {
         }
         match class {
             b"phptoken" => matches!(method, b"is"),
-            b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => crate::uri::uri_is_args_method(method),
             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
                 crate::spl_stubs::spl_stub_method(class, method).is_some()
                     && method != b"__construct"
@@ -12369,12 +12388,6 @@ impl Vm {
                     }
                     _ => None,
                 },
-                b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => crate::uri::uri_dispatch_with_args(
-                    class,
-                    method,
-                    args,
-                    &mut self.next_object_id,
-                ),
                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator" => {
                     self.spl_array_call(class, method, obj, Some(&args[1..]))
                 }
@@ -14616,23 +14629,6 @@ impl Vm {
                 }
                 _ => None,
             },
-            b"uri\\uricomparisonmode" => {
-                match const_name {
-                    b"IncludeFragment" | b"ExcludeFragment" => {
-                        // Return an enum-like object so instance comparison works.
-                        // Callers don't need to distinguish the value yet — our
-                        // `equals` compares serialized URIs regardless of mode.
-                        Some(Value::String(PhpString::from_bytes(
-                            if const_name == b"IncludeFragment" {
-                                b"IncludeFragment"
-                            } else {
-                                b"ExcludeFragment"
-                            },
-                        )))
-                    }
-                    _ => None,
-                }
-            }
             b"reflectionattribute" => match const_name {
                 b"IS_INSTANCEOF" => Some(Value::Long(2)),
                 _ => None,
@@ -31780,72 +31776,6 @@ impl Vm {
                                                     Value::False
                                                 },
                                             );
-                                        }
-                                        b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
-                                            // __construct(string $uri, ?string $baseUrl = null)
-                                            let uri_val = call
-                                                .args
-                                                .get(1)
-                                                .cloned()
-                                                .unwrap_or(Value::Null);
-                                            let uri_str =
-                                                uri_val.to_php_string().to_string_lossy();
-                                            let base_str =
-                                                call.args.get(2).and_then(|v| match v {
-                                                    Value::Null | Value::Undef => None,
-                                                    other => Some(
-                                                        other.to_php_string().to_string_lossy(),
-                                                    ),
-                                                });
-                                            let ok = crate::uri::parse_into(
-                                                &mut obj_mut,
-                                                &uri_str,
-                                                base_str.as_deref(),
-                                                class_lower != b"uri\\whatwg\\url",
-                                            );
-                                            if !ok {
-                                                drop(obj_mut);
-                                                let (exc_class, msg) = if class_lower
-                                                    == b"uri\\whatwg\\url"
-                                                {
-                                                    let code =
-                                                        crate::uri::whatwg_error_code(&uri_str);
-                                                    let msg = if code.is_empty() {
-                                                        "The specified URI is malformed"
-                                                            .to_string()
-                                                    } else {
-                                                        format!(
-                                                            "The specified URI is malformed ({})",
-                                                            code
-                                                        )
-                                                    };
-                                                    (
-                                                        b"Uri\\WhatWg\\InvalidUrlException"
-                                                            as &[u8],
-                                                        msg,
-                                                    )
-                                                } else {
-                                                    (
-                                                        b"Uri\\InvalidUriException" as &[u8],
-                                                        "The specified URI is malformed"
-                                                            .to_string(),
-                                                    )
-                                                };
-                                                let exc = self
-                                                    .create_exception(exc_class, &msg, op.line);
-                                                self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, saved_pc)) =
-                                                    exception_handlers.pop()
-                                                {
-                                                    pending_calls_catch_depth = Some(saved_pc);
-                                                    ip = catch_target as usize;
-                                                    return Ok(Flow::Continue);
-                                                }
-                                                return Err(VmError {
-                                                    message: msg,
-                                                    line: op.line,
-                                                });
-                                            }
                                         }
                                         b"fiber" => {
                                             // Fiber::__construct(callable $callback)

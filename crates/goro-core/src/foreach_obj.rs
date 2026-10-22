@@ -33,7 +33,6 @@ pub(crate) fn is_internal_slot(name: &[u8]) -> bool {
         b"__fiber_",
         b"__timestamp",
         b"__lazy_",
-        b"__uri_",
         b"__weak_ref_id",
         b"__sxml_",
         b"__hash_",
