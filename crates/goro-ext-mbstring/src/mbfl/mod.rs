@@ -15,6 +15,7 @@ pub mod chinese;
 pub mod common;
 pub mod eucjp;
 pub mod iso2022;
+pub mod legacy;
 pub mod mobile;
 pub mod singlebyte;
 pub mod sjis;

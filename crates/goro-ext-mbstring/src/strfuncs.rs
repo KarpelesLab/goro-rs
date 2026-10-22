@@ -548,6 +548,10 @@ fn mb_strcut(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         return Ok(pstr(&s[start..end.min(s.len())]));
     }
+    // mbfl_strcut(): through libmbfl's legacy filters where they are ported
+    if let Some(out) = crate::mbfl::legacy::strcut(&s, from, len, enc.no) {
+        return Ok(pstring(out));
+    }
     Ok(pstring(strcut_generic(&s, from, len, enc)))
 }
 
