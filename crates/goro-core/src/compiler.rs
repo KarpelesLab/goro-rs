@@ -16177,6 +16177,26 @@ impl Compiler {
                         }
                         _ => None,
                     };
+                    // ext/intl static methods implemented by a procedural
+                    // function (`@alias`): its stub declares the by-reference
+                    // parameters (IntlTimeZone::getCanonicalID(), ...).
+                    let intl_alias: Option<Vec<u8>> = match &class_name {
+                        Some(c) if static_bridge.is_none() => crate::stubs::find_method(c, method)
+                            .filter(|(sc, m)| sc.ext == "intl" && m.is_static())
+                            .and_then(|(sc, m)| {
+                                crate::stub_sigs::ALIASES
+                                    .iter()
+                                    .find(|(k, _)| {
+                                        k.split_once("::").is_some_and(|(kc, km)| {
+                                            kc.eq_ignore_ascii_case(sc.name)
+                                                && km.eq_ignore_ascii_case(m.name)
+                                        })
+                                    })
+                                    .map(|(_, f)| f.as_bytes().to_ascii_lowercase())
+                            }),
+                        _ => None,
+                    };
+                    let static_bridge = static_bridge.or(intl_alias.as_deref());
                     if let Some(class_name) = class_name {
                         // Static class name known at compile time
                         // Keep parent:: and self:: as markers for late static binding forwarding.

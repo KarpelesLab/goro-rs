@@ -415,6 +415,10 @@ fn run_method(
     if msgformat::RESET_BEFORE_ZPP.contains(&name.as_str()) {
         error::reset_global();
     }
+    if !pre_zpp(vm, &name, args) {
+        vm.call_stack.pop();
+        return Value::Null;
+    }
     let r = match zpp::parse(vm, &name, stub, args) {
         Some(a) => {
             let mut call = Call {
@@ -431,6 +435,20 @@ fn run_method(
     };
     vm.call_stack.pop();
     r
+}
+
+/// What some handlers do before parsing their arguments (false: an
+/// exception was thrown).
+fn pre_zpp(vm: &mut Vm, name: &str, args: &[Value]) -> bool {
+    match name {
+        "IntlCalendar::set" => calendar::pre_set(vm, args),
+        _ => true,
+    }
+}
+
+/// The compare_check hook of the intl classes.
+fn compare_check(vm: &mut Vm, a: &Value, b: &Value) {
+    timezone::compare_check(vm, a, b);
 }
 
 fn call_method(
@@ -609,7 +627,7 @@ pub fn register(vm: &mut Vm) {
         call: call_method,
         prop_added: None,
         prop_write: None,
-        compare_check: None,
+        compare_check: Some(compare_check),
         prop_read: None,
         param_names: Some(param_names),
     };
