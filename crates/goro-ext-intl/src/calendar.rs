@@ -145,7 +145,7 @@ fn key(k: &str) -> ArrayKey {
 }
 
 /// Calendar_get_debug_info
-fn debug_info(_vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
+fn debug_info(vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
     if purpose != 0 {
         return None;
     }
@@ -161,6 +161,8 @@ fn debug_info(_vm: &mut Vm, o: &Obj, purpose: u8) -> Option<PhpArray> {
     };
     a.set(key("valid"), Value::True);
     a.set(key("type"), s(cal.type_name()));
+    // php-src builds (and never frees) an IntlTimeZone object here
+    let _ = vm.alloc_object_id();
     let mut tz = PhpArray::new();
     tz.set(key("valid"), Value::True);
     tz.set(key("id"), s(&cal.zone.id));
@@ -1080,7 +1082,8 @@ fn is_leap_year(vm: &mut Vm, c: &mut Call) -> Value {
 /// A GregorianCalendar(y, m, d[, h, mi[, s]]) in PHP's default zone.
 fn gregorian_from_fields(vm: &mut Vm, v: &[i32]) -> Calendar {
     let tz = datecore::php_default_tz(vm);
-    let locale = crate::common::default_locale(vm);
+    // ICU's default locale (Locale::getDefault()), not intl.default_locale
+    let locale = crate::common::icu_default_locale();
     let mut cal = Calendar::new(
         CalType::Gregorian,
         zone::create_or_unknown(&tz),

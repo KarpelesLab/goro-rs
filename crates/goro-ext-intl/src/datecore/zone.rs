@@ -554,6 +554,9 @@ pub fn format_custom_id(offset: i32) -> String {
     let neg = offset < 0;
     let a = (offset as i64).abs() / 1000;
     let (h, m, s) = (a / 3600, a / 60 % 60, a % 60);
+    if a == 0 {
+        return "GMT".to_string();
+    }
     let mut id = format!("GMT{}{:02}:{:02}", if neg { '-' } else { '+' }, h, m);
     if s != 0 {
         id.push_str(&format!(":{:02}", s));

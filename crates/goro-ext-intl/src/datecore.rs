@@ -180,6 +180,13 @@ pub fn canonical_tz_id(id: &str) -> Option<String> {
 
 /// The default time zone ID (date.timezone / date_default_timezone_get()).
 pub fn default_tz_id(vm: &Vm) -> String {
+    // date_default_timezone_set() (ext/date keeps it there)
+    if let Some(v) = vm.constants.get(b"__default_timezone".as_slice()) {
+        let s = v.to_php_string();
+        if !s.as_bytes().is_empty() {
+            return s.to_string_lossy();
+        }
+    }
     match vm.constants.get(b"date.timezone".as_slice()) {
         Some(v) if !v.to_php_string().as_bytes().is_empty() => v.to_php_string().to_string_lossy(),
         _ => "UTC".to_string(),
@@ -797,3 +804,82 @@ pub fn datetime_zone(vm: &mut Vm, o: &Obj, func: &str) -> Result<Rc<Zone>, ()> {
 
 /// A cell holding a calendar state, for the formatters.
 pub type CalCell = Rc<RefCell<CalState>>;
+
+/// intl_zval_to_millis(): the UDate a date argument designates (a number
+/// of seconds, a numeric string, a DateTimeInterface or an IntlCalendar),
+/// NaN with the error reported to `err` (and the global error) otherwise.
+pub fn zval_to_millis(vm: &mut Vm, v: &Value, func: &str, err: Option<&mut IntlError>) -> f64 {
+    match v.deref() {
+        Value::Long(n) => 1000.0 * n as f64,
+        Value::Double(d) => 1000.0 * d,
+        Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
+            Some((goro_core::value::NumStr::Long(n), _)) => 1000.0 * n as f64,
+            Some((goro_core::value::NumStr::Double(d), _)) => 1000.0 * d,
+            None => {
+                let m = format!(
+                    "string '{}' is not numeric, which would be required for it to be a valid date",
+                    s.to_string_lossy()
+                );
+                report(vm, func, err, U_ILLEGAL_ARGUMENT_ERROR, &m);
+                f64::NAN
+            }
+        },
+        Value::Object(o) => {
+            if crate::zpp::obj_instanceof(vm, &o, "DateTimeInterface") {
+                match datetime_decompose(vm, &o) {
+                    Ok((ms, _)) => ms,
+                    Err(Some((code, m))) => {
+                        report(vm, func, err, code, &m);
+                        f64::NAN
+                    }
+                    Err(None) => f64::NAN,
+                }
+            } else if crate::zpp::obj_instanceof(vm, &o, "IntlCalendar") {
+                let t = crate::obj::state::<CalState>(&o)
+                    .and_then(|st| st.borrow_mut().cal.as_mut().map(|c| c.get_time()));
+                match t {
+                    None => {
+                        report(
+                            vm,
+                            func,
+                            err,
+                            U_ILLEGAL_ARGUMENT_ERROR,
+                            "IntlCalendar object is not properly constructed",
+                        );
+                        f64::NAN
+                    }
+                    Some(Ok(t)) => t,
+                    Some(Err(())) => {
+                        report(
+                            vm,
+                            func,
+                            err,
+                            U_ILLEGAL_ARGUMENT_ERROR,
+                            "call to internal Calendar::getTime() has failed",
+                        );
+                        f64::NAN
+                    }
+                }
+            } else {
+                report(
+                    vm,
+                    func,
+                    err,
+                    U_ILLEGAL_ARGUMENT_ERROR,
+                    "invalid object type for date/time (only IntlCalendar and DateTimeInterface permitted)",
+                );
+                f64::NAN
+            }
+        }
+        _ => {
+            report(
+                vm,
+                func,
+                err,
+                U_ILLEGAL_ARGUMENT_ERROR,
+                "invalid PHP type for date",
+            );
+            f64::NAN
+        }
+    }
+}
