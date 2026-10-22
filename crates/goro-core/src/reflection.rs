@@ -3860,7 +3860,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
 
                 let has_constructor = rcls(vm, &class_lower)
                     .map(|c| c.get_method(b"__construct").is_some())
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                    || native_ctor_in_chain(vm, &class_lower);
 
                 // If no constructor and args were passed, throw
                 if !has_constructor && args.len() > 1 {
@@ -3899,9 +3900,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 // An internal constructor: construct like `new` does.
                 if rmethod(vm, &class_lower, b"__construct")
                     .is_some_and(|m| m.op_array.internal_sig.is_some())
-                    || vm
-                        .object_construct_handlers
-                        .contains_key(class_lower.as_slice())
+                    || native_ctor_in_chain(vm, &class_lower)
                 {
                     let mut a = PhpArray::new();
                     for arg in args.iter().skip(1) {
@@ -4046,7 +4045,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
 
                 let has_constructor = rcls(vm, &class_lower)
                     .map(|c| c.get_method(b"__construct").is_some())
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                    || native_ctor_in_chain(vm, &class_lower);
 
                 // If no constructor and args were passed, throw
                 if !has_constructor && !ctor_args.is_empty() {
@@ -4085,9 +4085,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 // An internal constructor: construct like `new` does.
                 if rmethod(vm, &class_lower, b"__construct")
                     .is_some_and(|m| m.op_array.internal_sig.is_some())
-                    || vm
-                        .object_construct_handlers
-                        .contains_key(class_lower.as_slice())
+                    || native_ctor_in_chain(vm, &class_lower)
                 {
                     return Some(
                         run_snippet_in_scope(
@@ -11587,6 +11585,28 @@ pub fn create_reflection_class_constant(
     );
     obj.set_property(b"__reflection_value".to_vec(), value);
     Value::Object(Rc::new(RefCell::new(obj)))
+}
+
+/// Whether the class or an ancestor is an extension class constructed by
+/// an object_construct_handler (no user __construct overriding it).
+fn native_ctor_in_chain(vm: &Vm, class_lower: &[u8]) -> bool {
+    let mut cur = class_lower.to_vec();
+    for _ in 0..64 {
+        if vm.object_construct_handlers.contains_key(cur.as_slice()) {
+            return true;
+        }
+        let Some(c) = vm.classes.get(&cur) else {
+            return false;
+        };
+        if c.methods.contains_key(b"__construct".as_slice()) {
+            return false;
+        }
+        match &c.parent {
+            Some(p) => cur = p.to_ascii_lowercase(),
+            None => return false,
+        }
+    }
+    false
 }
 
 /// "Cannot instantiate ..." for classes object_init_ex() refuses.
