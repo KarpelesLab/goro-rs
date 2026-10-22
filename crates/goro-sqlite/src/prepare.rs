@@ -736,8 +736,9 @@ fn sqlite3Prepare(
             }
         }
 
-        // Rust: there is no db->pDisconnect list (virtual tables are not
-        // supported yet), so sqlite3VtabUnlockList() is not needed here.
+        if !db.pDisconnect.is_empty() {
+            crate::vtab::sqlite3VtabUnlockList(db);
+        }
 
         let n = if nBytes >= 0 {
             (nBytes as usize).min(zSql.len())
