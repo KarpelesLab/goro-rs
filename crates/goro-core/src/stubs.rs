@@ -786,8 +786,61 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
             }
         }
     }
+    if c.flags & F_ATTRIBUTE != 0 {
+        if let Some(a) = internal_attribute_attr(c.name) {
+            ce.attributes.push(a);
+        }
+    }
     ce.filename = None;
     ce
+}
+
+/// The `#[Attribute(flags)]` an internal attribute class is declared with
+/// (zend_attributes.stub.php).
+fn internal_attribute_attr(name: &str) -> Option<crate::object::RuntimeAttribute> {
+    use crate::opcode::{Op, OpCode, OperandType};
+    let (flags, repr): (i64, &str) = match name.to_ascii_lowercase().as_str() {
+        "attribute" | "allowdynamicproperties" => (1, "Attribute::TARGET_CLASS"),
+        "returntypewillchange" => (4, "Attribute::TARGET_METHOD"),
+        "sensitiveparameter" => (32, "Attribute::TARGET_PARAMETER"),
+        "override" => (12, "Attribute::TARGET_METHOD | Attribute::TARGET_PROPERTY"),
+        "deprecated" => (
+            87,
+            "Attribute::TARGET_METHOD | Attribute::TARGET_FUNCTION | Attribute::TARGET_CLASS_CONSTANT | Attribute::TARGET_CONSTANT | Attribute::TARGET_CLASS",
+        ),
+        "nodiscard" => (6, "Attribute::TARGET_METHOD | Attribute::TARGET_FUNCTION"),
+        "delayedtargetvalidation" => (127, "Attribute::TARGET_ALL"),
+        _ => return None,
+    };
+    let mut oa = OpArray::new();
+    let t = oa.alloc_temp();
+    oa.emit(Op {
+        opcode: OpCode::ArrayNew,
+        op1: OperandType::Unused,
+        op2: OperandType::Unused,
+        result: OperandType::Tmp(t),
+        line: 0,
+    });
+    let k = oa.add_literal(Value::Long(flags));
+    oa.emit(Op {
+        opcode: OpCode::ArrayAppend,
+        op1: OperandType::Tmp(t),
+        op2: OperandType::Const(k),
+        result: OperandType::Unused,
+        line: 0,
+    });
+    oa.emit(Op {
+        opcode: OpCode::Return,
+        op1: OperandType::Tmp(t),
+        op2: OperandType::Unused,
+        result: OperandType::Unused,
+        line: 0,
+    });
+    oa.param_default_repr = vec![Some(repr.to_string())];
+    Some(crate::object::RuntimeAttribute {
+        name: b"Attribute".to_vec(),
+        args_op_array: oa,
+    })
 }
 
 /// Whether objects of the class can't be (un)serialized

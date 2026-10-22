@@ -10766,6 +10766,56 @@ impl Vm {
         self.classes.get(class_name_lower)
     }
 
+    /// Attribute::__construct(int $flags = Attribute::TARGET_ALL): the
+    /// value of $flags, or the exception to throw.
+    #[inline(never)]
+    fn attribute_ctor_flags(
+        args: &[Value],
+        named: &[(Vec<u8>, Value)],
+        strict: bool,
+    ) -> Result<Value, (&'static [u8], String)> {
+        if args.len() > 2 {
+            return Err((
+                b"ArgumentCountError",
+                format!(
+                    "Attribute::__construct() expects at most 1 argument, {} given",
+                    args.len() - 1
+                ),
+            ));
+        }
+        let arg = args
+            .get(1)
+            .cloned()
+            .or_else(|| named.iter().find(|(n, _)| n == b"flags").map(|(_, v)| v.clone()));
+        let Some(arg) = arg.map(|a| a.deref()) else {
+            return Ok(Value::Long(127));
+        };
+        let coerced = match &arg {
+            Value::Long(_) => Some(arg.clone()),
+            _ if strict => None,
+            Value::True => Some(Value::Long(1)),
+            Value::False => Some(Value::Long(0)),
+            Value::Double(d) if d.fract() == 0.0 && d.is_finite() => Some(Value::Long(*d as i64)),
+            Value::String(s) => match crate::value::parse_numeric_str(s.as_bytes(), false) {
+                Some((crate::value::NumStr::Long(n), _)) => Some(Value::Long(n)),
+                Some((crate::value::NumStr::Double(d), _)) if d.fract() == 0.0 => {
+                    Some(Value::Long(d as i64))
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        coerced.ok_or_else(|| {
+            (
+                &b"TypeError"[..],
+                format!(
+                    "Attribute::__construct(): Argument #1 ($flags) must be of type int, {} given",
+                    Self::value_type_name(&arg)
+                ),
+            )
+        })
+    }
+
     /// The declared shape of a class (lowercase name): a user class's
     /// entry, or for an internal class one synthesized from its stub
     /// (properties_info, methods, constants).
@@ -33305,6 +33355,46 @@ impl Vm {
                                                     ),
                                                     line: op.line,
                                                 });
+                                            }
+                                        }
+                                        b"attribute" => {
+                                            // Attribute::__construct(int $flags = Attribute::TARGET_ALL)
+                                            let r = Self::attribute_ctor_flags(
+                                                &call.args,
+                                                &call.named_args,
+                                                op_array.strict_types,
+                                            );
+                                            match r {
+                                                Ok(v) => {
+                                                    obj_mut.set_property(b"flags".to_vec(), v);
+                                                }
+                                                Err((cls, msg)) => {
+                                                    drop(obj_mut);
+                                                    let ctor_trace_args: Vec<Value> =
+                                                        call.args.iter().skip(1).cloned().collect();
+                                                    self.call_stack.push((
+                                                        "Attribute->__construct".to_string(),
+                                                        self.current_file.clone(),
+                                                        op.line,
+                                                        ctor_trace_args,
+                                                        true,
+                                                    ));
+                                                    let exc =
+                                                        self.create_exception(cls, &msg, op.line);
+                                                    self.call_stack.pop();
+                                                    self.current_exception = Some(exc);
+                                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                                        exception_handlers.pop()
+                                                    {
+                                                        pending_calls_catch_depth = Some(saved_pc);
+                                                        ip = catch_target as usize;
+                                                        return Ok(Flow::Continue);
+                                                    }
+                                                    return Err(VmError {
+                                                        message: self.uncaught_exception_message(),
+                                                        line: op.line,
+                                                    });
+                                                }
                                             }
                                         }
                                         b"nodiscard" => {
