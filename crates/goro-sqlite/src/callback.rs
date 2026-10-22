@@ -67,7 +67,8 @@ pub fn sqlite3FindFunction(
 }
 
 /// C: `void sqlite3SchemaClear(void *p)`
-pub fn sqlite3SchemaClear(p: &mut [u8]) {
+/// Rust: clears the schema of db.aDb[iDb] (C passes the Schema pointer).
+pub fn sqlite3SchemaClear(db: &mut Sqlite3, iDb: i32) {
     todo!("sqlite3SchemaClear")
 }
 

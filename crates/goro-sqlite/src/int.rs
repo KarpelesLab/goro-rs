@@ -1742,6 +1742,18 @@ pub struct Context<'a> {
     pub argc: u16,
     /// Error message set by sqlite3_result_error (copied into pOut too).
     pub zErr: Option<ZStr>,
+    /// Collating sequence of the OP_CollSeq opcode immediately preceding
+    /// the function opcode, if any (what C sqlite3GetFuncCollSeq() reads
+    /// through pVdbe->aOp[iOp-1]).
+    pub pColl: Option<CollSeqRef>,
+    /// The statement's Vdbe.iCurrentTime (sqlite3StmtCurrentTime()); None
+    /// outside of a running statement.
+    pub pCurrentTime: Option<&'a mut i64>,
+    /// Opcode and P5 of the invoking instruction (C
+    /// pVdbe->aOp[iOp].opcode / .p5, used by sqlite3NotPureFunc()); 0 when
+    /// the function is not invoked by the VDBE.
+    pub opcode: u8,
+    pub p5: u16,
 }
 
 /// A cursor is a pointer into a single BTree within a database file.
@@ -1760,8 +1772,9 @@ pub struct VdbeCursor {
     pub seekHit: u16,
     /// ub.pBtx: separate btree for an ephemeral table
     pub pBtx: Option<BtreeP>,
-    /// ub.aAltMap: mapping from table to index column numbers
-    pub aAltMap: Vec<u32>,
+    /// ub.aAltMap: mapping from table to index column numbers (shared
+    /// with the P4_INTARRAY operand of OP_DeferredSeek)
+    pub aAltMap: Option<Rc<Vec<u32>>>,
     pub seqCount: i64,
     pub cacheStatus: u32,
     pub seekResult: i32,
@@ -1785,7 +1798,9 @@ pub struct VdbeCursor {
     pub payloadSize: u32,
     pub szRow: u32,
     pub pCache: Option<Box<VdbeTxtBlbCache>>,
-    /// Pseudo-table cursor: register holding the record (C uses seekResult)
+    /// Serial types of the parsed header fields (C aType[]).  For
+    /// CURTYPE_PSEUDO cursors, seekResult is the register holding the
+    /// record, as in C.
     pub aType: Vec<u32>,
 }
 

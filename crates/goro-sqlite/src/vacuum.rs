@@ -18,7 +18,7 @@ pub fn sqlite3RunVacuum(
     db: &mut Sqlite3,
     pzErrMsg: &mut Option<ZStr>,
     iDb: i32,
-    pOut: &mut Mem,
+    pOut: Option<&mut Mem>,
 ) -> i32 {
     todo!("sqlite3RunVacuum")
 }

@@ -482,7 +482,15 @@ pub fn sqlite3VdbeFreeCursorNN(db: &mut Sqlite3, p: &mut Vdbe, pCx: &mut VdbeCur
 }
 
 /// C: `int sqlite3VdbeFrameRestore(VdbeFrame *pFrame)`
-pub fn sqlite3VdbeFrameRestore(db: &mut Sqlite3, pFrame: &mut crate::vdbe::VdbeFrame) -> i32 {
+/// Rust: the frame does not point back to its Vdbe, so the Vdbe is passed
+/// explicitly.  See the VdbeFrame documentation in vdbe.rs for the
+/// push/pop protocol (the parent state is swapped back into `v`, the
+/// child state is left in the frame so that it can be reused).
+pub fn sqlite3VdbeFrameRestore(
+    db: &mut Sqlite3,
+    v: &mut Vdbe,
+    pFrame: &mut crate::vdbe::VdbeFrame,
+) -> i32 {
     todo!("sqlite3VdbeFrameRestore")
 }
 
@@ -538,7 +546,7 @@ pub fn sqlite3VdbeFinalize(db: &mut Sqlite3, p: &mut Vdbe) -> i32 {
 }
 
 /// C: `void sqlite3VdbeDeleteAuxData(sqlite3 *db, AuxData **pp, int iOp, int mask)`
-pub fn sqlite3VdbeDeleteAuxData(db: &mut Sqlite3, pp: /*AuxData***/ (), iOp: i32, mask: i32) {
+pub fn sqlite3VdbeDeleteAuxData(db: &mut Sqlite3, pp: &mut Vec<AuxData>, iOp: i32, mask: i32) {
     todo!("sqlite3VdbeDeleteAuxData")
 }
 
@@ -616,7 +624,13 @@ pub fn sqlite3IntFloatCompare(i: i64, r: f64) -> i32 {
 }
 
 /// C: `int sqlite3MemCompare(const Mem *pMem1, const Mem *pMem2, const CollSeq *pColl)`
-pub fn sqlite3MemCompare(db: &mut Sqlite3, pMem1: &Mem, pMem2: &Mem, pColl: &CollSeqRef) -> i32 {
+/// Rust: pColl is None for a NULL collating sequence (binary).
+pub fn sqlite3MemCompare(
+    db: &mut Sqlite3,
+    pMem1: &Mem,
+    pMem2: &Mem,
+    pColl: Option<&CollSeqRef>,
+) -> i32 {
     todo!("sqlite3MemCompare")
 }
 
