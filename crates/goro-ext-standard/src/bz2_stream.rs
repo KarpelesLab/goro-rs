@@ -51,7 +51,7 @@ impl BzFile {
             .unwrap_or(9);
         BzFile {
             file,
-            dec: (!writing).then(|| bz2codec::Decompress::new(false, false)),
+            dec: (!writing).then(|| bz2codec::Decompress::new(false)),
             enc: writing.then(|| bz2codec::Compress::new(block, 0)),
             buf: Vec::new(),
             pos: 0,

@@ -1790,10 +1790,7 @@ impl BzDecompress {
             let mut bin = 0;
             while bin < buf.len() {
                 if self.status == BzStatus::Uninitialized {
-                    self.dec = Some(crate::bz2codec::Decompress::new(
-                        self.small,
-                        self.concatenated,
-                    ));
+                    self.dec = Some(crate::bz2codec::Decompress::new(self.small));
                     self.status = BzStatus::Running;
                 }
                 if self.status != BzStatus::Running {

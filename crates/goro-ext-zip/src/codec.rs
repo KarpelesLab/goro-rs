@@ -115,7 +115,7 @@ pub fn compress(input: &[u8], method: i32, flags: u32) -> Result<Compressed, Zip
         CM_ZSTD => {
             // the (16-bit) flags if a zstd level, else 0: zstd's default (3)
             let level = if (1..=22).contains(&flags) {
-                flags as u8
+                flags as i32
             } else {
                 3
             };
