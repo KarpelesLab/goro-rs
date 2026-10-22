@@ -481,10 +481,17 @@ impl Parser {
         if !self.source.is_empty() {
             let shebang = self.source.starts_with(b"#!")
                 && self.tokens.first().is_some_and(|t| t.span.start > 0);
-            if let Some(e) =
-                crate::php_recognizer::check(&self.source, crate::short_open_tag(), shebang)
-            {
+            let r = crate::php_recognizer::run(&self.source, crate::short_open_tag(), shebang);
+            if let Some(e) = r.error {
                 return Err(self.merge_syntax_error(e));
+            }
+            // Nothing after `__halt_compiler();` is scanned.
+            if let Some((_, stop_line)) = r.stop {
+                if crate::LEXER_ERROR
+                    .with(|e| e.borrow().as_ref().is_some_and(|(_, l)| *l > stop_line))
+                {
+                    let _ = crate::take_lexer_error();
+                }
             }
         }
         let nesting = self.first_nesting_error();
@@ -501,9 +508,9 @@ impl Parser {
         }
     }
 
-    /// Combine php-src's syntax error with what goro's own scanner and
-    /// parser find: errors php-src raises while scanning (invalid literals)
-    /// or from parser actions (modifier checks) win when they come first.
+    /// Combine php-src's syntax error with what goro's own scanner finds:
+    /// errors php-src raises while scanning (invalid literals / escapes)
+    /// win when they come first.
     fn merge_syntax_error(&mut self, e: crate::php_recognizer::SyntaxError) -> ParseError {
         let php = ParseError {
             message: e.message,
@@ -516,15 +523,6 @@ impl Parser {
                 let mut span = php.span;
                 span.line = line;
                 return ParseError { message, span };
-            }
-            return php;
-        }
-        if let Err(ge) = self.parse_program() {
-            let parse_time = (ge.message.starts_with("Multiple ")
-                && ge.message.ends_with("modifiers are not allowed"))
-                || (ge.message.starts_with("Cannot use the ") && ge.message.contains(" modifier "));
-            if parse_time && (ge.span.start as usize) < e.offset {
-                return ge;
             }
         }
         php

@@ -136,6 +136,18 @@ def main():
         'RULE_CLASS_CONST_SEMI_RESERVED': rule('class_const_decl', 'semi_reserved \'=\' expr backup_doc_comment'),
         'RULE_FUNCTION_NAME_READONLY': rule('function_name', '"\'readonly\'"'),
         'RULE_CALL_READONLY': rule('function_call', '"\'readonly\'" argument_list'),
+        # Parser actions that check modifiers (zend_add_*_modifier(),
+        # zend_modifier_list_to_flags(), zend_modifier_token_to_flag()).
+        'RULE_CLASS_MODIFIERS_ADD': rule('class_modifiers', 'class_modifiers class_modifier'),
+        'RULE_ANON_CLASS_MODIFIERS_ONE': rule('anonymous_class_modifiers', 'class_modifier'),
+        'RULE_ANON_CLASS_MODIFIERS_ADD': rule('anonymous_class_modifiers', 'anonymous_class_modifiers class_modifier'),
+        'RULE_CPP_MODIFIERS': rule('optional_cpp_modifiers', 'non_empty_member_modifiers'),
+        'RULE_PROPERTY_MODIFIERS': rule('property_modifiers', 'non_empty_member_modifiers'),
+        'RULE_METHOD_MODIFIERS': rule('method_modifiers', 'non_empty_member_modifiers'),
+        'RULE_CONST_MODIFIERS': rule('class_const_modifiers', 'non_empty_member_modifiers'),
+        'RULE_HOOK_MODIFIERS': rule('property_hook_modifiers', 'non_empty_member_modifiers'),
+        'RULE_TRAIT_ALIAS_MODIFIER_NAME': rule('trait_alias', 'trait_method_reference "\'as\'" member_modifier identifier'),
+        'RULE_TRAIT_ALIAS_MODIFIER': rule('trait_alias', 'trait_method_reference "\'as\'" member_modifier'),
     }
 
     # token kind numbers (php's T_* values) -> bison symbol numbers

@@ -46,6 +46,8 @@ const YYSYMBOL_ERROR: i32 = 1;
 #[derive(Clone, Copy)]
 struct PTok {
     sym: i32,
+    /// php_scanner token id
+    id: i32,
     start: usize,
     end: usize,
     line: u32,
@@ -119,6 +121,7 @@ fn parse(
                 }
                 return Ok(PTok {
                     sym: YYSYMBOL_EOF,
+                    id: 0,
                     start: src.len(),
                     end: src.len(),
                     line: eof_line,
@@ -179,6 +182,7 @@ fn parse(
             }
             return Ok(PTok {
                 sym,
+                id: t.id,
                 start: t.start,
                 end: t.end,
                 line,
@@ -285,6 +289,44 @@ fn parse(
                     feedback.push(t.start);
                 }
             }
+            g::RULE_CLASS_MODIFIERS_ADD
+            | g::RULE_ANON_CLASS_MODIFIERS_ONE
+            | g::RULE_ANON_CLASS_MODIFIERS_ADD
+            | g::RULE_CPP_MODIFIERS
+            | g::RULE_PROPERTY_MODIFIERS
+            | g::RULE_METHOD_MODIFIERS
+            | g::RULE_CONST_MODIFIERS
+            | g::RULE_HOOK_MODIFIERS
+            | g::RULE_TRAIT_ALIAS_MODIFIER_NAME
+            | g::RULE_TRAIT_ALIAS_MODIFIER => {
+                let (first, last) = match yyn {
+                    g::RULE_TRAIT_ALIAS_MODIFIER_NAME | g::RULE_TRAIT_ALIAS_MODIFIER => {
+                        (vals[base + 2], vals[base + 2])
+                    }
+                    g::RULE_CLASS_MODIFIERS_ADD | g::RULE_ANON_CLASS_MODIFIERS_ADD => {
+                        (first_val, vals[base + 1])
+                    }
+                    _ => {
+                        // non_empty_member_modifiers: consecutive tokens
+                        let mut last = first_val;
+                        while toks.get(last + 1).is_some_and(|t| is_member_modifier(t.id)) {
+                            last += 1;
+                        }
+                        (first_val, last)
+                    }
+                };
+                let ids: Vec<i32> = (first..=last)
+                    .filter_map(|i| toks.get(i))
+                    .map(|t| t.id)
+                    .collect();
+                if let Some(message) = modifier_error(yyn, &ids) {
+                    return Some(SyntaxError {
+                        message,
+                        line: last_line,
+                        offset: toks.get(first).map_or(0, |t| t.start),
+                    });
+                }
+            }
             _ => {}
         }
         states.truncate(base);
@@ -299,6 +341,188 @@ fn parse(
         };
         states.push(state);
         vals.push(first_val);
+    }
+}
+
+fn is_member_modifier(id: i32) -> bool {
+    matches!(
+        id,
+        ps::T_PUBLIC
+            | ps::T_PROTECTED
+            | ps::T_PRIVATE
+            | ps::T_PUBLIC_SET
+            | ps::T_PROTECTED_SET
+            | ps::T_PRIVATE_SET
+            | ps::T_STATIC
+            | ps::T_ABSTRACT
+            | ps::T_FINAL
+            | ps::T_READONLY
+    )
+}
+
+/// The compile error php-src's parser actions raise for a modifier list
+/// (zend_add_class_modifier(), zend_add_anonymous_class_modifier(),
+/// zend_modifier_list_to_flags(), zend_modifier_token_to_flag()).
+fn modifier_error(rule: i32, ids: &[i32]) -> Option<String> {
+    const PUBLIC: u32 = 1;
+    const PROTECTED: u32 = 2;
+    const PRIVATE: u32 = 4;
+    const PPP: u32 = PUBLIC | PROTECTED | PRIVATE;
+    const STATIC: u32 = 0x10;
+    const FINAL: u32 = 0x20;
+    const ABSTRACT: u32 = 0x40;
+    const READONLY: u32 = 0x80;
+    const PUBLIC_SET: u32 = 0x100;
+    const PROTECTED_SET: u32 = 0x200;
+    const PRIVATE_SET: u32 = 0x400;
+    const PPP_SET: u32 = PUBLIC_SET | PROTECTED_SET | PRIVATE_SET;
+    let name = |id: i32| match id {
+        ps::T_PUBLIC => "public",
+        ps::T_PROTECTED => "protected",
+        ps::T_PRIVATE => "private",
+        ps::T_STATIC => "static",
+        ps::T_FINAL => "final",
+        ps::T_READONLY => "readonly",
+        ps::T_ABSTRACT => "abstract",
+        ps::T_PUBLIC_SET => "public(set)",
+        ps::T_PROTECTED_SET => "protected(set)",
+        _ => "private(set)",
+    };
+    match rule {
+        g::RULE_CLASS_MODIFIERS_ADD
+        | g::RULE_ANON_CLASS_MODIFIERS_ONE
+        | g::RULE_ANON_CLASS_MODIFIERS_ADD => {
+            let anon = rule != g::RULE_CLASS_MODIFIERS_ADD;
+            let class_flag = |id: i32| match id {
+                ps::T_ABSTRACT => ABSTRACT,
+                ps::T_FINAL => FINAL,
+                _ => READONLY,
+            };
+            let mut flags = 0u32;
+            for (i, &id) in ids.iter().enumerate() {
+                let new = class_flag(id);
+                if !anon && i == 0 {
+                    flags = new;
+                    continue;
+                }
+                let nf = flags | new;
+                if anon {
+                    if new & ABSTRACT != 0 {
+                        return Some(
+                            "Cannot use the abstract modifier on an anonymous class".into(),
+                        );
+                    }
+                    if new & FINAL != 0 {
+                        return Some("Cannot use the final modifier on an anonymous class".into());
+                    }
+                    if flags & new & READONLY != 0 {
+                        return Some("Multiple readonly modifiers are not allowed".into());
+                    }
+                } else {
+                    if flags & new & ABSTRACT != 0 {
+                        return Some("Multiple abstract modifiers are not allowed".into());
+                    }
+                    if flags & new & FINAL != 0 {
+                        return Some("Multiple final modifiers are not allowed".into());
+                    }
+                    if flags & new & READONLY != 0 {
+                        return Some("Multiple readonly modifiers are not allowed".into());
+                    }
+                    if nf & ABSTRACT != 0 && nf & FINAL != 0 {
+                        return Some("Cannot use the final modifier on an abstract class".into());
+                    }
+                }
+                flags = nf;
+            }
+            None
+        }
+        _ => {
+            #[derive(PartialEq, Clone, Copy)]
+            enum T {
+                Property,
+                Method,
+                Constant,
+                Cpp,
+                Hook,
+            }
+            let target = match rule {
+                g::RULE_CPP_MODIFIERS => T::Cpp,
+                g::RULE_PROPERTY_MODIFIERS => T::Property,
+                g::RULE_CONST_MODIFIERS => T::Constant,
+                g::RULE_HOOK_MODIFIERS => T::Hook,
+                _ => T::Method,
+            };
+            let to_flag = |id: i32| -> Result<u32, String> {
+                let f = match id {
+                    ps::T_PUBLIC if target != T::Hook => PUBLIC,
+                    ps::T_PROTECTED if target != T::Hook => PROTECTED,
+                    ps::T_PRIVATE if target != T::Hook => PRIVATE,
+                    ps::T_READONLY if matches!(target, T::Property | T::Cpp) => READONLY,
+                    ps::T_ABSTRACT if matches!(target, T::Method | T::Property) => ABSTRACT,
+                    ps::T_FINAL => FINAL,
+                    ps::T_STATIC if matches!(target, T::Property | T::Method) => STATIC,
+                    ps::T_PUBLIC_SET if matches!(target, T::Property | T::Cpp) => PUBLIC_SET,
+                    ps::T_PROTECTED_SET if matches!(target, T::Property | T::Cpp) => PROTECTED_SET,
+                    ps::T_PRIVATE_SET if matches!(target, T::Property | T::Cpp) => PRIVATE_SET,
+                    _ => 0,
+                };
+                if f != 0 {
+                    return Ok(f);
+                }
+                let member = match target {
+                    T::Property => "property",
+                    T::Method => "method",
+                    T::Constant => "class constant",
+                    T::Cpp => "parameter",
+                    T::Hook => "property hook",
+                };
+                Err(format!(
+                    "Cannot use the {} modifier on a {}",
+                    name(id),
+                    member
+                ))
+            };
+            if matches!(
+                rule,
+                g::RULE_TRAIT_ALIAS_MODIFIER_NAME | g::RULE_TRAIT_ALIAS_MODIFIER
+            ) {
+                return ids.first().and_then(|&id| to_flag(id).err());
+            }
+            let mut flags = 0u32;
+            for &id in ids {
+                let new = match to_flag(id) {
+                    Ok(f) => f,
+                    Err(e) => return Some(e),
+                };
+                let duplicate = flags & new != 0;
+                // zend_add_member_modifier()
+                let nf = flags | new;
+                if flags & PPP != 0 && new & PPP != 0 {
+                    return Some("Multiple access type modifiers are not allowed".into());
+                }
+                if nf & ABSTRACT != 0 && nf & FINAL != 0 {
+                    if target == T::Method {
+                        return Some("Cannot use the final modifier on an abstract method".into());
+                    }
+                    if target == T::Property {
+                        return Some(
+                            "Cannot use the final modifier on an abstract property".into(),
+                        );
+                    }
+                }
+                if matches!(target, T::Property | T::Cpp)
+                    && flags & PPP_SET != 0
+                    && new & PPP_SET != 0
+                {
+                    return Some("Multiple access type modifiers are not allowed".into());
+                }
+                if duplicate {
+                    return Some(format!("Multiple {} modifiers are not allowed", name(id)));
+                }
+                flags = nf;
+            }
+            None
+        }
     }
 }
 

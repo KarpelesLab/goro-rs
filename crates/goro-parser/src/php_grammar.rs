@@ -16,6 +16,16 @@ pub const RULE_TRAIT_ALIAS_RESERVED: i32 = 346;
 pub const RULE_CLASS_CONST_SEMI_RESERVED: i32 = 395;
 pub const RULE_FUNCTION_NAME_READONLY: i32 = 188;
 pub const RULE_CALL_READONLY: i32 = 517;
+pub const RULE_CLASS_MODIFIERS_ADD: i32 = 199;
+pub const RULE_ANON_CLASS_MODIFIERS_ONE: i32 = 200;
+pub const RULE_ANON_CLASS_MODIFIERS_ADD: i32 = 201;
+pub const RULE_CPP_MODIFIERS: i32 = 269;
+pub const RULE_PROPERTY_MODIFIERS: i32 = 354;
+pub const RULE_METHOD_MODIFIERS: i32 = 357;
+pub const RULE_CONST_MODIFIERS: i32 = 359;
+pub const RULE_HOOK_MODIFIERS: i32 = 384;
+pub const RULE_TRAIT_ALIAS_MODIFIER_NAME: i32 = 347;
+pub const RULE_TRAIT_ALIAS_MODIFIER: i32 = 348;
 
 /// Token kind values (`T_*` constants) by name.
 pub static TOKEN_VALUES: [(&str, i32); 158] = [
