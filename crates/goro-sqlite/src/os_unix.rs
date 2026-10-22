@@ -143,6 +143,9 @@ pub struct UnixFile {
     sectorSize: i32,
     /// Precomputed device characteristics
     deviceCharacteristics: i32,
+    /// C mmapSizeMax: configured FCNTL_MMAP_SIZE value (nothing is ever
+    /// mapped; the value is only reported back, as C does)
+    mmapSizeMax: i64,
 }
 
 fn errno_of(e: &std::io::Error) -> i32 {
@@ -1145,6 +1148,17 @@ pub(crate) fn unixFileControl(pFile: &mut UnixFile, op: i32, pArg: FcntlArg) -> 
             *p = fileHasMoved(pFile) as i32;
             SQLITE_OK
         }
+        (SQLITE_FCNTL_MMAP_SIZE, FcntlArg::I64(p)) => {
+            let mut newLimit = *p;
+            if newLimit > crate::global::sqlite3GlobalConfig().mxMmap {
+                newLimit = crate::global::sqlite3GlobalConfig().mxMmap;
+            }
+            *p = pFile.mmapSizeMax;
+            if newLimit >= 0 && newLimit != pFile.mmapSizeMax {
+                pFile.mmapSizeMax = newLimit;
+            }
+            SQLITE_OK
+        }
         (SQLITE_FCNTL_EXTERNAL_READER, FcntlArg::Int(p)) => {
             // No shared memory: there is never an external reader.
             *p = 0;
@@ -1203,6 +1217,7 @@ fn fillInUnixFile(
         szChunk: 0,
         sectorSize: 0,
         deviceCharacteristics: 0,
+        mmapSizeMax: crate::global::sqlite3GlobalConfig().szMmap,
     };
     if crate::os::uri_boolean(
         if (ctrlFlags & UNIXFILE_URI) != 0 {

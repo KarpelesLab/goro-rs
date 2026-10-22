@@ -2514,7 +2514,18 @@ pub fn sqlite3PagerSetSpillsize(pPager: &mut crate::pager::Pager, mxPage: i32) -
 
 /// Invoke SQLITE_FCNTL_MMAP_SIZE based on the current value of szMmap
 /// (no-op: SQLITE_MAX_MMAP_SIZE==0).
-fn pagerFixMaplimit(_pPager: &mut Pager) {}
+fn pagerFixMaplimit(pPager: &mut Pager) {
+    // SQLITE_MAX_MMAP_SIZE>0: the limit is passed down to the VFS (which
+    // records it), but pages are never fetched through a mapping.
+    if let crate::os::SqliteFile::Unix(_) = pPager.fd {
+        let mut sz = pPager.szMmap;
+        sqlite3OsFileControlHint(
+            &mut pPager.fd,
+            SQLITE_FCNTL_MMAP_SIZE,
+            FcntlArg::I64(&mut sz),
+        );
+    }
+}
 
 /// C: `void sqlite3PagerSetMmapLimit(Pager *pPager, sqlite3_int64 szMmap)`
 ///

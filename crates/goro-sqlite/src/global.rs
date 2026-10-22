@@ -371,7 +371,7 @@ pub static sqlite3Config: Sqlite3Config = Sqlite3Config {
     nLookaside: 40,
     nStmtSpill: 64 * 1024,
     szMmap: 0,
-    mxMmap: 0,
+    mxMmap: SQLITE_MAX_MMAP_SIZE as i64,
     szPage: 0,
     nPage: 20,
     mxParserStack: 0,
