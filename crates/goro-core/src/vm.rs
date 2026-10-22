@@ -16355,7 +16355,13 @@ impl Vm {
         }
 
         match (result, ret_ref) {
-            (Ok(_), Some(r)) => Ok(Value::Reference(r)),
+            (Ok(v), Some(r)) => {
+                // VERIFY_RETURN_TYPE coerces the referenced value in place.
+                if op_array.return_type.is_some() {
+                    *r.borrow_mut() = v;
+                }
+                Ok(Value::Reference(r))
+            }
             (result, _) => result,
         }
     }
