@@ -418,6 +418,7 @@ impl Vm {
             named_args: Vec::new(),
             target: CallTarget {
                 no_ctor: true,
+                no_ns_fallback: false,
                 fn_gen,
                 ..CallTarget::NONE
             },
@@ -487,6 +488,7 @@ impl Vm {
                     has_builtin: false,
                     method: Some((sep, is_static)),
                     no_ctor: false,
+                    no_ns_fallback: false,
                     fn_gen: self.user_functions.len() + 1,
                 }
             };

@@ -530,6 +530,10 @@ pub(crate) struct CallTarget {
     /// The `new` of a user class without a constructor (all user code; see
     /// init_method_call_fast): the call only arms the object's destructor.
     pub(crate) no_ctor: bool,
+    /// A namespaced name that does not fall back to the global function
+    /// (a qualified, fully qualified or imported name, or a dynamic call:
+    /// INIT_FCALL_BY_NAME rather than INIT_NS_FCALL_BY_NAME).
+    pub(crate) no_ns_fallback: bool,
     /// `user_functions.len() + 1` when resolved (0: not resolved): a
     /// function declared since then (while the arguments were evaluated)
     /// makes the lookup run again.
@@ -556,6 +560,7 @@ impl CallTarget {
         has_builtin: false,
         method: None,
         no_ctor: false,
+        no_ns_fallback: false,
         fn_gen: 0,
     };
 }
@@ -17926,6 +17931,7 @@ impl Vm {
                 has_builtin: found.is_some(),
                 method,
                 no_ctor: false,
+                no_ns_fallback: false,
                 fn_gen: self.user_functions.len() + 1,
             };
         }
@@ -17955,6 +17961,7 @@ impl Vm {
             has_builtin: found.is_some(),
             method: None,
             no_ctor: false,
+            no_ns_fallback: false,
             fn_gen: self.user_functions.len() + 1,
         }
     }
@@ -18039,7 +18046,12 @@ impl Vm {
     /// target resolved.
     #[inline]
     pub(crate) fn push_plain_call(&mut self, op_array: &OpArray, ip: usize, name: PhpString) {
-        let target = self.plain_call_target(op_array, ip, name.as_bytes());
+        let mut target = self.plain_call_target(op_array, ip, name.as_bytes());
+        // (INIT_FCALL's result operand flags a name without global fallback)
+        target.no_ns_fallback = op_array
+            .ops
+            .get(ip)
+            .is_some_and(|op| !matches!(op.result, OperandType::Unused));
         let args = self.take_values(0);
         self.pending_calls.push(PendingCall {
             name,
@@ -18184,6 +18196,7 @@ impl Vm {
                         has_builtin: c.has_builtin,
                         method: c.method,
                         no_ctor: false,
+                        no_ns_fallback: false,
                         fn_gen,
                     };
                 }
@@ -23966,11 +23979,14 @@ impl Vm {
                                 }
                             }
                         }
+                        let mut target = CallTarget::NONE;
+                        target.no_ns_fallback = !matches!(op.op1, OperandType::Const(_))
+                            || !matches!(op.result, OperandType::Unused);
                         self.pending_calls.push(PendingCall {
                             name,
                             args: init_args,
                             named_args: Vec::new(),
-                            target: CallTarget::NONE,
+                            target,
                         });
                     }
                     Ok(Flow::Next)
@@ -25685,7 +25701,10 @@ impl Vm {
                     // Namespace fallback: if a namespaced function isn't found,
                     // try the global (unqualified) name. This handles calls like
                     // strlen() from within namespace Foo (compiled as Foo\strlen).
-                    if func_name_lower.contains(&b'\\') && !func_name_lower.contains(&b':') {
+                    if func_name_lower.contains(&b'\\')
+                        && !func_name_lower.contains(&b':')
+                        && !call.target.no_ns_fallback
+                    {
                         // Only for plain function calls (not Class::method)
                         let has_user = self.user_functions.contains_key(&func_name_lower);
                         let has_builtin = self.functions.contains_key(&func_name_lower);
@@ -39546,6 +39565,9 @@ impl Vm {
                             };
                         if let Some(v) = self.constants.get(&normalized) {
                             Some(v.clone())
+                        } else if !matches!(op.op2, OperandType::Unused) {
+                            // A qualified / imported name: no global fallback.
+                            None
                         } else {
                             // Namespace fallback: try the unqualified (global) name
                             if let Some(last_sep) = name_bytes.iter().rposition(|&b| b == b'\\') {

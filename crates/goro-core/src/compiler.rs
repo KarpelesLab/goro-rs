@@ -1563,6 +1563,26 @@ impl Compiler {
         }
     }
 
+    /// INIT_FCALL's result operand for a call of function `name` (as
+    /// written) resolved to `resolved`: a constant when the namespaced name
+    /// has no global fallback (qualified, fully qualified or imported with
+    /// `use function`: ZEND_INIT_FCALL_BY_NAME), Unused otherwise.
+    #[inline(never)]
+    fn fcall_no_fallback_flag(&mut self, name: &[u8], resolved: &[u8]) -> OperandType {
+        if !resolved.contains(&b'\\') {
+            return OperandType::Unused;
+        }
+        let imported = || {
+            self.use_function_map
+                .contains_key(&name.to_ascii_lowercase())
+        };
+        if name.contains(&b'\\') || imported() {
+            OperandType::Const(self.op_array.add_literal(Value::True))
+        } else {
+            OperandType::Unused
+        }
+    }
+
     /// Compile and emit SendVal/SendNamedVal/SendUnpack opcodes for function call arguments.
     fn compile_send_args(&mut self, args: &[Argument], line: u32) -> CompileResult<()> {
         self.compile_send_args_with_name(args, line, None)
@@ -13613,11 +13633,15 @@ impl Compiler {
 
                 // Init function call
                 let arg_count_idx = self.op_array.add_literal(Value::Long(args.len() as i64));
+                let no_fallback = match (&name.kind, &resolved_name) {
+                    (ExprKind::Identifier(n), Some(r)) => self.fcall_no_fallback_flag(n, r),
+                    _ => OperandType::Unused,
+                };
                 self.op_array.emit(Op {
                     opcode: OpCode::InitFCall,
                     op1: name_op,
                     op2: OperandType::Const(arg_count_idx),
-                    result: OperandType::Unused,
+                    result: no_fallback,
                     line: expr.span.line,
                 });
 
@@ -14706,14 +14730,23 @@ impl Compiler {
                                 self.prefix_with_namespace(name)
                             }
                         };
+                        // A qualified or imported name has no global
+                        // fallback (op2 flags it).
+                        let no_fallback = qualified.contains(&b'\\')
+                            && (name.contains(&b'\\') || self.use_const_map.contains_key(name));
                         let name_idx = self
                             .op_array
                             .add_literal(Value::String(PhpString::from_vec(qualified)));
                         let tmp = self.op_array.alloc_temp();
+                        let flag = if no_fallback {
+                            OperandType::Const(self.op_array.add_literal(Value::True))
+                        } else {
+                            OperandType::Unused
+                        };
                         self.op_array.emit(Op {
                             opcode: OpCode::ConstLookup,
                             op1: OperandType::Const(name_idx),
-                            op2: OperandType::Unused,
+                            op2: flag,
                             result: OperandType::Tmp(tmp),
                             line: expr.span.line,
                         });
