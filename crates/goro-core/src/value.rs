@@ -51,6 +51,39 @@ thread_local! {
     /// heap->peak: the highest MEMORY_USAGE since start / the last
     /// memory_reset_peak_usage().
     static MEMORY_PEAK: Cell<usize> = const { Cell::new(0) };
+    /// Custom heap handlers (zend_mm_set_custom_handlers()) observing the
+    /// allocations the accounting sees.
+    static MM_OBSERVER: Cell<Option<fn(MmEvent)>> = const { Cell::new(None) };
+}
+
+/// What custom heap handlers observe (see set_mm_observer()).
+#[derive(Clone, Copy, Debug)]
+pub enum MmEvent {
+    /// A block of this many bytes is allocated.
+    Alloc(usize),
+    /// A block of this many bytes is freed.
+    Free(usize),
+    /// zend_mm_gc() (gc_mem_caches()) freed this many bytes.
+    Gc(usize),
+}
+
+/// Install (or remove) custom heap handlers observing allocations.
+pub fn set_mm_observer(f: Option<fn(MmEvent)>) {
+    MM_OBSERVER.with(|o| o.set(f));
+}
+
+#[inline]
+fn mm_observe(ev: MmEvent) {
+    if let Some(f) = MM_OBSERVER.with(|o| o.get()) {
+        f(ev);
+    }
+}
+
+/// zend_mm_gc(): the allocator frees its cached memory (gc_mem_caches());
+/// nothing is cached here. Returns the bytes freed.
+pub fn memory_gc() -> usize {
+    mm_observe(MmEvent::Gc(0));
+    0
 }
 
 #[inline]
@@ -173,6 +206,7 @@ pub fn memory_alloc_reporting(bytes: usize, reported: usize) -> bool {
         }
         m.set(new_total);
         note_peak(new_total);
+        mm_observe(MmEvent::Alloc(bytes));
         true
     })
 }
@@ -193,6 +227,7 @@ pub fn memory_charge_reporting(bytes: usize, reported: usize) {
         }
         m.set(new_total);
         note_peak(new_total);
+        mm_observe(MmEvent::Alloc(bytes));
     })
 }
 
@@ -220,6 +255,7 @@ pub fn memory_free(bytes: usize) {
         let current = m.get();
         m.set(current.saturating_sub(bytes));
     });
+    mm_observe(MmEvent::Free(bytes));
 }
 
 /// Get current memory usage.

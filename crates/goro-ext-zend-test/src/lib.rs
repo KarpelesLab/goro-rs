@@ -18,6 +18,7 @@ mod fiber;
 mod functions;
 mod handlers;
 mod ini;
+mod mm;
 mod observer;
 mod support;
 
@@ -47,6 +48,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_extension(NAME);
     functions::register(vm);
     ini::register(vm);
+    mm::register(vm);
     register_constants(vm);
     classes::register(vm);
     fiber::register(vm);

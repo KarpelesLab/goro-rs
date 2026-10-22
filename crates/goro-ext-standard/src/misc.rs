@@ -345,6 +345,7 @@ final class StreamBucket {
     vm.register_function(b"gc_disable", gc_disable_fn);
     vm.register_function(b"gc_enable", gc_enable_fn);
     vm.register_function(b"gc_status", gc_status_fn);
+    vm.register_function(b"gc_mem_caches", gc_mem_caches_fn);
     vm.constants
         .entry(b"zend.enable_gc".to_vec())
         .or_insert(Value::String(PhpString::from_bytes(b"1")));
@@ -14475,6 +14476,11 @@ fn compact_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 fn gc_destructor_fiber_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     while goro_core::gc::dtor_step(vm) {}
     Ok(Value::Null)
+}
+
+/// gc_mem_caches(): zend_mm_gc()
+fn gc_mem_caches_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    Ok(Value::Long(goro_core::value::memory_gc() as i64))
 }
 
 fn gc_status_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

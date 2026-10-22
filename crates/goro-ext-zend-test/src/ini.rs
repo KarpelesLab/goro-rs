@@ -20,6 +20,7 @@ pub(crate) const ENTRIES: &[(&str, &str, u8)] = &[
     ("zend_test.str_test", "", ALL),
     ("zend_test.not_empty_str_test", "val", ALL_NOT_EMPTY),
     ("zend_test.observe_opline_in_zendmm", "0", ALL),
+    ("zend_test.zend_mm_custom_handlers.enabled", "0", ALL),
     ("zend_test.observer.enabled", "0", SYSTEM),
     ("zend_test.observer.show_output", "1", SYSTEM),
     ("zend_test.observer.observe_all", "0", SYSTEM),
@@ -114,7 +115,7 @@ pub(crate) fn ini_str(vm: &Vm, name: &str) -> Vec<u8> {
         .unwrap_or_default()
 }
 
-fn parse_bool(s: &[u8]) -> bool {
+pub(crate) fn parse_bool(s: &[u8]) -> bool {
     let t = s.trim_ascii();
     if t.eq_ignore_ascii_case(b"true")
         || t.eq_ignore_ascii_case(b"yes")
