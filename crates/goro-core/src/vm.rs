@@ -39712,6 +39712,34 @@ impl Vm {
                                     .into(),
                             line: op.line,
                         });
+                    } else if let Value::Object(obj) = &arr_val
+                        && native_handlers(obj).is_some_and(|h| h.read_dimension.is_some())
+                    {
+                        // An extension object: read_dimension(BP_VAR_W)
+                        let v = self.fetch_dim_from_object(
+                            &arr_val,
+                            Some(key_val.clone()),
+                            crate::fetch_w::DimFetch::W,
+                            op.line,
+                        );
+                        if self.current_exception.is_some() {
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: "Uncaught exception".into(),
+                                line: op.line,
+                            });
+                        }
+                        let v = match v.unwrap_or(Value::Null) {
+                            Value::Reference(r) => Value::Reference(r),
+                            other => Value::Reference(Rc::new(RefCell::new(other))),
+                        };
+                        self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
                     } else if let Value::Object(obj) = &arr_val {
                         // Type-check the offset for ArrayObject-family. PHP raises
                         // "Cannot access offset of type <t> on ArrayObject" when

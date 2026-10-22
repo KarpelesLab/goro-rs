@@ -940,6 +940,22 @@ impl Vm {
         if class_lower == b"weakmap" {
             return self.weakmap_fetch_dim_w(obj, key, mode);
         }
+        // An extension object's read_dimension handler (BP_VAR_W)
+        if let Some(f) = crate::vm::native_handlers(obj).and_then(|h| h.read_dimension) {
+            let k = key.as_ref().map(|k| k.deref());
+            if let Some(v) = f(self, obj, k.as_ref(), 1) {
+                if self.current_exception.is_some() {
+                    return None;
+                }
+                if !matches!(v, Value::Object(_) | Value::Reference(_)) {
+                    indirect_notice(self);
+                }
+                return Some(v);
+            }
+            if self.current_exception.is_some() {
+                return None;
+            }
+        }
         // spl_fixedarray_object_read_dimension() without an offset.
         if key.is_none()
             && self

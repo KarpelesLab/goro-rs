@@ -1587,6 +1587,38 @@ fn call_scoped_method_callable(
         b"self" | b"static" => org_lower.clone(),
         p => lower_bytes(p.strip_prefix(b"\\").unwrap_or(p)),
     };
+    if !vm.classes.contains_key(&target) {
+        // A method of a natively implemented internal class
+        let m = &method_lower[pos + 2..];
+        let fail = |vm: &mut Vm| VmError {
+            message: "Uncaught exception".into(),
+            line: vm.current_line,
+        };
+        if m == b"__construct" {
+            let h = vm.object_construct_handlers.get(&target).copied()?;
+            let obj = this?;
+            let mut a = vec![obj];
+            a.extend_from_slice(call_args);
+            let line = vm.current_line;
+            let _ = h(vm, &a, line);
+            return Some(if vm.current_exception.is_some() {
+                Err(fail(vm))
+            } else {
+                Ok(Value::Null)
+            });
+        }
+        let (native, h) = vm.find_native_class_handler(&target)?;
+        if !(h.has_method)(&native, m, this.is_none()) {
+            return None;
+        }
+        let had = vm.current_exception.is_some();
+        let r = (h.call)(vm, &native, m, &org_name, this.as_ref(), call_args);
+        return Some(if !had && vm.current_exception.is_some() {
+            Err(fail(vm))
+        } else {
+            Ok(r)
+        });
+    }
     let class = vm.classes.get(&target)?.clone();
     let method = class.get_method(&method_lower[pos + 2..])?;
     let mut op = method.op_array.clone();
