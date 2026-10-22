@@ -17756,6 +17756,15 @@ impl Vm {
                 }
             }
             self.current_exception = Some(exc_val);
+            // The check is the callee's RECV: observers see it begin and
+            // end with the exception.
+            if self.observer.is_some() && self.observe_frame_begin(user_fn) {
+                let err = Err(VmError {
+                    message: String::new(),
+                    line: def_line,
+                });
+                self.observe_frame_end(user_fn, &err);
+            }
             return Err(RecvFail::TypeError(err_msg, def_line));
         }
         // Emit implicit float-to-int deprecation for non-strict mode

@@ -334,10 +334,30 @@ fn init_backtrace(vm: &mut Vm, f: &Func, depth: usize) {
     if let Some(n) = &f.name {
         out.push_str(&format!("{}{}()\n", inner, n));
     }
-    // The function's own frame is on the call stack already.
-    let skip = usize::from(f.name.is_some() && !f.builtin);
-    for (name, _, _, _, _) in vm.call_stack.iter().rev().skip(skip) {
-        let n = name.replace("->", "::");
+    // Frames are named by their function's scope and name: a closure's
+    // frame by the class of its object.
+    let objects = vm.frame_objects();
+    let names: Vec<String> = vm
+        .call_stack
+        .iter()
+        .enumerate()
+        .map(|(i, (name, _, _, _, _))| {
+            let n = name.replace("->", "::");
+            match objects.get(i) {
+                Some(Some(Value::Object(o))) if n.starts_with("{closure") => {
+                    format!("{}::{}", String::from_utf8_lossy(&o.borrow().class_name), n)
+                }
+                _ => n,
+            }
+        })
+        .collect();
+    // The function's own frame may be on the call stack already.
+    let skip = usize::from(f.name.as_ref().is_some_and(|n| {
+        names
+            .last()
+            .is_some_and(|top| top == n || n.ends_with(&format!("::{top}")))
+    }));
+    for n in names.iter().rev().skip(skip) {
         match n.as_str() {
             "include" | "include_once" | "require" | "require_once" | "eval" => continue,
             _ => out.push_str(&format!("{}{}()\n", inner, n)),
