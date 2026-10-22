@@ -65,6 +65,31 @@ fn strtoul(s: &[u8], base: u32) -> (u64, usize, bool) {
     (v, i, overflow)
 }
 
+/// zend_ini_consume_quantity_prefix(): the position strtoull() starts
+/// parsing digits at, past whitespace, a sign and a base prefix.
+fn consume_quantity_prefix(s: &[u8], start: usize, end: usize, base: u32) -> usize {
+    let at = |i: usize| if i < end { s[i] } else { 0 };
+    let mut d = start;
+    while d < end && is_ws(s[d]) {
+        d += 1;
+    }
+    if at(d) == b'+' || at(d) == b'-' {
+        d += 1;
+    }
+    if at(d) == b'0' && !at(d + 1).is_ascii_digit() {
+        if d + 1 == end {
+            return d;
+        }
+        match at(d + 1) {
+            b'x' | b'X' | b'o' | b'O' => d += 2,
+            // 0b or 0B is valid in base 16, but not in the other bases.
+            b'b' | b'B' if base != 16 => d += 2,
+            _ => {}
+        }
+    }
+    d
+}
+
 /// Returns the parsed quantity (as unsigned bits) and an optional warning.
 pub fn parse_quantity(value: &[u8], signed: bool) -> (u64, Option<String>) {
     let mut lo = 0;
@@ -118,8 +143,9 @@ pub fn parse_quantity(value: &[u8], signed: bool) -> (u64, Option<String>) {
         }
         if base != 0 {
             d += 2;
-            let ok = d < hi && (s[d] as char).is_digit(base);
-            if !ok {
+            // strtoull() may silently skip whitespace, a sign and a base
+            // prefix, which would be invalid at this position.
+            if d == hi || d != consume_quantity_prefix(s, d, hi, base) {
                 return (
                     0,
                     Some(format!(

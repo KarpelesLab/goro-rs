@@ -38,6 +38,8 @@ $dirs = [
     'ext/sockets' => 'sockets',
     'ext/mysqli' => 'mysqli',
     'ext/uri' => 'uri',
+    // Test-only extension; its symbols only exist while it is loaded.
+    'ext/zend_test' => 'zend_test',
 ];
 
 const F_PUBLIC = 1;
@@ -73,7 +75,7 @@ foreach ($dirs as $dir => $ext) {
     sort($files);
     foreach ($files as $p) {
         // Zend's test-only stubs are not part of a normal build.
-        if (str_contains($p, 'zend_test')) continue;
+        if ($dir !== 'ext/zend_test' && str_contains($p, 'zend_test')) continue;
         parse_file($p, $ext);
     }
 }
@@ -509,21 +511,32 @@ foreach ($constants as $c) {
 echo "];\n\n";
 
 ksort($classes);
-echo "pub static CLASSES: &[StubClass] = &[\n";
-foreach ($classes as $c) {
-    $kind = ['class' => 0, 'interface' => 1, 'trait' => 2, 'enum' => 3][$c['kind']];
-    echo "    StubClass {\n";
-    echo "        name: " . rstr($c['name']) . ", kind: $kind, flags: 0x" . dechex($c['flags'] | ($c['deprecated'] ? F_DEPRECATED : 0)) . ", ext: " . rstr($c['ext']) . ",\n";
-    echo "        parent: " . rs($c['parent']) . ", interfaces: &[" . implode(', ', array_map('rstr', $c['interfaces'])) . "], backing: " . rstr($c['backing']) . ",\n";
-    echo "        consts: &[" . implode(', ', array_map(fn($k) => "StubConst { name: " . rstr($k['name']) . ", ty: " . rstr($k['type']) . ", value: " . rs($k['value']) . ", flags: 0x" . dechex($k['flags'] | ($k['deprecated'] ? F_DEPRECATED : 0)) . ", ext: \"\" }", $c['consts'])) . "],\n";
-    echo "        props: &[" . implode(', ', array_map(fn($k) => "StubProp { name: " . rstr($k['name']) . ", ty: " . rstr($k['type']) . ", default: " . rs($k['default']) . ", flags: 0x" . dechex($k['flags']) . " }", $c['props'])) . "],\n";
-    echo "        cases: &[" . implode(', ', array_map(fn($k) => "StubCase { name: " . rstr($k['name']) . ", value: " . rs($k['value']) . " }", $c['cases'])) . "],\n";
-    echo "        methods: &[\n";
-    foreach ($c['methods'] as $m) echo "            " . func_rs($m, false) . ",\n";
-    echo "        ],\n";
-    echo "    },\n";
+// Extensions declaring their classes themselves (with a ClassEntry, from PHP
+// source) only use their stubs for arginfo: they are kept out of CLASSES,
+// which describes the classes the VM implements natively.
+const SELF_DECLARED_CLASS_EXTS = ['zend_test'];
+function classes_rs(string $name, array $list, bool $methodExt): void {
+    echo "pub static $name: &[StubClass] = &[\n";
+    foreach ($list as $c) {
+        $kind = ['class' => 0, 'interface' => 1, 'trait' => 2, 'enum' => 3][$c['kind']];
+        echo "    StubClass {\n";
+        echo "        name: " . rstr($c['name']) . ", kind: $kind, flags: 0x" . dechex($c['flags'] | ($c['deprecated'] ? F_DEPRECATED : 0)) . ", ext: " . rstr($c['ext']) . ",\n";
+        echo "        parent: " . rs($c['parent']) . ", interfaces: &[" . implode(', ', array_map('rstr', $c['interfaces'])) . "], backing: " . rstr($c['backing']) . ",\n";
+        echo "        consts: &[" . implode(', ', array_map(fn($k) => "StubConst { name: " . rstr($k['name']) . ", ty: " . rstr($k['type']) . ", value: " . rs($k['value']) . ", flags: 0x" . dechex($k['flags'] | ($k['deprecated'] ? F_DEPRECATED : 0)) . ", ext: \"\" }", $c['consts'])) . "],\n";
+        echo "        props: &[" . implode(', ', array_map(fn($k) => "StubProp { name: " . rstr($k['name']) . ", ty: " . rstr($k['type']) . ", default: " . rs($k['default']) . ", flags: 0x" . dechex($k['flags']) . " }", $c['props'])) . "],\n";
+        echo "        cases: &[" . implode(', ', array_map(fn($k) => "StubCase { name: " . rstr($k['name']) . ", value: " . rs($k['value']) . " }", $c['cases'])) . "],\n";
+        echo "        methods: &[\n";
+        foreach ($c['methods'] as $m) {
+            $m['ext'] = $c['ext'];
+            echo "            " . func_rs($m, $methodExt) . ",\n";
+        }
+        echo "        ],\n";
+        echo "    },\n";
+    }
+    echo "];\n\n";
 }
-echo "];\n\n";
+classes_rs('CLASSES', array_filter($classes, fn($c) => !in_array($c['ext'], SELF_DECLARED_CLASS_EXTS, true)), false);
+classes_rs('SELF_DECLARED_CLASSES', array_filter($classes, fn($c) => in_array($c['ext'], SELF_DECLARED_CLASS_EXTS, true)), true);
 
 // Functions and methods implemented by another one (`@alias` /
 // `@implementation-alias`: ZEND_FALIAS, ZEND_RAW_FENTRY to the target's

@@ -7613,6 +7613,14 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 None => return Ok(Value::False),
             }
         }
+        // A stream: what remains of it (php_stream_copy_to_stream_ex()).
+        Value::Resource(_) => match vm.functions.get(b"stream_get_contents".as_slice()).copied() {
+            Some(f) => match f(vm, std::slice::from_ref(data_val))? {
+                Value::String(s) => s.as_bytes().to_vec(),
+                _ => return Ok(Value::False),
+            },
+            None => return Ok(Value::False),
+        },
         _ => data_val.to_php_string().as_bytes().to_vec(),
     };
     let path_str = path.to_string_lossy();
@@ -13006,8 +13014,25 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         let mut user = PhpArray::new();
         let mut libxml = PhpArray::new();
         let mut mysqli = PhpArray::new();
+        // Constants of extensions that list theirs (in module order).
+        let mut modules: Vec<(Vec<u8>, PhpArray)> = Vec::new();
+        for (module, names) in &vm.module_constants {
+            let mut arr = PhpArray::new();
+            for n in names {
+                if let Some(v) = vm.constants.get(n) {
+                    arr.set(
+                        goro_core::array::ArrayKey::String(PhpString::from_vec(n.clone())),
+                        v.clone(),
+                    );
+                }
+            }
+            modules.push((module.clone(), arr));
+        }
         for (name, val) in &vm.constants {
             if is_ini_entry_name(name) {
+                continue;
+            }
+            if vm.module_constants.iter().any(|(_, n)| n.contains(name)) {
                 continue;
             }
             let target = if name.starts_with(b"LIBXML_") {
@@ -13033,6 +13058,14 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 goro_core::array::ArrayKey::String(PhpString::from_bytes(b"mysqli")),
                 Value::Array(Rc::new(RefCell::new(mysqli))),
             );
+        }
+        for (module, arr) in modules {
+            if !arr.is_empty() {
+                result.set(
+                    goro_core::array::ArrayKey::String(PhpString::from_vec(module)),
+                    Value::Array(Rc::new(RefCell::new(arr))),
+                );
+            }
         }
         result.set(
             goro_core::array::ArrayKey::String(PhpString::from_bytes(b"user")),

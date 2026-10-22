@@ -72,6 +72,50 @@ impl Vm {
     /// Display an uncaught exception (or a not-yet-displayed fatal error)
     /// through the output layer. Clears `current_exception` and sets
     /// `fatal_emitted` so front-ends do not print it again.
+    /// zend_exception_error() reports an exception with what its
+    /// __toString() returns, which calls getTraceAsString() for each
+    /// exception of the chain: the observer sees these internal calls.
+    /// `report` is "Uncaught " followed by that string.
+    #[cold]
+    fn observe_uncaught_tostring(
+        &mut self,
+        exc: &Value,
+        chain: &[(String, String, String, u32, String)],
+        report: &str,
+    ) {
+        let base = |vm: &Vm, v: &Value| -> &'static str {
+            let Value::Object(o) = v else {
+                return "Exception";
+            };
+            let cl = o.borrow().class_name.to_ascii_lowercase();
+            if cl == b"error"
+                || crate::vm::is_builtin_subclass(&cl, b"error")
+                || vm.class_extends(&cl, b"error")
+            {
+                "Error"
+            } else {
+                "Exception"
+            }
+        };
+        let tostring = format!("{}::__toString", base(self, exc));
+        self.observe_internal_begin(&tostring);
+        let mut cur = exc.clone();
+        for (_, _, _, _, trace) in chain {
+            let name = format!("{}::getTraceAsString", base(self, &cur));
+            self.observe_internal_begin(&name);
+            let t = Value::String(PhpString::from_string(trace.clone()));
+            self.observe_internal_end(&name, Some(&t));
+            let next = match &cur {
+                Value::Object(o) => o.borrow().get_property(b"previous"),
+                _ => Value::Null,
+            };
+            cur = next;
+        }
+        let s = report.strip_prefix("Uncaught ").unwrap_or(report);
+        let s = Value::String(PhpString::from_string(s.to_string()));
+        self.observe_internal_end(&tostring, Some(&s));
+    }
+
     pub fn report_uncaught(&mut self, e: &VmError) {
         let stack_trace = self.format_stack_trace();
         let max_len = self.exception_string_param_max_len;
@@ -257,6 +301,9 @@ impl Vm {
                             trace_str
                         ));
                     }
+                }
+                if self.observer.is_some() {
+                    self.observe_uncaught_tostring(&exc, &chain, &fatal);
                 }
                 fatal.push_str("\n  thrown");
                 self.fatal_error_cb(

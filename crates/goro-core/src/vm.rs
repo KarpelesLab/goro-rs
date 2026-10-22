@@ -114,6 +114,61 @@ pub struct NativeClassHandler {
     pub param_names: Option<fn(&[u8], &[u8]) -> Option<&'static [&'static str]>>,
 }
 
+/// The function call hooks of the observer API (zend_observer.h), installed
+/// by an extension (`Vm::observer`): `begin` runs as a function starts
+/// executing (fcall_init + begin handlers), `end` as it finishes, with its
+/// return value (None when it threw or bailed out).
+#[derive(Clone, Copy)]
+pub struct ObserverHooks {
+    pub begin: fn(&mut Vm, &ObservedFrame),
+    pub end: fn(&mut Vm, &ObservedFrame, Option<&Value>),
+}
+
+/// Fiber events of the observer API (zend_observer_fiber_init_register(),
+/// _switch_register(), _destroy_register()). Contexts are identified by
+/// their fiber object's id; 0 is the main context.
+pub enum FiberEvent {
+    /// A fiber's context is initialized (Fiber::start()).
+    Init(u64),
+    /// Control switches between contexts, because of `kind`.
+    Switch {
+        from: u64,
+        to: u64,
+        kind: FiberSwitch,
+    },
+    /// A finished fiber's context is destroyed.
+    Destroy(u64),
+}
+
+/// What a fiber context switch does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FiberSwitch {
+    /// Into a fiber starting.
+    Start,
+    /// Into a suspended fiber (resume() / throw()).
+    Resume,
+    /// Into a suspended fiber being destroyed.
+    Destroying,
+    /// Out of a fiber suspending.
+    Suspend,
+    /// Out of a fiber whose function returned.
+    Returned,
+    /// Out of a fiber whose function threw.
+    Threw,
+    /// Out of a destroyed fiber that finished unwinding.
+    Destroyed,
+}
+
+/// The function an observer hook is called for.
+pub enum ObservedFrame<'a> {
+    /// User code: a function, method or closure, or the top-level code of
+    /// a script, an included file or eval()'d code (empty name).
+    User(&'a OpArray),
+    /// An internal function or method, by declared name ("var_dump",
+    /// "ReflectionProperty::isStatic").
+    Internal(&'a str),
+}
+
 /// Object handlers (zend_object_handlers equivalent) for extension objects
 /// whose `PhpObject::native` is set. Every hook may decline (return None /
 /// false) to get the default behaviour.
@@ -295,6 +350,32 @@ pub(crate) enum Flow {
     Continue,
     /// Leave the frame with this value.
     Return(Value),
+}
+
+/// The internal constructor or static method a DO_FCALL runs, when an
+/// observer watches it (see `Vm::observe_fcall`): its begin hook ran, its
+/// end hook runs when the call is over. (Kept per call, not on the VM: a
+/// fiber can suspend inside the call.)
+struct ObservedFcall(Option<String>);
+
+/// An outlined DO_FCALL handler's result, with its observation.
+struct ObservedFcallResult(ObservedFcall, Result<Flow, VmError>);
+
+impl ObservedFcall {
+    #[inline(always)]
+    fn run(self, f: impl FnOnce() -> Result<Flow, VmError>) -> ObservedFcallResult {
+        ObservedFcallResult(self, outlined(f))
+    }
+}
+
+impl ObservedFcallResult {
+    #[inline(always)]
+    fn end(self, vm: &mut Vm) -> Result<Flow, VmError> {
+        if let Some(n) = self.0.0 {
+            vm.observe_fcall_end(&n, self.1.is_ok());
+        }
+        self.1
+    }
 }
 
 /// Runs a big opcode handler in its own stack frame: the dispatch loop's
@@ -816,6 +897,21 @@ pub struct Vm {
     /// the number of registered functions changes.
     pub(crate) zpp_map: crate::fxhash::FxHashMap<Vec<u8>, (&'static crate::arginfo::FuncInfo, u8)>,
     pub(crate) zpp_map_fn_count: usize,
+    /// Builtins of extensions whose stub arginfo matches their zpp (the
+    /// counterpart of arginfo_verified.rs for extensions not covered by it):
+    /// lowercase name -> CHECK_* flags. Set at registration.
+    pub zpp_extension_verified: HashMap<Vec<u8>, u8>,
+    /// Observer API hooks (zend_observer_fcall_register()), if an extension
+    /// installed them: one check per call when there are none.
+    pub observer: Option<ObserverHooks>,
+    /// Observer API fiber hooks, if an extension installed them.
+    pub fiber_observer: Option<fn(&mut Vm, FiberEvent)>,
+    /// The next top-level code run is a script, an included file or eval()'d
+    /// code (observed as a "file" frame).
+    pub(crate) observe_code: bool,
+    /// Builtins taking extra named arguments (Z_PARAM_VARIADIC_WITH_NAMED):
+    /// they receive them in `pending_named_args`.
+    pub builtin_named_variadics: std::collections::HashSet<Vec<u8>>,
     /// Internal methods (class -> method) with verified stub arginfo
     pub(crate) zpp_method_map: crate::fxhash::FxHashMap<
         Vec<u8>,
@@ -860,6 +956,14 @@ pub struct Vm {
     pub headers_sent: bool,
     /// Constants registered by extensions with CONST_DEPRECATED: name -> message.
     pub internal_deprecated_constants: HashMap<Vec<u8>, String>,
+    /// Declarations of builtins carrying what their stub declares besides
+    /// arginfo (attributes, parameter attributes, an exposed doc comment),
+    /// for Reflection: lowercase name -> declaration.
+    pub internal_function_decls: HashMap<Vec<u8>, Rc<OpArray>>,
+    /// Constants extensions register, in registration order, by module
+    /// (lowercase name): ReflectionExtension::getConstants(),
+    /// get_defined_constants(true).
+    pub module_constants: Vec<(Vec<u8>, Vec<Vec<u8>>)>,
     /// OG(output_start_filename/lineno): where output started.
     pub output_start: Option<(String, u32)>,
     /// Stream-wrapper include hook: returns the source of an include/require
@@ -1957,6 +2061,11 @@ impl Vm {
             builtin_named_skipped: Vec::new(),
             zpp_map: Default::default(),
             zpp_map_fn_count: usize::MAX,
+            zpp_extension_verified: Default::default(),
+            builtin_named_variadics: std::collections::HashSet::new(),
+            observer: None,
+            fiber_observer: None,
+            observe_code: false,
             zpp_method_map: Default::default(),
             zpp_internal_class_cache: Default::default(),
             zpp_return_names: Default::default(),
@@ -1973,6 +2082,8 @@ impl Vm {
             headers_sent: false,
             rfc1867_callback: None,
             internal_deprecated_constants: HashMap::new(),
+            internal_function_decls: HashMap::new(),
+            module_constants: Vec::new(),
             output_start: None,
             include_stream_hook: None,
             socket_stream_hooks: None,
@@ -3665,6 +3776,32 @@ impl Vm {
         }
     }
 
+    /// The #[\Deprecated] and #[\NoDiscard] attributes of a builtin with a
+    /// declaration (`internal_function_decls`), checked before it is called;
+    /// `unused`: the call's result is discarded.
+    fn internal_decl_call_checks(&mut self, func_lower: &[u8], unused: bool, line: u32) {
+        let Some(decl) = self.internal_function_decls.get(func_lower).cloned() else {
+            return;
+        };
+        if decl.attributes.is_empty() {
+            return;
+        }
+        let display = match crate::arginfo::lookup(func_lower) {
+            Some(info) => info.name.to_string(),
+            None => String::from_utf8_lossy(func_lower).into_owned(),
+        };
+        if let Some(custom) = self.get_deprecated_message(&decl.attributes) {
+            let msg = self.format_deprecated_message(&format!("Function {}()", display), &custom);
+            self.emit_deprecated_at(&msg, line);
+            if self.current_exception.is_some() {
+                return;
+            }
+        }
+        if unused {
+            self.emit_nodiscard_warning(&decl.attributes, &display, true, line);
+        }
+    }
+
     /// Compose a deprecation banner with the right separator before the suffix.
     /// PHP renders "X is deprecated" (no suffix), "X is deprecated, msg" (with msg only),
     /// "X is deprecated since V" (with since only), or "X is deprecated since V, msg" (both).
@@ -5116,6 +5253,13 @@ impl Vm {
                                 .builtin_implements_interface(&obj_class_lower, &class_name_lower)
                             {
                                 return true;
+                            }
+                            // An internal class described by the stubs: its
+                            // declared ancestry decides.
+                            if let Some(r) =
+                                crate::stubs::stub_instanceof(&obj_class_lower, &class_name_lower)
+                            {
+                                return r;
                             }
                             // If target is a common interface/abstract class we don't track,
                             // be permissive and accept any object
@@ -7673,6 +7817,294 @@ impl Vm {
     /// Pop a class scope
     pub fn pop_class_scope(&mut self) {
         self.class_scope_stack.pop();
+    }
+
+    /// The argument of an int-backed enum's from()/tryFrom() after weak
+    /// zpp coercion (Z_PARAM_LONG): numeric strings, floats with an
+    /// integral value and bools become ints; anything else is left for the
+    /// type check.
+    fn enum_from_weak_int(&mut self, backing: &[u8], arg: Value, strict: bool, line: u32) -> Value {
+        if strict
+            || !backing.eq_ignore_ascii_case(b"int")
+            || !matches!(
+                arg,
+                Value::String(_) | Value::Double(_) | Value::True | Value::False
+            )
+        {
+            return arg;
+        }
+        match self.zpp_coerce_scalar(crate::arginfo::T_INT, &arg, false, line) {
+            Ok(Some(v)) => v,
+            _ => arg,
+        }
+    }
+
+    /// The observer's begin hook for a user frame about to run; whether it
+    /// is observed (its end hook must run).
+    #[cold]
+    #[inline(never)]
+    fn observe_frame_begin(&mut self, op_array: &OpArray) -> bool {
+        let Some(h) = self.observer else {
+            return false;
+        };
+        if op_array.is_generator
+            || (op_array.name.is_empty() && !std::mem::take(&mut self.observe_code))
+        {
+            return false;
+        }
+        (h.begin)(self, &ObservedFrame::User(op_array));
+        true
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn observe_frame_end(&mut self, op_array: &OpArray, result: &Result<Value, VmError>) {
+        let Some(h) = self.observer else {
+            return;
+        };
+        let rv = match result {
+            Ok(Value::Undef) => Some(Value::Null),
+            Ok(Value::Reference(r)) => Some(r.borrow().clone()),
+            Ok(v) => Some(v.clone()),
+            Err(_) => None,
+        };
+        (h.end)(self, &ObservedFrame::User(op_array), rv.as_ref());
+    }
+
+    /// "Class::method" of internal method `method_lower` of internal class
+    /// `class_lower`, as declared (the declaring class).
+    pub(crate) fn internal_method_display(
+        &self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) -> String {
+        match crate::stubs::find_method(class_lower, method_lower) {
+            Some((c, m)) => format!("{}::{}", c.name, m.name),
+            None => format!(
+                "{}::{}",
+                self.builtin_canonical_name(class_lower),
+                String::from_utf8_lossy(method_lower)
+            ),
+        }
+    }
+
+    /// The observer's id of the running fiber context (0: main).
+    fn fiber_context_id(&self) -> u64 {
+        match &self.current_fiber {
+            Some(Value::Object(o)) => o.borrow().object_id,
+            _ => 0,
+        }
+    }
+
+    #[inline]
+    fn fiber_event(&mut self, ev: FiberEvent) {
+        if let Some(f) = self.fiber_observer {
+            f(self, ev);
+        }
+    }
+
+    /// The fiber context switches after a fiber ran: suspended or finished.
+    fn fiber_switch_out(
+        &mut self,
+        obj_rc: &Rc<RefCell<PhpObject>>,
+        to: u64,
+        result: &Result<crate::fiber::FiberYield, crate::fiber::FiberOutcome>,
+    ) {
+        if self.fiber_observer.is_none() {
+            return;
+        }
+        let id = obj_rc.borrow().object_id;
+        let destroyed = obj_rc
+            .borrow()
+            .get_property(b"__fiber_destroyed")
+            .is_truthy();
+        let kind = match result {
+            Ok(_) => FiberSwitch::Suspend,
+            Err(crate::fiber::FiberOutcome::Returned(_)) if destroyed => FiberSwitch::Destroyed,
+            Err(crate::fiber::FiberOutcome::Threw(e)) if destroyed && Self::is_graceful_exit(e) => {
+                FiberSwitch::Destroyed
+            }
+            Err(crate::fiber::FiberOutcome::Returned(_)) => FiberSwitch::Returned,
+            Err(_) => FiberSwitch::Threw,
+        };
+        self.fiber_event(FiberEvent::Switch { from: id, to, kind });
+        if kind != FiberSwitch::Suspend {
+            self.fiber_event(FiberEvent::Destroy(id));
+        }
+    }
+
+    /// The internal method `method_lower` called on an object of class
+    /// `class_lower` runs when the call is initialized (it takes no
+    /// arguments): its "Class::method" for the observer.
+    fn observed_internal_method(&self, class_lower: &[u8], method_lower: &[u8]) -> Option<String> {
+        // (Constructors run with their arguments, at the call.)
+        if method_lower == b"__construct" {
+            return None;
+        }
+        let mut cur = class_lower.to_vec();
+        for _ in 0..64 {
+            match self.classes.get(&cur) {
+                Some(ce) if ce.methods.contains_key(method_lower) => return None,
+                Some(ce) => cur = ce.parent.as_ref()?.to_ascii_lowercase(),
+                None => {
+                    if self.is_spl_args_method(&cur, method_lower) {
+                        return None;
+                    }
+                    let (c, m) = crate::stubs::find_method(&cur, method_lower)?;
+                    return Some(format!("{}::{}", c.name, m.name));
+                }
+            }
+        }
+        None
+    }
+
+    /// "Class::method" of the internal method `method_lower` an object of
+    /// class `class_lower` has (declared or inherited), for the observer.
+    fn observed_internal_method_any(
+        &self,
+        class_lower: &[u8],
+        method_lower: &[u8],
+    ) -> Option<String> {
+        let mut cur = class_lower.to_vec();
+        for _ in 0..64 {
+            match self.classes.get(&cur) {
+                Some(ce) if ce.methods.contains_key(method_lower) => return None,
+                Some(ce) => cur = ce.parent.as_ref()?.to_ascii_lowercase(),
+                None => {
+                    let (c, m) = crate::stubs::find_method(&cur, method_lower)?;
+                    return Some(format!("{}::{}", c.name, m.name));
+                }
+            }
+        }
+        None
+    }
+
+    /// A DO_FCALL starts: an internal constructor or static method it
+    /// runs is observed inside the call (when there is an observer).
+    #[inline(always)]
+    fn observe_fcall(&mut self) -> ObservedFcall {
+        match self.observer {
+            None => ObservedFcall(None),
+            Some(_) => self.observe_fcall_begin(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn observe_fcall_begin(&mut self) -> ObservedFcall {
+        let observed = self.observed_internal_ctor();
+        if let Some(n) = &observed {
+            self.observe_internal_begin(n);
+        }
+        ObservedFcall(observed)
+    }
+
+    /// The internal call observe_fcall_begin() saw is over.
+    #[cold]
+    #[inline(never)]
+    fn observe_fcall_end(&mut self, n: &str, ok: bool) {
+        let rv = (ok && self.current_exception.is_none()).then_some(Value::Null);
+        self.observe_internal_end(n, rv.as_ref());
+    }
+
+    /// The internal constructor the pending call runs, if it is one:
+    /// "Class::__construct" (the declaring class).
+    fn observed_internal_ctor(&self) -> Option<String> {
+        let call = self.pending_calls.last()?;
+        let name = call.name.as_bytes();
+        let lname = name.to_ascii_lowercase();
+        let (class_part, method) = match lname.windows(2).position(|w| w == b"::") {
+            Some(p) => (Some(&lname[..p]), &lname[p + 2..]),
+            None => (None, lname.as_slice()),
+        };
+        let is_ctor = method == b"__construct";
+        // Static internal methods (Class::method()) other than constructors.
+        if !is_ctor && class_part.is_none() {
+            return None;
+        }
+        let mut cur: Vec<u8> = match class_part {
+            Some(b"parent") => {
+                let scope = self.class_scope_stack.last()?;
+                self.classes
+                    .get(scope)?
+                    .parent
+                    .as_ref()?
+                    .to_ascii_lowercase()
+            }
+            Some(b"self") if !is_ctor => self.class_scope_stack.last()?.clone(),
+            Some(b"static") if !is_ctor => self.called_class_stack.last()?.to_ascii_lowercase(),
+            Some(b"self") | Some(b"static") | None => match call.args.first() {
+                Some(Value::Object(o)) => o.borrow().class_name.to_ascii_lowercase(),
+                _ => return None,
+            },
+            Some(c) => c.strip_prefix(b"\\").unwrap_or(c).to_vec(),
+        };
+        if cur.starts_with(b"__") {
+            // VM-internal dispatch names (__fiber::start, __spl::...).
+            return None;
+        }
+        for _ in 0..64 {
+            match self.classes.get(&cur) {
+                // A user (or PHP-implemented) method runs as a frame.
+                Some(ce) if ce.methods.contains_key(method) => return None,
+                // The methods of enums (cases(), from(), tryFrom()).
+                Some(ce)
+                    if ce.is_enum
+                        && (method == b"cases"
+                            || (ce.enum_backing_type.is_some()
+                                && (method == b"from" || method == b"tryfrom"))) =>
+                {
+                    let m = match method {
+                        b"cases" => "cases",
+                        b"from" => "from",
+                        _ => "tryFrom",
+                    };
+                    return Some(format!("{}::{}", String::from_utf8_lossy(&ce.name), m));
+                }
+                Some(ce) => cur = ce.parent.as_ref()?.to_ascii_lowercase(),
+                None => {
+                    let (c, m) = crate::stubs::find_method(&cur, method)?;
+                    if !is_ctor && !m.is_static() {
+                        return None;
+                    }
+                    return Some(format!("{}::{}", c.name, m.name));
+                }
+            }
+        }
+        None
+    }
+
+    /// Observer begin hook for an internal method run by the VM itself
+    /// (`name`: "Class::method"), if there is an observer.
+    #[inline]
+    pub(crate) fn observe_internal_begin(&mut self, name: &str) {
+        if let Some(h) = self.observer {
+            (h.begin)(self, &ObservedFrame::Internal(name));
+        }
+    }
+
+    /// Observer end hook matching `observe_internal_begin`.
+    #[inline]
+    pub(crate) fn observe_internal_end(&mut self, name: &str, retval: Option<&Value>) {
+        if let Some(h) = self.observer {
+            (h.end)(self, &ObservedFrame::Internal(name), retval);
+        }
+    }
+
+    /// Run a compiled script (its main op_array, with the classes it
+    /// declares) in a scope of its own, like an included file without
+    /// variables of the includer.
+    pub fn run_compiled(
+        &mut self,
+        op_array: &OpArray,
+        classes: Vec<ClassEntry>,
+    ) -> Result<Value, VmError> {
+        let saved_pending = std::mem::replace(&mut self.pending_classes, classes);
+        let cvs = vec![Value::Undef; op_array.cv_names.len()];
+        self.observe_code = true;
+        let r = self.execute_op_array(op_array, cvs);
+        self.pending_classes = saved_pending;
+        r
     }
 
     /// Public wrapper for execute_op_array (used by reflection invoke)
@@ -14117,56 +14549,85 @@ impl Vm {
                 }
             }
 
-            // Try SPL built-in method dispatch
-            // First try no-arg dispatch
-            let result = self.dispatch_spl_method(&class_lower, &method_lower, obj);
+            // Internal methods: the observer sees them run.
+            let observed = if self.observer.is_some() {
+                self.observed_internal_method_any(&class_lower, &method_lower)
+            } else {
+                None
+            };
+            if let Some(n) = &observed {
+                self.observe_internal_begin(n);
+            }
+            let r = self.call_internal_method(obj, obj_val, &class_lower, &method_lower, args);
+            if let Some(n) = &observed {
+                self.observe_internal_end(n, r.as_ref());
+            }
+            return r;
+        }
+        None
+    }
+
+    /// call_object_method() for an internal method (no-argument and
+    /// argument-taking dispatch, up the class chain).
+    fn call_internal_method(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        obj_val: &Value,
+        class_lower: &[u8],
+        method_lower: &[u8],
+        args: &[Value],
+    ) -> Option<Value> {
+        let class_lower = class_lower.to_vec();
+        let method_lower = method_lower.to_vec();
+        // Try SPL built-in method dispatch
+        // First try no-arg dispatch
+        let result = self.dispatch_spl_method(&class_lower, &method_lower, obj);
+        if result.is_some() {
+            return result;
+        }
+
+        // Try args-based SPL dispatch
+        if self.is_spl_args_method(&class_lower, &method_lower) {
+            let mut spl_args = vec![obj_val.clone()];
+            spl_args.extend_from_slice(args);
+            let result = self.handle_spl_docall(&class_lower, &method_lower, &spl_args);
             if result.is_some() {
                 return result;
             }
+        }
 
-            // Try args-based SPL dispatch
-            if self.is_spl_args_method(&class_lower, &method_lower) {
+        // Check parent classes for SPL dispatch. The class chain may go
+        // through user-defined classes (e.g. `class MyHeap extends SplHeap`)
+        // before reaching a built-in like SplHeap, so walk both user and
+        // built-in parent edges.
+        let mut current_lower = class_lower.clone();
+        for _ in 0..50 {
+            let next_lower: Option<Vec<u8>> = self
+                .classes
+                .get(&current_lower)
+                .and_then(|c| c.parent.clone())
+                .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
+                .or_else(|| {
+                    get_builtin_parent(&current_lower)
+                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
+                });
+            let parent_lower = match next_lower {
+                Some(p) => p,
+                None => break,
+            };
+            let result = self.dispatch_spl_method(&parent_lower, &method_lower, obj);
+            if result.is_some() {
+                return result;
+            }
+            if self.is_spl_args_method(&parent_lower, &method_lower) {
                 let mut spl_args = vec![obj_val.clone()];
                 spl_args.extend_from_slice(args);
-                let result = self.handle_spl_docall(&class_lower, &method_lower, &spl_args);
+                let result = self.handle_spl_docall(&parent_lower, &method_lower, &spl_args);
                 if result.is_some() {
                     return result;
                 }
             }
-
-            // Check parent classes for SPL dispatch. The class chain may go
-            // through user-defined classes (e.g. `class MyHeap extends SplHeap`)
-            // before reaching a built-in like SplHeap, so walk both user and
-            // built-in parent edges.
-            let mut current_lower = class_lower.clone();
-            for _ in 0..50 {
-                let next_lower: Option<Vec<u8>> = self
-                    .classes
-                    .get(&current_lower)
-                    .and_then(|c| c.parent.clone())
-                    .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
-                    .or_else(|| {
-                        get_builtin_parent(&current_lower)
-                            .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect())
-                    });
-                let parent_lower = match next_lower {
-                    Some(p) => p,
-                    None => break,
-                };
-                let result = self.dispatch_spl_method(&parent_lower, &method_lower, obj);
-                if result.is_some() {
-                    return result;
-                }
-                if self.is_spl_args_method(&parent_lower, &method_lower) {
-                    let mut spl_args = vec![obj_val.clone()];
-                    spl_args.extend_from_slice(args);
-                    let result = self.handle_spl_docall(&parent_lower, &method_lower, &spl_args);
-                    if result.is_some() {
-                        return result;
-                    }
-                }
-                current_lower = parent_lower;
-            }
+            current_lower = parent_lower;
         }
         None
     }
@@ -14462,6 +14923,7 @@ impl Vm {
         // execute_op_array_inner).
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
         self.bind_next_frame = true;
+        self.observe_code = true;
         self.execute_op_array(op_array, cvs)
     }
 
@@ -15497,7 +15959,14 @@ impl Vm {
                 .find(|&e| e != crate::errdisplay::ER_SILENT)
                 .unwrap_or(crate::errdisplay::E_ALL);
         }
+        // Generator bodies are observed as they run (each resumption); of
+        // top-level code, only scripts, included files and eval()'d code
+        // (not code the engine runs internally, like attribute arguments).
+        let observed = self.observer.is_some() && self.observe_frame_begin(op_array);
         let result = self.execute_op_array_inner(op_array, cvs, cv_frame);
+        if observed {
+            self.observe_frame_end(op_array, &result);
+        }
         if unsilenced {
             self.error_reporting = crate::errdisplay::ER_SILENT;
         }
@@ -15581,9 +16050,15 @@ impl Vm {
                 ret_ref = Some(r);
             }
         }
-        // Coerce return value in weak mode
+        // Coerce return value in weak mode (internal functions implemented in
+        // PHP don't verify their return values, like ZEND_INTERNAL_FUNCTIONs
+        // in release builds)
         if let Ok(ref mut val) = result {
-            if let Some(ref ret_type) = op_array.return_type {
+            if let Some(ref ret_type) = op_array
+                .return_type
+                .as_ref()
+                .filter(|_| op_array.internal_sig.is_none())
+            {
                 // Note: implicit float-to-int deprecation is emitted at the
                 // OpCode::Return site (before finally blocks run), not here.
                 // (strict mode only widens int to float)
@@ -15840,6 +16315,10 @@ impl Vm {
         let mut cvs = cvs;
         let mut tmps = tmps;
         let mut stepped = false;
+        // Internal methods implemented in PHP (extension classes declared from
+        // source, see OpArray::internal_sig) have no lines of their own: the
+        // executed line stays the caller's (zend_get_executed_lineno()).
+        let internal_code = op_array.internal_sig.is_some();
         let ForeachState {
             positions: foreach_positions,
             iter_handles: foreach_iter_handles,
@@ -16035,7 +16514,9 @@ impl Vm {
 
             let op = &op_array.ops[ip];
             ip += 1;
-            self.current_line = op.line;
+            if !internal_code {
+                self.current_line = op.line;
+            }
             // In-place modification of a CV holding a reference bound to typed
             // properties is verified after the op.
             let typed_ref_watch = if !typed_ref::any() {
@@ -21342,7 +21823,9 @@ impl Vm {
                         Flow::Return(v) => return Ok(v),
                     }
                 }
-                OpCode::DoFCall => match outlined(|| -> Result<Flow, VmError> {
+                // (An internal constructor or static method is observed
+                // inside the call.)
+                OpCode::DoFCall => match self.observe_fcall().run(|| -> Result<Flow, VmError> {
                     self.last_call_by_ref = false;
                     let mut call = self.pending_calls.pop().ok_or_else(|| VmError {
                         message: "no pending function call".into(),
@@ -21388,7 +21871,8 @@ impl Vm {
                                 let mut resolved_name = resolved_class;
                                 resolved_name.extend_from_slice(&call_name_bytes[4..]); // keep "::" and rest
                                 call.name = PhpString::from_vec(resolved_name);
-                            } else if let Some(called) = self.called_class_stack.last().cloned() {
+                            } else if let Some(called) = self.called_class_stack.last().cloned()
+                            {
                                 let mut resolved_name = called;
                                 resolved_name.extend_from_slice(&call_name_bytes[4..]); // keep "::" and rest
                                 call.name = PhpString::from_vec(resolved_name);
@@ -21453,7 +21937,8 @@ impl Vm {
                                 let global_name = func_name_lower[last_sep + 1..].to_vec();
                                 let global_has_user =
                                     self.user_functions.contains_key(&global_name);
-                                let global_has_builtin = self.functions.contains_key(&global_name);
+                                let global_has_builtin =
+                                    self.functions.contains_key(&global_name);
                                 if global_has_user || global_has_builtin {
                                     // Also update call.name to preserve original case of global name
                                     let orig_bytes = call.name.as_bytes();
@@ -21486,7 +21971,8 @@ impl Vm {
 
                     // Generic zpp for static methods of internal classes
                     // (verified stub arginfo).
-                    if (func_name_lower.first() == Some(&b'_') || func_name_lower.contains(&b':'))
+                    if (func_name_lower.first() == Some(&b'_')
+                        || func_name_lower.contains(&b':'))
                         && self.zpp_internal_static(
                             &func_name_lower,
                             &mut call.args,
@@ -21495,7 +21981,9 @@ impl Vm {
                             op.line,
                         )
                     {
-                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                        if let Some((catch_target, _, _, _, saved_pc)) =
+                            exception_handlers.pop()
+                        {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
                             return Ok(Flow::Continue);
@@ -21529,7 +22017,8 @@ impl Vm {
                                     match cvs.first() {
                                         Some(v @ Value::Object(o)) => {
                                             let cl = o.borrow().class_name.to_ascii_lowercase();
-                                            if cl == native || self.class_extends(&cl, &native) {
+                                            if cl == native || self.class_extends(&cl, &native)
+                                            {
                                                 Some(v.clone())
                                             } else {
                                                 None
@@ -21540,13 +22029,13 @@ impl Vm {
                                 } else {
                                     None
                                 };
-                                if (h.has_method)(&native, &method_part, true) || fwd_this.is_some()
+                                if (h.has_method)(&native, &method_part, true)
+                                    || fwd_this.is_some()
                                 {
                                     let called: Vec<u8> = if is_forwarding_call {
-                                        self.called_class_stack
-                                            .last()
-                                            .cloned()
-                                            .unwrap_or_else(|| call.name.as_bytes()[..sep].to_vec())
+                                        self.called_class_stack.last().cloned().unwrap_or_else(
+                                            || call.name.as_bytes()[..sep].to_vec(),
+                                        )
                                     } else {
                                         call.name.as_bytes()[..sep].to_vec()
                                     };
@@ -21554,7 +22043,9 @@ impl Vm {
                                         "{}{}{}",
                                         self.builtin_canonical_name(&native),
                                         if fwd_this.is_some() { "->" } else { "::" },
-                                        String::from_utf8_lossy(&call.name.as_bytes()[sep + 2..])
+                                        String::from_utf8_lossy(
+                                            &call.name.as_bytes()[sep + 2..]
+                                        )
                                     );
                                     // A forwarded instance call gets its frame from the
                                     // native method dispatch itself.
@@ -21716,7 +22207,9 @@ impl Vm {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         self.pending_calls.truncate(saved_pc);
                                         while self.error_reporting_stack.len() > saved_depth {
-                                            if let Some(saved) = self.error_reporting_stack.pop() {
+                                            if let Some(saved) =
+                                                self.error_reporting_stack.pop()
+                                            {
                                                 self.error_reporting = saved;
                                             }
                                         }
@@ -21724,11 +22217,13 @@ impl Vm {
                                             catch_target
                                         } else {
                                             finally_target
-                                        } as usize;
+                                        }
+                                            as usize;
                                         return Ok(Flow::Continue);
                                     }
                                     return Err(VmError {
-                                        message: "Uncaught exception thrown into fiber".to_string(),
+                                        message: "Uncaught exception thrown into fiber"
+                                            .to_string(),
                                         line: op.line,
                                     });
                                 }
@@ -21803,7 +22298,8 @@ impl Vm {
                         // Handle Fiber instance method calls (start, resume, throw)
                         let method = &func_name_lower[9..]; // skip "__fiber::"
                         let fiber_obj = call.args.first().cloned().unwrap_or(Value::Null);
-                        let extra_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+                        let extra_args: Vec<Value> =
+                            call.args.iter().skip(1).cloned().collect();
 
                         // Push call stack entry for fiber methods
                         let method_display = match method {
@@ -21821,8 +22317,21 @@ impl Vm {
                             true,
                         ));
 
-                        let result =
-                            self.fiber_dispatch_method(&fiber_obj, method, &extra_args, op.line);
+                        let observed = self
+                            .observer
+                            .map(|_| self.internal_method_display(b"fiber", method));
+                        if let Some(n) = &observed {
+                            self.observe_internal_begin(n);
+                        }
+                        let result = self.fiber_dispatch_method(
+                            &fiber_obj,
+                            method,
+                            &extra_args,
+                            op.line,
+                        );
+                        if let Some(n) = &observed {
+                            self.observe_internal_end(n, result.as_ref().ok());
+                        }
                         match result {
                             Ok(val) => {
                                 self.call_stack.pop();
@@ -21873,21 +22382,20 @@ impl Vm {
                         if let Value::Object(obj_rc) = &arg {
                             let target_oid = obj_rc.borrow().object_id;
                             // Check for existing WeakReference (singleton pattern)
-                            let existing =
-                                self.weak_ref_cache
-                                    .get(&target_oid)
-                                    .and_then(|(wid, wr_val)| {
-                                        // Verify the WeakReference itself is still alive
-                                        if let Value::Object(wr_rc) = wr_val {
-                                            if Rc::strong_count(wr_rc) > 0 {
-                                                Some((*wid, wr_val.clone()))
-                                            } else {
-                                                None
-                                            }
+                            let existing = self.weak_ref_cache.get(&target_oid).and_then(
+                                |(wid, wr_val)| {
+                                    // Verify the WeakReference itself is still alive
+                                    if let Value::Object(wr_rc) = wr_val {
+                                        if Rc::strong_count(wr_rc) > 0 {
+                                            Some((*wid, wr_val.clone()))
                                         } else {
                                             None
                                         }
-                                    });
+                                    } else {
+                                        None
+                                    }
+                                },
+                            );
                             if let Some((_wid, wr_val)) = existing {
                                 self.write_operand(
                                     &op.result,
@@ -21905,7 +22413,8 @@ impl Vm {
 
                                 // Create the WeakReference object
                                 let wr_id = self.alloc_object_id();
-                                let mut wr_obj = PhpObject::new(b"WeakReference".to_vec(), wr_id);
+                                let mut wr_obj =
+                                    PhpObject::new(b"WeakReference".to_vec(), wr_id);
                                 wr_obj.set_property(
                                     b"__weak_ref_id".to_vec(),
                                     Value::Long(weak_id as i64),
@@ -21951,7 +22460,8 @@ impl Vm {
                         // WeakMap instance method calls
                         let method = &func_name_lower[11..]; // skip "__weakmap::"
                         let wm_obj = call.args.first().cloned().unwrap_or(Value::Null);
-                        let extra_args: Vec<Value> = call.args.iter().skip(1).cloned().collect();
+                        let extra_args: Vec<Value> =
+                            call.args.iter().skip(1).cloned().collect();
                         let wm_id = if let Value::Object(ref rc) = wm_obj {
                             rc.borrow().object_id
                         } else {
@@ -21959,20 +22469,22 @@ impl Vm {
                         };
                         match method {
                             b"offsetget" => {
-                                let key_obj = extra_args.first().cloned().unwrap_or(Value::Null);
+                                let key_obj =
+                                    extra_args.first().cloned().unwrap_or(Value::Null);
                                 if let Value::Object(key_rc) = &key_obj {
                                     let key_oid = key_rc.borrow().object_id;
-                                    let result =
-                                        if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                                            entries
-                                                .iter()
-                                                .find(|(oid, weak, _)| {
-                                                    *oid == key_oid && weak.upgrade().is_some()
-                                                })
-                                                .map(|(_, _, v)| v.clone())
-                                        } else {
-                                            None
-                                        };
+                                    let result = if let Some(entries) =
+                                        self.weak_map_entries.get(&wm_id)
+                                    {
+                                        entries
+                                            .iter()
+                                            .find(|(oid, weak, _)| {
+                                                *oid == key_oid && weak.upgrade().is_some()
+                                            })
+                                            .map(|(_, _, v)| v.clone())
+                                    } else {
+                                        None
+                                    };
                                     if let Some(val) = result {
                                         self.write_operand(
                                             &op.result,
@@ -21989,7 +22501,8 @@ impl Vm {
                                             "Object {}#{} not contained in WeakMap",
                                             class_display, key_oid
                                         );
-                                        let exc = self.create_exception(b"Error", &msg, op.line);
+                                        let exc =
+                                            self.create_exception(b"Error", &msg, op.line);
                                         self.current_exception = Some(exc);
                                         if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                             exception_handlers.last()
@@ -22021,13 +22534,15 @@ impl Vm {
                                 }
                             }
                             b"offsetset" => {
-                                let key_obj = extra_args.first().cloned().unwrap_or(Value::Null);
+                                let key_obj =
+                                    extra_args.first().cloned().unwrap_or(Value::Null);
                                 let val = extra_args.get(1).cloned().unwrap_or(Value::Null);
                                 if let Value::Object(key_rc) = &key_obj {
                                     let key_oid = key_rc.borrow().object_id;
                                     let weak = Rc::downgrade(key_rc);
                                     key_rc.borrow().weak_key.set(true);
-                                    let entries = self.weak_map_entries.entry(wm_id).or_default();
+                                    let entries =
+                                        self.weak_map_entries.entry(wm_id).or_default();
                                     if let Some(entry) =
                                         entries.iter_mut().find(|(oid, _, _)| *oid == key_oid)
                                     {
@@ -22060,19 +22575,21 @@ impl Vm {
                                 }
                             }
                             b"offsetexists" => {
-                                let key_obj = extra_args.first().cloned().unwrap_or(Value::Null);
+                                let key_obj =
+                                    extra_args.first().cloned().unwrap_or(Value::Null);
                                 if let Value::Object(key_rc) = &key_obj {
                                     let key_oid = key_rc.borrow().object_id;
-                                    let exists =
-                                        if let Some(entries) = self.weak_map_entries.get(&wm_id) {
-                                            entries.iter().any(|(oid, weak, val)| {
-                                                *oid == key_oid
-                                                    && weak.upgrade().is_some()
-                                                    && !matches!(val, Value::Null)
-                                            })
-                                        } else {
-                                            false
-                                        };
+                                    let exists = if let Some(entries) =
+                                        self.weak_map_entries.get(&wm_id)
+                                    {
+                                        entries.iter().any(|(oid, weak, val)| {
+                                            *oid == key_oid
+                                                && weak.upgrade().is_some()
+                                                && !matches!(val, Value::Null)
+                                        })
+                                    } else {
+                                        false
+                                    };
                                     self.write_operand(
                                         &op.result,
                                         if exists { Value::True } else { Value::False },
@@ -22098,10 +22615,12 @@ impl Vm {
                                 }
                             }
                             b"offsetunset" => {
-                                let key_obj = extra_args.first().cloned().unwrap_or(Value::Null);
+                                let key_obj =
+                                    extra_args.first().cloned().unwrap_or(Value::Null);
                                 if let Value::Object(key_rc) = &key_obj {
                                     let key_oid = key_rc.borrow().object_id;
-                                    if let Some(entries) = self.weak_map_entries.get_mut(&wm_id) {
+                                    if let Some(entries) = self.weak_map_entries.get_mut(&wm_id)
+                                    {
                                         entries.retain(|(oid, _, _)| *oid != key_oid);
                                     }
                                     self.write_operand(
@@ -22129,15 +22648,15 @@ impl Vm {
                                 }
                             }
                             b"count" => {
-                                let count = if let Some(entries) = self.weak_map_entries.get(&wm_id)
-                                {
-                                    entries
-                                        .iter()
-                                        .filter(|(_, weak, _)| weak.upgrade().is_some())
-                                        .count()
-                                } else {
-                                    0
-                                };
+                                let count =
+                                    if let Some(entries) = self.weak_map_entries.get(&wm_id) {
+                                        entries
+                                            .iter()
+                                            .filter(|(_, weak, _)| weak.upgrade().is_some())
+                                            .count()
+                                    } else {
+                                        0
+                                    };
                                 self.write_operand(
                                     &op.result,
                                     Value::Long(count as i64),
@@ -22155,9 +22674,10 @@ impl Vm {
                             self.closure_frames.pop();
                         }
                         let cur = self.closure_frames.last().and_then(|(d, name, c)| {
-                            (*d == depth && self.call_stack.last().is_some_and(|f| f.0 == *name))
-                                .then(|| c.upgrade().map(Value::Object))
-                                .flatten()
+                            (*d == depth
+                                && self.call_stack.last().is_some_and(|f| f.0 == *name))
+                            .then(|| c.upgrade().map(Value::Object))
+                            .flatten()
                         });
                         match cur {
                             Some(c) => self.write_operand(
@@ -22188,14 +22708,15 @@ impl Vm {
                         // Closure::fromCallable($callable) - convert callable to a Closure
                         let callable = call.args.first().cloned().unwrap_or(Value::Null);
                         let scope = self.class_scope_stack.last().cloned();
-                        let this =
-                            if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
-                                cvs.first()
-                                    .map(|v| v.deref())
-                                    .filter(|v| matches!(v, Value::Object(_)))
-                            } else {
-                                None
-                            };
+                        let this = if op_array.cv_names.first().map(|n| n.as_slice())
+                            == Some(b"this")
+                        {
+                            cvs.first()
+                                .map(|v| v.deref())
+                                .filter(|v| matches!(v, Value::Object(_)))
+                        } else {
+                            None
+                        };
                         let result = match self.closure_from_callable(&callable, scope, this) {
                             Ok(c) => c,
                             Err(e) => {
@@ -22242,7 +22763,8 @@ impl Vm {
                             .cloned()
                             .unwrap_or(Value::String(PhpString::from_bytes(b"static")));
                         let scope_provided = call.args.len() >= 3;
-                        let result = self.bind_closure(&closure, new_this, scope, scope_provided);
+                        let result =
+                            self.bind_closure(&closure, new_this, scope, scope_provided);
                         if self.current_exception.is_some() {
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
@@ -22517,7 +23039,8 @@ impl Vm {
 
                         for (id_val, s_start, s_end, s_line) in combined {
                             let text: &[u8] =
-                                if s_start < src.len() && s_end <= src.len() && s_start < s_end {
+                                if s_start < src.len() && s_end <= src.len() && s_start < s_end
+                                {
                                     &src[s_start..s_end]
                                 } else {
                                     b""
@@ -22601,14 +23124,14 @@ impl Vm {
                         let result = match parsed {
                             Some((local_ts, tz_opt)) => {
                                 // Determine effective timezone: parsed > arg > default
-                                let (effective_tz, effective_tz_type) = if let Some((n, t)) = tz_opt
-                                {
-                                    (n, t)
-                                } else if let Some((n, t)) = arg_tz_name.clone() {
-                                    (n, t)
-                                } else {
-                                    (default_tz_name.clone(), 3)
-                                };
+                                let (effective_tz, effective_tz_type) =
+                                    if let Some((n, t)) = tz_opt {
+                                        (n, t)
+                                    } else if let Some((n, t)) = arg_tz_name.clone() {
+                                        (n, t)
+                                    } else {
+                                        (default_tz_name.clone(), 3)
+                                    };
                                 // Convert naive local to UTC using the effective tz
                                 let (off, _) =
                                     vm_timezone_offset_and_abbrev(&effective_tz, local_ts);
@@ -22698,7 +23221,8 @@ impl Vm {
                     {
                         let is_immutable = func_name_lower.starts_with(b"datetimeimmutable");
                         // Validate argument class
-                        let expects_immutable = func_name_lower.ends_with(b"::createfromimmutable");
+                        let expects_immutable =
+                            func_name_lower.ends_with(b"::createfromimmutable");
                         let expects_mutable = func_name_lower.ends_with(b"::createfrommutable");
                         if let Some(Value::Object(o)) = call.args.first() {
                             let ob = o.borrow();
@@ -22731,7 +23255,8 @@ impl Vm {
                                     method_name, required, cls
                                 );
                                 drop(ob);
-                                let exc = self.create_exception(b"TypeError", &err_msg, op.line);
+                                let exc =
+                                    self.create_exception(b"TypeError", &err_msg, op.line);
                                 self.current_exception = Some(exc);
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()
@@ -22824,7 +23349,8 @@ impl Vm {
                                         .map(|b| b.to_ascii_lowercase())
                                         .collect();
                                     class_lower == b"dateinterval"
-                                        || self.class_is_subclass_of(&class_lower, b"dateinterval")
+                                        || self
+                                            .class_is_subclass_of(&class_lower, b"dateinterval")
                                 } else {
                                     false
                                 }
@@ -22943,7 +23469,10 @@ impl Vm {
                                     } else {
                                         local_ts - offset
                                     };
-                                    obj.set_property(b"__timestamp".to_vec(), Value::Long(utc_ts));
+                                    obj.set_property(
+                                        b"__timestamp".to_vec(),
+                                        Value::Long(utc_ts),
+                                    );
                                 }
                             }
                             // Default if missing
@@ -22953,7 +23482,10 @@ impl Vm {
                             ) {
                                 obj.set_property(b"timezone_type".to_vec(), Value::Long(3));
                             }
-                            if matches!(obj.get_property(b"timezone"), Value::Null | Value::Undef) {
+                            if matches!(
+                                obj.get_property(b"timezone"),
+                                Value::Null | Value::Undef
+                            ) {
                                 obj.set_property(
                                     b"timezone".to_vec(),
                                     Value::String(PhpString::from_bytes(b"UTC")),
@@ -23145,12 +23677,13 @@ impl Vm {
                         // Also walk the original-case name so we can extract
                         // the user-typed method name for stack traces.
                         let orig_name_bytes = call.name.as_bytes();
-                        let orig_spl_path =
-                            if orig_name_bytes.len() >= 7 && &orig_name_bytes[..7] == b"__spl::" {
-                                &orig_name_bytes[7..]
-                            } else {
-                                spl_path
-                            };
+                        let orig_spl_path = if orig_name_bytes.len() >= 7
+                            && &orig_name_bytes[..7] == b"__spl::"
+                        {
+                            &orig_name_bytes[7..]
+                        } else {
+                            spl_path
+                        };
                         if let Some(sep) = spl_path.iter().position(|&b| b == b':') {
                             if sep + 1 < spl_path.len() && spl_path[sep + 1] == b':' {
                                 let spl_class = &spl_path[..sep];
@@ -23178,10 +23711,13 @@ impl Vm {
                                 let class_display =
                                     crate::stubs::find_method(spl_class, spl_method)
                                         .map(|(c, _)| c.name.to_string())
-                                        .unwrap_or_else(|| self.builtin_canonical_name(spl_class));
+                                        .unwrap_or_else(|| {
+                                            self.builtin_canonical_name(spl_class)
+                                        });
                                 let method_display =
                                     String::from_utf8_lossy(orig_method).to_string();
-                                let frame_name = format!("{}->{}", class_display, method_display);
+                                let frame_name =
+                                    format!("{}->{}", class_display, method_display);
                                 let extra_args: Vec<Value> =
                                     call.args.iter().skip(1).cloned().collect();
                                 self.call_stack.push((
@@ -23235,6 +23771,15 @@ impl Vm {
                                     Value::Null
                                 } else if !named_ok {
                                     Value::Null
+                                } else if self.observer.is_some() {
+                                    let name =
+                                        self.internal_method_display(spl_class, spl_method);
+                                    self.observe_internal_begin(&name);
+                                    let r = self
+                                        .handle_spl_docall(spl_class, spl_method, &spl_args)
+                                        .unwrap_or(Value::Null);
+                                    self.observe_internal_end(&name, Some(&r));
+                                    r
                                 } else {
                                     self.handle_spl_docall(spl_class, spl_method, &spl_args)
                                         .unwrap_or(Value::Null)
@@ -23343,7 +23888,8 @@ impl Vm {
                             .cloned()
                             .unwrap_or(Value::String(PhpString::from_bytes(b"static")));
                         let scope_provided = call.args.len() >= 3;
-                        let result = self.bind_closure(&closure, new_this, scope, scope_provided);
+                        let result =
+                            self.bind_closure(&closure, new_this, scope, scope_provided);
                         if self.current_exception.is_some() {
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()
@@ -23400,7 +23946,13 @@ impl Vm {
                                 }));
                             }
                             let r = r.unwrap_or(Value::Null);
-                            self.write_operand(&op.result, r, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.write_operand(
+                                &op.result,
+                                r,
+                                &mut cvs,
+                                &mut tmps,
+                                &static_cv_keys,
+                            );
                             return Ok(Flow::Continue);
                         }
 
@@ -23440,7 +23992,8 @@ impl Vm {
                         );
                     } else if func_name_lower.contains(&b':') && {
                         // Check if this is an enum static method call (from/tryFrom/cases)
-                        let sep_pos = func_name_lower.iter().position(|&b| b == b':').unwrap_or(0);
+                        let sep_pos =
+                            func_name_lower.iter().position(|&b| b == b':').unwrap_or(0);
                         if sep_pos > 0 && func_name_lower.get(sep_pos + 1) == Some(&b':') {
                             let class_part = &func_name_lower[..sep_pos];
                             let method_part = &func_name_lower[sep_pos + 2..];
@@ -23472,7 +24025,8 @@ impl Vm {
                                             "Cannot use ::from on non-backed enum {}",
                                             class_name
                                         );
-                                        let exc = self.create_exception(b"Error", &msg, op.line);
+                                        let exc =
+                                            self.create_exception(b"Error", &msg, op.line);
                                         self.current_exception = Some(exc);
                                         if let Some((catch_target, _, _, _, saved_pc)) =
                                             exception_handlers.pop()
@@ -23489,14 +24043,26 @@ impl Vm {
                                     // Type check: for int-backed enums, only int is accepted
                                     // For string-backed enums, both string and int are accepted
                                     let bt = class.enum_backing_type.as_ref().unwrap();
-                                    if bt.eq_ignore_ascii_case(b"int")
-                                        && !matches!(arg, Value::Long(_))
+                                    // Z_PARAM_LONG: weak mode coerces scalars.
+                                    let arg = self.enum_from_weak_int(
+                                        bt,
+                                        arg,
+                                        op_array.strict_types,
+                                        op.line,
+                                    );
+                                    let is_int_backed = bt.eq_ignore_ascii_case(b"int");
+                                    if (is_int_backed && !matches!(arg, Value::Long(_)))
+                                        || (!is_int_backed
+                                            && op_array.strict_types
+                                            && !matches!(arg, Value::String(_)))
                                     {
                                         let class_name = String::from_utf8_lossy(&class.name);
-                                        let arg_type = arg.type_name();
+                                        let arg_type = Self::value_type_name(&arg);
                                         let msg = format!(
-                                            "{}::from(): Argument #1 ($value) must be of type int, {} given",
-                                            class_name, arg_type
+                                            "{}::from(): Argument #1 ($value) must be of type {}, {} given",
+                                            class_name,
+                                            if is_int_backed { "int" } else { "string" },
+                                            arg_type
                                         );
                                         let exc =
                                             self.create_exception(b"TypeError", &msg, op.line);
@@ -23551,7 +24117,8 @@ impl Vm {
                                             .unwrap_or(Value::Null)
                                     } else {
                                         let class_name = String::from_utf8_lossy(&class.name);
-                                        let arg_str = lookup_arg.to_php_string().to_string_lossy();
+                                        let arg_str =
+                                            lookup_arg.to_php_string().to_string_lossy();
                                         let msg = if bt.eq_ignore_ascii_case(b"string") {
                                             format!(
                                                 "\"{}\" is not a valid backing value for enum {}",
@@ -23586,19 +24153,38 @@ impl Vm {
                                 let arg = call.args.first().cloned().unwrap_or(Value::Null);
                                 let class = self.classes.get(&class_part).cloned();
                                 if let Some(class) = class {
+                                    // Z_PARAM_LONG: weak mode coerces scalars.
+                                    let arg = match class.enum_backing_type.as_ref() {
+                                        Some(bt) => self.enum_from_weak_int(
+                                            bt,
+                                            arg,
+                                            op_array.strict_types,
+                                            op.line,
+                                        ),
+                                        None => arg,
+                                    };
                                     // Type check for int-backed enums
                                     if let Some(ref bt) = class.enum_backing_type {
-                                        if bt.eq_ignore_ascii_case(b"int")
-                                            && !matches!(arg, Value::Long(_))
+                                        let is_int_backed = bt.eq_ignore_ascii_case(b"int");
+                                        if (is_int_backed && !matches!(arg, Value::Long(_)))
+                                            || (!is_int_backed
+                                                && op_array.strict_types
+                                                && !matches!(arg, Value::String(_)))
                                         {
-                                            let class_name = String::from_utf8_lossy(&class.name);
-                                            let arg_type = arg.type_name();
+                                            let class_name =
+                                                String::from_utf8_lossy(&class.name);
+                                            let arg_type = Self::value_type_name(&arg);
                                             let msg = format!(
-                                                "{}::tryFrom(): Argument #1 ($value) must be of type int, {} given",
-                                                class_name, arg_type
+                                                "{}::tryFrom(): Argument #1 ($value) must be of type {}, {} given",
+                                                class_name,
+                                                if is_int_backed { "int" } else { "string" },
+                                                arg_type
                                             );
-                                            let exc =
-                                                self.create_exception(b"TypeError", &msg, op.line);
+                                            let exc = self.create_exception(
+                                                b"TypeError",
+                                                &msg,
+                                                op.line,
+                                            );
                                             self.current_exception = Some(exc);
                                             if let Some((catch_target, _, _, _, saved_pc)) =
                                                 exception_handlers.pop()
@@ -23690,7 +24276,10 @@ impl Vm {
                         let zpp = self.zpp_info(&func_name_lower);
                         let mut zpp_err: Option<crate::arginfo::ZppError> = None;
                         // Compiled to an opcode by php-src: no frame of its own
+                        // (A call through a closure, e.g. strlen(...)($s), is a
+                        // real call.)
                         let special = call.named_args.is_empty()
+                            && !via_closure
                             && !call_name_bytes.contains(&b'\\')
                             && crate::internal_frames::compiled_special(
                                 &func_name_lower,
@@ -23701,11 +24290,13 @@ impl Vm {
                             let forwards_named = func_name_lower == b"call_user_func"
                                 || func_name_lower == b"call_user_func_array"
                                 || func_name_lower == b"forward_static_call"
-                                || func_name_lower == b"forward_static_call_array";
+                                || func_name_lower == b"forward_static_call_array"
+                                || self.builtin_named_variadics.contains(&func_name_lower);
                             if forwards_named {
                                 // Store named args on VM for forwarding
                                 self.pending_named_args = std::mem::take(&mut call.named_args);
-                            } else if let Some(info) = crate::arginfo::lookup(&func_name_lower) {
+                            } else if let Some(info) = crate::arginfo::lookup(&func_name_lower)
+                            {
                                 // Stub arginfo: map names to positions, fill skipped defaults
                                 let named = std::mem::take(&mut call.named_args);
                                 match self.zpp_resolve_named(info, &mut call.args, named) {
@@ -23723,19 +24314,20 @@ impl Vm {
                                 }
                                 if let Err(err_msg) = resolved {
                                     // For variadic builtins, use a different error format
-                                    let (exc_class, final_msg) =
-                                        if err_msg.starts_with("Unknown named parameter") {
-                                            let display = call.name.to_string_lossy();
-                                            (
-                                                b"ArgumentCountError" as &[u8],
-                                                format!(
-                                                    "{}() does not accept unknown named parameters",
-                                                    display
-                                                ),
-                                            )
-                                        } else {
-                                            (b"Error" as &[u8], err_msg)
-                                        };
+                                    let (exc_class, final_msg) = if err_msg
+                                        .starts_with("Unknown named parameter")
+                                    {
+                                        let display = call.name.to_string_lossy();
+                                        (
+                                            b"ArgumentCountError" as &[u8],
+                                            format!(
+                                                "{}() does not accept unknown named parameters",
+                                                display
+                                            ),
+                                        )
+                                    } else {
+                                        (b"Error" as &[u8], err_msg)
+                                    };
                                     let exc_val =
                                         self.create_exception(exc_class, &final_msg, op.line);
                                     self.current_exception = Some(exc_val);
@@ -23760,8 +24352,10 @@ impl Vm {
                                 // No param names registered for this builtin - error on unknown named params
                                 let first_name =
                                     String::from_utf8_lossy(&call.named_args[0].0).into_owned();
-                                let err_msg = format!("Unknown named parameter ${}", first_name);
-                                let exc_val = self.create_exception(b"Error", &err_msg, op.line);
+                                let err_msg =
+                                    format!("Unknown named parameter ${}", first_name);
+                                let exc_val =
+                                    self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()
@@ -23975,6 +24569,33 @@ impl Vm {
                             }
                         }
 
+                        // #[\Deprecated] / #[\NoDiscard] of builtins declaring
+                        // attributes (zend_deprecated_function(),
+                        // zend_nodiscard_function() in ZEND_DO_FCALL).
+                        if !self.internal_function_decls.is_empty() && !special {
+                            self.internal_decl_call_checks(
+                                &func_name_lower,
+                                matches!(op.op1, OperandType::Const(_)),
+                                op.line,
+                            );
+                            if self.current_exception.is_some() {
+                                if let Some((catch_target, finally_target, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = if catch_target > 0 {
+                                        catch_target
+                                    } else {
+                                        finally_target
+                                    } as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: "Uncaught exception".to_string(),
+                                    line: op.line,
+                                });
+                            }
+                        }
                         self.caller_strict_types = op_array.strict_types;
                         self.builtin_named_skipped = named_skipped_args;
 
@@ -23995,8 +24616,11 @@ impl Vm {
 
                         // call_user_func()/call_user_func_array() have no frame of their
                         // own in php-src (ZEND_INIT_USER_CALL).
-                        let is_direct_ucf = func_name_lower == b"call_user_func"
-                            || func_name_lower == b"call_user_func_array";
+                        // (Not when called through the namespace fallback:
+                        // ZEND_INIT_NS_FCALL_BY_NAME makes a real call.)
+                        let is_direct_ucf = (func_name_lower == b"call_user_func"
+                            || func_name_lower == b"call_user_func_array")
+                            && !call_name_bytes.contains(&b'\\');
                         let own_frame = !is_assert_call && !is_direct_ucf && !special;
                         if own_frame {
                             self.push_builtin_frame(
@@ -24007,7 +24631,11 @@ impl Vm {
                         } else if is_direct_ucf {
                             self.ucf_call_line = Some(op.line);
                         }
-                        let builtin_result = func(self, &call.args);
+                        let builtin_result = if own_frame {
+                            self.call_builtin_observed(func, &func_name_lower, &call.args)
+                        } else {
+                            func(self, &call.args)
+                        };
                         if own_frame {
                             self.pop_builtin_frame();
                         } else {
@@ -24022,8 +24650,13 @@ impl Vm {
                                 // Only trigger handlers if the exception is newly set,
                                 // not if it was already present before the call (e.g. inside a finally block)
                                 if !had_exception_before && self.current_exception.is_some() {
-                                    if let Some((catch_target, finally_target, _, _, saved_pc)) =
-                                        exception_handlers.pop()
+                                    if let Some((
+                                        catch_target,
+                                        finally_target,
+                                        _,
+                                        _,
+                                        saved_pc,
+                                    )) = exception_handlers.pop()
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         if catch_target > 0 {
@@ -24038,8 +24671,9 @@ impl Vm {
                                             &self.current_exception
                                         {
                                             let exc = exc_obj.borrow();
-                                            let class =
-                                                crate::value::display_class_name(&exc.class_name);
+                                            let class = crate::value::display_class_name(
+                                                &exc.class_name,
+                                            );
                                             let message = exc
                                                 .get_property(b"message")
                                                 .to_php_string()
@@ -24084,8 +24718,13 @@ impl Vm {
                                 // For assert, keep the stack frame so it appears in stack traces
                                 // Check if there's a pending exception to catch
                                 if self.current_exception.is_some() {
-                                    if let Some((catch_target, finally_target, _, _, saved_pc)) =
-                                        exception_handlers.pop()
+                                    if let Some((
+                                        catch_target,
+                                        finally_target,
+                                        _,
+                                        _,
+                                        saved_pc,
+                                    )) = exception_handlers.pop()
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         if is_assert_call {
@@ -24106,7 +24745,8 @@ impl Vm {
                                 });
                             }
                         }
-                    } else if let Some(user_fn) = self.user_functions.get(&func_name_lower).cloned()
+                    } else if let Some(user_fn) =
+                        self.user_functions.get(&func_name_lower).cloned()
                     {
                         // Check for #[\Deprecated] and #[\NoDiscard] attributes
                         if !user_fn.attributes.is_empty() {
@@ -24134,7 +24774,9 @@ impl Vm {
                                             obj.properties
                                                 .iter()
                                                 .find(|(k, _)| k == b"message")
-                                                .map(|(_, v)| v.to_php_string().to_string_lossy())
+                                                .map(|(_, v)| {
+                                                    v.to_php_string().to_string_lossy()
+                                                })
                                         } else {
                                             None
                                         }
@@ -24188,8 +24830,13 @@ impl Vm {
                                 // If the user error handler threw, propagate that exception
                                 // before executing the deprecated function body.
                                 if self.current_exception.is_some() {
-                                    if let Some((catch_target, finally_target, _, _, saved_pc)) =
-                                        exception_handlers.pop()
+                                    if let Some((
+                                        catch_target,
+                                        finally_target,
+                                        _,
+                                        _,
+                                        saved_pc,
+                                    )) = exception_handlers.pop()
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         if catch_target > 0 {
@@ -24205,8 +24852,9 @@ impl Vm {
                                         .and_then(|e| {
                                             if let Value::Object(o) = e {
                                                 let obj = o.borrow();
-                                                let cls = String::from_utf8_lossy(&obj.class_name)
-                                                    .to_string();
+                                                let cls =
+                                                    String::from_utf8_lossy(&obj.class_name)
+                                                        .to_string();
                                                 obj.properties
                                                     .iter()
                                                     .find(|(k, _)| k == b"message")
@@ -24263,8 +24911,13 @@ impl Vm {
                                     op.line,
                                 );
                                 if self.current_exception.is_some() {
-                                    if let Some((catch_target, finally_target, _, _, saved_pc)) =
-                                        exception_handlers.pop()
+                                    if let Some((
+                                        catch_target,
+                                        finally_target,
+                                        _,
+                                        _,
+                                        saved_pc,
+                                    )) = exception_handlers.pop()
                                     {
                                         pending_calls_catch_depth = Some(saved_pc);
                                         if catch_target > 0 {
@@ -24283,7 +24936,9 @@ impl Vm {
                         }
 
                         // Check visibility and abstract for static method calls (ClassName::method)
-                        if let Some(sep_pos) = func_name_lower.windows(2).position(|w| w == b"::") {
+                        if let Some(sep_pos) =
+                            func_name_lower.windows(2).position(|w| w == b"::")
+                        {
                             {
                                 let class_part_lower = &func_name_lower[..sep_pos];
                                 let method_part_lower = &func_name_lower[sep_pos + 2..];
@@ -24291,13 +24946,16 @@ impl Vm {
                                 let is_magic = method_part_lower.starts_with(b"__");
                                 if !is_magic {
                                     if let Some(class) = self.classes.get(class_part_lower) {
-                                        if let Some(method) = class.get_method(method_part_lower) {
+                                        if let Some(method) =
+                                            class.get_method(method_part_lower)
+                                        {
                                             // Check for abstract method call
                                             if method.is_abstract {
                                                 let orig_bytes = call.name.as_bytes();
-                                                let class_display =
-                                                    String::from_utf8_lossy(&orig_bytes[..sep_pos])
-                                                        .to_string();
+                                                let class_display = String::from_utf8_lossy(
+                                                    &orig_bytes[..sep_pos],
+                                                )
+                                                .to_string();
                                                 let method_display =
                                                     String::from_utf8_lossy(&method.name)
                                                         .to_string();
@@ -24305,19 +24963,29 @@ impl Vm {
                                                     "Cannot call abstract method {}::{}()",
                                                     class_display, method_display
                                                 );
-                                                let exc = self
-                                                    .create_exception(b"Error", &err_msg, op.line);
+                                                let exc = self.create_exception(
+                                                    b"Error", &err_msg, op.line,
+                                                );
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                                    exception_handlers.last()
+                                                if let Some((
+                                                    catch_target,
+                                                    _,
+                                                    _,
+                                                    _,
+                                                    eh_pc_depth,
+                                                )) = exception_handlers.last()
                                                 {
-                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    pending_calls_catch_depth =
+                                                        Some(*eh_pc_depth);
                                                     self.call_stack.pop();
                                                     ip = *catch_target as usize;
                                                     return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
-                                                    message: format!("Uncaught Error: {}", err_msg),
+                                                    message: format!(
+                                                        "Uncaught Error: {}",
+                                                        err_msg
+                                                    ),
                                                     line: op.line,
                                                 });
                                             }
@@ -24348,13 +25016,16 @@ impl Vm {
                                                         .classes
                                                         .get(class_part_lower)
                                                         .map(|c| {
-                                                            c.get_method(b"__callstatic").is_some()
+                                                            c.get_method(b"__callstatic")
+                                                                .is_some()
                                                         })
                                                         .unwrap_or(false);
                                                     let has_call = self
                                                         .classes
                                                         .get(class_part_lower)
-                                                        .map(|c| c.get_method(b"__call").is_some())
+                                                        .map(|c| {
+                                                            c.get_method(b"__call").is_some()
+                                                        })
                                                         .unwrap_or(false);
                                                     if has_callstatic || has_call {
                                                         // Clone needed values before borrowing ends
@@ -24389,47 +25060,56 @@ impl Vm {
                                                                         )
                                                                     })
                                                                 {
-                                                                    let cs_op =
-                                                                        cs_method.op_array.clone();
-                                                                    let cs_declaring = cs_method
-                                                                        .declaring_class
+                                                                    let cs_op = cs_method
+                                                                        .op_array
                                                                         .clone();
+                                                                    let cs_declaring =
+                                                                        cs_method
+                                                                            .declaring_class
+                                                                            .clone();
                                                                     let mut fn_cvs = vec![
-                                                                            Value::Undef;
-                                                                            cs_op.cv_names.len()
-                                                                        ];
+                                                                        Value::Undef;
+                                                                        cs_op.cv_names.len()
+                                                                    ];
                                                                     if !fn_cvs.is_empty() {
                                                                         fn_cvs[0] = Value::String(
-                                                                            PhpString::from_vec(
-                                                                                method_part_owned
-                                                                                    .clone(),
-                                                                            ),
-                                                                        );
+                                                                        PhpString::from_vec(
+                                                                            method_part_owned
+                                                                                .clone(),
+                                                                        ),
+                                                                    );
                                                                     }
                                                                     if fn_cvs.len() > 1 {
                                                                         let mut args_arr = crate::array::PhpArray::new();
                                                                         for arg in &call.args {
-                                                                            args_arr
-                                                                                .push(arg.clone());
+                                                                            args_arr.push(
+                                                                                arg.clone(),
+                                                                            );
                                                                         }
                                                                         fn_cvs[1] = Value::Array(
-                                                                            Rc::new(RefCell::new(
-                                                                                args_arr,
-                                                                            )),
-                                                                        );
-                                                                    }
-                                                                    self.called_class_stack.push(
-                                                                        class_display_owned.clone(),
+                                                                        Rc::new(RefCell::new(
+                                                                            args_arr,
+                                                                        )),
                                                                     );
+                                                                    }
+                                                                    self.called_class_stack
+                                                                        .push(
+                                                                            class_display_owned
+                                                                                .clone(),
+                                                                        );
                                                                     self.class_scope_stack
                                                                         .push(cs_declaring);
                                                                     let r = self
                                                                         .execute_op_array_vm(
                                                                             &cs_op, fn_cvs,
                                                                         );
-                                                                    self.called_class_stack.pop();
-                                                                    self.class_scope_stack.pop();
-                                                                    break 'magic_dispatch Some(r);
+                                                                    self.called_class_stack
+                                                                        .pop();
+                                                                    self.class_scope_stack
+                                                                        .pop();
+                                                                    break 'magic_dispatch Some(
+                                                                        r,
+                                                                    );
                                                                 }
                                                             }
                                                             if has_call
@@ -24453,44 +25133,52 @@ impl Vm {
                                                                             .declaring_class
                                                                             .clone();
                                                                     let mut fn_cvs = vec![
-                                                                            Value::Undef;
-                                                                            call_op.cv_names.len()
-                                                                        ];
+                                                                        Value::Undef;
+                                                                        call_op.cv_names.len()
+                                                                    ];
                                                                     if !fn_cvs.is_empty() {
-                                                                        fn_cvs[0] = cvs[0].clone(); // $this
+                                                                        fn_cvs[0] =
+                                                                            cvs[0].clone(); // $this
                                                                     }
                                                                     if fn_cvs.len() > 1 {
                                                                         fn_cvs[1] = Value::String(
-                                                                            PhpString::from_vec(
-                                                                                method_part_owned
-                                                                                    .clone(),
-                                                                            ),
-                                                                        );
+                                                                        PhpString::from_vec(
+                                                                            method_part_owned
+                                                                                .clone(),
+                                                                        ),
+                                                                    );
                                                                     }
                                                                     if fn_cvs.len() > 2 {
                                                                         let mut args_arr = crate::array::PhpArray::new();
                                                                         for arg in &call.args {
-                                                                            args_arr
-                                                                                .push(arg.clone());
+                                                                            args_arr.push(
+                                                                                arg.clone(),
+                                                                            );
                                                                         }
                                                                         fn_cvs[2] = Value::Array(
-                                                                            Rc::new(RefCell::new(
-                                                                                args_arr,
-                                                                            )),
-                                                                        );
-                                                                    }
-                                                                    self.called_class_stack.push(
-                                                                        class_display_owned.clone(),
+                                                                        Rc::new(RefCell::new(
+                                                                            args_arr,
+                                                                        )),
                                                                     );
+                                                                    }
+                                                                    self.called_class_stack
+                                                                        .push(
+                                                                            class_display_owned
+                                                                                .clone(),
+                                                                        );
                                                                     self.class_scope_stack
                                                                         .push(call_declaring);
                                                                     let r = self
                                                                         .execute_op_array_vm(
                                                                             &call_op, fn_cvs,
                                                                         );
-                                                                    self.called_class_stack.pop();
-                                                                    self.class_scope_stack.pop();
-                                                                    break 'magic_dispatch Some(r);
+                                                                    self.called_class_stack
+                                                                        .pop();
+                                                                    self.class_scope_stack
+                                                                        .pop();
+                                                                    break 'magic_dispatch Some(
+                                                                        r,
+                                                                    );
                                                                 }
                                                             }
                                                             // Fallback to __callStatic if __call wasn't preferred or available
@@ -24504,47 +25192,56 @@ impl Vm {
                                                                         )
                                                                     })
                                                                 {
-                                                                    let cs_op =
-                                                                        cs_method.op_array.clone();
-                                                                    let cs_declaring = cs_method
-                                                                        .declaring_class
+                                                                    let cs_op = cs_method
+                                                                        .op_array
                                                                         .clone();
+                                                                    let cs_declaring =
+                                                                        cs_method
+                                                                            .declaring_class
+                                                                            .clone();
                                                                     let mut fn_cvs = vec![
-                                                                            Value::Undef;
-                                                                            cs_op.cv_names.len()
-                                                                        ];
+                                                                        Value::Undef;
+                                                                        cs_op.cv_names.len()
+                                                                    ];
                                                                     if !fn_cvs.is_empty() {
                                                                         fn_cvs[0] = Value::String(
-                                                                            PhpString::from_vec(
-                                                                                method_part_owned
-                                                                                    .clone(),
-                                                                            ),
-                                                                        );
+                                                                        PhpString::from_vec(
+                                                                            method_part_owned
+                                                                                .clone(),
+                                                                        ),
+                                                                    );
                                                                     }
                                                                     if fn_cvs.len() > 1 {
                                                                         let mut args_arr = crate::array::PhpArray::new();
                                                                         for arg in &call.args {
-                                                                            args_arr
-                                                                                .push(arg.clone());
+                                                                            args_arr.push(
+                                                                                arg.clone(),
+                                                                            );
                                                                         }
                                                                         fn_cvs[1] = Value::Array(
-                                                                            Rc::new(RefCell::new(
-                                                                                args_arr,
-                                                                            )),
-                                                                        );
-                                                                    }
-                                                                    self.called_class_stack.push(
-                                                                        class_display_owned.clone(),
+                                                                        Rc::new(RefCell::new(
+                                                                            args_arr,
+                                                                        )),
                                                                     );
+                                                                    }
+                                                                    self.called_class_stack
+                                                                        .push(
+                                                                            class_display_owned
+                                                                                .clone(),
+                                                                        );
                                                                     self.class_scope_stack
                                                                         .push(cs_declaring);
                                                                     let r = self
                                                                         .execute_op_array_vm(
                                                                             &cs_op, fn_cvs,
                                                                         );
-                                                                    self.called_class_stack.pop();
-                                                                    self.class_scope_stack.pop();
-                                                                    break 'magic_dispatch Some(r);
+                                                                    self.called_class_stack
+                                                                        .pop();
+                                                                    self.class_scope_stack
+                                                                        .pop();
+                                                                    break 'magic_dispatch Some(
+                                                                        r,
+                                                                    );
                                                                 }
                                                             }
                                                             None
@@ -24564,10 +25261,16 @@ impl Vm {
                                                         b"Error", &err_msg, op.line,
                                                     );
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, saved_pc)) =
-                                                        exception_handlers.pop()
+                                                    if let Some((
+                                                        catch_target,
+                                                        _,
+                                                        _,
+                                                        _,
+                                                        saved_pc,
+                                                    )) = exception_handlers.pop()
                                                     {
-                                                        pending_calls_catch_depth = Some(saved_pc);
+                                                        pending_calls_catch_depth =
+                                                            Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         return Ok(Flow::Continue);
                                                     } else {
@@ -24651,7 +25354,8 @@ impl Vm {
                                 raw_display.clone()
                             }
                         } else if !user_fn.display_name.is_empty() {
-                            let name = String::from_utf8_lossy(&user_fn.display_name).to_string();
+                            let name =
+                                String::from_utf8_lossy(&user_fn.display_name).to_string();
                             // A closure's frame is qualified by its scope
                             // (Class::{closure:...}, or Class->... with $this).
                             match user_fn.scope_class.as_ref().filter(|_| {
@@ -24739,7 +25443,8 @@ impl Vm {
                                 0
                             };
                             // A closure's captured (use) values precede its arguments.
-                            let captures = if crate::closure::is_closure_fn_name(&user_fn.name) {
+                            let captures = if crate::closure::is_closure_fn_name(&user_fn.name)
+                            {
                                 user_fn.closure_capture_names.len().min(call.args.len()) as u32
                             } else {
                                 0
@@ -24768,7 +25473,8 @@ impl Vm {
                                     let mut fname =
                                         String::from_utf8_lossy(user_fn.effective_name())
                                             .to_string();
-                                    if user_fn.display_name.is_empty() && !fname.contains("::") {
+                                    if user_fn.display_name.is_empty() && !fname.contains("::")
+                                    {
                                         if let Some(sc) = &user_fn.scope_class {
                                             let cname = self
                                                 .classes
@@ -24796,7 +25502,8 @@ impl Vm {
                                     .saturating_sub(this_param)
                                     .saturating_sub(captures);
                                 let has_optional = total_params > required;
-                                let qualifier = if has_optional { "at least" } else { "exactly" };
+                                let qualifier =
+                                    if has_optional { "at least" } else { "exactly" };
                                 // Get filename
                                 let file_display = &self.current_file;
                                 let err_msg = format!(
@@ -24846,7 +25553,8 @@ impl Vm {
                                         ),
                                         None => (b"ArgumentCountError", err_msg, op.line),
                                     };
-                                let exc_val = self.create_exception(exc_class, &err_msg, exc_line);
+                                let exc_val =
+                                    self.create_exception(exc_class, &err_msg, exc_line);
                                 if exc_class == b"TypeError" && !user_fn.filename.is_empty() {
                                     if let Value::Object(ref o) = exc_val {
                                         o.borrow_mut().set_property(
@@ -24886,7 +25594,8 @@ impl Vm {
                                     .map(|v| v as usize)
                                     .unwrap_or(usize::MAX);
                                 let mut missing_param_err: Option<String> = None;
-                                for param_idx in implicit_args..(implicit_args + required as usize)
+                                for param_idx in
+                                    implicit_args..(implicit_args + required as usize)
                                 {
                                     if param_idx >= variadic_start {
                                         break;
@@ -24895,12 +25604,12 @@ impl Vm {
                                         && matches!(call.args[param_idx], Value::Undef)
                                     {
                                         let display_name = call.name.to_string_lossy();
-                                        let fn_display = if let Some(pos) = display_name.rfind("::")
-                                        {
-                                            &display_name[pos + 2..]
-                                        } else {
-                                            &display_name
-                                        };
+                                        let fn_display =
+                                            if let Some(pos) = display_name.rfind("::") {
+                                                &display_name[pos + 2..]
+                                            } else {
+                                                &display_name
+                                            };
                                         let param_name = user_fn
                                             .cv_names
                                             .get(param_idx)
@@ -25064,10 +25773,10 @@ impl Vm {
                                 }
                             }
                             // Store the args for func_get_args() support
-                            generator.args =
-                                call.args[crate::internal_frames::implicit_args(&user_fn)
+                            generator.args = call.args
+                                [crate::internal_frames::implicit_args(&user_fn)
                                     .min(call.args.len())..]
-                                    .to_vec();
+                                .to_vec();
                             // Record the call site so backtraces include it
                             generator.call_file = self.current_file.clone();
                             generator.call_line = op.line;
@@ -25080,9 +25789,11 @@ impl Vm {
                                 // (The first argument is $this only for a method that has
                                 // one; the caller's first CV only when it is $this.)
                                 let callee_this =
-                                    user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
-                                let caller_this = op_array.cv_names.first().map(|n| n.as_slice())
-                                    == Some(b"this");
+                                    user_fn.cv_names.first().map(|n| n.as_slice())
+                                        == Some(b"this");
+                                let caller_this =
+                                    op_array.cv_names.first().map(|n| n.as_slice())
+                                        == Some(b"this");
                                 let called_class = if is_forwarding_call {
                                     match (call.args.first(), cvs.first()) {
                                         (Some(Value::Object(obj)), _) if callee_this => {
@@ -25150,8 +25861,8 @@ impl Vm {
                             // one; the caller's first CV only when it is $this.)
                             let callee_this =
                                 user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
-                            let caller_this =
-                                op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+                            let caller_this = op_array.cv_names.first().map(|n| n.as_slice())
+                                == Some(b"this");
                             let called_class = if is_forwarding_call {
                                 // Forwarding call: preserve the current called_class
                                 match (call.args.first(), cvs.first()) {
@@ -25226,8 +25937,10 @@ impl Vm {
                             } else if pushed_scope_from_fn {
                                 // Use the creation-time called class, else the scope class
                                 if let Some(ref scope) = user_fn.scope_class {
-                                    let canon =
-                                        user_fn.closure_called_class.clone().unwrap_or_else(|| {
+                                    let canon = user_fn
+                                        .closure_called_class
+                                        .clone()
+                                        .unwrap_or_else(|| {
                                             self.classes
                                                 .get(scope)
                                                 .map(|c| c.name.clone())
@@ -25275,7 +25988,9 @@ impl Vm {
                                     .and_then(|pos| {
                                         self.classes
                                             .get(&func_name_lower[..pos])
-                                            .and_then(|c| c.get_method(&func_name_lower[pos + 2..]))
+                                            .and_then(|c| {
+                                                c.get_method(&func_name_lower[pos + 2..])
+                                            })
                                             .map(|m| {
                                                 m.declaring_class
                                                     .iter()
@@ -25283,21 +25998,22 @@ impl Vm {
                                                     .collect()
                                             })
                                     });
-                                let caller_this = if op_array.cv_names.first().map(|n| n.as_slice())
-                                    == Some(b"this")
-                                {
-                                    match cvs.first() {
-                                        Some(v @ Value::Object(_)) => Some(v.clone()),
-                                        Some(Value::Reference(r))
-                                            if matches!(&*r.borrow(), Value::Object(_)) =>
-                                        {
-                                            Some(r.borrow().clone())
+                                let caller_this =
+                                    if op_array.cv_names.first().map(|n| n.as_slice())
+                                        == Some(b"this")
+                                    {
+                                        match cvs.first() {
+                                            Some(v @ Value::Object(_)) => Some(v.clone()),
+                                            Some(Value::Reference(r))
+                                                if matches!(&*r.borrow(), Value::Object(_)) =>
+                                            {
+                                                Some(r.borrow().clone())
+                                            }
+                                            _ => None,
                                         }
-                                        _ => None,
-                                    }
-                                } else {
-                                    None
-                                };
+                                    } else {
+                                        None
+                                    };
                                 let compatible = match (&caller_this, &declaring_lower) {
                                     (Some(Value::Object(o)), Some(decl)) => {
                                         let oc: Vec<u8> = o
@@ -25358,7 +26074,8 @@ impl Vm {
                                     self.class_scope_stack.pop();
                                     self.is_global_scope = was_global;
                                     self.call_stack.pop();
-                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                    let exc =
+                                        self.create_exception(b"Error", &err_msg, op.line);
                                     self.current_exception = Some(exc);
                                     if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                         exception_handlers.last()
@@ -25392,10 +26109,12 @@ impl Vm {
                             }
                             // Add extra named args with string keys
                             for (name, val) in call.named_args.drain(..) {
-                                variadic_arr.set(ArrayKey::String(PhpString::from_vec(name)), val);
+                                variadic_arr
+                                    .set(ArrayKey::String(PhpString::from_vec(name)), val);
                             }
                             if vi < func_cvs.len() {
-                                func_cvs[vi] = Value::Array(Rc::new(RefCell::new(variadic_arr)));
+                                func_cvs[vi] =
+                                    Value::Array(Rc::new(RefCell::new(variadic_arr)));
                             }
                         } else {
                             for (i, arg) in call.args.iter().enumerate() {
@@ -25506,7 +26225,9 @@ impl Vm {
                                         self.pending_calls.truncate(saved_pending_calls);
                                         // Restore error_reporting to the depth when the try/catch was set up
                                         while self.error_reporting_stack.len() > saved_depth {
-                                            if let Some(saved) = self.error_reporting_stack.pop() {
+                                            if let Some(saved) =
+                                                self.error_reporting_stack.pop()
+                                            {
                                                 self.error_reporting = saved;
                                             }
                                         }
@@ -25525,13 +26246,20 @@ impl Vm {
                                         // (with the frames of the calls the exception left)
                                         self.call_stack.truncate(call_frame_depth);
                                         self.current_exception = Some(exc);
-                                        let (catch_target, _, _, saved_depth, saved_pending_calls) =
-                                            exception_handlers.pop().unwrap();
+                                        let (
+                                            catch_target,
+                                            _,
+                                            _,
+                                            saved_depth,
+                                            saved_pending_calls,
+                                        ) = exception_handlers.pop().unwrap();
                                         // Restore pending_calls to the depth at TryBegin
                                         self.pending_calls.truncate(saved_pending_calls);
                                         // Restore error_reporting to the depth when the try/catch was set up
                                         while self.error_reporting_stack.len() > saved_depth {
-                                            if let Some(saved) = self.error_reporting_stack.pop() {
+                                            if let Some(saved) =
+                                                self.error_reporting_stack.pop()
+                                            {
                                                 self.error_reporting = saved;
                                             }
                                         }
@@ -25570,7 +26298,8 @@ impl Vm {
                             && name_bytes.ends_with(b"::__construct")
                             && (is_forwarding_call
                                 || !matches!(call.args.first(), Some(Value::Object(_))))
-                            && self.user_class_without_ctor(&name_bytes[..name_bytes.len() - 13]);
+                            && self
+                                .user_class_without_ctor(&name_bytes[..name_bytes.len() - 13]);
                         if no_ctor_static {
                             let msg = "Cannot call constructor";
                             let exc = self.create_exception(b"Error", msg, op.line);
@@ -25587,7 +26316,9 @@ impl Vm {
                                 line: op.line,
                             });
                         }
-                        if name_bytes.ends_with(b"::__construct") || name_bytes == b"__construct" {
+                        if name_bytes.ends_with(b"::__construct")
+                            || name_bytes == b"__construct"
+                        {
                             if let Some(Value::Object(obj_rc)) = call.args.first() {
                                 if obj_rc.borrow().has_property(b"__ctor_pending") {
                                     obj_rc
@@ -25635,11 +26366,14 @@ impl Vm {
                                 });
                             }
                             // Named arguments for extension-provided constructors.
-                            if !call.named_args.is_empty() && !self.native_class_handlers.is_empty()
+                            if !call.named_args.is_empty()
+                                && !self.native_class_handlers.is_empty()
                             {
                                 if let Some(Value::Object(o)) = call.args.first() {
                                     let cl = o.borrow().class_name.to_ascii_lowercase();
-                                    if let Some((native, _)) = self.find_native_class_handler(&cl) {
+                                    if let Some((native, _)) =
+                                        self.find_native_class_handler(&cl)
+                                    {
                                         let named = std::mem::take(&mut call.named_args);
                                         if let Err(n) = self.merge_native_named_args(
                                             &native,
@@ -25657,8 +26391,10 @@ impl Vm {
                             if !call.named_args.is_empty() {
                                 let first_name =
                                     String::from_utf8_lossy(&call.named_args[0].0).into_owned();
-                                let err_msg = format!("Unknown named parameter ${}", first_name);
-                                let exc_val = self.create_exception(b"Error", &err_msg, op.line);
+                                let err_msg =
+                                    format!("Unknown named parameter ${}", first_name);
+                                let exc_val =
+                                    self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc_val);
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()
@@ -25728,10 +26464,14 @@ impl Vm {
                                     // A root class (no parent, not an alias) is its own
                                     // nearest built-in ancestor: skip the ancestry scan.
                                     let is_root_class = raw_class_lower == b"stdclass"
-                                        || self.classes.get(&raw_class_lower).is_some_and(|ce| {
-                                            ce.parent.is_none()
-                                                && ce.name.eq_ignore_ascii_case(&raw_class_lower)
-                                        });
+                                        || self.classes.get(&raw_class_lower).is_some_and(
+                                            |ce| {
+                                                ce.parent.is_none()
+                                                    && ce
+                                                        .name
+                                                        .eq_ignore_ascii_case(&raw_class_lower)
+                                            },
+                                        );
                                     // An internal class's ancestor only depends on the
                                     // stubs: computed once.
                                     let internal = !self.classes.contains_key(&raw_class_lower);
@@ -25753,28 +26493,37 @@ impl Vm {
                                         )
                                     {
                                         raw_class_lower.clone()
-                                    } else if self.class_extends(&raw_class_lower, b"arrayobject") {
-                                        b"arrayobject".to_vec()
                                     } else if self
-                                        .class_extends(&raw_class_lower, b"recursivearrayiterator")
+                                        .class_extends(&raw_class_lower, b"arrayobject")
                                     {
+                                        b"arrayobject".to_vec()
+                                    } else if self.class_extends(
+                                        &raw_class_lower,
+                                        b"recursivearrayiterator",
+                                    ) {
                                         b"recursivearrayiterator".to_vec()
-                                    } else if self.class_extends(&raw_class_lower, b"arrayiterator")
+                                    } else if self
+                                        .class_extends(&raw_class_lower, b"arrayiterator")
                                     {
                                         b"arrayiterator".to_vec()
-                                    } else if self.class_extends(&raw_class_lower, b"datetime") {
+                                    } else if self.class_extends(&raw_class_lower, b"datetime")
+                                    {
                                         b"datetime".to_vec()
                                     } else if self
                                         .class_extends(&raw_class_lower, b"datetimeimmutable")
                                     {
                                         b"datetimeimmutable".to_vec()
-                                    } else if self.class_extends(&raw_class_lower, b"datetimezone")
+                                    } else if self
+                                        .class_extends(&raw_class_lower, b"datetimezone")
                                     {
                                         b"datetimezone".to_vec()
-                                    } else if self.class_extends(&raw_class_lower, b"dateinterval")
+                                    } else if self
+                                        .class_extends(&raw_class_lower, b"dateinterval")
                                     {
                                         b"dateinterval".to_vec()
-                                    } else if self.class_extends(&raw_class_lower, b"dateperiod") {
+                                    } else if self
+                                        .class_extends(&raw_class_lower, b"dateperiod")
+                                    {
                                         b"dateperiod".to_vec()
                                     } else if self
                                         .class_extends(&raw_class_lower, b"reflectionenum")
@@ -25887,7 +26636,9 @@ impl Vm {
                                                                 None
                                                             }
                                                         })
-                                                        .unwrap_or_else(|| "TypeError".to_string());
+                                                        .unwrap_or_else(|| {
+                                                            "TypeError".to_string()
+                                                        });
                                                     return Err(VmError {
                                                         message: format!(
                                                             "Uncaught {}: {}",
@@ -25910,7 +26661,8 @@ impl Vm {
                                             let class_canonical =
                                                 self.builtin_canonical_name(&class_lower);
                                             // Reject too many arguments (at most 3 user args + $this = 4 total).
-                                            let user_arg_count = call.args.len().saturating_sub(1);
+                                            let user_arg_count =
+                                                call.args.len().saturating_sub(1);
                                             if user_arg_count > 3 {
                                                 let msg = format!(
                                                     "{}::__construct() expects at most 3 arguments, {} given",
@@ -25951,7 +26703,8 @@ impl Vm {
                                                         b"__spl_array".to_vec(),
                                                         cloned,
                                                     );
-                                                } else if let Value::Object(wrapped) = &call.args[1]
+                                                } else if let Value::Object(wrapped) =
+                                                    &call.args[1]
                                                 {
                                                     emit_deprecation = true;
                                                     // Reject enums: they are not compatible with ArrayObject.
@@ -25971,9 +26724,9 @@ impl Vm {
                                                         // Emit the deprecation first (PHP emits
                                                         // the deprecation before the exception).
                                                         self.emit_deprecated_at(&format!(
-                                                            "{}::__construct(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
-                                                            class_canonical, class_canonical
-                                                        ), op.line);
+                                                        "{}::__construct(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
+                                                        class_canonical, class_canonical
+                                                    ), op.line);
                                                         let msg = "Enums are not compatible with ArrayObject";
                                                         let exc = self.create_exception(
                                                             b"InvalidArgumentException",
@@ -26021,9 +26774,9 @@ impl Vm {
                                                             );
                                                         drop(obj_mut);
                                                         self.emit_deprecated_at(&format!(
-                                                            "{}::__construct(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
-                                                            class_canonical, class_canonical
-                                                        ), op.line);
+                                                        "{}::__construct(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
+                                                        class_canonical, class_canonical
+                                                    ), op.line);
                                                         let msg = format!(
                                                             "Overloaded object of type {} is not compatible with ArrayObject",
                                                             inner_class_display
@@ -26106,11 +26859,13 @@ impl Vm {
                                                 // that derives from ArrayIterator.
                                                 let iter_class = call.args[3].to_php_string();
                                                 let iter_class_bytes = iter_class.as_bytes();
-                                                let iter_class_lower: Vec<u8> = iter_class_bytes
-                                                    .iter()
-                                                    .map(|b| b.to_ascii_lowercase())
-                                                    .collect();
-                                                let is_valid = iter_class_lower == b"arrayiterator"
+                                                let iter_class_lower: Vec<u8> =
+                                                    iter_class_bytes
+                                                        .iter()
+                                                        .map(|b| b.to_ascii_lowercase())
+                                                        .collect();
+                                                let is_valid = iter_class_lower
+                                                    == b"arrayiterator"
                                                     || iter_class_lower
                                                         == b"recursivearrayiterator"
                                                     || self.class_extends(
@@ -26121,7 +26876,9 @@ impl Vm {
                                                     let msg = format!(
                                                         "{}::__construct(): Argument #3 ($iteratorClass) must be a class name derived from ArrayIterator, {} given",
                                                         class_canonical,
-                                                        String::from_utf8_lossy(iter_class_bytes)
+                                                        String::from_utf8_lossy(
+                                                            iter_class_bytes
+                                                        )
                                                     );
                                                     drop(obj_mut);
                                                     let exc = self.create_exception(
@@ -26130,10 +26887,16 @@ impl Vm {
                                                         op.line,
                                                     );
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, saved_pc)) =
-                                                        exception_handlers.pop()
+                                                    if let Some((
+                                                        catch_target,
+                                                        _,
+                                                        _,
+                                                        _,
+                                                        saved_pc,
+                                                    )) = exception_handlers.pop()
                                                     {
-                                                        pending_calls_catch_depth = Some(saved_pc);
+                                                        pending_calls_catch_depth =
+                                                            Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         return Ok(Flow::Continue);
                                                     } else {
@@ -26154,9 +26917,9 @@ impl Vm {
                                             if emit_deprecation {
                                                 drop(obj_mut);
                                                 self.emit_deprecated_at(&format!(
-                                                    "{}::__construct(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
-                                                    class_canonical, class_canonical
-                                                ), op.line);
+                                                "{}::__construct(): Using an object as a backing array for {} is deprecated, as it allows violating class constraints and invariants",
+                                                class_canonical, class_canonical
+                                            ), op.line);
                                             }
                                         }
                                         b"splfixedarray" => {
@@ -26170,9 +26933,9 @@ impl Vm {
                                                         // Emit deprecation warning for null
                                                         drop(obj_mut);
                                                         self.emit_deprecated_at(
-                                                            "SplFixedArray::__construct(): Passing null to parameter #1 ($size) of type int is deprecated",
-                                                            op.line,
-                                                        );
+                                                        "SplFixedArray::__construct(): Passing null to parameter #1 ($size) of type int is deprecated",
+                                                        op.line,
+                                                    );
                                                         obj_mut = obj.borrow_mut();
                                                     }
                                                     Value::Object(o) => {
@@ -26281,9 +27044,9 @@ impl Vm {
                                         b"splheap" | b"splminheap" | b"splmaxheap" => {
                                             obj_mut.set_property(
                                                 b"__spl_array".to_vec(),
-                                                Value::Array(Rc::new(
-                                                    RefCell::new(PhpArray::new()),
-                                                )),
+                                                Value::Array(Rc::new(RefCell::new(
+                                                    PhpArray::new(),
+                                                ))),
                                             );
                                         }
                                         b"spldoublylinkedlist" | b"splstack" | b"splqueue" => {
@@ -26331,10 +27094,12 @@ impl Vm {
                                             let min_args: usize = match class_lower.as_slice() {
                                                 b"callbackfilteriterator"
                                                 | b"recursivecallbackfilteriterator" => 2,
-                                                b"regexiterator" | b"recursiveregexiterator" => 2,
+                                                b"regexiterator"
+                                                | b"recursiveregexiterator" => 2,
                                                 _ => 1,
                                             };
-                                            let user_arg_count = call.args.len().saturating_sub(1);
+                                            let user_arg_count =
+                                                call.args.len().saturating_sub(1);
                                             if user_arg_count < min_args {
                                                 drop(obj_mut);
                                                 let class_canonical =
@@ -26354,7 +27119,9 @@ impl Vm {
                                                 } else {
                                                     format!(
                                                         "{}::__construct() expects exactly {} arguments, {} given",
-                                                        class_canonical, min_args, user_arg_count
+                                                        class_canonical,
+                                                        min_args,
+                                                        user_arg_count
                                                     )
                                                 };
                                                 let exc = self.create_exception(
@@ -26363,10 +27130,16 @@ impl Vm {
                                                     op.line,
                                                 );
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                                    exception_handlers.last()
+                                                if let Some((
+                                                    catch_target,
+                                                    _,
+                                                    _,
+                                                    _,
+                                                    eh_pc_depth,
+                                                )) = exception_handlers.last()
                                                 {
-                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    pending_calls_catch_depth =
+                                                        Some(*eh_pc_depth);
                                                     let ct = *catch_target;
                                                     ip = ct as usize;
                                                     return Ok(Flow::Continue);
@@ -26380,30 +27153,31 @@ impl Vm {
                                                 });
                                             }
                                             // Max-argument check per builtin.
-                                            let max_args: Option<usize> =
-                                                match class_lower.as_slice() {
-                                                    b"iteratoriterator" => Some(2),
-                                                    b"norewinditerator" | b"infiniteiterator"
-                                                    | b"parentiterator" => Some(1),
-                                                    b"filteriterator"
-                                                    | b"recursivefilteriterator" => Some(1),
-                                                    b"callbackfilteriterator"
-                                                    | b"recursivecallbackfilteriterator" => Some(2),
-                                                    b"cachingiterator"
-                                                    | b"recursivecachingiterator" => Some(2),
-                                                    b"recursiveiteratoriterator"
-                                                    | b"recursivetreeiterator" => Some(3),
-                                                    b"regexiterator"
-                                                    | b"recursiveregexiterator" => Some(5),
-                                                    _ => None,
-                                                };
+                                            let max_args: Option<usize> = match class_lower
+                                                .as_slice()
+                                            {
+                                                b"iteratoriterator" => Some(2),
+                                                b"norewinditerator" | b"infiniteiterator"
+                                                | b"parentiterator" => Some(1),
+                                                b"filteriterator"
+                                                | b"recursivefilteriterator" => Some(1),
+                                                b"callbackfilteriterator"
+                                                | b"recursivecallbackfilteriterator" => Some(2),
+                                                b"cachingiterator"
+                                                | b"recursivecachingiterator" => Some(2),
+                                                b"recursiveiteratoriterator"
+                                                | b"recursivetreeiterator" => Some(3),
+                                                b"regexiterator"
+                                                | b"recursiveregexiterator" => Some(5),
+                                                _ => None,
+                                            };
                                             if let Some(max) = max_args {
                                                 let user_arg_count =
                                                     call.args.len().saturating_sub(1);
                                                 if user_arg_count > max {
                                                     drop(obj_mut);
-                                                    let class_canonical =
-                                                        self.builtin_canonical_name(&class_lower);
+                                                    let class_canonical = self
+                                                        .builtin_canonical_name(&class_lower);
                                                     let msg = format!(
                                                         "{}::__construct() expects at most {} argument{}, {} given",
                                                         class_canonical,
@@ -26456,19 +27230,19 @@ impl Vm {
                                                         .iter()
                                                         .map(|b| b.to_ascii_lowercase())
                                                         .collect();
-                                                    let is_agg = self.class_implements_interface(
-                                                        &io_class_lower,
-                                                        b"iteratoraggregate",
-                                                    ) || self
-                                                        .builtin_implements_interface(
+                                                    let is_agg =
+                                                        self.class_implements_interface(
+                                                            &io_class_lower,
+                                                            b"iteratoraggregate",
+                                                        ) || self.builtin_implements_interface(
                                                             &io_class_lower,
                                                             b"iteratoraggregate",
                                                         );
-                                                    let is_iter = self.class_implements_interface(
-                                                        &io_class_lower,
-                                                        b"iterator",
-                                                    ) || self
-                                                        .builtin_implements_interface(
+                                                    let is_iter =
+                                                        self.class_implements_interface(
+                                                            &io_class_lower,
+                                                            b"iterator",
+                                                        ) || self.builtin_implements_interface(
                                                             &io_class_lower,
                                                             b"iterator",
                                                         );
@@ -26486,32 +27260,35 @@ impl Vm {
                                                             )
                                                             .unwrap_or(Value::Null);
                                                         let is_traversable =
-                                                            if let Value::Object(ro) = &resolved {
+                                                            if let Value::Object(ro) = &resolved
+                                                            {
                                                                 let rc: Vec<u8> = ro
                                                                     .borrow()
                                                                     .class_name
                                                                     .iter()
-                                                                    .map(|b| b.to_ascii_lowercase())
+                                                                    .map(|b| {
+                                                                        b.to_ascii_lowercase()
+                                                                    })
                                                                     .collect();
                                                                 self.class_implements_interface(
-                                                                &rc,
-                                                                b"traversable",
-                                                            ) || self.class_implements_interface(
-                                                                &rc,
-                                                                b"iterator",
-                                                            ) || self.class_implements_interface(
-                                                                &rc,
-                                                                b"iteratoraggregate",
-                                                            ) || self.builtin_implements_interface(
-                                                                &rc,
-                                                                b"traversable",
-                                                            ) || self.builtin_implements_interface(
-                                                                &rc,
-                                                                b"iterator",
-                                                            ) || self.builtin_implements_interface(
-                                                                &rc,
-                                                                b"iteratoraggregate",
-                                                            )
+                                                            &rc,
+                                                            b"traversable",
+                                                        ) || self.class_implements_interface(
+                                                            &rc,
+                                                            b"iterator",
+                                                        ) || self.class_implements_interface(
+                                                            &rc,
+                                                            b"iteratoraggregate",
+                                                        ) || self.builtin_implements_interface(
+                                                            &rc,
+                                                            b"traversable",
+                                                        ) || self.builtin_implements_interface(
+                                                            &rc,
+                                                            b"iterator",
+                                                        ) || self.builtin_implements_interface(
+                                                            &rc,
+                                                            b"iteratoraggregate",
+                                                        )
                                                             } else {
                                                                 false
                                                             };
@@ -26603,8 +27380,8 @@ impl Vm {
                                                 };
                                                 if let Some(err_detail) = cb_error {
                                                     drop(obj_mut);
-                                                    let class_canonical =
-                                                        self.builtin_canonical_name(&class_lower);
+                                                    let class_canonical = self
+                                                        .builtin_canonical_name(&class_lower);
                                                     let msg = format!(
                                                         "{}::__construct(): Argument #2 ($callback) must be a valid callback, {}",
                                                         class_canonical, err_detail
@@ -26719,10 +27496,16 @@ impl Vm {
                                                     op.line,
                                                 );
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                                    exception_handlers.last()
+                                                if let Some((
+                                                    catch_target,
+                                                    _,
+                                                    _,
+                                                    _,
+                                                    eh_pc_depth,
+                                                )) = exception_handlers.last()
                                                 {
-                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    pending_calls_catch_depth =
+                                                        Some(*eh_pc_depth);
                                                     let ct = *catch_target;
                                                     ip = ct as usize;
                                                     return Ok(Flow::Continue);
@@ -26744,10 +27527,16 @@ impl Vm {
                                                     op.line,
                                                 );
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                                    exception_handlers.last()
+                                                if let Some((
+                                                    catch_target,
+                                                    _,
+                                                    _,
+                                                    _,
+                                                    eh_pc_depth,
+                                                )) = exception_handlers.last()
                                                 {
-                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    pending_calls_catch_depth =
+                                                        Some(*eh_pc_depth);
                                                     let ct = *catch_target;
                                                     ip = ct as usize;
                                                     return Ok(Flow::Continue);
@@ -26802,10 +27591,16 @@ impl Vm {
                                                 );
                                                 self.call_stack.pop();
                                                 self.current_exception = Some(exc);
-                                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                                    exception_handlers.last()
+                                                if let Some((
+                                                    catch_target,
+                                                    _,
+                                                    _,
+                                                    _,
+                                                    eh_pc_depth,
+                                                )) = exception_handlers.last()
                                                 {
-                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    pending_calls_catch_depth =
+                                                        Some(*eh_pc_depth);
                                                     let ct = *catch_target;
                                                     ip = ct as usize;
                                                     return Ok(Flow::Continue);
@@ -26820,9 +27615,9 @@ impl Vm {
                                             }
                                             obj_mut.set_property(
                                                 b"__spl_array".to_vec(),
-                                                Value::Array(Rc::new(
-                                                    RefCell::new(PhpArray::new()),
-                                                )),
+                                                Value::Array(Rc::new(RefCell::new(
+                                                    PhpArray::new(),
+                                                ))),
                                             );
                                             obj_mut.set_property(
                                                 b"__spl_idx".to_vec(),
@@ -26841,9 +27636,9 @@ impl Vm {
                                             );
                                             obj_mut.set_property(
                                                 b"__spl_array".to_vec(),
-                                                Value::Array(Rc::new(
-                                                    RefCell::new(PhpArray::new()),
-                                                )),
+                                                Value::Array(Rc::new(RefCell::new(
+                                                    PhpArray::new(),
+                                                ))),
                                             );
                                         }
                                         b"splfileinfo" => {
@@ -26859,10 +27654,13 @@ impl Vm {
                                         b"splfileobject" => {
                                             // __construct(string $filename, string $mode = "r", ...)
                                             if call.args.len() > 1 {
-                                                let path =
-                                                    call.args[1].to_php_string().to_string_lossy();
+                                                let path = call.args[1]
+                                                    .to_php_string()
+                                                    .to_string_lossy();
                                                 let mode = if call.args.len() > 2 {
-                                                    call.args[2].to_php_string().to_string_lossy()
+                                                    call.args[2]
+                                                        .to_php_string()
+                                                        .to_string_lossy()
                                                 } else {
                                                     "r".to_string()
                                                 };
@@ -26889,7 +27687,8 @@ impl Vm {
                                                         let _ = std::fs::write(&path, b"");
                                                     } else if mode.starts_with('x') {
                                                         // Create only if not exists
-                                                        if std::path::Path::new(&path).exists() {
+                                                        if std::path::Path::new(&path).exists()
+                                                        {
                                                             drop(obj_mut);
                                                             let msg = format!(
                                                                 "SplFileObject::__construct({}): Failed to open stream: File exists",
@@ -26972,10 +27771,9 @@ impl Vm {
                                                     while let Some(line) = lines_iter.next() {
                                                         if lines_iter.peek().is_some() {
                                                             lines_arr.push(Value::String(
-                                                                PhpString::from_string(format!(
-                                                                    "{}\n",
-                                                                    line
-                                                                )),
+                                                                PhpString::from_string(
+                                                                    format!("{}\n", line),
+                                                                ),
                                                             ));
                                                         } else {
                                                             // Last segment
@@ -26999,7 +27797,8 @@ impl Vm {
                                                             lines_arr,
                                                         ))),
                                                     );
-                                                } else if let Ok(content) = std::fs::read(&path) {
+                                                } else if let Ok(content) = std::fs::read(&path)
+                                                {
                                                     // Binary file - store as single line
                                                     let mut lines_arr = PhpArray::new();
                                                     lines_arr.push(Value::String(
@@ -27061,13 +27860,15 @@ impl Vm {
                                             // Store an empty lines array - works as a temporary file
                                             obj_mut.set_property(
                                                 b"__spl_file_path".to_vec(),
-                                                Value::String(PhpString::from_bytes(b"php://temp")),
+                                                Value::String(PhpString::from_bytes(
+                                                    b"php://temp",
+                                                )),
                                             );
                                             obj_mut.set_property(
                                                 b"__spl_file_lines".to_vec(),
-                                                Value::Array(Rc::new(
-                                                    RefCell::new(PhpArray::new()),
-                                                )),
+                                                Value::Array(Rc::new(RefCell::new(
+                                                    PhpArray::new(),
+                                                ))),
                                             );
                                             obj_mut.set_property(
                                                 b"__spl_pos".to_vec(),
@@ -27128,9 +27929,9 @@ impl Vm {
                                         b"reflectionfunction" => {
                                             drop(obj_mut);
                                             let ctor_handled =
-                                                crate::reflection::reflection_function_construct(
-                                                    self, &call.args, op.line,
-                                                );
+                                            crate::reflection::reflection_function_construct(
+                                                self, &call.args, op.line,
+                                            );
                                             if !ctor_handled {
                                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                                     exception_handlers.pop()
@@ -27150,9 +27951,9 @@ impl Vm {
                                         b"reflectionproperty" => {
                                             drop(obj_mut);
                                             let ctor_handled =
-                                                crate::reflection::reflection_property_construct(
-                                                    self, &call.args, op.line,
-                                                );
+                                            crate::reflection::reflection_property_construct(
+                                                self, &call.args, op.line,
+                                            );
                                             if !ctor_handled {
                                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                                     exception_handlers.pop()
@@ -27172,9 +27973,9 @@ impl Vm {
                                         b"reflectionparameter" => {
                                             drop(obj_mut);
                                             let ctor_handled =
-                                                crate::reflection::reflection_parameter_construct(
-                                                    self, &call.args, op.line,
-                                                );
+                                            crate::reflection::reflection_parameter_construct(
+                                                self, &call.args, op.line,
+                                            );
                                             if !ctor_handled {
                                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                                     exception_handlers.pop()
@@ -27215,8 +28016,9 @@ impl Vm {
                                         b"reflectionconstant" => {
                                             // ReflectionConstant::__construct(string $name)
                                             if call.args.len() > 1 {
-                                                let const_name =
-                                                    call.args[1].to_php_string().to_string_lossy();
+                                                let const_name = call.args[1]
+                                                    .to_php_string()
+                                                    .to_string_lossy();
                                                 // For lookup, strip a single leading backslash and
                                                 // lowercase the namespace prefix (the form used when
                                                 // the constant was registered via define()).
@@ -27255,10 +28057,16 @@ impl Vm {
                                                         op.line,
                                                     );
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, saved_pc)) =
-                                                        exception_handlers.pop()
+                                                    if let Some((
+                                                        catch_target,
+                                                        _,
+                                                        _,
+                                                        _,
+                                                        saved_pc,
+                                                    )) = exception_handlers.pop()
                                                     {
-                                                        pending_calls_catch_depth = Some(saved_pc);
+                                                        pending_calls_catch_depth =
+                                                            Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         return Ok(Flow::Continue);
                                                     } else {
@@ -27347,27 +28155,30 @@ impl Vm {
                                                 }
                                             }
                                             if call.args.len() > 1 {
-                                                let raw =
-                                                    call.args[1].to_php_string().to_string_lossy();
+                                                let raw = call.args[1]
+                                                    .to_php_string()
+                                                    .to_string_lossy();
                                                 // Canonicalize known extension names; otherwise pass through unchanged.
-                                                let canonical =
-                                                    match raw.to_ascii_lowercase().as_str() {
-                                                        "reflection" => "Reflection".to_string(),
-                                                        "core" => "Core".to_string(),
-                                                        "standard" => "standard".to_string(),
-                                                        "date" => "date".to_string(),
-                                                        "json" => "json".to_string(),
-                                                        "spl" => "SPL".to_string(),
-                                                        "pcre" => "pcre".to_string(),
-                                                        "phar" => "Phar".to_string(),
-                                                        "hash" => "hash".to_string(),
-                                                        "random" => "Random".to_string(),
-                                                        "ctype" => "ctype".to_string(),
-                                                        "filter" => "filter".to_string(),
-                                                        "tokenizer" => "tokenizer".to_string(),
-                                                        "uri" => "uri".to_string(),
-                                                        _ => raw.clone(),
-                                                    };
+                                                let canonical = match raw
+                                                    .to_ascii_lowercase()
+                                                    .as_str()
+                                                {
+                                                    "reflection" => "Reflection".to_string(),
+                                                    "core" => "Core".to_string(),
+                                                    "standard" => "standard".to_string(),
+                                                    "date" => "date".to_string(),
+                                                    "json" => "json".to_string(),
+                                                    "spl" => "SPL".to_string(),
+                                                    "pcre" => "pcre".to_string(),
+                                                    "phar" => "Phar".to_string(),
+                                                    "hash" => "hash".to_string(),
+                                                    "random" => "Random".to_string(),
+                                                    "ctype" => "ctype".to_string(),
+                                                    "filter" => "filter".to_string(),
+                                                    "tokenizer" => "tokenizer".to_string(),
+                                                    "uri" => "uri".to_string(),
+                                                    _ => raw.clone(),
+                                                };
                                                 obj_mut.set_property(
                                                     b"name".to_vec(),
                                                     Value::String(PhpString::from_string(
@@ -27446,13 +28257,16 @@ impl Vm {
                                             let default_tz_lookup = || {
                                                 self.constants
                                                     .get(b"__default_timezone".as_ref())
-                                                    .map(|v| v.to_php_string().to_string_lossy())
+                                                    .map(|v| {
+                                                        v.to_php_string().to_string_lossy()
+                                                    })
                                                     .filter(|s| !s.is_empty())
                                                     .or_else(|| {
                                                         self.constants
                                                             .get(b"date.timezone".as_ref())
                                                             .map(|v| {
-                                                                v.to_php_string().to_string_lossy()
+                                                                v.to_php_string()
+                                                                    .to_string_lossy()
                                                             })
                                                             .filter(|s| !s.is_empty())
                                                     })
@@ -27477,7 +28291,9 @@ impl Vm {
                                                 default_tz_lookup()
                                             };
                                             let now_secs = std::time::SystemTime::now()
-                                                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                                                .duration_since(
+                                                    std::time::SystemTime::UNIX_EPOCH,
+                                                )
                                                 .map(|d| d.as_secs() as i64)
                                                 .unwrap_or(0);
                                             let timestamp = if datetime_str.is_empty()
@@ -27586,7 +28402,9 @@ impl Vm {
                                                     let b = s.as_bytes();
                                                     if b.len() == 5
                                                         && (b[0] == b'+' || b[0] == b'-')
-                                                        && b[1..].iter().all(|c| c.is_ascii_digit())
+                                                        && b[1..]
+                                                            .iter()
+                                                            .all(|c| c.is_ascii_digit())
                                                     {
                                                         format!(
                                                             "{}{}{}:{}{}",
@@ -27602,17 +28420,19 @@ impl Vm {
                                                 };
                                                 if !trimmed.is_empty() {
                                                     if vm_parse_tz_offset(trimmed).is_some() {
-                                                        effective_tz = normalize_offset(trimmed);
+                                                        effective_tz =
+                                                            normalize_offset(trimmed);
                                                         effective_tz_type = 1;
                                                     } else if is_abbrev_not_utc(trimmed) {
                                                         effective_tz = trimmed.to_uppercase();
                                                         effective_tz_type = 2;
-                                                    } else if let Some(idx) =
-                                                        trimmed.rfind(|c: char| c.is_whitespace())
+                                                    } else if let Some(idx) = trimmed
+                                                        .rfind(|c: char| c.is_whitespace())
                                                     {
                                                         let tail = trimmed[idx + 1..].trim();
                                                         if vm_parse_tz_offset(tail).is_some() {
-                                                            effective_tz = normalize_offset(tail);
+                                                            effective_tz =
+                                                                normalize_offset(tail);
                                                             effective_tz_type = 1;
                                                         } else if is_abbrev_not_utc(tail) {
                                                             effective_tz = tail.to_uppercase();
@@ -27630,8 +28450,9 @@ impl Vm {
                                                 // If user explicitly passed a tz arg, use it (override).
                                                 if let Value::Object(tz_obj) = &call.args[2] {
                                                     let tb = tz_obj.borrow();
-                                                    let typ =
-                                                        tb.get_property(b"timezone_type").to_long();
+                                                    let typ = tb
+                                                        .get_property(b"timezone_type")
+                                                        .to_long();
                                                     effective_tz_type =
                                                         if typ != 0 { typ } else { 3 };
                                                     effective_tz = tb
@@ -27643,10 +28464,11 @@ impl Vm {
                                                     }
                                                 }
                                             }
-                                            let (offset_secs, _) = vm_timezone_offset_and_abbrev(
-                                                &effective_tz,
-                                                timestamp,
-                                            );
+                                            let (offset_secs, _) =
+                                                vm_timezone_offset_and_abbrev(
+                                                    &effective_tz,
+                                                    timestamp,
+                                                );
                                             let utc_timestamp = if is_at_timestamp
                                                 || effective_tz == "UTC"
                                                 || effective_tz == "utc"
@@ -27671,20 +28493,24 @@ impl Vm {
                                             );
                                             obj_mut.set_property(
                                                 b"timezone".to_vec(),
-                                                Value::String(PhpString::from_string(effective_tz)),
+                                                Value::String(PhpString::from_string(
+                                                    effective_tz,
+                                                )),
                                             );
                                         }
                                         b"dateinterval" => {
                                             // DateInterval::__construct($duration) - ISO 8601 duration
                                             if call.args.len() > 1 {
-                                                let spec =
-                                                    call.args[1].to_php_string().to_string_lossy();
+                                                let spec = call.args[1]
+                                                    .to_php_string()
+                                                    .to_string_lossy();
                                                 // PHP distinguishes two error shapes:
                                                 //  * "Failed to parse interval (...)" when the spec contains '/'
                                                 //    (it looks like a date1/date2 form but isn't valid)
                                                 //  * "Unknown or bad format (...)" for any other malformed spec
                                                 let contains_slash = spec.contains('/');
-                                                if !spec.starts_with('P') && !spec.starts_with('p')
+                                                if !spec.starts_with('P')
+                                                    && !spec.starts_with('p')
                                                 {
                                                     drop(obj_mut);
                                                     let err_msg = if contains_slash {
@@ -27693,7 +28519,10 @@ impl Vm {
                                                             spec
                                                         )
                                                     } else {
-                                                        format!("Unknown or bad format ({})", spec)
+                                                        format!(
+                                                            "Unknown or bad format ({})",
+                                                            spec
+                                                        )
                                                     };
                                                     let exc = self.create_exception(
                                                         b"DateMalformedIntervalStringException",
@@ -27701,10 +28530,16 @@ impl Vm {
                                                         op.line,
                                                     );
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, saved_pc)) =
-                                                        exception_handlers.pop()
+                                                    if let Some((
+                                                        catch_target,
+                                                        _,
+                                                        _,
+                                                        _,
+                                                        saved_pc,
+                                                    )) = exception_handlers.pop()
                                                     {
-                                                        pending_calls_catch_depth = Some(saved_pc);
+                                                        pending_calls_catch_depth =
+                                                            Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         return Ok(Flow::Continue);
                                                     } else {
@@ -27719,12 +28554,30 @@ impl Vm {
                                                 }
                                                 let (y, m, d, h, i, s) =
                                                     parse_iso8601_duration(&spec);
-                                                obj_mut.set_property(b"y".to_vec(), Value::Long(y));
-                                                obj_mut.set_property(b"m".to_vec(), Value::Long(m));
-                                                obj_mut.set_property(b"d".to_vec(), Value::Long(d));
-                                                obj_mut.set_property(b"h".to_vec(), Value::Long(h));
-                                                obj_mut.set_property(b"i".to_vec(), Value::Long(i));
-                                                obj_mut.set_property(b"s".to_vec(), Value::Long(s));
+                                                obj_mut.set_property(
+                                                    b"y".to_vec(),
+                                                    Value::Long(y),
+                                                );
+                                                obj_mut.set_property(
+                                                    b"m".to_vec(),
+                                                    Value::Long(m),
+                                                );
+                                                obj_mut.set_property(
+                                                    b"d".to_vec(),
+                                                    Value::Long(d),
+                                                );
+                                                obj_mut.set_property(
+                                                    b"h".to_vec(),
+                                                    Value::Long(h),
+                                                );
+                                                obj_mut.set_property(
+                                                    b"i".to_vec(),
+                                                    Value::Long(i),
+                                                );
+                                                obj_mut.set_property(
+                                                    b"s".to_vec(),
+                                                    Value::Long(s),
+                                                );
                                                 obj_mut.set_property(
                                                     b"f".to_vec(),
                                                     Value::Double(0.0),
@@ -27733,8 +28586,10 @@ impl Vm {
                                                     b"invert".to_vec(),
                                                     Value::Long(0),
                                                 );
-                                                obj_mut
-                                                    .set_property(b"days".to_vec(), Value::False);
+                                                obj_mut.set_property(
+                                                    b"days".to_vec(),
+                                                    Value::False,
+                                                );
                                                 obj_mut.set_property(
                                                     b"from_string".to_vec(),
                                                     Value::False,
@@ -27810,10 +28665,16 @@ impl Vm {
                                                         op.line,
                                                     );
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, saved_pc)) =
-                                                        exception_handlers.pop()
+                                                    if let Some((
+                                                        catch_target,
+                                                        _,
+                                                        _,
+                                                        _,
+                                                        saved_pc,
+                                                    )) = exception_handlers.pop()
                                                     {
-                                                        pending_calls_catch_depth = Some(saved_pc);
+                                                        pending_calls_catch_depth =
+                                                            Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         return Ok(Flow::Continue);
                                                     } else {
@@ -27839,10 +28700,16 @@ impl Vm {
                                                         op.line,
                                                     );
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, saved_pc)) =
-                                                        exception_handlers.pop()
+                                                    if let Some((
+                                                        catch_target,
+                                                        _,
+                                                        _,
+                                                        _,
+                                                        saved_pc,
+                                                    )) = exception_handlers.pop()
                                                     {
-                                                        pending_calls_catch_depth = Some(saved_pc);
+                                                        pending_calls_catch_depth =
+                                                            Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         return Ok(Flow::Continue);
                                                     } else {
@@ -27857,17 +28724,18 @@ impl Vm {
                                                 }
                                                 // Determine timezone type: 1=offset, 2=abbreviation, 3=identifier.
                                                 // UTC and tz-database identifiers (containing "/") are type 3.
-                                                let tz_type = if vm_parse_tz_offset(&tz).is_some() {
-                                                    1
-                                                } else if tz.eq_ignore_ascii_case("UTC")
-                                                    || tz.contains('/')
-                                                {
-                                                    3
-                                                } else if vm_is_tz_abbrev(&tz) {
-                                                    2
-                                                } else {
-                                                    3
-                                                };
+                                                let tz_type =
+                                                    if vm_parse_tz_offset(&tz).is_some() {
+                                                        1
+                                                    } else if tz.eq_ignore_ascii_case("UTC")
+                                                        || tz.contains('/')
+                                                    {
+                                                        3
+                                                    } else if vm_is_tz_abbrev(&tz) {
+                                                        2
+                                                    } else {
+                                                        3
+                                                    };
                                                 obj_mut.set_property(
                                                     b"timezone_type".to_vec(),
                                                     Value::Long(tz_type),
@@ -27904,13 +28772,15 @@ impl Vm {
                                         }
                                         b"phptoken" => {
                                             // PhpToken::__construct(int $id, string $text, int $line = -1, int $pos = -1)
-                                            let id_val =
-                                                call.args.get(1).cloned().unwrap_or(Value::Long(0));
-                                            let text_val = call
+                                            let id_val = call
                                                 .args
-                                                .get(2)
+                                                .get(1)
                                                 .cloned()
-                                                .unwrap_or(Value::String(PhpString::empty()));
+                                                .unwrap_or(Value::Long(0));
+                                            let text_val =
+                                                call.args.get(2).cloned().unwrap_or(
+                                                    Value::String(PhpString::empty()),
+                                                );
                                             let line_val = call
                                                 .args
                                                 .get(3)
@@ -27946,14 +28816,26 @@ impl Vm {
                                             //   int $options = 0
                                             // )
                                             // Default include_start=true, include_end=false. INCLUDE_END_DATE=8, EXCLUDE_START_DATE=1.
-                                            let start_arg =
-                                                call.args.get(1).cloned().unwrap_or(Value::Null);
-                                            let interval_arg =
-                                                call.args.get(2).cloned().unwrap_or(Value::Null);
-                                            let end_arg =
-                                                call.args.get(3).cloned().unwrap_or(Value::Null);
-                                            let opts_arg =
-                                                call.args.get(4).cloned().unwrap_or(Value::Long(0));
+                                            let start_arg = call
+                                                .args
+                                                .get(1)
+                                                .cloned()
+                                                .unwrap_or(Value::Null);
+                                            let interval_arg = call
+                                                .args
+                                                .get(2)
+                                                .cloned()
+                                                .unwrap_or(Value::Null);
+                                            let end_arg = call
+                                                .args
+                                                .get(3)
+                                                .cloned()
+                                                .unwrap_or(Value::Null);
+                                            let opts_arg = call
+                                                .args
+                                                .get(4)
+                                                .cloned()
+                                                .unwrap_or(Value::Long(0));
                                             let opts = opts_arg.to_long();
                                             let include_start = (opts & 1) == 0;
                                             let include_end = (opts & 8) != 0;
@@ -27969,10 +28851,16 @@ impl Vm {
                                                         op.line,
                                                     );
                                                     self.current_exception = Some(exc);
-                                                    if let Some((catch_target, _, _, _, saved_pc)) =
-                                                        exception_handlers.pop()
+                                                    if let Some((
+                                                        catch_target,
+                                                        _,
+                                                        _,
+                                                        _,
+                                                        saved_pc,
+                                                    )) = exception_handlers.pop()
                                                     {
-                                                        pending_calls_catch_depth = Some(saved_pc);
+                                                        pending_calls_catch_depth =
+                                                            Some(saved_pc);
                                                         ip = catch_target as usize;
                                                         return Ok(Flow::Continue);
                                                     } else {
@@ -27987,7 +28875,8 @@ impl Vm {
                                                 }
                                             }
                                             obj_mut.set_property(b"start".to_vec(), start_arg);
-                                            obj_mut.set_property(b"current".to_vec(), Value::Null);
+                                            obj_mut
+                                                .set_property(b"current".to_vec(), Value::Null);
                                             // If 3rd arg is int, it's recurrences. PHP stores
                                             // recurrences = constructor_arg + 1 (the start date counts).
                                             let (end_v, recurrences_v) = match &end_arg {
@@ -28000,8 +28889,10 @@ impl Vm {
                                                 _ => (Value::Null, Value::Long(0)),
                                             };
                                             obj_mut.set_property(b"end".to_vec(), end_v);
-                                            obj_mut
-                                                .set_property(b"interval".to_vec(), interval_arg);
+                                            obj_mut.set_property(
+                                                b"interval".to_vec(),
+                                                interval_arg,
+                                            );
                                             obj_mut.set_property(
                                                 b"recurrences".to_vec(),
                                                 recurrences_v,
@@ -28025,15 +28916,20 @@ impl Vm {
                                         }
                                         b"uri\\whatwg\\url" | b"uri\\rfc3986\\uri" => {
                                             // __construct(string $uri, ?string $baseUrl = null)
-                                            let uri_val =
-                                                call.args.get(1).cloned().unwrap_or(Value::Null);
-                                            let uri_str = uri_val.to_php_string().to_string_lossy();
-                                            let base_str = call.args.get(2).and_then(|v| match v {
-                                                Value::Null | Value::Undef => None,
-                                                other => {
-                                                    Some(other.to_php_string().to_string_lossy())
-                                                }
-                                            });
+                                            let uri_val = call
+                                                .args
+                                                .get(1)
+                                                .cloned()
+                                                .unwrap_or(Value::Null);
+                                            let uri_str =
+                                                uri_val.to_php_string().to_string_lossy();
+                                            let base_str =
+                                                call.args.get(2).and_then(|v| match v {
+                                                    Value::Null | Value::Undef => None,
+                                                    other => Some(
+                                                        other.to_php_string().to_string_lossy(),
+                                                    ),
+                                                });
                                             let ok = crate::uri::parse_into(
                                                 &mut obj_mut,
                                                 &uri_str,
@@ -28048,7 +28944,8 @@ impl Vm {
                                                     let code =
                                                         crate::uri::whatwg_error_code(&uri_str);
                                                     let msg = if code.is_empty() {
-                                                        "The specified URI is malformed".to_string()
+                                                        "The specified URI is malformed"
+                                                            .to_string()
                                                     } else {
                                                         format!(
                                                             "The specified URI is malformed ({})",
@@ -28067,8 +28964,8 @@ impl Vm {
                                                             .to_string(),
                                                     )
                                                 };
-                                                let exc =
-                                                    self.create_exception(exc_class, &msg, op.line);
+                                                let exc = self
+                                                    .create_exception(exc_class, &msg, op.line);
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                                     exception_handlers.pop()
@@ -28173,7 +29070,9 @@ impl Vm {
                                             let arg = arg.unwrap_or(Value::Null).deref();
                                             let ctor_trace_args: Vec<Value> =
                                                 call.args.iter().skip(1).cloned().collect();
-                                            let err: Option<(&[u8], String)> = if call.args.len()
+                                            let err: Option<(&[u8], String)> = if call
+                                                .args
+                                                .len()
                                                 > 2
                                             {
                                                 Some((
@@ -28183,15 +29082,17 @@ impl Vm {
                                                         call.args.len() - 1
                                                     ),
                                                 ))
-                                            } else if !matches!(arg, Value::Null | Value::String(_))
-                                                && (op_array.strict_types
-                                                    || !matches!(
-                                                        arg,
-                                                        Value::True
-                                                            | Value::False
-                                                            | Value::Long(_)
-                                                            | Value::Double(_)
-                                                    ))
+                                            } else if !matches!(
+                                                arg,
+                                                Value::Null | Value::String(_)
+                                            ) && (op_array.strict_types
+                                                || !matches!(
+                                                    arg,
+                                                    Value::True
+                                                        | Value::False
+                                                        | Value::Long(_)
+                                                        | Value::Double(_)
+                                                ))
                                             {
                                                 Some((
                                                     b"TypeError",
@@ -28205,10 +29106,10 @@ impl Vm {
                                                 Value::Undef
                                             ) {
                                                 Some((
-                                                    b"Error",
-                                                    "Cannot modify readonly property NoDiscard::$message"
-                                                        .to_string(),
-                                                ))
+                                                b"Error",
+                                                "Cannot modify readonly property NoDiscard::$message"
+                                                    .to_string(),
+                                            ))
                                             } else {
                                                 None
                                             };
@@ -28221,7 +29122,8 @@ impl Vm {
                                                     ctor_trace_args,
                                                     true,
                                                 ));
-                                                let exc = self.create_exception(cls, &msg, op.line);
+                                                let exc =
+                                                    self.create_exception(cls, &msg, op.line);
                                                 self.call_stack.pop();
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, saved_pc)) =
@@ -28245,7 +29147,8 @@ impl Vm {
                                         b"deprecated" => {
                                             // Deprecated::__construct(?string $message = null, ?string $since = null)
                                             // Validate args as nullable string. On type mismatch, throw TypeError.
-                                            let user_arg_count = call.args.len().saturating_sub(1);
+                                            let user_arg_count =
+                                                call.args.len().saturating_sub(1);
                                             if user_arg_count > 2 {
                                                 drop(obj_mut);
                                                 let msg = format!(
@@ -28274,14 +29177,19 @@ impl Vm {
                                                 });
                                             }
                                             // Validate each arg is null or string (nullable string)
-                                            let mut type_err: Option<(u32, &'static str, String)> =
-                                                None;
+                                            let mut type_err: Option<(
+                                                u32,
+                                                &'static str,
+                                                String,
+                                            )> = None;
                                             for (idx, name) in
                                                 [(1usize, "message"), (2usize, "since")]
                                             {
                                                 if let Some(v) = call.args.get(idx) {
-                                                    if !matches!(v, Value::Null | Value::String(_))
-                                                    {
+                                                    if !matches!(
+                                                        v,
+                                                        Value::Null | Value::String(_)
+                                                    ) {
                                                         let type_name = self.format_arg_type(v);
                                                         type_err =
                                                             Some((idx as u32, name, type_name));
@@ -28309,7 +29217,10 @@ impl Vm {
                                                     return Ok(Flow::Continue);
                                                 }
                                                 return Err(VmError {
-                                                    message: format!("Uncaught TypeError: {}", msg),
+                                                    message: format!(
+                                                        "Uncaught TypeError: {}",
+                                                        msg
+                                                    ),
                                                     line: op.line,
                                                 });
                                             }
@@ -28333,8 +29244,8 @@ impl Vm {
                                                     true,
                                                 ));
                                                 let msg = "Cannot modify readonly property Deprecated::$message".to_string();
-                                                let exc =
-                                                    self.create_exception(b"Error", &msg, op.line);
+                                                let exc = self
+                                                    .create_exception(b"Error", &msg, op.line);
                                                 self.call_stack.pop();
                                                 self.current_exception = Some(exc);
                                                 if let Some((catch_target, _, _, _, saved_pc)) =
@@ -28349,10 +29260,16 @@ impl Vm {
                                                     line: op.line,
                                                 });
                                             }
-                                            let msg_val =
-                                                call.args.get(1).cloned().unwrap_or(Value::Null);
-                                            let since_val =
-                                                call.args.get(2).cloned().unwrap_or(Value::Null);
+                                            let msg_val = call
+                                                .args
+                                                .get(1)
+                                                .cloned()
+                                                .unwrap_or(Value::Null);
+                                            let since_val = call
+                                                .args
+                                                .get(2)
+                                                .cloned()
+                                                .unwrap_or(Value::Null);
                                             obj_mut.set_property(b"message".to_vec(), msg_val);
                                             obj_mut.set_property(b"since".to_vec(), since_val);
                                         }
@@ -28361,11 +29278,16 @@ impl Vm {
                                             let is_exc = class_lower == b"exception"
                                                 || class_lower == b"error"
                                                 || class_lower == b"errorexception"
-                                                || is_builtin_subclass(&class_lower, b"exception")
+                                                || is_builtin_subclass(
+                                                    &class_lower,
+                                                    b"exception",
+                                                )
                                                 || is_builtin_subclass(&class_lower, b"error")
-                                                || self.class_extends(&class_lower, b"exception")
+                                                || self
+                                                    .class_extends(&class_lower, b"exception")
                                                 || self.class_extends(&class_lower, b"error");
-                                            if is_exc && class_lower.as_slice() == b"errorexception"
+                                            if is_exc
+                                                && class_lower.as_slice() == b"errorexception"
                                             {
                                                 // ErrorException($message, $code, $severity, $filename, $line, $previous)
                                                 if call.args.len() > 1 {
@@ -28490,12 +29412,12 @@ impl Vm {
                                                                 base_class, given_type
                                                             );
                                                             // Push a frame for Exception->__construct so it appears in the trace
-                                                            let ctor_trace_args: Vec<Value> = call
-                                                                .args
-                                                                .iter()
-                                                                .skip(1)
-                                                                .cloned()
-                                                                .collect();
+                                                            let ctor_trace_args: Vec<Value> =
+                                                                call.args
+                                                                    .iter()
+                                                                    .skip(1)
+                                                                    .cloned()
+                                                                    .collect();
                                                             let ctor_name = format!(
                                                                 "{}->__construct",
                                                                 base_class
@@ -28569,8 +29491,10 @@ impl Vm {
                                 {
                                     let class_part = &name_bytes[..pos];
                                     let method_part = &name_bytes[pos + 2..];
-                                    let class_lower: Vec<u8> =
-                                        class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let class_lower: Vec<u8> = class_part
+                                        .iter()
+                                        .map(|b| b.to_ascii_lowercase())
+                                        .collect();
 
                                     // When in instance context, PHP uses the CURRENT SCOPE's __call,
                                     // not the explicitly named class's __call. For example, if B extends A
@@ -28616,8 +29540,8 @@ impl Vm {
                                                     if op.attributes.is_empty()
                                                         && !m.attributes.is_empty()
                                                     {
-                                                        std::rc::Rc::make_mut(&mut op).attributes =
-                                                            m.attributes.clone();
+                                                        std::rc::Rc::make_mut(&mut op)
+                                                            .attributes = m.attributes.clone();
                                                     }
                                                     (op, m.declaring_class.clone())
                                                 })
@@ -28658,10 +29582,11 @@ impl Vm {
                                         // OR the named class is an ancestor of $this's runtime class.
                                         // Outside an instance method (e.g. `$a::method()` from main), we always
                                         // route through __callStatic.
-                                        let inside_instance_method =
-                                            !self.class_scope_stack.is_empty()
-                                                && op_array.cv_names.first().map(|n| n.as_slice())
-                                                    == Some(b"this");
+                                        let inside_instance_method = !self
+                                            .class_scope_stack
+                                            .is_empty()
+                                            && op_array.cv_names.first().map(|n| n.as_slice())
+                                                == Some(b"this");
                                         let in_instance_context = !calling_class_is_trait
                                             && inside_instance_method
                                             && matches!(cvs.first(), Some(Value::Object(_)))
@@ -28684,7 +29609,8 @@ impl Vm {
                                                 }
                                             });
                                         if in_instance_context {
-                                            if let Some((call_op, declaring_class)) = magic_call {
+                                            if let Some((call_op, declaring_class)) = magic_call
+                                            {
                                                 // Deprecation message uses the original called method name
                                                 let display_fallback = format!(
                                                     "{}::{}",
@@ -28713,9 +29639,10 @@ impl Vm {
                                                     fn_cvs[0] = cvs[0].clone(); // $this
                                                 }
                                                 if fn_cvs.len() > 1 {
-                                                    fn_cvs[1] = Value::String(PhpString::from_vec(
-                                                        method_part.to_vec(),
-                                                    ));
+                                                    fn_cvs[1] =
+                                                        Value::String(PhpString::from_vec(
+                                                            method_part.to_vec(),
+                                                        ));
                                                 }
                                                 if fn_cvs.len() > 2 {
                                                     let mut args_arr =
@@ -28732,8 +29659,10 @@ impl Vm {
                                                     "{}::__call",
                                                     self.classes
                                                         .get(&declaring_class)
-                                                        .map(|c| String::from_utf8_lossy(&c.name)
-                                                            .to_string())
+                                                        .map(|c| String::from_utf8_lossy(
+                                                            &c.name
+                                                        )
+                                                        .to_string())
                                                         .unwrap_or_else(|| {
                                                             String::from_utf8_lossy(class_part)
                                                                 .to_string()
@@ -28750,7 +29679,8 @@ impl Vm {
                                                     frame_args,
                                                     true,
                                                 ));
-                                                self.called_class_stack.push(class_part.to_vec());
+                                                self.called_class_stack
+                                                    .push(class_part.to_vec());
                                                 self.class_scope_stack.push(declaring_class);
                                                 let result =
                                                     self.execute_op_array_vm(&call_op, fn_cvs);
@@ -28761,12 +29691,21 @@ impl Vm {
                                                     Ok(v) => v,
                                                     Err(e) => {
                                                         if self.current_exception.is_some() {
-                                                            if let Some((ct, ft, _, _, saved_pc)) =
-                                                                exception_handlers.pop()
+                                                            if let Some((
+                                                                ct,
+                                                                ft,
+                                                                _,
+                                                                _,
+                                                                saved_pc,
+                                                            )) = exception_handlers.pop()
                                                             {
                                                                 pending_calls_catch_depth =
                                                                     Some(saved_pc);
-                                                                ip = if ct > 0 { ct } else { ft }
+                                                                ip = if ct > 0 {
+                                                                    ct
+                                                                } else {
+                                                                    ft
+                                                                }
                                                                     as usize;
                                                                 return Ok(Flow::Continue);
                                                             }
@@ -28796,15 +29735,17 @@ impl Vm {
                                             let cname = self
                                                 .classes
                                                 .get(&class_lower)
-                                                .map(|c| crate::value::display_class_name(&c.name))
+                                                .map(|c| {
+                                                    crate::value::display_class_name(&c.name)
+                                                })
                                                 .unwrap_or_default();
                                             let err_msg = format!(
                                                 "Cannot call abstract method {}::{}()",
                                                 cname,
                                                 String::from_utf8_lossy(method_part)
                                             );
-                                            let exc =
-                                                self.create_exception(b"Error", &err_msg, op.line);
+                                            let exc = self
+                                                .create_exception(b"Error", &err_msg, op.line);
                                             self.current_exception = Some(exc);
                                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                                 exception_handlers.last()
@@ -28835,7 +29776,8 @@ impl Vm {
                                                     true,
                                                 );
                                                 if matches!(op.op1, OperandType::Const(_)) {
-                                                    let attrs = call_static_op.attributes.clone();
+                                                    let attrs =
+                                                        call_static_op.attributes.clone();
                                                     self.emit_nodiscard_warning(
                                                         &attrs,
                                                         &display_fallback,
@@ -28843,15 +29785,17 @@ impl Vm {
                                                         op.line,
                                                     );
                                                 }
-                                                let mut fn_cvs = vec![
-                                                    Value::Undef;
-                                                    call_static_op.cv_names.len()
-                                                ];
+                                                let mut fn_cvs =
+                                                    vec![
+                                                        Value::Undef;
+                                                        call_static_op.cv_names.len()
+                                                    ];
                                                 // __callStatic($name, $arguments)
                                                 if !fn_cvs.is_empty() {
-                                                    fn_cvs[0] = Value::String(PhpString::from_vec(
-                                                        method_part.to_vec(),
-                                                    ));
+                                                    fn_cvs[0] =
+                                                        Value::String(PhpString::from_vec(
+                                                            method_part.to_vec(),
+                                                        ));
                                                 }
                                                 if fn_cvs.len() > 1 {
                                                     let mut args_arr =
@@ -28868,8 +29812,10 @@ impl Vm {
                                                     "{}::__callStatic",
                                                     self.classes
                                                         .get(&declaring_class)
-                                                        .map(|c| String::from_utf8_lossy(&c.name)
-                                                            .to_string())
+                                                        .map(|c| String::from_utf8_lossy(
+                                                            &c.name
+                                                        )
+                                                        .to_string())
                                                         .unwrap_or_else(|| {
                                                             String::from_utf8_lossy(class_part)
                                                                 .to_string()
@@ -28886,10 +29832,13 @@ impl Vm {
                                                     frame_args,
                                                     false,
                                                 ));
-                                                self.called_class_stack.push(class_part.to_vec());
+                                                self.called_class_stack
+                                                    .push(class_part.to_vec());
                                                 self.class_scope_stack.push(declaring_class);
-                                                let result = self
-                                                    .execute_op_array_vm(&call_static_op, fn_cvs);
+                                                let result = self.execute_op_array_vm(
+                                                    &call_static_op,
+                                                    fn_cvs,
+                                                );
                                                 self.called_class_stack.pop();
                                                 self.class_scope_stack.pop();
                                                 self.call_stack.pop();
@@ -28897,12 +29846,21 @@ impl Vm {
                                                     Ok(v) => v,
                                                     Err(e) => {
                                                         if self.current_exception.is_some() {
-                                                            if let Some((ct, ft, _, _, saved_pc)) =
-                                                                exception_handlers.pop()
+                                                            if let Some((
+                                                                ct,
+                                                                ft,
+                                                                _,
+                                                                _,
+                                                                saved_pc,
+                                                            )) = exception_handlers.pop()
                                                             {
                                                                 pending_calls_catch_depth =
                                                                     Some(saved_pc);
-                                                                ip = if ct > 0 { ct } else { ft }
+                                                                ip = if ct > 0 {
+                                                                    ct
+                                                                } else {
+                                                                    ft
+                                                                }
                                                                     as usize;
                                                                 return Ok(Flow::Continue);
                                                             }
@@ -28931,14 +29889,15 @@ impl Vm {
                                     let method_part = &func_display[sep_pos + 2..];
                                     let class_lower_str = class_part.to_ascii_lowercase();
                                     let method_lower_str = method_part.to_ascii_lowercase();
-                                    let result = crate::reflection::reflection_static_call_named(
-                                        self,
-                                        &class_lower_str,
-                                        &method_lower_str,
-                                        method_part,
-                                        &call.args,
-                                        op.line,
-                                    );
+                                    let result =
+                                        crate::reflection::reflection_static_call_named(
+                                            self,
+                                            &class_lower_str,
+                                            &method_lower_str,
+                                            method_part,
+                                            &call.args,
+                                            op.line,
+                                        );
                                     if let Some(val) = result {
                                         self.write_operand(
                                             &op.result,
@@ -28993,8 +29952,10 @@ impl Vm {
                                 {
                                     let class_part = &name_bytes[..sep_pos];
                                     let method_part = &name_bytes[sep_pos + 2..];
-                                    let class_lower: Vec<u8> =
-                                        class_part.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let class_lower: Vec<u8> = class_part
+                                        .iter()
+                                        .map(|b| b.to_ascii_lowercase())
+                                        .collect();
                                     let method_lower: Vec<u8> = method_part
                                         .iter()
                                         .map(|b| b.to_ascii_lowercase())
@@ -29009,7 +29970,9 @@ impl Vm {
                                                 && !self
                                                     .classes
                                                     .get(&class_lower)
-                                                    .map(|c| c.get_method(&method_lower).is_some())
+                                                    .map(|c| {
+                                                        c.get_method(&method_lower).is_some()
+                                                    })
                                                     .unwrap_or(false) =>
                                         {
                                             native
@@ -29030,7 +29993,10 @@ impl Vm {
                                     };
                                     let (this_val, args_skip_first) = if is_forwarding_call {
                                         // parent::X(args): $this from CV, args as-is
-                                        (cv0_object.or(arg0_object).unwrap_or(Value::Null), false)
+                                        (
+                                            cv0_object.or(arg0_object).unwrap_or(Value::Null),
+                                            false,
+                                        )
                                     } else if let Some(v) = arg0_object {
                                         (v, true)
                                     } else {
@@ -29038,7 +30004,8 @@ impl Vm {
                                     };
                                     // parent::m() naming a user class that inherits m from a
                                     // built-in SPL class: dispatch on that built-in.
-                                    let class_lower = if self.classes.contains_key(&class_lower) {
+                                    let class_lower = if self.classes.contains_key(&class_lower)
+                                    {
                                         self.spl_builtin_base(&class_lower)
                                             .map(|b| b.to_vec())
                                             .unwrap_or(class_lower)
@@ -29097,10 +30064,16 @@ impl Vm {
                                                     .native_class_handlers
                                                     .contains_key(&class_lower)
                                             {
-                                                if let Some((catch_target, _, _, _, eh_pc_depth)) =
-                                                    exception_handlers.last()
+                                                if let Some((
+                                                    catch_target,
+                                                    _,
+                                                    _,
+                                                    _,
+                                                    eh_pc_depth,
+                                                )) = exception_handlers.last()
                                                 {
-                                                    pending_calls_catch_depth = Some(*eh_pc_depth);
+                                                    pending_calls_catch_depth =
+                                                        Some(*eh_pc_depth);
                                                     ip = *catch_target as usize;
                                                     return Ok(Flow::Continue);
                                                 }
@@ -29178,7 +30151,8 @@ impl Vm {
                                         } else {
                                             &method_part[b"__property_set_".len()..]
                                         };
-                                        let this_val = cvs.first().cloned().unwrap_or(Value::Null);
+                                        let this_val =
+                                            cvs.first().cloned().unwrap_or(Value::Null);
                                         // Validate like zend_std_{read,write}_property on the
                                         // parent's plain property.
                                         let class_part = &name_bytes[..sep_pos];
@@ -29249,7 +30223,9 @@ impl Vm {
                                                             )
                                                         })
                                                         .unwrap_or_else(|| {
-                                                            crate::value::display_class_name(&decl)
+                                                            crate::value::display_class_name(
+                                                                &decl,
+                                                            )
                                                         });
                                                     let argc = call.args.len()
                                                         + usize::from(named_value.is_some());
@@ -29294,7 +30270,8 @@ impl Vm {
                                         if let Some((cls, msg)) = hook_err {
                                             let exc = self.create_exception(cls, &msg, op.line);
                                             self.current_exception = Some(exc);
-                                            if let Some((c, f, _, _, pc)) = exception_handlers.pop()
+                                            if let Some((c, f, _, _, pc)) =
+                                                exception_handlers.pop()
                                             {
                                                 pending_calls_catch_depth = Some(pc);
                                                 ip = if c > 0 { c } else { f } as usize;
@@ -29326,8 +30303,10 @@ impl Vm {
                                                     .cloned()
                                                     .or(named_value)
                                                     .unwrap_or(Value::Null);
-                                                obj.borrow_mut()
-                                                    .set_property(prop.to_vec(), new_val.clone());
+                                                obj.borrow_mut().set_property(
+                                                    prop.to_vec(),
+                                                    new_val.clone(),
+                                                );
                                                 // parent::$prop::set($v) returns the assigned value
                                                 self.write_operand(
                                                     &op.result,
@@ -29395,7 +30374,7 @@ impl Vm {
                                     let cl = cls.trim_start_matches('\\').to_ascii_lowercase();
                                     // An instance call ($this prepended) always has a real class.
                                     let is_instance_call = matches!(call.args.first(), Some(Value::Object(o))
-                                        if o.borrow().class_name.eq_ignore_ascii_case(cl.as_bytes()));
+                                    if o.borrow().class_name.eq_ignore_ascii_case(cl.as_bytes()));
                                     let known = is_instance_call
                                         || self.classes.contains_key(cl.as_bytes())
                                         || self.class_aliases.contains_key(cl.as_bytes())
@@ -29411,14 +30390,21 @@ impl Vm {
                                                 .get(b"interface_exists".as_slice())
                                                 .copied();
                                             let args = [
-                                                Value::String(PhpString::from_bytes(cl.as_bytes())),
+                                                Value::String(PhpString::from_bytes(
+                                                    cl.as_bytes(),
+                                                )),
                                                 Value::False,
                                             ];
-                                            ce.map(|f| matches!(f(self, &args), Ok(Value::True)))
-                                                .unwrap_or(true)
+                                            ce.map(|f| {
+                                                matches!(f(self, &args), Ok(Value::True))
+                                            })
+                                            .unwrap_or(true)
                                                 || ie
                                                     .map(|f| {
-                                                        matches!(f(self, &args), Ok(Value::True))
+                                                        matches!(
+                                                            f(self, &args),
+                                                            Ok(Value::True)
+                                                        )
                                                     })
                                                     .unwrap_or(false)
                                         };
@@ -29467,7 +30453,8 @@ impl Vm {
                                 }
                                 // Throw as Error exception
                                 {
-                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                    let exc =
+                                        self.create_exception(b"Error", &err_msg, op.line);
                                     self.current_exception = Some(exc);
                                     if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                         exception_handlers.last()
@@ -29485,7 +30472,7 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
-                })? {
+                }).end(self)? {
                     Flow::Next => {}
                     Flow::Continue => continue 'exec,
                     Flow::Return(v) => return Ok(v),
@@ -35488,8 +36475,10 @@ impl Vm {
                                                 ))],
                                                 false,
                                             ));
-                                            let exec_r =
-                                                self.execute_op_array_vm(&inc_op_array, inc_cvs);
+                                            let exec_r = {
+                                                self.observe_code = true;
+                                                self.execute_op_array_vm(&inc_op_array, inc_cvs)
+                                            };
                                             self.call_stack.pop();
                                             let result = match exec_r {
                                                 Ok(v) => v,
@@ -35742,8 +36731,10 @@ impl Vm {
                                             Vec::new(),
                                             false,
                                         ));
-                                        let exec_r =
-                                            self.execute_op_array_vm(&eval_op_array, eval_cvs);
+                                        let exec_r = {
+                                            self.observe_code = true;
+                                            self.execute_op_array_vm(&eval_op_array, eval_cvs)
+                                        };
                                         self.call_stack.pop();
                                         let eval_result = match exec_r {
                                             Ok(v) => v,
@@ -49067,6 +50058,16 @@ impl Vm {
                             } else {
                                 false
                             };
+                            // An internal method without arguments runs here
+                            // (observer).
+                            let observed_method = if self.observer.is_some() {
+                                self.observed_internal_method(&class_name_lower, &method_name_lower)
+                            } else {
+                                None
+                            };
+                            if let Some(n) = &observed_method {
+                                self.observe_internal_begin(n);
+                            }
                             // SPL class method dispatch - try the class itself and parent chain
                             let mut spl_result = self.dispatch_spl_method(
                                 &class_name_lower,
@@ -49112,6 +50113,9 @@ impl Vm {
                                         break;
                                     }
                                 }
+                            }
+                            if let Some(n) = &observed_method {
+                                self.observe_internal_end(n, spl_result.as_ref());
                             }
                             spl_result
                         } else {
@@ -49773,6 +50777,34 @@ impl Vm {
                     .unwrap()
                     .op_array
                     .clone();
+                // A #[\Deprecated] __toString() (zend_deprecated_function()).
+                let attrs = self
+                    .classes
+                    .get(&class_lower)
+                    .and_then(|c| c.get_method(b"__tostring"))
+                    .map(|m| (m.attributes.clone(), m.declaring_class.clone()))
+                    .filter(|(a, _)| !a.is_empty());
+                if let Some((attrs, decl)) = attrs {
+                    let line = self.current_line;
+                    if let Some(custom) = self.get_deprecated_message(&attrs) {
+                        self.current_line = line;
+                        let cname = self
+                            .classes
+                            .get(&decl)
+                            .map(|c| crate::value::display_class_name(&c.name))
+                            .unwrap_or_default();
+                        let prefix = format!("Method {}::__toString()", cname);
+                        let msg = self.format_deprecated_message(&prefix, &custom);
+                        if method.internal_sig.is_some() {
+                            self.emit_deprecated_at(&msg, line);
+                        } else {
+                            self.emit_user_deprecated_at(&msg, line);
+                        }
+                    }
+                    if self.current_exception.is_some() {
+                        return PhpString::empty();
+                    }
+                }
                 let mut method_cvs = vec![Value::Undef; method.cv_names.len()];
                 if !method_cvs.is_empty() {
                     method_cvs[0] = val.clone();
@@ -50560,7 +51592,22 @@ impl Vm {
             }
             _ => None,
         };
+        // An internal constructor runs inside the call (observer).
+        let observed_ctor = match self.observer {
+            Some(_) => self.observed_internal_ctor(),
+            None => None,
+        };
+        if let Some(n) = &observed_ctor {
+            self.observe_internal_begin(n);
+        }
         let r = self.generator_do_fcall_inner(line, strict);
+        if let Some(n) = &observed_ctor {
+            let rv = match &r {
+                Ok(_) if self.current_exception.is_none() => Some(Value::Null),
+                _ => None,
+            };
+            self.observe_internal_end(n, rv.as_ref());
+        }
         if let (Ok(_), Some(o)) = (&r, ctor_obj) {
             if o.borrow().has_property(b"__ctor_pending") {
                 o.borrow_mut()
@@ -51454,6 +52501,16 @@ impl Vm {
         let mut fiber =
             crate::fiber::PhpFiber::new(display_name_for_stack.clone(), fiber_stack_size, body);
         fiber.start_args = args.to_vec();
+        let switched_from = self.fiber_context_id();
+        if self.fiber_observer.is_some() {
+            let id = obj_rc.borrow().object_id;
+            self.fiber_event(FiberEvent::Init(id));
+            self.fiber_event(FiberEvent::Switch {
+                from: switched_from,
+                to: id,
+                kind: FiberSwitch::Start,
+            });
+        }
 
         // Track the fiber object for getCurrent() and for proper nesting.
         self.fiber_stack.push(self.current_fiber.take());
@@ -51500,6 +52557,7 @@ impl Vm {
         let caller_file = self.current_file.clone();
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
+        self.fiber_switch_out(&obj_rc, switched_from, &result);
 
         // Back in the caller's file (the fiber may have suspended elsewhere).
         let fiber_susp_pos = (
@@ -52367,6 +53425,22 @@ impl Vm {
         line: u32,
     ) -> Result<Value, VmError> {
         let fiber_id = obj_rc.borrow().object_id;
+        let switched_from = self.fiber_context_id();
+        if self.fiber_observer.is_some() {
+            let destroying = obj_rc
+                .borrow()
+                .get_property(b"__fiber_destroyed")
+                .is_truthy();
+            self.fiber_event(FiberEvent::Switch {
+                from: switched_from,
+                to: fiber_id,
+                kind: if destroying {
+                    FiberSwitch::Destroying
+                } else {
+                    FiberSwitch::Resume
+                },
+            });
+        }
         obj_rc.borrow_mut().set_property(
             b"__fiber_state".to_vec(),
             Value::Long(FiberState::Running as i64),
@@ -52402,6 +53476,7 @@ impl Vm {
         };
         let result = fiber.resume(input);
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
+        self.fiber_switch_out(&obj_rc, switched_from, &result);
         let fiber_susp_pos = (
             std::mem::replace(&mut self.current_file, caller_file),
             self.current_line,

@@ -6159,8 +6159,24 @@ pub(crate) fn rfunc<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a OpArray> {
     if let Some(v) = INTERNAL_FN_CACHE.with(|c| c.borrow().get(lower).copied()) {
         return v;
     }
-    let built: Option<&'static OpArray> = crate::stubs::find_function(lower)
-        .map(|f| &*Box::leak(Box::new(crate::stubs::op_array_for(f, None, false))));
+    let built: Option<&'static OpArray> = crate::stubs::find_function(lower).map(|f| {
+        let mut oa = crate::stubs::op_array_for(f, None, false);
+        // What the stub declares beyond arginfo (attributes, an exposed doc
+        // comment), from the extension's own declaration.
+        if let Some(d) = vm.internal_function_decls.get(lower) {
+            oa.attributes = d.attributes.clone();
+            oa.param_attributes = d.param_attributes.clone();
+            oa.doc_comment = d.doc_comment.clone();
+        }
+        &*Box::leak(Box::new(oa))
+    });
+    // A builtin without a stub (registered from C code in php-src): its
+    // declaration describes it.
+    let built = built.or_else(|| {
+        vm.internal_function_decls
+            .get(lower)
+            .map(|d| &*Box::leak(Box::new((**d).clone())))
+    });
     INTERNAL_FN_CACHE.with(|c| c.borrow_mut().insert(lower.to_vec(), built));
     built
 }
@@ -6403,7 +6419,7 @@ pub fn reflection_function_method(
             }
         }
         b"getdoccomment" => {
-            if let Some(op_array) = vm.user_functions.get(func_lower.as_slice()) {
+            if let Some(op_array) = rfunc(vm, func_lower.as_slice()) {
                 if let Some(doc) = op_array.doc_comment.as_ref() {
                     Some(Value::String(PhpString::from_bytes(doc)))
                 } else {
@@ -7072,9 +7088,7 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 }
             }
             b"getattributes" => {
-                let attrs = vm
-                    .user_functions
-                    .get(func_lower.as_slice())
+                let attrs = rfunc(vm, func_lower.as_slice())
                     .map(|op| op.attributes.clone())
                     .unwrap_or_default();
                 let filter_name = args.get(1).and_then(|v| {
@@ -9355,10 +9369,52 @@ pub fn reflection_constant_method(
             let attrs = constant_attrs_or_internal(vm, name.as_bytes());
             Some(create_reflection_attributes(vm, &attrs, None, 0, 64))
         }
-        b"__tostring" => Some(Value::String(PhpString::from_string(format!(
-            "Constant [ {} ]\n",
-            name
-        )))),
+        b"__tostring" => {
+            // _const_string()
+            let key = normalize_const_key(name.as_bytes());
+            let value = vm
+                .constants
+                .get(name.as_bytes())
+                .or_else(|| vm.constants.get(key.as_slice()))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let user = vm.constant_files.contains_key(key.as_slice());
+            let deprecated = constant_attrs_lookup(vm, name.as_bytes())
+                .unwrap_or_default()
+                .iter()
+                .any(|a| attr_is_deprecated(&a.name))
+                || internal_constant_deprecated(vm, name.as_bytes());
+            let mut flags = Vec::new();
+            if !user {
+                flags.push("persistent");
+            }
+            if deprecated {
+                flags.push("deprecated");
+            }
+            let flags = if flags.is_empty() {
+                String::new()
+            } else {
+                format!("<{}> ", flags.join(", "))
+            };
+            let ty = match &value {
+                Value::Null | Value::Undef => "null",
+                Value::True | Value::False => "bool",
+                Value::Long(_) => "int",
+                Value::Double(_) => "float",
+                Value::String(_) => "string",
+                Value::Array(_) => "array",
+                Value::Resource(_) => "resource",
+                _ => "object",
+            };
+            let shown = match &value {
+                Value::Array(_) => "Array".to_string(),
+                v => v.to_php_string().to_string_lossy(),
+            };
+            Some(Value::String(PhpString::from_string(format!(
+                "Constant [ {}{} {} ] {{ {} }}\n",
+                flags, ty, name, shown
+            ))))
+        }
         _ => None,
     }
 }
@@ -9915,6 +9971,17 @@ pub fn reflection_extension_method(
         }
         b"getconstants" => {
             let mut result = PhpArray::new();
+            if let Some((_, names)) = vm
+                .module_constants
+                .iter()
+                .find(|(m, _)| m.as_slice() == ext_lower.as_bytes())
+            {
+                for n in names {
+                    if let Some(v) = vm.constants.get(n) {
+                        result.set(ArrayKey::String(PhpString::from_vec(n.clone())), v.clone());
+                    }
+                }
+            }
             let const_list = get_extension_constants(&ext_lower);
             for (cname, val) in const_list {
                 let v = vm.constants.get(cname.as_bytes()).cloned().unwrap_or(val);
@@ -10594,9 +10661,7 @@ pub fn reflection_parameter_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -
                         32,
                     ))
                 } else {
-                    let attrs = vm
-                        .user_functions
-                        .get(func_target.as_bytes())
+                    let attrs = rfunc(vm, func_target.as_bytes())
                         .and_then(|op| op.param_attributes.get(param_idx))
                         .cloned()
                         .unwrap_or_default();
@@ -12447,14 +12512,8 @@ pub fn reflection_attribute_method(
                     if let Some((_, flag_val)) = arr_b.iter().next() {
                         // Type-check first: must be int
                         if !matches!(flag_val, Value::Long(_) | Value::Null) {
-                            let actual_type = match flag_val {
-                                Value::String(_) => "string",
-                                Value::Double(_) => "float",
-                                Value::True | Value::False => "bool",
-                                Value::Array(_) => "array",
-                                Value::Object(_) => "object",
-                                _ => "unknown",
-                            };
+                            // zend_zval_value_name()
+                            let actual_type = Vm::value_type_name(flag_val);
                             let err_msg = format!(
                                 "Attribute::__construct(): Argument #1 ($flags) must be of type int, {} given",
                                 actual_type
@@ -13085,7 +13144,15 @@ pub(crate) fn zend_type_string(pt: &ParamType) -> String {
 
 /// Extension name of an internal method's class (from its stub).
 fn internal_method_ext(m: &crate::object::MethodDef) -> Option<&'static str> {
-    crate::stubs::find_class(&m.declaring_class).map(|c| c.ext)
+    crate::stubs::find_class(&m.declaring_class)
+        .map(|c| c.ext)
+        // Classes extensions declare themselves: the ext is in the arginfo.
+        .or_else(|| {
+            m.op_array
+                .internal_sig
+                .map(|f| f.ext)
+                .filter(|e| !e.is_empty())
+        })
 }
 
 fn op_array_is_deprecated(op: &OpArray, attrs: &[RuntimeAttribute]) -> bool {
@@ -13298,7 +13365,9 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
     let is_internal =
         op.internal_sig.is_some() || ctx.internal_fn_ext.is_some() || ctx.internal_user_arginfo;
     let mut s = String::new();
-    if !is_internal {
+    // (Internal functions only have a doc comment when their stub exposes
+    // it.)
+    {
         let doc = ctx.method.and_then(|m| m.doc_comment.clone()).or_else(|| {
             op.doc_comment
                 .as_ref()
@@ -13821,7 +13890,9 @@ pub(crate) fn class_string(
     }
     s.push_str(if internal { "<internal" } else { "<user" });
     if internal {
-        if let Some(sc) = crate::stubs::find_class(class_lower) {
+        if let Some(sc) = crate::stubs::find_class(class_lower)
+            .or_else(|| crate::stubs::find_self_declared_class(class_lower))
+        {
             s.push(':');
             s.push_str(sc.ext);
         }

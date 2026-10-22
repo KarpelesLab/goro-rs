@@ -730,7 +730,8 @@ impl Vm {
     fn zpp_rebuild_map(&mut self) {
         self.zpp_map.clear();
         for name in self.functions.keys() {
-            let flags = verified_flags(name);
+            let flags =
+                verified_flags(name) | self.zpp_extension_verified.get(name).copied().unwrap_or(0);
             if flags != 0 {
                 if let Some(info) = lookup(name) {
                     self.zpp_map.insert(name.clone(), (info, flags));

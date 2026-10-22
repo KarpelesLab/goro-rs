@@ -515,8 +515,10 @@ impl Parser {
         // zend_compile_attributes() reports `#[A(...)]` while compiling the
         // declaration, i.e. on the line of the token after the attributes.
         let mut fcc_arg = false;
+        let mut group = 0u32;
         while matches!(self.peek(), TokenKind::AttributeOpen) {
             self.advance();
+            group += 1;
             loop {
                 let mut parts = Vec::new();
                 let line = self.span().line;
@@ -568,7 +570,8 @@ impl Parser {
                         _ => break,
                     }
                 }
-                let args = if matches!(self.peek(), TokenKind::OpenParen) {
+                let has_args = matches!(self.peek(), TokenKind::OpenParen);
+                let args = if has_args {
                     self.advance();
                     let a = self.parse_arguments()?;
                     fcc_arg |= self.first_class_callable_flag;
@@ -581,6 +584,8 @@ impl Parser {
                     name: parts,
                     args,
                     line,
+                    group,
+                    has_args,
                 });
                 if !self.eat(&TokenKind::Comma) {
                     break;

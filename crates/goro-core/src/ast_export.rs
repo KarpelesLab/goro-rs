@@ -40,6 +40,14 @@ fn anon_class(name: &[u8]) -> Option<Rc<Statement>> {
     ANON_CLASSES.with(|m| m.borrow().get(name).cloned())
 }
 
+/// zend_ast_export() of a whole script (zend_test_compile_to_ast()).
+pub fn export_program(program: &Program) -> String {
+    register_program(program);
+    let mut s = String::new();
+    export_stmts(&mut s, &program.statements, 0);
+    s
+}
+
 /// zend_ast_export("", expr, "").
 pub fn export_expr(e: &Expr) -> String {
     let mut s = String::new();
@@ -208,14 +216,25 @@ fn export_type(s: &mut String, t: &TypeHint) {
     }
 }
 
+/// One `#[...]` per attribute group, as written.
 fn export_attributes(s: &mut String, attrs: &[Attribute], indent: usize, newlines: bool) {
-    for a in attrs {
+    let mut i = 0;
+    while i < attrs.len() {
+        let group = attrs[i].group;
         s.push_str("#[");
-        s.push_str(&join_name(&a.name));
-        if !a.args.is_empty() {
-            s.push('(');
-            export_args(s, &a.args, indent);
-            s.push(')');
+        let start = i;
+        while i < attrs.len() && attrs[i].group == group {
+            let a = &attrs[i];
+            if i > start {
+                s.push_str(", ");
+            }
+            s.push_str(&join_name(&a.name));
+            if a.has_args {
+                s.push('(');
+                export_args(s, &a.args, indent);
+                s.push(')');
+            }
+            i += 1;
         }
         s.push(']');
         if newlines {
@@ -1484,7 +1503,13 @@ fn export_stmt(s: &mut String, st: &Statement, indent: usize) {
                 s.push_str(": ");
                 s.push_str(&lossy(t));
             }
-            export_class_no_header(s, extends.as_deref(), implements, body, indent);
+            if modifiers.is_interface {
+                // An interface's parents are its ZEND_AST_CLASS implements list.
+                let parents: Vec<Vec<u8>> = extends.iter().chain(implements).cloned().collect();
+                export_class_no_header(s, None, &parents, body, indent);
+            } else {
+                export_class_no_header(s, extends.as_deref(), implements, body, indent);
+            }
             s.push('\n');
             false
         }
@@ -1552,6 +1577,31 @@ fn export_stmt(s: &mut String, st: &Statement, indent: usize) {
         StmtKind::Unset(items) => {
             if let Some(e) = items.first() {
                 func_op(s, "unset", e, indent);
+            }
+            true
+        }
+        // `const X = v;` is a Declare without a body naming no declare()
+        // directive.
+        StmtKind::Declare {
+            directives,
+            body: None,
+            attributes,
+        } if !directives.iter().any(|(n, _)| {
+            matches!(
+                n.to_ascii_lowercase().as_slice(),
+                b"strict_types" | b"ticks" | b"encoding"
+            )
+        }) =>
+        {
+            export_attributes(s, attributes, indent, true);
+            s.push_str("const ");
+            for (i, (n, v)) in directives.iter().enumerate() {
+                if i > 0 {
+                    s.push_str(", ");
+                }
+                s.push_str(&lossy(n));
+                s.push_str(" = ");
+                ex(s, v, 0, indent);
             }
             true
         }

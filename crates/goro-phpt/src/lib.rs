@@ -331,6 +331,14 @@ pub fn run_test_with_dir_and_filename(
 fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> TestResult {
     // Parse INI settings
     let mut ini_settings = parse_ini_settings(test.ini_section());
+    // run-tests.php loads the extensions a test lists that are built shared
+    // with `-d extension=...` (zend_test is only loaded on request).
+    if test.sections.get("EXTENSIONS").is_some_and(|e| {
+        e.lines()
+            .any(|x| x.trim().eq_ignore_ascii_case("zend_test"))
+    }) {
+        ini_settings.insert(0, ("extension".to_string(), "zend_test".to_string()));
+    }
     // run-tests.php placeholders: {PWD}, {TMP}, {MAIL:path}
     for (_, v) in ini_settings.iter_mut() {
         if v.contains("{PWD}") {
@@ -393,6 +401,8 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_mbstring::register(&mut vm);
                 goro_ext_spl::register(&mut vm);
                 goro_ext_reflection::register(&mut vm);
+                // Loadable on request (see run_test_inner).
+                vm.register_extension(goro_ext_zend_test::NAME);
                 vm.register_extension(b"simplexml");
                 vm.register_extension(b"tokenizer");
                 vm.register_extension(b"pcre");
@@ -422,6 +432,9 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
             let skipif_ini: Vec<(String, String)> = ini_settings
                 .iter()
                 .filter(|(k, _)| k != "output_handler" && k != "zlib.output_compression")
+                // (The zend_test observer settings would trace the SKIPIF
+                // code itself.)
+                .filter(|(k, _)| !k.starts_with("zend_test."))
                 .cloned()
                 .collect();
             // Written next to the test as run-tests.php does, so that
@@ -1570,6 +1583,9 @@ fn execute_php_inner_impl(
     goro_ext_mbstring::register(&mut vm);
     goro_ext_spl::register(&mut vm);
     goro_ext_reflection::register(&mut vm);
+    if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
+        goro_ext_zend_test::register(&mut vm);
+    }
     // Also register aliases that PHP tests may use
     vm.register_extension(b"simplexml");
     vm.register_extension(b"tokenizer");

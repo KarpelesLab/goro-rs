@@ -235,7 +235,7 @@ impl Vm {
                 });
             }
             self.push_builtin_frame(lname, args, at);
-            let r = f(self, args);
+            let r = self.call_builtin_observed(f, lname, args);
             self.pop_builtin_frame();
             return r;
         };
@@ -256,8 +256,45 @@ impl Vm {
             });
         }
         self.push_builtin_frame(lname, orig.as_deref().unwrap_or(&owned), at);
-        let r = f(self, &owned);
+        let r = self.call_builtin_observed(f, lname, &owned);
         self.pop_builtin_frame();
+        r
+    }
+
+    /// Run builtin `f` (lowercase name `lname`), with the observer's
+    /// begin/end hooks around it when there is an observer.
+    #[inline(always)]
+    pub(crate) fn call_builtin_observed(
+        &mut self,
+        f: crate::vm::BuiltinFn,
+        lname: &[u8],
+        args: &[Value],
+    ) -> Result<Value, crate::vm::VmError> {
+        if self.observer.is_none() {
+            return f(self, args);
+        }
+        self.call_builtin_with_observer(f, lname, args)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn call_builtin_with_observer(
+        &mut self,
+        f: crate::vm::BuiltinFn,
+        lname: &[u8],
+        args: &[Value],
+    ) -> Result<Value, crate::vm::VmError> {
+        let Some(h) = self.observer else {
+            return f(self, args);
+        };
+        let name = match crate::arginfo::lookup(lname) {
+            Some(info) => info.name.to_string(),
+            None => String::from_utf8_lossy(lname).into_owned(),
+        };
+        let frame = crate::vm::ObservedFrame::Internal(&name);
+        (h.begin)(self, &frame);
+        let r = f(self, args);
+        (h.end)(self, &frame, r.as_ref().ok());
         r
     }
 }
@@ -321,7 +358,11 @@ impl Vm {
         } else {
             self.ucf_call_line = Some(line);
         }
-        let r = f(self, &args);
+        let r = if own_frame {
+            self.call_builtin_observed(f, lname, &args)
+        } else {
+            f(self, &args)
+        };
         if own_frame {
             self.pop_builtin_frame();
         } else {

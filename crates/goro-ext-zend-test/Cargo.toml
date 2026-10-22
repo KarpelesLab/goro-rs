@@ -1,0 +1,12 @@
+[package]
+name = "goro-ext-zend-test"
+version = "0.1.0"
+edition = "2024"
+description = "php-src's zend_test extension (engine test helpers) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-parser = { path = "../goro-parser" }

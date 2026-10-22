@@ -311,6 +311,9 @@ impl Compiler {
                     (b"headers_sent", 0) | (b"headers_sent", 1) => true,
                     // settype(&$var, $type)
                     (b"settype", 0) => true,
+                    // ext/zend_test: zend_terminate_string(&$str),
+                    // zend_test_fill_packed_array(&$array)
+                    (b"zend_terminate_string", 0) | (b"zend_test_fill_packed_array", 0) => true,
                     // getopt($short, $long, &$rest_index)
                     (b"getopt", 2) => true,
                     // parse_str($string, &$result)

@@ -94,6 +94,10 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
 
     let mut vm = Vm::new();
     register_extensions(&mut vm);
+    // Extensions only loaded on request (`-d extension=zend_test`).
+    if goro_ext_zend_test::requested(ini.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
+        goro_ext_zend_test::register(&mut vm);
+    }
     vm.constants.insert(
         b"PHP_SAPI".to_vec(),
         Value::String(PhpString::from_string(sapi.to_string())),

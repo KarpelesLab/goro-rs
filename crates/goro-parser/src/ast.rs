@@ -5,6 +5,10 @@ pub struct Attribute {
     pub args: Vec<Argument>,
     /// Line of the attribute name.
     pub line: u32,
+    /// Which `#[...]` group of the list the attribute is in (from 1).
+    pub group: u32,
+    /// Whether the attribute has an argument list (`#[A()]` vs `#[A]`).
+    pub has_args: bool,
 }
 #[derive(Debug, Clone)]
 pub struct Program {

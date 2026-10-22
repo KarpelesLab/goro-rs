@@ -173,6 +173,15 @@ pub fn find_class(name: &[u8]) -> Option<&'static StubClass> {
     class_index_of(name).map(|i| &crate::stub_sigs::CLASSES[i])
 }
 
+/// The stub of a class an extension declares itself
+/// (`stub_sigs::SELF_DECLARED_CLASSES`).
+pub fn find_self_declared_class(name: &[u8]) -> Option<&'static StubClass> {
+    let n = name.strip_prefix(b"\\").unwrap_or(name);
+    crate::stub_sigs::SELF_DECLARED_CLASSES
+        .iter()
+        .find(|c| c.name.as_bytes().eq_ignore_ascii_case(n))
+}
+
 /// Hierarchy of an internal class, precomputed from the stubs.
 pub struct StubHierarchy {
     /// Declared name of the parent class.

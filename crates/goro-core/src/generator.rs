@@ -698,10 +698,7 @@ impl PhpGenerator {
             vm.set_cv_frame_vars(&self.cvs);
         }
         let saved_file = vm.enter_op_array_file(&self.op_array);
-        let result = match crate::stack::with_room(|| self.resume_inner(vm)) {
-            Ok(r) => r,
-            Err(crate::stack::Exhausted) => Err(vm.stack_exhausted_error(false)),
-        };
+        let result = self.resume_inner_observed(vm);
         vm.leave_op_array_file(saved_file);
         if let Ok(true) = result {
             self.last_value = self.current_value.clone();
@@ -1061,6 +1058,32 @@ impl PhpGenerator {
     }
 
     /// Inner resume implementation (depth check is done by the caller)
+    /// Run the body until it suspends or finishes, with the observer's
+    /// begin/end hooks around it: a generator is observed per resumption,
+    /// its end getting the value yielded or returned. (A generator
+    /// delegating with `yield from` is suspended while its leaf runs.)
+    fn resume_inner_observed(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
+        let Some(h) = vm.observer else {
+            return match crate::stack::with_room(|| self.resume_inner(vm)) {
+                Ok(r) => r,
+                Err(crate::stack::Exhausted) => Err(vm.stack_exhausted_error(false)),
+            };
+        };
+        let op = self.op_array.clone();
+        (h.begin)(vm, &crate::vm::ObservedFrame::User(&op));
+        let result = match crate::stack::with_room(|| self.resume_inner(vm)) {
+            Ok(r) => r,
+            Err(crate::stack::Exhausted) => Err(vm.stack_exhausted_error(false)),
+        };
+        let rv = match &result {
+            Ok(true) => Some(self.current_value.deref()),
+            Ok(false) => Some(self.return_value.deref()),
+            Err(_) => None,
+        };
+        (h.end)(vm, &crate::vm::ObservedFrame::User(&op), rv.as_ref());
+        result
+    }
+
     fn resume_inner(&mut self, vm: &mut Vm) -> Result<bool, VmError> {
         if self.state == GeneratorState::Created {
             if let Some(i) = self.op_array.cv_names.iter().position(|n| n == b"GLOBALS") {
@@ -2943,10 +2966,7 @@ impl PhpGenerator {
             vm.set_cv_frame_vars(&self.cvs);
         }
         let saved_file = vm.enter_op_array_file(&self.op_array);
-        let result = match crate::stack::with_room(|| self.resume_inner(vm)) {
-            Ok(r) => r,
-            Err(crate::stack::Exhausted) => Err(vm.stack_exhausted_error(false)),
-        };
+        let result = self.resume_inner_observed(vm);
         vm.leave_op_array_file(saved_file);
         if let Ok(true) = result {
             self.last_value = self.current_value.clone();
@@ -3258,7 +3278,14 @@ impl Vm {
             true,
         ));
         let prev_caller = self.generator_caller.take();
+        let observed = self.observer.map(|_| format!("Generator::{}", display));
+        if let Some(n) = &observed {
+            self.observe_internal_begin(n);
+        }
         let r = self.generator_method_inner(g, method, args, line);
+        if let Some(n) = &observed {
+            self.observe_internal_end(n, r.as_ref().ok());
+        }
         self.generator_caller = prev_caller;
         self.call_stack.truncate(depth);
         if r.is_ok() && self.current_exception.is_some() && !self.exit_requested {
