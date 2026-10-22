@@ -14,7 +14,7 @@ pub fn sqlite3FkLocateIndex(
     pParent: &TableRef,
     pFKey: &FKeyRef,
     ppIdx: &mut Option<IndexRef>,
-    paiCol: /*int***/ (),
+    paiCol: Option<&mut Option<Vec<i32>>>,
 ) -> i32 {
     todo!("sqlite3FkLocateIndex")
 }

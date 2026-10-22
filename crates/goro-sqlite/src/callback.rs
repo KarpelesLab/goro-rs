@@ -8,7 +8,67 @@
 use crate::int::*;
 use std::rc::Rc;
 
-pub struct FuncDefHash {}
+/// The hash table of built-in SQL functions (C `FuncDefHash`, the global
+/// `sqlite3BuiltinFunctions`).
+///
+/// C keeps SQLITE_FUNC_HASH_SZ buckets; each bucket is a list (through
+/// `FuncDef.u.pHash`) of the first FuncDef of every distinct name, and
+/// each of those heads a list (through `FuncDef.pNext`) of the overloads
+/// of that name.  The Rust structure mirrors this exactly so that the
+/// iteration order (PRAGMA function_list) is the same:
+/// `a[h]` is the u.pHash chain of bucket `h` (index 0 = head) and each
+/// entry of it is the pNext chain of one name (index 0 = head).
+///
+/// (Copied from the sqlite-port-build branch so that mainapi/pragma can
+/// use it; take that branch's version on merge.)
+pub struct FuncDefHash {
+    pub a: Vec<Vec<Vec<FuncDefRef>>>,
+}
+
+impl Default for FuncDefHash {
+    fn default() -> Self {
+        FuncDefHash::new()
+    }
+}
+
+impl FuncDefHash {
+    pub fn new() -> FuncDefHash {
+        FuncDefHash {
+            a: (0..SQLITE_FUNC_HASH_SZ).map(|_| Vec::new()).collect(),
+        }
+    }
+
+    /// The pNext chain of the built-in functions named zFunc in bucket h
+    /// (the chain whose head sqlite3FunctionSearch() returns).
+    pub fn chain(&self, h: i32, zFunc: &[u8]) -> Option<&[FuncDefRef]> {
+        for c in self.a[h as usize].iter() {
+            debug_assert!((c[0].funcFlags & SQLITE_FUNC_BUILTIN) != 0);
+            if c[0].zName.eq_ignore_ascii_case(zFunc) {
+                return Some(&c[..]);
+            }
+        }
+        None
+    }
+
+    /// Every built-in function in the order of C's
+    /// `for(i..SQLITE_FUNC_HASH_SZ) for(p=a[i]; p; p=p->u.pHash)
+    /// for(; p; p=p->pNext)` loops (PRAGMA function_list).
+    pub fn all(&self) -> Vec<FuncDefRef> {
+        let mut v = Vec::new();
+        for b in self.a.iter() {
+            for c in b.iter() {
+                v.extend(c.iter().cloned());
+            }
+        }
+        v
+    }
+}
+
+/// SQLITE_FUNC_HASH(C,L)
+#[inline]
+pub fn SQLITE_FUNC_HASH(c: u8, l: i32) -> i32 {
+    ((c as i32) + l) % (SQLITE_FUNC_HASH_SZ as i32)
+}
 
 /// C: `int sqlite3CheckCollSeq(Parse *pParse, CollSeq *pColl)`
 pub fn sqlite3CheckCollSeq(db: &mut Sqlite3, pColl: &CollSeqRef) -> i32 {
@@ -66,12 +126,22 @@ pub fn sqlite3FindFunction(
     todo!("sqlite3FindFunction")
 }
 
+/// Rust helper (sqlite-port-build branch): replace the application-defined
+/// function `pOld` (as returned by sqlite3FindFunction(..., createFlag=1))
+/// by `pNew` in db.aFunc, keeping its position in the chain.  Returns the
+/// installed FuncDef.
+pub fn sqlite3FuncDefReplace(db: &mut Sqlite3, pOld: &FuncDefRef, pNew: FuncDef) -> FuncDefRef {
+    todo!("sqlite3FuncDefReplace")
+}
+
 /// C: `void sqlite3SchemaClear(void *p)`
-pub fn sqlite3SchemaClear(p: &mut [u8]) {
+/// Rust (sqlite-port-build signature): clears db.aDb[iDb].pSchema.
+pub fn sqlite3SchemaClear(db: &mut Sqlite3, iDb: i32) {
     todo!("sqlite3SchemaClear")
 }
 
 /// C: `Schema * sqlite3SchemaGet(sqlite3 *db, Btree *pBt)`
-pub fn sqlite3SchemaGet(db: &mut Sqlite3, pBt: &BtreeP) -> Option<Box<Schema>> {
+/// Rust (sqlite-port-build signature): returns a fresh Schema with a new id.
+pub fn sqlite3SchemaGet(db: &mut Sqlite3, pBt: Option<&BtreeP>) -> Schema {
     todo!("sqlite3SchemaGet")
 }
