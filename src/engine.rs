@@ -48,6 +48,7 @@ pub fn register_extensions(vm: &mut Vm) {
     goro_ext_fileinfo::register(vm);
     goro_ext_sodium::register(vm);
     goro_ext_intl::register(vm);
+    goro_ext_sqlite3::register(vm);
     goro_ext_xsl::register(vm);
     goro_ext_gd::register(vm);
     goro_ext_dba::register(vm);

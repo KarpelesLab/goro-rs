@@ -1,0 +1,13 @@
+[package]
+name = "goro-ext-sqlite3"
+version = "0.1.0"
+edition = "2024"
+description = "PHP sqlite3 extension (SQLite3, SQLite3Stmt, SQLite3Result) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-ext-standard = { path = "../goro-ext-standard" }
+goro-sqlite = { path = "../goro-sqlite" }

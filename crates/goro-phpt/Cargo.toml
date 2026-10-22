@@ -54,6 +54,7 @@ goro-ext-zip = { path = "../goro-ext-zip" }
 goro-ext-fileinfo = { path = "../goro-ext-fileinfo" }
 goro-ext-sodium = { path = "../goro-ext-sodium" }
 goro-ext-intl = { path = "../goro-ext-intl" }
+goro-ext-sqlite3 = { path = "../goro-ext-sqlite3" }
 libc = "0.2"
 tempfile = "3"
 regex = "1"
