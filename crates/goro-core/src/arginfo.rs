@@ -1284,6 +1284,8 @@ impl Vm {
                     | b"uri\\rfc3986\\uri"
             )
             || self.spl_has_builtin_tostring(&lower)
+            // SimpleXMLIterator and user subclasses keep the cast handler
+            || self.class_extends(&lower, b"simplexmlelement")
     }
 }
 

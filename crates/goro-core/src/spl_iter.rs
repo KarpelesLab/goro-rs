@@ -190,7 +190,22 @@ impl Vm {
         }
     }
 
+    /// The internal iterator of SimpleXMLElement/SimpleXMLIterator
+    /// (php_sxe_iterator_funcs) yields NULL data and keys once exhausted,
+    /// where the methods throw.
+    fn sxe_iterator_exhausted(&mut self, it: &Value) -> bool {
+        let plain = matches!(it, Value::Object(o) if {
+            let b = o.borrow();
+            b.class_name.eq_ignore_ascii_case(b"SimpleXMLElement")
+                || b.class_name.eq_ignore_ascii_case(b"SimpleXMLIterator")
+        });
+        plain && !self.it_valid(it)
+    }
+
     pub(crate) fn it_current(&mut self, it: &Value) -> Value {
+        if self.sxe_iterator_exhausted(it) {
+            return Value::Null;
+        }
         match it {
             Value::Object(_) => self
                 .spl_call_method(it, b"current", &[])
@@ -206,6 +221,9 @@ impl Vm {
     }
 
     pub(crate) fn it_key(&mut self, it: &Value) -> Value {
+        if self.sxe_iterator_exhausted(it) {
+            return Value::Null;
+        }
         match it {
             Value::Object(_) => self.spl_call_method(it, b"key", &[]).unwrap_or(Value::Null),
             Value::Generator(g) => {

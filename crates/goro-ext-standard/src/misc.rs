@@ -2508,25 +2508,11 @@ fn php_array_merge_wrapper(
     Ok(Value::Array(Rc::new(RefCell::new(out))))
 }
 
-fn merge_to_array(v: &Value) -> PhpArray {
+/// convert_to_array() of a merged value.
+fn merge_to_array(vm: &mut Vm, v: &Value) -> PhpArray {
     match v {
         Value::Array(a) => a.borrow().clone(),
-        Value::Null | Value::Undef => PhpArray::new(),
-        Value::Object(o) => {
-            let mut arr = PhpArray::new();
-            for (k, val) in o.borrow().properties.iter() {
-                arr.set(
-                    Vm::value_to_array_key(Value::String(PhpString::from_vec(k.clone()))),
-                    val.clone(),
-                );
-            }
-            arr
-        }
-        other => {
-            let mut arr = PhpArray::new();
-            arr.push(other.clone());
-            arr
-        }
+        other => vm.convert_to_array(other.clone()).borrow().clone(),
     }
 }
 
@@ -2571,10 +2557,10 @@ fn php_array_merge_recursive(
                             a.push(Value::Null);
                             a
                         } else {
-                            merge_to_array(&dval)
+                            merge_to_array(vm, &dval)
                         };
                         let src_val = if let Value::Object(_) = &src_val {
-                            Value::Array(Rc::new(RefCell::new(merge_to_array(&src_val))))
+                            Value::Array(Rc::new(RefCell::new(merge_to_array(vm, &src_val))))
                         } else {
                             src_val
                         };

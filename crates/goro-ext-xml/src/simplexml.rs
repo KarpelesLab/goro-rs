@@ -2005,7 +2005,9 @@ fn read_memory(
 }
 
 fn read_file(vm: &mut Vm, fname: &str, filename: &str, options: i64) -> Option<NodeId> {
-    match crate::io::read_resource(vm, filename) {
+    let data =
+        crate::dom::with_active_fn(fname.to_string(), || crate::io::read_resource(vm, filename));
+    match data {
         Some(data) => {
             let url = crate::io::resource_url(filename);
             read_memory(vm, fname, &data, options, Some(&url))
@@ -2194,8 +2196,25 @@ fn create_object(vm: &mut Vm, o: &Obj) {
     });
 }
 
-/// Native constructor `new SimpleXMLElement(...)`.
-fn construct(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), String> {
+/// Native constructor `new SimpleXMLElement(...)`: runs in its own frame
+/// (SimpleXMLElement->__construct() in backtraces).
+fn construct(vm: &mut Vm, args: &[Value], line: u32) -> Result<(), String> {
+    if !matches!(args.first(), Some(Value::Object(_))) {
+        return Ok(());
+    }
+    vm.call_stack.push((
+        "SimpleXMLElement::__construct".to_string(),
+        vm.current_file.clone(),
+        vm.current_line,
+        args[1..].to_vec(),
+        true,
+    ));
+    let r = construct_inner(vm, args, line);
+    vm.call_stack.pop();
+    r
+}
+
+fn construct_inner(vm: &mut Vm, args: &[Value], _line: u32) -> Result<(), String> {
     let this = match args.first() {
         Some(Value::Object(o)) => o.clone(),
         _ => return Ok(()),
@@ -2349,15 +2368,37 @@ fn add_namespaces(t: &Tree, node: NodeId, recursive: bool, arr: &mut PhpArray) {
     }
 }
 
-fn add_registered_namespaces(t: &Tree, node: NodeId, recursive: bool, arr: &mut PhpArray) {
+/// sxe_add_registered_namespaces(): with `xmlns_attrs` (modern documents)
+/// attributes in the xmlns namespace count as declarations too.
+fn add_registered_namespaces(
+    t: &Tree,
+    node: NodeId,
+    recursive: bool,
+    xmlns_attrs: bool,
+    arr: &mut PhpArray,
+) {
     if t.nodes[node].t == NType::Element {
         for &ns in &t.nodes[node].ns_def {
             add_ns(arr, t.nss[ns].prefix.as_deref(), &t.nss[ns].href);
         }
+        if xmlns_attrs {
+            for a in t.attrs_of(node) {
+                if let Some(ns) = t.nodes[a].ns {
+                    if t.nss[ns].href == "http://www.w3.org/2000/xmlns/" {
+                        let prefix = if t.nss[ns].prefix.is_some() {
+                            t.nodes[a].name.clone()
+                        } else {
+                            String::new()
+                        };
+                        add_ns(arr, Some(&prefix), &t.node_get_content(a));
+                    }
+                }
+            }
+        }
         if recursive {
             let mut c = t.nodes[node].children;
             while let Some(x) = c {
-                add_registered_namespaces(t, x, recursive, arr);
+                add_registered_namespaces(t, x, recursive, xmlns_attrs, arr);
                 c = t.nodes[x].next;
             }
         }
@@ -2623,8 +2664,10 @@ fn call_method(
                 Some(n) => n,
                 None => return Value::False,
             };
+            // Only do this for modern documents to keep BC.
+            let modern = crate::dom::modern::is_modern_doc(s.doc.get());
             let mut arr = PhpArray::new();
-            tree::with(|t| add_registered_namespaces(t, node, recursive, &mut arr));
+            tree::with(|t| add_registered_namespaces(t, node, recursive, modern, &mut arr));
             arr_val(arr)
         }
         "asxml" | "savexml" => {
@@ -2681,7 +2724,13 @@ fn call_method(
                         );
                         return Value::Null;
                     }
-                    if crate::io::write_resource(vm, &f, &bytes) {
+                    let fname = format!(
+                        "SimpleXMLElement::{}",
+                        if mname == "asxml" { "asXML" } else { "saveXML" }
+                    );
+                    if crate::dom::with_active_fn(fname, || {
+                        crate::io::write_resource(vm, &f, &bytes)
+                    }) {
                         Value::True
                     } else {
                         Value::False

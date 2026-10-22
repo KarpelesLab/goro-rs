@@ -1771,6 +1771,15 @@ fn call_method(
     r.unwrap_or(Value::Null)
 }
 
+/// Run `f` with `name` as the active function (the php_error_docref()
+/// prefix of diagnostics raised below it).
+pub fn with_active_fn<R>(name: String, f: impl FnOnce() -> R) -> R {
+    let prev = CURRENT_FN.with(|c| c.replace(Some(name)));
+    let r = f();
+    CURRENT_FN.with(|c| *c.borrow_mut() = prev);
+    r
+}
+
 /// Name of the running DOM method ("DOMDocument::loadXML").
 pub fn cur_method() -> String {
     CURRENT_FN.with(|c| c.borrow().clone()).unwrap_or_default()

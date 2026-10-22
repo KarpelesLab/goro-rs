@@ -7509,6 +7509,36 @@ impl Vm {
         cur
     }
 
+    /// convert_to_array(): `(array)$val` (an array is returned as is).
+    pub fn convert_to_array(&mut self, val: Value) -> Rc<RefCell<PhpArray>> {
+        match val {
+            Value::Array(a) => a,
+            // Closures convert like scalars: [$closure].
+            Value::Object(obj) if obj.borrow().closure.is_some() => {
+                let mut arr = PhpArray::new();
+                arr.push(Value::Object(obj));
+                Rc::new(RefCell::new(arr))
+            }
+            Value::Object(obj) => match native_handlers(&obj)
+                .and_then(|h| h.get_properties)
+                .and_then(|f| f(self, &obj, 1))
+            {
+                Some(a) => Rc::new(RefCell::new(a)),
+                None => self.object_to_array(&obj),
+            },
+            Value::Null | Value::Undef => Rc::new(RefCell::new(PhpArray::new())),
+            Value::Reference(r) => {
+                let v = r.borrow().clone();
+                self.convert_to_array(v)
+            }
+            other => {
+                let mut arr = PhpArray::new();
+                arr.push(other);
+                Rc::new(RefCell::new(arr))
+            }
+        }
+    }
+
     /// Convert an object to an array (as `(array)$obj`).
     /// - Filters internal/lazy properties.
     /// - Skips uninitialized (Undef) properties.
@@ -31074,28 +31104,7 @@ impl Vm {
                         op.line,
                     );
                     self.warn_nan_coercion(&val, "array", op.line);
-                    let arr = match val {
-                        Value::Array(a) => a,
-                        // Closures convert like scalars: [$closure].
-                        Value::Object(obj) if obj.borrow().closure.is_some() => {
-                            let mut arr = PhpArray::new();
-                            arr.push(Value::Object(obj));
-                            Rc::new(RefCell::new(arr))
-                        }
-                        Value::Object(obj) => match native_handlers(&obj)
-                            .and_then(|h| h.get_properties)
-                            .and_then(|f| f(self, &obj, 1))
-                        {
-                            Some(a) => Rc::new(RefCell::new(a)),
-                            None => self.object_to_array(&obj),
-                        },
-                        Value::Null | Value::Undef => Rc::new(RefCell::new(PhpArray::new())),
-                        other => {
-                            let mut arr = PhpArray::new();
-                            arr.push(other);
-                            Rc::new(RefCell::new(arr))
-                        }
-                    };
+                    let arr = self.convert_to_array(val);
                     self.write_operand(
                         &op.result,
                         Value::Array(arr),
@@ -48990,9 +48999,13 @@ impl Vm {
                         op.line,
                     );
                     value = self.dup_stored_array(&op.op2, value);
-                    let prop_name = self
-                        .read_operand(&op.result, &cvs, &tmps, &op_array.literals)
-                        .to_php_string();
+                    let prop_name_val =
+                        self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                    // zval_try_get_tmp_string() of an array property name
+                    if matches!(prop_name_val.deref(), Value::Array(_)) {
+                        self.emit_warning_at("Array to string conversion", op.line);
+                    }
+                    let prop_name = prop_name_val.to_php_string();
                     // $obj->p naming a static property (zend_get_property_offset).
                     if let Value::Object(o) = &obj_val_raw {
                         if let Err(e) = self.static_as_instance_check(
