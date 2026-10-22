@@ -5195,6 +5195,32 @@ impl Parser {
             }
         }
 
+        // `variable '=' ampersand variable` is itself an expression: the
+        // right side is a variable, and what follows applies to the whole
+        // assignment (`$r = &$o->p + 1` is `($r = &$o->p) + 1`).
+        if Self::is_lvalue(&expr)
+            && matches!(self.peek(), TokenKind::Assign)
+            && matches!(self.peek_at(1), TokenKind::Ampersand)
+        {
+            self.advance();
+            self.advance();
+            let right = self.parse_postfix()?;
+            // A class constant cannot be referenced (`$a = &C::X`).
+            if matches!(right.kind, ExprKind::ClassConstAccess { .. }) {
+                return Err(ParseError {
+                    message: "syntax error, unexpected token \";\", expecting \"->\" or \"?->\" or \"{\" or \"[\"".into(),
+                    span: self.span(),
+                });
+            }
+            return Ok(Expr {
+                span: expr.span.merge(right.span),
+                kind: ExprKind::AssignRef {
+                    target: Box::new(expr),
+                    value: Box::new(right),
+                },
+            });
+        }
+
         Ok(expr)
     }
 
