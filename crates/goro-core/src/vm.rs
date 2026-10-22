@@ -16282,7 +16282,10 @@ impl Vm {
             if s_bytes.starts_with(b"__deferred_global_const__::") {
                 let const_name = &s_bytes[b"__deferred_global_const__::".len()..];
                 // The namespaced name, then the global one.
-                return self.deferred_global_const(const_name).cloned().unwrap_or(Value::Null);
+                return self
+                    .deferred_global_const(const_name)
+                    .cloned()
+                    .unwrap_or(Value::Null);
             }
             if s_bytes.starts_with(b"__deferred_const__::") {
                 let rest = &s_bytes[b"__deferred_const__::".len()..];
@@ -16326,7 +16329,10 @@ impl Vm {
     ) -> Value {
         if s.starts_with(b"__deferred_global_const__::") {
             let const_name = &s[b"__deferred_global_const__::".len()..];
-            return self.deferred_global_const(const_name).cloned().unwrap_or(Value::Null);
+            return self
+                .deferred_global_const(const_name)
+                .cloned()
+                .unwrap_or(Value::Null);
         }
         if s.starts_with(b"__deferred_const__::") {
             let rest = &s[b"__deferred_const__::".len()..];

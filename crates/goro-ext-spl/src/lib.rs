@@ -177,7 +177,10 @@ fn spl_object_hash_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         _ => None,
     };
     if let Some(id) = gen_id {
-        return Ok(Value::String(PhpString::from_string(format!("{:032x}", id))));
+        return Ok(Value::String(PhpString::from_string(format!(
+            "{:032x}",
+            id
+        ))));
     }
     if let Some(Value::Object(obj)) = args.first() {
         let id = obj.borrow().object_id;
