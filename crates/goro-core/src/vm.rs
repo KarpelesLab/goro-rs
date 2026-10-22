@@ -20040,8 +20040,10 @@ impl Vm {
             // exception (left by a builtin that called back into user code)
             // is dispatched by the general handlers, so it disables this.
             if !fast_tried && typed_ref_watch.is_none() && self.current_exception.is_none() {
-                let fast = if matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertySet)
-                    && self.isset_get_cache.is_none()
+                let fast = if matches!(
+                    op.opcode,
+                    OpCode::PropertyGet | OpCode::PropertySet | OpCode::PropertyGetW
+                ) && self.isset_get_cache.is_none()
                 {
                     self.fast_prop_op(op_array, ip - 1, cvs.as_mut_slice(), tmps.as_mut_slice())
                 } else if matches!(

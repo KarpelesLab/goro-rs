@@ -11,6 +11,7 @@
 //! before; the results are identical by construction (they use the same
 //! `Value` arithmetic / comparison routines as the general handlers).
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::opcode::{Op, OpCode, OperandType};
@@ -639,6 +640,7 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::AssignConcat
             | OpCode::PropertyGet
             | OpCode::PropertySet
+            | OpCode::PropertyGetW
             | OpCode::PropertyGetIncDec
             | OpCode::ArrayGet
             | OpCode::ArraySet
@@ -711,7 +713,10 @@ impl crate::vm::Vm {
                     }
                 }
                 // (the read of `$o->p++` is one of an object's property)
-                OpCode::PropertyGet | OpCode::PropertySet | OpCode::PropertyGetIncDec => {
+                OpCode::PropertyGet
+                | OpCode::PropertySet
+                | OpCode::PropertyGetW
+                | OpCode::PropertyGetIncDec => {
                     if self.isset_get_cache.is_some() {
                         break 'run ip;
                     }
@@ -1067,6 +1072,8 @@ impl crate::vm::Vm {
             _ => return Fast::No,
         };
         let write = op.opcode == OpCode::PropertySet;
+        // `$o->p[k] = v` / `$o->p[] = v` (see prop_dim_write)
+        let w_fetch = op.opcode == OpCode::PropertyGetW;
         let name_op = if write { &op.result } else { &op.op2 };
         let name = match name_op {
             OperandType::Const(i) => match literals.get(*i as usize) {
@@ -1098,7 +1105,7 @@ impl crate::vm::Vm {
                 _ => return Fast::No,
             }
         } else {
-            if !tmp_writable(&op.result, tmps) {
+            if !w_fetch && !tmp_writable(&op.result, tmps) {
                 return Fast::No;
             }
             None
@@ -1125,6 +1132,8 @@ impl crate::vm::Vm {
         // or holds something releasing / tracking could care about.
         let ok = if write {
             is_plain_scalar(cur) && !matches!(cur, Value::Undef)
+        } else if w_fetch {
+            matches!(cur, Value::Array(_))
         } else {
             match cur {
                 Value::Undef => false,
@@ -1159,7 +1168,7 @@ impl crate::vm::Vm {
         let plain = match cached {
             Some(p) => p,
             None => {
-                let p = self.plain_public_prop(&ob.class_name, name, write, scope);
+                let p = self.plain_public_prop(&ob.class_name, name, write || w_fetch, scope);
                 op_array
                     .sites
                     .borrow_mut()
@@ -1174,6 +1183,10 @@ impl crate::vm::Vm {
         };
         if !plain {
             return Fast::No;
+        }
+        if w_fetch {
+            drop(ob);
+            return self.prop_dim_write(op_array, ip, &obj, idx, cvs, tmps);
         }
         if let Some(v) = new_val {
             drop(ob);
@@ -1197,6 +1210,103 @@ impl crate::vm::Vm {
         } else {
             Fast::No
         }
+    }
+
+    /// fast_prop_op() of the PropertyGetW at `ip` of a plain property
+    /// (slot `idx` of `obj`) holding an array, whose result the next opcode
+    /// writes a plain value into (`$o->p[k] = v`, `$o->p[] = v`): what both
+    /// do then (the write fetch separates an array shared with other
+    /// holders; the write is fast_dim_op()'s), the fetched container not
+    /// left in its temporary. Jumps past both.
+    fn prop_dim_write(
+        &self,
+        op_array: &crate::opcode::OpArray,
+        ip: usize,
+        obj: &Rc<RefCell<crate::object::PhpObject>>,
+        idx: usize,
+        cvs: &[Value],
+        tmps: &mut [Value],
+    ) -> Fast {
+        let op = &op_array.ops[ip];
+        let literals = &op_array.literals;
+        let OperandType::Tmp(t) = op.result else {
+            return Fast::No;
+        };
+        let Some(next) = op_array.ops.get(ip + 1) else {
+            return Fast::No;
+        };
+        let append = next.opcode == OpCode::ArrayAppend;
+        if !(append || next.opcode == OpCode::ArraySet) || next.op1 != OperandType::Tmp(t) {
+            return Fast::No;
+        }
+        if self.dim_rw_key.is_some() || self.dim_rw_abort.is_some() {
+            return Fast::No;
+        }
+        // (a variable bound to a symbol table holds a reference)
+        let val = match next.op2 {
+            OperandType::Tmp(i) => tmps.get(i as usize).cloned(),
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                Some(Value::Reference(r)) => r.try_borrow().ok().map(|v| v.clone()),
+                v => v.cloned(),
+            },
+            OperandType::Const(i) => literals.get(i as usize).cloned(),
+            _ => None,
+        };
+        let val = match val {
+            Some(v) if is_plain_scalar(&v) && !matches!(v, Value::Undef) => v,
+            _ => return Fast::No,
+        };
+        let key = if append {
+            None
+        } else {
+            match dim_key(&next.result, cvs, tmps, literals) {
+                Some(k) => Some(k),
+                None => return Fast::No,
+            }
+        };
+        // (the holder of the previous fetch, as PropertyGetW drops it)
+        if let Some(slot) = tmps.get_mut(t as usize) {
+            *slot = Value::Undef;
+        }
+        let Ok(mut ob) = obj.try_borrow_mut() else {
+            return Fast::No;
+        };
+        let arr = match ob.properties.get(idx) {
+            Some((_, Value::Array(arr))) => arr.clone(),
+            _ => return Fast::No,
+        };
+        // (an element releasing its value takes the general path)
+        match (&key, arr.try_borrow()) {
+            (Some(k), Ok(a)) if a.get(k).is_none_or(is_plain_scalar) => {}
+            (None, Ok(_)) => {}
+            _ => return Fast::No,
+        }
+        // Shared with other holders (but this clone): the property gets
+        // its own copy.
+        let arr = if Rc::strong_count(&arr) > 2 {
+            let sep = Rc::new(RefCell::new(arr.borrow().clone()));
+            let slot = &mut ob.properties[idx].1;
+            let old = std::mem::replace(slot, Value::Array(sep.clone()));
+            crate::gc::on_value_replaced(&old, slot);
+            sep
+        } else {
+            arr
+        };
+        drop(ob);
+        let Ok(mut a) = arr.try_borrow_mut() else {
+            return Fast::No;
+        };
+        match key {
+            Some(k) => a.set(k, val),
+            // A full array ("next element is already occupied") raises its
+            // Error in the general handler; try_push() leaves it unchanged.
+            None => {
+                if a.try_push(val).is_err() {
+                    return Fast::No;
+                }
+            }
+        }
+        Fast::Jump(ip + 2)
     }
 }
 
