@@ -53,6 +53,33 @@ pub fn closure_parts(inner: &Value) -> (Vec<u8>, Vec<Value>) {
     }
 }
 
+/// Whether the function name of `closure_parts(inner)` is a closure's and
+/// is `name` (case-insensitively), without building the parts.
+pub fn closure_fn_named(inner: &Value, name: &[u8]) -> bool {
+    let check = |n: &[u8]| is_closure_fn_name(n) && n.eq_ignore_ascii_case(name);
+    match inner {
+        Value::Array(arr) => {
+            let a = arr.borrow();
+            if a.len() == 2
+                && matches!(
+                    (a.get_int(0), a.get_int(1)),
+                    (Some(Value::Object(_)), Some(Value::String(_)))
+                )
+            {
+                drop(a);
+                return check(&closure_parts(inner).0);
+            }
+            match a.values().next() {
+                Some(Value::String(s)) => check(s.as_bytes()),
+                Some(v) => check(v.to_php_string().as_bytes()),
+                None => check(b""),
+            }
+        }
+        Value::String(s) => check(s.as_bytes()),
+        other => check(other.to_php_string().as_bytes()),
+    }
+}
+
 /// `==` on two distinct Closure objects (zend_closure_compare): only fake
 /// closures (created from callables) over the same function, with the same
 /// bound `$this`, compare equal.

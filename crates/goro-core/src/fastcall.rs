@@ -489,6 +489,7 @@ impl Vm {
                     method: Some((sep, is_static)),
                     no_ctor: false,
                     no_ns_fallback: false,
+                    closure: false,
                     fn_gen: self.user_functions.len() + 1,
                 }
             };

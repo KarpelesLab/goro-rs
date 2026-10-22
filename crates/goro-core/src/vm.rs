@@ -614,6 +614,9 @@ pub(crate) struct CallTarget {
     /// (a qualified, fully qualified or imported name, or a dynamic call:
     /// INIT_FCALL_BY_NAME rather than INIT_NS_FCALL_BY_NAME).
     pub(crate) no_ns_fallback: bool,
+    /// A `$closure()` call (see init_closure_call_fast): `user` is the
+    /// closure's function, registered under the call's name.
+    pub(crate) closure: bool,
     /// `user_functions.len() + 1` when resolved (0: not resolved): a
     /// function declared since then (while the arguments were evaluated)
     /// makes the lookup run again.
@@ -641,6 +644,7 @@ impl CallTarget {
         method: None,
         no_ctor: false,
         no_ns_fallback: false,
+        closure: false,
         fn_gen: 0,
     };
 }
@@ -3491,10 +3495,17 @@ impl Vm {
 
     /// A call's frame is about to be pushed at the next call_stack depth:
     /// remember the Closure object it was called through (InitFCall).
-    fn note_closure_frame(&mut self, call_name: &PhpString, frame_name: &str) {
+    /// `known`: the call was set up from the Closure object at the top of
+    /// closure_call_objs (see init_closure_call_fast), which names it.
+    fn note_closure_frame(&mut self, call_name: &PhpString, frame_name: &str, known: bool) {
         let depth = self.call_stack.len() + 1;
         while self.closure_frames.last().is_some_and(|f| f.0 >= depth) {
-            self.closure_frames.pop();
+            if let Some((_, mut s, _)) = self.closure_frames.pop() {
+                if s.capacity() != 0 && s.capacity() <= 1024 && self.string_pool.len() < 64 {
+                    s.clear();
+                    self.string_pool.push(s);
+                }
+            }
         }
         let at = self.pending_calls.len();
         while self.closure_call_objs.last().is_some_and(|(i, _)| *i > at) {
@@ -3505,13 +3516,18 @@ impl Vm {
             let Some(obj) = weak.upgrade() else {
                 return;
             };
-            let name = crate::closure::closure_parts(&Value::Object(obj).unwrap_closure()).0;
-            let c = weak;
             // (fake closures of functions and methods are not closures)
-            if crate::closure::is_closure_fn_name(&name)
-                && name.eq_ignore_ascii_case(call_name.as_bytes())
-            {
-                self.closure_frames.push((depth, frame_name.to_string(), c));
+            let named = known || {
+                let inner = obj.borrow().closure.as_deref().cloned();
+                crate::closure::closure_fn_named(
+                    &inner.unwrap_or(Value::Object(obj)),
+                    call_name.as_bytes(),
+                )
+            };
+            if named {
+                let mut name = self.string_pool.pop().unwrap_or_default();
+                name.push_str(frame_name);
+                self.closure_frames.push((depth, name, weak));
             }
         }
     }
@@ -17303,18 +17319,29 @@ impl Vm {
         }
         if name[0] == b'_' {
             // A closure without a scope or $this, called through its object.
-            if call.target.fn_gen != 0 || !crate::closure::is_closure_fn_name(name) {
+            if !crate::closure::is_closure_fn_name(name) {
                 return false;
             }
-            let mut buf = [0u8; 128];
-            for (d, s) in buf.iter_mut().zip(name) {
-                *d = s.to_ascii_lowercase();
-            }
-            let lower = &buf[..name.len()];
-            if self.functions.contains_key(lower) {
-                return false;
-            }
-            let Some(f) = self.user_functions.get(lower) else {
+            let f = if call.target.closure && call.target.fn_gen == self.user_functions.len() + 1 {
+                // (resolved by init_closure_call_fast)
+                let Some(f) = call.target.user.as_ref() else {
+                    return false;
+                };
+                f
+            } else if call.target.fn_gen == 0 || call.target.closure {
+                let mut buf = [0u8; 128];
+                for (d, s) in buf.iter_mut().zip(name) {
+                    *d = s.to_ascii_lowercase();
+                }
+                let lower = &buf[..name.len()];
+                if self.functions.contains_key(lower) {
+                    return false;
+                }
+                let Some(f) = self.user_functions.get(lower) else {
+                    return false;
+                };
+                f
+            } else {
                 return false;
             };
             return match Self::fast_closure_simple(f, call) {
@@ -17513,19 +17540,29 @@ impl Vm {
     #[inline(never)]
     fn init_closure_call_fast(
         &mut self,
-        op: &crate::opcode::Op,
+        op_array: &OpArray,
+        ip: usize,
         cvs: &[Value],
         tmps: &[Value],
     ) -> bool {
-        let v = match op.op1 {
-            OperandType::Cv(i) => cvs.get(i as usize),
-            OperandType::Tmp(t) => tmps.get(t as usize),
-            _ => None,
-        };
-        let o = match v {
-            Some(Value::Object(o)) => o,
+        let op = &op_array.ops[ip];
+        // (a variable bound to a symbol table holds a reference)
+        let o = match op.op1 {
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                Some(Value::Object(o)) => Rc::clone(o),
+                Some(Value::Reference(r)) => match &*r.borrow() {
+                    Value::Object(o) => Rc::clone(o),
+                    _ => return false,
+                },
+                _ => return false,
+            },
+            OperandType::Tmp(t) => match tmps.get(t as usize) {
+                Some(Value::Object(o)) => Rc::clone(o),
+                _ => return false,
+            },
             _ => return false,
         };
+        let o = &o;
         let (name, captures) = {
             let ob = o.borrow();
             let Some(inner) = ob.closure.as_deref() else {
@@ -17562,11 +17599,28 @@ impl Vm {
             args.extend(a.borrow().values().skip(1).cloned());
         }
         self.closure_pending_calls.push(at);
+        // The closure's function, for the sends and the call (see
+        // fast_fcall_target), unless a builtin has its name. (The call
+        // site remembers what the name it saw last resolved to.)
+        let target = if name.len() <= 64 {
+            let t = self.plain_call_target(op_array, ip, name.as_bytes());
+            match t.user {
+                Some(f) if !t.has_builtin => CallTarget {
+                    user: Some(f),
+                    closure: true,
+                    fn_gen: t.fn_gen,
+                    ..CallTarget::NONE
+                },
+                _ => CallTarget::NONE,
+            }
+        } else {
+            CallTarget::NONE
+        };
         self.pending_calls.push(PendingCall {
             name,
             args,
             named_args: Vec::new(),
-            target: CallTarget::NONE,
+            target,
         });
         true
     }
@@ -18069,6 +18123,7 @@ impl Vm {
                 method,
                 no_ctor: false,
                 no_ns_fallback: false,
+                closure: false,
                 fn_gen: self.user_functions.len() + 1,
             };
         }
@@ -18099,6 +18154,7 @@ impl Vm {
             method: None,
             no_ctor: false,
             no_ns_fallback: false,
+            closure: false,
             fn_gen: self.user_functions.len() + 1,
         }
     }
@@ -18334,6 +18390,7 @@ impl Vm {
                         method: c.method,
                         no_ctor: false,
                         no_ns_fallback: false,
+                        closure: false,
                         fn_gen,
                     };
                 }
@@ -23660,7 +23717,7 @@ impl Vm {
                 }
                 OpCode::InitFCall => match outlined(|| -> Result<Flow, VmError> {
                     // `$closure()` (see init_closure_call_fast)
-                    if self.init_closure_call_fast(op, &cvs, &tmps) {
+                    if self.init_closure_call_fast(op_array, ip - 1, &cvs, &tmps) {
                         return Ok(Flow::Next);
                     }
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -25130,7 +25187,8 @@ impl Vm {
                         trace_args.extend_from_slice(&call.args[skip..]);
                         let call_frame_depth = self.call_stack.len();
                         if captures.is_some() {
-                            self.note_closure_frame(&call.name, &display);
+                            let known = call.target.closure;
+                            self.note_closure_frame(&call.name, &display, known);
                         }
                         self.call_stack
                             .push((display, file, op.line, trace_args, has_this));
@@ -28649,7 +28707,7 @@ impl Vm {
                             call.args.iter().skip(skip).cloned().collect::<Vec<_>>()
                         };
                         let call_frame_depth = self.call_stack.len();
-                        self.note_closure_frame(&call.name, &early_call_display);
+                        self.note_closure_frame(&call.name, &early_call_display, false);
                         self.call_stack.push((
                             early_call_display,
                             self.current_file.clone(),
