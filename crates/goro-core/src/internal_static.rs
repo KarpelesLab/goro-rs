@@ -139,7 +139,7 @@ impl Vm {
             }
             b"closure::fromcallable" => {
                 let callable = args.first().cloned().unwrap_or(Value::Null);
-                let scope = self.class_scope_stack.last().cloned();
+                let scope = self.scope_top().cloned();
                 match self.closure_from_callable(&callable, scope, this) {
                     Ok(c) => c,
                     Err(e) => {

@@ -2809,8 +2809,19 @@ impl Vm {
         Value::String(PhpString::from_vec(name))
     }
 
+    /// The class scope of the running code (lowercase), None outside any
+    /// class (an empty entry: a function running outside any class).
+    #[inline]
+    pub(crate) fn scope_top(&self) -> Option<&Vec<u8>> {
+        self.class_scope_stack.last().filter(|s| !s.is_empty())
+    }
+
     pub fn current_class_scope(&self) -> Option<Vec<u8>> {
-        let scope_lower = self.class_scope_stack.last().cloned().or_else(|| {
+        // (an empty entry: a function running outside any class)
+        if self.scope_top().is_some_and(|s| s.is_empty()) {
+            return None;
+        }
+        let scope_lower = self.scope_top().cloned().or_else(|| {
             self.called_class_stack
                 .last()
                 .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect())
@@ -5523,7 +5534,7 @@ impl Vm {
                 if message == format!("Class \"{}\" not found", kw)
                     || message.starts_with(&format!("Call to undefined method {}::", kw))
                 {
-                    message = if kw == "parent" && !self.class_scope_stack.is_empty() {
+                    message = if kw == "parent" && self.scope_top().is_some() {
                         "Cannot access \"parent\" when current class scope has no parent"
                             .to_string()
                     } else {
@@ -6080,7 +6091,7 @@ impl Vm {
             ParamType::Simple(name) => {
                 match name.as_slice() {
                     b"self" => {
-                        if let Some(scope) = self.class_scope_stack.last() {
+                        if let Some(scope) = self.scope_top() {
                             // Look up original case class name
                             if let Some(class_entry) = self.classes.get(scope) {
                                 return String::from_utf8_lossy(&class_entry.name).to_string();
@@ -6089,7 +6100,7 @@ impl Vm {
                         }
                     }
                     b"parent" => {
-                        if let Some(scope) = self.class_scope_stack.last() {
+                        if let Some(scope) = self.scope_top() {
                             if let Some(class_entry) = self.classes.get(scope) {
                                 if let Some(parent_name) = &class_entry.parent {
                                     // Look up original case of parent
@@ -6311,7 +6322,7 @@ impl Vm {
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
-                            if let Some(scope) = self.class_scope_stack.last() {
+                            if let Some(scope) = self.scope_top() {
                                 let scope_lower: Vec<u8> =
                                     scope.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 obj_class_lower == scope_lower || {
@@ -6338,7 +6349,7 @@ impl Vm {
                                 .iter()
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
-                            if let Some(scope) = self.class_scope_stack.last() {
+                            if let Some(scope) = self.scope_top() {
                                 let scope_lower: Vec<u8> =
                                     scope.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 if let Some(class_entry) = self.classes.get(&scope_lower) {
@@ -9582,14 +9593,14 @@ impl Vm {
         }
         let mut cur: Vec<u8> = match class_part {
             Some(b"parent") => {
-                let scope = self.class_scope_stack.last()?;
+                let scope = self.scope_top()?;
                 self.classes
                     .get(scope)?
                     .parent
                     .as_ref()?
                     .to_ascii_lowercase()
             }
-            Some(b"self") if !is_ctor => self.class_scope_stack.last()?.clone(),
+            Some(b"self") if !is_ctor => self.scope_top()?.clone(),
             Some(b"static") if !is_ctor => self.called_class_stack.last()?.to_ascii_lowercase(),
             Some(b"self") | Some(b"static") | None => match call.args.first() {
                 Some(Value::Object(o)) => o.borrow().class_name.to_ascii_lowercase(),
@@ -10568,12 +10579,15 @@ impl Vm {
 
     /// Get the current class scope name (lowercase), if any
     pub fn get_current_class_name(&self) -> Option<Vec<u8>> {
-        self.class_scope_stack.last().cloned()
+        self.scope_top().cloned()
     }
 
     /// The scope current_class_scope() names, without copying it (case as
     /// stored).
     pub(crate) fn class_scope_ref(&self) -> Option<&[u8]> {
+        if self.class_scope_stack.last().is_some_and(|s| s.is_empty()) {
+            return None;
+        }
         self.class_scope_stack
             .last()
             .or_else(|| self.called_class_stack.last())
@@ -18034,7 +18048,7 @@ impl Vm {
         let class: &[u8] = match kind {
             0 => self.called_class_stack.last()?.as_slice(),
             1 => {
-                if let Some(scope) = self.class_scope_stack.last() {
+                if let Some(scope) = self.scope_top() {
                     self.classes
                         .get(scope)
                         .map(|c| c.name.as_slice())
@@ -18045,8 +18059,7 @@ impl Vm {
             }
             _ => {
                 let parent = self
-                    .class_scope_stack
-                    .last()
+                    .scope_top()
                     .and_then(|scope| self.classes.get(scope))
                     .and_then(|c| c.parent.as_deref())
                     .or_else(|| {
@@ -19025,7 +19038,17 @@ impl Vm {
         // top-level code, only scripts, included files and eval()'d code
         // (not code the engine runs internally, like attribute arguments).
         let observed = self.observer.is_some() && self.observe_frame_begin(op_array);
+        // A function outside any class runs without a class scope (the
+        // caller's does not carry over); top-level code (an included file,
+        // eval()) keeps the includer's.
+        let scopeless = op_array.scope_class.is_none() && !op_array.name.is_empty();
+        if scopeless {
+            self.class_scope_stack.push(Vec::new());
+        }
         let result = self.execute_op_array_inner(op_array, cvs, cv_frame);
+        if scopeless {
+            self.class_scope_stack.pop();
+        }
         if observed {
             self.observe_frame_end(op_array, &result);
         }
@@ -26400,7 +26423,7 @@ impl Vm {
                         } else if call_name_lower.starts_with(b"self::") {
                             // self:: resolves to the current class scope (lexical class)
                             // but forwards the called class for LSB
-                            if let Some(scope) = self.class_scope_stack.last().cloned() {
+                            if let Some(scope) = self.scope_top().cloned() {
                                 // Look up original-case name
                                 let resolved_class = self
                                     .classes
@@ -26420,9 +26443,7 @@ impl Vm {
                         } else if call_name_lower.starts_with(b"parent::") {
                             // parent:: resolves to the parent of the current class scope
                             // but forwards the called class for LSB
-                            let parent_class = self
-                                .class_scope_stack
-                                .last()
+                            let parent_class = self.scope_top()
                                 .and_then(|scope| self.classes.get(scope))
                                 .and_then(|c| c.parent.clone())
                                 .or_else(|| {
@@ -33462,9 +33483,9 @@ impl Vm {
                                         // OR the named class is an ancestor of $this's runtime class.
                                         // Outside an instance method (e.g. `$a::method()` from main), we always
                                         // route through __callStatic.
-                                        let inside_instance_method = !self
-                                            .class_scope_stack
-                                            .is_empty()
+                                        let inside_instance_method = self
+                                            .scope_top()
+                                            .is_some()
                                             && op_array.cv_names.first().map(|n| n.as_slice())
                                                 == Some(b"this");
                                         let in_instance_context = !calling_class_is_trait
@@ -39234,25 +39255,18 @@ impl Vm {
                             let resolved = self.resolve_static_class(raw);
                             if resolved == b"static" {
                                 // No called class - try scope class (bound closure context)
-                                self.class_scope_stack
-                                    .last()
+                                self.scope_top()
                                     .cloned()
                                     .unwrap_or_else(|| b"static".to_vec())
                             } else {
                                 resolved.to_vec()
                             }
                         } else if raw.eq_ignore_ascii_case(b"self") {
-                            self.class_scope_stack
-                                .last()
-                                .or_else(|| self.called_class_stack.last())
-                                .cloned()
+                            self.class_scope_ref()
+                                .map(|s| s.to_vec())
                                 .unwrap_or_else(|| b"self".to_vec())
                         } else if raw.eq_ignore_ascii_case(b"parent") {
-                            let scope = self
-                                .class_scope_stack
-                                .last()
-                                .or_else(|| self.called_class_stack.last())
-                                .cloned();
+                            let scope = self.class_scope_ref().map(|s| s.to_vec());
                             if let Some(scope_lower) = scope {
                                 self.classes
                                     .get(&scope_lower)
@@ -39346,7 +39360,7 @@ impl Vm {
                                         let scope = op_array
                                             .scope_class
                                             .clone()
-                                            .or_else(|| self.class_scope_stack.last().cloned())
+                                            .or_else(|| self.scope_top().cloned())
                                             .map(|s| s.to_ascii_lowercase());
                                         let ok = match meta.visibility {
                                             Visibility::Private => {
@@ -51403,7 +51417,7 @@ impl Vm {
                                 .to_vec()
                         } else if class_name_raw.as_bytes().eq_ignore_ascii_case(b"self") {
                             // self:: uses the lexically defining class (class scope)
-                            if let Some(scope) = self.class_scope_stack.last() {
+                            if let Some(scope) = self.scope_top() {
                                 // Resolve to original case from class table
                                 if let Some(class_entry) = self.classes.get(scope) {
                                     class_entry.name.clone()
@@ -58530,7 +58544,7 @@ impl Vm {
     /// (`Class->$prop::get()`, the class being the hook's scope, the
     /// innermost `class_scope_stack` entry).
     pub(crate) fn push_hook_frame(&mut self, hook: &OpArray, cvs: &[Value]) {
-        let decl = self.class_scope_stack.last().cloned().unwrap_or_default();
+        let decl = self.scope_top().cloned().unwrap_or_default();
         let class_name = self
             .classes
             .get(&decl.to_ascii_lowercase())

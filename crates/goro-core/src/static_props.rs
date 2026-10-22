@@ -56,7 +56,7 @@ impl Vm {
         op_array
             .scope_class
             .clone()
-            .or_else(|| self.class_scope_stack.last().cloned())
+            .or_else(|| self.scope_top().cloned())
             .map(|s| s.to_ascii_lowercase())
     }
 
@@ -99,7 +99,7 @@ impl Vm {
         let resolved: Vec<u8> = if name.eq_ignore_ascii_case(b"static") {
             match self.called_class_stack.last() {
                 Some(c) => c.clone(),
-                None => match self.class_scope_stack.last() {
+                None => match self.scope_top() {
                     Some(s) => s.clone(),
                     None => {
                         return Err(SpErr::Throw(
@@ -110,7 +110,7 @@ impl Vm {
                 },
             }
         } else if name.eq_ignore_ascii_case(b"self") || name.eq_ignore_ascii_case(b"parent") {
-            let scope = match self.class_scope_stack.last() {
+            let scope = match self.scope_top() {
                 Some(s) => s.clone(),
                 None => {
                     return Err(SpErr::Throw(
