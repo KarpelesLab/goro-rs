@@ -77,7 +77,11 @@ impl Parser {
     /// `__halt_compiler();` at the top level: drop everything after it and
     /// resolve direct references to `__COMPILER_HALT_OFFSET__` (unqualified
     /// or `\`-qualified) to the byte offset right after the statement.
-    fn apply_halt_compiler(tokens: &mut Vec<Token>, docs: &mut Vec<Option<Vec<u8>>>) {
+    fn apply_halt_compiler(
+        tokens: &mut Vec<Token>,
+        docs: &mut Vec<Option<Vec<u8>>>,
+        halt_map: Option<std::rc::Rc<dyn Fn(u32) -> u32>>,
+    ) {
         let mut depth: i32 = 0;
         let mut halt: Option<(usize, u32)> = None;
         for i in 0..tokens.len() {
@@ -116,6 +120,8 @@ impl Parser {
             }
         }
         let Some((hi, offset)) = halt else { return };
+        // (an offset into the original script under zend.multibyte filters)
+        let offset = halt_map.map_or(offset, |f| f(offset));
         // Keep `__halt_compiler ( ) ;` and the Eof token; drop the rest.
         if let Some(eof) = tokens.last().cloned() {
             if tokens.len() > hi + 4 {
@@ -186,7 +192,8 @@ impl Parser {
             doc_comments.push(pending_doc.take());
             filtered.push(tok);
         }
-        Self::apply_halt_compiler(&mut filtered, &mut doc_comments);
+        let halt_map = crate::multibyte::take_halt_offset_map();
+        Self::apply_halt_compiler(&mut filtered, &mut doc_comments, halt_map);
         Self {
             tokens: filtered,
             token_doc_comments: doc_comments,

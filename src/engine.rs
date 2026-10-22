@@ -7,7 +7,7 @@ use goro_core::opcode::OpArray;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::Vm;
-use goro_parser::{Lexer, Parser};
+use goro_parser::Parser;
 
 /// INI settings in the order they apply (later entries override earlier ones).
 pub type IniSettings = Vec<(String, String)>;
@@ -94,6 +94,9 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
     set_php_precision(14);
     set_php_serialize_precision(-1);
     goro_parser::set_short_open_tag(ini_lookup(ini, "short_open_tag").is_some_and(ini_truthy));
+    goro_ext_mbstring::zend_multibyte::install(&|k: &str| {
+        ini_lookup(ini, k).map(|v| v.to_string())
+    });
 
     let mut vm = Vm::new();
     register_extensions(&mut vm);
@@ -211,11 +214,9 @@ pub fn compile(
     filename: &str,
     skip_shebang: bool,
 ) -> Result<Compiled, CompileError> {
-    let mut lexer = Lexer::new(source);
-    if skip_shebang {
-        lexer.skip_shebang();
-    }
-    let tokens = lexer.tokenize();
+    let script = goro_parser::multibyte::lex_script(source, skip_shebang);
+    let tokens = script.tokens;
+    let source = script.source.as_slice();
     let mut lexer_deprecations = goro_parser::take_lexer_deprecations();
     // Lexer and parser diagnostics, in source order.
     lexer_deprecations.sort_by_key(|(_, line)| *line);

@@ -36474,10 +36474,10 @@ impl Vm {
                             }
                             // Compile and execute (the CLI sets CG(skip_shebang)
                             // for every file it compiles)
-                            let mut lexer = goro_parser::Lexer::new(&source);
-                            lexer.skip_shebang();
-                            let tokens = lexer.tokenize();
-                            let mut parser = goro_parser::Parser::new(tokens).with_source(&source);
+                            // (through the zend.multibyte filters)
+                            let script = goro_parser::multibyte::lex_script(&source, true);
+                            let mut parser =
+                                goro_parser::Parser::new(script.tokens).with_source(&script.source);
                             match parser.parse() {
                                 Ok(program) => {
                                     let mut compiler = crate::compiler::Compiler::new();

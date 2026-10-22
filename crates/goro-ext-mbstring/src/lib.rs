@@ -15,6 +15,7 @@ pub mod onig;
 pub mod state;
 pub mod strfuncs;
 pub mod unicode;
+pub mod zend_multibyte;
 pub mod zpp;
 
 use goro_core::string::PhpString;
@@ -24,6 +25,7 @@ use goro_core::vm::Vm;
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"mbstring");
     mbstring::register(vm);
+    vm.startup_hooks.push(zend_multibyte::startup);
 
     vm.constants
         .insert(b"MB_CASE_UPPER".to_vec(), Value::Long(0));

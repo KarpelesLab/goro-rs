@@ -215,6 +215,9 @@ pub struct Compiler {
     /// The hoisted (early-bound) class declaration statements, by address: a
     /// same-named declaration elsewhere in the file is not that statement.
     hoisted_class_stmts: std::collections::HashSet<usize>,
+    /// The `declare()` statements a file starts with, by address: the only
+    /// ones that may declare an encoding (zend_is_first_statement()).
+    leading_declare_stmts: std::collections::HashSet<usize>,
     /// Top-level functions declared in this compilation unit: lowercased
     /// qualified name -> (display name, declaration line).
     hoisted_function_names: HashMap<Vec<u8>, (Vec<u8>, u32)>,
@@ -462,6 +465,7 @@ impl Compiler {
             anon_class_name_map: HashMap::new(),
             hoisted_class_names: std::collections::HashSet::new(),
             hoisted_class_stmts: std::collections::HashSet::new(),
+            leading_declare_stmts: std::collections::HashSet::new(),
             hoisted_function_names: HashMap::new(),
             seen_class_symbols: std::collections::HashSet::new(),
             seen_function_symbols: std::collections::HashSet::new(),
@@ -2033,6 +2037,17 @@ impl Compiler {
         let warnings_base = COMPILE_WARNINGS.with(|w| w.borrow().len());
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         self.build_anon_class_name_map(&program.statements);
+        // zend_handle_encoding_declaration() warned while the file was parsed.
+        for (msg, line) in goro_parser::multibyte::take_declare_warnings() {
+            push_compile_warning_tuple((msg.clone(), line));
+            push_pending_compile_warning(msg, line);
+        }
+        self.leading_declare_stmts = program
+            .statements
+            .iter()
+            .take_while(|st| matches!(st.kind, StmtKind::Declare { .. }))
+            .map(|st| st as *const Statement as usize)
+            .collect();
         // Reject yield/yield-from at script top level (must appear inside a function).
         if let Some(line) = find_top_level_yield(&program.statements) {
             return Err(CompileError {
@@ -4425,8 +4440,17 @@ impl Compiler {
                     // declare(encoding = ...): value must be a literal; non-string literals get a warning
                     if name_lower == b"encoding" {
                         let line = value.span.line;
+                        // (with zend.multibyte off, the parser warned instead)
+                        let multibyte = goro_parser::multibyte::multibyte_enabled();
                         match &value.kind {
-                            ExprKind::String(_) => { /* OK - not validated further */ }
+                            // Checked by the parser
+                            ExprKind::String(_) => {}
+                            ExprKind::Int(_)
+                            | ExprKind::Float(_)
+                            | ExprKind::True
+                            | ExprKind::False
+                            | ExprKind::Null
+                                if !multibyte => {}
                             ExprKind::Int(n) => {
                                 let msg = format!("Unsupported encoding [{}]", n);
                                 push_compile_warning_tuple((msg.clone(), line));
@@ -4454,6 +4478,15 @@ impl Compiler {
                                     line: value.span.line,
                                 });
                             }
+                        }
+                        if !self
+                            .leading_declare_stmts
+                            .contains(&(stmt as *const Statement as usize))
+                        {
+                            return Err(CompileError {
+                                message: "Encoding declaration pragma must be the very first statement in the script".into(),
+                                line: stmt.span.line,
+                            });
                         }
                         continue;
                     }

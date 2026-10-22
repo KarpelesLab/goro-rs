@@ -1361,7 +1361,7 @@ fn execute_php_inner_impl(
         Value, memory_reset, set_memory_limit, set_php_precision, set_php_serialize_precision,
     };
     use goro_core::vm::Vm;
-    use goro_parser::{Lexer, Parser};
+    use goro_parser::Parser;
 
     // Reset memory tracking and limits for this test
     memory_reset();
@@ -1416,9 +1416,16 @@ fn execute_php_inner_impl(
         })
         .unwrap_or(false);
     goro_parser::set_short_open_tag(short_tags);
-    let mut lexer = Lexer::new(source);
-    lexer.skip_shebang();
-    let tokens = lexer.tokenize();
+    goro_ext_mbstring::zend_multibyte::install(&|k: &str| {
+        ini_settings
+            .iter()
+            .rev()
+            .find(|(n, _)| n == k)
+            .map(|(_, v)| v.clone())
+    });
+    let script = goro_parser::multibyte::lex_script(source, true);
+    let tokens = script.tokens;
+    let source = script.source.as_slice();
 
     // Drain any deprecations recorded by the lexer (e.g. `${var}` syntax).
     let mut lexer_deprecations = goro_parser::take_lexer_deprecations();
