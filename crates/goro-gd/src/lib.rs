@@ -19,13 +19,18 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 pub mod color_match;
+pub mod crop;
 pub mod filter;
 pub mod fonts;
 pub mod gd;
+pub mod interpolation;
 pub mod io;
+pub mod matrix;
 pub mod png;
+pub mod rotate;
 pub mod tables;
 pub mod topal;
+pub mod transform;
 
 pub use io::{In, Out};
 
@@ -113,16 +118,6 @@ pub mod interp {
     pub const WEIGHTED4: i32 = 21;
     pub const LINEAR: i32 = 22;
     pub const METHOD_COUNT: i32 = 22;
-}
-
-/// gdCropMode
-pub mod crop {
-    pub const DEFAULT: i32 = 0;
-    pub const TRANSPARENT: i32 = 1;
-    pub const BLACK: i32 = 2;
-    pub const WHITE: i32 = 3;
-    pub const SIDES: i32 = 4;
-    pub const THRESHOLD: i32 = 5;
 }
 
 /// gd_errors.h priorities (syslog levels)
