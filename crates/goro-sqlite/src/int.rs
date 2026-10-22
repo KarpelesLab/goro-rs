@@ -420,6 +420,24 @@ pub struct Schema {
     pub cache_size: i32,
 }
 
+/// A Schema object (C `Schema*`).  Like in C, the schema of a database
+/// file belongs to its BtShared (sqlite3BtreeSchema()), so every
+/// connection on a shared cache sees the same object; Db::pSchema is a
+/// counted reference to it.  The TEMP schema (and the schema of a detached
+/// slot, C NULL, which is an empty `Schema` with id SchemaId(0)) belongs to
+/// the Db entry alone.
+///
+/// Keep `borrow()`/`borrow_mut()` short (like for TableRef): never hold one
+/// across a call that takes `db`.
+pub type SchemaP = Rc<RefCell<Schema>>;
+
+impl Schema {
+    /// A new, empty schema object with the NULL id (C `pSchema = 0`).
+    pub fn null() -> SchemaP {
+        Rc::new(RefCell::new(Schema::default()))
+    }
+}
+
 /// Each database file to be accessed by the system is an instance of this
 /// structure.
 pub struct Db {
@@ -427,7 +445,7 @@ pub struct Db {
     pub pBt: Option<BtreeP>,
     pub safety_level: u8,
     pub bSyncSet: u8,
-    pub pSchema: Schema,
+    pub pSchema: SchemaP,
 }
 
 #[derive(Clone, Default)]
@@ -482,8 +500,6 @@ pub struct Sqlite3 {
     pub aVdbe: Vec<VdbeSlot>,
     /// Built-in SQL functions (C sqlite3BuiltinFunctions).
     pub builtinFuncs: Rc<crate::callback::FuncDefHash>,
-    /// Source of SchemaId values.
-    pub nextSchemaId: u32,
 
     // --- sqlite3 struct ---
     pub pVfs: Rc<crate::os::Vfs>,
@@ -722,7 +738,7 @@ impl Sqlite3 {
             return -32768;
         }
         for (i, d) in self.aDb.iter().enumerate() {
-            if d.pSchema.id == id {
+            if d.pSchema.borrow().id == id {
                 return i as i32;
             }
         }
@@ -747,16 +763,16 @@ impl Sqlite3 {
     }
     /// DbHasProperty(db, i, p)
     pub fn DbHasProperty(&self, i: i32, p: u16) -> bool {
-        (self.aDb[i as usize].pSchema.schemaFlags & p) == p
+        (self.aDb[i as usize].pSchema.borrow().schemaFlags & p) == p
     }
     pub fn DbHasAnyProperty(&self, i: i32, p: u16) -> bool {
-        (self.aDb[i as usize].pSchema.schemaFlags & p) != 0
+        (self.aDb[i as usize].pSchema.borrow().schemaFlags & p) != 0
     }
     pub fn DbSetProperty(&mut self, i: i32, p: u16) {
-        self.aDb[i as usize].pSchema.schemaFlags |= p;
+        self.aDb[i as usize].pSchema.borrow_mut().schemaFlags |= p;
     }
     pub fn DbClearProperty(&mut self, i: i32, p: u16) {
-        self.aDb[i as usize].pSchema.schemaFlags &= !p;
+        self.aDb[i as usize].pSchema.borrow_mut().schemaFlags &= !p;
     }
     /// The parse tree of a Tree<> field, imported into the arena if owned.
     pub fn tree<I: ArenaId>(&mut self, t: &Tree<I>) -> I {

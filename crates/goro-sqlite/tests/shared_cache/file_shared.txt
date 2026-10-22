@@ -1,0 +1,59 @@
+# file-based shared cache, explain, schema changes seen by the other side
+@openshared 1 $DIR/shc_t2.db
+@openshared 2 $DIR/shc_t2.db
+@open 3 $DIR/shc_t2.db
+1: CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT UNIQUE, c);
+1: INSERT INTO t VALUES(1,'one',1.5),(2,'two',NULL);
+2: SELECT * FROM t;
+3: SELECT * FROM t;
+2: EXPLAIN SELECT * FROM t WHERE b='one';
+2: EXPLAIN INSERT INTO t(b) VALUES('x');
+2: EXPLAIN UPDATE t SET c=c+1 WHERE a IN (SELECT a FROM t);
+2: EXPLAIN DELETE FROM t;
+3: EXPLAIN SELECT * FROM t WHERE b='one';
+1: CREATE TEMP TABLE tmp(x); INSERT INTO tmp VALUES(42);
+2: SELECT * FROM tmp;
+2: CREATE TEMP TABLE tmp(y); INSERT INTO tmp VALUES(43);
+1: SELECT * FROM tmp;
+2: SELECT * FROM tmp;
+1: ALTER TABLE t ADD COLUMN d DEFAULT 7;
+2: SELECT * FROM t;
+2: DROP TABLE t;
+1: SELECT * FROM t;
+1: CREATE TABLE u(x); CREATE TRIGGER tr AFTER INSERT ON u BEGIN INSERT INTO u2 VALUES(new.x); END; CREATE TABLE u2(x);
+2: INSERT INTO u VALUES(5); SELECT * FROM u2;
+1: SELECT * FROM u2;
+1: SAVEPOINT s1; INSERT INTO u VALUES(6); SAVEPOINT s2; INSERT INTO u VALUES(7); ROLLBACK TO s2; RELEASE s1;
+2: SELECT * FROM u;
+1: BEGIN; SELECT * FROM u;
+2: INSERT INTO u VALUES(8);
+2: SELECT count(*) FROM u;
+1: COMMIT;
+2: BEGIN; INSERT INTO u VALUES(9);
+1: SELECT 1;
+1: SELECT count(*) FROM u;
+2: COMMIT;
+1: SELECT count(*) FROM u;
+3: SELECT count(*) FROM u;
+1: VACUUM;
+2: PRAGMA integrity_check;
+1: ANALYZE; SELECT * FROM sqlite_stat1;
+2: SELECT * FROM sqlite_stat1;
+2: CREATE INDEX ux ON u(x); REINDEX;
+1: SELECT name FROM sqlite_schema ORDER BY 1;
+1: PRAGMA cache_size;
+2: PRAGMA cache_size=100;
+1: PRAGMA cache_size;
+2: PRAGMA cache_size;
+1: ATTACH '$DIR/shc_t2b.db' AS aux; CREATE TABLE aux.z(q); INSERT INTO aux.z VALUES(1);
+2: ATTACH '$DIR/shc_t2b.db' AS aux; SELECT * FROM aux.z;
+1: DETACH aux;
+2: SELECT * FROM aux.z;
+2: DETACH aux;
+@close 1
+2: SELECT count(*) FROM u;
+@close 2
+@close 3
+@openshared 4 $DIR/shc_t2.db
+4: SELECT count(*) FROM u;
+@close 4

@@ -16,7 +16,9 @@ Reference sources (read-only, do not copy them into the repo):
 
 Compile-time configuration we mirror: the default amalgamation build plus
 `SQLITE_ENABLE_COLUMN_METADATA`, `SQLITE_ENABLE_MATH_FUNCTIONS`,
-`SQLITE_OMIT_SHARED_CACHE`, default `SQLITE_DQS=3`, no
+shared cache compiled in (with the `SQLITE_THREADSAFE=0` flavour of
+btmutex.c: no mutexes, `db->noSharedCache` stays 0; no unlock-notify),
+default `SQLITE_DQS=3`, no
 `SQLITE_ENABLE_EXPLAIN_COMMENTS`, no `SQLITE_DEBUG` (asserts become
 `debug_assert!`), UTF-8 only (UTF-16 entry points may stay unimplemented),
 no load_extension, no mmap of the database file (the WAL -shm file is
@@ -131,8 +133,16 @@ hold one across a call that might borrow the same object (clone the Rc or
 copy the fields out first).  Panics from a double borrow are bugs.
 
 `Table::pSchema`, `Index::pSchema` ... are `SchemaId`s; the schema itself is
-`db.aDb[i].pSchema` (owned by the Db); `db.schema_index(id)` is
-`sqlite3SchemaToIndex()`.
+`db.aDb[i].pSchema`, a `SchemaP = Rc<RefCell<Schema>>`.  As in C the
+Schema of a database file belongs to its BtShared (sqlite3BtreeSchema()),
+so connections on a shared cache share the object (and its tables, indexes
+and triggers); the TEMP schema belongs to the Db alone, and a detached
+slot holds `Schema::null()`.  Access it with short borrows:
+`db.aDb[i].pSchema.borrow().tblHash.find(..).cloned()`,
+`db.aDb[i].pSchema.borrow_mut().schema_cookie = ..`; never keep the borrow
+across a call that takes `db` (bind `.values()` to a local before a loop).
+`db.schema_index(id)` is `sqlite3SchemaToIndex()`.  SchemaIds are unique
+in the process.  Schema objects must not hold per-connection state.
 
 ### 4. Strings are bytes
 

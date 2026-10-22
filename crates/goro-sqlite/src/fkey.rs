@@ -762,6 +762,7 @@ pub fn sqlite3FkReferences(db: &Sqlite3, pTab: &TableRef) -> Vec<FKeyRef> {
     }
     db.aDb[i as usize]
         .pSchema
+        .borrow()
         .fkeyHash
         .find(&zName)
         .cloned()
@@ -780,7 +781,7 @@ fn fkTriggerDelete(_db: &mut Sqlite3, _p: Option<TriggerRef>) {}
 /// in a particular database.  This needs to happen when the schema
 /// changes.
 pub fn sqlite3FkClearTriggerCache(db: &mut Sqlite3, iDb: i32) {
-    let tabs: Vec<TableRef> = db.aDb[iDb as usize].pSchema.tblHash.values();
+    let tabs: Vec<TableRef> = db.aDb[iDb as usize].pSchema.borrow().tblHash.values();
     for pTab in tabs.iter() {
         if !pTab.borrow().IsOrdinaryTable() {
             continue;
@@ -1634,7 +1635,7 @@ pub fn sqlite3FkDelete(db: &mut Sqlite3, pTab: &TableRef) {
         /* Remove the FK from the fkeyHash hash table. */
         if iDb >= 0 {
             let zTo = pFKey.borrow().zTo.clone();
-            let h = &mut db.aDb[iDb as usize].pSchema.fkeyHash;
+            let h = &mut db.aDb[iDb as usize].pSchema.borrow_mut().fkeyHash;
             if let Some(list) = h.find_mut(&zTo) {
                 if let Some(pos) = list.iter().position(|x| Rc::ptr_eq(x, pFKey)) {
                     list.remove(pos);

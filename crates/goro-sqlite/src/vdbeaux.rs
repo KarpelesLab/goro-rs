@@ -1318,14 +1318,17 @@ pub fn sqlite3VdbeDisplayP4(pOp: &VdbeOp) -> Option<ZStr> {
 /// C: `void sqlite3VdbeUsesBtree(Vdbe *p, int i)`
 ///
 /// Declare to the Vdbe that the BTree object at db->aDb[i] is used.
-/// (Without shared cache no btree is sharable, so lockMask stays empty.)
+/// Rust: lockMask (the sharable btrees to enter) is not maintained: with
+/// SQLITE_THREADSAFE=0, sqlite3VdbeEnter() only runs sqlite3BtreeEnter(),
+/// which the btree entry points used by a statement (BeginTrans, Cursor,
+/// LockTable, ...) do themselves.
 pub fn sqlite3VdbeUsesBtree(p: &mut Vdbe, i: i32) {
     debug_assert!(i >= 0 && i < (std::mem::size_of::<yDbMask>() * 8) as i32);
     p.btreeMask |= (1 as yDbMask) << i;
 }
 
 /// C: `void sqlite3VdbeEnter(Vdbe *p)`
-/// No shared cache: lockMask is always empty, nothing to lock.
+/// lockMask is always empty (see sqlite3VdbeUsesBtree()), nothing to lock.
 pub fn sqlite3VdbeEnter(db: &mut Sqlite3, p: &mut Vdbe) {
     if p.lockMask == 0 {
         return; /* The common case */
@@ -1333,7 +1336,7 @@ pub fn sqlite3VdbeEnter(db: &mut Sqlite3, p: &mut Vdbe) {
 }
 
 /// C: `void sqlite3VdbeLeave(Vdbe *p)`
-/// No shared cache: nothing to unlock.
+/// No mutexes (SQLITE_THREADSAFE=0 flavour): nothing to unlock.
 pub fn sqlite3VdbeLeave(p: &mut Vdbe) {
     if p.lockMask == 0 {
         return; /* The common case */

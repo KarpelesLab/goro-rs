@@ -1,0 +1,26 @@
+1: 1
+1: 2
+3: Error: 1 1 no such table: t
+5: hello
+4: a
+4: ai
+4: ok
+5: Error: 6 262 database table is locked
+5: Error: 6 262 database schema is locked: main
+5: Error: 6 262 database schema is locked: main
+4: hello
+5: Error: 6 262 database table is locked: a
+4: Error: 6 262 database table is locked: a
+4: hello
+4: w
+4: w2
+4: 3
+4: Error: 6 262 database schema is locked: main
+4: Error: 6 262 database schema is locked: main
+4: Error: 6 262 database schema is locked: main
+4: Error: 1 1 database is already attached
+5: close 0
+4: 3
+4: close 0
+1: close 0
+2: close 0

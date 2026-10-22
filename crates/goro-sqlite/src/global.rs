@@ -389,3 +389,18 @@ pub static sqlite3Config: Sqlite3Config = Sqlite3Config {
 pub fn sqlite3GlobalConfig() -> &'static Sqlite3Config {
     &sqlite3Config
 }
+
+/// sqlite3GlobalConfig.sharedCacheEnabled, the one member that changes at
+/// run time (sqlite3_enable_shared_cache()); `Sqlite3Config::
+/// sharedCacheEnabled` keeps the initial value.
+static SHARED_CACHE_ENABLED: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Read sqlite3GlobalConfig.sharedCacheEnabled.
+pub fn sqlite3SharedCacheEnabled() -> i32 {
+    SHARED_CACHE_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Set sqlite3GlobalConfig.sharedCacheEnabled.
+pub fn sqlite3SetSharedCacheEnabled(enable: i32) {
+    SHARED_CACHE_ENABLED.store(enable, std::sync::atomic::Ordering::Relaxed);
+}

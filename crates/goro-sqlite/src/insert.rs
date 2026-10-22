@@ -439,7 +439,7 @@ pub fn sqlite3ComputeGeneratedColumns(db: &mut Sqlite3, iRegStore: i32, pTab: &T
 fn autoIncBegin(db: &mut Sqlite3, iDb: i32, pTab: &TableRef) -> i32 {
     let mut memId = 0;
     if (pTab.borrow().tabFlags & TF_Autoincrement) != 0 && (db.mDbFlags & DBFLAG_Vacuum) == 0 {
-        let pSeqTab = db.aDb[iDb as usize].pSchema.pSeqTab.clone();
+        let pSeqTab = db.aDb[iDb as usize].pSchema.borrow().pSeqTab.clone();
 
         /* Verify that the sqlite_sequence table exists and is an ordinary
          ** rowid table with exactly two columns.
@@ -587,7 +587,12 @@ pub fn sqlite3AutoincrementBegin(db: &mut Sqlite3) {
     let aAinc = db.ppr().pAinc.clone();
     for p in aAinc.iter() {
         let memId = p.regCtr;
-        let pSeqTab = db.aDb[p.iDb as usize].pSchema.pSeqTab.clone().unwrap();
+        let pSeqTab = db.aDb[p.iDb as usize]
+            .pSchema
+            .borrow()
+            .pSeqTab
+            .clone()
+            .unwrap();
         sqlite3OpenTable(db, 0, p.iDb, &pSeqTab, OP_OpenRead as i32);
         let zName = p.pTab.as_ref().unwrap().borrow().zName.clone();
         sqlite3VdbeLoadString(db.v(), memId - 1, &zName);
@@ -673,7 +678,12 @@ fn autoIncrementEnd(db: &mut Sqlite3) {
         let iRec = sqlite3GetTempReg(db);
         let a = sqlite3VdbeCurrentAddr(db.v()) + 7;
         sqlite3VdbeAddOp3(db.v(), OP_Le, memId + 2, a, memId);
-        let pSeqTab = db.aDb[p.iDb as usize].pSchema.pSeqTab.clone().unwrap();
+        let pSeqTab = db.aDb[p.iDb as usize]
+            .pSchema
+            .borrow()
+            .pSeqTab
+            .clone()
+            .unwrap();
         sqlite3OpenTable(db, 0, p.iDb, &pSeqTab, OP_OpenWrite as i32);
         let v = db.v();
         let a = sqlite3VdbeAddOpList(v, &autoIncEnd, 0);

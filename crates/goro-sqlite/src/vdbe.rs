@@ -2248,7 +2248,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             }
             if rc == SQLITE_OK
                 && p5 != 0
-                && (iMeta != p3 || db.aDb[p1 as usize].pSchema.iGeneration != p4_i!())
+                && (iMeta != p3 || db.aDb[p1 as usize].pSchema.borrow().iGeneration != p4_i!())
             {
                 // IMPLEMENTATION-OF: R-03189-51135 As each SQL statement
                 // runs, the schema version is checked to ensure that the
@@ -2258,7 +2258,7 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
                 // If the schema-cookie from the database file matches the
                 // cookie stored with the in-memory representation of the
                 // schema, do not reload the schema from the database file.
-                if db.aDb[p1 as usize].pSchema.schema_cookie != iMeta {
+                if db.aDb[p1 as usize].pSchema.borrow().schema_cookie != iMeta {
                     crate::build::sqlite3ResetOneSchema(db, p1);
                 }
                 p.expired = 1;
@@ -2292,13 +2292,13 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
             if p2 == BTREE_SCHEMA_VERSION {
                 // When the schema cookie changes, record the new cookie
                 // internally
-                db.aDb[p1 as usize].pSchema.schema_cookie =
+                db.aDb[p1 as usize].pSchema.borrow_mut().schema_cookie =
                     (p3 as u32).wrapping_sub(p5 as u32) as i32;
                 db.mDbFlags |= DBFLAG_SchemaChange;
                 crate::fkey::sqlite3FkClearTriggerCache(db, p1);
             } else if p2 == BTREE_FILE_FORMAT {
                 // Record changes in the file format
-                db.aDb[p1 as usize].pSchema.file_format = p3 as u8;
+                db.aDb[p1 as usize].pSchema.borrow_mut().file_format = p3 as u8;
             }
             if p1 == 1 {
                 // Invalidate all prepared statements whenever the TEMP
@@ -3937,10 +3937,37 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         }
 
         // Opcode: TableLock P1 P2 P3 P4 *
+        // Synopsis: iDb=P1 root=P2 write=P3
         //
-        // Obtain a lock on a particular table.  This opcode is only used
-        // when SQLITE_OMIT_SHARED_CACHE is not defined: a no-op here.
-        OP_TableLock => Ok(Fl::Next),
+        // Obtain a lock on a particular table. This instruction is only used
+        // when the shared-cache feature is enabled.
+        //
+        // P1 is the index of the database in sqlite3.aDb[] of the database
+        // on which the lock is acquired.  A readlock is obtained if P3==0 or
+        // a write lock if P3==1.
+        //
+        // P2 contains the root-page of the table to lock.
+        //
+        // P4 contains a pointer to the name of the table being locked. This
+        // is only used to generate an error message if the lock cannot be
+        // obtained.
+        OP_TableLock => {
+            let isWriteLock = p3 as u8;
+            if isWriteLock != 0 || 0 == (db.flags & SQLITE_ReadUncommit) {
+                debug_assert!(p1 >= 0 && p1 < db.nDb());
+                debug_assert!(isWriteLock == 0 || isWriteLock == 1);
+                let pBt = db.aDb[p1 as usize].pBt.clone().expect("btree");
+                let rc = crate::btree::sqlite3BtreeLockTable(&pBt, p2, isWriteLock);
+                if rc != 0 {
+                    if (rc & 0xFF) == SQLITE_LOCKED {
+                        let z = p4_z!().unwrap_or_default();
+                        verr!(db, p, b"database table is locked: %s", &z);
+                    }
+                    abort!(rc);
+                }
+            }
+            Ok(Fl::Next)
+        }
 
         // Virtual table opcodes.
         OP_VBegin | OP_VCreate | OP_VDestroy | OP_VOpen | OP_VCheck | OP_VInitIn | OP_VFilter
@@ -5050,7 +5077,7 @@ fn op_open(
     let wrFlag;
     if opcode == OP_OpenWrite {
         wrFlag = BTREE_WRCSR | (p5 & OPFLAG_FORDELETE) as i32;
-        let ff = db.aDb[iDb as usize].pSchema.file_format;
+        let ff = db.aDb[iDb as usize].pSchema.borrow().file_format;
         if ff < p.minWriteFileFormat {
             p.minWriteFileFormat = ff;
         }

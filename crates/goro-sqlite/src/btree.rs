@@ -15,8 +15,13 @@
 //! * Overflow cells (`MemPage::apOvfl`) are owned copies of the cell.
 //! * `BtShared` keeps weak references to its open cursors (C pCursor list,
 //!   most recently opened first).
-//! * There is no shared cache (SQLITE_OMIT_SHARED_CACHE): table locks are
-//!   no-ops, a BtShared belongs to exactly one Btree.  No mmap.
+//! * Shared cache (sqlite3SharedCacheList) is a thread-local list of weak
+//!   references to the sharable BtShared objects; a Btree's busy handler
+//!   stands for C `p->db` (sqlite3BtreeEnter() makes it the BtShared's,
+//!   `pBt->db`).  Table locks (BtShared::pLock) refer to their Btree
+//!   weakly; the C `Btree::lock` member (the schema-table read lock) is an
+//!   ordinary entry of that list.  No mutexes (as SQLITE_THREADSAFE=0), no
+//!   unlock-notify.  No mmap.
 //! * The btree layer cannot reference the connection: the public functions
 //!   that need connection state take `db` and gather what C reads through
 //!   `p->db` into `BtDbState` / `BtAutovac` / `BtCheckCtx`; the internal
@@ -218,7 +223,7 @@ pub struct Btree {
     pub pBt: BtSharedP,
     /// TRANS_NONE, TRANS_READ or TRANS_WRITE
     pub inTrans: u8,
-    /// True if we can share pBt with another db (always 0)
+    /// True if we can share pBt with another db
     pub sharable: u8,
     /// True if db currently has pBt locked
     pub locked: u8,
@@ -232,6 +237,21 @@ pub struct Btree {
     pub iBDataVersion: u32,
     /// Calls to sqlite3BtreeMovetoUnpacked() (SQLITE_DEBUG)
     pub nSeek: u64,
+    /// Rust: the busy handler of the connection owning this Btree (what
+    /// the BtShared needs of C `p->db`).
+    pub busyHandler: Rc<RefCell<BusyHandler>>,
+}
+
+/// A shared-cache table lock (C `BtLock`): the Btree `pBtree` holds a lock
+/// of type eLock (READ_LOCK or WRITE_LOCK) on the table with root page
+/// iTable.
+pub struct BtLock {
+    /// Btree handle holding this lock
+    pub pBtree: Weak<RefCell<Btree>>,
+    /// Root page of table
+    pub iTable: Pgno,
+    /// READ_LOCK or WRITE_LOCK
+    pub eLock: u8,
 }
 
 /// An instance of this object represents a single database file.
@@ -282,6 +302,17 @@ pub struct BtShared {
     pub nPreformatSize: i32,
     /// Rust: copy of db->flags, refreshed by sqlite3BtreeBeginTrans()
     pub dbFlags: u64,
+    /// Number of references to this structure (Btrees sharing it)
+    pub nRef: i32,
+    /// Pointer to space allocated by sqlite3BtreeSchema()
+    pub pSchema: Option<SchemaP>,
+    /// List of locks held on this shared-btree struct (most recent first)
+    pub pLock: Vec<BtLock>,
+    /// Btree with currently open write transaction
+    pub pWriter: Option<Weak<RefCell<Btree>>>,
+    /// Rust: busy handler of the connection currently using this BtShared
+    /// (C pBt->db->busyHandler), shared with the pager's busy callback.
+    pub pBusy: Rc<RefCell<Rc<RefCell<BusyHandler>>>>,
 }
 
 /// An instance of the following structure is used to hold information
@@ -578,15 +609,235 @@ fn isSameCursor(c: &BtCursorP, cur: *const BtCursor) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Shared cache stubs, debug helpers
+// Shared cache, debug helpers
 // ---------------------------------------------------------------------------
+
+thread_local! {
+    /// A list of BtShared objects that are eligible for participation
+    /// in shared cache (C sqlite3SharedCacheList, most recent first).
+    ///
+    /// Rust: the C list is process-wide and protected by
+    /// SQLITE_MUTEX_STATIC_MAIN; connections of this port are not Send, so
+    /// the list is per thread.
+    static sqlite3SharedCacheList: RefCell<Vec<Weak<RefCell<BtShared>>>> =
+        const { RefCell::new(Vec::new()) };
+}
 
 /// C: `int sqlite3_enable_shared_cache(int enable)`
 ///
-/// This build omits the shared cache (SQLITE_OMIT_SHARED_CACHE): the
-/// function exists for API compatibility and has no effect.
+/// Enable or disable the shared pager and schema features.
+///
+/// This routine has no effect on existing database connections.
+/// The shared cache setting effects only future calls to
+/// sqlite3_open(), sqlite3_open16(), or sqlite3_open_v2().
 pub fn sqlite3_enable_shared_cache(enable: i32) -> i32 {
+    crate::global::sqlite3SetSharedCacheEnabled(enable);
     SQLITE_OK
+}
+
+/// C: `void sqlite3BtreeEnter(Btree *p)` (SQLITE_THREADSAFE=0 flavour)
+///
+/// Set BtShared.db to the database handle associated with p: here, make
+/// the busy handler of p's connection the one the BtShared (and its
+/// pager) invokes.
+pub fn sqlite3BtreeEnter(p: &BtreeP) {
+    let (pBt, bh) = {
+        let b = p.borrow();
+        (b.pBt.clone(), b.busyHandler.clone())
+    };
+    let slot = pBt.borrow().pBusy.clone();
+    let same = Rc::ptr_eq(&slot.borrow(), &bh);
+    if !same {
+        *slot.borrow_mut() = bh;
+    }
+}
+
+/// C: `void sqlite3BtreeEnterAll(sqlite3 *db)` (SQLITE_THREADSAFE=0
+/// flavour: db->noSharedCache is left alone)
+pub fn sqlite3BtreeEnterAll(db: &mut Sqlite3) {
+    for i in 0..db.aDb.len() {
+        if let Some(p) = &db.aDb[i].pBt {
+            sqlite3BtreeEnter(p);
+        }
+    }
+}
+
+/// C: `void sqlite3BtreeEnterCursor(BtCursor *pCur)`
+pub fn sqlite3BtreeEnterCursor(pCur: &BtCursorP) {
+    let p = pCur.borrow().pBtree.clone();
+    if let Some(p) = p {
+        sqlite3BtreeEnter(&p);
+    }
+}
+
+/// Query to see if Btree handle p may obtain a lock of type eLock
+/// (READ_LOCK or WRITE_LOCK) on the table with root-page iTab. Return
+/// SQLITE_OK if the lock may be obtained (by calling
+/// setSharedCacheTableLock()), or SQLITE_LOCKED if not.
+fn querySharedCacheTableLock(p: &BtreeP, iTab: Pgno, eLock: u8) -> i32 {
+    let (pBt, sharable) = {
+        let b = p.borrow();
+        (b.pBt.clone(), b.sharable)
+    };
+    debug_assert!(eLock == READ_LOCK as u8 || eLock == WRITE_LOCK as u8);
+
+    /* This routine is a no-op if the shared-cache is not enabled */
+    if sharable == 0 {
+        return SQLITE_OK;
+    }
+
+    let me = Rc::as_ptr(p);
+    let mut bt = pBt.borrow_mut();
+
+    /* If requesting a write-lock, then the Btree must have an open write
+     ** transaction on this file. And, obviously, for this to be so there
+     ** must be an open write transaction on the file itself.
+     */
+    debug_assert!(
+        eLock == READ_LOCK as u8 || bt.pWriter.as_ref().map_or(false, |w| w.as_ptr() == me)
+    );
+    debug_assert!(eLock == READ_LOCK as u8 || bt.inTransaction == TRANS_WRITE as u8);
+
+    /* If some other connection is holding an exclusive lock, the
+     ** requested lock may not be obtained.
+     */
+    let isWriter = bt.pWriter.as_ref().map_or(false, |w| w.as_ptr() == me);
+    if !isWriter && (bt.btsFlags as i32 & BTS_EXCLUSIVE) != 0 {
+        /* sqlite3ConnectionBlocked(p->db, pBt->pWriter->db): no unlock-notify */
+        return SQLITE_LOCKED_SHAREDCACHE;
+    }
+
+    for pIter in bt.pLock.iter() {
+        /* The condition (pIter->eLock!=eLock) in the following if(...)
+         ** statement is a simplification of:
+         **
+         **   (eLock==WRITE_LOCK || pIter->eLock==WRITE_LOCK)
+         **
+         ** since we know that if eLock==WRITE_LOCK, then no other connection
+         ** may hold a WRITE_LOCK on any table in this file (since there can
+         ** only be a single writer).
+         */
+        debug_assert!(pIter.eLock == READ_LOCK as u8 || pIter.eLock == WRITE_LOCK as u8);
+        if pIter.pBtree.as_ptr() != me && pIter.iTable == iTab && pIter.eLock != eLock {
+            /* sqlite3ConnectionBlocked(p->db, pIter->pBtree->db) */
+            if eLock == WRITE_LOCK as u8 {
+                debug_assert!(isWriter);
+                bt.btsFlags |= BTS_PENDING as u16;
+            }
+            return SQLITE_LOCKED_SHAREDCACHE;
+        }
+    }
+    SQLITE_OK
+}
+
+/// Add a lock on the table with root-page iTable to the shared-btree used
+/// by Btree handle p. Parameter eLock must be either READ_LOCK or
+/// WRITE_LOCK.
+///
+/// This function assumes the following:
+///
+///   (a) The specified Btree object p is connected to a sharable
+///       database (one with the BtShared.sharable flag set), and
+///
+///   (b) No other Btree objects hold a lock that conflicts
+///       with the requested lock (i.e. querySharedCacheTableLock() has
+///       already been called and returned SQLITE_OK).
+///
+/// SQLITE_OK is returned if the lock is added successfully. SQLITE_NOMEM
+/// is returned if a malloc attempt fails.
+fn setSharedCacheTableLock(p: &BtreeP, iTable: Pgno, eLock: u8) -> i32 {
+    let pBt = p.borrow().pBt.clone();
+    debug_assert!(eLock == READ_LOCK as u8 || eLock == WRITE_LOCK as u8);
+
+    /* This function should only be called on a sharable b-tree after it
+     ** has been determined that no other b-tree holds a conflicting lock.  */
+    debug_assert!(p.borrow().sharable != 0);
+
+    let me = Rc::as_ptr(p);
+    let mut bt = pBt.borrow_mut();
+
+    /* First search the list for an existing lock on this table. */
+    let idx = bt
+        .pLock
+        .iter()
+        .position(|l| l.iTable == iTable && l.pBtree.as_ptr() == me);
+
+    /* If the above search did not find a BtLock struct associating Btree p
+     ** with table iTable, allocate one and link it into the list.
+     */
+    let idx = match idx {
+        Some(i) => i,
+        None => {
+            bt.pLock.insert(
+                0,
+                BtLock {
+                    pBtree: Rc::downgrade(p),
+                    iTable,
+                    eLock: 0,
+                },
+            );
+            0
+        }
+    };
+
+    /* Set the BtLock.eLock variable to the maximum of the current lock
+     ** and the requested lock. This means if a write-lock was already held
+     ** and a read-lock requested, we don't incorrectly downgrade the lock.
+     */
+    let pLock = &mut bt.pLock[idx];
+    if eLock > pLock.eLock {
+        pLock.eLock = eLock;
+    }
+
+    SQLITE_OK
+}
+
+/// Release all the table locks (locks obtained via calls to
+/// the setSharedCacheTableLock() procedure) held by Btree object p.
+///
+/// This function assumes that Btree p has an open read or write
+/// transaction. If it does not, then the BTS_PENDING flag
+/// may be incorrectly cleared.
+fn clearAllSharedCacheTableLocks(p: &BtreeP) {
+    let pBt = p.borrow().pBt.clone();
+    debug_assert!(p.borrow().inTrans > 0);
+    let me = Rc::as_ptr(p);
+    let mut bt = pBt.borrow_mut();
+    debug_assert!(p.borrow().sharable != 0 || bt.pLock.is_empty());
+
+    bt.pLock.retain(|l| l.pBtree.as_ptr() != me);
+
+    debug_assert!((bt.btsFlags as i32 & BTS_PENDING) == 0 || bt.pWriter.is_some());
+    if bt.pWriter.as_ref().map_or(false, |w| w.as_ptr() == me) {
+        bt.pWriter = None;
+        bt.btsFlags &= !((BTS_EXCLUSIVE | BTS_PENDING) as u16);
+    } else if bt.nTransaction == 2 {
+        /* This function is called when Btree p is concluding its
+         ** transaction. If there currently exists a writer, and p is not
+         ** that writer, then the number of locks held by connections other
+         ** than the writer must be about to drop to zero. In this case
+         ** set the BTS_PENDING flag to 0.
+         **
+         ** If there is not currently a writer, then BTS_PENDING must
+         ** be zero already. So this next line is harmless in that case.
+         */
+        bt.btsFlags &= !(BTS_PENDING as u16);
+    }
+}
+
+/// This function changes all write-locks held by Btree p into read-locks.
+fn downgradeAllSharedCacheTableLocks(p: &BtreeP) {
+    let pBt = p.borrow().pBt.clone();
+    let me = Rc::as_ptr(p);
+    let mut bt = pBt.borrow_mut();
+    if bt.pWriter.as_ref().map_or(false, |w| w.as_ptr() == me) {
+        bt.pWriter = None;
+        bt.btsFlags &= !((BTS_EXCLUSIVE | BTS_PENDING) as u16);
+        for pLock in bt.pLock.iter_mut() {
+            debug_assert!(pLock.eLock == READ_LOCK as u8 || pLock.pBtree.as_ptr() == me);
+            pLock.eLock = READ_LOCK as u8;
+        }
+    }
 }
 
 /// C: `sqlite3_uint64 sqlite3BtreeSeekCount(Btree *pBt)` (SQLITE_DEBUG)
@@ -2410,12 +2661,33 @@ pub fn sqlite3BtreeOpen(
     vfsFlags: i32,
 ) -> i32 {
     let st = BtDbState::new(db);
-    btreeOpen(&st, pVfs, zFilename, ppBtree, flags, vfsFlags)
+    /* The BtShared objects already open in db (for the "database is
+     ** already attached" check of a shared cache). */
+    let aExisting: Vec<BtSharedP> = db
+        .aDb
+        .iter()
+        .filter_map(|d| d.pBt.as_ref().map(|b| b.borrow().pBt.clone()))
+        .collect();
+    btreeOpenShared(&st, &aExisting, pVfs, zFilename, ppBtree, flags, vfsFlags)
 }
 
-/// sqlite3BtreeOpen() body.
+/// sqlite3BtreeOpen() body, for a connection that has no other btree open.
 pub fn btreeOpen(
     db: &BtDbState,
+    pVfs: &Rc<crate::os::Vfs>,
+    zFilename: Option<&[u8]>,
+    ppBtree: &mut Option<BtreeP>,
+    flags: i32,
+    vfsFlags: i32,
+) -> i32 {
+    btreeOpenShared(db, &[], pVfs, zFilename, ppBtree, flags, vfsFlags)
+}
+
+/// sqlite3BtreeOpen() body.  aExisting: the BtShared objects of the
+/// btrees the connection has open (C db->aDb[iDb].pBt->pBt).
+fn btreeOpenShared(
+    db: &BtDbState,
+    aExisting: &[BtSharedP],
     pVfs: &Rc<crate::os::Vfs>,
     zFilename: Option<&[u8]>,
     ppBtree: &mut Option<BtreeP>,
@@ -2454,6 +2726,79 @@ pub fn btreeOpen(
     }
     if (vfsFlags & SQLITE_OPEN_MAIN_DB) != 0 && (isMemdb || isTempDb) {
         vfsFlags = (vfsFlags & !SQLITE_OPEN_MAIN_DB) | SQLITE_OPEN_TEMP_DB;
+    }
+    let mut sharable: u8 = 0;
+
+    /*
+     ** If this Btree is a candidate for shared cache, try to find an
+     ** existing BtShared object that we can share with
+     */
+    let mut pShared: Option<BtSharedP> = None;
+    if !isTempDb && (!isMemdb || (vfsFlags & SQLITE_OPEN_URI) != 0) {
+        if (vfsFlags & SQLITE_OPEN_SHAREDCACHE) != 0 {
+            let zName = zFilename.map(crate::os::zpath_name).unwrap_or(b"");
+            sharable = 1;
+            let zFullPathname: ZStr = if isMemdb {
+                zName.to_vec()
+            } else {
+                let mut z = ZStr::new();
+                let rc = crate::os::sqlite3OsFullPathname(pVfs, zName, pVfs.mxPathname + 1, &mut z);
+                if rc != 0 && rc != SQLITE_OK_SYMLINK {
+                    *ppBtree = None;
+                    return rc;
+                }
+                z
+            };
+            let list: Vec<BtSharedP> = sqlite3SharedCacheList.with(|l| {
+                let mut l = l.borrow_mut();
+                l.retain(|w| w.strong_count() > 0);
+                l.iter().filter_map(|w| w.upgrade()).collect()
+            });
+            for pBt in list {
+                debug_assert!(pBt.borrow().nRef > 0);
+                let pager = pagerOf(&pBt);
+                let (zName2, sameVfs) = {
+                    let mut pg = pager.borrow_mut();
+                    (
+                        sqlite3PagerFilename(&pg, 0).unwrap_or_default(),
+                        Rc::ptr_eq(&sqlite3PagerVfs(&mut pg), pVfs),
+                    )
+                };
+                if zFullPathname == zName2 && sameVfs {
+                    for pExisting in aExisting.iter().rev() {
+                        if Rc::ptr_eq(pExisting, &pBt) {
+                            *ppBtree = None;
+                            return SQLITE_CONSTRAINT;
+                        }
+                    }
+                    pBt.borrow_mut().nRef += 1;
+                    pShared = Some(pBt);
+                    break;
+                }
+            }
+        }
+    }
+    if let Some(pBt) = pShared {
+        let p: BtreeP = Rc::new(RefCell::new(Btree {
+            pBt: pBt.clone(),
+            inTrans: TRANS_NONE as u8,
+            sharable,
+            locked: 0,
+            hasIncrblobCur: 0,
+            wantToLock: 0,
+            nBackup: 0,
+            iBDataVersion: 0,
+            nSeek: 0,
+            busyHandler: db.busyHandler.clone(),
+        }));
+        /* Rust: the sibling list of sharable Btrees of a connection
+         ** (Btree.pNext/pPrev) only orders mutex acquisition; omitted. */
+        if sqlite3BtreeSchema(&p, None).is_none() {
+            let pager = pagerOf(&pBt);
+            sqlite3PagerSetCachesize(&mut pager.borrow_mut(), SQLITE_DEFAULT_CACHE_SIZE);
+        }
+        *ppBtree = Some(p);
+        return SQLITE_OK;
     }
 
     let mut pPager: Option<PagerP> = None;
@@ -2507,11 +2852,21 @@ pub fn btreeOpen(
         pTmpSpace: Vec::new(),
         nPreformatSize: 0,
         dbFlags: db.flags,
+        nRef: 0,
+        pSchema: None,
+        pLock: Vec::new(),
+        pWriter: None,
+        pBusy: Rc::new(RefCell::new(db.busyHandler.clone())),
     }));
     {
-        let bh = db.busyHandler.clone();
-        let x: Rc<dyn Fn() -> i32> =
-            Rc::new(move || crate::mainapi::sqlite3InvokeBusyHandler(&mut bh.borrow_mut()));
+        /* sqlite3PagerSetBusyHandler(pBt->pPager, btreeInvokeBusyHandler, pBt):
+         ** the handler of pBt->db, the connection currently using pBt. */
+        let slot = pBt.borrow().pBusy.clone();
+        let x: Rc<dyn Fn() -> i32> = Rc::new(move || {
+            let bh = slot.borrow().clone();
+            let r = crate::mainapi::sqlite3InvokeBusyHandler(&mut bh.borrow_mut());
+            r
+        });
         sqlite3PagerSetBusyHandler(&mut pager.borrow_mut(), Some(x));
     }
     let nReserve: u8;
@@ -2571,25 +2926,33 @@ pub fn btreeOpen(
         bt.pageSize = pageSize;
         bt.usableSize = pageSize - nReserve as u32;
         debug_assert!((bt.pageSize & 7) == 0); /* 8-byte alignment of pageSize */
+
+        /* Add the new BtShared object to the linked list sharable BtShareds.
+         */
+        bt.nRef = 1;
+    }
+    if sharable != 0 {
+        sqlite3SharedCacheList.with(|l| l.borrow_mut().insert(0, Rc::downgrade(&pBt)));
     }
 
     let p: BtreeP = Rc::new(RefCell::new(Btree {
         pBt: pBt.clone(),
         inTrans: TRANS_NONE as u8,
-        sharable: 0,
+        sharable,
         locked: 0,
         hasIncrblobCur: 0,
         wantToLock: 0,
         nBackup: 0,
         iBDataVersion: 0,
         nSeek: 0,
+        busyHandler: db.busyHandler.clone(),
     }));
 
     /* If the B-Tree was successfully opened, set the pager-cache size to the
      ** default value. Except, when opening on an existing shared pager-cache,
      ** do not change the pager-cache size.
      */
-    if sqlite3BtreeSchema(&p, 0, ()).is_none() {
+    if sqlite3BtreeSchema(&p, None).is_none() {
         sqlite3PagerSetCachesize(&mut pager.borrow_mut(), SQLITE_DEFAULT_CACHE_SIZE);
     }
     /* C: sqlite3OsFileControlHint(pFile, SQLITE_FCNTL_PDB, &pBt->db) only
@@ -2638,17 +3001,50 @@ pub fn btreeClose(db: Option<&mut Sqlite3>, p: &BtreeP, nVdbeRead: i32) -> i32 {
      ** The call to sqlite3BtreeRollback() drops any table-locks held by
      ** this handle.
      */
+    sqlite3BtreeEnter(p);
     btreeRollback(p, SQLITE_OK, 0, nVdbeRead);
 
-    /* Clean out and delete the BtShared object. */
-    debug_assert!(cursorList(&pBt).is_empty());
-    let pager = pagerOf(&pBt);
-    sqlite3PagerClose(db, &mut pager.borrow_mut());
-    let mut bt = pBt.borrow_mut();
-    freeTempSpace(&mut bt);
-    bt.pCursor.clear();
-    bt.pPage1 = None;
+    /* If there are still other outstanding references to the shared-btree
+     ** structure, return now. The remainder of this procedure cleans
+     ** up the shared-btree.
+     */
+    if p.borrow().sharable == 0 || removeFromSharingList(&pBt) {
+        /* The pBt is no longer on the sharing list, so we can access
+         ** it without having to hold the mutex.
+         **
+         ** Clean out and delete the BtShared object.
+         */
+        debug_assert!(cursorList(&pBt).is_empty());
+        let pager = pagerOf(&pBt);
+        sqlite3PagerClose(db, &mut pager.borrow_mut());
+        /* pBt->xFreeSchema(pBt->pSchema): the schema is dropped with its
+         ** last reference (the callers run sqlite3SchemaClear() first when
+         ** sqlite3BtreeConnectionCount() is 1). */
+        let mut bt = pBt.borrow_mut();
+        bt.pSchema = None;
+        freeTempSpace(&mut bt);
+        bt.pCursor.clear();
+        bt.pPage1 = None;
+    }
     SQLITE_OK
+}
+
+/// Decrement the BtShared.nRef counter.  When it reaches zero,
+/// remove the BtShared structure from the sharing list.  Return
+/// true if the BtShared.nRef counter reaches zero and return
+/// false if it is still positive.
+fn removeFromSharingList(pBt: &BtSharedP) -> bool {
+    let mut bt = pBt.borrow_mut();
+    bt.nRef -= 1;
+    if bt.nRef <= 0 {
+        let me = Rc::as_ptr(pBt);
+        sqlite3SharedCacheList.with(|l| {
+            l.borrow_mut()
+                .retain(|w| w.strong_count() > 0 && w.as_ptr() != me)
+        });
+        return true;
+    }
+    false
 }
 
 /// C: `int sqlite3BtreeSetCacheSize(Btree *p, int mxPage)`
@@ -3189,6 +3585,7 @@ fn btreeBeginTrans(db: &BtDbState, p: &BtreeP, wrflag: i32, pSchemaVersion: &mut
     let pPager = pagerOf(&pBt);
     let mut rc = SQLITE_OK;
 
+    sqlite3BtreeEnter(p);
     'trans_begun: {
         /* If the btree is already in a write-transaction, or it
          ** is already in a read-transaction and a read-transaction
@@ -3208,6 +3605,37 @@ fn btreeBeginTrans(db: &BtDbState, p: &BtreeP, wrflag: i32, pSchemaVersion: &mut
         /* Write transactions are not possible on a read-only database */
         if (pBt.borrow().btsFlags as i32 & BTS_READ_ONLY) != 0 && wrflag != 0 {
             rc = SQLITE_READONLY;
+            break 'trans_begun;
+        }
+
+        {
+            /* If another database handle has already opened a write transaction
+             ** on this shared-btree structure and a second write transaction is
+             ** requested, return SQLITE_LOCKED.
+             */
+            let bt = pBt.borrow();
+            let me = Rc::as_ptr(p);
+            let pBlock = if (wrflag != 0 && bt.inTransaction == TRANS_WRITE as u8)
+                || (bt.btsFlags as i32 & BTS_PENDING) != 0
+            {
+                true
+            } else if wrflag > 1 {
+                bt.pLock.iter().any(|l| l.pBtree.as_ptr() != me)
+            } else {
+                false
+            };
+            if pBlock {
+                /* sqlite3ConnectionBlocked(p->db, pBlock): no unlock-notify */
+                rc = SQLITE_LOCKED_SHAREDCACHE;
+                break 'trans_begun;
+            }
+        }
+
+        /* Any read-only or read-write transaction implies a read-lock on
+         ** page 1. So if some other shared-cache client already has a write-lock
+         ** on page 1, the transaction cannot be opened. */
+        rc = querySharedCacheTableLock(p, SCHEMA_ROOT as Pgno, READ_LOCK as u8);
+        if SQLITE_OK != rc {
             break 'trans_begun;
         }
 
@@ -3271,12 +3699,31 @@ fn btreeBeginTrans(db: &BtDbState, p: &BtreeP, wrflag: i32, pSchemaVersion: &mut
             let mut bt = pBt.borrow_mut();
             if pb.inTrans == TRANS_NONE as u8 {
                 bt.nTransaction += 1;
+                if pb.sharable != 0 {
+                    /* p->lock: the read lock on the schema table */
+                    bt.pLock.insert(
+                        0,
+                        BtLock {
+                            pBtree: Rc::downgrade(p),
+                            iTable: 1,
+                            eLock: READ_LOCK as u8,
+                        },
+                    );
+                }
             }
             pb.inTrans = if wrflag != 0 { TRANS_WRITE } else { TRANS_READ } as u8;
             if pb.inTrans > bt.inTransaction {
                 bt.inTransaction = pb.inTrans;
             }
             drop(pb);
+            if wrflag != 0 {
+                debug_assert!(bt.pWriter.is_none());
+                bt.pWriter = Some(Rc::downgrade(p));
+                bt.btsFlags &= !(BTS_EXCLUSIVE as u16);
+                if wrflag > 1 {
+                    bt.btsFlags |= BTS_EXCLUSIVE as u16;
+                }
+            }
             drop(bt);
             if wrflag != 0 {
                 let pPage1 = page1Of(&pBt);
@@ -3905,6 +4352,7 @@ fn btreeEndTransaction(p: &BtreeP, nVdbeRead: i32) {
         /* If there are other active statements that belong to this database
          ** handle, downgrade to a read-only transaction. The other statements
          ** may still be reading from the database.  */
+        downgradeAllSharedCacheTableLocks(p);
         p.borrow_mut().inTrans = TRANS_READ as u8;
     } else {
         /* If the handle had any kind of transaction open, decrement the
@@ -3912,6 +4360,7 @@ fn btreeEndTransaction(p: &BtreeP, nVdbeRead: i32) {
          ** reaches 0, set the shared state to TRANS_NONE. The unlockBtreeIfUnused()
          ** call below will unlock the pager.  */
         if inTrans != TRANS_NONE as u8 {
+            clearAllSharedCacheTableLocks(p);
             let mut bt = pBt.borrow_mut();
             bt.nTransaction -= 1;
             if 0 == bt.nTransaction {
@@ -4318,6 +4767,10 @@ pub fn sqlite3BtreeCursor(
     pKeyInfo: Option<KeyInfoRef>,
     ppCur: &mut Option<BtCursorP>,
 ) -> i32 {
+    if p.borrow().sharable != 0 {
+        /* btreeCursorWithLock() */
+        sqlite3BtreeEnter(p);
+    }
     btreeCursor(p, iTable, wrFlag, pKeyInfo, ppCur)
 }
 
@@ -11382,35 +11835,62 @@ pub fn sqlite3BtreeIsInBackup(db: &mut Sqlite3, p: &BtreeP) -> i32 {
 /// purposes (for example, to store a high-level schema associated with
 /// the shared-btree). The btree layer manages reference counting issues.
 ///
-/// Rust: without shared cache the Schema object is owned by the Db entry
-/// of the connection (Db::pSchema), so no blob is ever attached to the
-/// BtShared and this always returns None.
-pub fn sqlite3BtreeSchema(
-    p: &BtreeP,
-    nBytes: i32,
-    xFree: /*fnptr: void(*xFree)(void *)*/ (),
-) -> Option<Vec<u8>> {
-    None
+/// The first time this is called on a shared-btree, nBytes bytes of memory
+/// are allocated, zeroed, and returned to the caller. For each subsequent
+/// call the nBytes parameter is ignored and a pointer to the same blob
+/// of memory returned.
+///
+/// If the nBytes parameter is 0 and the blob of memory has not yet been
+/// allocated, a null pointer is returned. If the blob has already been
+/// allocated, it is returned as normal.
+///
+/// Rust: the blob is the Schema object.  `xNew` (C nBytes!=0) creates it
+/// when there is none yet; None is C nBytes==0.  xFree (sqlite3SchemaClear)
+/// is not kept: the callers clear the schema before closing the last
+/// Btree of the BtShared, and the object is freed with its last reference.
+pub fn sqlite3BtreeSchema(p: &BtreeP, xNew: Option<&dyn Fn() -> Schema>) -> Option<SchemaP> {
+    let pBt = p.borrow().pBt.clone();
+    sqlite3BtreeEnter(p);
+    let mut bt = pBt.borrow_mut();
+    if bt.pSchema.is_none() {
+        if let Some(f) = xNew {
+            bt.pSchema = Some(Rc::new(RefCell::new(f())));
+        }
+    }
+    bt.pSchema.clone()
 }
 
 /// C: `int sqlite3BtreeSchemaLocked(Btree *p)`
 ///
 /// Return SQLITE_LOCKED_SHAREDCACHE if another user of the same shared
 /// btree as the argument handle holds an exclusive lock on the
-/// sqlite_schema table. Otherwise SQLITE_OK.  Always SQLITE_OK without
-/// shared cache.
+/// sqlite_schema table. Otherwise SQLITE_OK.
 pub fn sqlite3BtreeSchemaLocked(db: &mut Sqlite3, p: &BtreeP) -> i32 {
-    SQLITE_OK
+    sqlite3BtreeEnter(p);
+    let rc = querySharedCacheTableLock(p, SCHEMA_ROOT as Pgno, READ_LOCK as u8);
+    debug_assert!(rc == SQLITE_OK || rc == SQLITE_LOCKED_SHAREDCACHE);
+    rc
 }
 
 /// C: `int sqlite3BtreeLockTable(Btree *p, int iTab, u8 isWriteLock)`
 ///
 /// Obtain a lock on the table whose root page is iTab.  The
 /// lock is a write lock if isWritelock is true or a read lock
-/// if it is false.  Without shared cache this is a no-op.
+/// if it is false.
 pub fn sqlite3BtreeLockTable(p: &BtreeP, iTab: i32, isWriteLock: u8) -> i32 {
+    let mut rc = SQLITE_OK;
     debug_assert!(p.borrow().inTrans != TRANS_NONE as u8);
-    SQLITE_OK
+    if p.borrow().sharable != 0 {
+        let lockType = READ_LOCK as u8 + isWriteLock;
+        debug_assert!(isWriteLock == 0 || isWriteLock == 1);
+
+        sqlite3BtreeEnter(p);
+        rc = querySharedCacheTableLock(p, iTab as Pgno, lockType);
+        if rc == SQLITE_OK {
+            rc = setSharedCacheTableLock(p, iTab as Pgno, lockType);
+        }
+    }
+    rc
 }
 
 /// C: `int sqlite3BtreePutData(BtCursor *pCsr, u32 offset, u32 amt, void *z)`
@@ -11575,18 +12055,17 @@ pub fn sqlite3BtreeClearCache(p: &BtreeP) {
 /// C: `int sqlite3BtreeSharable(Btree *p)`
 ///
 /// Return true if the Btree passed as the only argument is sharable.
-/// (Always false: no shared cache.)
 pub fn sqlite3BtreeSharable(p: &BtreeP) -> i32 {
-    0
+    p.borrow().sharable as i32
 }
 
 /// C: `int sqlite3BtreeConnectionCount(Btree *p)`
 ///
 /// Return the number of connections to the BtShared object accessed by
-/// the Btree handle passed as the only argument. (Always 1: no shared
-/// cache.)
+/// the Btree handle passed as the only argument. For private caches
+/// this is always 1. For shared caches it may be 1 or greater.
 pub fn sqlite3BtreeConnectionCount(p: &BtreeP) -> i32 {
-    1
+    p.borrow().pBt.borrow().nRef
 }
 
 // ---------------------------------------------------------------------------

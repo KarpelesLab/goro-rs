@@ -1,0 +1,49 @@
+2: t|2
+1: c
+2: 1|a
+2: 2|b
+2: 3|c
+2: 4|d
+1: c
+2: Error: 1 1 no such table: t
+2: 1|a
+2: 2|b
+2: 3|c
+2: 4|d
+1: c
+1: c
+1: e
+2: Error: 1 1 no such table: x
+1: Error: 1 1 no such table: x
+1: sqlite_sequence
+1: t2
+1: Error: 19 787 FOREIGN KEY constraint failed
+2: 1
+2: 1
+2: 5
+1: 5
+1: 0|id|INTEGER|0||1
+1: 1|v||0||0
+2: main|vv|view|1|0|0
+2: main|sqlite_schema|table|5|0|0
+2: main|t2|table|2|0|0
+2: main|c|table|1|0|0
+2: main|sqlite_sequence|table|2|0|0
+2: main|p|table|1|1|0
+2: temp|sqlite_temp_schema|table|5|0|0
+1: Error: 1 1 no such table: vv
+1: memory
+2: off
+1: off
+2: 4096
+1: 1|a
+2: 1|a
+1: Error: 6 262 database table is locked: t2
+1: 2|b
+2: 2|b
+1: 6
+1: close 0
+2: 6
+2: Error: 1 1 no such table: log
+2: 6
+2: close 0
