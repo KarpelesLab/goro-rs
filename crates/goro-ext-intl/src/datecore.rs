@@ -883,3 +883,33 @@ pub fn zval_to_millis(vm: &mut Vm, v: &Value, func: &str, err: Option<&mut IntlE
         }
     }
 }
+
+/// "Call to private Class::__construct() from ..." when `new` runs the
+/// private constructor of `class` outside of its scope.
+pub fn private_ctor_error(vm: &Vm, class: &str) -> Option<String> {
+    let scope = vm.current_class_scope();
+    let lower = class.to_ascii_lowercase();
+    let in_scope = scope.as_ref().is_some_and(|s| {
+        let s = s.to_ascii_lowercase();
+        s == lower.as_bytes() || vm.class_extends(&s, lower.as_bytes())
+    });
+    if in_scope {
+        return None;
+    }
+    let from = match scope {
+        Some(s) if !s.is_empty() => {
+            let l = s.to_ascii_lowercase();
+            let name = vm
+                .classes
+                .get(&l)
+                .map(|c| String::from_utf8_lossy(&c.name).into_owned())
+                .unwrap_or_else(|| String::from_utf8_lossy(&s).into_owned());
+            format!("scope {}", name)
+        }
+        _ => "global scope".to_string(),
+    };
+    Some(format!(
+        "Call to private {}::__construct() from {}",
+        class, from
+    ))
+}

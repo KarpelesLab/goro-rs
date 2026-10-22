@@ -140,6 +140,11 @@ fn clone_obj(vm: &mut Vm, src: &Obj, dst: &Obj) {
 
 /// IntlTimeZone::__construct()
 fn construct(vm: &mut Vm, _c: &mut Call) -> Value {
+    // the constructor is private
+    if let Some(m) = crate::datecore::private_ctor_error(vm, "IntlTimeZone") {
+        crate::zpp::throw(vm, b"Error", &m);
+        return Value::Null;
+    }
     crate::zpp::throw(
         vm,
         b"Exception",
@@ -534,6 +539,7 @@ fn to_date_time_zone(vm: &mut Vm, c: &mut Call) -> Value {
 }
 
 fn get_error_code(_vm: &mut Vm, c: &mut Call) -> Value {
+    error::reset_global();
     let Some(st) = c.this.as_ref().and_then(state) else {
         return Value::False;
     };
@@ -541,6 +547,7 @@ fn get_error_code(_vm: &mut Vm, c: &mut Call) -> Value {
 }
 
 fn get_error_message(_vm: &mut Vm, c: &mut Call) -> Value {
+    error::reset_global();
     let Some(st) = c.this.as_ref().and_then(state) else {
         return Value::False;
     };
