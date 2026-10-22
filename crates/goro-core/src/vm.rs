@@ -824,6 +824,10 @@ pub struct Vm {
     /// Set to true when emit_fatal_at has already written the "Fatal error: ..."
     /// line to vm.output, so the top-level error handler does not re-emit it.
     pub fatal_emitted: bool,
+    /// !USED_RET(): the (lowercase) name of the function DO_FCALL is calling
+    /// when the call is an expression statement whose result is discarded.
+    /// An internal function that cares takes it on entry.
+    pub call_result_unused: Option<Vec<u8>>,
     /// Stack of property names whose hooks are currently executing (recursion guard)
     pub(crate) property_hook_stack: Vec<Vec<u8>>,
     /// CVs returned from the most recent include/eval execution (for scope sharing)
@@ -1142,6 +1146,7 @@ impl Vm {
             exit_code: 0,
             last_error: None,
             fatal_emitted: false,
+            call_result_unused: None,
             property_hook_stack: Vec::new(),
             include_return_cvs: None,
             included_files: std::collections::HashSet::new(),
@@ -4256,12 +4261,13 @@ impl Vm {
     fn check_unsupported_operand_types(a: &Value, b: &Value, op_symbol: &str) -> Option<String> {
         let a_deref = a.deref();
         let b_deref = b.deref();
-        let a_is_array = matches!(a_deref, Value::Array(_));
-        let b_is_array = matches!(b_deref, Value::Array(_));
+        // zendi_try_convert_scalar_to_number() fails for arrays and resources.
+        let a_is_array = matches!(a_deref, Value::Array(_) | Value::Resource(_));
+        let b_is_array = matches!(b_deref, Value::Array(_) | Value::Resource(_));
 
         if op_symbol == "+" {
             // array + array is valid (union), but array + non-array or non-array + array is not
-            if a_is_array && b_is_array {
+            if matches!(a_deref, Value::Array(_)) && matches!(b_deref, Value::Array(_)) {
                 return None;
             }
             if a_is_array || b_is_array {
@@ -22352,6 +22358,11 @@ impl Vm {
                     } else if matches!(op.op1, OperandType::Const(_)) {
                         self.internal_nodiscard_check(&func_name_lower, op.line);
                     }
+                    self.call_result_unused = if matches!(op.op1, OperandType::Const(_)) {
+                        Some(func_name_lower.clone())
+                    } else {
+                        None
+                    };
 
                     // Generic zpp for static methods of internal classes
                     // (verified stub arginfo).
@@ -40585,6 +40596,31 @@ impl Vm {
                                 ip = *catch_target as usize;
                                 return Ok(Flow::Continue);
                             }
+                            return Err(VmError {
+                                message: msg,
+                                line: op.line,
+                            });
+                        }
+                    }
+                    // get_property_ptr_ptr of extension objects (e.g.
+                    // __PHP_Incomplete_Class) may refuse the binding.
+                    if let Value::Object(o) = &obj_val {
+                        if !self.native_prop_write_allowed(o, prop_name.as_bytes(), 0) {
+                            if let Some((catch_target, _, _, _, saved_pc)) =
+                                exception_handlers.pop()
+                            {
+                                pending_calls_catch_depth = Some(saved_pc);
+                                ip = catch_target as usize;
+                                continue;
+                            }
+                            let msg = match &self.current_exception {
+                                Some(Value::Object(o)) => o
+                                    .borrow()
+                                    .get_property(b"message")
+                                    .to_php_string()
+                                    .to_string_lossy(),
+                                _ => "Uncaught exception".to_string(),
+                            };
                             return Err(VmError {
                                 message: msg,
                                 line: op.line,

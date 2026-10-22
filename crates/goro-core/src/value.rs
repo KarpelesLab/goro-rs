@@ -1834,7 +1834,8 @@ fn format_php_float_with_precision(f: f64, sig_digits: usize) -> String {
 
     // PHP uses G format with `sig_digits` significant digits
     // This is equivalent to: sprintf("%.{sig_digits}G", f) but with some PHP-specific quirks
-    let sig_digits = sig_digits.clamp(1, 500);
+    // A double has at most 767 significant decimal digits.
+    let sig_digits = sig_digits.clamp(1, 800);
     // Rust's {:.Ne} gives N decimal places after leading digit = N+1 significant digits.
     // We want sig_digits significant digits total, so use sig_digits - 1.
     let fmt_width = if sig_digits > 0 { sig_digits - 1 } else { 0 };

@@ -318,6 +318,11 @@ impl Compiler {
                     // ext/zend_test: zend_terminate_string(&$str),
                     // zend_test_fill_packed_array(&$array)
                     (b"zend_terminate_string", 0) | (b"zend_test_fill_packed_array", 0) => true,
+                    // flock($stream, $operation, &$would_block)
+                    (b"flock", 2) => true,
+                    // array_walk(&$array, ...): the walk reloads the variable
+                    // after each callback, so it needs the variable itself.
+                    (b"array_walk", 0) | (b"array_walk_recursive", 0) => true,
                     // getopt($short, $long, &$rest_index)
                     (b"getopt", 2) => true,
                     // parse_str($string, &$result)
@@ -1886,7 +1891,9 @@ impl Compiler {
     /// Used to determine if a by-ref argument should emit "Only variables should be passed by reference"
     fn is_writable_lvalue(expr: &Expr) -> bool {
         match &expr.kind {
-            ExprKind::Variable(_) | ExprKind::DynamicVariable(_) => true,
+            // $GLOBALS is a read-only copy of the symbol table (PHP 8.1+).
+            ExprKind::Variable(name) => name.as_slice() != b"GLOBALS",
+            ExprKind::DynamicVariable(_) => true,
             ExprKind::PropertyAccess { nullsafe, .. } => !nullsafe,
             ExprKind::StaticPropertyAccess { .. } => true,
             ExprKind::ArrayAccess { .. } => true,

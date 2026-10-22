@@ -357,7 +357,7 @@ impl Vm {
                             b"$".to_vec()
                         };
                         d.extend_from_slice(a.name.as_bytes());
-                        (d, i >= fi.required as usize)
+                        (d, a.variadic || i >= fi.required as usize)
                     })
                     .collect();
             } else if let Some(names) = self.builtin_param_names.get(&tl) {
