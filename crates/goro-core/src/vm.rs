@@ -50500,6 +50500,13 @@ impl Vm {
                 },
 
                 OpCode::NewObject => match outlined(|| -> Result<Flow, VmError> {
+                    if let OperandType::Const(i) = op.op1 {
+                        if let Some(Value::String(n)) = op_array.literals.get(i as usize) {
+                            if n.as_bytes().contains(&0) {
+                                crate::class_table::bind_anon_class(n.as_bytes());
+                            }
+                        }
+                    }
                     // A user class (see new_object_fast)
                     match self.new_object_fast(op, &op_array.literals, &tmps) {
                         fastcall::NewFast::No => {}
@@ -53837,9 +53844,9 @@ impl Vm {
                                                         .contains_key(&class_lower)
                                                     && !crate::spl::SPL_CLASSES
                                                         .contains(&class_lower.as_slice())
-                                                    // Reflection objects take no dynamic
-                                                    // properties either.
-                                                    && !class_lower.starts_with(b"reflection"));
+                                                    // (internal classes deprecate too:
+                                                    // only stdClass allows them)
+                                                    && !self.is_known_builtin_class(&class_lower));
                                         let allows_dynamic = self
                                             .classes
                                             .get(&class_lower)

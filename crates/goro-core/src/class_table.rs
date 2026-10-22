@@ -112,6 +112,7 @@ impl Vm {
     /// Names of the declared classes of the given kinds, in class-table order
     /// (internal classes first): get_declared_classes() and friends.
     pub fn declared_class_names(&self, want: &[ClassKind]) -> Vec<Vec<u8>> {
+        let bound = ANON_BOUND.with(|b| b.borrow().clone());
         let mut out = Vec::new();
         for c in crate::stub_sigs::CLASSES {
             if want.contains(&ClassKind::of_stub(c)) && self.stub_ext_enabled(c.ext) {
@@ -125,6 +126,10 @@ impl Vm {
             if !want.contains(&ClassKind::of_entry(ce)) {
                 continue;
             }
+            // An anonymous class is declared when its `new` first runs.
+            if ce.name.contains(&0) && !bound.contains(&ce.name) {
+                continue;
+            }
             // Aliases are listed under their (lowercased) alias name.
             if !ce.name.eq_ignore_ascii_case(key) && !ce.name.contains(&0) {
                 out.push(key.clone());
@@ -134,4 +139,21 @@ impl Vm {
         }
         out
     }
+}
+
+thread_local! {
+    /// The anonymous classes whose declaration ran (ZEND_DECLARE_ANON_CLASS).
+    static ANON_BOUND: std::cell::RefCell<std::collections::HashSet<Vec<u8>>> =
+        std::cell::RefCell::new(std::collections::HashSet::new());
+}
+
+/// ZEND_DECLARE_ANON_CLASS: the anonymous class `name` is bound.
+#[cold]
+pub fn bind_anon_class(name: &[u8]) {
+    ANON_BOUND.with(|b| {
+        let mut b = b.borrow_mut();
+        if !b.contains(name) {
+            b.insert(name.to_vec());
+        }
+    });
 }
