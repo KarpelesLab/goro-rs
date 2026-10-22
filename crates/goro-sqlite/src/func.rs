@@ -38,7 +38,7 @@ pub fn sqlite3IsLikeFunction(
     db: &mut Sqlite3,
     pExpr: ExprId,
     pIsNocase: &mut i32,
-    aWc: Option<&[u8]>,
+    aWc: Option<&mut [u8]>,
 ) -> i32 {
     todo!("sqlite3IsLikeFunction")
 }
