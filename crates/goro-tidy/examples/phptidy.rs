@@ -42,18 +42,25 @@ fn main() {
             eprintln!("bad option {k}={v}");
         }
     }
+    // php_tidy_parse_string(): a bad encoding leaves the document
+    // unparsed (and uninitialized: diagnose() does nothing)
+    let mut initialized = true;
     if let Some(e) = enc {
-        tidylib::set_char_encoding(&mut doc, e.as_bytes());
+        if tidylib::set_char_encoding(&mut doc, e.as_bytes()) < 0 {
+            initialized = false;
+        }
     }
     // every PHP operation ends with tidy_doc_update_properties(), which
     // saves the document
-    tidylib::parse_buffer(&mut doc, data);
-    tidylib::save_buffer(&mut doc);
+    if initialized {
+        tidylib::parse_buffer(&mut doc, data);
+        tidylib::save_buffer(&mut doc);
+    }
     if clean {
         tidylib::clean_and_repair(&mut doc);
         tidylib::save_buffer(&mut doc);
     }
-    if diag {
+    if diag && initialized {
         tidylib::run_diagnostics(&mut doc);
         tidylib::save_buffer(&mut doc);
     }
