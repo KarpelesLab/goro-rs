@@ -27,6 +27,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"ord", ord);
     vm.register_function(b"sprintf", sprintf);
     vm.register_function(b"nl2br", nl2br);
+    vm.register_function(b"hebrev", hebrev_fn);
     vm.register_function(b"chunk_split", chunk_split);
     vm.register_function(b"str_pad", str_pad);
     vm.register_function(b"str_word_count", str_word_count);
@@ -1424,6 +1425,23 @@ pub fn do_sprintf_vm(vm: &mut Vm, args: &[Value]) -> Result<Vec<u8>, VmError> {
     do_sprintf_inner(Some(vm), args)
 }
 
+thread_local! {
+    /// The formatted-print function being run, for its diagnostics.
+    static SPRINTF_FNAME: std::cell::Cell<&'static str> = const { std::cell::Cell::new("sprintf") };
+}
+
+/// do_sprintf_vm() for `fname` (printf, vsprintf, fprintf, ...).
+pub fn do_sprintf_vm_named(
+    vm: &mut Vm,
+    fname: &'static str,
+    args: &[Value],
+) -> Result<Vec<u8>, VmError> {
+    let prev = SPRINTF_FNAME.with(|f| f.replace(fname));
+    let r = do_sprintf_inner(Some(vm), args);
+    SPRINTF_FNAME.with(|f| f.set(prev));
+    r
+}
+
 fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, VmError> {
     if args.is_empty() {
         return Ok(Vec::new());
@@ -1702,7 +1720,8 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                             let line = vm_ref.current_line;
                             vm_ref.emit_notice_at(
                                 &format!(
-                                    "sprintf(): Requested precision of {} digits was truncated to PHP maximum of {} digits",
+                                    "{}(): Requested precision of {} digits was truncated to PHP maximum of {} digits",
+                                    SPRINTF_FNAME.with(|f| f.get()),
                                     p, PHP_MAX_FLOAT_PRECISION
                                 ),
                                 line,
@@ -1927,8 +1946,13 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                             // Try fixed display
                             format!("{}", f)
                         } else {
-                            let s = format!("{:e}", f);
-                            php_fix_exponent(&s)
+                            let s = php_fix_exponent(&format!("{:e}", f));
+                            match s.find(['e', 'E']) {
+                                Some(p) if !s[..p].contains('.') => {
+                                    format!("{}.0{}", &s[..p], &s[p..])
+                                }
+                                _ => s,
+                            }
                         }
                     } else {
                         // Use Rust's formatting with significant digits
@@ -1959,12 +1983,17 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                             if let Some(e_pos) = s.find(['e', 'E']) {
                                 let mantissa = &s[..e_pos];
                                 let exponent = &s[e_pos..];
+                                // php_gcvt(): the exponential form keeps at
+                                // least one decimal ("1.0e+20").
+                                let mantissa = if mantissa.contains('.') {
+                                    mantissa.trim_end_matches('0').trim_end_matches('.')
+                                } else {
+                                    mantissa
+                                };
                                 if mantissa.contains('.') {
-                                    let mantissa =
-                                        mantissa.trim_end_matches('0').trim_end_matches('.');
                                     format!("{}{}", mantissa, exponent)
                                 } else {
-                                    s
+                                    format!("{}.0{}", mantissa, exponent)
                                 }
                             } else {
                                 s
@@ -2089,6 +2118,151 @@ fn php_fix_exponent(s: &str) -> String {
     } else {
         s.to_string()
     }
+}
+
+/// hebrev(): convert logical Hebrew text to visual text (string.c).
+fn hebrev_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let input = zval_get_string(vm, args.first().unwrap_or(&Value::Null))?;
+    let max_chars = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    Ok(Value::String(PhpString::from_vec(php_hebrev(
+        input.as_bytes(),
+        max_chars,
+    ))))
+}
+
+fn php_hebrev(str: &[u8], max_chars: i64) -> Vec<u8> {
+    let str_len = str.len();
+    if str_len == 0 {
+        return Vec::new();
+    }
+    let isheb = |c: u8| (224..=250).contains(&c);
+    let isblank = |c: u8| c == b' ' || c == b'\t';
+    let isnewline = |c: u8| c == b'\n' || c == b'\r';
+    let ispunct = |c: u8| c.is_ascii_punctuation();
+    // The C code reads the terminating NUL past the end.
+    let at = |i: usize| str.get(i).copied().unwrap_or(0);
+
+    let mut heb_str = vec![0u8; str_len];
+    // `target` walks backwards from the end of heb_str.
+    let mut target = str_len as isize - 1;
+    let mut tmp = 0usize;
+    let (mut block_start, mut block_end) = (0usize, 0usize);
+    let mut heb_block = isheb(at(0));
+    loop {
+        if heb_block {
+            while (isheb(at(tmp + 1))
+                || isblank(at(tmp + 1))
+                || ispunct(at(tmp + 1))
+                || at(tmp + 1) == b'\n')
+                && block_end < str_len - 1
+            {
+                tmp += 1;
+                block_end += 1;
+            }
+            for i in block_start + 1..=block_end + 1 {
+                let c = match str[i - 1] {
+                    b'(' => b')',
+                    b')' => b'(',
+                    b'[' => b']',
+                    b']' => b'[',
+                    b'{' => b'}',
+                    b'}' => b'{',
+                    b'<' => b'>',
+                    b'>' => b'<',
+                    b'\\' => b'/',
+                    b'/' => b'\\',
+                    c => c,
+                };
+                if target >= 0 {
+                    heb_str[target as usize] = c;
+                }
+                target -= 1;
+            }
+            heb_block = false;
+        } else {
+            while !isheb(at(tmp + 1)) && at(tmp + 1) != b'\n' && block_end < str_len - 1 {
+                tmp += 1;
+                block_end += 1;
+            }
+            while (isblank(at(tmp)) || ispunct(at(tmp)))
+                && at(tmp) != b'/'
+                && at(tmp) != b'-'
+                && block_end > block_start
+            {
+                tmp -= 1;
+                block_end -= 1;
+            }
+            let mut i = block_end + 1;
+            while i > block_start {
+                if target >= 0 {
+                    heb_str[target as usize] = str[i - 1];
+                }
+                target -= 1;
+                i -= 1;
+            }
+            heb_block = true;
+        }
+        block_start = block_end + 1;
+        if block_end >= str_len - 1 {
+            break;
+        }
+    }
+
+    let mut broken = Vec::with_capacity(str_len);
+    let mut begin = str_len - 1;
+    let mut end = str_len - 1;
+    loop {
+        let mut char_count: i64 = 0;
+        while (max_chars == 0 || (max_chars > 0 && char_count < max_chars)) && begin > 0 {
+            char_count += 1;
+            begin -= 1;
+            if isnewline(heb_str[begin]) {
+                while begin > 0 && isnewline(heb_str[begin - 1]) {
+                    begin -= 1;
+                    char_count += 1;
+                }
+                break;
+            }
+        }
+        if max_chars >= 0 && char_count == max_chars {
+            // try to avoid breaking words
+            let mut new_char_count = char_count;
+            let mut new_begin = begin;
+            while new_char_count > 0 {
+                if isblank(heb_str[new_begin]) || isnewline(heb_str[new_begin]) {
+                    break;
+                }
+                new_begin += 1;
+                new_char_count -= 1;
+            }
+            if new_char_count > 0 {
+                begin = new_begin;
+            }
+        }
+        let orig_begin = begin;
+        if isblank(heb_str[begin]) {
+            heb_str[begin] = b'\n';
+        }
+        while begin <= end && isnewline(heb_str[begin]) {
+            begin += 1;
+        }
+        if begin <= end {
+            broken.extend_from_slice(&heb_str[begin..=end]);
+        }
+        let mut i = orig_begin;
+        while i <= end && isnewline(heb_str[i]) {
+            broken.push(heb_str[i]);
+            i += 1;
+        }
+        begin = orig_begin;
+        if begin == 0 {
+            break;
+        }
+        begin -= 1;
+        end = begin;
+    }
+    broken.truncate(str_len);
+    broken
 }
 
 fn nl2br(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -4076,7 +4250,7 @@ fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut all_args = vec![Value::String(format)];
     all_args.extend(fmt_args);
     validate_sprintf_arg_count(vm, "vprintf", &all_args)?;
-    let result = do_sprintf_vm(vm, &all_args)?;
+    let result = do_sprintf_vm_named(vm, "vprintf", &all_args)?;
     let len = result.len();
     vm.write_output(&result);
     Ok(Value::Long(len as i64))
@@ -4094,7 +4268,7 @@ fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     validate_sprintf_format_arg(vm, "printf", args.first())?;
     validate_sprintf_arg_count(vm, "printf", args)?;
-    let result = do_sprintf_vm(vm, args)?;
+    let result = do_sprintf_vm_named(vm, "printf", args)?;
     let len = result.len();
     vm.write_output(&result);
     Ok(Value::Long(len as i64))
@@ -4341,7 +4515,7 @@ fn vsprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut all_args = vec![Value::String(format)];
     all_args.extend(fmt_args);
     validate_sprintf_arg_count(vm, "vsprintf", &all_args)?;
-    let result = do_sprintf_vm(vm, &all_args)?;
+    let result = do_sprintf_vm_named(vm, "vsprintf", &all_args)?;
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
@@ -4825,6 +4999,19 @@ fn strripos(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
+/// zval_get_string(): "Array" with a warning for arrays, __toString() (or
+/// an Error) for objects.
+pub(crate) fn zval_get_string(vm: &mut Vm, v: &Value) -> Result<PhpString, VmError> {
+    match v.deref() {
+        Value::String(s) => Ok(s),
+        Value::Array(_) => {
+            vm.emit_warning("Array to string conversion");
+            Ok(PhpString::from_bytes(b"Array"))
+        }
+        other => vm.value_to_string_checked(&other),
+    }
+}
+
 fn substr_replace_single(s: &[u8], replacement: &[u8], start: i64, length: Option<i64>) -> Vec<u8> {
     let len = s.len() as i64;
     let start_idx = if start < 0 {
@@ -4877,22 +5064,31 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // If first argument is an array, process each element
     if let Value::Array(arr) = string_arg {
-        let arr = arr.borrow();
+        let entries: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let repl_vals: Option<Vec<Value>> = match replacement_arg {
+            Value::Array(a) => Some(a.borrow().values().cloned().collect()),
+            _ => None,
+        };
+        let repl_scalar = match replacement_arg {
+            Value::Array(_) => PhpString::empty(),
+            v => zval_get_string(_vm, v)?,
+        };
         let mut result = PhpArray::new();
 
-        for (i, (key, val)) in arr.iter().enumerate() {
-            let s = val.to_php_string();
+        for (i, (key, val)) in entries.iter().enumerate() {
+            let s = zval_get_string(_vm, val)?;
 
             // Get replacement for this element
-            let repl = if let Value::Array(repl_arr) = replacement_arg {
-                let repl_arr = repl_arr.borrow();
-                repl_arr
-                    .iter()
-                    .nth(i)
-                    .map(|(_, v)| v.to_php_string())
-                    .unwrap_or(PhpString::empty())
-            } else {
-                replacement_arg.to_php_string()
+            let repl = match &repl_vals {
+                Some(rv) => match rv.get(i) {
+                    Some(v) => zval_get_string(_vm, v)?,
+                    None => PhpString::empty(),
+                },
+                None => repl_scalar.clone(),
             };
 
             // Get start for this element
@@ -4918,7 +5114,12 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             });
 
             let replaced = substr_replace_single(s.as_bytes(), repl.as_bytes(), start, length);
-            result.set(key.clone(), Value::String(PhpString::from_vec(replaced)));
+            // zend_symtable_update(): numeric string keys become integers.
+            let key = match key {
+                ArrayKey::String(k) => Vm::value_to_array_key(Value::String(k.clone())),
+                k => k.clone(),
+            };
+            result.set(key, Value::String(PhpString::from_vec(replaced)));
         }
 
         Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
@@ -5060,6 +5261,14 @@ fn str_increment(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
+/// zval_get_long() of a pack() argument: an out-of-range float warns.
+fn pack_long(vm: &mut Vm, v: Option<&Value>) -> i64 {
+    let Some(v) = v else { return 0 };
+    let line = vm.current_line;
+    vm.warn_oob_float_to_int(v, line);
+    v.to_long()
+}
+
 fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let format = args.first().unwrap_or(&Value::Null).to_php_string();
     let fmt = format.as_bytes();
@@ -5148,7 +5357,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match code {
             b'C' | b'c' => {
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0);
+                    let v = pack_long(_vm, args.get(arg_idx));
                     result.push(v as u8);
                     arg_idx += 1;
                 }
@@ -5156,7 +5365,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'S' | b'v' => {
                 // unsigned short (16-bit LE)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u16;
+                    let v = pack_long(_vm, args.get(arg_idx)) as u16;
                     result.extend_from_slice(&v.to_le_bytes());
                     arg_idx += 1;
                 }
@@ -5164,7 +5373,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'n' => {
                 // unsigned short (16-bit BE)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u16;
+                    let v = pack_long(_vm, args.get(arg_idx)) as u16;
                     result.extend_from_slice(&v.to_be_bytes());
                     arg_idx += 1;
                 }
@@ -5172,7 +5381,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'L' | b'V' => {
                 // unsigned long (32-bit LE)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u32;
+                    let v = pack_long(_vm, args.get(arg_idx)) as u32;
                     result.extend_from_slice(&v.to_le_bytes());
                     arg_idx += 1;
                 }
@@ -5180,7 +5389,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'l' => {
                 // signed long (32-bit, native byte order — LE on x86)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as i32;
+                    let v = pack_long(_vm, args.get(arg_idx)) as i32;
                     result.extend_from_slice(&v.to_ne_bytes());
                     arg_idx += 1;
                 }
@@ -5188,7 +5397,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'i' => {
                 // signed int (machine-dependent size and byte order — 4 bytes on x86_64)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as std::ffi::c_int;
+                    let v = pack_long(_vm, args.get(arg_idx)) as std::ffi::c_int;
                     result.extend_from_slice(&v.to_ne_bytes());
                     arg_idx += 1;
                 }
@@ -5196,7 +5405,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'I' => {
                 // unsigned int (machine-dependent — 4 bytes on x86_64)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as std::ffi::c_uint;
+                    let v = pack_long(_vm, args.get(arg_idx)) as std::ffi::c_uint;
                     result.extend_from_slice(&v.to_ne_bytes());
                     arg_idx += 1;
                 }
@@ -5204,7 +5413,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b's' => {
                 // signed short (16-bit, native byte order)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as i16;
+                    let v = pack_long(_vm, args.get(arg_idx)) as i16;
                     result.extend_from_slice(&v.to_ne_bytes());
                     arg_idx += 1;
                 }
@@ -5212,7 +5421,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'q' => {
                 // signed long long (64-bit, native byte order)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0);
+                    let v = pack_long(_vm, args.get(arg_idx));
                     result.extend_from_slice(&v.to_ne_bytes());
                     arg_idx += 1;
                 }
@@ -5220,7 +5429,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'N' => {
                 // unsigned long (32-bit BE)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u32;
+                    let v = pack_long(_vm, args.get(arg_idx)) as u32;
                     result.extend_from_slice(&v.to_be_bytes());
                     arg_idx += 1;
                 }
@@ -5228,7 +5437,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'Q' | b'P' => {
                 // unsigned long long (64-bit LE)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u64;
+                    let v = pack_long(_vm, args.get(arg_idx)) as u64;
                     result.extend_from_slice(&v.to_le_bytes());
                     arg_idx += 1;
                 }
@@ -5236,7 +5445,7 @@ fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'J' => {
                 // unsigned long long (64-bit BE)
                 for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_long()).unwrap_or(0) as u64;
+                    let v = pack_long(_vm, args.get(arg_idx)) as u64;
                     result.extend_from_slice(&v.to_be_bytes());
                     arg_idx += 1;
                 }

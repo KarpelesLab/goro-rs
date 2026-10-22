@@ -56,6 +56,7 @@ pub fn register_standard_functions(vm: &mut Vm) {
     csv::register(vm);
     ob::register(vm);
     arrdiff::register(vm);
+    serialize::register_incomplete_class(vm);
     html::register(vm);
     image::register(vm);
     regex::register(vm);

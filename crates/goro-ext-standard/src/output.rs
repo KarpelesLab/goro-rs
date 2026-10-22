@@ -429,6 +429,19 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                             }
                         }
                         params
+                    } else if let Some(fi) = goro_core::arginfo::lookup(&target_lower) {
+                        // Internal function: its stub arginfo (optional and
+                        // variadic parameters are "<optional>").
+                        fi.params
+                            .iter()
+                            .enumerate()
+                            .map(|(i, p)| {
+                                (
+                                    format!("${}", p.name),
+                                    p.variadic || i >= fi.required as usize,
+                                )
+                            })
+                            .collect()
                     } else if let Some(param_names) = vm.builtin_param_names.get(&target_lower) {
                         // Built-in function: get parameter names from registered info
                         param_names
@@ -1321,13 +1334,11 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                 }
             }
 
-            vm.write_output(
-                format!(
-                    "{}{}object({})#{} ({}) {{\n",
-                    prefix, lazy_prefix, class_name, oid, prop_count
-                )
-                .as_bytes(),
+            let header = format!(
+                "{}{}object({})#{} ({}) {{\n",
+                prefix, lazy_prefix, class_name, oid, prop_count
             );
+            vm.write_output(&restore_raw_name(header, &obj_borrow.class_name));
 
             // Check for recursion (self-referencing objects)
             if !seen.insert(oid) {
@@ -1345,12 +1356,18 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     v => v,
                 };
                 let display_name = debug_prop_key(&key, class_lower.as_slice() == b"gmp");
+                // A non-UTF-8 name is printed verbatim.
+                let bare = match key.iter().rposition(|&c| c == 0) {
+                    Some(p) => &key[p + 1..],
+                    None => &key[..],
+                };
+                let line = restore_raw_name(format!("{}  [{}]=>\n", prefix, display_name), bare);
                 if let Some(t) = uninit_type {
-                    vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
+                    vm.write_output(&line);
                     vm.write_output(format!("{}  uninitialized({})\n", prefix, t).as_bytes());
                     continue;
                 }
-                vm.write_output(format!("{}  [{}]=>\n", prefix, display_name).as_bytes());
+                vm.write_output(&line);
                 var_dump_value(vm, &value, indent + 2, seen);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());
@@ -1393,6 +1410,24 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                 var_dump_value(vm, &inner, indent, seen);
             }
         }
+    }
+}
+
+/// Output text naming a class or property whose raw name is not UTF-8: put
+/// the raw bytes back in place of their lossy rendering.
+fn restore_raw_name(text: String, raw: &[u8]) -> Vec<u8> {
+    if std::str::from_utf8(raw).is_ok() {
+        return text.into_bytes();
+    }
+    let lossy = String::from_utf8_lossy(raw);
+    match text.find(lossy.as_ref()) {
+        Some(p) => [
+            &text.as_bytes()[..p],
+            raw,
+            &text.as_bytes()[p + lossy.len()..],
+        ]
+        .concat(),
+        None => text.into_bytes(),
     }
 }
 

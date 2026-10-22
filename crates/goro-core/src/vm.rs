@@ -40606,25 +40606,13 @@ impl Vm {
                     // __PHP_Incomplete_Class) may refuse the binding.
                     if let Value::Object(o) = &obj_val {
                         if !self.native_prop_write_allowed(o, prop_name.as_bytes(), 0) {
-                            if let Some((catch_target, _, _, _, saved_pc)) =
-                                exception_handlers.pop()
-                            {
-                                pending_calls_catch_depth = Some(saved_pc);
-                                ip = catch_target as usize;
-                                continue;
-                            }
-                            let msg = match &self.current_exception {
-                                Some(Value::Object(o)) => o
-                                    .borrow()
-                                    .get_property(b"message")
-                                    .to_php_string()
-                                    .to_string_lossy(),
-                                _ => "Uncaught exception".to_string(),
-                            };
-                            return Err(VmError {
-                                message: msg,
-                                line: op.line,
-                            });
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
                         }
                     }
                     let value = match &op.op2 {

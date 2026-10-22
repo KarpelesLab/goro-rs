@@ -941,6 +941,20 @@ struct UnserData {
     allowed_classes: Option<Vec<Vec<u8>>>,
     max_depth: i64,
     cur_depth: i64,
+    /// var_hash->ref_props: typed property slots filled so far, keyed by
+    /// (object address, storage name), with their (class, name, type).
+    ref_props: std::collections::HashMap<(usize, Vec<u8>), RefTypeSource>,
+    /// ZEND_REF_ADD_TYPE_SOURCE: the first typed property each reference
+    /// made by `R:` is bound to, keyed by the reference cell's address.
+    ref_sources: std::collections::HashMap<usize, RefTypeSource>,
+}
+
+/// A typed property a reference is bound to: (class, property, type).
+#[derive(Clone)]
+struct RefTypeSource {
+    class: String,
+    prop: String,
+    ty: String,
 }
 
 impl UnserData {
@@ -948,7 +962,14 @@ impl UnserData {
         match s {
             Slot::Tmp(i) => self.tmps.get(*i).cloned().unwrap_or(Value::Null),
             Slot::Arr(a, k) => a.borrow().get(k).cloned().unwrap_or(Value::Null),
-            Slot::Prop(o, k) => o.borrow().get_property(k),
+            // The slot itself (a reference stays a reference).
+            Slot::Prop(o, k) => o
+                .borrow()
+                .properties
+                .iter()
+                .find(|(n, _)| n == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or(Value::Null),
         }
     }
 }
@@ -962,7 +983,18 @@ fn slot_set(d: &Rc<RefCell<UnserData>>, s: &Slot, v: Value) {
             }
         }
         Slot::Arr(a, k) => a.borrow_mut().set(k.clone(), v),
-        Slot::Prop(o, k) => o.borrow_mut().set_property(k.clone(), v),
+        // The slot is overwritten, not written through a reference it holds
+        // (process_nested_object_data() replaces the old value).
+        Slot::Prop(o, k) => {
+            let mut ob = o.borrow_mut();
+            match ob.properties.iter_mut().find(|(n, _)| n == k) {
+                Some((_, slot)) => {
+                    let old = std::mem::replace(slot, v);
+                    goro_core::gc::on_value_replaced(&old, slot);
+                }
+                None => ob.properties.push((k.clone(), v)),
+            }
+        }
     }
 }
 
@@ -981,6 +1013,8 @@ fn unser_init(vm: &Vm) -> Rc<RefCell<UnserData>> {
             allowed_classes: None,
             max_depth,
             cur_depth: 0,
+            ref_props: std::collections::HashMap::new(),
+            ref_sources: std::collections::HashMap::new(),
         }));
         if !locked() {
             UNSER_DATA.with(|s| *s.borrow_mut() = Some(d.clone()));
@@ -1015,6 +1049,8 @@ fn unser_destroy(vm: &mut Vm, d: &Rc<RefCell<UnserData>>) {
         let mut dd = d.borrow_mut();
         dd.entries.clear();
         dd.tmps.clear();
+        dd.ref_props.clear();
+        dd.ref_sources.clear();
         std::mem::take(&mut dd.delayed)
     };
     let saved_line = vm.current_line;
@@ -1242,6 +1278,18 @@ impl<'a> Parser<'a> {
                         other => {
                             let r = Rc::new(RefCell::new(other));
                             slot_set(&self.d, &target, Value::Reference(r.clone()));
+                            // A typed property becomes the type source of
+                            // the new reference.
+                            if let Slot::Prop(o, k) = &target {
+                                let mut dd = self.d.borrow_mut();
+                                let src = dd
+                                    .ref_props
+                                    .get(&(Rc::as_ptr(o) as usize, k.clone()))
+                                    .cloned();
+                                if let Some(src) = src {
+                                    dd.ref_sources.insert(Rc::as_ptr(&r) as usize, src);
+                                }
+                            }
                             r
                         }
                     };
@@ -2370,14 +2418,74 @@ impl<'a> Parser<'a> {
                 Ok(x) => x,
                 Err(()) => break false,
             };
-            obj.borrow_mut().set_property(storage.clone(), Value::Null);
             let slot = Slot::Prop(obj.clone(), storage.clone());
+            // A previous value of the slot (even a reference) is replaced.
+            slot_set(&self.d, &slot, Value::Null);
             if !self.unserialize(vm, p, &slot) {
                 break false;
             }
             if let Some(pt) = ptype {
-                let v = obj.borrow().get_property(&storage);
-                let inner = v.deref();
+                let raw = self.d.borrow().get(&slot);
+                let inner = raw.deref();
+                let type_name = vm.param_type_name(&pt);
+                let display = if decl_name.is_empty() {
+                    goro_core::value::display_class_name(&obj.borrow().class_name)
+                } else {
+                    goro_core::value::display_class_name(&decl_name)
+                };
+                let prop_name = unmangle(&storage)
+                    .map(|(_, n)| n.to_vec())
+                    .unwrap_or(storage.clone());
+                let this_src = RefTypeSource {
+                    class: display.clone(),
+                    prop: String::from_utf8_lossy(&prop_name).to_string(),
+                    ty: type_name.clone(),
+                };
+                // zend_verify_prop_assignable_by_ref(): an int held by a
+                // typed reference cannot be coerced for a float property.
+                if let Value::Reference(r) = &raw {
+                    let src = self
+                        .d
+                        .borrow()
+                        .ref_sources
+                        .get(&(Rc::as_ptr(r) as usize))
+                        .cloned();
+                    if let Some(src) = src {
+                        let tys: Vec<&str> = type_name
+                            .split(['|', '?', '(', ')', '&'])
+                            .filter(|t| !t.is_empty())
+                            .collect();
+                        let has = |t: &str| tys.iter().any(|x| x.eq_ignore_ascii_case(t));
+                        if matches!(inner, Value::Long(_))
+                            && has("float")
+                            && !has("int")
+                            && !has("mixed")
+                        {
+                            let msg = format!(
+                                "Reference with value of type int held by property {}::${} of type {} is not compatible with property {}::${} of type {}",
+                                src.class,
+                                src.prop,
+                                src.ty,
+                                this_src.class,
+                                this_src.prop,
+                                this_src.ty
+                            );
+                            slot_set(&self.d, &slot, Value::Undef);
+                            throw(vm, b"TypeError", &msg);
+                            break false;
+                        }
+                    } else {
+                        self.d
+                            .borrow_mut()
+                            .ref_sources
+                            .insert(Rc::as_ptr(r) as usize, this_src.clone());
+                    }
+                } else {
+                    self.d
+                        .borrow_mut()
+                        .ref_props
+                        .insert((Rc::as_ptr(obj) as usize, storage.clone()), this_src);
+                }
                 if !vm.value_matches_type_strict_pub(&inner, &pt) {
                     let display = if decl_name.is_empty() {
                         goro_core::value::display_class_name(&obj.borrow().class_name)
@@ -2676,4 +2784,74 @@ pub(crate) fn unserialize_value_hook(vm: &mut Vm, data: &[u8], pos: &mut usize) 
         Value::Reference(r) => r.borrow().clone(),
         v => v,
     })
+}
+
+/// php_lookup_class_name() of an __PHP_Incomplete_Class object.
+fn incomplete_class_name(obj: &Rc<RefCell<PhpObject>>) -> String {
+    match obj.borrow().get_property(b"__PHP_Incomplete_Class_Name") {
+        Value::String(s) => s.to_string_lossy(),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn incomplete_class_msg(what: &str, class: &str) -> String {
+    format!(
+        "The script tried to {} on an incomplete object. Please ensure that the class definition \"{}\" of the object you are trying to operate on was loaded _before_ unserialize() gets called or provide an autoloader to load the class definition",
+        what, class
+    )
+}
+
+/// incomplete_class_get_property() / has_property(): every access warns.
+fn incomplete_prop_read(
+    vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    _name: &[u8],
+) -> Option<Option<Value>> {
+    let func = match vm.call_stack.last() {
+        Some((f, ..)) => f.replace("->", "::"),
+        None => "main".to_string(),
+    };
+    let msg = incomplete_class_msg("access a property", &incomplete_class_name(obj));
+    let line = vm.current_line;
+    vm.emit_warning_at(&format!("{}(): {}", func, msg), line);
+    Some(Some(Value::Null))
+}
+
+/// incomplete_class_write_property() / unset_property(): an Error.
+fn incomplete_prop_write(
+    vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    _name: &[u8],
+    _kind: u8,
+) -> bool {
+    let msg = incomplete_class_msg("modify a property", &incomplete_class_name(obj));
+    let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    false
+}
+
+/// Object handlers of __PHP_Incomplete_Class (incomplete_class.c).
+pub(crate) fn register_incomplete_class(vm: &mut Vm) {
+    let h = goro_core::vm::NativeClassHandler {
+        // incomplete_class_get_method(): calling any method is an Error.
+        // (Magic methods are looked up by the engine itself, not called.)
+        has_method: |_, m, is_static| !is_static && !m.starts_with(b"__"),
+        call: |vm, _, _, _, this, _| {
+            let class = match this {
+                Some(Value::Object(o)) => incomplete_class_name(o),
+                _ => "unknown".to_string(),
+            };
+            let msg = incomplete_class_msg("call a method", &class);
+            let exc = vm.create_exception(b"Error", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            Value::Null
+        },
+        prop_added: None,
+        prop_write: Some(incomplete_prop_write),
+        compare_check: None,
+        prop_read: Some(incomplete_prop_read),
+        param_names: None,
+    };
+    vm.native_class_handlers
+        .insert(b"__php_incomplete_class".to_vec(), h);
 }

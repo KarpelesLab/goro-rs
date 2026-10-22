@@ -1119,6 +1119,10 @@ fn get_html_translation_table_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
             }
         } else if let Some(b) = map_unicode_to_byte(cp, cs) {
             vec![b]
+        } else if cp < 0x80 {
+            // Every supported charset is ASCII-compatible (the multi-byte
+            // ones only get the basic entities).
+            vec![cp as u8]
         } else {
             continue;
         };

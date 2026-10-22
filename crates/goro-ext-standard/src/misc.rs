@@ -355,6 +355,15 @@ final class StreamBucket {
         b"zend.exception_string_param_max_len".to_vec(),
         on_set_exception_string_param_max_len,
     );
+    // Stack limit settings (0 = detected from the system).
+    for k in [
+        &b"zend.max_allowed_stack_size"[..],
+        b"zend.reserved_stack_size",
+    ] {
+        vm.constants
+            .entry(k.to_vec())
+            .or_insert(Value::String(PhpString::from_bytes(b"0")));
+    }
     vm.register_function(goro_core::gc::DESTRUCTOR_FIBER_FN, gc_destructor_fiber_fn);
     goro_core::gc::gc_request_startup();
     vm.register_function(b"debug_zval_dump", debug_zval_dump_fn);
@@ -488,6 +497,7 @@ final class StreamBucket {
     vm.register_function(b"array_replace", array_replace_fn);
     vm.register_function(b"array_replace_recursive", array_replace_recursive_fn);
     vm.register_function(b"array_find", array_find_fn);
+    vm.register_function(b"get_meta_tags", get_meta_tags_fn);
     vm.register_function(b"array_find_key", array_find_key_fn);
     vm.register_function(b"array_intersect_ukey", array_intersect_ukey_fn);
     vm.register_function(b"array_intersect_uassoc", array_intersect_uassoc_fn);
@@ -2341,7 +2351,7 @@ fn array_values(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let arr = arr.borrow();
         let mut result = PhpArray::new();
         for (_, val) in arr.iter() {
-            result.push(val.clone());
+            result.push(unwrap_rc1_ref(val));
         }
         Ok(Value::Array(Rc::new(RefCell::new(result))))
     } else {
@@ -2475,11 +2485,6 @@ fn php_array_merge_recursive(
                 match dest_entry {
                     Some(de) => {
                         let src_val = src_entry.deref();
-                        // Resolve the destination slot (writing through references).
-                        let dref = match &de {
-                            Value::Reference(r) => Some(r.clone()),
-                            _ => None,
-                        };
                         let dval = de.deref();
                         if let Value::Array(t) = &dval {
                             if stack.contains(&(Rc::as_ptr(t) as usize)) {
@@ -2527,13 +2532,10 @@ fn php_array_merge_recursive(
                         } else {
                             darr.push(src_val.clone());
                         }
+                        // SEPARATE_ZVAL(dest_entry): a reference in the
+                        // destination is replaced, not written through.
                         let newv = Value::Array(Rc::new(RefCell::new(darr)));
-                        match dref {
-                            Some(r) => {
-                                *r.borrow_mut() = newv;
-                            }
-                            None => dest.borrow_mut().set(k.clone(), newv),
-                        }
+                        dest.borrow_mut().set(k.clone(), newv);
                     }
                     None => {
                         let v = merge_copy_entry(&src_entry);
@@ -2558,7 +2560,10 @@ fn array_reverse(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let preserve_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
         let arr = arr.borrow();
-        let entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<_> = arr
+            .iter()
+            .map(|(k, v)| (k.clone(), unwrap_rc1_ref(v)))
+            .collect();
         let mut result = PhpArray::new();
         for (key, val) in entries.into_iter().rev() {
             if preserve_keys {
@@ -2623,10 +2628,44 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, first, "array_unique", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
+        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(2); // SORT_STRING = 2 default
+        if flags & !8 == 2 {
+            // SORT_STRING (| SORT_FLAG_CASE): keep the first element of each string value
+            // (zval_get_tmp_string(): "Array to string conversion",
+            // __toString(), or an Error for unconvertible objects).
+            let entries: Vec<(ArrayKey, Value)> = arr
+                .borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            let mut result = PhpArray::new();
+            let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+            for (key, val) in entries {
+                let s = match val.deref() {
+                    Value::String(s) => s.as_bytes().to_vec(),
+                    Value::Array(_) => {
+                        vm.emit_warning("Array to string conversion");
+                        b"Array".to_vec()
+                    }
+                    other => vm.value_to_string_checked(&other)?.as_bytes().to_vec(),
+                };
+                if vm.current_exception.is_some() {
+                    return Ok(Value::Null);
+                }
+                let s = if flags & 8 != 0 {
+                    s.to_ascii_lowercase()
+                } else {
+                    s
+                };
+                if seen.insert(s) {
+                    result.set(key, unwrap_rc1_ref(&val));
+                }
+            }
+            return Ok(Value::Array(Rc::new(RefCell::new(result))));
+        }
         let arr = arr.borrow();
         let mut result = PhpArray::new();
         let mut seen: Vec<Vec<u8>> = Vec::new();
-        let flags = args.get(1).map(|v| v.to_long()).unwrap_or(2); // SORT_STRING = 2 default
         for (key, val) in arr.iter() {
             // Reference elements compare by their value.
             let dv = val.deref();
@@ -2659,7 +2698,7 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             };
             if !seen.contains(&s) {
                 seen.push(s);
-                result.set(key.clone(), val.clone());
+                result.set(key.clone(), unwrap_rc1_ref(val));
             }
         }
         Ok(Value::Array(Rc::new(RefCell::new(result))))
@@ -2705,7 +2744,7 @@ fn array_slice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         let end = match length {
             Some(l) if l < 0 => (entries.len() as i64 + l).max(start as i64) as usize,
-            Some(l) => (start + l as usize).min(entries.len()),
+            Some(l) => start.saturating_add(l as usize).min(entries.len()),
             None => entries.len(),
         };
 
@@ -2716,13 +2755,13 @@ fn array_slice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             match k {
                 ArrayKey::String(s) => {
                     // String keys are always preserved
-                    result.set(ArrayKey::String(s.clone()), v.clone());
+                    result.set(ArrayKey::String(s.clone()), unwrap_rc1_ref(v));
                 }
                 ArrayKey::Int(i) => {
                     if preserve_keys {
-                        result.set(ArrayKey::Int(*i), v.clone());
+                        result.set(ArrayKey::Int(*i), unwrap_rc1_ref(v));
                     } else {
-                        result.push(v.clone());
+                        result.push(unwrap_rc1_ref(v));
                     }
                 }
             }
@@ -2734,6 +2773,7 @@ fn array_slice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let used_ret = vm.call_result_unused.take().as_deref() != Some(b"array_splice".as_slice());
     let first = args.first().unwrap_or(&Value::Null);
     let arr_opt = match first {
         Value::Array(a) => Some(a.clone()),
@@ -2743,80 +2783,124 @@ fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         },
         _ => None,
     };
-    if let Some(arr) = arr_opt {
-        let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-        // length is nullable: null means remove everything from offset
-        let length = match args.get(2) {
-            Some(Value::Null) | None => None,
-            Some(v) => Some(v.to_long()),
-        };
-        // If replacement is an object, convert it to an array (as (array)$obj).
-        let replacement_converted: Option<Value> = match args.get(3) {
-            Some(Value::Object(obj)) => Some(Value::Array(vm.object_to_array(obj))),
-            _ => None,
-        };
-        let replacement = replacement_converted.as_ref().or_else(|| args.get(3));
+    let Some(arr) = arr_opt else {
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    };
+    let mut offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let num_in = arr.borrow().len() as i64;
+    // length is nullable: null means remove everything from offset
+    let mut length = match args.get(2) {
+        Some(Value::Null) | None => num_in,
+        Some(v) => v.to_long(),
+    };
+    // convert_to_array() of the replacement.
+    let replacement: Option<Vec<Value>> = match args.get(3).map(|v| v.deref()) {
+        None => None,
+        Some(Value::Array(a)) => Some(a.borrow().values().cloned().collect()),
+        Some(Value::Object(obj)) => Some(
+            vm.object_to_array(&obj)
+                .borrow()
+                .values()
+                .cloned()
+                .collect(),
+        ),
+        Some(Value::Null | Value::Undef) => Some(Vec::new()),
+        Some(other) => Some(vec![other]),
+    };
 
-        let mut arr_mut = arr.borrow_mut();
-        let entries: Vec<(goro_core::array::ArrayKey, Value)> = arr_mut
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        let total = entries.len() as i64;
+    // php_splice(): clamp the offset and the length.
+    if offset > num_in {
+        offset = num_in;
+    } else if offset < 0 {
+        offset = (num_in + offset).max(0);
+    }
+    if length < 0 {
+        length += num_in - offset;
+    } else if (offset as u32).wrapping_add(length as u32) > num_in as u32 {
+        length = num_in - offset;
+    }
+    let start = offset as usize;
+    let end = if length <= 0 {
+        start
+    } else {
+        start.saturating_add(length as usize).min(num_in as usize)
+    };
 
-        let start = if offset < 0 {
-            (total + offset).max(0) as usize
-        } else {
-            offset.min(total) as usize
-        };
-        let len = match length {
-            Some(l) if l < 0 => ((total + l) as usize).saturating_sub(start),
-            Some(l) => l as usize,
-            None => entries.len() - start,
-        };
-        let end = (start + len).min(entries.len());
+    let entries: Vec<(ArrayKey, Value)> = arr
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let strong_before = Rc::strong_count(&arr);
 
-        // Extract removed elements (values only, re-indexed)
-        let removed: Vec<Value> = entries[start..end].iter().map(|(_, v)| v.clone()).collect();
-
-        // Build new array: re-index integer keys, preserve string keys
-        let mut new_arr = PhpArray::new();
-        // Elements before the splice point
-        for (k, v) in &entries[..start] {
-            match k {
-                goro_core::array::ArrayKey::String(_) => new_arr.set(k.clone(), v.clone()),
-                goro_core::array::ArrayKey::Int(_) => new_arr.push(v.clone()),
-            }
-        }
-        // Replacement elements (always re-indexed)
-        if let Some(repl) = replacement {
-            if let Value::Array(repl_arr) = repl {
-                let repl_arr = repl_arr.borrow();
-                for (_, v) in repl_arr.iter() {
+    // Integer keys are renumbered, string keys kept.
+    let mut new_arr = PhpArray::new();
+    let mut removed_arr = PhpArray::new();
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i == start {
+            if let Some(repl) = &replacement {
+                for v in repl {
                     new_arr.push(v.clone());
                 }
-            } else {
-                new_arr.push(repl.clone());
             }
         }
-        // Elements after the splice point
-        for (k, v) in &entries[end..] {
-            match k {
-                goro_core::array::ArrayKey::String(_) => new_arr.set(k.clone(), v.clone()),
-                goro_core::array::ArrayKey::Int(_) => new_arr.push(v.clone()),
-            }
+        let target = if i >= start && i < end {
+            &mut removed_arr
+        } else {
+            &mut new_arr
+        };
+        match k {
+            ArrayKey::String(_) => target.set(k.clone(), v.clone()),
+            ArrayKey::Int(_) => target.push(v.clone()),
         }
-        *arr_mut = new_arr;
-
-        // Return removed elements (always re-indexed)
-        let mut removed_arr = PhpArray::new();
-        for val in removed {
-            removed_arr.push(val);
-        }
-        Ok(Value::Array(Rc::new(RefCell::new(removed_arr))))
-    } else {
-        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
     }
+    if start >= entries.len() {
+        if let Some(repl) = &replacement {
+            for v in repl {
+                new_arr.push(v.clone());
+            }
+        }
+    }
+    drop(entries);
+    *arr.borrow_mut() = new_arr;
+
+    if !used_ret {
+        // The removed elements are released now; a destructor that replaces
+        // or modifies the array makes the splice fail (php_splice() holds an
+        // extra reference, so such a write separates the array from it).
+        let may_destruct = removed_arr
+            .values()
+            .any(|v| matches!(v.deref(), Value::Object(_) | Value::Array(_)));
+        let snapshot: Option<Vec<(ArrayKey, Value)>> = may_destruct.then(|| {
+            arr.borrow()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        });
+        drop(removed_arr);
+        vm.run_pending_destructors_pub();
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
+        }
+        let modified = snapshot.is_some_and(|snap| {
+            let a = arr.borrow();
+            a.len() != snap.len()
+                || a.iter()
+                    .zip(snap.iter())
+                    .any(|((k, v), (sk, sv))| k != sk || !v.identical(sv))
+        });
+        if modified || Rc::strong_count(&arr) < strong_before {
+            let msg = "Array was modified during array_splice operation";
+            let exc = vm.create_exception(b"Error", msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: msg.to_string(),
+                line: vm.current_line,
+            });
+        }
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(removed_arr))))
 }
 
 fn array_search(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3168,9 +3252,14 @@ fn walk_key_value(k: &ArrayKey) -> Value {
 /// php_array_walk() for arrays: each element is made a reference (so by-ref
 /// callbacks write back) and the callback is invoked through the generic
 /// callable path, which handles by-value/by-ref parameters and arity.
+///
+/// `holder` is the variable (reference) the walked array lives in: as in
+/// php_array_walk(), it is reloaded after every callback, so that a callback
+/// replacing the array continues with the new one.
 fn php_array_walk_arr(
     vm: &mut Vm,
-    arr: &Rc<RefCell<PhpArray>>,
+    arr: Rc<RefCell<PhpArray>>,
+    holder: Option<&Rc<RefCell<Value>>>,
     cb: &Value,
     userdata: Option<&Value>,
     recursive: bool,
@@ -3179,21 +3268,29 @@ fn php_array_walk_arr(
     if depth > 256 {
         return Ok(true);
     }
+    // While the callback runs, the walk must not hold the array strongly
+    // when it is reachable from `holder`: an extra holder would make a
+    // write from the callback separate (copy) it.
+    let mut weak = Rc::downgrade(&arr);
+    let mut strong = if holder.is_some() { None } else { Some(arr) };
     let mut pos = 0usize;
     loop {
+        let Some(arr) = strong.clone().or_else(|| weak.upgrade()) else {
+            break;
+        };
         let entry = {
             let a = arr.borrow();
-            a.iter().nth(pos).map(|(k, v)| (k.clone(), v.clone()))
+            a.entry_at(pos).map(|(k, v)| (k.clone(), v.clone()))
         };
         let (key, val) = match entry {
             Some(e) => e,
             None => break,
         };
         // ZVAL_MAKE_REF
-        let r = match &val {
-            Value::Reference(r) => r.clone(),
+        let r = match val {
+            Value::Reference(r) => r,
             other => {
-                let r = Rc::new(RefCell::new(other.clone()));
+                let r = Rc::new(RefCell::new(other));
                 arr.borrow_mut()
                     .set(key.clone(), Value::Reference(r.clone()));
                 r
@@ -3209,12 +3306,16 @@ fn php_array_walk_arr(
             None
         };
         if let Some(sub) = inner_arr {
-            if Rc::ptr_eq(&sub, arr) {
+            if Rc::ptr_eq(&sub, &arr) {
                 vm.emit_warning("array_walk_recursive(): Recursion detected");
                 return Ok(true);
             }
-            php_array_walk_arr(vm, &sub, cb, userdata, true, depth + 1)?;
+            drop(arr);
+            if !php_array_walk_arr(vm, sub, Some(&r), cb, userdata, true, depth + 1)? {
+                return Ok(false);
+            }
         } else {
+            drop(arr);
             let mut cargs = vec![
                 cb.clone(),
                 Value::Reference(r.clone()),
@@ -3223,19 +3324,52 @@ fn php_array_walk_arr(
             if let Some(u) = userdata {
                 cargs.push(u.clone());
             }
-            drop(r);
             call_user_func(vm, &cargs)?;
             if vm.current_exception.is_some() {
                 return Ok(false);
             }
         }
+        // Reload the array: the callback may have replaced it. A copy of
+        // the walked array (separated by a write) still holds the element's
+        // reference and continues from the same place.
+        if let Some(h) = holder {
+            let cur = h.borrow().deref();
+            match cur {
+                Value::Array(a) => {
+                    if weak.upgrade().is_none_or(|w| !Rc::ptr_eq(&a, &w)) {
+                        weak = Rc::downgrade(&a);
+                        let copied = matches!(a.borrow().get(&key),
+                            Some(Value::Reference(x)) if Rc::ptr_eq(x, &r));
+                        if !copied {
+                            pos = 0;
+                            continue;
+                        }
+                    }
+                }
+                Value::Object(_) => break,
+                _ => {
+                    let msg = "Iterated value is no longer an array or object".to_string();
+                    let exc = vm.throw_type_error(msg.clone());
+                    vm.current_exception = Some(exc);
+                    return Err(VmError {
+                        message: msg,
+                        line: vm.current_line,
+                    });
+                }
+            }
+        }
         // Continue after the current key (its position may have moved).
-        let a = arr.borrow();
-        pos = match a.keys().position(|k| *k == key) {
-            Some(p) => p + 1,
-            None => pos,
+        let Some(arr) = strong.clone().or_else(|| weak.upgrade()) else {
+            break;
         };
+        let a = arr.borrow();
+        if let Some(p) = a.position_of(&key) {
+            pos = p + 1;
+        }
     }
+    let Some(arr) = strong.take().or_else(|| weak.upgrade()) else {
+        return Ok(true);
+    };
     // References only held by the array (rc=1) are indistinguishable from
     // plain values; store them as such.
     if let Ok(mut a) = arr.try_borrow_mut() {
@@ -3377,7 +3511,11 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Array case
     if let Value::Array(arr) = first.deref() {
-        php_array_walk_arr(vm, &arr, callback, args.get(2), false, 0)?;
+        let holder = match first {
+            Value::Reference(r) => Some(r),
+            _ => None,
+        };
+        php_array_walk_arr(vm, arr, holder, callback, args.get(2), false, 0)?;
         return Ok(Value::True);
     }
 
@@ -3549,9 +3687,25 @@ fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let mut result = PhpArray::new();
     let keys_vec: Vec<_> = keys.values().cloned().collect();
     let vals_vec: Vec<_> = vals.values().cloned().collect();
+    drop(keys);
+    drop(vals);
     for (k, v) in keys_vec.iter().zip(vals_vec.iter()) {
         // PHP array_combine converts values to strings first, then to array keys
-        let key_str = k.to_php_string();
+        let key_str = match k.deref() {
+            Value::Long(n) => {
+                result.set(goro_core::array::ArrayKey::Int(n), unwrap_rc1_ref(v));
+                continue;
+            }
+            Value::String(s) => s,
+            Value::Array(_) => {
+                vm.emit_warning("Array to string conversion");
+                PhpString::from_bytes(b"Array")
+            }
+            other => vm.value_to_string_checked(&other)?,
+        };
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
+        }
         let key = {
             let s_str = key_str.to_string_lossy();
             if let Ok(n) = s_str.parse::<i64>() {
@@ -3564,7 +3718,7 @@ fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 goro_core::array::ArrayKey::String(key_str)
             }
         };
-        result.set(key, v.clone());
+        result.set(key, unwrap_rc1_ref(v));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
@@ -3698,7 +3852,7 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    if num > 10_000_000 {
+    if num > i32::MAX as i64 {
         let msg = "array_fill(): Argument #2 ($count) is too large".to_string();
         let exc = vm.throw_type_error(msg.clone());
         if let Value::Object(obj) = &exc {
@@ -3709,6 +3863,32 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             message: msg,
             line: vm.current_line,
         });
+    }
+    if num > 0 && start > i64::MAX - num + 1 {
+        let msg = "Cannot add element to the array as the next element is already occupied";
+        let exc = vm.create_exception(b"Error", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
+    }
+    // array_init_size(): zend_hash_check_size() refuses more than
+    // HT_MAX_SIZE elements; below that the allocation may exceed the
+    // memory limit.
+    if num > 0x4000_0000 {
+        let msg = format!(
+            "Possible integer overflow in memory allocation ({} * 16 + 16)",
+            num
+        );
+        let line = vm.current_line;
+        return Err(vm.emit_fatal_at(&msg, line));
+    }
+    let bytes = (num as usize).next_power_of_two().max(8) * 16;
+    let limit = goro_core::value::memory_get_limit();
+    if limit > 0 && goro_core::value::memory_get_usage().saturating_add(bytes) > limit {
+        goro_core::value::memory_alloc(bytes);
+        return Err(vm.memory_limit_fatal());
     }
     let val = args.get(2).cloned().unwrap_or(Value::Null);
     let mut result = PhpArray::new();
@@ -5834,9 +6014,9 @@ fn array_count_values(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let arr = arr.borrow();
         let mut result = PhpArray::new();
         for (_, val) in arr.iter() {
-            let key = match val {
-                Value::Long(n) => ArrayKey::Int(*n),
-                Value::String(s) => ArrayKey::String(s.clone()),
+            let key = match val.deref() {
+                Value::Long(n) => ArrayKey::Int(n),
+                v @ Value::String(_) => Vm::value_to_array_key(v),
                 _ => {
                     // PHP warns and skips non-int/non-string values
                     vm.emit_warning("array_count_values(): Can only count string and integer values, entry skipped");
@@ -6423,7 +6603,7 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     validate_fmt_arg2(vm, "fprintf", &args[1])?;
     let fid = args[0].to_long();
     let format_args = &args[1..]; // skip the handle, pass format + args
-    let formatted = crate::strings::do_sprintf_vm(vm, format_args)?;
+    let formatted = crate::strings::do_sprintf_vm_named(vm, "fprintf", format_args)?;
     let len = formatted.len();
 
     // php_stream_write() on the stream (filters, read buffer, sockets).
@@ -6460,7 +6640,7 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             format_args.push(v.clone());
         }
     }
-    let formatted = crate::strings::do_sprintf_vm(vm, &format_args)?;
+    let formatted = crate::strings::do_sprintf_vm_named(vm, "vfprintf", &format_args)?;
     let len = formatted.len();
 
     if has_file_handle(fid) {
@@ -7379,6 +7559,254 @@ fn read_path_with_wrappers_inner(path_str: &str) -> std::io::Result<Vec<u8>> {
     std::fs::read(&normalized)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MetaTok {
+    Eof,
+    OpenTag,
+    CloseTag,
+    Slash,
+    Equal,
+    Space,
+    Id,
+    Str,
+    Other,
+}
+
+/// php_meta_tags_data: the tokenizer state of get_meta_tags().
+struct MetaTokenizer<'a> {
+    data: &'a [u8],
+    pos: usize,
+    eof: bool,
+    ulc: bool,
+    lc: i32,
+    in_meta: bool,
+    token: Vec<u8>,
+}
+
+impl MetaTokenizer<'_> {
+    /// php_stream_getc(): EOF (-1) once the data is exhausted, which also
+    /// sets the stream's EOF flag.
+    fn getc(&mut self) -> i32 {
+        match self.data.get(self.pos) {
+            Some(&c) => {
+                self.pos += 1;
+                c as i32
+            }
+            None => {
+                self.eof = true;
+                -1
+            }
+        }
+    }
+
+    /// php_next_meta_token()
+    fn next(&mut self) -> MetaTok {
+        const BUFSIZE: usize = 256;
+        let mut ch: i32 = 0;
+        self.token.clear();
+        loop {
+            if !self.ulc {
+                if self.eof {
+                    break;
+                }
+                ch = self.getc();
+                if ch == 0 {
+                    break;
+                }
+            }
+            if self.eof {
+                break;
+            }
+            if self.ulc {
+                ch = self.lc;
+                self.ulc = false;
+            }
+            match ch {
+                0x3c => return MetaTok::OpenTag,
+                0x3e => return MetaTok::CloseTag,
+                0x3d => return MetaTok::Equal,
+                0x2f => return MetaTok::Slash,
+                0x27 | 0x22 => {
+                    let compliment = ch;
+                    let mut buf = Vec::new();
+                    while !self.eof {
+                        ch = self.getc();
+                        if ch == 0 || ch == compliment || ch == 0x3c || ch == 0x3e {
+                            break;
+                        }
+                        buf.push(ch as u8);
+                        if buf.len() == BUFSIZE {
+                            break;
+                        }
+                    }
+                    if ch == 0x3c || ch == 0x3e {
+                        // Was just an apostrophe
+                        self.ulc = true;
+                        self.lc = ch;
+                    }
+                    if self.in_meta {
+                        self.token = buf;
+                    }
+                    return MetaTok::Str;
+                }
+                0x0a | 0x0d | 0x09 => {}
+                0x20 => return MetaTok::Space,
+                _ => {
+                    let is_alnum =
+                        |c: i32| (0..128).contains(&c) && (c as u8).is_ascii_alphanumeric();
+                    if is_alnum(ch) {
+                        let mut buf = vec![ch as u8];
+                        while !self.eof {
+                            ch = self.getc();
+                            if ch == 0 || !(is_alnum(ch) || b"-_.:".contains(&(ch as u8)) && ch > 0)
+                            {
+                                break;
+                            }
+                            buf.push(ch as u8);
+                            if buf.len() == BUFSIZE {
+                                break;
+                            }
+                        }
+                        let is_alpha = (0..128).contains(&ch) && (ch as u8).is_ascii_alphabetic();
+                        if !is_alpha && ch != 0x2d {
+                            self.ulc = true;
+                            self.lc = ch;
+                        }
+                        self.token = buf;
+                        return MetaTok::Id;
+                    }
+                    return MetaTok::Other;
+                }
+            }
+        }
+        MetaTok::Eof
+    }
+}
+
+/// get_meta_tags(): the content attributes of the <meta> tags of a file.
+fn get_meta_tags_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let filename = args.first().cloned().unwrap_or(Value::Null);
+    let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    let contents = file_get_contents_fn(
+        vm,
+        &[
+            filename,
+            if use_include_path {
+                Value::True
+            } else {
+                Value::False
+            },
+        ],
+    )?;
+    let Value::String(contents) = contents else {
+        return Ok(Value::False);
+    };
+    const UNSAFE: &[u8] = b".\\+*?[^]$() ";
+    let sanitize = |n: &[u8]| -> Vec<u8> {
+        n.iter()
+            .map(|&c| if UNSAFE.contains(&c) { b'_' } else { c })
+            .collect()
+    };
+    let mut md = MetaTokenizer {
+        data: contents.as_bytes(),
+        pos: 0,
+        eof: false,
+        ulc: false,
+        lc: 0,
+        in_meta: false,
+        token: Vec::new(),
+    };
+    let mut result = PhpArray::new();
+    let (mut in_tag, mut done) = (false, false);
+    let (mut looking_for_val, mut have_name, mut have_content) = (false, false, false);
+    let (mut saw_name, mut saw_content) = (false, false);
+    let mut name: Option<Vec<u8>> = None;
+    let mut value: Option<Vec<u8>> = None;
+    let mut tok_last = MetaTok::Eof;
+    while !done {
+        let tok = md.next();
+        if tok == MetaTok::Eof {
+            break;
+        }
+        let tdata = md.token.clone();
+        if tok == MetaTok::Id {
+            if tok_last == MetaTok::OpenTag {
+                md.in_meta = tdata.eq_ignore_ascii_case(b"meta");
+            } else if tok_last == MetaTok::Slash && in_tag {
+                if tdata.eq_ignore_ascii_case(b"head") {
+                    done = true;
+                }
+            } else if tok_last == MetaTok::Equal && looking_for_val {
+                if saw_name {
+                    name = Some(sanitize(&tdata));
+                    have_name = true;
+                } else if saw_content {
+                    value = Some(tdata);
+                    have_content = true;
+                }
+                looking_for_val = false;
+            } else if md.in_meta {
+                if tdata.eq_ignore_ascii_case(b"name") {
+                    saw_name = true;
+                    saw_content = false;
+                    looking_for_val = true;
+                } else if tdata.eq_ignore_ascii_case(b"content") {
+                    saw_name = false;
+                    saw_content = true;
+                    looking_for_val = true;
+                }
+            }
+        } else if tok == MetaTok::Str && tok_last == MetaTok::Equal && looking_for_val {
+            if saw_name {
+                name = Some(sanitize(&tdata));
+                have_name = true;
+            } else if saw_content {
+                value = Some(tdata);
+                have_content = true;
+            }
+            looking_for_val = false;
+        } else if tok == MetaTok::OpenTag {
+            if looking_for_val {
+                looking_for_val = false;
+                have_name = false;
+                saw_name = false;
+                have_content = false;
+                saw_content = false;
+            }
+            in_tag = true;
+        } else if tok == MetaTok::CloseTag {
+            if have_name {
+                // C string semantics: the name ends at its first NUL.
+                let mut n = name.take().unwrap_or_default();
+                if let Some(p) = n.iter().position(|&c| c == 0) {
+                    n.truncate(p);
+                }
+                n.make_ascii_lowercase();
+                let v = if have_content {
+                    value.take().unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                result.set(
+                    Vm::value_to_array_key(Value::String(PhpString::from_vec(n))),
+                    Value::String(PhpString::from_vec(v)),
+                );
+            }
+            name = None;
+            value = None;
+            in_tag = false;
+            looking_for_val = false;
+            have_name = false;
+            saw_name = false;
+            have_content = false;
+            saw_content = false;
+            md.in_meta = false;
+        }
+        tok_last = tok;
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
 fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     // Empty filename → ValueError, matching PHP's behavior.
@@ -7742,29 +8170,216 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 }
-fn realpath_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let path = args.first().unwrap_or(&Value::Null).to_php_string();
-    let path_str = path.to_string_lossy().to_string();
-    // PHP: realpath("") and realpath(".") return the current working dir.
-    let resolved_input = if path_str.is_empty() {
-        ".".to_string()
-    } else {
-        path_str
-    };
-    match std::fs::canonicalize(&resolved_input) {
-        Ok(p) => Ok(Value::String(PhpString::from_string(
-            p.to_string_lossy().to_string(),
-        ))),
-        Err(_) => Ok(Value::False),
+/// A realpath cache entry (realpath_cache_bucket).
+struct RealpathEntry {
+    path: Vec<u8>,
+    realpath: Vec<u8>,
+    is_dir: bool,
+    expires: i64,
+}
+
+thread_local! {
+    /// The realpath cache (zend_virtual_cwd.c): resolved paths are reused
+    /// until they expire or clearstatcache(true) drops them.
+    static REALPATH_CACHE: RefCell<Vec<RealpathEntry>> = const { RefCell::new(Vec::new()) };
+    static REALPATH_SEEDED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn realpath_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn realpath_cache_ttl(vm: &Vm) -> i64 {
+    vm.constants
+        .get(b"realpath_cache_ttl".as_ref())
+        .map(|v| v.to_long())
+        .unwrap_or(120)
+}
+
+/// realpath_cache_find()
+fn realpath_cache_find(path: &[u8], now: i64) -> Option<(Vec<u8>, bool)> {
+    REALPATH_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        c.retain(|e| e.expires >= now);
+        c.iter()
+            .find(|e| e.path == path)
+            .map(|e| (e.realpath.clone(), e.is_dir))
+    })
+}
+
+/// realpath_cache_add()
+fn realpath_cache_add(path: &[u8], realpath: &[u8], is_dir: bool, expires: i64) {
+    REALPATH_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.iter().any(|e| e.path == path) {
+            return;
+        }
+        c.push(RealpathEntry {
+            path: path.to_vec(),
+            realpath: realpath.to_vec(),
+            is_dir,
+            expires,
+        });
+    })
+}
+
+/// Resolve an absolute path through the realpath cache, caching every
+/// leading component on the way like tsrm_realpath_r() does.
+fn realpath_cached(vm: &Vm, abs: &[u8]) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let now = realpath_now();
+    if let Some((rp, _)) = realpath_cache_find(abs, now) {
+        return Some(rp);
+    }
+    let expires = now + realpath_cache_ttl(vm);
+    // Lexically split into components; "." and ".." are resolved by the
+    // filesystem lookup of each prefix.
+    let mut prefix: Vec<u8> = Vec::new();
+    let mut result = None;
+    let comps: Vec<&[u8]> = abs
+        .split(|&c| c == b'/')
+        .filter(|c| !c.is_empty())
+        .collect();
+    if comps.is_empty() {
+        return Some(b"/".to_vec());
+    }
+    for comp in comps {
+        prefix.push(b'/');
+        prefix.extend_from_slice(comp);
+        if let Some((rp, _)) = realpath_cache_find(&prefix, now) {
+            result = Some(rp);
+            continue;
+        }
+        let p = std::path::Path::new(std::ffi::OsStr::from_bytes(&prefix));
+        match std::fs::canonicalize(p) {
+            Ok(rp) => {
+                let rp = rp.as_os_str().as_bytes().to_vec();
+                let is_dir = std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false);
+                realpath_cache_add(&prefix, &rp, is_dir, expires);
+                result = Some(rp);
+            }
+            Err(_) => return None,
+        }
+    }
+    result
+}
+
+/// The startup resolution of the main script (php_execute_script) fills
+/// the cache with its directories.
+fn realpath_cache_seed(vm: &Vm) {
+    if REALPATH_SEEDED.with(|s| s.replace(true)) {
+        return;
+    }
+    let script = vm.current_file.clone();
+    if script.starts_with('/') {
+        realpath_cached(vm, script.as_bytes());
     }
 }
 
-fn realpath_cache_size_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Long(0))
+fn realpath_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    let p = path.as_bytes();
+    realpath_cache_seed(vm);
+    let abs: Vec<u8> = if p.first() == Some(&b'/') {
+        p.to_vec()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) if std::fs::metadata(&cwd).is_ok() => {
+                use std::os::unix::ffi::OsStrExt;
+                let mut a = cwd.as_os_str().as_bytes().to_vec();
+                if !p.is_empty() {
+                    a.push(b'/');
+                    a.extend_from_slice(p);
+                }
+                a
+            }
+            _ => {
+                // No usable working directory (bug #77484): the path is
+                // resolved relative to nothing.
+                if p.is_empty() {
+                    return Ok(Value::False);
+                }
+                let norm: Vec<&[u8]> = p
+                    .split(|&c| c == b'/')
+                    .filter(|c| !c.is_empty() && *c != b".")
+                    .collect();
+                if norm.is_empty() {
+                    return Ok(Value::String(PhpString::from_bytes(b".")));
+                }
+                return Ok(Value::False);
+            }
+        }
+    };
+    match realpath_cached(vm, &abs) {
+        Some(rp) => Ok(Value::String(PhpString::from_vec(rp))),
+        None => Ok(Value::False),
+    }
 }
 
-fn realpath_cache_get_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn realpath_cache_size_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    realpath_cache_seed(vm);
+    let now = realpath_now();
+    let size: usize = REALPATH_CACHE.with(|c| {
+        c.borrow()
+            .iter()
+            .filter(|e| e.expires >= now)
+            .map(|e| {
+                // sizeof(realpath_cache_bucket) + path (+ realpath when it
+                // differs), NUL-terminated.
+                let mut sz = 56 + e.path.len() + 1;
+                if e.realpath != e.path {
+                    sz += e.realpath.len() + 1;
+                }
+                sz
+            })
+            .sum()
+    });
+    Ok(Value::Long(size as i64))
+}
+
+fn realpath_cache_get_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    realpath_cache_seed(vm);
+    let now = realpath_now();
+    let mut result = PhpArray::new();
+    REALPATH_CACHE.with(|c| {
+        for e in c.borrow().iter().filter(|e| e.expires >= now) {
+            // realpath_cache_key(): the path's hash.
+            let mut h: u64 = 0xcbf29ce484222325;
+            for &b in &e.path {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            let mut entry = PhpArray::new();
+            entry.set(
+                ArrayKey::String(PhpString::from_bytes(b"key")),
+                if h > i64::MAX as u64 {
+                    Value::Double(h as f64)
+                } else {
+                    Value::Long(h as i64)
+                },
+            );
+            entry.set(
+                ArrayKey::String(PhpString::from_bytes(b"is_dir")),
+                if e.is_dir { Value::True } else { Value::False },
+            );
+            entry.set(
+                ArrayKey::String(PhpString::from_bytes(b"realpath")),
+                Value::String(PhpString::from_vec(e.realpath.clone())),
+            );
+            entry.set(
+                ArrayKey::String(PhpString::from_bytes(b"expires")),
+                Value::Long(e.expires),
+            );
+            result.set(
+                ArrayKey::String(PhpString::from_vec(e.path.clone())),
+                Value::Array(Rc::new(RefCell::new(entry))),
+            );
+        }
+    });
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn getcwd_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -11634,6 +12249,8 @@ fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn rmdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // php_clear_stat_cache(1, ...): the realpath cache is dropped.
+    REALPATH_CACHE.with(|c| c.borrow_mut().clear());
     let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
     if path_v.as_bytes().contains(&0) {
         let msg = "rmdir(): Argument #1 ($directory) must not contain any null bytes".to_string();
@@ -13809,8 +14426,24 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn clearstatcache_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Null) // No-op - we don't cache stat results
+fn clearstatcache_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Stat results are not cached; the realpath cache is.
+    let clear_realpath = args.first().map(|v| v.is_truthy()).unwrap_or(false);
+    if clear_realpath {
+        let filename = args
+            .get(1)
+            .map(|v| v.to_php_string())
+            .unwrap_or_else(PhpString::empty);
+        REALPATH_CACHE.with(|c| {
+            let mut c = c.borrow_mut();
+            if filename.is_empty() {
+                c.clear();
+            } else {
+                c.retain(|e| e.path != filename.as_bytes());
+            }
+        });
+    }
+    Ok(Value::Null)
 }
 
 fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -13873,7 +14506,11 @@ fn array_walk_recursive_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
                 line: vm.current_line,
             });
         }
-        php_array_walk_arr(vm, &a, callback, extra_data.as_ref(), true, 0)?;
+        let holder = match arr_val {
+            Value::Reference(r) => Some(r),
+            _ => None,
+        };
+        php_array_walk_arr(vm, a, holder, callback, extra_data.as_ref(), true, 0)?;
     }
     Ok(Value::True)
 }
@@ -14056,6 +14693,8 @@ fn link_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn unlink_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // php_clear_stat_cache(1, ...): the realpath cache is dropped.
+    REALPATH_CACHE.with(|c| c.borrow_mut().clear());
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     if path.as_bytes().contains(&0) {
         let msg = "unlink(): Argument #1 ($filename) must not contain any null bytes".to_string();
@@ -14078,6 +14717,8 @@ fn unlink_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn rename_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // php_clear_stat_cache(1, ...): the realpath cache is dropped.
+    REALPATH_CACHE.with(|c| c.borrow_mut().clear());
     let from = args.first().unwrap_or(&Value::Null).to_php_string();
     let to = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let from_str = from.to_string_lossy();
@@ -14611,7 +15252,7 @@ fn array_find_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         let result = call_user_func(vm, &[callback.clone(), value.clone(), key_val])?;
         if result.is_truthy() {
-            return Ok(value.clone());
+            return Ok(value.deref());
         }
     }
     Ok(Value::Null)
