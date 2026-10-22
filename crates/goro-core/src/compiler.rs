@@ -18502,6 +18502,33 @@ impl Compiler {
                 result: OperandType::Unused,
                 line,
             });
+            // `$obj->{expr}(...)`: the method name is evaluated (after the
+            // object) and resolved at run time ("M:" + name).
+            if let CallableTarget::Method { method, .. } = target {
+                if !matches!(method.kind, ExprKind::Identifier(_)) {
+                    let name = self.compile_expr(method)?;
+                    let pre = self
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_bytes(b"M:")));
+                    let desc = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Concat,
+                        op1: OperandType::Const(pre),
+                        op2: name,
+                        result: OperandType::Tmp(desc),
+                        line,
+                    });
+                    let tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::MakeFcc,
+                        op1: OperandType::Tmp(arr_tmp),
+                        op2: OperandType::Tmp(desc),
+                        result: OperandType::Tmp(tmp),
+                        line,
+                    });
+                    return Ok(OperandType::Tmp(tmp));
+                }
+            }
             Ok(self.emit_make_fcc(OperandType::Tmp(arr_tmp), fcc_desc, line))
         } else {
             // No captures - just return the closure name

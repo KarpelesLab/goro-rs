@@ -1295,6 +1295,9 @@ pub struct Vm {
     pub(crate) pending_callable_deprecations: RefCell<Vec<String>>,
     /// Line of a direct call_user_func() call, for its callee's frame.
     pub ucf_call_line: Option<u32>,
+    /// The next user function call is made by Closure::__invoke()
+    /// (`[$closure, '__invoke']`): its errors name that method.
+    pub closure_invoke_call: bool,
     /// INI on-modify handlers registered by extensions (key -> handler).
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
@@ -2524,6 +2527,7 @@ impl Vm {
             gc_frames: Vec::new(),
             pending_callable_deprecations: RefCell::new(Vec::new()),
             ucf_call_line: None,
+            closure_invoke_call: false,
             ini_set_hooks: HashMap::new(),
             treat_data_hook: None,
             phpinfo_hooks: Vec::new(),
@@ -7735,6 +7739,7 @@ impl Vm {
         named_args: Vec<(Vec<u8>, Value)>,
         this_val: Option<Value>,
     ) -> Result<Value, VmError> {
+        let via_invoke = std::mem::take(&mut self.closure_invoke_call);
         let implicit_args = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
             1
         } else {
@@ -7804,7 +7809,9 @@ impl Vm {
                     }
                 } else if !matches!(call.args[i], Value::Reference(_)) {
                     let mut fname = String::from_utf8_lossy(op_array.effective_name()).to_string();
-                    if op_array.display_name.is_empty() && !fname.contains("::") {
+                    if via_invoke {
+                        fname = "Closure::__invoke".to_string();
+                    } else if op_array.display_name.is_empty() && !fname.contains("::") {
                         if let Some(sc) = &op_array.scope_class {
                             let cname = self
                                 .classes

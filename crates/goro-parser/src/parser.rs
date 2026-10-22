@@ -2114,6 +2114,53 @@ impl Parser {
         self.parse_simple_type()
     }
 
+    /// `C::$m(...)` with a method name computed at run time: the callable
+    /// `[C::class, $m]` (ZEND_CALLABLE_CONVERT of the dynamic static call),
+    /// or the call itself.
+    fn dyn_static_call(
+        &mut self,
+        class: Expr,
+        method: Expr,
+        args: Vec<Argument>,
+        span: Span,
+        is_fcc: bool,
+    ) -> Expr {
+        if !is_fcc {
+            return Expr {
+                span,
+                kind: ExprKind::DynamicStaticMethodCall {
+                    class: Box::new(class),
+                    method: Box::new(method),
+                    args,
+                },
+            };
+        }
+        let cspan = class.span;
+        let class = match class.kind {
+            ExprKind::Identifier(_) => Expr {
+                span: cspan,
+                kind: ExprKind::ClassConstAccess {
+                    class: Box::new(class),
+                    constant: b"class".to_vec(),
+                },
+            },
+            _ => class,
+        };
+        let elem = |value: Expr| ArrayElement {
+            key: None,
+            value,
+            unpack: false,
+            by_ref: false,
+        };
+        Expr {
+            span,
+            kind: ExprKind::FirstClassCallable(CallableTarget::Function(Box::new(Expr {
+                span,
+                kind: ExprKind::Array(vec![elem(class), elem(method)]),
+            }))),
+        }
+    }
+
     /// `C::$$v` / `C::${e}`: the static property named by `name_expr`, or,
     /// followed by `(`, a call of the method named by that variable's value
     /// (member_name: simple_variable).
@@ -2134,20 +2181,16 @@ impl Parser {
         }
         self.advance(); // (
         let args = self.parse_arguments()?;
+        let is_fcc = self.first_class_callable_flag;
         let end_span = self.span();
         self.expect(&TokenKind::CloseParen)?;
         let span = name_expr.span;
-        Ok(Expr {
-            span: class.span.merge(end_span),
-            kind: ExprKind::DynamicStaticMethodCall {
-                class: Box::new(class),
-                method: Box::new(Expr {
-                    kind: ExprKind::DynamicVariable(Box::new(name_expr)),
-                    span,
-                }),
-                args,
-            },
-        })
+        let full = class.span.merge(end_span);
+        let method = Expr {
+            kind: ExprKind::DynamicVariable(Box::new(name_expr)),
+            span,
+        };
+        Ok(self.dyn_static_call(class, method, args, full, is_fcc))
     }
 
     /// A class_name in a trait use / adaptation (`static` is reserved).
@@ -5491,23 +5534,16 @@ impl Parser {
                                 // Dynamic method call: resolve variable to get method name
                                 self.advance(); // (
                                 let args = self.parse_arguments()?;
+                                let is_fcc = self.first_class_callable_flag;
                                 let end_span = self.span();
                                 self.expect(&TokenKind::CloseParen)?;
-                                // Create a StaticMethodCall with the variable name as a dynamic expression
-                                // We need to compile this as InitDynamicStaticCall
-                                // For now, treat it as a function call: get the variable value,
-                                // then call ClassName::$method_value()
-                                expr = Expr {
-                                    span: expr.span.merge(end_span),
-                                    kind: ExprKind::DynamicStaticMethodCall {
-                                        class: Box::new(expr),
-                                        method: Box::new(Expr {
-                                            kind: ExprKind::Variable(name),
-                                            span: member_span,
-                                        }),
-                                        args,
-                                    },
+                                // Foo::$method(): the method named by the variable's value
+                                let full = expr.span.merge(end_span);
+                                let method = Expr {
+                                    kind: ExprKind::Variable(name),
+                                    span: member_span,
                                 };
+                                expr = self.dyn_static_call(expr, method, args, full, is_fcc);
                             } else {
                                 expr = Expr {
                                     span: expr.span.merge(member_span),
@@ -5620,16 +5656,11 @@ impl Parser {
                                 // Foo::{'method'}(...) is a static call with a dynamic name
                                 self.advance();
                                 let args = self.parse_arguments()?;
+                                let is_fcc = self.first_class_callable_flag;
                                 let end_span = self.span();
                                 self.expect(&TokenKind::CloseParen)?;
-                                expr = Expr {
-                                    span: expr.span.merge(end_span),
-                                    kind: ExprKind::DynamicStaticMethodCall {
-                                        class: Box::new(expr),
-                                        method: Box::new(inner),
-                                        args,
-                                    },
-                                };
+                                let full = expr.span.merge(end_span);
+                                expr = self.dyn_static_call(expr, inner, args, full, is_fcc);
                                 continue;
                             }
                             expr = Expr {

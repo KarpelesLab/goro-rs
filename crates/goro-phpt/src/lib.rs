@@ -2399,8 +2399,8 @@ fn match_expectf_at(pb: &[u8], mut pi: usize, ab: &[u8], mut ai: usize) -> bool 
                     while ai < ab.len() && ab[ai].is_ascii_digit() {
                         ai += 1;
                     }
-                    // \d+ backtracks: "%d%d" matches "12"
-                    if pb.get(pi) == Some(&b'%') && pb.get(pi + 1) == Some(&b'd') {
+                    // \d+ backtracks: "%d%d" matches "12", "%d7" matches "17"
+                    if pi < pb.len() {
                         for try_ai in (start + 1..=ai).rev() {
                             if match_expectf_at(pb, pi, ab, try_ai) {
                                 return true;

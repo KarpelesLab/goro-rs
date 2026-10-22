@@ -663,7 +663,13 @@ impl Vm {
         }
         if let Some(m) = desc.strip_prefix(b"m:") {
             let obj = caps.first().map(|v| v.deref()).unwrap_or(Value::Null);
-            return self.fcc_method(obj, m, wrapper, scope);
+            return self.fcc_method(obj, m, wrapper, scope, false);
+        }
+        // A method name computed at run time: the compiled forwarding
+        // closure does not know it, a magic __call() gets a trampoline.
+        if let Some(m) = desc.strip_prefix(b"M:") {
+            let obj = caps.first().map(|v| v.deref()).unwrap_or(Value::Null);
+            return self.fcc_method(obj, m, wrapper, scope, true);
         }
         // "S:" is a static method callable in a constant expression.
         let const_expr = desc.starts_with(b"S:");
@@ -750,7 +756,7 @@ impl Vm {
                 };
                 match (t, m) {
                     (Some(o @ Value::Object(_)), Some(Value::String(m))) => {
-                        self.fcc_method(o, m.as_bytes(), wrapper, scope)
+                        self.fcc_method(o, m.as_bytes(), wrapper, scope, false)
                     }
                     (Some(Value::String(c)), Some(Value::String(m))) => {
                         self.fcc_static(c.as_bytes(), m.as_bytes(), None, wrapper, scope)
@@ -769,7 +775,7 @@ impl Vm {
                     .map(|c| c.get_method(b"__invoke").is_some())
                     .unwrap_or(false)
                 {
-                    self.fcc_method(callable.clone(), b"__invoke", wrapper, scope)
+                    self.fcc_method(callable.clone(), b"__invoke", wrapper, scope, false)
                 } else {
                     Err((
                         b"Error",
@@ -796,6 +802,7 @@ impl Vm {
         m: &[u8],
         wrapper: Value,
         scope: Option<Vec<u8>>,
+        dynamic: bool,
     ) -> FccResult {
         let o = match &obj {
             Value::Object(o) => o.clone(),
@@ -843,6 +850,14 @@ impl Vm {
             )
         });
         let has_call = ce.get_method(b"__call").is_some();
+        let canon = ce.name.clone();
+        let magic = |vm: &mut Vm| -> FccResult {
+            if dynamic {
+                Ok(vm.magic_call_closure(&canon, m, Some(obj.clone())))
+            } else {
+                Ok(vm.make_closure_object(wrapper.clone()))
+            }
+        };
         match method {
             Some((is_static, vis, decl, mname)) => {
                 if let Some(msg) = self.check_visibility(
@@ -854,7 +869,7 @@ impl Vm {
                     scope.as_deref(),
                 ) {
                     if has_call {
-                        return Ok(self.make_closure_object(wrapper));
+                        return magic(self);
                     }
                     return Err((b"Error", msg));
                 }
@@ -875,7 +890,7 @@ impl Vm {
                 }
                 Ok(self.make_closure_object(inner))
             }
-            None if has_call => Ok(self.make_closure_object(wrapper)),
+            None if has_call => magic(self),
             None => Err((
                 b"Error",
                 format!(

@@ -1808,6 +1808,7 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
                     .eq_ignore_ascii_case(b"__invoke")
             {
                 vm.ucf_call_line = None;
+                vm.closure_invoke_call = true;
             }
         }
     }
