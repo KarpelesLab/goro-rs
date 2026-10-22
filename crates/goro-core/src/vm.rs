@@ -615,6 +615,9 @@ pub struct Vm {
     /// CLI: unbuffered output reaches stdout at flush points (see
     /// `flush_cli_output`) instead of only at the end of the request.
     pub cli_direct_output: bool,
+    /// CLI: unbuffered output is written right away (like sapi_cli's
+    /// ub_write), for processes sharing stdout (pcntl_fork()).
+    pub cli_write_through: bool,
     /// Output buffer stack for ob_start/ob_end_clean/ob_get_contents
     pub ob_stack: Vec<Vec<u8>>,
     /// Output handler metadata, index-aligned with `ob_stack` (see ob.rs)
@@ -1114,6 +1117,7 @@ impl Vm {
         let mut vm = Self {
             output: Vec::new(),
             cli_direct_output: false,
+            cli_write_through: false,
             ob_stack: Vec::new(),
             ob_handlers: Vec::new(),
             ob_running: None,

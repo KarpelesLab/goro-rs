@@ -170,6 +170,9 @@ impl Vm {
             if self.output.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
                 self.output.extend_from_slice(data);
             }
+            if self.cli_write_through {
+                self.flush_cli_output();
+            }
             return;
         }
         self.ob_sync();

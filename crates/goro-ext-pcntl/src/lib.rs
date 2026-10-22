@@ -499,6 +499,9 @@ fn pcntl_fork(vm: &mut Vm, _args: &[Value]) -> R {
             _ => format!("Error {}", e),
         };
         warn(vm, "pcntl_fork", &msg);
+    } else {
+        // Parent and child now share stdout: write as the CLI does.
+        vm.cli_write_through = true;
     }
     Ok(Value::Long(id as i64))
 }
