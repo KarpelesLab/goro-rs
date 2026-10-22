@@ -715,6 +715,19 @@ pub(crate) fn run_snippet_in_scope(
     vars: &[(&str, Value)],
     scope_lower: &[u8],
 ) -> Option<Value> {
+    run_snippet_in_scope_ex(vm, src, vars, scope_lower, false)
+}
+
+/// `run_snippet_in_scope`; with `internal_call`, the calls the snippet makes
+/// are made from internal code ("[internal function]" frames, as
+/// ReflectionMethod::invoke()'s call of the method).
+fn run_snippet_in_scope_ex(
+    vm: &mut Vm,
+    src: &str,
+    vars: &[(&str, Value)],
+    scope_lower: &[u8],
+    internal_call: bool,
+) -> Option<Value> {
     let source = format!("<?php {}", src).into_bytes();
     let mut lexer = goro_parser::Lexer::new(&source);
     let tokens = lexer.tokenize();
@@ -725,7 +738,11 @@ pub(crate) fn run_snippet_in_scope(
     // Errors raised by the snippet are reported at the caller's line.
     let line = vm.current_line;
     for op in op_array.ops.iter_mut() {
-        op.line = line;
+        op.line = if internal_call && op.opcode == crate::opcode::OpCode::DoFCall {
+            0
+        } else {
+            line
+        };
     }
     let mut cvs = vec![Value::Undef; op_array.cv_names.len()];
     for (name, val) in vars {
@@ -6096,7 +6113,7 @@ fn invoke_user_method(
     } else {
         "return $__o->$__m(...$__a);".to_string()
     };
-    let r = run_snippet_in_scope(
+    let r = run_snippet_in_scope_ex(
         vm,
         &src,
         &[
@@ -6105,6 +6122,7 @@ fn invoke_user_method(
             ("__a", args),
         ],
         &decl,
+        true,
     );
     Some(r.unwrap_or(Value::Null))
 }

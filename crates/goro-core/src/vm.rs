@@ -4733,6 +4733,41 @@ impl Vm {
         &f.3
     }
 
+    /// Whether named argument `name` of a call to `call_name` (a pending
+    /// call's name) binds a by-reference parameter.
+    pub(crate) fn named_arg_by_ref(&self, call_name: &[u8], name: &[u8]) -> bool {
+        let lower = call_name.to_ascii_lowercase();
+        let user = self.user_functions.get(&lower).cloned().or_else(|| {
+            let sep = lower.windows(2).position(|w| w == b"::")?;
+            self.classes
+                .get(&lower[..sep])
+                .and_then(|c| c.get_method(&lower[sep + 2..]))
+                .map(|m| m.op_array.clone())
+        });
+        if let Some(op) = user {
+            let implicit = crate::internal_frames::implicit_args(&op);
+            let param = op
+                .by_ref_params
+                .iter()
+                .enumerate()
+                .find(|(i, _)| {
+                    op.cv_names
+                        .get(implicit + i)
+                        .is_some_and(|n| n.as_slice() == name)
+                })
+                .map(|(_, by_ref)| *by_ref);
+            // (an extra named argument goes to the variadic parameter)
+            return param.unwrap_or_else(|| {
+                op.variadic_param.is_some() && op.by_ref_params.last().copied().unwrap_or(false)
+            });
+        }
+        crate::arginfo::lookup(&lower).is_some_and(|info| {
+            info.params
+                .iter()
+                .any(|p| p.by_ref == 1 && p.name.as_bytes() == name)
+        })
+    }
+
     /// A closure's name in error messages: qualified by its scope
     /// (zend_verify_type_error_common, zend_missing_arg_error: `Foo::{closure:...}`).
     pub(crate) fn closure_scoped_display(&self, op: &OpArray) -> Option<String> {
@@ -6450,18 +6485,19 @@ impl Vm {
                     if !fn_cvs.is_empty() {
                         fn_cvs[0] = obj_val.clone();
                     }
-                    // The destructor frame is called from the releasing statement.
+                    // The destructor frame is called from the releasing statement,
+                    // or from internal code when a builtin releases the object.
                     let frame = format!(
                         "{}->__destruct",
                         crate::value::display_class_name(&class_name_orig)
                     );
-                    self.call_stack.push((
-                        frame,
-                        self.current_file.clone(),
-                        self.current_line,
-                        Vec::new(),
-                        true,
-                    ));
+                    self.sync_builtin_frames();
+                    let (file, fline) = if self.in_builtin_frame() {
+                        (String::new(), 0)
+                    } else {
+                        (self.current_file.clone(), self.current_line)
+                    };
+                    self.call_stack.push((frame, file, fline, Vec::new(), true));
                     self.called_class_stack.push(class_name_orig);
                     self.class_scope_stack.push(if decl.is_empty() {
                         class_lower.clone()
@@ -21166,25 +21202,19 @@ impl Vm {
                 OpCode::SendNamedVal => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name: Vec<u8> = name_val.to_php_string().as_bytes().to_vec();
-                    // Known builtin functions that pass a specific named param
-                    // by reference. Currently: Uri\WhatWg\Url::parse and
-                    // Uri\Rfc3986\Uri::parse have &$errors.
-                    let callee_named_byref = self
-                        .pending_calls
-                        .last()
-                        .map(|c| {
-                            let fn_lower: Vec<u8> = c
-                                .name
-                                .as_bytes()
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            let is_parse = fn_lower == b"uri\\whatwg\\url::parse"
-                                || fn_lower == b"uri\\rfc3986\\uri::parse";
-                            is_parse && name.eq_ignore_ascii_case(b"errors")
-                        })
-                        .unwrap_or(false);
-                    let val = if callee_named_byref {
+                    // A variable given to a by-reference parameter is sent by
+                    // reference (ZEND_SEND_VAR_EX with a named argument).
+                    let callee_named_byref = matches!(op.op1, OperandType::Cv(_))
+                        && self
+                            .pending_calls
+                            .last()
+                            .is_some_and(|c| self.named_arg_by_ref(c.name.as_bytes(), &name));
+                    let val = if let (OperandType::Const(_), OperandType::Tmp(t)) =
+                        (&op.result, &op.op1)
+                    {
+                        // A reference fetched for a by-reference parameter
+                        tmps.get(*t as usize).cloned().unwrap_or(Value::Null)
+                    } else if callee_named_byref {
                         if let OperandType::Cv(idx) = &op.op1 {
                             let i = *idx as usize;
                             if let Some(Value::Reference(r)) = cvs.get(i) {
@@ -39778,22 +39808,33 @@ impl Vm {
                 },
 
                 OpCode::JmpIfArgByRef => match outlined(|| -> Result<Flow, VmError> {
-                    let by_ref = self
-                        .pending_calls
-                        .last()
-                        .and_then(|call| {
-                            let idx = call.args.len();
-                            self.user_fn_lookup(call.name.as_bytes()).map(|f| {
-                                match f.by_ref_params.get(idx) {
-                                    Some(b) => *b,
-                                    None => {
-                                        f.variadic_param.is_some()
-                                            && f.by_ref_params.last().copied().unwrap_or(false)
-                                    }
-                                }
-                            })
+                    // op2 = Const(name): a named argument
+                    let named = match &op.op2 {
+                        OperandType::Const(i) => op_array.literals.get(*i as usize).cloned(),
+                        _ => None,
+                    };
+                    let by_ref = if let Some(name) = named {
+                        let name = name.to_php_string();
+                        self.pending_calls.last().is_some_and(|c| {
+                            self.named_arg_by_ref(c.name.as_bytes(), name.as_bytes())
                         })
-                        .unwrap_or(false);
+                    } else {
+                        self.pending_calls
+                            .last()
+                            .and_then(|call| {
+                                let idx = call.args.len();
+                                self.user_fn_lookup(call.name.as_bytes()).map(|f| {
+                                    match f.by_ref_params.get(idx) {
+                                        Some(b) => *b,
+                                        None => {
+                                            f.variadic_param.is_some()
+                                                && f.by_ref_params.last().copied().unwrap_or(false)
+                                        }
+                                    }
+                                })
+                            })
+                            .unwrap_or(false)
+                    };
                     if by_ref {
                         if let OperandType::JmpTarget(t) = op.op1 {
                             ip = t as usize;

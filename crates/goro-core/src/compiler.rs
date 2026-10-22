@@ -1264,10 +1264,91 @@ impl Compiler {
                 });
             } else if let Some(name) = &arg.name {
                 has_named = true;
-                let val = self.compile_expr(&arg.value)?;
                 let name_idx = self
                     .op_array
                     .add_literal(Value::String(PhpString::from_vec(name.clone())));
+                // An array element or property given to a by-reference
+                // parameter is fetched for writing (decided at runtime, as
+                // ZEND_FETCH_DIM_FUNC_ARG does).
+                let dim_or_prop = matches!(
+                    &arg.value.kind,
+                    ExprKind::ArrayAccess { index: Some(_), .. }
+                        | ExprKind::PropertyAccess {
+                            nullsafe: false,
+                            ..
+                        }
+                );
+                let var_base = {
+                    let mut base = &arg.value;
+                    while let ExprKind::ArrayAccess { array, .. } = &base.kind {
+                        base = array;
+                    }
+                    matches!(
+                        base.kind,
+                        ExprKind::Variable(_) | ExprKind::PropertyAccess { .. }
+                    )
+                };
+                if dim_or_prop && var_base {
+                    let jmp_ref = self.op_array.emit(Op {
+                        opcode: OpCode::JmpIfArgByRef,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Const(name_idx),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let v = self.compile_expr(&arg.value)?;
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SendNamedVal,
+                        op1: v,
+                        op2: OperandType::Const(name_idx),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let jmp_end = self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(0),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let ref_start = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp_ref, ref_start);
+                    let ref_tmp = match &arg.value.kind {
+                        ExprKind::ArrayAccess {
+                            array,
+                            index: Some(idx_expr),
+                        } => {
+                            let arr_op = self.compile_dim_write_base(array)?;
+                            let idx_op = self.compile_expr(idx_expr)?;
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::ArrayGetRef,
+                                op1: arr_op,
+                                op2: idx_op,
+                                result: OperandType::Tmp(t),
+                                line,
+                            });
+                            t
+                        }
+                        ExprKind::PropertyAccess {
+                            object, property, ..
+                        } => self.compile_property_ref(object, property, line)?,
+                        _ => unreachable!(),
+                    };
+                    // (result = Const: the reference is sent as is)
+                    let keep_ref = self.op_array.add_literal(Value::True);
+                    self.op_array.emit(Op {
+                        opcode: OpCode::SendNamedVal,
+                        op1: OperandType::Tmp(ref_tmp),
+                        op2: OperandType::Const(name_idx),
+                        result: OperandType::Const(keep_ref),
+                        line,
+                    });
+                    let end = self.op_array.current_offset();
+                    self.op_array.patch_jump(jmp_end, end);
+                    continue;
+                }
+                let val = self.compile_expr(&arg.value)?;
                 self.op_array.emit(Op {
                     opcode: OpCode::SendNamedVal,
                     op1: val,
