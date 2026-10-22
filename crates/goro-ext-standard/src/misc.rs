@@ -2000,7 +2000,11 @@ pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErr
         // Try "Class::method" syntax
         if let Some(pos) = func_lower.windows(2).rposition(|w| w == b"::") {
             if pos + 1 < func_lower.len() && func_lower[pos + 1] == b':' {
-                let class_part_lower = func_lower[..pos].to_vec();
+                // A fully qualified "\Foo::bar" names class Foo.
+                let class_part_lower = func_lower[..pos]
+                    .strip_prefix(b"\\")
+                    .unwrap_or(&func_lower[..pos])
+                    .to_vec();
                 let method_lower = &func_lower[pos + 2..];
 
                 // Check for forwarding calls (parent::, self::)

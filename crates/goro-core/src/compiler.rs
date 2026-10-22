@@ -2073,6 +2073,91 @@ impl Compiler {
                     line,
                 });
             }
+            // zend_compile_namespace() / zend_verify_namespace() placement rules.
+            let mut has_bracketed = false;
+            let mut current_ns = false;
+            let mut in_ns = false;
+            let mut only_declares = true;
+            for st in &program.statements {
+                let StmtKind::NamespaceDecl { body, .. } = &st.kind else {
+                    // The parser appends anonymous class declarations.
+                    if matches!(&st.kind, StmtKind::ClassDecl { name, .. } if name.starts_with(b"__anonymous_class_"))
+                    {
+                        continue;
+                    }
+                    if has_bracketed && !in_ns && !matches!(st.kind, StmtKind::Nop) {
+                        return Err(CompileError {
+                            message: "No code may exist outside of namespace {}".into(),
+                            line: st.span.line,
+                        });
+                    }
+                    if is_declare_directive(st).is_none() && !matches!(st.kind, StmtKind::Nop) {
+                        only_declares = false;
+                    }
+                    continue;
+                };
+                let check = |with_bracket: bool,
+                             has_bracketed: bool,
+                             current_ns: bool,
+                             in_ns: bool,
+                             first_ok: bool|
+                 -> Option<&'static str> {
+                    if !has_bracketed {
+                        if current_ns && with_bracket {
+                            return Some(
+                                "Cannot mix bracketed namespace declarations with unbracketed namespace declarations",
+                            );
+                        }
+                    } else if !with_bracket {
+                        return Some(
+                            "Cannot mix bracketed namespace declarations with unbracketed namespace declarations",
+                        );
+                    } else if current_ns || in_ns {
+                        return Some("Namespace declarations cannot be nested");
+                    }
+                    let is_first =
+                        (!with_bracket && !current_ns) || (with_bracket && !has_bracketed);
+                    if is_first && !first_ok {
+                        return Some(
+                            "Namespace declaration statement has to be the very first statement or after any declare call in the script",
+                        );
+                    }
+                    None
+                };
+                let with_bracket = body.is_some();
+                if let Some(msg) = check(
+                    with_bracket,
+                    has_bracketed,
+                    current_ns,
+                    in_ns,
+                    only_declares,
+                ) {
+                    return Err(CompileError {
+                        message: msg.into(),
+                        line: st.span.line,
+                    });
+                }
+                only_declares = false;
+                in_ns = true;
+                current_ns = !with_bracket
+                    || matches!(&st.kind, StmtKind::NamespaceDecl { name: Some(_), .. });
+                if let Some(b) = body {
+                    has_bracketed = true;
+                    for inner in b {
+                        if let StmtKind::NamespaceDecl { body: ib, .. } = &inner.kind {
+                            if let Some(msg) = check(ib.is_some(), true, current_ns, true, false) {
+                                return Err(CompileError {
+                                    message: msg.into(),
+                                    line: inner.span.line,
+                                });
+                            }
+                        }
+                    }
+                    // zend_end_namespace()
+                    in_ns = false;
+                    current_ns = false;
+                }
+            }
         }
         // First pass: process namespace/use declarations and compile function/class declarations
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
@@ -13149,7 +13234,19 @@ impl Compiler {
                 // A bare identifier used as an expression could be a constant
                 // Check for well-known constants
                 let lower: Vec<u8> = name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                let val = match lower.as_slice() {
+                // zend_try_ct_eval_const(): inside a namespace (or with a
+                // `use const` alias) an unqualified name may name another
+                // constant, so only magic and special constants fold.
+                let special = matches!(lower.as_slice(), b"true" | b"false" | b"null")
+                    || (lower.starts_with(b"__") && lower.ends_with(b"__"));
+                let fold_key: &[u8] = if !special
+                    && (!self.current_namespace.is_empty() || self.use_const_map.contains_key(name))
+                {
+                    b""
+                } else {
+                    &lower
+                };
+                let val = match fold_key {
                     // Magic constants
                     b"__line__" => Value::Long(expr.span.line as i64),
                     b"__file__" => {
@@ -18303,6 +18400,17 @@ fn type_hint_to_param_type_with_ns(
                     // Check for fully qualified (starts with \)
                     if name.starts_with(b"\\") {
                         return ParamType::Simple(name[1..].to_vec());
+                    }
+                    // namespace\Foo is relative to the current namespace.
+                    if lower.starts_with(b"namespace\\") {
+                        let rest = &name[b"namespace\\".len()..];
+                        if namespace.is_empty() {
+                            return ParamType::Simple(rest.to_vec());
+                        }
+                        let mut result = namespace.to_vec();
+                        result.push(b'\\');
+                        result.extend_from_slice(rest);
+                        return ParamType::Simple(result);
                     }
                     // Check use map
                     if let Some(pos) = name.iter().position(|&b| b == b'\\') {

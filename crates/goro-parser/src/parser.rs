@@ -928,6 +928,15 @@ impl Parser {
                 }
             }
             TokenKind::Const => self.parse_const_with_attrs(Vec::new()),
+            // `namespace\foo();`: a namespace-relative name in an expression.
+            TokenKind::Namespace if matches!(self.peek_at(1), TokenKind::Backslash) => {
+                let expr = self.parse_expression()?;
+                self.expect_semicolon()?;
+                Ok(Statement {
+                    kind: StmtKind::Expression(expr),
+                    span,
+                })
+            }
             TokenKind::Namespace => {
                 self.advance();
                 // zend_compile_namespace(): `namespace namespace;` parses (the
@@ -986,6 +995,29 @@ impl Parser {
                             break;
                         }
                     }
+                }
+                // `namespace\...` lexes as a namespace-relative name.
+                if name_parts
+                    .first()
+                    .is_some_and(|p| p.eq_ignore_ascii_case(b"namespace"))
+                {
+                    let joined = name_parts.join(&b'\\');
+                    if name_parts.len() > 1 {
+                        return Err(ParseError {
+                            message: format!(
+                                "syntax error, unexpected namespace-relative name \"{}\", expecting \"{{\"",
+                                String::from_utf8_lossy(&joined)
+                            ),
+                            span,
+                        });
+                    }
+                    return Err(ParseError {
+                        message: format!(
+                            "Cannot use '{}' as namespace name",
+                            String::from_utf8_lossy(&joined)
+                        ),
+                        span,
+                    });
                 }
                 let body = if matches!(self.peek(), TokenKind::OpenBrace) {
                     let stmts = self.parse_block()?;
@@ -2212,6 +2244,21 @@ impl Parser {
             return Ok(TypeHint::Simple(name));
         }
         match self.peek().clone() {
+            // A namespace-relative name: namespace\Foo
+            TokenKind::Namespace if matches!(self.peek_at(1), TokenKind::Backslash) => {
+                self.advance();
+                let mut full_name = b"namespace".to_vec();
+                while self.eat(&TokenKind::Backslash) {
+                    if let TokenKind::Identifier(part) = self.peek().clone() {
+                        self.advance();
+                        full_name.push(b'\\');
+                        full_name.extend_from_slice(&part);
+                    } else {
+                        break;
+                    }
+                }
+                Ok(TypeHint::Simple(full_name))
+            }
             TokenKind::Identifier(name) => {
                 self.advance();
                 // Check for qualified name continuation
