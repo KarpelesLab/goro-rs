@@ -47,7 +47,12 @@ pub(crate) fn register(vm: &mut Vm) {
         .cloned()
         .collect();
     for k in decls {
-        if let Some(op) = vm.user_functions.remove(&k) {
+        if let Some(mut op) = vm.user_functions.remove(&k) {
+            // Named like the function (not its declaration's namespace).
+            let o = Rc::make_mut(&mut op);
+            if o.name.len() >= DECLS.len() {
+                o.name.drain(..DECLS.len());
+            }
             vm.internal_function_decls
                 .insert(k[DECLS.len()..].to_vec(), op);
         }

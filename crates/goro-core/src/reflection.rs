@@ -10626,7 +10626,7 @@ pub fn reflection_named_type_method(
 
 /// ReflectionUnionType / ReflectionIntersectionType method dispatch
 pub fn reflection_composite_type_method(
-    _vm: &mut Vm,
+    vm: &mut Vm,
     method: &[u8],
     obj: &Rc<RefCell<PhpObject>>,
 ) -> Option<Value> {
@@ -10636,8 +10636,16 @@ pub fn reflection_composite_type_method(
 
     match method {
         b"gettypes" => {
-            let ob = obj.borrow();
-            Some(ob.get_property(b"__types"))
+            // New objects on each call (zend_reflection_type_factory()).
+            let types = obj.borrow().get_property(b"__types");
+            let mut out = PhpArray::new();
+            if let Value::Array(a) = types {
+                let members: Vec<Value> = a.borrow().values().cloned().collect();
+                for m in members {
+                    out.push(attach_type_handle(vm, &m));
+                }
+            }
+            Some(Value::Array(Rc::new(RefCell::new(out))))
         }
         b"allowsnull" => Some(if matches!(allows_null, Value::True) {
             Value::True
@@ -12104,6 +12112,8 @@ pub fn create_reflection_type_scoped(
                         &ParamType::Simple(b"null".to_vec()),
                         scope_class,
                     );
+                    detach_type_handle(&inner_type);
+                    detach_type_handle(&null_type);
                     let mut types = PhpArray::new();
                     types.push(inner_type);
                     types.push(null_type);
@@ -12208,6 +12218,7 @@ pub fn create_reflection_type_scoped(
                 if param_type_allows_null(t) {
                     allows_null = true;
                 }
+                detach_type_handle(&rt);
                 type_arr.push(rt);
             }
             let obj_id = vm.alloc_object_id();
@@ -12230,6 +12241,7 @@ pub fn create_reflection_type_scoped(
             let mut type_arr = PhpArray::new();
             for t in types {
                 let rt = create_reflection_type_scoped(vm, t, scope_class);
+                detach_type_handle(&rt);
                 type_arr.push(rt);
             }
             let obj_id = vm.alloc_object_id();
@@ -12242,6 +12254,44 @@ pub fn create_reflection_type_scoped(
             Value::Object(Rc::new(RefCell::new(obj)))
         }
     }
+}
+
+/// The member types of a union or intersection type are held without an
+/// object handle: getTypes() makes objects of them (attach_type_handle()).
+fn detach_type_handle(v: &Value) {
+    if let Value::Object(o) = v {
+        let id = std::mem::replace(&mut o.borrow_mut().object_id, 0);
+        if id != 0 {
+            crate::object::FREED_OBJECT_IDS.with(|ids| ids.borrow_mut().push(id));
+        }
+    }
+}
+
+/// A new ReflectionType object for member type `v` (see detach_type_handle()).
+fn attach_type_handle(vm: &mut Vm, v: &Value) -> Value {
+    let Value::Object(o) = v else {
+        return v.clone();
+    };
+    let (class, props) = {
+        let ob = o.borrow();
+        let props: Vec<(Vec<u8>, Value)> = [
+            b"__type_name".as_slice(),
+            b"__allows_null",
+            b"__is_builtin",
+            b"__types",
+        ]
+        .iter()
+        .filter(|k| ob.has_property(k))
+        .map(|k| (k.to_vec(), ob.get_property(k)))
+        .collect();
+        (ob.class_name.clone(), props)
+    };
+    let id = vm.alloc_object_id();
+    let mut obj = PhpObject::new(class, id);
+    for (k, v) in props {
+        obj.set_property(k, v);
+    }
+    Value::Object(Rc::new(RefCell::new(obj)))
 }
 
 /// Helper to check if a class has a constant (walks parent chain)
