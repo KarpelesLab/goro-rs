@@ -642,6 +642,9 @@ pub(crate) struct CallTarget {
     /// function declared since then (while the arguments were evaluated)
     /// makes the lookup run again.
     pub(crate) fn_gen: usize,
+    /// The call is made by Closure::__invoke() (`$closure->__invoke()`):
+    /// its argument errors have no "called in" (the caller is internal).
+    pub(crate) via_invoke: bool,
 }
 
 /// What a forwarding call site (`self::m()`, `static::m()`,
@@ -691,6 +694,7 @@ impl CallTarget {
         forward: None,
         forward_this: false,
         fn_gen: 0,
+        via_invoke: false,
     };
 }
 
@@ -1302,6 +1306,8 @@ pub struct Vm {
     /// The next user function call is made by Closure::__invoke()
     /// (`[$closure, '__invoke']`): its errors name that method.
     pub closure_invoke_call: bool,
+    /// The call being type-checked is made by Closure::__invoke().
+    pub(crate) pending_call_via_invoke: bool,
     /// INI on-modify handlers registered by extensions (key -> handler).
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
@@ -2532,6 +2538,7 @@ impl Vm {
             pending_callable_deprecations: RefCell::new(Vec::new()),
             ucf_call_line: None,
             closure_invoke_call: false,
+            pending_call_via_invoke: false,
             ini_set_hooks: HashMap::new(),
             treat_data_hook: None,
             phpinfo_hooks: Vec::new(),
@@ -6589,6 +6596,7 @@ impl Vm {
         line: u32,
         caller_strict: bool,
     ) -> Option<String> {
+        let called_in = !self.pending_call_via_invoke;
         for (i, arg) in args.iter().enumerate() {
             // Extra arguments are checked against the variadic parameter.
             let (ti, variadic) = match user_fn.variadic_param {
@@ -6620,16 +6628,16 @@ impl Vm {
                     // anonymous class's method name ends at its NUL byte.
                     let func_display_name =
                         func_display_name.split('\0').next().unwrap_or_default();
+                    let msg = format!(
+                        "{}(): Argument #{}{} must be of type {}, {} given",
+                        func_display_name, arg_num, param_name, expected, given,
+                    );
+                    if !called_in {
+                        return Some(msg);
+                    }
                     return Some(format!(
-                        "{}(): Argument #{}{} \
-                         must be of type {}, {} given, called in {} on line {}",
-                        func_display_name,
-                        arg_num,
-                        param_name,
-                        expected,
-                        given,
-                        self.current_file,
-                        line
+                        "{}, called in {} on line {}",
+                        msg, self.current_file, line
                     ));
                 }
             }
@@ -8668,18 +8676,30 @@ impl Vm {
                 PhpString::from_bytes(b"__closure_call"),
                 vec![closure.clone()],
             ),
-            b"__invoke" => match closure.unwrap_closure() {
-                Value::Array(arr) => {
-                    let mut values: Vec<Value> = arr.borrow().values().cloned().collect();
-                    if values.is_empty() {
-                        (PhpString::empty(), Vec::new())
-                    } else {
-                        let name = values.remove(0).to_php_string();
-                        (name, values)
+            b"__invoke" => {
+                let (name, args) = match closure.unwrap_closure() {
+                    Value::Array(arr) => {
+                        let mut values: Vec<Value> = arr.borrow().values().cloned().collect();
+                        if values.is_empty() {
+                            (PhpString::empty(), Vec::new())
+                        } else {
+                            let name = values.remove(0).to_php_string();
+                            (name, values)
+                        }
                     }
-                }
-                other => (other.to_php_string(), Vec::new()),
-            },
+                    other => (other.to_php_string(), Vec::new()),
+                };
+                self.pending_calls.push(PendingCall {
+                    name,
+                    args,
+                    named_args: Vec::new(),
+                    target: CallTarget {
+                        via_invoke: true,
+                        ..CallTarget::NONE
+                    },
+                });
+                return Ok(());
+            }
             // Static methods called through an instance.
             b"bind" => (PhpString::from_bytes(b"Closure::bind"), Vec::new()),
             b"fromcallable" => (PhpString::from_bytes(b"Closure::fromCallable"), Vec::new()),
@@ -18299,6 +18319,7 @@ impl Vm {
         };
         // For method calls like ClassName::method, format as ClassName::method
         // For regular functions, just the function name
+        self.pending_call_via_invoke = call.target.via_invoke;
         let param_err = self.check_param_types_with_strict(
             user_fn,
             &call.args,
@@ -18307,6 +18328,7 @@ impl Vm {
             line,
             caller_strict,
         );
+        self.pending_call_via_invoke = false;
         // Pop temp scope
         if temp_scope_pushed {
             self.class_scope_stack.pop();
@@ -18479,6 +18501,7 @@ impl Vm {
                 forward: None,
                 forward_this: false,
                 fn_gen: self.user_functions.len() + 1,
+                via_invoke: false,
             };
         }
         let builtin = match found {
@@ -18512,6 +18535,7 @@ impl Vm {
             forward: None,
             forward_this: false,
             fn_gen: self.user_functions.len() + 1,
+            via_invoke: false,
         }
     }
 
@@ -29388,14 +29412,17 @@ impl Vm {
                                 let type_err = if user_fn.param_types.is_empty() {
                                     None
                                 } else {
-                                    self.check_param_types_with_strict(
+                                    self.pending_call_via_invoke = call.target.via_invoke;
+                                    let r = self.check_param_types_with_strict(
                                         &user_fn,
                                         &call.args,
                                         &display_name,
                                         usize::from(method_expects_this),
                                         op.line,
                                         op_array.strict_types,
-                                    )
+                                    );
+                                    self.pending_call_via_invoke = false;
+                                    r
                                 };
                                 if scope_pushed {
                                     self.class_scope_stack.pop();
@@ -53326,7 +53353,19 @@ impl Vm {
                                         ),
                                         op.line,
                                     );
-                                    Value::Null
+                                    // `$o->p op= v` / `$o->p++` work on the property slot:
+                                    // a value the error handler stored there is used.
+                                    if matches!(
+                                        op.opcode,
+                                        OpCode::PropertyGetRW | OpCode::PropertyGetIncDec
+                                    ) {
+                                        match obj.borrow().get_property(prop_name.as_bytes()) {
+                                            Value::Undef => Value::Null,
+                                            v => v.deref(),
+                                        }
+                                    } else {
+                                        Value::Null
+                                    }
                                 }
                             } else {
                                 prop

@@ -493,6 +493,7 @@ impl Vm {
                     forward: None,
                     forward_this: false,
                     fn_gen: self.user_functions.len() + 1,
+                    via_invoke: false,
                 }
             };
         self.pending_calls.push(PendingCall {
