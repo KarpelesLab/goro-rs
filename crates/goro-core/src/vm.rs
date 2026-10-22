@@ -5732,6 +5732,32 @@ impl Vm {
 
     /// Whether named argument `name` of a call to `call_name` (a pending
     /// call's name) binds a by-reference parameter.
+    /// "f(): Argument #N ($name) could not be passed by reference" for a
+    /// literal named argument of user function `call_name` whose parameter
+    /// `name` is by reference.
+    fn named_literal_by_ref_error(&self, call_name: &[u8], name: &[u8]) -> Option<String> {
+        let lower = call_name.to_ascii_lowercase();
+        let op = self.user_functions.get(&lower).cloned().or_else(|| {
+            let sep = lower.windows(2).position(|w| w == b"::")?;
+            self.classes
+                .get(&lower[..sep])
+                .and_then(|c| c.get_method(&lower[sep + 2..]))
+                .map(|m| m.op_array.clone())
+        })?;
+        let implicit = crate::internal_frames::implicit_args(&op);
+        let i = (implicit..op.by_ref_params.len())
+            .find(|&i| op.cv_names.get(i).is_some_and(|n| n.as_slice() == name))?;
+        if !op.by_ref_params[i] || op.variadic_param == Some(i as u32) {
+            return None;
+        }
+        Some(format!(
+            "{}(): Argument #{} (${}) could not be passed by reference",
+            String::from_utf8_lossy(op.effective_name()),
+            i - implicit + 1,
+            String::from_utf8_lossy(name)
+        ))
+    }
+
     pub(crate) fn named_arg_by_ref(&self, call_name: &[u8], name: &[u8]) -> bool {
         let lower = call_name.to_ascii_lowercase();
         let user = self.user_functions.get(&lower).cloned().or_else(|| {
@@ -25021,6 +25047,28 @@ impl Vm {
                 OpCode::SendNamedVal => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let name: Vec<u8> = name_val.to_php_string().as_bytes().to_vec();
+                    // A literal given to a by-reference parameter (ZEND_SEND_VAL_EX)
+                    if let OperandType::Const(_) = op.op1 {
+                        if let Some(msg) = self
+                            .pending_calls
+                            .last()
+                            .and_then(|c| self.named_literal_by_ref_error(c.name.as_bytes(), &name))
+                        {
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     // A variable given to a by-reference parameter is sent by
                     // reference (ZEND_SEND_VAR_EX with a named argument).
                     let callee_named_byref = matches!(op.op1, OperandType::Cv(_))

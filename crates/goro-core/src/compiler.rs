@@ -2246,6 +2246,16 @@ impl Compiler {
                     None
                 } else {
                     match &arg.value.kind {
+                        // A nullsafe chain is not a variable (SEND_VAL_EX).
+                        _ if expr_is_in_nullsafe_chain(&arg.value) => Some(1),
+                        // `[&$a] = $v` / `list(&$a) = $v` is the variable $v
+                        // (a destructuring without references is a value).
+                        ExprKind::Assign { target, .. }
+                            if matches!(&target.kind, ExprKind::Array(elems)
+                                if Self::list_has_ref(elems)) =>
+                        {
+                            None
+                        }
                         // A call compiled to a VM builtin yields a TMP, and
                         // $GLOBALS is passed like one (SEND_VAL_EX).
                         ExprKind::FunctionCall { .. }
@@ -2268,15 +2278,6 @@ impl Compiler {
                         | ExprKind::ArrayAccess { .. }
                         | ExprKind::AssignRef { .. }
                         | ExprKind::Spread(_) => None,
-                        // `[...] = $v` / `list(...) = $v` evaluates to $v.
-                        ExprKind::Assign { target, .. }
-                            if matches!(
-                                target.kind,
-                                ExprKind::Array(_) | ExprKind::FunctionCall { .. }
-                            ) =>
-                        {
-                            None
-                        }
                         _ => Some(1),
                     }
                 };
