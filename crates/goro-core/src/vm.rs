@@ -32651,8 +32651,9 @@ impl Vm {
                         op.line,
                     );
                     let result = if let Value::Array(arr) = &arr_val {
-                        let key = Self::value_to_array_key(key_val.clone());
-                        match arr.borrow().get(&key).cloned() {
+                        let key = self.value_to_array_key_checked(&key_val, op.line);
+                        let found = arr.borrow().get(&key).cloned();
+                        match found {
                             Some(v) => v,
                             None => {
                                 // Emit "Undefined array key" warning
@@ -32819,6 +32820,7 @@ impl Vm {
                             Value::Long(_) => "int",
                             Value::Double(_) => "float",
                             Value::String(_) => "string",
+                            Value::Resource(_) => "resource",
                             _ => "",
                         };
                         if !type_name.is_empty() {

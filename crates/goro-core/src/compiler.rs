@@ -3396,6 +3396,19 @@ impl Compiler {
                         });
                     }
                 }
+                // foreach ($a as [&$x, $y]): iterates by reference, each
+                // element bound to a hidden variable that is destructured.
+                let list_ref =
+                    matches!(&value.kind, ExprKind::Array(elems) if Self::list_has_ref(elems));
+                let by_ref = &(*by_ref || list_ref);
+                let list_ref_cv = if list_ref {
+                    let mut name = b"\0vv".to_vec();
+                    name.extend_from_slice(self.dynvar_count.to_string().as_bytes());
+                    self.dynvar_count += 1;
+                    Some(self.op_array.get_or_create_cv(&name))
+                } else {
+                    None
+                };
                 let arr = self.compile_expr(expr)?;
                 // foreach (f() as &$v): iterate f()'s returned reference, or a
                 // copy of a by-value result.
@@ -3463,7 +3476,7 @@ impl Compiler {
                     ExprKind::Variable(name) if *by_ref => {
                         Some(self.op_array.get_or_create_cv(name))
                     }
-                    _ => None,
+                    _ => list_ref_cv,
                 };
                 let jmp_done = if *by_ref {
                     // For by-ref foreach, ForeachNextRef stores reference directly in val_tmp
@@ -3489,7 +3502,20 @@ impl Compiler {
                 };
 
                 // Assign value to the value variable
-                if *by_ref {
+                if let (Some(cv), ExprKind::Array(elems)) = (list_ref_cv, &value.kind) {
+                    let hidden = Expr {
+                        kind: ExprKind::Variable(self.op_array.cv_names[cv as usize].clone()),
+                        span: value.span,
+                    };
+                    self.compile_list_destructure_ref(elems, &hidden, stmt.span.line)?;
+                    self.op_array.emit(Op {
+                        opcode: OpCode::UnsetCv,
+                        op1: OperandType::Cv(cv),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                } else if *by_ref {
                     // Plain variables were bound by ForeachNextRef; other
                     // targets are bound to the element's reference.
                     match &value.kind {
@@ -10066,6 +10092,26 @@ impl Compiler {
         OperandType::Tmp(t)
     }
 
+    /// Whether a destructuring target list assigns the variable `name`.
+    fn list_targets_var(elems: &[ArrayElement], name: &[u8]) -> bool {
+        elems.iter().any(|e| match &e.value.kind {
+            ExprKind::Variable(n) => n == name,
+            ExprKind::Array(sub) => Self::list_targets_var(sub, name),
+            _ => false,
+        })
+    }
+
+    /// The number of by-reference elements of a destructuring target.
+    fn list_ref_count(elems: &[ArrayElement]) -> usize {
+        elems
+            .iter()
+            .map(|e| match &e.value.kind {
+                ExprKind::Array(sub) => Self::list_ref_count(sub),
+                _ => e.by_ref as usize,
+            })
+            .sum()
+    }
+
     fn list_has_ref(elems: &[ArrayElement]) -> bool {
         elems.iter().any(|e| {
             e.by_ref || matches!(&e.value.kind, ExprKind::Array(sub) if Self::list_has_ref(sub))
@@ -11188,6 +11234,72 @@ impl Compiler {
                 // Destructuring with by-reference elements: [&$a, $b] = $src
                 if let ExprKind::Array(elems) = &target.kind {
                     if Self::list_has_ref(elems) {
+                        // The source variable is itself a target: it is
+                        // fetched once (bound to a hidden variable), so
+                        // rebinding it does not change what is destructured.
+                        let self_target = matches!(&value.kind, ExprKind::Variable(n) if Self::list_targets_var(elems, n));
+                        let is_call = matches!(
+                            &value.kind,
+                            ExprKind::FunctionCall { .. }
+                                | ExprKind::MethodCall { .. }
+                                | ExprKind::StaticMethodCall { .. }
+                                | ExprKind::DynamicStaticMethodCall { .. }
+                        );
+                        if self_target || is_call {
+                            let mut hname = b"\0vv".to_vec();
+                            hname.extend_from_slice(self.dynvar_count.to_string().as_bytes());
+                            self.dynvar_count += 1;
+                            let hcv = self.op_array.get_or_create_cv(&hname);
+                            let line = expr.span.line;
+                            let val = self.compile_expr(value)?;
+                            if is_call {
+                                self.mark_ref_call(&val);
+                                // FETCH_LIST_W of a by-value temporary.
+                                let msg_idx =
+                                    self.op_array
+                                        .add_literal(Value::String(PhpString::from_bytes(
+                                        b"Attempting to set reference to non referenceable value",
+                                    )));
+                                let cond_idx = self.op_array.add_literal(Value::Long(1));
+                                for _ in 0..Self::list_ref_count(elems) {
+                                    self.op_array.emit(Op {
+                                        opcode: OpCode::EmitNotice,
+                                        op1: OperandType::Const(msg_idx),
+                                        op2: OperandType::Const(cond_idx),
+                                        result: OperandType::Unused,
+                                        line,
+                                    });
+                                }
+                            }
+                            self.op_array.emit(Op {
+                                opcode: OpCode::AssignRef,
+                                op1: OperandType::Cv(hcv),
+                                op2: val,
+                                result: OperandType::Unused,
+                                line,
+                            });
+                            let hidden = Expr {
+                                kind: ExprKind::Variable(hname),
+                                span: value.span,
+                            };
+                            self.compile_list_destructure_ref(elems, &hidden, line)?;
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::Assign,
+                                op1: OperandType::Tmp(t),
+                                op2: OperandType::Cv(hcv),
+                                result: OperandType::Unused,
+                                line,
+                            });
+                            self.op_array.emit(Op {
+                                opcode: OpCode::UnsetCv,
+                                op1: OperandType::Cv(hcv),
+                                op2: OperandType::Unused,
+                                result: OperandType::Unused,
+                                line,
+                            });
+                            return Ok(OperandType::Tmp(t));
+                        }
                         match &value.kind {
                             ExprKind::Variable(_)
                             | ExprKind::ArrayAccess { .. }
