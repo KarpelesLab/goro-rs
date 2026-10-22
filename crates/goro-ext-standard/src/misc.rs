@@ -346,6 +346,9 @@ final class StreamBucket {
     vm.constants
         .entry(b"zend.exception_string_param_max_len".to_vec())
         .or_insert(Value::String(PhpString::from_bytes(b"15")));
+    vm.constants
+        .entry(b"zend.exception_ignore_args".to_vec())
+        .or_insert(Value::String(PhpString::from_bytes(b"0")));
     vm.ini_validators.insert(
         b"zend.exception_string_param_max_len".to_vec(),
         on_set_exception_string_param_max_len,

@@ -125,6 +125,8 @@ pub struct PhpGenerator {
     /// frame_name(), computed on the first resume (it only depends on the
     /// function and its class, which do not change).
     frame_name_cache: Option<(String, bool)>,
+    /// call_stack index of the generator's frame while it runs
+    frame_depth: usize,
     /// Finally blocks being executed: (handler depth at entry, the exception
     /// that led into it), as in Vm::execute_frame.
     pub(crate) fin: Vec<(usize, Option<Value>)>,
@@ -248,6 +250,7 @@ impl PhpGenerator {
             current_ref: None,
             hook_key: None,
             frame_name_cache: None,
+            frame_depth: 0,
             fin: Vec::new(),
             pending_finally_levels: 1,
             yield_from_result: OperandType::Unused,
@@ -673,6 +676,7 @@ impl PhpGenerator {
         } else {
             (String::new(), 0)
         };
+        self.frame_depth = vm.call_stack.len();
         vm.call_stack.push((
             func_name,
             func_file,
@@ -710,8 +714,9 @@ impl PhpGenerator {
         self.is_running = false;
         vm.running_generators.pop();
 
-        // Pop the call_stack entry
-        vm.call_stack.pop();
+        // Pop the call_stack entry (with the frames of the calls an
+        // exception left)
+        vm.call_stack.truncate(self.frame_depth);
 
         // Pop class context
         if pushed_called {
@@ -2367,6 +2372,8 @@ impl PhpGenerator {
                         .len()
                         .saturating_sub(usize::from(guarded));
                     Vm::finally_escape(&mut self.fin, caught_at, &vm.current_exception);
+                    // (the frames of the calls the exception left)
+                    vm.call_stack.truncate(self.frame_depth + 1);
                     self.pending_return = None;
                     self.pending_finally_jump = None;
                     if let Some(exc) = vm.current_exception.take() {

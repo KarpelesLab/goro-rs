@@ -4733,6 +4733,12 @@ impl Vm {
         &f.3
     }
 
+    /// call_stack index of the running fiber's bottom frame (0 outside fibers)
+    #[inline]
+    pub(crate) fn fiber_call_base(&self) -> usize {
+        self.fiber_bases.last().map_or(0, |f| f.1)
+    }
+
     /// Display name of a method frame's class: the method's declaring class
     /// (lowercase `declaring`), or `fallback` if unknown.
     pub(crate) fn frame_class_display(&self, declaring: &[u8], fallback: &[u8]) -> String {
@@ -16373,6 +16379,10 @@ impl Vm {
         fe: &mut ForeachState,
     ) -> Result<Value, VmError> {
         let mut ip: usize = single_step.unwrap_or(0);
+        // call_stack depth of the frame's callees (relative to the running
+        // fiber's bottom): an exception caught here drops the frames of the
+        // calls it left.
+        let callee_base = self.call_stack.len().saturating_sub(self.fiber_call_base());
         let temp_count = op_array.temp_count as usize;
         let mut cvs = cvs;
         let mut tmps = tmps;
@@ -34615,6 +34625,12 @@ impl Vm {
                         .len()
                         .saturating_sub(usize::from(guarded));
                     Self::finally_escape(fin, caught_at, &self.current_exception);
+                    if single_step.is_none() {
+                        let base = callee_base + self.fiber_call_base();
+                        if self.call_stack.len() > base {
+                            self.call_stack.truncate(base);
+                        }
+                    }
                     // Restore pending_calls depth saved when we jumped to this catch block
                     if let Some(depth) = pending_calls_catch_depth.take() {
                         self.pending_calls.truncate(depth);
@@ -36799,6 +36815,7 @@ impl Vm {
                                         self.current_file =
                                             format!("{}({}) : eval()'d code", saved_file, op.line);
                                         // The eval() frame of backtraces.
+                                        let eval_depth = self.call_stack.len();
                                         self.call_stack.push((
                                             "eval".to_string(),
                                             saved_file.clone(),
@@ -36810,7 +36827,8 @@ impl Vm {
                                             self.observe_code = true;
                                             self.execute_op_array_vm(&eval_op_array, eval_cvs)
                                         };
-                                        self.call_stack.pop();
+                                        // (with the frames of the calls an exception left)
+                                        self.call_stack.truncate(eval_depth);
                                         let eval_result = match exec_r {
                                             Ok(v) => v,
                                             Err(e) => {
