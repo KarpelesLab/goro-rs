@@ -23234,7 +23234,11 @@ impl Vm {
                                     }
                                 } else {
                                     // Create a new reference for the variable
-                                    let current = cvs.get(i).cloned().unwrap_or(Value::Null);
+                                    // (an undefined variable becomes null)
+                                    let current = match cvs.get(i) {
+                                        Some(Value::Undef) | None => Value::Null,
+                                        Some(v) => v.clone(),
+                                    };
                                     let r = Rc::new(RefCell::new(current));
                                     cvs[i] = Value::Reference(r.clone());
                                     if let Some(call) = self.pending_calls.last_mut() {

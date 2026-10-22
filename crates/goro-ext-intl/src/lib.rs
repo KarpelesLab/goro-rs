@@ -28,6 +28,11 @@ pub mod datecore;
 pub mod error;
 pub mod obj;
 pub mod zpp;
+// NumberFormatter / MessageFormatter internals
+pub mod decfmt;
+pub mod numdata;
+mod numdata_tables;
+pub mod rbnf;
 
 pub use zpp::Obj;
 
@@ -561,7 +566,13 @@ pub fn register(vm: &mut Vm) {
     for (c, list) in consts::CLASSES {
         let l: Vec<(Vec<u8>, Value, Option<String>)> = list
             .iter()
-            .map(|(k, v)| (k.as_bytes().to_vec(), const_value(*v), None))
+            .map(|(k, v)| {
+                // #[\Deprecated(since: '8.3')]
+                let dep = (*c == "NumberFormatter" && *k == "TYPE_CURRENCY").then(|| {
+                    "Constant NumberFormatter::TYPE_CURRENCY is deprecated since 8.3".to_string()
+                });
+                (k.as_bytes().to_vec(), const_value(*v), dep)
+            })
             .collect();
         vm.ext_class_constants
             .insert(c.to_ascii_lowercase().into_bytes(), l);
