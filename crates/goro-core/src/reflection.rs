@@ -10341,6 +10341,18 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         "fileinfo" => &["finfo"],
         "filter" => &["Filter\\FilterException", "Filter\\FilterFailedException"],
         "sodium" => &["SodiumException"],
+        // PHP_MINIT(uri) registration order
+        "uri" => &[
+            "Uri\\Rfc3986\\Uri",
+            "Uri\\WhatWg\\Url",
+            "Uri\\UriComparisonMode",
+            "Uri\\UriException",
+            "Uri\\UriError",
+            "Uri\\InvalidUriException",
+            "Uri\\WhatWg\\InvalidUrlException",
+            "Uri\\WhatWg\\UrlValidationError",
+            "Uri\\WhatWg\\UrlValidationErrorType",
+        ],
         "intl" => &[
             "Collator",
             "NumberFormatter",
