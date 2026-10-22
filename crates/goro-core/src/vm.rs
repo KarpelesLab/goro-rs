@@ -17930,6 +17930,14 @@ impl Vm {
                             ),
                         )
                     };
+                    // SPEC(COMMUTATIVE): the VM swaps the operands so op1 is the
+                    // "stronger" one (CV > VAR/TMP > CONST); it is the first
+                    // array zend_hash_compare() protects against recursion.
+                    let (a, b) = if commutative_swap(&op.op1, &op.op2) {
+                        (b, a)
+                    } else {
+                        (a, b)
+                    };
                     self.write_operand(
                         &op.result,
                         if a.identical(&b) {
@@ -17973,6 +17981,14 @@ impl Vm {
                                 op.line,
                             ),
                         )
+                    };
+                    // SPEC(COMMUTATIVE): the VM swaps the operands so op1 is the
+                    // "stronger" one (CV > VAR/TMP > CONST); it is the first
+                    // array zend_hash_compare() protects against recursion.
+                    let (a, b) = if commutative_swap(&op.op1, &op.op2) {
+                        (b, a)
+                    } else {
+                        (a, b)
                     };
                     self.write_operand(
                         &op.result,
@@ -53286,6 +53302,18 @@ fn is_compile_error_exception(msg: &str) -> bool {
             && (msg.contains(" modifier on a") || msg.contains(" modifier on an")))
         || msg == "__HALT_COMPILER() can only be used from the outermost scope"
         || msg == "Encoding must be a literal"
+}
+
+/// zend_vm_set_opcode_handler(): commutative handlers get the operand of the
+/// lower type (IS_CONST < IS_TMP_VAR/IS_VAR < IS_CV) as op2.
+fn commutative_swap(op1: &OperandType, op2: &OperandType) -> bool {
+    let rank = |o: &OperandType| match o {
+        OperandType::Const(_) => 1,
+        OperandType::Tmp(_) => 2,
+        OperandType::Cv(_) => 8,
+        _ => 0,
+    };
+    rank(op1) < rank(op2)
 }
 
 /// Whether a parser message is one php-src's scanner/parser produces (others
