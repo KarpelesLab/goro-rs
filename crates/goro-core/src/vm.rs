@@ -21060,10 +21060,14 @@ impl Vm {
                             return Err(e);
                         }
                     };
-                    // concat_function(): an empty operand shares the other string.
-                    let result = if a_str.is_empty() {
+                    // An empty operand shares the other string (concat_function();
+                    // ZEND_CONCAT of two strings only for a non-literal one).
+                    let both_str = matches!(a, Value::String(_)) && matches!(b, Value::String(_));
+                    let a_lit = both_str && matches!(op.op1, OperandType::Const(_));
+                    let b_lit = both_str && matches!(op.op2, OperandType::Const(_));
+                    let result = if a_str.is_empty() && !a_lit {
                         b_str
-                    } else if b_str.is_empty() {
+                    } else if b_str.is_empty() && !b_lit {
                         a_str
                     } else {
                         let mut r = Vec::with_capacity(a_str.len() + b_str.len());
