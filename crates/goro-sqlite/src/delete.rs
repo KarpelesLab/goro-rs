@@ -94,8 +94,8 @@ pub fn sqlite3GenerateIndexKey(
     iDataCur: i32,
     regOut: i32,
     prefixOnly: i32,
-    piPartIdxLabel: &mut i32,
-    pPrior: &IndexRef,
+    piPartIdxLabel: Option<&mut i32>,
+    pPrior: Option<&IndexRef>,
     regPrior: i32,
 ) -> i32 {
     todo!("sqlite3GenerateIndexKey")

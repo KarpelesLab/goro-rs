@@ -413,8 +413,8 @@ pub fn sqlite3FindInIndex(
     db: &mut Sqlite3,
     pX: ExprId,
     inFlags: u32,
-    prRhsHasNull: &mut i32,
-    aiMap: &mut i32,
+    prRhsHasNull: Option<&mut i32>,
+    aiMap: Option<&mut [i32]>,
     piTab: &mut i32,
 ) -> i32 {
     todo!("sqlite3FindInIndex")
