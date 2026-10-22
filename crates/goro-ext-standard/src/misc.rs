@@ -9924,6 +9924,13 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .unwrap_or_else(|| original.as_bytes().to_vec());
         let mut class = goro_core::object::ClassEntry::new(canonical);
         class.allow_dynamic_properties = true; // builtins generally allow this
+        // An alias of an internal interface / trait / enum is one too.
+        match vm.class_kind(&original_lower) {
+            Some(goro_core::class_table::ClassKind::Interface) => class.is_interface = true,
+            Some(goro_core::class_table::ClassKind::Trait) => class.is_trait = true,
+            Some(goro_core::class_table::ClassKind::Enum) => class.is_enum = true,
+            _ => {}
+        }
         vm.classes.insert(alias_lower.clone(), class);
         vm.class_aliases
             .insert(alias_lower.clone(), original_lower.clone());
