@@ -600,12 +600,9 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let total_len = s.len().saturating_mul(times as usize);
     // zend_string_safe_alloc(): bail out like the Zend allocator would.
     let mem_limit = goro_core::value::memory_get_limit();
-    let over = if mem_limit > 0 {
-        goro_core::value::memory_get_usage().saturating_add(total_len) > mem_limit
-    } else {
-        total_len > (1usize << 40)
-    };
-    if over {
+    if mem_limit > 0 {
+        vm.memory_check(total_len.saturating_add(25) & !7)?;
+    } else if total_len > (1usize << 40) {
         let msg = format!(
             "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
             mem_limit,
@@ -4500,17 +4497,8 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .len()
         .saturating_add(est_breaks.saturating_mul(brk_bytes.len()))
         .saturating_add(1);
-    let mem_limit = goro_core::value::memory_get_limit();
-    if mem_limit > 0 {
-        let usage = goro_core::value::memory_get_usage();
-        if usage.saturating_add(alloc_size) > mem_limit {
-            let msg = format!(
-                "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
-                mem_limit, alloc_size,
-            );
-            let line = vm.current_line;
-            return Err(vm.emit_fatal_at(&msg, line));
-        }
+    if goro_core::value::memory_get_limit() > 0 {
+        vm.memory_check(alloc_size)?;
     }
 
     // PHP's wordwrap algorithm (mirrors PHP's C implementation for multi-char breaks):

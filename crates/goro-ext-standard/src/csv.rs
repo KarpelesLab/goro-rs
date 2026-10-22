@@ -248,18 +248,7 @@ pub fn fgetcsv_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         // emalloc(len + 1): bail out like the Zend allocator would.
         let alloc = (len as u64 + 1).div_ceil(4096).saturating_mul(4096);
-        let mem_limit = goro_core::value::memory_get_limit();
-        if mem_limit > 0
-            && (goro_core::value::memory_get_usage() as u64).saturating_add(alloc)
-                > mem_limit as u64
-        {
-            let msg = format!(
-                "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
-                mem_limit, alloc
-            );
-            let line = vm.current_line;
-            return Err(vm.emit_fatal_at(&msg, line));
-        }
+        vm.memory_check(usize::try_from(alloc).unwrap_or(usize::MAX))?;
         crate::misc::stream_get_line(vm, F, &handle, Some(len as usize))
     };
     let buf = match buf {
