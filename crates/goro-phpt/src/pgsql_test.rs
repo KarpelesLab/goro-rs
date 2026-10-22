@@ -271,6 +271,8 @@ pub fn try_start() -> Option<EmbeddedPostgres> {
         Some(r) if r.status == goro_ext_pgsql::libpq::ExecStatus::CommandOk
     );
     c.finish();
+    // libpq's static escaping settings must not leak into the forked tests
+    goro_ext_pgsql::libpq::escape::STATIC.with(|s| s.set((0, false)));
     if !ok {
         drop(fx(child));
         return None;

@@ -137,12 +137,14 @@ pub fn pg_copy_to(vm: &mut Vm, f: &'static str, args: &[Value]) -> Value {
 
 /// pgsql_copy_from_query
 fn copy_from_query(vm: &mut Vm, c: &ConnRef, v: &Value) -> Result<(), bool> {
-    let s = vm.value_to_string(&v.deref());
+    let s = match vm.value_to_string_checked(&v.deref()) {
+        Ok(s) => s,
+        Err(_) => return Err(true),
+    };
     if vm.current_exception.is_some() {
         return Err(true);
     }
     let mut b = s.as_bytes().to_vec();
-    // (strlen semantics: the query stops at a NUL)
     if !b.is_empty() && b[b.len() - 1] != b'\n' {
         b.push(b'\n');
     }

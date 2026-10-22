@@ -107,7 +107,7 @@ pub fn type_error(vm: &mut Vm, fname: &str, n: usize, msg: &str) {
 
 /// zend_argument_must_not_be_empty_error
 pub fn must_not_be_empty(vm: &mut Vm, fname: &str, n: usize) {
-    value_error(vm, fname, n, "cannot be empty");
+    value_error(vm, fname, n, "must not be empty");
 }
 
 pub fn type_mismatch(vm: &mut Vm, fname: &str, n: usize, ty: &str, v: &Value) {

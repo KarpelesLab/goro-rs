@@ -505,7 +505,10 @@ pub fn params_of(vm: &mut Vm, arr: &Rc<RefCell<PhpArray>>) -> Option<Vec<Param>>
         match v {
             Value::Null => out.push(None),
             v => {
-                let s = vm.value_to_string(&v);
+                let s = match vm.value_to_string_checked(&v) {
+                    Ok(s) => s,
+                    Err(_) => return None,
+                };
                 if vm.current_exception.is_some() {
                     return None;
                 }
@@ -1088,7 +1091,11 @@ pub fn pg_socket_poll(vm: &mut Vm, f: &'static str, args: &[Value]) -> Value {
         return Value::Null;
     };
     let v = Value::Resource(id);
-    let fd = match (hooks.stream_socket_fd)(vm, &v, f) {
+    // php_stream_cast(..., 0): no error reporting
+    let saved = vm.warning_capture.replace(Vec::new());
+    let r = (hooks.stream_socket_fd)(vm, &v, f);
+    vm.warning_capture = saved;
+    let fd = match r {
         Ok(Some(fd)) => fd,
         Ok(None) => {
             vm.current_exception = None;
