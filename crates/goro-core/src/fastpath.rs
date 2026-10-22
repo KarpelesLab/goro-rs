@@ -805,6 +805,17 @@ impl crate::vm::Vm {
             let frame_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
                 && matches!(cvs.first().map(|v| v.deref()), Some(Value::Object(_)));
             self.push_static_call(op_array, ip, name, frame_this)
+        } else if let Some(name) = crate::vm::forward_fcall_name(op, literals) {
+            let this = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
+                match cvs.first().map(|v| v.deref()) {
+                    Some(t @ Value::Object(_)) => Some(t),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            self.push_forward_call(name, this.as_ref());
+            true
         } else {
             false
         }

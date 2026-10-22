@@ -823,6 +823,12 @@ pub struct Vm {
     /// (and for a method, where "::" is in its name and whether it is
     /// called on an object)
     fast_fcall_sep: Option<(usize, bool)>,
+    /// The fast call is a closure's: how many of its arguments are the
+    /// captured (use) values (see fast_closure_simple).
+    fast_fcall_captures: Option<usize>,
+    /// The fast call is a forwarding one (self::, static::, parent::; see
+    /// fast_forward_target).
+    fast_fcall_forward: bool,
     /// Emptied buffers of finished calls (locals, temporaries, backtrace
     /// frames), reused by the next ones.
     value_pool: Vec<Vec<Value>>,
@@ -1268,6 +1274,8 @@ impl Vm {
             stack_configured: false,
             fast_fcall_fn: None,
             fast_fcall_sep: None,
+            fast_fcall_captures: None,
+            fast_fcall_forward: false,
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),
             bytes_pool: Vec::new(),
@@ -14228,6 +14236,36 @@ pub(crate) fn static_fcall_name<'a>(
     Some(s)
 }
 
+/// The constant name of an INIT_FCALL of a forwarding call `self::m()`,
+/// `static::m()` or `parent::m()` (not of a magic method).
+pub(crate) fn forward_fcall_name<'a>(
+    op: &crate::opcode::Op,
+    literals: &'a [Value],
+) -> Option<&'a PhpString> {
+    let OperandType::Const(i) = op.op1 else {
+        return None;
+    };
+    let Some(Value::String(s)) = literals.get(i as usize) else {
+        return None;
+    };
+    let b = s.as_bytes();
+    if b.len() > 64 {
+        return None;
+    }
+    let sep = b.windows(2).position(|w| w == b"::")?;
+    let (class, method) = (&b[..sep], &b[sep + 2..]);
+    if method.is_empty()
+        || method.starts_with(b"__")
+        || method.contains(&b':')
+        || !(class.eq_ignore_ascii_case(b"self")
+            || class.eq_ignore_ascii_case(b"parent")
+            || class.eq_ignore_ascii_case(b"static"))
+    {
+        return None;
+    }
+    Some(s)
+}
+
 /// Append `b` to `dst` as String::from_utf8_lossy() renders it.
 #[inline]
 fn push_lossy(dst: &mut String, b: &[u8]) {
@@ -16686,8 +16724,34 @@ impl Vm {
             return false;
         };
         let name = call.name.as_bytes();
-        if !call.named_args.is_empty() || name.is_empty() || name.len() > 128 || name[0] == b'_' {
+        if !call.named_args.is_empty() || name.is_empty() || name.len() > 128 {
             return false;
+        }
+        if name[0] == b'_' {
+            // A closure without a scope or $this, called through its object.
+            if call.target.fn_gen != 0 || !crate::closure::is_closure_fn_name(name) {
+                return false;
+            }
+            let mut buf = [0u8; 128];
+            for (d, s) in buf.iter_mut().zip(name) {
+                *d = s.to_ascii_lowercase();
+            }
+            let lower = &buf[..name.len()];
+            if self.functions.contains_key(lower) {
+                return false;
+            }
+            let Some(f) = self.user_functions.get(lower) else {
+                return false;
+            };
+            return match Self::fast_closure_simple(f, call) {
+                Some(captures) => {
+                    self.fast_fcall_fn = Some(Rc::clone(f));
+                    self.fast_fcall_sep = None;
+                    self.fast_fcall_captures = Some(captures);
+                    true
+                }
+                None => false,
+            };
         }
         // A plain function name, or a public method of a user class,
         // resolved when the call was set up.
@@ -16732,13 +16796,16 @@ impl Vm {
                 let method = &lower[p + 2..];
                 // (a constructor is called like any method; its object's
                 // destructor is armed once it completed)
+                if lower.starts_with(b"static::")
+                    || lower.starts_with(b"self::")
+                    || lower.starts_with(b"parent::")
+                {
+                    return self.fast_forward_target();
+                }
                 if method.is_empty()
                     || method.contains(&b':')
                     || (method.starts_with(b"__") && method != b"__construct")
                     || method == b"tokenize"
-                    || lower.starts_with(b"static::")
-                    || lower.starts_with(b"self::")
-                    || lower.starts_with(b"parent::")
                 {
                     return false;
                 }
@@ -16823,6 +16890,154 @@ impl Vm {
 
     /// fast_fcall_target(): user function `f` takes the call as is.
     #[inline]
+    /// fast_fcall_target() for a forwarding call `self::m()`, `static::m()`
+    /// or `parent::m()` of a user method: the class is resolved as the
+    /// general handler resolves it, and the call renamed after it when the
+    /// fast path takes it (`fast_fcall_forward` is then set).
+    fn fast_forward_target(&mut self) -> bool {
+        let Some(call) = self.pending_calls.last() else {
+            return false;
+        };
+        let name = call.name.as_bytes();
+        let starts = |p: &[u8]| name.len() > p.len() && name[..p.len()].eq_ignore_ascii_case(p);
+        let (plen, kind) = if starts(b"static::") {
+            (6, 0)
+        } else if starts(b"self::") {
+            (4, 1)
+        } else if starts(b"parent::") {
+            (6, 2)
+        } else {
+            return false;
+        };
+        let method = &name[plen + 2..];
+        if method.is_empty()
+            || method.contains(&b':')
+            || method.starts_with(b"__")
+            || method.eq_ignore_ascii_case(b"tokenize")
+        {
+            return false;
+        }
+        // (as DO_FCALL's general handler resolves the class)
+        let class: Vec<u8> = match kind {
+            0 => match self.called_class_stack.last() {
+                Some(c) => c.clone(),
+                None => return false,
+            },
+            1 => {
+                if let Some(scope) = self.class_scope_stack.last() {
+                    self.classes
+                        .get(scope)
+                        .map(|c| c.name.clone())
+                        .unwrap_or_else(|| scope.clone())
+                } else if let Some(called) = self.called_class_stack.last() {
+                    called.clone()
+                } else {
+                    return false;
+                }
+            }
+            _ => {
+                let parent = self
+                    .class_scope_stack
+                    .last()
+                    .and_then(|scope| self.classes.get(scope))
+                    .and_then(|c| c.parent.clone())
+                    .or_else(|| {
+                        self.called_class_stack
+                            .last()
+                            .and_then(|called| self.classes.get(&called.to_ascii_lowercase()))
+                            .and_then(|c| c.parent.clone())
+                    });
+                let Some(parent) = parent else {
+                    return false;
+                };
+                self.classes
+                    .get(&parent.to_ascii_lowercase())
+                    .map(|c| c.name.clone())
+                    .unwrap_or(parent)
+            }
+        };
+        let sep = class.len();
+        let total = sep + name.len() - plen;
+        if class.is_empty() || total > 128 {
+            return false;
+        }
+        let mut buf = [0u8; 128];
+        for (d, s) in buf.iter_mut().zip(class.iter().chain(&name[plen..])) {
+            *d = s.to_ascii_lowercase();
+        }
+        let lower = &buf[..total];
+        let method_lower = &lower[sep + 2..];
+        let has_this = matches!(call.args.first(), Some(Value::Object(_)));
+        let Some(ce) = self.classes.get(&lower[..sep]) else {
+            return false;
+        };
+        if ce.filename.is_none() || ce.is_enum {
+            return false;
+        }
+        let Some(m) = ce.get_method(method_lower) else {
+            return false;
+        };
+        if m.is_abstract || m.is_static == has_this {
+            return false;
+        }
+        if m.visibility != Visibility::Public {
+            let caller_scope = self.current_class_scope();
+            if self
+                .check_visibility(
+                    m.visibility,
+                    &m.declaring_class,
+                    &class,
+                    &String::from_utf8_lossy(&m.name),
+                    false,
+                    caller_scope.as_deref(),
+                )
+                .is_some()
+            {
+                return false;
+            }
+        }
+        if self.functions.contains_key(lower) {
+            return false;
+        }
+        let Some(f) = self.user_functions.get(lower) else {
+            return false;
+        };
+        if !Self::fast_fcall_simple(f, call, true, has_this) {
+            return false;
+        }
+        let f = Rc::clone(f);
+        let mut new_name = class;
+        new_name.extend_from_slice(&name[plen..]);
+        if let Some(call) = self.pending_calls.last_mut() {
+            call.name = PhpString::from_vec(new_name);
+        }
+        self.fast_fcall_fn = Some(f);
+        self.fast_fcall_sep = Some((sep, has_this));
+        self.fast_fcall_forward = true;
+        true
+    }
+
+    /// fast_fcall_target(): closure `f` takes the call as is; Some(number
+    /// of captured values among the arguments).
+    fn fast_closure_simple(f: &OpArray, call: &PendingCall) -> Option<usize> {
+        let nargs = call.args.len();
+        let captures = f.closure_capture_names.len().min(nargs);
+        // (a captured $this is one of the captured values)
+        let implicit = usize::from(
+            captures == 0
+                && f.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                && matches!(call.args.first(), Some(Value::Object(_))),
+        );
+        let simple = f.attributes.is_empty()
+            && !f.is_generator
+            && f.variadic_param.is_none()
+            && !f.display_name.is_empty()
+            && crate::closure::is_closure_fn_name(&f.name)
+            && nargs - captures - implicit >= f.required_param_count as usize
+            && !call.args.iter().any(|a| matches!(a, Value::Undef));
+        simple.then_some(captures)
+    }
+
     fn fast_fcall_simple(f: &OpArray, call: &PendingCall, method: bool, has_this: bool) -> bool {
         let implicit = usize::from(has_this);
         let nargs = call.args.len();
@@ -17255,6 +17470,23 @@ impl Vm {
             target,
         });
         true
+    }
+
+    /// INIT_FCALL of a forwarding call (see forward_fcall_name): what the
+    /// general handler does for one. `this`: the running frame's `$this`.
+    #[inline(never)]
+    pub(crate) fn push_forward_call(&mut self, name: &PhpString, this: Option<&Value>) {
+        // A non-static user method gets a compatible $this up front.
+        let mut args = self.take_values(0);
+        if let Some(t) = this.and_then(|t| self.static_syntax_this(name.as_bytes(), t)) {
+            args.push(t);
+        }
+        self.pending_calls.push(PendingCall {
+            name: name.clone(),
+            args,
+            named_args: Vec::new(),
+            target: CallTarget::NONE,
+        });
     }
 
     /// SEND_VAL of a plain value (not an undefined variable) to a call
@@ -22594,6 +22826,23 @@ impl Vm {
                         self.push_plain_call(op_array, ip - 1, name);
                     })
                 }
+                OpCode::InitFCall if forward_fcall_name(op, &op_array.literals).is_some() => {
+                    outlined(|| {
+                        let this = if op_array.cv_names.first().map(|n| n.as_slice())
+                            == Some(b"this")
+                        {
+                            match cvs.first().map(|v| v.deref()) {
+                                Some(t @ Value::Object(_)) => Some(t),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(name) = forward_fcall_name(op, &op_array.literals) {
+                            self.push_forward_call(name, this.as_ref());
+                        }
+                    })
+                }
                 OpCode::InitFCall => match outlined(|| -> Result<Flow, VmError> {
                     let name_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     // INIT_DYNAMIC_CALL on an undefined CV warns first.
@@ -23940,6 +24189,9 @@ impl Vm {
                         let user_fn = self.fast_fcall_fn.take().expect("fast call target");
                         // Instance method: where "::" is in the name
                         let method_sep = self.fast_fcall_sep.take();
+                        // A closure: its captured values lead the arguments.
+                        let captures = self.fast_fcall_captures.take();
+                        let forwarding = std::mem::take(&mut self.fast_fcall_forward);
                         self.last_call_by_ref = false;
                         let mut call = self.pending_calls.pop().expect("pending call");
                         while matches!(self.closure_pending_calls.last(), Some(&i) if i > self.pending_calls.len())
@@ -23952,7 +24204,22 @@ impl Vm {
                         // Push call stack frame early for proper error stack traces
                         // (in the buffers of a finished call's frame)
                         let mut display = self.string_pool.pop().unwrap_or_default();
-                        if !user_fn.display_name.is_empty() {
+                        // A closure's frame is qualified by its scope
+                        // (Class::{closure:...}).
+                        if let (Some(_), Some(scope)) = (
+                            captures,
+                            user_fn
+                                .scope_class
+                                .as_ref()
+                                .filter(|_| user_fn.display_name.starts_with(b"{closure")),
+                        ) {
+                            match self.classes.get(scope) {
+                                Some(c) => push_lossy(&mut display, &c.name),
+                                None => display.push_str(&self.builtin_canonical_name(scope)),
+                            }
+                            display.push_str("::");
+                            push_lossy(&mut display, &user_fn.display_name);
+                        } else if !user_fn.display_name.is_empty() {
                             push_lossy(&mut display, &user_fn.display_name);
                         } else if let (Some((sep, _)), Some(scope)) =
                             (method_sep, &user_fn.scope_class)
@@ -23969,12 +24236,28 @@ impl Vm {
                         }
                         let is_method = method_sep.is_some();
                         // (an instance method: $this is not an argument)
-                        let has_this = method_sep.is_some_and(|(_, t)| t);
+                        let has_this = match captures {
+                            // (a static closure has no $this, even if its body uses it)
+                            Some(_) => {
+                                user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
+                                    && !user_fn.is_static_closure
+                            }
+                            None => method_sep.is_some_and(|(_, t)| t),
+                        };
                         let mut file = self.string_pool.pop().unwrap_or_default();
                         file.push_str(&self.current_file);
                         let mut trace_args = self.take_values(0);
-                        trace_args.extend_from_slice(&call.args[usize::from(has_this)..]);
+                        // (a closure's captured values are not arguments)
+                        let skip = match captures {
+                            Some(n) if n > 0 => n,
+                            _ => usize::from(has_this),
+                        }
+                        .min(call.args.len());
+                        trace_args.extend_from_slice(&call.args[skip..]);
                         let call_frame_depth = self.call_stack.len();
+                        if captures.is_some() {
+                            self.note_closure_frame(&call.name, &display);
+                        }
                         self.call_stack
                             .push((display, file, op.line, trace_args, has_this));
                         // Check parameter types before executing
@@ -24039,6 +24322,21 @@ impl Vm {
                                 Some(Value::Object(obj)) if has_this => {
                                     called_class.extend_from_slice(&obj.borrow().class_name)
                                 }
+                                // A forwarding call keeps the called class: the
+                                // caller's $this's, else the current one.
+                                _ if forwarding => match cvs.first() {
+                                    Some(Value::Object(obj))
+                                        if op_array.cv_names.first().map(|n| n.as_slice())
+                                            == Some(b"this") =>
+                                    {
+                                        called_class.extend_from_slice(&obj.borrow().class_name)
+                                    }
+                                    _ => match self.called_class_stack.last() {
+                                        Some(current) => called_class.extend_from_slice(current),
+                                        None => called_class
+                                            .extend_from_slice(&call.name.as_bytes()[..sep]),
+                                    },
+                                },
                                 _ => called_class.extend_from_slice(&call.name.as_bytes()[..sep]),
                             }
                             self.called_class_stack.push(called_class);
@@ -24058,6 +24356,34 @@ impl Vm {
                                 None => defining_class.extend_from_slice(class_lower),
                             }
                             self.class_scope_stack.push(defining_class);
+                        }
+                        // A closure's scope, and its called class (its
+                        // $this's class, else the class it was created with).
+                        let closure_scope = captures.is_some() && user_fn.scope_class.is_some();
+                        let mut closure_called = false;
+                        if captures.is_some() {
+                            if let Some(scope) = &user_fn.scope_class {
+                                self.class_scope_stack.push(scope.clone());
+                            }
+                            let fn_has_this_cv =
+                                user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+                            if let (true, Some(Value::Object(obj))) =
+                                (fn_has_this_cv, call.args.first())
+                            {
+                                let class_name = obj.borrow().class_name.clone();
+                                self.called_class_stack.push(class_name);
+                                closure_called = true;
+                            } else if let Some(scope) = &user_fn.scope_class {
+                                let canon =
+                                    user_fn.closure_called_class.clone().unwrap_or_else(|| {
+                                        self.classes
+                                            .get(scope)
+                                            .map(|c| c.name.clone())
+                                            .unwrap_or_else(|| scope.clone())
+                                    });
+                                self.called_class_stack.push(canon);
+                                closure_called = true;
+                            }
                         }
                         let mut func_cvs = self.take_values(user_fn.cv_names.len());
                         for (slot, arg) in func_cvs.iter_mut().zip(call.args.iter()) {
@@ -24119,6 +24445,12 @@ impl Vm {
                                 self.recycle_bytes(v);
                             }
                         }
+                        if closure_scope {
+                            self.class_scope_stack.pop();
+                        }
+                        if closure_called {
+                            self.called_class_stack.pop();
+                        }
                         self.is_global_scope = was_global;
                         let result = match call_result {
                             Ok(v) => v,
@@ -24130,6 +24462,9 @@ impl Vm {
                                     // (as the general handler does)
                                     if is_method {
                                         self.called_class_stack.pop();
+                                        self.class_scope_stack.pop();
+                                    }
+                                    if closure_scope {
                                         self.class_scope_stack.pop();
                                     }
                                     return Err(e);
