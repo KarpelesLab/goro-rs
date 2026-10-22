@@ -15,7 +15,10 @@ use std::io::Read;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let path = args.get(1).cloned().unwrap_or_else(|| ":memory:".to_string());
+    let path = args
+        .get(1)
+        .cloned()
+        .unwrap_or_else(|| ":memory:".to_string());
     let mut sql = Vec::new();
     std::io::stdin().read_to_end(&mut sql).unwrap();
     let mut pdb: Option<Box<Sqlite3>> = None;
@@ -35,7 +38,13 @@ fn main() {
         let mut stmt: Option<StmtId> = None;
         let mut tail = 0usize;
         let rest = sql[off..].to_vec();
-        let rc = sqlite3_prepare_v2(&mut db, Some(&rest), rest.len() as i32, &mut stmt, &mut tail);
+        let rc = sqlite3_prepare_v2(
+            &mut db,
+            Some(&rest),
+            rest.len() as i32,
+            &mut stmt,
+            &mut tail,
+        );
         if rc != SQLITE_OK {
             let msg = sqlite3_errmsg(&mut db).unwrap_or_default();
             println!("Error: {} {}", rc, String::from_utf8_lossy(&msg));
