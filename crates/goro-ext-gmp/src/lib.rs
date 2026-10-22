@@ -83,6 +83,7 @@ pub fn register(vm: &mut Vm) {
     vm.object_is_operator_type = Some(is_gmp_object);
     vm.gmp_to_hex = Some(gmp_to_hex_str);
     vm.gmp_from_hex = Some(gmp_set_from_hex_str);
+    vm.gmp_from_dec = Some(gmp_set_from_dec_str);
     vm.object_construct_handlers
         .insert(b"gmp".to_vec(), gmp_construct_native);
 
@@ -661,6 +662,14 @@ pub fn gmp_set_from_hex_str(val: &Value, hex: &str) -> bool {
     match parse_gmp_hex(hex) {
         Some(n) => set_gmp_value(val, n),
         None => false,
+    }
+}
+
+/// convert_zstr_to_gmp(..., base 10): the legacy serialization's number.
+pub fn gmp_set_from_dec_str(val: &Value, dec: &str) -> bool {
+    match parse_bigint_str_strict(dec, 10) {
+        Ok(n) => set_gmp_value(val, n),
+        Err(_) => false,
     }
 }
 

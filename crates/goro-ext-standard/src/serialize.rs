@@ -2122,8 +2122,7 @@ impl<'a> Parser<'a> {
                 )
             });
         if !incomplete && class_lower == b"gmp" {
-            let v = self.gmp_custom(vm, &payload)?;
-            slot_set(&self.d, slot, v.clone());
+            let v = self.gmp_custom(vm, &payload, slot)?;
             *p += datalen + 1;
             return Some(v);
         }
@@ -2164,8 +2163,17 @@ impl<'a> Parser<'a> {
         Some(v)
     }
 
-    /// Legacy GMP `C:3:"GMP":N:{s:N:"num";a:N:{props}}` format.
-    fn gmp_custom(&mut self, vm: &mut Vm, payload: &[u8]) -> Option<Value> {
+    /// Legacy GMP `C:3:"GMP":N:{s:N:"num";a:N:{props}}` format
+    /// (gmp_unserialize()). The nested values share the outer back-reference
+    /// table, and the object is registered in its slot before they are
+    /// parsed, so `R:` entries may refer to it.
+    fn gmp_custom(&mut self, vm: &mut Vm, payload: &[u8], slot: &Slot) -> Option<Value> {
+        let id = vm.alloc_object_id();
+        let obj = Rc::new(RefCell::new(PhpObject::new(b"GMP".to_vec(), id)));
+        let obj_val = Value::Object(obj.clone());
+        // gmp_create(): a fresh GMP holds 0.
+        let _ = vm.gmp_from_dec.map(|set| set(&obj_val, "0"));
+        slot_set(&self.d, slot, obj_val.clone());
         let mut sub = Parser {
             data: payload,
             d: self.d.clone(),
@@ -2190,42 +2198,18 @@ impl<'a> Parser<'a> {
             .cloned()
             .unwrap_or(Value::Null)
             .deref();
-        let num = match (ok, num_val) {
-            (true, Value::String(s))
-                if {
-                    let b = s.as_bytes();
-                    let digits = if b.first() == Some(&b'-') || b.first() == Some(&b'+') {
-                        &b[1..]
-                    } else {
-                        b
-                    };
-                    !digits.is_empty() && digits.iter().all(|c| c.is_ascii_digit())
-                } =>
-            {
-                s.to_string_lossy()
-            }
-            _ => {
-                throw(vm, b"Exception", "Could not unserialize number");
-                return None;
-            }
+        // convert_zstr_to_gmp(..., base 10)
+        let num_ok = match (ok, &num_val) {
+            (true, Value::String(s)) => vm
+                .gmp_from_dec
+                .is_some_and(|set| set(&obj_val, &s.to_string_lossy())),
+            _ => false,
         };
-        let id = vm.alloc_object_id();
-        let obj = Rc::new(RefCell::new(PhpObject::new(b"GMP".to_vec(), id)));
-        obj.borrow_mut().set_property(
-            b"num".to_vec(),
-            Value::String(PhpString::from_string(num.clone())),
-        );
-        let obj_val = Value::Object(obj.clone());
-        let hex = match num.parse::<i128>() {
-            Ok(n) if n >= 0 => format!("{:x}", n),
-            Ok(n) => format!("-{:x}", -n),
-            Err(_) => String::new(),
-        };
-        if !hex.is_empty() {
-            if let Some(setter) = vm.gmp_from_hex {
-                setter(&obj_val, &hex);
-            }
+        if !num_ok {
+            throw(vm, b"Exception", "Could not unserialize number");
+            return None;
         }
+        let num = obj.borrow().get_property(b"num");
         let tmp_idx = {
             let mut d = self.d.borrow_mut();
             d.tmps.push(Value::Null);
@@ -2267,7 +2251,7 @@ impl<'a> Parser<'a> {
                 }
                 ob.set_property(name, v);
             }
-            ob.set_property(b"num".to_vec(), Value::String(PhpString::from_string(num)));
+            ob.set_property(b"num".to_vec(), num);
         }
         Some(obj_val)
     }

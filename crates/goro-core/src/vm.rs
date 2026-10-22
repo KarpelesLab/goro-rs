@@ -1056,6 +1056,9 @@ pub struct Vm {
     /// Object unserialize hook (parses hex string back into the object).
     /// Returns true on success.
     pub gmp_from_hex: Option<fn(&Value, &str) -> bool>,
+    /// Like `gmp_from_hex` for a base-10 string (the legacy `C:3:"GMP"`
+    /// serialization format).
+    pub gmp_from_dec: Option<fn(&Value, &str) -> bool>,
     /// Native constructor handler keyed by lowercase class name.
     /// Called for `new ClassName(args...)` where `args[0]` is `$this` (the
     /// freshly-allocated object). On success, return Ok(()). On error, the
@@ -2332,6 +2335,7 @@ impl Vm {
             object_is_operator_type: None,
             gmp_to_hex: None,
             gmp_from_hex: None,
+            gmp_from_dec: None,
             object_construct_handlers: Default::default(),
             object_create_handlers: Default::default(),
             trace_without_args_classes: Vec::new(),
