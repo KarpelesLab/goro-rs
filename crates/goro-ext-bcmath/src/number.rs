@@ -29,6 +29,7 @@ const CLASS_DISPLAY: &str = "BcMath\\Number";
 const EXPAND_SCALE: usize = 10;
 
 static HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    read_property: Some(read_property),
     cast: Some(cast),
     compare: Some(compare_handler),
     clone_obj: Some(clone_obj),
@@ -169,6 +170,15 @@ fn new_number(vm: &mut Vm, n: &Num, scale: usize) -> Value {
     set_props(&o, n, scale);
     attach(&o);
     Value::Object(o)
+}
+
+/// bcmath_number_get_property_ptr_ptr() returns NULL: `&$num->value`
+/// gets a copy of the value instead of the readonly error.
+fn read_property(_vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], mode: u8) -> Option<Value> {
+    if mode == 3 && (name == b"value" || name == b"scale") {
+        return Some(o.borrow().get_property(name));
+    }
+    None
 }
 
 fn cast(o: &Rc<RefCell<PhpObject>>, kind: u8) -> Option<Value> {

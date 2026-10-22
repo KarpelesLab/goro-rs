@@ -173,7 +173,8 @@ pub enum ObservedFrame<'a> {
 /// whose `PhpObject::native` is set. Every hook may decline (return None /
 /// false) to get the default behaviour.
 pub struct NativeObjectHandlers {
-    /// `$obj->name` read. mode: 0 = read, 1 = fetch for write, 2 = isset fetch.
+    /// `$obj->name` read. mode: 0 = read, 1 = fetch for write, 2 = isset fetch,
+    /// 3 = by-reference fetch of a readonly property (Some: a copy is handed out).
     pub read_property: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8], u8) -> Option<Value>>,
     /// `$obj->name = v`. Returns true when handled.
     pub write_property: Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8], &Value) -> bool>,
@@ -40709,7 +40710,15 @@ impl Vm {
                             Value::Null
                         } else if let Some(msg) = deny {
                             let cur = obj.borrow().get_property(&pkey);
-                            if matches!(cur, Value::Object(_)) {
+                            // An extension object whose get_property_ptr_ptr
+                            // handler returns NULL hands out a copy of the
+                            // value (read_property mode 3).
+                            let native = native_handlers(obj)
+                                .and_then(|h| h.read_property)
+                                .and_then(|f| f(self, obj, prop_name.as_bytes(), 3));
+                            if let Some(v) = native {
+                                v
+                            } else if matches!(cur, Value::Object(_)) {
                                 cur
                             } else {
                                 ref_error = Some(msg);
