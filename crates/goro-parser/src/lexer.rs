@@ -1651,6 +1651,9 @@ impl<'a> Lexer<'a> {
 
         // Now scan until we find the closing label
         let mut content = Vec::new();
+        // `{$...}` / `${...}` code in the body (offsets into `content`): kept
+        // verbatim, never a closing label, and not indentation-stripped.
+        let mut code_ranges: Vec<(usize, usize)> = Vec::new();
         let mut closing_indent = Vec::new();
         let mut found_closing = false;
         loop {
@@ -1680,6 +1683,34 @@ impl<'a> Lexer<'a> {
             content.extend_from_slice(&indent);
             // A line ends at "\n", "\r\n" or a bare "\r" ({NEWLINE}).
             loop {
+                if !is_nowdoc {
+                    let p = self.pos;
+                    let code_start = match (self.peek(), self.peek_at(1)) {
+                        (Some(b'$'), Some(b'{')) => Some(p + 1),
+                        (Some(b'{'), Some(b'$')) => Some(p),
+                        _ => None,
+                    };
+                    if let Some(brace) = code_start {
+                        let end = interp_code_close(self.source, brace)
+                            .map_or(self.source.len(), |i| i + 1);
+                        let start = content.len();
+                        while self.pos < end {
+                            let c = self.advance().unwrap_or(0);
+                            content.push(c);
+                        }
+                        code_ranges.push((start, content.len()));
+                        continue;
+                    }
+                    if self.peek() == Some(b'\\') && self.peek_at(1).is_some() {
+                        content.push(b'\\');
+                        self.advance();
+                        if !matches!(self.peek(), Some(b'\n' | b'\r')) {
+                            let c = self.advance().unwrap_or(0);
+                            content.push(c);
+                        }
+                        continue;
+                    }
+                }
                 match self.advance() {
                     Some(b'\n') => {
                         content.push(b'\n');
@@ -1721,35 +1752,8 @@ impl<'a> Lexer<'a> {
             let indent_len = closing_indent.len();
             let using_spaces = closing_indent[0] == b' ';
             let closing_line = self.line;
-            let mut stripped = Vec::new();
-            // Lines with their terminators ("\n", "\r\n" or "\r").
-            let mut lines: Vec<(&[u8], &[u8])> = Vec::new();
-            if !content.is_empty() {
-                let mut st = 0;
-                let mut k = 0;
-                while k < content.len() {
-                    match content[k] {
-                        b'\n' => {
-                            lines.push((&content[st..k], &content[k..k + 1]));
-                            k += 1;
-                            st = k;
-                        }
-                        b'\r' => {
-                            let nl = if content.get(k + 1) == Some(&b'\n') {
-                                2
-                            } else {
-                                1
-                            };
-                            lines.push((&content[st..k], &content[k..k + nl]));
-                            k += nl;
-                            st = k;
-                        }
-                        _ => k += 1,
-                    }
-                }
-                lines.push((&content[st..], &[]));
-            }
-            let first_line = closing_line.saturating_sub(lines.len() as u32);
+            let newlines = content.iter().filter(|&&c| c == b'\n').count() as u32;
+            let first_line = closing_line.saturating_sub(newlines + 1);
             // Found while scanning the body, before its newlines are counted.
             if closing_indent.iter().any(|&c| c != closing_indent[0]) {
                 crate::push_lexer_error(
@@ -1757,33 +1761,53 @@ impl<'a> Lexer<'a> {
                     first_line,
                 );
             }
-            for (i, &(line, newline)) in lines.iter().enumerate() {
-                let body = line;
-                let mut skip = 0;
-                while skip < indent_len && skip < body.len() {
-                    let c = body[skip];
-                    if c != b' ' && c != b'\t' {
-                        crate::push_lexer_error(
-                            format!(
-                                "Invalid body indentation level (expecting an indentation level of at least {})",
-                                indent_len
-                            ),
-                            first_line + i as u32,
-                        );
-                        break;
+            let in_code = |k: usize| code_ranges.iter().any(|&(a, b)| k >= a && k < b);
+            let mut stripped = Vec::with_capacity(content.len());
+            let mut line_no = first_line;
+            let mut at_line_start = true;
+            let mut k = 0;
+            while k < content.len() {
+                if at_line_start {
+                    at_line_start = false;
+                    // Whitespace-only lines need not be fully indented.
+                    let mut skip = 0;
+                    while skip < indent_len && k + skip < content.len() {
+                        let c = content[k + skip];
+                        if c == b'\n' || c == b'\r' {
+                            break;
+                        }
+                        if (c != b' ' && c != b'\t') || in_code(k + skip) {
+                            crate::push_lexer_error(
+                                format!(
+                                    "Invalid body indentation level (expecting an indentation level of at least {})",
+                                    indent_len
+                                ),
+                                line_no,
+                            );
+                            break;
+                        }
+                        if (c == b' ') != using_spaces {
+                            crate::push_lexer_error(
+                                "Invalid indentation - tabs and spaces cannot be mixed".into(),
+                                line_no,
+                            );
+                            break;
+                        }
+                        skip += 1;
                     }
-                    if (c == b' ') != using_spaces {
-                        crate::push_lexer_error(
-                            "Invalid indentation - tabs and spaces cannot be mixed".into(),
-                            first_line + i as u32,
-                        );
-                        break;
-                    }
-                    skip += 1;
+                    k += skip;
+                    continue;
                 }
-                // Whitespace-only lines need not be fully indented.
-                stripped.extend_from_slice(&line[skip.min(line.len())..]);
-                stripped.extend_from_slice(newline);
+                let c = content[k];
+                stripped.push(c);
+                k += 1;
+                if c == b'\n' {
+                    line_no += 1;
+                }
+                let line_end = c == b'\n' || (c == b'\r' && content.get(k) != Some(&b'\n'));
+                if line_end && !in_code(k - 1) {
+                    at_line_start = true;
+                }
             }
             content = stripped;
         }
@@ -2306,30 +2330,7 @@ fn lex_interp_code(
     prefix: &[u8],
     suffix: &[u8],
 ) -> (Vec<Token>, usize) {
-    let mut i = start + 1;
-    let mut depth = 1usize;
-    while i < src.len() {
-        match src[i] {
-            b'{' => depth += 1,
-            b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            q @ (b'\'' | b'"' | b'`') => {
-                i += 1;
-                while i < src.len() && src[i] != q {
-                    if src[i] == b'\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-            }
-            _ => {}
-        }
-        i += 1;
-    }
+    let i = interp_code_close(src, start).unwrap_or(src.len());
     let inner_end = i.min(src.len());
     let mut code = b"<?php ".to_vec();
     code.extend_from_slice(prefix);
@@ -2369,6 +2370,35 @@ fn lex_interp_code(
         Span::new(inner_end as u32, inner_end as u32, end_line),
     ));
     (out, (inner_end + 1).min(src.len()))
+}
+
+/// The index of the `}` closing the braced code at `src[start]` (a `{`).
+fn interp_code_close(src: &[u8], start: usize) -> Option<usize> {
+    let mut i = start + 1;
+    let mut depth = 1usize;
+    while i < src.len() {
+        match src[i] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            q @ (b'\'' | b'"' | b'`') => {
+                i += 1;
+                while i < src.len() && src[i] != q {
+                    if src[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Encode a `\u{...}` escape like zend_language_scanner.l: invalid or empty
