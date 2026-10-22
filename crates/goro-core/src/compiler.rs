@@ -968,7 +968,32 @@ impl Compiler {
             }
         }
         // zend_compile_attributes(): argument list errors.
+        fn has_empty_array_elem(e: &Expr) -> bool {
+            match &e.kind {
+                ExprKind::Array(elems) => elems.iter().any(|el| {
+                    (el.key.is_none()
+                        && matches!(el.value.kind, ExprKind::Null)
+                        && el.value.span.start == el.value.span.end)
+                        || el.key.as_ref().is_some_and(has_empty_array_elem)
+                        || has_empty_array_elem(&el.value)
+                }),
+                ExprKind::PropertyAccess { object, .. } => has_empty_array_elem(object),
+                ExprKind::ArrayAccess { array, index } => {
+                    has_empty_array_elem(array)
+                        || index.as_deref().is_some_and(has_empty_array_elem)
+                }
+                ExprKind::UnaryOp { operand, .. } => has_empty_array_elem(operand),
+                ExprKind::BinaryOp { left, right, .. } => {
+                    has_empty_array_elem(left) || has_empty_array_elem(right)
+                }
+                _ => false,
+            }
+        }
         for a in attrs {
+            if a.args.iter().any(|arg| has_empty_array_elem(&arg.value)) {
+                self.deferred_fatal_errors
+                    .push("Cannot use empty array elements in arrays".into());
+            }
             let mut seen_named: Vec<&[u8]> = Vec::new();
             for arg in &a.args {
                 match &arg.name {

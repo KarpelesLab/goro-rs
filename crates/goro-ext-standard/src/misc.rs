@@ -937,7 +937,12 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Check if it's a built-in keyword constant (TRUE, FALSE, NULL)
     let name_upper: Vec<u8> = name_bytes.iter().map(|b| b.to_ascii_uppercase()).collect();
-    if name_upper == b"TRUE" || name_upper == b"FALSE" || name_upper == b"NULL" {
+    // zend_register_constant(): __COMPILER_HALT_OFFSET__ is reserved.
+    if name_upper == b"TRUE"
+        || name_upper == b"FALSE"
+        || name_upper == b"NULL"
+        || name_bytes == b"__COMPILER_HALT_OFFSET__"
+    {
         let name_str = name.to_string_lossy();
         vm.emit_warning(&format!(
             "Constant {} already defined, this will be an error in PHP 9",

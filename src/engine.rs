@@ -139,6 +139,7 @@ fn is_fatal_parse_error(err_msg: &str) -> bool {
     err_msg.contains("Match expressions")
         || err_msg.starts_with("Unparenthesized `")
         || err_msg.starts_with("Cannot mix [] and list()")
+        || err_msg.ends_with("can only be used from the outermost scope")
         || err_msg.starts_with("Cannot assign to array(), use [] instead")
         || err_msg.starts_with("Assignments can only happen to writable values")
         || err_msg.contains("Cannot use")
