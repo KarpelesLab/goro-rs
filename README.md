@@ -55,7 +55,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/json | 88 | 88 | 100% |
 | ext/bcmath / filter / gmp | 377 | 380 | 99.2% |
 | ext/ctype / tokenizer | 102 | 102 | 100% |
-| ext/uri (RFC 3986 + WHATWG URL) | 185 | 309 | 59.9% |
+| ext/uri (uriparser port + lexbor WHATWG URL parser port) | 309 | 309 | 100% |
 | ext/posix / pcntl / calendar / ftp / gettext / shmop / sysv* | 254 | 254 | 100% |
 | ext/curl (libcurl emulation) / sockets | 252 | 253 | 99.6% |
 | ext/opcache (behavioural tests) | 300 | 303 | 99.0% |
@@ -99,7 +99,9 @@ Highlights beyond the core language:
   from libxslt 1.1.45 with all of EXSLT; it matches libxslt on its own test suite and the DocBook
   stylesheets), gd (port of the bundled libgd with byte-identical PNG/GIF/JPEG output; FreeType
   text on skrifa, WebP/AVIF on the OxideAV codecs), dba (cdb/cdb_make, inifile and flatfile
-  handlers), readline (GNU readline emulation, with the `php -a` interactive shell), zend_test.
+  handlers), readline (GNU readline emulation, with the `php -a` interactive shell),
+  uri (`Uri\Rfc3986\Uri` on a uriparser port, `Uri\WhatWg\Url` on a port of lexbor's WHATWG
+  URL parser), zend_test.
 
 ### Not Yet Implemented
 - pdo_sqlite/…, ffi, ldap, sqlite3, tidy, odbc, snmp, enchant
