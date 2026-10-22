@@ -1346,10 +1346,7 @@ pub(super) fn check_liveness(fh: &mut FileHandle) {
         if !c.alive(fd) {
             fh.eof = true;
         }
-        let w = c.take_warnings();
-        if !w.is_empty() {
-            CRYPTO_WARNINGS.with(|q| q.borrow_mut().extend(w));
-        }
+        queue_crypto_output(c, fd);
         return;
     }
     let Some(sd) = fh.sock.as_ref() else {
@@ -2468,13 +2465,42 @@ const STREAM_CRYPTO_METHOD_TLSV1_3_CLIENT: i64 = 65;
 thread_local! {
     /// Warnings of TLS reads, emitted by the PHP function that read.
     static CRYPTO_WARNINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Callbacks TLS reads made due, with the descriptor of their stream.
+    static CRYPTO_CALLBACKS: RefCell<Vec<(i32, Value)>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Emit the warnings TLS reads queued (they run without the VM).
+/// Queue what a TLS read left for the VM: its warnings and callbacks.
+fn queue_crypto_output(c: &mut Box<dyn goro_core::crypto::CryptoStream>, fd: i32) {
+    let w = c.take_warnings();
+    if !w.is_empty() {
+        CRYPTO_WARNINGS.with(|q| q.borrow_mut().extend(w));
+    }
+    let cbs = c.take_callbacks();
+    if !cbs.is_empty() {
+        CRYPTO_CALLBACKS.with(|q| q.borrow_mut().extend(cbs.into_iter().map(|cb| (fd, cb))));
+    }
+}
+
+/// Emit the warnings TLS reads queued (they run without the VM), and call
+/// the callbacks they made due (php_openssl_limit_handshake_reneg()).
 pub(crate) fn flush_crypto_warnings(vm: &mut Vm, func: &str) {
     let w = CRYPTO_WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()));
     for m in w {
         vm.emit_warning(&format!("{}(): {}", func, m));
+    }
+    let cbs = CRYPTO_CALLBACKS.with(|q| std::mem::take(&mut *q.borrow_mut()));
+    for (fd, cb) in cbs {
+        let fid = FILE_HANDLES.with(|h| {
+            h.borrow()
+                .iter()
+                .find(|(_, fh)| fh.sock.is_some() && fh.file.as_raw_fd() == fd)
+                .map(|(id, _)| *id)
+        });
+        let Some(fid) = fid else { continue };
+        if vm.call_callback(&cb, &[Value::resource(fid)]).is_err() && vm.current_exception.is_none()
+        {
+            vm.emit_warning("SSL: failed invoking reneg limit notification callback");
+        }
     }
 }
 
@@ -2747,10 +2773,7 @@ fn crypto_read(
     let timeout = if sd.tv_sec == -1 { -1 } else { sd.timeout_ms() };
     let c = fh.crypto.as_mut()?;
     let r = c.read(fd, buf, blocked, timeout);
-    let w = c.take_warnings();
-    if !w.is_empty() {
-        CRYPTO_WARNINGS.with(|q| q.borrow_mut().extend(w));
-    }
+    queue_crypto_output(c, fd);
     match &r {
         Ok(0) if !buf.is_empty() => fh.eof = true,
         Err(e) if e.kind() == std::io::ErrorKind::TimedOut => sd.timeout_event = true,

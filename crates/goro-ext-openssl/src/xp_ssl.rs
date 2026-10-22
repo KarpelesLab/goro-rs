@@ -617,6 +617,97 @@ pub struct SslStream {
     warnings: Vec<String>,
     /// The PHP function warnings are reported for.
     func: String,
+    /// Server: renegotiation rate limiting (sslsock->reneg).
+    reneg: Option<RenegLimit>,
+    /// Record boundaries of what the peer sent.
+    records: RecordScan,
+    /// reneg_limit_callback calls due.
+    callbacks: Vec<Value>,
+}
+
+/// php_openssl_handshake_bucket_t
+struct RenegLimit {
+    prev_handshake: i64,
+    limit: i64,
+    window: i64,
+    tokens: i64,
+    callback: Option<Value>,
+}
+
+impl RenegLimit {
+    /// php_openssl_init_server_reneg_limit(): None without rate limiting.
+    fn from_opts(opts: Option<&PhpArray>) -> Option<RenegLimit> {
+        // OPENSSL_DEFAULT_RENEG_LIMIT / OPENSSL_DEFAULT_RENEG_WINDOW
+        let limit = opt_long(opts, "reneg_limit").unwrap_or(2);
+        if limit < 0 {
+            return None;
+        }
+        let window = opt_long(opts, "reneg_window").unwrap_or(300);
+        Some(RenegLimit {
+            prev_handshake: 0,
+            limit,
+            window,
+            tokens: 0,
+            callback: opt(opts, "reneg_limit_callback").map(|v| v.deref()),
+        })
+    }
+
+    /// php_openssl_limit_handshake_reneg() at a handshake start: true when
+    /// the stream must close (after the callback, if any).
+    fn handshake_start(&mut self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // The initial handshake is never rate-limited.
+        if self.prev_handshake == 0 {
+            self.prev_handshake = now;
+            return false;
+        }
+        let elapsed = now - self.prev_handshake;
+        self.prev_handshake = now;
+        let rate = if self.window != 0 {
+            self.limit / self.window
+        } else {
+            0
+        };
+        self.tokens = (self.tokens - elapsed * rate).max(0) + 1;
+        self.tokens > self.limit
+    }
+}
+
+/// Tracks the TLS record headers in the bytes the peer sends, to see a
+/// renegotiation (a handshake record after the handshake) start.
+#[derive(Default)]
+struct RecordScan {
+    hdr: Vec<u8>,
+    left: usize,
+}
+
+impl RecordScan {
+    /// Whether a handshake record starts in `data`.
+    fn scan(&mut self, data: &[u8]) -> bool {
+        let mut saw = false;
+        let mut i = 0;
+        while i < data.len() {
+            if self.left > 0 {
+                let k = self.left.min(data.len() - i);
+                self.left -= k;
+                i += k;
+                continue;
+            }
+            self.hdr.push(data[i]);
+            i += 1;
+            if self.hdr.len() == 5 {
+                if self.hdr[0] == 22 {
+                    saw = true;
+                }
+                self.left = u16::from_be_bytes([self.hdr[3], self.hdr[4]]) as usize;
+                self.hdr.clear();
+            }
+        }
+        saw
+    }
 }
 
 fn setup(vm: &mut Vm, p: &CryptoSetup<'_>) -> Option<Box<dyn CryptoStream>> {
@@ -985,6 +1076,13 @@ fn setup(vm: &mut Vm, p: &CryptoSetup<'_>) -> Option<Box<dyn CryptoStream>> {
         eof: false,
         warnings: Vec::new(),
         func: f,
+        reneg: if is_client {
+            None
+        } else {
+            RenegLimit::from_opts(opts)
+        },
+        records: RecordScan::default(),
+        callbacks: Vec::new(),
     }))
 }
 
@@ -1282,6 +1380,10 @@ impl SslStream {
             Err(e) => return Some(self.fail(vm, fd, &e)),
         }
         let hello = std::mem::take(&mut self.hello);
+        self.records.scan(&hello);
+        if let Some(r) = self.reneg.as_mut() {
+            r.handshake_start();
+        }
         if let Err(e) = self.conn.as_mut().unwrap().feed(&hello) {
             return Some(self.fail(vm, fd, &e));
         }
@@ -1407,6 +1509,7 @@ impl SslStream {
                 Ok(Step::Complete) => return Hs::Done,
                 Ok(Step::WantRead) => match sock_recv(fd, &mut buf) {
                     Recv::Data(n) => {
+                        self.records.scan(&buf[..n]);
                         let r = self.conn.as_mut().unwrap().feed(&buf[..n]);
                         if let Err(e) = r {
                             return self.fail(vm, fd, &e);
@@ -1558,6 +1661,28 @@ impl SslStream {
         let mut buf = vec![0u8; 16 * 1024 + 512];
         match sock_recv(fd, &mut buf) {
             Recv::Data(n) => {
+                // A handshake record after the handshake: the client
+                // renegotiates (the info callback's SSL_CB_HANDSHAKE_START).
+                let reneg = self.records.scan(&buf[..n])
+                    && self.active
+                    && self.conn.as_ref().and_then(|c| c.negotiated_version())
+                        != Some(ProtocolVersion::TLSv1_3);
+                if reneg {
+                    if let Some(r) = self.reneg.as_mut() {
+                        if r.handshake_start() {
+                            // should_close: php_stream_xport_shutdown(SHUT_RDWR)
+                            // and EOF (the engine cannot renegotiate anyway).
+                            if let Some(cb) = r.callback.clone() {
+                                self.callbacks.push(cb);
+                            }
+                            unsafe {
+                                libc::shutdown(fd, libc::SHUT_RDWR);
+                            }
+                            self.eof = true;
+                            return Ok(true);
+                        }
+                    }
+                }
                 let conn = self.conn.as_mut().unwrap();
                 if let Err(e) = conn.feed(&buf[..n]) {
                     if let Ok(pt) = conn.recv() {
@@ -1833,6 +1958,10 @@ impl CryptoStream for SslStream {
 
     fn take_warnings(&mut self) -> Vec<String> {
         std::mem::take(&mut self.warnings)
+    }
+
+    fn take_callbacks(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.callbacks)
     }
 
     fn alive(&mut self, fd: i32) -> bool {

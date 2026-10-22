@@ -76,6 +76,12 @@ pub trait CryptoStream {
     fn meta(&self) -> Option<PhpArray>;
     /// Warnings raised by read/write (emitted by the caller, which has the VM).
     fn take_warnings(&mut self) -> Vec<String>;
+    /// Callbacks a read made due (the "reneg_limit_callback" of a server
+    /// stream whose client renegotiated too often), each to be called by
+    /// the caller with the stream as its argument.
+    fn take_callbacks(&mut self) -> Vec<Value> {
+        Vec::new()
+    }
     /// PHP_STREAM_OPTION_CHECK_LIVENESS on an active TLS stream (SSL_peek()).
     fn alive(&mut self, fd: i32) -> bool;
     /// php_openssl_sockop_close(): send close_notify if active.
