@@ -1442,10 +1442,17 @@ pub fn parse_str_into(vm: &mut Vm, data: &[u8], arr: &Rc<RefCell<PhpArray>>) {
         parse_body: false,
         exception: None,
     };
-    treat_data(&mut ctx, PARSE_STRING, data, false, &arg_sep, max_vars, arr);
+    if !ctx
+        .vm
+        .treat_data_hook
+        .is_some_and(|h| h(ctx.vm, 3, data, arr))
+    {
+        treat_data(&mut ctx, PARSE_STRING, data, false, &arg_sep, max_vars, arr);
+    }
 }
 
 pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
+    goro_core::sapi_headers::reset();
     REQUEST.with(|r| *r.borrow_mut() = Some(req.clone()));
     RAW_INPUT.with(|r| *r.borrow_mut() = Default::default());
     crate::info::set_web_sapi(req.cgi);
@@ -1535,20 +1542,34 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
 
         // $_GET
         if has('G') {
-            treat_data(
-                &mut ctx,
-                PARSE_GET,
-                &req.query_string,
-                false,
-                &arg_sep,
-                max_vars,
-                &get,
-            );
+            if !ctx
+                .vm
+                .treat_data_hook
+                .is_some_and(|h| h(ctx.vm, 1, &req.query_string, &get))
+            {
+                treat_data(
+                    &mut ctx,
+                    PARSE_GET,
+                    &req.query_string,
+                    false,
+                    &arg_sep,
+                    max_vars,
+                    &get,
+                );
+            }
         }
         // $_POST
         if has('P') && is_post {
             match post_entry {
-                Some("std") if buffered => std_post_handler(&mut ctx, &req.body, max_vars, &post),
+                Some("std") if buffered => {
+                    if !ctx
+                        .vm
+                        .treat_data_hook
+                        .is_some_and(|h| h(ctx.vm, 0, &req.body, &post))
+                    {
+                        std_post_handler(&mut ctx, &req.body, max_vars, &post)
+                    }
+                }
                 Some("rfc1867") => {
                     let cfg = UploadCfg {
                         max_file_uploads: ini("max_file_uploads")
@@ -1592,7 +1613,13 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
         // $_COOKIE
         if has('C') {
             if let Some(c) = &req.cookie_data {
-                treat_data(&mut ctx, PARSE_COOKIE, c, true, b";", max_vars, &cookie);
+                if !ctx
+                    .vm
+                    .treat_data_hook
+                    .is_some_and(|h| h(ctx.vm, 2, c, &cookie))
+                {
+                    treat_data(&mut ctx, PARSE_COOKIE, c, true, b";", max_vars, &cookie);
+                }
             }
         }
     }

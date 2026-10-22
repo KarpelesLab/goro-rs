@@ -13046,6 +13046,24 @@ fn header_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             });
         }
+        // sapi_header_op(): SG(sapi_headers).mimetype, with the default
+        // charset applied (sapi_apply_default_charset()).
+        if name.eq_ignore_ascii_case(b"Content-Type") {
+            let mut mimetype = value.clone();
+            let charset = _vm
+                .constants
+                .get(b"default_charset".as_slice())
+                .map(|v| v.to_php_string().as_bytes().to_vec())
+                .unwrap_or_else(|| b"UTF-8".to_vec());
+            if !charset.is_empty()
+                && mimetype.starts_with(b"text/")
+                && !mimetype.windows(8).any(|w| w == b"charset=")
+            {
+                mimetype.extend_from_slice(b";charset=");
+                mimetype.extend_from_slice(&charset);
+            }
+            goro_core::sapi_headers::content_type_set(&mimetype);
+        }
         // sapi_header_op(): a script setting Content-Length cannot know the
         // compressed size, so zlib output compression is switched off
         // (req #44164).

@@ -22,6 +22,9 @@ pub(crate) mod variance;
 use static_props::SpFetch;
 /// Internal class name of the graceful-exit unwinding object thrown into a
 /// fiber that is destroyed while suspended (not a user-visible class).
+/// See `Vm::treat_data_hook`.
+pub type TreatDataHook = fn(&mut Vm, u8, &[u8], &Rc<RefCell<PhpArray>>) -> bool;
+
 pub const GRACEFUL_EXIT_CLASS: &[u8] = b"\0GracefulExit";
 
 thread_local! {
@@ -957,6 +960,11 @@ pub struct Vm {
     /// Called by ini_set() before the value is stored; returning false
     /// rejects the new value (ini_set() then returns false).
     pub ini_set_hooks: HashMap<Vec<u8>, fn(&mut Vm, &[u8], &Value) -> bool>,
+    /// sapi_module.treat_data as an extension overrides it (mbstring's
+    /// encoding translation): (kind, data, target array) where kind is
+    /// PARSE_POST (0), PARSE_GET (1), PARSE_COOKIE (2) or PARSE_STRING (3).
+    /// Returns false to leave the data to the default handler.
+    pub treat_data_hook: Option<TreatDataHook>,
     /// PHP_MINFO handlers of extensions: each returns its module's text-mode
     /// phpinfo() section (INFO_MODULES).
     pub phpinfo_hooks: Vec<fn(&mut Vm) -> String>,
@@ -2099,6 +2107,7 @@ impl Vm {
             pending_callable_deprecations: RefCell::new(Vec::new()),
             ucf_call_line: None,
             ini_set_hooks: HashMap::new(),
+            treat_data_hook: None,
             phpinfo_hooks: Vec::new(),
             startup_hooks: Vec::new(),
             request_startup_hooks: Vec::new(),

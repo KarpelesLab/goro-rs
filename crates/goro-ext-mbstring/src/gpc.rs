@@ -16,6 +16,49 @@ use crate::zpp::*;
 
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_parse_str", mb_parse_str);
+    vm.treat_data_hook = Some(treat_data);
+}
+
+/// C: `mbstr_treat_data` (and `php_mb_post_handler` for PARSE_POST): with
+/// mbstring.encoding_translation on, request variables are converted from
+/// the HTTP input encoding to the internal encoding.
+fn treat_data(vm: &mut Vm, arg: u8, data: &[u8], arr: &Rc<RefCell<PhpArray>>) -> bool {
+    state::sync(vm);
+    if !state::with(|s| s.encoding_translation) {
+        return false;
+    }
+    let separator: Vec<u8> = match arg {
+        // php_mb_post_handler
+        0 => b"&".to_vec(),
+        2 => b";".to_vec(),
+        _ => match vm.constants.get(b"arg_separator.input".as_ref()) {
+            Some(v) if !v.to_php_string().is_empty() => v.to_php_string().as_bytes().to_vec(),
+            _ => b"&".to_vec(),
+        },
+    };
+    let (to, from_list) = state::with(|s| {
+        match arg {
+            0 => s.http_input_identify_post = None,
+            1 => s.http_input_identify_get = None,
+            2 => s.http_input_identify_cookie = None,
+            _ => s.http_input_identify_string = None,
+        }
+        s.illegalchars = 0;
+        (s.internal_encoding, s.http_input_list.clone())
+    });
+    let detected = encoding_handler(vm, arr, data, &separator, to, &from_list, false, true);
+    state::with(|s| {
+        s.http_input_identify = detected;
+        if detected.is_some() {
+            match arg {
+                0 => s.http_input_identify_post = detected,
+                1 => s.http_input_identify_get = detected,
+                2 => s.http_input_identify_cookie = detected,
+                _ => s.http_input_identify_string = detected,
+            }
+        }
+    });
+    true
 }
 
 /// php_url_decode
@@ -251,6 +294,7 @@ pub fn encoding_handler(
     to: &'static Encoding,
     from_list: &[&'static Encoding],
     report_errors: bool,
+    request_startup: bool,
 ) -> Option<&'static Encoding> {
     // C string semantics
     let res = match res.iter().position(|&c| c == 0) {
@@ -279,10 +323,20 @@ pub fn encoding_handler(
         .map(|v| v.to_long())
         .unwrap_or(1000);
     if list.len() as i64 > max_input_vars.saturating_mul(2) {
-        vm.emit_warning(&format!(
-            "mb_parse_str(): Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
-            max_input_vars
-        ));
+        if request_startup {
+            // php_error_docref() while the request starts up
+            if vm.error_reporting & 2 != 0 {
+                vm.write_output(format!(
+                    "\nWarning: PHP Request Startup: Input variables exceeded {}. To increase the limit change max_input_vars in php.ini. in Unknown on line 0\n",
+                    max_input_vars
+                ).as_bytes());
+            }
+        } else {
+            vm.emit_warning(&format!(
+                "mb_parse_str(): Input variables exceeded {}. To increase the limit change max_input_vars in php.ini.",
+                max_input_vars
+            ));
+        }
         return None;
     }
     let pass: &'static Encoding = &mbfl::basic::ENC_PASS;
@@ -329,7 +383,7 @@ fn mb_parse_str(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let to = state::current_internal_encoding();
     let from_list = state::with(|st| st.http_input_list.clone());
-    let detected = encoding_handler(vm, &track, &s, &sep, to, &from_list, true);
+    let detected = encoding_handler(vm, &track, &s, &sep, to, &from_list, true, false);
     state::with(|st| st.http_input_identify = detected);
     if let Some(Value::Reference(r)) = args.get(1) {
         *r.borrow_mut() = Value::Array(track);

@@ -45,6 +45,7 @@ use goro_core::vm::Vm;
 /// Register all standard extension functions
 pub fn register_standard_functions(vm: &mut Vm) {
     vm.register_extension(b"standard");
+    goro_core::sapi_headers::set_add_header_hook(misc::sapi_add_header);
     output::register(vm);
     strings::register(vm);
     crypt::register(vm);

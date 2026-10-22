@@ -65,8 +65,16 @@ pub fn register(vm: &mut Vm) {
         "mbstring.http_output_conv_mimetypes",
     ] {
         if !vm.constants.contains_key(key.as_bytes()) {
-            vm.constants
-                .insert(key.as_bytes().to_vec(), Value::String(PhpString::empty()));
+            let default: &[u8] = match key {
+                "mbstring.http_output_conv_mimetypes" => {
+                    mbstring::DEFAULT_CONV_MIMETYPES.as_bytes()
+                }
+                _ => b"",
+            };
+            vm.constants.insert(
+                key.as_bytes().to_vec(),
+                Value::String(PhpString::from_bytes(default)),
+            );
         }
     }
 }

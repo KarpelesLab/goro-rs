@@ -1163,6 +1163,67 @@ fn mb_get_info(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 const PHP_OUTPUT_HANDLER_START: i64 = 0x01;
 const PHP_OUTPUT_HANDLER_FINAL: i64 = 0x08;
 
+/// mbstring.http_output_conv_mimetypes matches `mimetype`
+/// (_php_mb_match_regex(): a caseless PCRE).
+fn conv_mimetype_matches(vm: &Vm, mimetype: &[u8]) -> bool {
+    let pattern = vm
+        .constants
+        .get(b"mbstring.http_output_conv_mimetypes".as_slice())
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_else(|| DEFAULT_CONV_MIMETYPES.as_bytes().to_vec());
+    let pattern = pattern.trim_ascii();
+    if pattern.is_empty() {
+        return false;
+    }
+    let cctx = goro_pcre::CompileContext::default();
+    let Ok(re) = goro_pcre::Code::compile(pattern, goro_pcre::constants::PCRE2_CASELESS, &cctx)
+    else {
+        return false;
+    };
+    let mut md = goro_pcre::MatchData::new(1);
+    re.match_at(mimetype, 0, 0, &mut md, &goro_pcre::MatchContext::default()) >= 0
+}
+
+/// The default of mbstring.http_output_conv_mimetypes
+pub const DEFAULT_CONV_MIMETYPES: &str = "^(text/|application/xhtml\\+xml)";
+
+/// mb_output_handler() on PHP_OUTPUT_HANDLER_START: conversion is enabled
+/// when the content type is the default one or matches
+/// mbstring.http_output_conv_mimetypes, and its charset is set.
+fn output_handler_start(vm: &mut Vm, enc: &'static Encoding) {
+    let set = goro_core::sapi_headers::mimetype();
+    let send_default = goro_core::sapi_headers::send_default_content_type();
+    let mut matched = false;
+    let mimetype: Option<Vec<u8>> = match set {
+        Some(m) if conv_mimetype_matches(vm, &m) => {
+            matched = true;
+            Some(match m.iter().position(|&c| c == b';') {
+                Some(p) => m[..p].to_vec(),
+                None => m,
+            })
+        }
+        _ if send_default => Some(
+            vm.constants
+                .get(b"default_mimetype".as_slice())
+                .map(|v| v.to_php_string().as_bytes().to_vec())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| b"text/html".to_vec()),
+        ),
+        _ => None,
+    };
+    if send_default || matched {
+        if let (Some(charset), Some(mimetype)) = (enc.mime_name, mimetype) {
+            let mut line = b"Content-Type: ".to_vec();
+            line.extend_from_slice(&mimetype);
+            line.extend_from_slice(b"; charset=");
+            line.extend_from_slice(charset.as_bytes());
+            // sapi_add_header(p, len, 0)
+            goro_core::sapi_headers::add_header(&line, false);
+        }
+        state::with(|st| st.outconv_enabled = true);
+    }
+}
+
 fn mb_output_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = "mb_output_handler";
     let s = str_arg(vm, f, args, 0, "string")?;
@@ -1173,9 +1234,7 @@ fn mb_output_handler(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(pstring(s));
     }
     if status & PHP_OUTPUT_HANDLER_START != 0 {
-        // The CLI never sends headers, so the default content type applies
-        // and output conversion is enabled.
-        state::with(|st| st.outconv_enabled = true);
+        output_handler_start(vm, enc);
     }
     if !state::with(|st| st.outconv_enabled) {
         return Ok(pstring(s));

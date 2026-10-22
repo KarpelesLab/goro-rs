@@ -10,3 +10,4 @@ workspace = true
 [dependencies]
 goro-core = { path = "../goro-core" }
 goro-parser = { path = "../goro-parser" }
+goro-pcre = { path = "../goro-pcre" }
