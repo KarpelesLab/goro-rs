@@ -12486,6 +12486,121 @@ impl Compiler {
         Ok(OperandType::Tmp(t))
     }
 
+    /// A read of a property / dimension chain whose outer names or keys are
+    /// evaluated before the inner fetches (zend_delayed_compile_var(): the
+    /// FETCH_OBJ_R / FETCH_DIM_R of the inner levels are emitted after the
+    /// outer names and keys), when that order is observable.
+    fn needs_delayed_chain(expr: &Expr) -> bool {
+        let simple = |e: &Expr| {
+            matches!(
+                e.kind,
+                ExprKind::Identifier(_)
+                    | ExprKind::Int(_)
+                    | ExprKind::String(_)
+                    | ExprKind::Float(_)
+                    | ExprKind::True
+                    | ExprKind::False
+                    | ExprKind::Null
+            )
+        };
+        let mut e = expr;
+        let mut depth = 0;
+        let mut outer_dynamic = false;
+        loop {
+            let (inner, key) = match &e.kind {
+                ExprKind::PropertyAccess {
+                    object,
+                    property,
+                    nullsafe: false,
+                } => (object, property),
+                ExprKind::ArrayAccess {
+                    array,
+                    index: Some(index),
+                } => (array, index),
+                _ => break,
+            };
+            let inner_is_level = matches!(
+                inner.kind,
+                ExprKind::PropertyAccess {
+                    nullsafe: false,
+                    ..
+                } | ExprKind::ArrayAccess { index: Some(_), .. }
+            );
+            if inner_is_level && !simple(key) {
+                outer_dynamic = true;
+            }
+            depth += 1;
+            e = inner;
+        }
+        depth >= 2 && outer_dynamic && !expr_is_in_nullsafe_chain(expr)
+    }
+
+    /// See needs_delayed_chain: the base, then every name / key from the
+    /// innermost level out, then the fetches.
+    #[inline(never)]
+    fn compile_delayed_chain(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        // Levels from the outermost in.
+        let mut levels: Vec<&Expr> = Vec::new();
+        let mut e = expr;
+        loop {
+            match &e.kind {
+                ExprKind::PropertyAccess {
+                    object,
+                    nullsafe: false,
+                    ..
+                } => {
+                    levels.push(e);
+                    e = object;
+                }
+                ExprKind::ArrayAccess {
+                    array,
+                    index: Some(_),
+                } => {
+                    levels.push(e);
+                    e = array;
+                }
+                _ => break,
+            }
+        }
+        let mut cur = self.compile_expr(e)?;
+        // (opcode, key, line) of each fetch, innermost first
+        let mut fetches: Vec<(OpCode, OperandType, u32)> = Vec::with_capacity(levels.len());
+        for level in levels.iter().rev() {
+            match &level.kind {
+                ExprKind::PropertyAccess { property, .. } => {
+                    let name = match &property.kind {
+                        ExprKind::Identifier(n) => OperandType::Const(
+                            self.op_array
+                                .add_literal(Value::String(PhpString::from_vec(n.clone()))),
+                        ),
+                        _ => self.compile_expr(property)?,
+                    };
+                    fetches.push((OpCode::PropertyGet, name, level.span.line));
+                }
+                ExprKind::ArrayAccess {
+                    index: Some(idx), ..
+                } => {
+                    let key = self.compile_expr(idx)?;
+                    // FETCH_DIM_R takes the line once its key is compiled.
+                    fetches.push((OpCode::ArrayGet, key, self.zend_lineno.max(level.span.line)));
+                }
+                _ => unreachable!(),
+            }
+        }
+        for (opcode, key, line) in fetches {
+            let tmp = self.op_array.alloc_temp();
+            self.op_array.emit(Op {
+                opcode,
+                op1: cur,
+                op2: key,
+                result: OperandType::Tmp(tmp),
+                line,
+            });
+            cur = OperandType::Tmp(tmp);
+        }
+        Ok(cur)
+    }
+
     /// The null check of `?->` on `obj`: its jump joins the chain's
     /// short-circuit (None), or is returned to be handled locally.
     #[inline(never)]
@@ -12548,6 +12663,9 @@ impl Compiler {
             && expr_is_in_nullsafe_chain(expr)
         {
             return self.compile_nullsafe_chain(expr);
+        }
+        if self.memoize_mode == 0 && !self.in_const_expr && Self::needs_delayed_chain(expr) {
+            return self.compile_delayed_chain(expr);
         }
         if self.memoize_mode != 0
             && Self::is_memoizable(expr)
