@@ -19,8 +19,8 @@ fn storage(obj: &Rc<RefCell<PhpObject>>) -> Rc<RefCell<PhpArray>> {
     }
     let a = Rc::new(RefCell::new(PhpArray::new()));
     let mut ob = obj.borrow_mut();
-    ob.set_property(b"__spl_array".to_vec(), Value::Array(a.clone()));
-    ob.set_property(b"__spl_size".to_vec(), Value::Long(0));
+    ob.set_property_slice(b"__spl_array", Value::Array(a.clone()));
+    ob.set_property_slice(b"__spl_size", Value::Long(0));
     a
 }
 
@@ -31,7 +31,7 @@ fn fa_size(obj: &Rc<RefCell<PhpObject>>) -> i64 {
 fn sync_size(obj: &Rc<RefCell<PhpObject>>) {
     let n = fa_size(obj);
     obj.borrow_mut()
-        .set_property(b"__spl_size".to_vec(), Value::Long(n));
+        .set_property_slice(b"__spl_size", Value::Long(n));
 }
 
 impl Vm {
@@ -257,8 +257,8 @@ impl Vm {
         {
             let n = out.len() as i64;
             let mut ob = obj.borrow_mut();
-            ob.set_property(b"__spl_array".to_vec(), val_arr(out));
-            ob.set_property(b"__spl_size".to_vec(), Value::Long(n));
+            ob.set_property_slice(b"__spl_array", val_arr(out));
+            ob.set_property_slice(b"__spl_size", Value::Long(n));
         }
         Value::Object(obj)
     }
@@ -436,8 +436,8 @@ impl Vm {
         let it = self.spl_instantiate(b"InternalIterator");
         {
             let mut ob = it.borrow_mut();
-            ob.set_property(b"__spl_fa_target".to_vec(), Value::Object(obj.clone()));
-            ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+            ob.set_property_slice(b"__spl_fa_target", Value::Object(obj.clone()));
+            ob.set_property_slice(b"__spl_pos", Value::Long(0));
         }
         Value::Object(it)
     }
@@ -459,7 +459,7 @@ impl Vm {
         let r = match method {
             b"rewind" => {
                 it.borrow_mut()
-                    .set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                    .set_property_slice(b"__spl_pos", Value::Long(0));
                 Value::Null
             }
             b"valid" => {
@@ -483,7 +483,7 @@ impl Vm {
             }
             b"next" => {
                 it.borrow_mut()
-                    .set_property(b"__spl_pos".to_vec(), Value::Long(pos + 1));
+                    .set_property_slice(b"__spl_pos", Value::Long(pos + 1));
                 Value::Null
             }
             _ => return None,

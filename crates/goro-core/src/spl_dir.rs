@@ -61,7 +61,7 @@ fn prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Value {
 }
 
 fn set_prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8], v: Value) {
-    obj.borrow_mut().set_property(name.to_vec(), v);
+    obj.borrow_mut().set_property_slice(name, v);
 }
 
 fn sv(s: &[u8]) -> Value {

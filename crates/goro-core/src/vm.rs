@@ -965,7 +965,7 @@ pub struct Vm {
     /// Emptied foreach states of finished frames (see execute_op_array_inner).
     #[allow(clippy::vec_box)] // (the boxes are handed to frames)
     foreach_pool: Vec<Box<ForeachState>>,
-    string_pool: Vec<String>,
+    pub(crate) string_pool: Vec<String>,
     /// Call stack for stack trace generation: (function_name, file, line_called_from, args, is_instance_method)
     pub call_stack: Vec<(String, String, u32, Vec<Value>, bool)>,
     /// Stack of saved error_reporting levels (for @ operator)
@@ -17502,14 +17502,68 @@ impl Vm {
     #[inline(never)]
     fn init_spl_method_fast(
         &mut self,
-        op: &crate::opcode::Op,
+        op_array: &OpArray,
+        ip: usize,
         cvs: &[Value],
         tmps: &mut [Value],
-        literals: &[Value],
     ) -> bool {
+        let op = &op_array.ops[ip];
+        let literals = &op_array.literals;
         let OperandType::Const(i) = op.op2 else {
             return false;
         };
+        // The site set up this call for an object of this class before
+        // (classes do not change once declared).
+        let cached = {
+            let obj_class = |v: Option<&Value>| match v {
+                Some(Value::Object(o)) => Some(Rc::clone(o)),
+                _ => None,
+            };
+            let o = match op.op1 {
+                OperandType::Cv(i) => match cvs.get(i as usize) {
+                    Some(Value::Reference(r)) => obj_class(Some(&r.borrow())),
+                    v => obj_class(v),
+                },
+                OperandType::Tmp(t) => obj_class(tmps.get(t as usize)),
+                _ => None,
+            };
+            o.and_then(|o| {
+                let sites = op_array.sites.borrow();
+                let (c, name, by_val) = sites.as_ref()?.spl_sites.get(&(ip as u32))?;
+                let same = o.borrow().class_name == *c;
+                same.then(|| (Value::Object(o), name.clone(), *by_val))
+            })
+        };
+        // A method taking every argument by value: the sends need not ask
+        // (see send_val_fast).
+        let target = |vm: &Vm, by_val: bool| {
+            if by_val {
+                CallTarget {
+                    fn_gen: vm.user_functions.len() + 1,
+                    ..CallTarget::NONE
+                }
+            } else {
+                CallTarget::NONE
+            }
+        };
+        if let Some((obj_val, name, by_val)) = cached {
+            // INIT_METHOD_CALL consumes a temporary object operand.
+            if let OperandType::Tmp(t) = op.op1 {
+                if let Some(slot @ Value::Object(_)) = tmps.get_mut(t as usize) {
+                    *slot = Value::Undef;
+                }
+            }
+            let mut args = self.take_values(0);
+            args.push(obj_val);
+            let target = target(self, by_val);
+            self.pending_calls.push(PendingCall {
+                name,
+                args,
+                named_args: Vec::new(),
+                target,
+            });
+            return true;
+        }
         let Some(Value::String(method)) = literals.get(i as usize) else {
             return false;
         };
@@ -17570,13 +17624,29 @@ impl Vm {
         }
         let mut nm = b"__splx::".to_vec();
         nm.extend_from_slice(m);
+        let name = PhpString::from_vec(nm);
+        // (spl_deferred_arg_by_ref() finds no by-reference parameter)
+        let by_val = self
+            .spl_builtin_base(class_lower)
+            .and_then(|b| self.spl_stub_lookup(b, method_lower))
+            .is_some_and(|st| st.byref.is_empty());
+        if let Value::Object(o) = &obj_val {
+            let class = o.borrow().class_name.clone();
+            op_array
+                .sites
+                .borrow_mut()
+                .get_or_insert_with(Default::default)
+                .spl_sites
+                .insert(ip as u32, (class, name.clone(), by_val));
+        }
         let mut args = self.take_values(0);
         args.push(obj_val);
+        let target = target(self, by_val);
         self.pending_calls.push(PendingCall {
-            name: PhpString::from_vec(nm),
+            name,
             args,
             named_args: Vec::new(),
-            target: CallTarget::NONE,
+            target,
         });
         true
     }
@@ -17677,9 +17747,8 @@ impl Vm {
     /// method call (`__splx::method`, see spl_deferred_call); not while an
     /// observer watches calls.
     #[inline]
-    fn fast_splx_target(&self, op: &crate::opcode::Op) -> bool {
+    fn fast_splx_target(&self, _op: &crate::opcode::Op) -> bool {
         self.observer.is_none()
-            && !matches!(op.op1, OperandType::Const(_))
             && self.pending_calls.last().is_some_and(|c| {
                 let n = c.name.as_bytes();
                 n.len() > 8 && n[..8].eq_ignore_ascii_case(b"__splx::")
@@ -17910,7 +17979,7 @@ impl Vm {
 
     /// A vector of `n` undefined values, from the buffers of finished calls.
     #[inline]
-    fn take_values(&mut self, n: usize) -> Vec<Value> {
+    pub(crate) fn take_values(&mut self, n: usize) -> Vec<Value> {
         let mut v = self.value_pool.pop().unwrap_or_default();
         v.resize(n, Value::Undef);
         v
@@ -17918,7 +17987,7 @@ impl Vm {
 
     /// Keep the buffer of an emptied vector for take_values().
     #[inline]
-    fn recycle_values(&mut self, v: Vec<Value>) {
+    pub(crate) fn recycle_values(&mut self, v: Vec<Value>) {
         debug_assert!(v.is_empty());
         if v.capacity() != 0 && v.capacity() <= 256 && self.value_pool.len() < 64 {
             self.value_pool.push(v);
@@ -17946,7 +18015,7 @@ impl Vm {
 
     /// A call's backtrace frame is done with: keep its buffers.
     #[inline]
-    fn recycle_frame(&mut self, frame: (String, String, u32, Vec<Value>, bool)) {
+    pub(crate) fn recycle_frame(&mut self, frame: (String, String, u32, Vec<Value>, bool)) {
         let (mut name, mut file, _, mut args, _) = frame;
         clear_values(&mut args);
         self.recycle_values(args);
@@ -25861,7 +25930,21 @@ impl Vm {
                         if self.closure_pending_calls.last() == Some(&self.pending_calls.len()) {
                             self.closure_pending_calls.pop();
                         }
-                        self.call_result_unused = None;
+                        // (an unused result: the general handler's record)
+                        if matches!(op.op1, OperandType::Const(_)) {
+                            let n = call.name.as_bytes();
+                            let mut buf = [0u8; 64];
+                            if n.len() <= buf.len() {
+                                for (d, s) in buf.iter_mut().zip(n) {
+                                    *d = s.to_ascii_lowercase();
+                                }
+                                self.note_call_result(op, &buf[..n.len()]);
+                            } else {
+                                self.note_call_result(op, &n.to_ascii_lowercase());
+                            }
+                        } else {
+                            self.call_result_unused = None;
+                        }
                         let result = self.spl_deferred_call(
                             &call.name.as_bytes()[8..],
                             &call.args,
@@ -54269,7 +54352,7 @@ impl Vm {
                         return Ok(Flow::Next);
                     }
                     // A method of an SPL data structure (see init_spl_method_fast)
-                    if self.init_spl_method_fast(op, &cvs, &mut tmps, &op_array.literals) {
+                    if self.init_spl_method_fast(op_array, ip - 1, &cvs, &mut tmps) {
                         return Ok(Flow::Next);
                     }
                     let method_name = self

@@ -121,7 +121,7 @@ fn lprop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> i64 {
 }
 
 fn set_l(obj: &Rc<RefCell<PhpObject>>, name: &[u8], n: i64) {
-    obj.borrow_mut().set_property(name.to_vec(), Value::Long(n));
+    obj.borrow_mut().set_property_slice(name, Value::Long(n));
 }
 
 fn bv(b: bool) -> Value {

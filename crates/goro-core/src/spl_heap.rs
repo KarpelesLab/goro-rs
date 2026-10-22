@@ -70,7 +70,7 @@ impl Vm {
 
     fn heap_set_flag(obj: &Rc<RefCell<PhpObject>>, name: &[u8], on: bool) {
         obj.borrow_mut()
-            .set_property(name.to_vec(), if on { Value::True } else { Value::False });
+            .set_property_slice(name, if on { Value::True } else { Value::False });
     }
 
     /// Whether the object's class overrides compare() in userland.
@@ -489,7 +489,7 @@ impl Vm {
                     );
                 }
                 obj.borrow_mut()
-                    .set_property(b"__spl_extract_flags".to_vec(), Value::Long(v));
+                    .set_property_slice(b"__spl_extract_flags", Value::Long(v));
                 Some(Value::Long(v))
             }
             b"getextractflags" if pq => Some(Value::Long(Self::pq_extract_flags(obj))),
@@ -557,7 +557,7 @@ impl Vm {
                         return self.spl_throw(b"Exception", &invalid);
                     }
                     obj.borrow_mut()
-                        .set_property(b"__spl_extract_flags".to_vec(), Value::Long(f));
+                        .set_property_slice(b"__spl_extract_flags", Value::Long(f));
                 } else if flags != 0 {
                     return self.spl_throw(b"Exception", &invalid);
                 }

@@ -410,8 +410,24 @@ impl PhpObject {
     }
 
     pub fn set_property(&mut self, name: Vec<u8>, value: Value) {
-        // Update existing or append new. A slot holding a PHP reference is
-        // written through (the reference set stays intact).
+        if let Some(value) = self.set_existing_property(&name, value) {
+            self.properties.push((name, value));
+            self.account();
+        }
+    }
+
+    /// set_property() by a borrowed name (copied only for a new property).
+    pub fn set_property_slice(&mut self, name: &[u8], value: Value) {
+        if let Some(value) = self.set_existing_property(name, value) {
+            self.properties.push((name.to_vec(), value));
+            self.account();
+        }
+    }
+
+    /// Update property `name` if it exists; else hand the value back.
+    fn set_existing_property(&mut self, name: &[u8], value: Value) -> Option<Value> {
+        // A slot holding a PHP reference is written through (the reference
+        // set stays intact).
         for (k, v) in &mut self.properties {
             if *k == name {
                 // The overwritten value loses a holder (possible GC root).
@@ -425,11 +441,10 @@ impl PhpObject {
                         crate::gc::on_value_replaced(&old, v);
                     }
                 }
-                return;
+                return None;
             }
         }
-        self.properties.push((name, value));
-        self.account();
+        Some(value)
     }
 
     /// Bind a property slot to an existing reference (`$obj->p = &$x`).

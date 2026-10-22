@@ -27,7 +27,7 @@ fn prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Value {
 }
 
 fn set_prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8], v: Value) {
-    obj.borrow_mut().set_property(name.to_vec(), v);
+    obj.borrow_mut().set_property_slice(name, v);
 }
 
 /// The element storage, for reading (None: no storage yet).
@@ -672,16 +672,16 @@ impl Vm {
         let flags = dll_flags(self, obj) & IT_MASK;
         {
             let mut ob = it.borrow_mut();
-            ob.set_property(b"__spl_dll_target".to_vec(), Value::Object(obj.clone()));
-            ob.set_property(
-                b"__spl_dll_cur".to_vec(),
+            ob.set_property_slice(b"__spl_dll_target", Value::Object(obj.clone()));
+            ob.set_property_slice(
+                b"__spl_dll_cur",
                 match c.cur {
                     Some(n) => Value::Long(n),
                     None => Value::Null,
                 },
             );
-            ob.set_property(b"__spl_dll_tpos".to_vec(), Value::Long(c.pos));
-            ob.set_property(b"__spl_iter_mode".to_vec(), Value::Long(flags));
+            ob.set_property_slice(b"__spl_dll_tpos", Value::Long(c.pos));
+            ob.set_property_slice(b"__spl_iter_mode", Value::Long(flags));
         }
         Value::Object(it)
     }

@@ -104,7 +104,7 @@ fn prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Value {
 }
 
 fn set_prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8], v: Value) {
-    obj.borrow_mut().set_property(name.to_vec(), v);
+    obj.borrow_mut().set_property_slice(name, v);
 }
 
 fn lprop(obj: &Rc<RefCell<PhpObject>>, name: &[u8], default: i64) -> i64 {
@@ -408,13 +408,13 @@ impl Vm {
     fn dit_free(obj: &Rc<RefCell<PhpObject>>) {
         let t = Self::dit_type(obj).unwrap_or(-1);
         let mut ob = obj.borrow_mut();
-        ob.set_property(b"__spl_has_cur".to_vec(), Value::False);
-        ob.set_property(b"__spl_cur_data".to_vec(), Value::Null);
-        ob.set_property(b"__spl_has_key".to_vec(), Value::False);
-        ob.set_property(b"__spl_cur_key".to_vec(), Value::Null);
+        ob.set_property_slice(b"__spl_has_cur", Value::False);
+        ob.set_property_slice(b"__spl_cur_data", Value::Null);
+        ob.set_property_slice(b"__spl_has_key", Value::False);
+        ob.set_property_slice(b"__spl_cur_key", Value::Null);
         if t == DIT_CACHING || t == DIT_RCACHING {
-            ob.set_property(b"__spl_cit_str".to_vec(), Value::Null);
-            ob.set_property(b"__spl_cit_children".to_vec(), Value::Null);
+            ob.set_property_slice(b"__spl_cit_str", Value::Null);
+            ob.set_property_slice(b"__spl_cit_children", Value::Null);
         }
     }
 
@@ -448,14 +448,14 @@ impl Vm {
             }
             {
                 let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_cur_data".to_vec(), data.deref());
-                ob.set_property(b"__spl_has_cur".to_vec(), Value::True);
+                ob.set_property_slice(b"__spl_cur_data", data.deref());
+                ob.set_property_slice(b"__spl_has_cur", Value::True);
             }
             let key = self.it_key(&inner);
             if !self.exc() {
                 let mut ob = obj.borrow_mut();
-                ob.set_property(b"__spl_cur_key".to_vec(), key.deref());
-                ob.set_property(b"__spl_has_key".to_vec(), Value::True);
+                ob.set_property_slice(b"__spl_cur_key", key.deref());
+                ob.set_property_slice(b"__spl_has_key", Value::True);
             }
             return !self.exc();
         }
@@ -806,9 +806,9 @@ impl Vm {
             let ai = self.spl_instantiate(b"ArrayIterator");
             {
                 let mut ob = ai.borrow_mut();
-                ob.set_property(b"__spl_array".to_vec(), val_arr(PhpArray::new()));
-                ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
-                ob.set_property(b"__spl_flags".to_vec(), Value::Long(0));
+                ob.set_property_slice(b"__spl_array", val_arr(PhpArray::new()));
+                ob.set_property_slice(b"__spl_pos", Value::Long(0));
+                ob.set_property_slice(b"__spl_flags", Value::Long(0));
             }
             set_prop(obj, b"__spl_append_it", Value::Object(ai));
             set_prop(obj, b"__spl_dit", Value::Long(DIT_APPEND));
@@ -1006,12 +1006,12 @@ impl Vm {
                     return false;
                 }
                 let mut ob = obj.borrow_mut();
-                ob.set_property(b"__regex_pattern".to_vec(), Value::String(pattern));
-                ob.set_property(b"__regex_mode".to_vec(), Value::Long(mode));
-                ob.set_property(b"__regex_flags".to_vec(), Value::Long(flags));
-                ob.set_property(b"__regex_preg_flags".to_vec(), Value::Long(preg_flags));
+                ob.set_property_slice(b"__regex_pattern", Value::String(pattern));
+                ob.set_property_slice(b"__regex_mode", Value::Long(mode));
+                ob.set_property_slice(b"__regex_flags", Value::Long(flags));
+                ob.set_property_slice(b"__regex_preg_flags", Value::Long(preg_flags));
                 if !ob.has_property(b"replacement") {
-                    ob.set_property(b"replacement".to_vec(), Value::Null);
+                    ob.set_property_slice(b"replacement", Value::Null);
                 }
             }
             DIT_CALLBACK | DIT_RCALLBACK => {
@@ -1429,7 +1429,7 @@ impl Vm {
                 };
                 if user_current && !self.exc() {
                     obj.borrow_mut()
-                        .set_property(b"__spl_nr_cur".to_vec(), v.clone());
+                        .set_property_slice(b"__spl_nr_cur", v.clone());
                 }
                 v
             }
@@ -1882,20 +1882,20 @@ impl Vm {
         let mut st = PhpArray::new();
         st.set(ArrayKey::Int(0), Value::Long(RS_START));
         let mut ob = obj.borrow_mut();
-        ob.set_property(b"__spl_rii_its".to_vec(), val_arr(its));
-        ob.set_property(b"__spl_rii_st".to_vec(), val_arr(st));
-        ob.set_property(b"__spl_rii_mode".to_vec(), Value::Long(mode));
-        ob.set_property(b"__spl_rii_flags".to_vec(), Value::Long(flags));
-        ob.set_property(b"__spl_rii_maxd".to_vec(), Value::Long(-1));
-        ob.set_property(b"__spl_rii_initer".to_vec(), Value::False);
-        ob.set_property(b"__spl_rii_hooks".to_vec(), Value::Long(hooks));
+        ob.set_property_slice(b"__spl_rii_its", val_arr(its));
+        ob.set_property_slice(b"__spl_rii_st", val_arr(st));
+        ob.set_property_slice(b"__spl_rii_mode", Value::Long(mode));
+        ob.set_property_slice(b"__spl_rii_flags", Value::Long(flags));
+        ob.set_property_slice(b"__spl_rii_maxd", Value::Long(-1));
+        ob.set_property_slice(b"__spl_rii_initer", Value::False);
+        ob.set_property_slice(b"__spl_rii_hooks", Value::Long(hooks));
         if is_tree {
             let mut p = PhpArray::new();
             for s in ["", "| ", "  ", "|-", "\\-", ""] {
                 p.push(sv(s));
             }
-            ob.set_property(b"__spl_rti_prefix".to_vec(), val_arr(p));
-            ob.set_property(b"__spl_rti_postfix".to_vec(), sv(""));
+            ob.set_property_slice(b"__spl_rti_prefix", val_arr(p));
+            ob.set_property_slice(b"__spl_rti_postfix", sv(""));
         }
         true
     }

@@ -38,7 +38,7 @@ fn prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Value {
 }
 
 fn set_prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8], v: Value) {
-    obj.borrow_mut().set_property(name.to_vec(), v);
+    obj.borrow_mut().set_property_slice(name, v);
 }
 
 fn sv(s: &[u8]) -> Value {
@@ -716,9 +716,9 @@ impl Vm {
             None
         };
         let mut ob = obj.borrow_mut();
-        ob.set_property(b"__spl_stream".to_vec(), res);
-        ob.set_property(
-            b"__spl_file_path".to_vec(),
+        ob.set_property_slice(b"__spl_stream", res);
+        ob.set_property_slice(
+            b"__spl_file_path",
             Value::String(PhpString::from_vec(fname)),
         );
         if let Some(r) = resolved {
@@ -731,16 +731,16 @@ impl Vm {
             b"__spl_open_mode".to_vec(),
             Value::String(PhpString::from_vec(mode.to_vec())),
         );
-        ob.set_property(b"__spl_csv_delimiter".to_vec(), sv(b","));
-        ob.set_property(b"__spl_csv_enclosure".to_vec(), sv(b"\""));
-        ob.set_property(b"__spl_csv_escape".to_vec(), sv(b"\\"));
-        ob.set_property(b"__spl_escape_set".to_vec(), Value::False);
-        ob.set_property(b"__spl_line_num".to_vec(), Value::Long(0));
+        ob.set_property_slice(b"__spl_csv_delimiter", sv(b","));
+        ob.set_property_slice(b"__spl_csv_enclosure", sv(b"\""));
+        ob.set_property_slice(b"__spl_csv_escape", sv(b"\\"));
+        ob.set_property_slice(b"__spl_escape_set", Value::False);
+        ob.set_property_slice(b"__spl_line_num", Value::Long(0));
         if !matches!(ob.get_property(b"__spl_flags"), Value::Long(_)) {
-            ob.set_property(b"__spl_flags".to_vec(), Value::Long(0));
+            ob.set_property_slice(b"__spl_flags", Value::Long(0));
         }
         if !matches!(ob.get_property(b"__spl_max_line_len"), Value::Long(_)) {
-            ob.set_property(b"__spl_max_line_len".to_vec(), Value::Long(0));
+            ob.set_property_slice(b"__spl_max_line_len", Value::Long(0));
         }
         true
     }

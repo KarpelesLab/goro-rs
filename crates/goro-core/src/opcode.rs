@@ -576,6 +576,10 @@ pub(crate) struct SiteCaches {
     /// What the forwarding calls (self::m(), ...) last resolved to (see
     /// Vm::push_forward_call).
     pub(crate) forward_sites: crate::fxhash::FxHashMap<u32, crate::vm::ForwardSite>,
+    /// The INIT_METHOD_CALLs that set up a deferred SPL call: the object's
+    /// class name, the pending call's name and whether the method takes
+    /// no argument by reference (see Vm::init_spl_method_fast).
+    pub(crate) spl_sites: crate::fxhash::FxHashMap<u32, (Vec<u8>, crate::string::PhpString, bool)>,
 }
 
 impl OpArray {

@@ -102,14 +102,14 @@ impl Vm {
         class_lower: &[u8],
         method_lower: &[u8],
     ) -> Option<&'static crate::spl_stubs::StubMethod> {
-        let mut cur = class_lower.to_vec();
+        let mut cur: std::borrow::Cow<[u8]> = std::borrow::Cow::Borrowed(class_lower);
         for _ in 0..16 {
             if let Some(m) = crate::spl_stubs::spl_stub_method(&cur, method_lower) {
                 return Some(m);
             }
             {
                 let p = crate::vm::get_builtin_parent(&cur)?;
-                cur = p.iter().map(|b| b.to_ascii_lowercase()).collect()
+                cur = std::borrow::Cow::Owned(p.to_ascii_lowercase());
             }
         }
         None
@@ -118,17 +118,25 @@ impl Vm {
     /// Like spl_stub_lookup but also returns the declaring class (lowercase).
     pub(crate) fn spl_stub_lookup_decl(
         &self,
-        class_lower: &[u8],
+        class_lower: &'static [u8],
         method_lower: &[u8],
-    ) -> Option<(Vec<u8>, &'static crate::spl_stubs::StubMethod)> {
-        let mut cur = class_lower.to_vec();
+    ) -> Option<(
+        std::borrow::Cow<'static, [u8]>,
+        &'static crate::spl_stubs::StubMethod,
+    )> {
+        use std::borrow::Cow;
+        let mut cur: Cow<'static, [u8]> = Cow::Borrowed(class_lower);
         for _ in 0..16 {
             if let Some(m) = crate::spl_stubs::spl_stub_method(&cur, method_lower) {
                 return Some((cur, m));
             }
             {
                 let p = crate::vm::get_builtin_parent(&cur)?;
-                cur = p.iter().map(|b| b.to_ascii_lowercase()).collect()
+                cur = if p.iter().any(|b| b.is_ascii_uppercase()) {
+                    Cow::Owned(p.to_ascii_lowercase())
+                } else {
+                    Cow::Borrowed(p)
+                };
             }
         }
         None
@@ -168,26 +176,57 @@ impl Vm {
             Some(Value::Object(o)) => o.clone(),
             _ => return Value::Null,
         };
-        let class_lower = obj_class_lower(&obj);
-        let method_lower: Vec<u8> = method_orig.iter().map(|b| b.to_ascii_lowercase()).collect();
-        let base = match self.spl_builtin_base(&class_lower) {
+        // (lowercased in buffers when the names fit)
+        let mut cbuf = [0u8; 64];
+        let mut mbuf = [0u8; 64];
+        let lower = |s: &[u8], buf: &mut [u8; 64]| -> Option<usize> {
+            let out = buf.get_mut(..s.len())?;
+            for (o, c) in out.iter_mut().zip(s) {
+                *o = c.to_ascii_lowercase();
+            }
+            Some(s.len())
+        };
+        let class_owned;
+        let class_lower: &[u8] = {
+            let ob = obj.borrow();
+            match lower(&ob.class_name, &mut cbuf) {
+                Some(n) => &cbuf[..n],
+                None => {
+                    class_owned = ob.class_name.to_ascii_lowercase();
+                    &class_owned
+                }
+            }
+        };
+        let method_owned;
+        let method_lower: &[u8] = match lower(method_orig, &mut mbuf) {
+            Some(n) => &mbuf[..n],
+            None => {
+                method_owned = method_orig.to_ascii_lowercase();
+                &method_owned
+            }
+        };
+        let base = match self.spl_builtin_base(class_lower) {
             Some(b) => b,
             None => return Value::Null,
         };
-        let (decl, stub) = match self.spl_stub_lookup_decl(base, &method_lower) {
+        let (decl, stub) = match self.spl_stub_lookup_decl(base, method_lower) {
             Some(x) => x,
             None => return Value::Null,
         };
-        let decl_disp = self.builtin_canonical_name(&decl);
+        let decl_disp: std::borrow::Cow<str> = match crate::stubs::find_class_lower(&decl) {
+            Some(c) => std::borrow::Cow::Borrowed(c.name),
+            None => std::borrow::Cow::Owned(self.builtin_canonical_name(&decl)),
+        };
         let method_disp = String::from_utf8_lossy(method_orig);
-        let mut call_args: Vec<Value> = args.to_vec();
+        let mut call_args: Vec<Value> = self.take_values(0);
+        call_args.extend_from_slice(args);
         // Generic zpp (verified stub arginfo of the method)
-        if self.zpp_method_info(base, &method_lower).is_some() {
+        if self.zpp_method_info(base, method_lower).is_some() {
             let mut named = named.to_vec();
             if self
                 .zpp_method_call(
                     base,
-                    &method_lower,
+                    method_lower,
                     &mut call_args,
                     1,
                     &mut named,
@@ -200,7 +239,7 @@ impl Vm {
                 return Value::Null;
             }
         } else if !named.is_empty()
-            && !self.spl_map_named_args(base, &method_lower, &mut call_args, named)
+            && !self.spl_map_named_args(base, method_lower, &mut call_args, named)
         {
             return Value::Null;
         }
@@ -255,27 +294,36 @@ impl Vm {
                 return Value::Null;
             }
         }
-        let mut frame = String::with_capacity(decl_disp.len() + 2 + method_disp.len());
+        // (the frame's buffers are those of finished calls)
+        let mut frame = self.string_pool.pop().unwrap_or_default();
         frame.push_str(&decl_disp);
         frame.push_str("->");
         frame.push_str(&method_disp);
-        self.call_stack.push((
-            frame.clone(),
-            self.current_file.clone(),
-            line,
-            call_args[1..].to_vec(),
-            true,
-        ));
+        let mut frame2 = self.string_pool.pop().unwrap_or_default();
+        frame2.push_str(&frame);
+        let mut file = self.string_pool.pop().unwrap_or_default();
+        file.push_str(&self.current_file);
+        let mut frame_args = self.take_values(0);
+        frame_args.extend_from_slice(&call_args[1..]);
+        self.call_stack.push((frame, file, line, frame_args, true));
         self.spl_internal_frames
-            .push((self.call_stack.len(), frame));
-        let r = self.spl_invoke_builtin(&obj, &class_lower, &method_lower, &call_args);
-        self.spl_internal_frames.pop();
-        drop(call_args);
+            .push((self.call_stack.len(), frame2));
+        let r = self.spl_invoke_builtin(&obj, class_lower, method_lower, &call_args);
+        if let Some((_, mut f)) = self.spl_internal_frames.pop() {
+            if f.capacity() != 0 && f.capacity() <= 1024 && self.string_pool.len() < 64 {
+                f.clear();
+                self.string_pool.push(f);
+            }
+        }
+        crate::vm::clear_values(&mut call_args);
+        self.recycle_values(call_args);
         // Values the built-in dropped from its storage are destroyed now.
         if !self.destructible_objects.is_empty() {
             self.run_pending_destructors_pub();
         }
-        self.call_stack.pop();
+        if let Some(f) = self.call_stack.pop() {
+            self.recycle_frame(f);
+        }
         match r {
             Some(v) => v,
             None => {
@@ -330,28 +378,26 @@ impl Vm {
         method_lower: &[u8],
         args: &[Value],
     ) -> Option<Value> {
-        let mut chain: Vec<Vec<u8>> = vec![class_lower.to_vec()];
-        for _ in 0..50 {
-            let cur = chain.last().map(|c| c.as_slice()).unwrap_or_default();
-            let next: Option<Vec<u8>> = self
-                .classes
+        use std::borrow::Cow;
+        // The class chain, walked as needed (the class itself, then up to
+        // 50 ancestors).
+        let next_of = |vm: &Vm, cur: &[u8]| -> Option<Vec<u8>> {
+            vm.classes
                 .get(cur)
                 .and_then(|c| c.parent.as_ref())
                 .map(|p| p.to_ascii_lowercase())
-                .or_else(|| crate::vm::get_builtin_parent(cur).map(|p| p.to_ascii_lowercase()));
-            match next {
-                Some(n) => chain.push(n),
-                None => break,
-            }
-        }
+                .or_else(|| crate::vm::get_builtin_parent(cur).map(|p| p.to_ascii_lowercase()))
+        };
         let has_args = args.len() > 1;
         let try_args = |vm: &mut Vm| -> Option<Value> {
-            for c in &chain {
-                if vm.is_spl_args_method(c, method_lower) {
-                    if let Some(r) = vm.handle_spl_docall(c, method_lower, args) {
+            let mut c: Cow<[u8]> = Cow::Borrowed(class_lower);
+            for _ in 0..51 {
+                if vm.is_spl_args_method(&c, method_lower) {
+                    if let Some(r) = vm.handle_spl_docall(&c, method_lower, args) {
                         return Some(r);
                     }
                 }
+                c = Cow::Owned(next_of(vm, &c)?);
             }
             None
         };
@@ -360,12 +406,17 @@ impl Vm {
                 return Some(r);
             }
         }
-        for c in &chain {
-            if let Some(r) = self.dispatch_spl_method(c, method_lower, obj) {
+        let mut c: Cow<[u8]> = Cow::Borrowed(class_lower);
+        for _ in 0..51 {
+            if let Some(r) = self.dispatch_spl_method(&c, method_lower, obj) {
                 return Some(r);
             }
             if self.current_exception.is_some() {
                 return Some(Value::Null);
+            }
+            match next_of(self, &c) {
+                Some(n) => c = Cow::Owned(n),
+                None => break,
             }
         }
         if !has_args {
@@ -1135,6 +1186,6 @@ pub(crate) fn storage_arr(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Rc<RefCe
     };
     let a = Rc::new(RefCell::new(copy));
     obj.borrow_mut()
-        .set_property(name.to_vec(), Value::Array(a.clone()));
+        .set_property_slice(name, Value::Array(a.clone()));
     a
 }

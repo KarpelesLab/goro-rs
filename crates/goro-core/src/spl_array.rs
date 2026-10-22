@@ -33,7 +33,7 @@ fn prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> Value {
 }
 
 fn set_prop(obj: &Rc<RefCell<PhpObject>>, name: &[u8], v: Value) {
-    obj.borrow_mut().set_property(name.to_vec(), v);
+    obj.borrow_mut().set_property_slice(name, v);
 }
 
 pub(crate) fn ao_flags(obj: &Rc<RefCell<PhpObject>>) -> i64 {
@@ -714,9 +714,9 @@ impl Vm {
     /// the position survives insertions/removals); no key past the end.
     fn ao_set_pos(obj: &Rc<RefCell<PhpObject>>, idx: usize, key: Option<&ArrayKey>) {
         let mut ob = obj.borrow_mut();
-        ob.set_property(b"__spl_pos".to_vec(), Value::Long(idx as i64));
-        ob.set_property(
-            b"__spl_pos_key".to_vec(),
+        ob.set_property_slice(b"__spl_pos", Value::Long(idx as i64));
+        ob.set_property_slice(
+            b"__spl_pos_key",
             match key {
                 Some(k) => Self::key_value(k),
                 None => Value::Null,
@@ -1032,14 +1032,14 @@ impl Vm {
         let flags = (ao_flags(obj) & CLONE_MASK) | USE_OTHER;
         {
             let mut ob = it.borrow_mut();
-            ob.set_property(b"__spl_array".to_vec(), Value::Object(obj.clone()));
-            ob.set_property(b"__spl_flags".to_vec(), Value::Long(flags & !IS_SELF));
-            ob.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+            ob.set_property_slice(b"__spl_array", Value::Object(obj.clone()));
+            ob.set_property_slice(b"__spl_flags", Value::Long(flags & !IS_SELF));
+            ob.set_property_slice(b"__spl_pos", Value::Long(0));
         }
         if ao_flags(obj) & IS_SELF != 0 {
             // iterator over the object's own properties
             it.borrow_mut()
-                .set_property(b"__spl_flags".to_vec(), Value::Long(flags));
+                .set_property_slice(b"__spl_flags", Value::Long(flags));
         }
         Value::Object(it)
     }
