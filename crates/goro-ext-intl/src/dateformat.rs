@@ -47,7 +47,7 @@ crate::intl_functions! { pub FUNCTIONS:
     "datefmt_get_timezone_id" => get_timezone_id,
     "datefmt_get_calendar_object" => get_calendar_object,
     "datefmt_get_timezone" => get_timezone,
-    "datefmt_set_timezone" => set_timezone,
+    "datefmt_set_timezone" => datefmt_set_timezone,
     "datefmt_set_pattern" => set_pattern,
     "datefmt_get_pattern" => get_pattern,
     "datefmt_get_locale" => get_locale,
@@ -602,7 +602,7 @@ fn set_timezone(vm: &mut Vm, c: &mut Call) -> Value {
     let Some(st) = fetch(vm, c) else {
         return Value::Null;
     };
-    let v = c.arg(0);
+    let v = c.arg(if c.is_method { 0 } else { 1 });
     match dc::tz_from_arg(vm, &v, &c.name) {
         Ok(tz) => {
             st.borrow_mut().cal.tz_id = tz;
@@ -610,6 +610,17 @@ fn set_timezone(vm: &mut Vm, c: &mut Call) -> Value {
         }
         Err(()) => Value::False,
     }
+}
+
+/// datefmt_set_timezone(): IntlDateFormatter::setTimeZone() is not its
+/// alias, the formatter is the first argument.
+fn datefmt_set_timezone(vm: &mut Vm, c: &mut Call) -> Value {
+    if c.this.is_none() {
+        if let Value::Object(o) = c.arg(0) {
+            c.this = Some(o);
+        }
+    }
+    set_timezone(vm, c)
 }
 
 fn get_pattern(vm: &mut Vm, c: &mut Call) -> Value {
