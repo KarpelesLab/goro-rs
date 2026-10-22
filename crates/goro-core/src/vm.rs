@@ -33328,6 +33328,26 @@ impl Vm {
                             _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
                         }
                     } else {
+                        // VERIFY_RETURN_TYPE reads an undefined CV (and warns)
+                        // before RETURN does, when null passes the type.
+                        if let OperandType::Cv(i) = op.op1 {
+                            if !op_array.is_generator
+                                && matches!(cvs.get(i as usize), Some(Value::Undef))
+                                && op_array
+                                    .return_type
+                                    .as_ref()
+                                    .is_some_and(return_type_verifies_null)
+                            {
+                                let _ = self.read_operand_warn(
+                                    &op.op1,
+                                    &cvs,
+                                    &tmps,
+                                    &op_array.literals,
+                                    op_array,
+                                    op.line,
+                                );
+                            }
+                        }
                         self.read_operand_warn(
                             &op.op1,
                             &cvs,
@@ -44895,6 +44915,17 @@ impl Vm {
                     if let Some(class) = &class_opt {
                         if self.defer_anon_class(class) {
                             return Ok(Flow::Next);
+                        }
+                        // A class whose name is already taken is not early
+                        // bound (zend_hash_add() fails at compile time): it is
+                        // declared, and the redeclaration reported, at its
+                        // source position.
+                        if is_early_attempt
+                            && !class.name.contains(&0)
+                            && self.lookup_class(&class.name.to_ascii_lowercase()).is_some()
+                        {
+                            variance::defer(&class.name);
+                            return Ok(Flow::Continue);
                         }
                     }
                     if let Some(mut class) = class_opt {
@@ -57873,6 +57904,19 @@ fn commutative_swap(op1: &OperandType, op2: &OperandType) -> bool {
 
 /// Whether a parser message is one php-src's scanner/parser produces (others
 /// are reported as a bare "syntax error").
+/// Whether a declared return type is checked by VERIFY_RETURN_TYPE and
+/// accepts null (`mixed` is not checked).
+fn return_type_verifies_null(t: &ParamType) -> bool {
+    match t {
+        ParamType::Nullable(_) => true,
+        ParamType::Simple(n) => n.eq_ignore_ascii_case(b"null"),
+        ParamType::Union(ts) => ts
+            .iter()
+            .any(|t| matches!(t, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"null"))),
+        ParamType::Intersection(_) => false,
+    }
+}
+
 pub(crate) fn is_php_parse_message(msg: &str) -> bool {
     goro_parser::is_php_parse_error(msg)
         || msg.contains("unexpected")
