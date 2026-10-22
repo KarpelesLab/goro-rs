@@ -417,7 +417,7 @@ pub fn check_area(doc: &mut Doc, node: NodeId) {
 /// CheckTABLE()
 pub fn check_table(doc: &mut Doc, node: NodeId) {
     let has_summary = has(doc, node, AttrId::SUMMARY);
-    let vers = lexer::html_version(doc) as u32;
+    let vers = lexer::html_version(doc);
     let is_html5 = vers == HT50 || vers == XH50;
 
     check_attributes(doc, node);

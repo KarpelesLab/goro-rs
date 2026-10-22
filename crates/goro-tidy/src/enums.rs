@@ -670,6 +670,7 @@ pub const N_TIDY_ATTRIBS: usize = 346;
 #[repr(u16)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
 pub enum OptId {
+    UnknownOption,
     AccessibilityCheckLevel,
     AltText,
     AnchorAsName,
@@ -774,8 +775,9 @@ pub enum OptId {
     XmlSpace,
     XmlTags,
 }
-pub const N_TIDY_OPTIONS: usize = 103;
-pub const ALL_OPT_IDS: [OptId; 103] = [
+pub const N_TIDY_OPTIONS: usize = 104;
+pub const ALL_OPT_IDS: [OptId; 104] = [
+    OptId::UnknownOption,
     OptId::AccessibilityCheckLevel,
     OptId::AltText,
     OptId::AnchorAsName,

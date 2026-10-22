@@ -499,9 +499,7 @@ fn read_char_from_stream(doc: &mut Doc, sel: InSel) -> u32 {
         return n;
     }
     if s.encoding == BIG5 || s.encoding == SHIFTJIS {
-        if c < 128 {
-            return c;
-        } else if s.encoding == SHIFTJIS && (0xa1..=0xdf).contains(&c) {
+        if c < 128 || (s.encoding == SHIFTJIS && (0xa1..=0xdf).contains(&c)) {
             return c;
         } else {
             let c1 = s.source.get_byte();
