@@ -112,10 +112,12 @@ impl UCollator {
         } else {
             OFF
         };
-        let lang = locale.id.language.as_str();
-        let region = locale.id.region.map(|r| r.to_string()).unwrap_or_default();
-        if lang == "fr" && region == "CA" {
-            defaults[FRENCH_COLLATION as usize] = ON;
+        // the attributes ICU4X does not report, from ICU's tailorings
+        let base_id = name.split('@').next().unwrap_or("");
+        if let Some(e) = coll_entry(base_id) {
+            for a in [FRENCH_COLLATION, NORMALIZATION_MODE, HIRAGANA_QUATERNARY_MODE] {
+                defaults[a as usize] = e.3[a as usize];
+            }
         }
         Ok(UCollator {
             locale,
@@ -251,50 +253,101 @@ impl UCollator {
     }
 }
 
+/// The parent of a locale ID for collation data fallback ("" after a
+/// language).
+fn parent_id(id: &str) -> String {
+    let mut cur = id.to_string();
+    match cur.rfind('_') {
+        Some(p) => {
+            cur.truncate(p);
+            while cur.ends_with('_') {
+                cur.pop();
+            }
+            cur
+        }
+        None => String::new(),
+    }
+}
+
+/// The collation fallback chain of a base locale ID, ending with root.
+fn chain(base: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    let mut cur = base.to_string();
+    while !cur.is_empty() && cur != "root" {
+        v.push(cur.clone());
+        cur = parent_id(&cur);
+    }
+    v.push("root".to_string());
+    v
+}
+
+fn types_of(l: &str) -> Option<&'static (&'static str, &'static str, &'static [&'static str])> {
+    data::COLLATION_TYPES.iter().find(|t| t.0.eq_ignore_ascii_case(l))
+}
+
+/// The collation locale entry for a base locale ID (by fallback).
+fn coll_entry(base: &str) -> Option<&'static (&'static str, &'static str, &'static str, [i64; 8])> {
+    chain(base).into_iter().find_map(|l| {
+        data::COLLATION_LOCALES
+            .iter()
+            .find(|e| e.0.eq_ignore_ascii_case(&l))
+    })
+}
+
 /// The valid and actual locales of a collator opened for ICU ID `name`
-/// (uloc_getName() form), from ICU's collation locales.
+/// (uloc_getName() form), from ICU's collation data.
 fn collation_locales(name: &str) -> (String, String) {
-    let (base, kw) = match name.find('@') {
-        Some(p) => (&name[..p], &name[p..]),
-        None => (name, ""),
+    let base = match name.find('@') {
+        Some(p) => &name[..p],
+        None => name,
     };
-    let collation = uloc::keyword_value(name.as_bytes(), "collation")
+    let (valid, actual) = match coll_entry(base) {
+        Some(e) => (e.1.to_string(), e.2.to_string()),
+        None => ("root".to_string(), "root".to_string()),
+    };
+    let Some(ty) = uloc::keyword_value(name.as_bytes(), "collation")
         .ok()
         .flatten()
-        .filter(|c| c != "standard");
-    let _ = kw;
-    let mut cur = base.to_string();
-    loop {
-        if let Some((_, v, a)) = data::COLLATION_LOCALES
-            .iter()
-            .find(|(l, _, _)| l.eq_ignore_ascii_case(&cur))
-        {
-            return match &collation {
-                Some(c) => (format!("{}@collation={}", v, c), format!("{}@collation={}", a, c)),
-                None => (v.to_string(), a.to_string()),
-            };
-        }
-        match cur.rfind('_') {
-            Some(p) => {
-                cur.truncate(p);
-                while cur.ends_with('_') {
-                    cur.pop();
-                }
-                if cur.is_empty() {
-                    break;
-                }
-            }
-            None => break,
-        }
+        .map(|t| t.to_ascii_lowercase())
+    else {
+        return (valid, actual);
+    };
+    let vchain = chain(&valid);
+    // the default type of the valid locale, and where the type is defined
+    let default = vchain
+        .iter()
+        .find_map(|l| types_of(l).map(|t| t.1).filter(|d| !d.is_empty()))
+        .unwrap_or("standard");
+    let Some(def_at) = vchain
+        .iter()
+        .find(|l| types_of(l).is_some_and(|t| t.2.contains(&ty.as_str())))
+    else {
+        return (valid, actual);
+    };
+    if ty == "standard" || ty == default {
+        return (valid, actual);
     }
-    ("root".to_string(), "root".to_string())
+    let def_default = chain(def_at)
+        .iter()
+        .find_map(|l| types_of(l).map(|t| t.1).filter(|d| !d.is_empty()))
+        .unwrap_or("standard");
+    let with = |l: &str| {
+        let l = if l == "root" { "" } else { l };
+        format!("{}@collation={}", l, ty)
+    };
+    let a = if ty == def_default {
+        def_at.to_string()
+    } else {
+        with(def_at)
+    };
+    (with(&valid), a)
 }
 
 /// ICU's collation locales (the ICUDATA-coll package).
 pub fn collation_locale_list() -> Vec<String> {
     data::COLLATION_LOCALES
         .iter()
-        .map(|(l, _, _)| l.to_string())
+        .map(|e| e.0.to_string())
         .collect()
 }
 
