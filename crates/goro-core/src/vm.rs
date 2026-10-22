@@ -45407,6 +45407,7 @@ impl Vm {
                             op_array.ops.get(ip).map(|o| o.opcode),
                             Some(OpCode::PropertyUnset)
                         );
+                    let abort_before = self.dim_rw_abort;
                     let fetched = match op.op1 {
                         OperandType::Cv(ci) => {
                             let i = ci as usize;
@@ -45434,6 +45435,15 @@ impl Vm {
                             self.fetch_dim_for_write(&mut v, key, mode, None, op.line)
                         }
                     };
+                    // (an abandoned assignment is the next opcode's only)
+                    if self.dim_rw_abort != abort_before
+                        && !matches!(
+                            op_array.ops.get(ip).map(|o| o.opcode),
+                            Some(OpCode::ArraySet)
+                        )
+                    {
+                        self.dim_rw_abort = abort_before;
+                    }
                     // A fetched string element: remember where it lives so a
                     // string offset write into the result is stored back.
                     self.str_wb_obj_ctx = false;
@@ -55494,9 +55504,35 @@ impl Vm {
                                         };
                                         if has_tostring {
                                             let o = value.clone();
+                                            let held = Rc::strong_count(obj);
                                             if let Ok(s) = self.value_to_string_checked(&o) {
                                                 value = Value::String(s);
                                                 coerced_for_result = true;
+                                            }
+                                            // Only this assignment's own holds
+                                            // (obj_val_raw, obj_val) are left:
+                                            // __toString() released the object.
+                                            if self.current_exception.is_none()
+                                                && Rc::strong_count(obj) < held
+                                                && Rc::strong_count(obj) <= 2
+                                            {
+                                                let cd = self
+                                                    .classes
+                                                    .get(&declaring_class.to_ascii_lowercase())
+                                                    .map(|c| crate::value::display_class_name(&c.name))
+                                                    .unwrap_or_else(|| {
+                                                        crate::value::display_class_name(
+                                                            &class_name_orig,
+                                                        )
+                                                    });
+                                                let msg = format!(
+                                                    "Object was released while assigning to property {}::${}",
+                                                    cd,
+                                                    String::from_utf8_lossy(prop_name.as_bytes())
+                                                );
+                                                let exc =
+                                                    self.create_exception(b"Error", &msg, op.line);
+                                                self.current_exception = Some(exc);
                                             }
                                             // A throwing __toString() aborts the
                                             // assignment (zend_verify_weak_scalar_type_hint).

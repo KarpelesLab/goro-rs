@@ -871,11 +871,19 @@ impl Vm {
                 Some(vivify(arr, k))
             }
             Some(Value::False) if mode != DimFetch::Unset => {
+                let held = Rc::strong_count(arr);
+                let v = vivify(arr, k);
                 self.emit_deprecated_at(
                     "Automatic conversion of false to array is deprecated",
                     line,
                 );
-                Some(vivify(arr, k))
+                if Rc::strong_count(arr) < held && self.current_exception.is_none() {
+                    // The error handler released the container: the
+                    // assignment into the new array is abandoned
+                    // (ZEND_ASSIGN_DIM's assign_dim_error).
+                    self.dim_rw_abort = Some(self.call_depth);
+                }
+                Some(v)
             }
             Some(Value::Reference(r)) => {
                 let inner = r.borrow().clone();
