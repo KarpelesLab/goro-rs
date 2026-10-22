@@ -320,15 +320,18 @@ fn bind_params(vm: &mut Vm, s: &StmtData, d: &DbData) -> Result<(), ()> {
                 },
                 SQLITE_NULL => Bind::Null,
                 _ => {
-                    php_sqlite3_error(
-                        vm,
-                        Some(&d.shared),
+                    // php-src formats this message with "%pd", which its
+                    // spprintf() rejects with an E_CORE_ERROR bailout.
+                    let file = std::mem::replace(&mut vm.current_file, "Unknown".to_string());
+                    vm.emit_fatal_typed_at(
+                        16,
+                        "printf \"p\" modifier is no longer supported, use ZEND_LONG_FMT",
                         0,
-                        &format!(
-                            "Unknown parameter type: {} for parameter {}",
-                            param.type_, number
-                        ),
                     );
+                    vm.current_file = file;
+                    vm.exit_requested = true;
+                    vm.exit_code = 255;
+                    let _ = &d;
                     return Err(());
                 }
             }
