@@ -422,16 +422,40 @@ fn builtin_bounds(kind: &Kind, chars: &[(usize, u32)], len: usize) -> Vec<(usize
                     ]);
                 push(l.text, if hard { 100 } else { 0 }, &mut at);
             }
+            // Complex-context (SA) runs break at their dictionary words
+            let sa = |c: char| {
+                matches!(
+                    un::script(c),
+                    un::Script::Thai | un::Script::Lao | un::Script::Khmer | un::Script::Myanmar
+                ) && !un::is_mark(c)
+            };
+            let mut wat = 0usize;
+            let mut extra: Vec<usize> = Vec::new();
+            for w in un::words(&st) {
+                wat += w.len();
+                if wat < st.len() {
+                    let before = st[..wat].chars().next_back();
+                    let after = st[wat..].chars().next();
+                    if before.is_some_and(|c| sa(c) || un::is_mark(c)) && after.is_some_and(sa) {
+                        extra.push(map[wat]);
+                    }
+                }
+            }
+            if !extra.is_empty() {
+                for p in extra {
+                    if let Err(i) = out.binary_search_by(|b| b.0.cmp(&p)) {
+                        out.insert(i, (p, vec![0]));
+                    }
+                }
+            }
         }
         Kind::Sentence => {
             for s in un::sentences(&st) {
                 let term = s.chars().any(|c| {
                     matches!(c, '.' | '!' | '?' | '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '\u{2026}')
                 });
-                let sep = s
-                    .trim_end_matches([' ', '\t'])
-                    .ends_with(['\n', '\r', '\u{85}', '\u{2028}', '\u{2029}']);
-                push(s, if !term && sep { 100 } else { 0 }, &mut at);
+                // UBRK_SENTENCE_TERM / UBRK_SENTENCE_SEP
+                push(s, if term { 0 } else { 100 }, &mut at);
             }
         }
         _ => {}
@@ -444,9 +468,9 @@ fn word_status(w: &str) -> i32 {
     let mut letter = false;
     let mut number = false;
     for c in w.chars() {
+        // the CJK dictionary words are UBRK_WORD_IDEO (kana included)
         match un::script(c) {
-            un::Script::Hiragana | un::Script::Katakana => return 300,
-            un::Script::Han => return 400,
+            un::Script::Hiragana | un::Script::Katakana | un::Script::Han => return 400,
             _ => {}
         }
         if crate::uset::is_ideographic(c) {

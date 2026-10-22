@@ -14,7 +14,7 @@ goro-ext-date = { path = "../goro-ext-date" }
 goro-ext-iconv = { path = "../goro-ext-iconv" }
 goro-ext-mbstring = { path = "../goro-ext-mbstring" }
 # The ICU analog everything is built on (KarpelesLab/intlrs).
-intl = "=0.6.4"
+intl = { version = "=0.6.4", features = ["segmentation-dict-cjk", "segmentation-dict-km", "segmentation-dict-lao", "segmentation-dict-my"] }
 # ICU4X, for what intl lacks: collation tailorings combined with the
 # collator attributes, raw (one-level) decomposition mappings.
 icu_normalizer = "2.3"
