@@ -90,7 +90,7 @@ fn doc_cast(o: &Obj, ty: u8) -> Option<Value> {
         2 => Some(Value::Double(0.0)),
         3 => {
             let d = data_of(o)?;
-            let (_, out) = tidylib::save_buffer(&mut d.ptdoc.doc.borrow_mut());
+            let out = t_save(&mut d.ptdoc.doc.borrow_mut());
             Some(vstr(drop_last(out)))
         }
         _ => None,
@@ -113,7 +113,7 @@ fn node_text(doc: &mut Doc, n: NodeId) -> Vec<u8> {
     if doc.lexer.is_none() {
         return Vec::new();
     }
-    drop_last(tidylib::node_get_text(doc, n))
+    drop_last(safe(Vec::new(), || tidylib::node_get_text(doc, n)))
 }
 
 /// tidy_node_cast_handler()
@@ -132,6 +132,79 @@ fn node_cast(o: &Obj, ty: u8) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// TidyPanic(): a panic of the library (an internal inconsistency such as
+// "Panic - tree has lost its integrity") becomes php_tidy_panic()'s fatal
+// error when the running tidy function returns.
+
+static IN_TIDY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+thread_local! {
+    static PENDING_PANIC: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if IN_TIDY.load(std::sync::atomic::Ordering::SeqCst) == 0 {
+                prev(info);
+            }
+        }));
+    });
+}
+
+/// Run a library call; a panic is recorded and `dflt` returned.
+fn safe<T>(dflt: T, f: impl FnOnce() -> T) -> T {
+    IN_TIDY.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+    IN_TIDY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    match r {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown".to_string()
+            };
+            PENDING_PANIC.with(|p| *p.borrow_mut() = Some(msg));
+            dflt
+        }
+    }
+}
+
+/// php_tidy_panic(): E_ERROR "Could not allocate memory for tidy!"
+fn check_panic(vm: &mut Vm, r: R) -> R {
+    let Some(msg) = PENDING_PANIC.with(|p| p.borrow_mut().take()) else {
+        return r;
+    };
+    let p = docref_prefix(vm);
+    let line = vm.current_line;
+    Err(vm.emit_fatal_at(
+        &format!("{}Could not allocate memory for tidy! (Reason: {})", p, msg),
+        line,
+    ))
+}
+
+fn t_parse(doc: &mut Doc, input: Vec<u8>) -> i32 {
+    safe(-1, || tidylib::parse_buffer(doc, input))
+}
+
+fn t_clean(doc: &mut Doc) -> i32 {
+    safe(-1, || tidylib::clean_and_repair(doc))
+}
+
+fn t_diag(doc: &mut Doc) -> i32 {
+    safe(-1, || tidylib::run_diagnostics(doc))
+}
+
+fn t_save(doc: &mut Doc) -> Vec<u8> {
+    safe(Vec::new(), || tidylib::save_buffer(doc).1)
 }
 
 thread_local! {
@@ -259,7 +332,7 @@ fn set_prop(o: &Obj, name: &[u8], v: Value) {
 /// tidy_doc_update_properties()
 fn update_doc_properties(o: &Obj, d: &TidyData) {
     let mut doc = d.ptdoc.doc.borrow_mut();
-    let (_, out) = tidylib::save_buffer(&mut doc);
+    let out = t_save(&mut doc);
     if !out.is_empty() {
         set_prop(o, b"value", vstr(drop_last(out)));
     }
@@ -548,7 +621,7 @@ fn parse_string(
         }
     }
     d.ptdoc.initialized.set(true);
-    let r = tidylib::parse_buffer(&mut d.ptdoc.doc.borrow_mut(), input);
+    let r = t_parse(&mut d.ptdoc.doc.borrow_mut(), input);
     if r < 0 {
         let eb = d.ptdoc.doc.borrow().errout.bytes().to_vec();
         warn(vm, f, &String::from_utf8_lossy(&eb));
@@ -741,7 +814,7 @@ fn tidy_get_output(vm: &mut Vm, args: &[Value]) -> R {
     let Ok((_, d, _)) = fetch(vm, &f, None, args, "") else {
         return Ok(Value::Null);
     };
-    let (_, out) = tidylib::save_buffer(&mut d.ptdoc.doc.borrow_mut());
+    let out = t_save(&mut d.ptdoc.doc.borrow_mut());
     Ok(vstr(drop_last(out)))
 }
 
@@ -799,7 +872,7 @@ fn clean_repair(vm: &mut Vm, this: Option<&Value>, args: &[Value]) -> R {
             // tidyCleanAndRepair() on a document never parsed
             tidylib::status(&doc)
         } else {
-            tidylib::clean_and_repair(&mut doc)
+            t_clean(&mut doc)
         }
     };
     if r >= 0 {
@@ -864,12 +937,12 @@ fn quick_repair(vm: &mut Vm, f: &Func, args: &[Value], is_file: bool) -> R {
     if vm.current_exception.is_some() {
         return Ok(Value::Null);
     }
-    let retval = if tidylib::parse_buffer(&mut doc, data) < 0 {
+    let retval = if t_parse(&mut doc, data) < 0 {
         let eb = doc.errout.bytes().to_vec();
         warn(vm, f, &String::from_utf8_lossy(&eb));
         Value::False
-    } else if tidylib::clean_and_repair(&mut doc) >= 0 {
-        let (_, out) = tidylib::save_buffer(&mut doc);
+    } else if t_clean(&mut doc) >= 0 {
+        let out = t_save(&mut doc);
         vstr(drop_last(out))
     } else {
         Value::False
@@ -897,7 +970,7 @@ fn diagnose(vm: &mut Vm, this: Option<&Value>, args: &[Value]) -> R {
     let Ok((o, d, _)) = fetch(vm, &f, this, args, "") else {
         return Ok(Value::Null);
     };
-    if d.ptdoc.initialized.get() && tidylib::run_diagnostics(&mut d.ptdoc.doc.borrow_mut()) >= 0 {
+    if d.ptdoc.initialized.get() && t_diag(&mut d.ptdoc.doc.borrow_mut()) >= 0 {
         update_doc_properties(&o, &d);
         return Ok(Value::True);
     }
@@ -1332,7 +1405,10 @@ fn throw_r(vm: &mut Vm, r: R) -> Value {
     match r {
         Ok(v) => v,
         Err(e) => {
-            if vm.current_exception.is_none() {
+            if vm.fatal_emitted {
+                // a fatal error ends the script
+                vm.exit_requested = true;
+            } else if vm.current_exception.is_none() {
                 zpp::throw(vm, b"Error", &e.message);
             }
             Value::Null
@@ -1368,6 +1444,7 @@ fn tidy_call(
         this
     };
     let r = imp(vm, this, args);
+    let r = check_panic(vm, r);
     throw_r(vm, r)
 }
 
@@ -1514,10 +1591,8 @@ fn output_handler(vm: &mut Vm, input: &[u8], op: i64) -> Option<Vec<u8>> {
     tidylib::opt_set_bool(&mut doc, OptId::ForceOutput, true);
     tidylib::opt_set_bool(&mut doc, OptId::Mark, false);
     set_default_config(vm, None, &mut doc);
-    if tidylib::parse_buffer(&mut doc, input.to_vec()) >= 0
-        && tidylib::clean_and_repair(&mut doc) >= 0
-    {
-        let (_, out) = tidylib::save_buffer(&mut doc);
+    if t_parse(&mut doc, input.to_vec()) >= 0 && t_clean(&mut doc) >= 0 {
+        let out = t_save(&mut doc);
         return Some(drop_last(out));
     }
     None
@@ -1620,31 +1695,67 @@ fn minfo(vm: &mut Vm) -> String {
 // ---------------------------------------------------------------------------
 // registration
 
+macro_rules! checked {
+    ($($w:ident => $f:ident),* $(,)?) => {
+        $(fn $w(vm: &mut Vm, args: &[Value]) -> R {
+            let r = $f(vm, args);
+            check_panic(vm, r)
+        })*
+    };
+}
+
+checked!(
+    tidy_parse_string_c => tidy_parse_string,
+    tidy_get_error_buffer_c => tidy_get_error_buffer,
+    tidy_get_output_c => tidy_get_output,
+    tidy_parse_file_c => tidy_parse_file,
+    tidy_clean_repair_c => tidy_clean_repair,
+    tidy_repair_string_c => tidy_repair_string,
+    tidy_repair_file_c => tidy_repair_file,
+    tidy_diagnose_c => tidy_diagnose,
+    tidy_get_release_c => tidy_get_release,
+    tidy_get_opt_doc_c => tidy_get_opt_doc,
+    tidy_get_config_c => tidy_get_config,
+    tidy_get_status_c => tidy_get_status,
+    tidy_get_html_ver_c => tidy_get_html_ver,
+    tidy_is_xhtml_c => tidy_is_xhtml,
+    tidy_is_xml_c => tidy_is_xml,
+    tidy_error_count_c => tidy_error_count,
+    tidy_warning_count_c => tidy_warning_count,
+    tidy_access_count_c => tidy_access_count,
+    tidy_config_count_c => tidy_config_count,
+    tidy_getopt_c => tidy_getopt,
+    tidy_get_root_c => tidy_get_root,
+    tidy_get_html_c => tidy_get_html,
+    tidy_get_head_c => tidy_get_head,
+    tidy_get_body_c => tidy_get_body,
+);
+
 const FUNCTIONS: &[(&str, goro_core::vm::BuiltinFn)] = &[
-    ("tidy_parse_string", tidy_parse_string),
-    ("tidy_get_error_buffer", tidy_get_error_buffer),
-    ("tidy_get_output", tidy_get_output),
-    ("tidy_parse_file", tidy_parse_file),
-    ("tidy_clean_repair", tidy_clean_repair),
-    ("tidy_repair_string", tidy_repair_string),
-    ("tidy_repair_file", tidy_repair_file),
-    ("tidy_diagnose", tidy_diagnose),
-    ("tidy_get_release", tidy_get_release),
-    ("tidy_get_opt_doc", tidy_get_opt_doc),
-    ("tidy_get_config", tidy_get_config),
-    ("tidy_get_status", tidy_get_status),
-    ("tidy_get_html_ver", tidy_get_html_ver),
-    ("tidy_is_xhtml", tidy_is_xhtml),
-    ("tidy_is_xml", tidy_is_xml),
-    ("tidy_error_count", tidy_error_count),
-    ("tidy_warning_count", tidy_warning_count),
-    ("tidy_access_count", tidy_access_count),
-    ("tidy_config_count", tidy_config_count),
-    ("tidy_getopt", tidy_getopt),
-    ("tidy_get_root", tidy_get_root),
-    ("tidy_get_html", tidy_get_html),
-    ("tidy_get_head", tidy_get_head),
-    ("tidy_get_body", tidy_get_body),
+    ("tidy_parse_string", tidy_parse_string_c),
+    ("tidy_get_error_buffer", tidy_get_error_buffer_c),
+    ("tidy_get_output", tidy_get_output_c),
+    ("tidy_parse_file", tidy_parse_file_c),
+    ("tidy_clean_repair", tidy_clean_repair_c),
+    ("tidy_repair_string", tidy_repair_string_c),
+    ("tidy_repair_file", tidy_repair_file_c),
+    ("tidy_diagnose", tidy_diagnose_c),
+    ("tidy_get_release", tidy_get_release_c),
+    ("tidy_get_opt_doc", tidy_get_opt_doc_c),
+    ("tidy_get_config", tidy_get_config_c),
+    ("tidy_get_status", tidy_get_status_c),
+    ("tidy_get_html_ver", tidy_get_html_ver_c),
+    ("tidy_is_xhtml", tidy_is_xhtml_c),
+    ("tidy_is_xml", tidy_is_xml_c),
+    ("tidy_error_count", tidy_error_count_c),
+    ("tidy_warning_count", tidy_warning_count_c),
+    ("tidy_access_count", tidy_access_count_c),
+    ("tidy_config_count", tidy_config_count_c),
+    ("tidy_getopt", tidy_getopt_c),
+    ("tidy_get_root", tidy_get_root_c),
+    ("tidy_get_html", tidy_get_html_c),
+    ("tidy_get_head", tidy_get_head_c),
+    ("tidy_get_body", tidy_get_body_c),
 ];
 
 const NODETYPES: &[(&str, NodeType)] = &[
@@ -1822,6 +1933,7 @@ pub fn register(vm: &mut Vm) {
     }
     vm.register_extension(NAME);
     vm.phpinfo_hooks.push(minfo);
+    install_panic_hook();
 
     for (k, d) in [
         (&b"tidy.default_config"[..], &b""[..]),
