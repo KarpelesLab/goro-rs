@@ -45,6 +45,7 @@ goro-ext-posix = { path = "../goro-ext-posix" }
 goro-ext-calendar = { path = "../goro-ext-calendar" }
 goro-ext-phar = { path = "../goro-ext-phar" }
 goro-ext-exif = { path = "../goro-ext-exif" }
+goro-ext-gd = { path = "../goro-ext-gd" }
 goro-ext-zip = { path = "../goro-ext-zip" }
 goro-ext-fileinfo = { path = "../goro-ext-fileinfo" }
 goro-ext-sodium = { path = "../goro-ext-sodium" }

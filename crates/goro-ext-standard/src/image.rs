@@ -1606,6 +1606,11 @@ fn is_image_avif(s: &mut ImgStream) -> bool {
     avif_parse_ftyp(&mut st) == AvSt::Found
 }
 
+/// php_is_image_avif() on in-memory data (ext/gd's _php_image_type()).
+pub fn is_avif_data(data: &[u8]) -> bool {
+    is_image_avif(&mut ImgStream::new(data.to_vec()))
+}
+
 fn handle_avif(s: &mut ImgStream) -> Option<GfxInfo> {
     let mut st = AvifStream { s, dead: false };
     let mut np = 0;

@@ -107,6 +107,7 @@ goro-ext-posix = { path = "crates/goro-ext-posix" }
 goro-ext-calendar = { path = "crates/goro-ext-calendar" }
 goro-ext-phar = { path = "crates/goro-ext-phar" }
 goro-ext-exif = { path = "crates/goro-ext-exif" }
+goro-ext-gd = { path = "crates/goro-ext-gd" }
 goro-ext-zip = { path = "crates/goro-ext-zip" }
 goro-ext-fileinfo = { path = "crates/goro-ext-fileinfo" }
 goro-ext-sodium = { path = "crates/goro-ext-sodium" }

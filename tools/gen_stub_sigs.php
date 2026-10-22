@@ -63,6 +63,7 @@ $dirs = [
     'ext/sodium' => 'sodium',
     'ext/soap' => 'soap',
     'ext/intl' => 'intl',
+    'ext/gd' => 'gd',
     // Test-only extension; its symbols only exist while it is loaded.
     'ext/zend_test' => 'zend_test',
     'ext/dom' => 'dom',

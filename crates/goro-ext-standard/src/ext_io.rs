@@ -205,7 +205,7 @@ pub fn basename(path: &[u8]) -> Vec<u8> {
 }
 
 /// The PHP-visible image type helpers of ext/standard/image.c.
-pub use crate::image::{image_type_from_bytes, image_type_to_mime_type};
+pub use crate::image::{image_type_from_bytes, image_type_to_mime_type, is_avif_data};
 
 /// Streams and wrappers of other crates served by the stream layer.
 pub use crate::misc::userstream::{
