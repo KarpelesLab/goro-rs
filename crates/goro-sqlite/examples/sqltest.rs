@@ -22,7 +22,8 @@
 //!   next statement or `.rerun`;
 //! * `.rerun` (reset the last statement, bind, step again), `.reset`,
 //!   `.clear` (clear_bindings), `.info` (sql, expanded sql, flags,
-//!   parameters), `.err` (error codes and message), `.typed 0|1|2` (rows
+//!   parameters), `.stmtstatus` (sqlite3_stmt_status() counters), `.err`
+//!   (error codes and message), `.typed 0|1|2` (rows
 //!   as `T<bytes>:value`; 2 also shows column_int64/column_double);
 //! * `.func NAME NARG [FLAGS]` (FLAGS: d deterministic, D directonly,
 //!   i innocuous, s subtype), `.agg NAME`, `.coll NAME`: register test
@@ -414,6 +415,26 @@ fn meta_command(db: &mut Sqlite3, last: Option<StmtId>, zLine: &[u8], st: &mut S
                     w(st, zn.as_deref().unwrap_or(b"<null>"));
                     w(st, b"\n");
                 }
+            }
+        }
+        b".stmtstatus" => {
+            if let Some(id) = last {
+                let ops = [
+                    SQLITE_STMTSTATUS_FULLSCAN_STEP,
+                    SQLITE_STMTSTATUS_SORT,
+                    SQLITE_STMTSTATUS_AUTOINDEX,
+                    SQLITE_STMTSTATUS_VM_STEP,
+                    SQLITE_STMTSTATUS_REPREPARE,
+                    SQLITE_STMTSTATUS_RUN,
+                    SQLITE_STMTSTATUS_FILTER_MISS,
+                    SQLITE_STMTSTATUS_FILTER_HIT,
+                ];
+                let mut m = String::from("stmtstatus");
+                for op in ops {
+                    m.push_str(&format!(" {}", sqlite3_stmt_status(db, id, op as i32, 0)));
+                }
+                m.push('\n');
+                w(st, m.as_bytes());
             }
         }
         b".err" => {
