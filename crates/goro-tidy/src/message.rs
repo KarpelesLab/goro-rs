@@ -1064,8 +1064,13 @@ pub fn report_access_error(doc: &mut Doc, node: Option<NodeId>, code: u32) {
 
 /// ReportAttrError()
 pub fn report_attr_error(doc: &mut Doc, node: NodeId, av: Option<AttId>, code: u32) {
+    report_attr_error_opt(doc, Some(node), av, code);
+}
+
+/// ReportAttrError() with a node that may be NULL (`lexer->token`)
+pub fn report_attr_error_opt(doc: &mut Doc, node: Option<NodeId>, av: Option<AttId>, code: u32) {
     let args: Vec<RArg> = av.map(RArg::Att).into_iter().collect();
-    report(doc, None, Some(node), code, &args);
+    report(doc, None, node, code, &args);
 }
 
 /// ReportBadArgument()

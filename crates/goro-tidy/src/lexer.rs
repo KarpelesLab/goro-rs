@@ -2834,8 +2834,10 @@ fn parse_php(doc: &mut Doc) -> Option<NodeId> {
     php
 }
 
-fn token_node(doc: &Doc) -> NodeId {
-    doc.lxr().token.expect("tidy: no current token")
+/// `lexer->token` (NULL while the pseudo-attributes of an XML
+/// declaration are parsed)
+fn token_node(doc: &Doc) -> Option<NodeId> {
+    doc.lxr().token
 }
 
 /// ParseAttribute(): consumes the '>' terminating start tags
@@ -2876,22 +2878,22 @@ fn parse_attribute(
             unget(doc, c);
             unget(doc, '<' as u32);
             let t = token_node(doc);
-            message::report_attr_error(doc, t, None, UNEXPECTED_GT);
+            message::report_attr_error_opt(doc, t, None, UNEXPECTED_GT);
             return None;
         }
         if c == '=' as u32 {
             let t = token_node(doc);
-            message::report_attr_error(doc, t, None, UNEXPECTED_EQUALSIGN);
+            message::report_attr_error_opt(doc, t, None, UNEXPECTED_EQUALSIGN);
             continue;
         }
         if c == '"' as u32 || c == '\'' as u32 {
             let t = token_node(doc);
-            message::report_attr_error(doc, t, None, UNEXPECTED_QUOTEMARK);
+            message::report_attr_error_opt(doc, t, None, UNEXPECTED_QUOTEMARK);
             continue;
         }
         if c == END_OF_STREAM {
             let t = token_node(doc);
-            message::report_attr_error(doc, t, None, UNEXPECTED_END_OF_FILE_ATTR);
+            message::report_attr_error_opt(doc, t, None, UNEXPECTED_END_OF_FILE_ATTR);
             unget(doc, c);
             return None;
         }
@@ -2983,14 +2985,14 @@ fn parse_server_instruction(doc: &mut Doc) -> u32 {
                 c = read(doc);
                 if c == END_OF_STREAM {
                     let t = token_node(doc);
-                    message::report_attr_error(doc, t, None, UNEXPECTED_END_OF_FILE_ATTR);
+                    message::report_attr_error_opt(doc, t, None, UNEXPECTED_END_OF_FILE_ATTR);
                     unget(doc, c);
                     return 0;
                 }
                 if c == '>' as u32 {
                     unget(doc, c);
                     let t = token_node(doc);
-                    message::report_attr_error(doc, t, None, UNEXPECTED_GT);
+                    message::report_attr_error_opt(doc, t, None, UNEXPECTED_GT);
                     return 0;
                 }
                 add_char_to_lexer(doc, c);
@@ -3006,14 +3008,14 @@ fn parse_server_instruction(doc: &mut Doc) -> u32 {
                 c = read(doc);
                 if c == END_OF_STREAM {
                     let t = token_node(doc);
-                    message::report_attr_error(doc, t, None, UNEXPECTED_END_OF_FILE_ATTR);
+                    message::report_attr_error_opt(doc, t, None, UNEXPECTED_END_OF_FILE_ATTR);
                     unget(doc, c);
                     return 0;
                 }
                 if c == '>' as u32 {
                     unget(doc, c);
                     let t = token_node(doc);
-                    message::report_attr_error(doc, t, None, UNEXPECTED_GT);
+                    message::report_attr_error_opt(doc, t, None, UNEXPECTED_GT);
                     return 0;
                 }
                 add_char_to_lexer(doc, c);
@@ -3100,7 +3102,7 @@ fn parse_value(
         c = read(doc);
         if c == END_OF_STREAM {
             let t = token_node(doc);
-            message::report_attr_error(doc, t, None, UNEXPECTED_END_OF_FILE_ATTR);
+            message::report_attr_error_opt(doc, t, None, UNEXPECTED_END_OF_FILE_ATTR);
             unget(doc, c);
             break;
         }
@@ -3126,7 +3128,7 @@ fn parse_value(
                 c = '>' as u32;
                 unget(doc, c);
                 let t = token_node(doc);
-                message::report_attr_error(doc, t, None, UNEXPECTED_GT);
+                message::report_attr_error_opt(doc, t, None, UNEXPECTED_GT);
                 break;
             }
             if c == '/' as u32 {
@@ -3176,14 +3178,14 @@ fn parse_value(
             if munge {
                 if c == '\n' as u32 && attrs::is_url(doc, name) {
                     let t = token_node(doc);
-                    message::report_attr_error(doc, t, None, NEWLINE_IN_URI);
+                    message::report_attr_error_opt(doc, t, None, NEWLINE_IN_URI);
                     continue;
                 }
                 c = ' ' as u32;
                 if lastc == ' ' as u32 {
                     if attrs::is_url(doc, name) {
                         let t = token_node(doc);
-                        message::report_attr_error(doc, t, None, WHITE_IN_URI);
+                        message::report_attr_error_opt(doc, t, None, WHITE_IN_URI);
                     }
                     continue;
                 }
@@ -3325,7 +3327,7 @@ fn parse_attrs(doc: &mut Doc, isempty: &mut bool) -> Option<AttId> {
             add_attr_to_list(doc, &mut list, av);
             if delim == 0 && has_value {
                 let t = token_node(doc);
-                message::report_attr_error(doc, t, Some(av), MISSING_QUOTEMARK_OPEN);
+                message::report_attr_error_opt(doc, t, Some(av), MISSING_QUOTEMARK_OPEN);
             }
         } else {
             let av = new_attribute(doc);
@@ -3335,11 +3337,11 @@ fn parse_attrs(doc: &mut Doc, isempty: &mut bool) -> Option<AttId> {
             doc[av].value = value;
             let t = token_node(doc);
             if lc == b'"' {
-                message::report_attr_error(doc, t, Some(av), MISSING_QUOTEMARK);
+                message::report_attr_error_opt(doc, t, Some(av), MISSING_QUOTEMARK);
             } else if no_value {
-                message::report_attr_error(doc, t, Some(av), MISSING_ATTR_VALUE);
+                message::report_attr_error_opt(doc, t, Some(av), MISSING_ATTR_VALUE);
             } else {
-                message::report_attr_error(doc, t, Some(av), INVALID_ATTRIBUTE);
+                message::report_attr_error_opt(doc, t, Some(av), INVALID_ATTRIBUTE);
             }
             free_attribute(doc, av);
         }
