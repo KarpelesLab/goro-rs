@@ -6877,10 +6877,16 @@ impl Vm {
 
         // Record an "[internal function]" frame for the callback so backtraces
         // and func_get_args() see it (zend_call_function pushes a frame too).
+        // (std::str::from_utf8() validates ASCII much faster than the lossy
+        // decoder; callbacks run this for every call)
+        let lossy = |b: &[u8]| match std::str::from_utf8(b) {
+            Ok(s) => s.to_owned(),
+            Err(_) => String::from_utf8_lossy(b).into_owned(),
+        };
         let frame_display = if !op_array.display_name.is_empty() {
-            String::from_utf8_lossy(&op_array.display_name).to_string()
+            lossy(&op_array.display_name)
         } else if let Some(fcc) = &op_array.fcc_target_name {
-            String::from_utf8_lossy(fcc).to_string()
+            lossy(fcc)
         } else if let Some(sc) = &op_array.scope_class {
             let raw = String::from_utf8_lossy(&op_array.name).to_string();
             let m = raw.rsplit("::").next().unwrap_or(&raw).to_string();
