@@ -119,7 +119,6 @@ const azCompileOpt: &[&[u8]] = &[
     b"MAX_VDBE_OP=250000000",
     b"MAX_WORKER_THREADS=8",
     b"MUTEX_PTHREADS",
-    b"OMIT_SHARED_CACHE",
     b"SYSTEM_MALLOC",
     b"TEMP_STORE=1",
     b"THREADSAFE=1",
@@ -2537,7 +2536,7 @@ fn openDatabase(
 
     if (flags & SQLITE_OPEN_PRIVATECACHE as u32) != 0 {
         flags &= !(SQLITE_OPEN_SHAREDCACHE as u32);
-    } else if sqlite3GlobalConfig().sharedCacheEnabled != 0 {
+    } else if crate::global::sqlite3SharedCacheEnabled() != 0 {
         flags |= SQLITE_OPEN_SHAREDCACHE as u32;
     }
 

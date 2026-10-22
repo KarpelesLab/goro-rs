@@ -3934,10 +3934,37 @@ fn vdbe_step(db: &mut Sqlite3, p: &mut Vdbe, s: &mut ExecState) -> Result<Fl, Ex
         }
 
         // Opcode: TableLock P1 P2 P3 P4 *
+        // Synopsis: iDb=P1 root=P2 write=P3
         //
-        // Obtain a lock on a particular table.  This opcode is only used
-        // when SQLITE_OMIT_SHARED_CACHE is not defined: a no-op here.
-        OP_TableLock => Ok(Fl::Next),
+        // Obtain a lock on a particular table. This instruction is only used
+        // when the shared-cache feature is enabled.
+        //
+        // P1 is the index of the database in sqlite3.aDb[] of the database
+        // on which the lock is acquired.  A readlock is obtained if P3==0 or
+        // a write lock if P3==1.
+        //
+        // P2 contains the root-page of the table to lock.
+        //
+        // P4 contains a pointer to the name of the table being locked. This
+        // is only used to generate an error message if the lock cannot be
+        // obtained.
+        OP_TableLock => {
+            let isWriteLock = p3 as u8;
+            if isWriteLock != 0 || 0 == (db.flags & SQLITE_ReadUncommit) {
+                debug_assert!(p1 >= 0 && p1 < db.nDb());
+                debug_assert!(isWriteLock == 0 || isWriteLock == 1);
+                let pBt = db.aDb[p1 as usize].pBt.clone().expect("btree");
+                let rc = crate::btree::sqlite3BtreeLockTable(&pBt, p2, isWriteLock);
+                if rc != 0 {
+                    if (rc & 0xFF) == SQLITE_LOCKED {
+                        let z = p4_z!().unwrap_or_default();
+                        verr!(db, p, b"database table is locked: %s", &z);
+                    }
+                    abort!(rc);
+                }
+            }
+            Ok(Fl::Next)
+        }
 
         // Virtual table opcodes.  Virtual tables are not ported yet.
         OP_VBegin | OP_VCreate | OP_VDestroy | OP_VOpen | OP_VCheck | OP_VInitIn | OP_VFilter

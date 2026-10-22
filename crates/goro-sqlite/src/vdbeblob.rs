@@ -321,9 +321,9 @@ pub fn sqlite3_blob_open(
                 let s = &db.aDb[iDb as usize].pSchema;
                 (s.borrow().schema_cookie, s.borrow().iGeneration)
             };
-            let (tnum, nCol) = {
+            let (tnum, nCol, zTabName) = {
                 let t = pTab.borrow();
-                (t.tnum, t.nCol as i32)
+                (t.tnum, t.nCol as i32, t.zName.clone())
             };
             crate::vdbeaux::sqlite3VdbeAddOp4Int(
                 &mut v,
@@ -340,8 +340,11 @@ pub fn sqlite3_blob_open(
             /* Make sure a mutex is held on the table to be accessed */
             crate::vdbeaux::sqlite3VdbeUsesBtree(&mut v, iDb);
 
-            /* Configure the OP_TableLock instruction (SQLITE_OMIT_SHARED_CACHE) */
-            v.aOp[addr].opcode = OP_Noop;
+            /* Configure the OP_TableLock instruction */
+            v.aOp[addr].p1 = iDb;
+            v.aOp[addr].p2 = tnum as i32;
+            v.aOp[addr].p3 = wrFlag;
+            crate::vdbeaux::sqlite3VdbeChangeP4(&mut v, 2, P4::Z(zTabName), P4_TRANSIENT as i32);
 
             /* Remove either the OP_OpenWrite or OpenRead. Set the P2
              ** parameter of the other to pTab->tnum.  */
