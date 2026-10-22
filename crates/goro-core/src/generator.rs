@@ -3177,6 +3177,7 @@ impl Vm {
     pub(crate) fn generator_method(
         &mut self,
         g: &GenRc,
+        this: &Value,
         method: &[u8],
         args: &[Value],
         line: u32,
@@ -3277,6 +3278,7 @@ impl Vm {
             args.to_vec(),
             true,
         ));
+        self.note_frame_this(this);
         let prev_caller = self.generator_caller.take();
         let observed = self.observer.map(|_| format!("Generator::{}", display));
         if let Some(n) = &observed {

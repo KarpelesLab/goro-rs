@@ -15,58 +15,118 @@ impl Vm {
         fallback_trace: &str,
         max_len: usize,
     ) -> String {
-        if let Value::Array(arr) = trace_val {
-            let arr = arr.borrow();
-            let mut lines = Vec::new();
-            let mut idx = 0;
-            let key = |k: &[u8]| ArrayKey::String(PhpString::from_bytes(k));
-            for (_key, frame_val) in arr.iter() {
-                if let Value::Array(frame) = frame_val {
-                    let frame = frame.borrow();
-                    // Appended as C strings (smart_str_appends): an anonymous
-                    // class name ends at its NUL byte.
-                    let get_s = |k: &[u8]| {
-                        frame
-                            .get(&key(k))
-                            .map(|v| {
-                                let s = v.to_php_string();
-                                let b = s.as_bytes();
-                                let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-                                String::from_utf8_lossy(&b[..end]).into_owned()
-                            })
-                            .unwrap_or_default()
-                    };
-                    let file = get_s(b"file");
-                    let line = frame.get(&key(b"line")).map(|v| v.to_long()).unwrap_or(0);
-                    let function = get_s(b"function");
-                    let class = get_s(b"class");
-                    let type_str = get_s(b"type");
-                    let args_str = if let Some(Value::Array(args_arr)) = frame.get(&key(b"args")) {
-                        let args_arr = args_arr.borrow();
-                        let formatted: Vec<String> = args_arr
-                            .iter()
-                            .map(|(_k, v)| Vm::format_trace_arg_with_limit(v, max_len))
-                            .collect();
-                        formatted.join(", ")
-                    } else {
-                        String::new()
-                    };
-                    let loc = if file.is_empty() || file == "[internal function]" || line == 0 {
-                        "[internal function]".to_string()
-                    } else {
-                        format!("{}({})", file, line)
-                    };
-                    lines.push(format!(
-                        "#{} {}: {}{}{}({})",
-                        idx, loc, class, type_str, function, args_str
-                    ));
-                }
-                idx += 1;
-            }
-            lines.push(format!("#{} {{main}}", idx));
-            return lines.join("\n");
+        if matches!(trace_val, Value::Array(_)) {
+            return Self::trace_text(trace_val, true, max_len, &mut Vec::new());
         }
         fallback_trace.to_string()
+    }
+
+    /// zend_trace_to_string() of `trace` (an exception's "trace", a
+    /// debug_backtrace() array), with the warnings it raises.
+    pub fn trace_to_string(&mut self, trace: &Value, include_main: bool, max_len: usize) -> String {
+        let mut warnings = Vec::new();
+        let s = Self::trace_text(trace, include_main, max_len, &mut warnings);
+        for w in warnings {
+            self.emit_warning(&w);
+        }
+        s
+    }
+
+    /// zend_trace_to_string() / _build_trace_string(): "#N file(line):
+    /// class type function(args)" per frame, `warnings` collecting what
+    /// php-src reports about malformed frames.
+    pub fn trace_text(
+        trace_val: &Value,
+        include_main: bool,
+        max_len: usize,
+        warnings: &mut Vec<String>,
+    ) -> String {
+        let Value::Array(arr) = trace_val else {
+            return if include_main {
+                "#0 {main}".to_string()
+            } else {
+                String::new()
+            };
+        };
+        let arr = arr.borrow();
+        let mut out = String::new();
+        let mut num = 0;
+        let key = |k: &[u8]| ArrayKey::String(PhpString::from_bytes(k));
+        // Appended as C strings (smart_str_appends): an anonymous class name
+        // ends at its NUL byte.
+        let c_str = |s: &PhpString| {
+            let b = s.as_bytes();
+            let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+            String::from_utf8_lossy(&b[..end]).into_owned()
+        };
+        for (k, frame_val) in arr.iter() {
+            let Value::Array(frame) = frame_val.deref() else {
+                let idx = match k {
+                    ArrayKey::Int(i) => *i as u64,
+                    ArrayKey::String(_) => 0,
+                };
+                warnings.push(format!("Expected array for frame {}", idx));
+                continue;
+            };
+            let frame = frame.borrow();
+            out.push_str(&format!("#{} ", num));
+            num += 1;
+            match frame.get(&key(b"file")).map(|v| v.deref()) {
+                Some(Value::String(f)) => {
+                    let line = match frame.get(&key(b"line")).map(|v| v.deref()) {
+                        Some(Value::Long(l)) => l,
+                        Some(_) => {
+                            warnings.push("Line is not an int".to_string());
+                            0
+                        }
+                        None => 0,
+                    };
+                    let f = f.to_string_lossy();
+                    // (frames recorded without a location)
+                    if f.is_empty() || f == "[internal function]" {
+                        out.push_str("[internal function]: ");
+                    } else {
+                        out.push_str(&format!("{}({}): ", f, line));
+                    }
+                }
+                Some(_) => {
+                    warnings.push("File name is not a string".to_string());
+                    out.push_str("[unknown file]: ");
+                }
+                None => out.push_str("[internal function]: "),
+            }
+            for k in [&b"class"[..], b"type", b"function"] {
+                match frame.get(&key(k)).map(|v| v.deref()) {
+                    Some(Value::String(v)) => out.push_str(&c_str(&v)),
+                    Some(_) => {
+                        warnings.push(format!(
+                            "Value for {} is not a string",
+                            String::from_utf8_lossy(k)
+                        ));
+                        out.push_str("[unknown]");
+                    }
+                    None => {}
+                }
+            }
+            out.push('(');
+            match frame.get(&key(b"args")).map(|v| v.deref()) {
+                Some(Value::Array(args_arr)) => {
+                    let args_arr = args_arr.borrow();
+                    let formatted: Vec<String> = args_arr
+                        .iter()
+                        .map(|(_k, v)| Vm::format_trace_arg_with_limit(&v.deref(), max_len))
+                        .collect();
+                    out.push_str(&formatted.join(", "));
+                }
+                Some(_) => warnings.push("args element is not an array".to_string()),
+                None => {}
+            }
+            out.push_str(")\n");
+        }
+        if include_main {
+            out.push_str(&format!("#{} {{main}}", num));
+        }
+        out
     }
 
     /// Display an uncaught exception (or a not-yet-displayed fatal error)

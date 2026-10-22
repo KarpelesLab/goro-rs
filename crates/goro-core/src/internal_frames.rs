@@ -16,8 +16,12 @@
 //! stack: user code being entered from Rust, an exception being created, or
 //! debug_backtrace().
 
+use crate::array::{ArrayKey, PhpArray};
+use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::Vm;
+use std::cell::RefCell;
+use std::rc::Rc;
 
 /// A builtin call in progress.
 ///
@@ -443,6 +447,20 @@ pub fn sprintf_is_rope(args: &[Value]) -> bool {
     n == args.len() - 1
 }
 
+/// `$this` of an internal method call in progress (see `note_frame_this`).
+pub struct FrameThis {
+    /// call_stack index of the method's frame
+    depth: usize,
+    /// Heap pointer of that frame's name, to recognize it
+    name: *const u8,
+    obj: WeakThis,
+}
+
+enum WeakThis {
+    Object(std::rc::Weak<std::cell::RefCell<crate::object::PhpObject>>),
+    Generator(std::rc::Weak<std::cell::RefCell<crate::generator::PhpGenerator>>),
+}
+
 /// The compiled variables of a running user function, so backtraces show
 /// the current values of its parameters (zend_fetch_debug_backtrace reads
 /// the frame's CVs: `f(Array)` after `$a = []` inside `f`, NULL once unset)
@@ -461,6 +479,8 @@ pub struct CvFrame {
     base: u32,
     /// Number of declared non-variadic parameters
     nfixed: u32,
+    /// CV 0 is `$this` (a method or a closure bound to an object)
+    has_this: bool,
 }
 
 impl Vm {
@@ -484,7 +504,9 @@ impl Vm {
     }
 
     pub(crate) fn register_cv_frame(&mut self, op_array: &crate::opcode::OpArray) -> bool {
-        if op_array.param_count == 0 {
+        // debug_backtrace() shows the frame's `$this` as its "object"
+        let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+        if op_array.param_count == 0 && !has_this {
             return false;
         }
         let Some(depth) = self.call_stack.len().checked_sub(1) else {
@@ -492,7 +514,7 @@ impl Vm {
         };
         let frame = &self.call_stack[depth];
         if frame.0.is_empty()
-            || frame.3.is_empty()
+            || (frame.3.is_empty() && !has_this)
             || self
                 .cv_frames
                 .last()
@@ -514,7 +536,7 @@ impl Vm {
         let nfixed = op_array
             .param_count
             .saturating_sub(base + op_array.variadic_param.is_some() as u32);
-        if nfixed == 0 {
+        if nfixed == 0 && !has_this {
             return false;
         }
         self.cv_frames.push(CvFrame {
@@ -523,6 +545,7 @@ impl Vm {
             cvs: std::ptr::null(),
             base,
             nfixed,
+            has_this,
         });
         true
     }
@@ -540,20 +563,11 @@ impl Vm {
     pub fn sync_frame_args(&mut self) {
         for k in 0..self.cv_frames.len() {
             let f = &self.cv_frames[k];
-            if f.cvs.is_null() {
+            if f.cvs.is_null() || f.nfixed == 0 {
                 continue;
             }
-            let at = if self
-                .call_stack
-                .get(f.depth)
-                .is_some_and(|e| e.0.as_ptr() == f.name)
-            {
-                f.depth
-            } else {
-                match self.call_stack.iter().rposition(|e| e.0.as_ptr() == f.name) {
-                    Some(i) => i,
-                    None => continue,
-                }
+            let Some(at) = self.cv_frame_index(f) else {
+                continue;
             };
             // SAFETY: see CvFrame; the function owning `cvs` is still running.
             let cvs = unsafe { &*f.cvs };
@@ -575,43 +589,208 @@ impl Vm {
         }
     }
 
-    /// A fiber suspends: hand it the CV frames of its call_stack frames,
-    /// i.e. of its root frame (the fiber function's, at `root`) and above,
-    /// made relative to the root.
-    pub(crate) fn fiber_take_cv_frames(&mut self, root: usize) -> Vec<CvFrame> {
-        let at = self
-            .cv_frames
-            .iter()
-            .position(|f| f.depth >= root)
-            .unwrap_or(self.cv_frames.len());
-        let mut out = self.cv_frames.split_off(at);
-        for f in &mut out {
-            f.depth -= root;
+    /// The call_stack index of the frame `f` was registered for.
+    fn cv_frame_index(&self, f: &CvFrame) -> Option<usize> {
+        if self
+            .call_stack
+            .get(f.depth)
+            .is_some_and(|e| e.0.as_ptr() == f.name)
+        {
+            Some(f.depth)
+        } else {
+            self.call_stack.iter().rposition(|e| e.0.as_ptr() == f.name)
+        }
+    }
+
+    /// The internal method call whose frame was just pushed (the top
+    /// call_stack frame) runs on `this`: debug_backtrace() shows it as the
+    /// frame's "object". The entry holds no reference (the object's
+    /// lifetime is unchanged) and goes stale once the frame is popped.
+    pub fn note_frame_this(&mut self, this: &Value) {
+        let obj = match this {
+            Value::Object(o) => WeakThis::Object(std::rc::Rc::downgrade(o)),
+            Value::Generator(g) => WeakThis::Generator(std::rc::Rc::downgrade(g)),
+            _ => return,
+        };
+        let Some(depth) = self.call_stack.len().checked_sub(1) else {
+            return;
+        };
+        // (entries at this depth or above belong to frames that are gone)
+        while self.frame_this.last().is_some_and(|f| f.depth >= depth) {
+            self.frame_this.pop();
+        }
+        self.frame_this.push(FrameThis {
+            depth,
+            name: self.call_stack[depth].0.as_ptr(),
+            obj,
+        });
+    }
+
+    /// The `$this` of each call_stack frame (zend_fetch_debug_backtrace's
+    /// "object"), for the frames of running methods.
+    pub fn frame_objects(&self) -> Vec<Option<Value>> {
+        let mut out = vec![None; self.call_stack.len()];
+        for f in &self.frame_this {
+            let at = if self
+                .call_stack
+                .get(f.depth)
+                .is_some_and(|e| e.0.as_ptr() == f.name)
+            {
+                Some(f.depth)
+            } else {
+                self.call_stack.iter().rposition(|e| e.0.as_ptr() == f.name)
+            };
+            let obj = match &f.obj {
+                WeakThis::Object(o) => o.upgrade().map(Value::Object),
+                WeakThis::Generator(g) => g.upgrade().map(Value::Generator),
+            };
+            if let (Some(at), Some(obj)) = (at, obj) {
+                out[at] = Some(obj);
+            }
+        }
+        for f in &self.cv_frames {
+            if !f.has_this || f.cvs.is_null() {
+                continue;
+            }
+            let Some(at) = self.cv_frame_index(f) else {
+                continue;
+            };
+            // SAFETY: see CvFrame; the function owning `cvs` is still running.
+            let cvs = unsafe { &*f.cvs };
+            if let Some(v @ Value::Object(_)) = cvs.first().map(|v| v.deref()) {
+                out[at] = Some(v);
+            }
         }
         out
     }
 
-    /// A fiber resumes: re-install its CV frames once its root frame has
-    /// been pushed again (the top frame), before the rest of its call_stack
-    /// frames are appended.
-    pub(crate) fn fiber_restore_cv_frames(&mut self, frames: &mut Vec<CvFrame>) {
-        let Some(root) = self.call_stack.len().checked_sub(1) else {
-            frames.clear();
-            return;
+    /// zend_fetch_debug_backtrace(): the frames below the calling builtin
+    /// (debug_backtrace(), debug_print_backtrace()), or the frames of call_stack
+    /// range `range` (ReflectionFiber::getTrace()).
+    pub fn debug_backtrace_array(
+        &mut self,
+        options: i64,
+        limit: i64,
+        range: Option<(usize, usize)>,
+    ) -> PhpArray {
+        let vm = self;
+        if range.is_none() {
+            // Frames of the builtins being run (not debug_backtrace() itself)
+            vm.materialize_builtin_frames(true);
+        }
+        vm.sync_frame_args();
+        let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2
+        let provide_object = (options & 1) != 0; // DEBUG_BACKTRACE_PROVIDE_OBJECT = 1
+
+        let mut trace_arr = PhpArray::new();
+        // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
+        // Ordered outermost to innermost. Reversed for backtrace output.
+        let stack_len = vm.call_stack.len();
+        let max_frames = if limit > 0 {
+            limit as usize
+        } else {
+            usize::MAX
         };
-        let root_name = self.call_stack[root].0.as_ptr();
-        for f in frames.iter_mut() {
-            if f.depth == 0 {
-                f.name = root_name;
+        let objects = if provide_object {
+            vm.frame_objects()
+        } else {
+            Vec::new()
+        };
+
+        let (lo, hi) = range.unwrap_or((0, stack_len));
+        let frames: Vec<(String, String, u32, Vec<Value>, bool)> =
+            vm.call_stack[lo..hi].iter().rev().cloned().collect();
+        let key = |k: &[u8]| ArrayKey::String(PhpString::from_bytes(k));
+        let string = |s: &str| Value::String(PhpString::from_string(s.to_string()));
+        for (idx, (func_name, file, line, _, is_method)) in frames.iter().enumerate() {
+            if idx >= max_frames {
+                break;
             }
-            f.depth += root;
+            let mut frame = PhpArray::new();
+            // A frame called from internal code (callback of a builtin, fiber
+            // function, generator body resumed by the engine) has no location.
+            if !(file.is_empty() || file == "[internal function]" || *line == 0) {
+                frame.set(key(b"file"), string(file));
+                frame.set(key(b"line"), Value::Long(*line as i64));
+            }
+            // Parse class::method or class->method from func_name. For closures
+            // (`{closure:...}`) we never split on `::` even if the closure name
+            // embeds `Class::method()`.
+            let split = if func_name.starts_with("{closure:") {
+                None
+            } else if let Some(sep) = func_name.find("::") {
+                Some((sep, *is_method))
+            } else {
+                func_name.find("->").map(|sep| (sep, true))
+            };
+            if let Some((sep, instance)) = split {
+                frame.set(key(b"function"), string(&func_name[sep + 2..]));
+                frame.set(key(b"class"), string(&func_name[..sep]));
+                if instance {
+                    if let Some(Some(obj)) = objects.get(hi - 1 - idx) {
+                        frame.set(key(b"object"), obj.clone());
+                    }
+                }
+                // Use -> for instance methods, :: for static methods
+                let type_str: &[u8] = if instance { b"->" } else { b"::" };
+                frame.set(key(b"type"), Value::String(PhpString::from_bytes(type_str)));
+            } else {
+                frame.set(key(b"function"), string(func_name));
+            }
+            // Add args array unless DEBUG_BACKTRACE_IGNORE_ARGS is set (an
+            // include or eval frame without arguments has none)
+            if !ignore_args {
+                let raw = Vm::trace_frame_args_at(&frames, idx);
+                let skip = raw.is_empty()
+                    && matches!(
+                        func_name.as_str(),
+                        "eval" | "include" | "include_once" | "require" | "require_once"
+                    );
+                if !skip {
+                    let frame_args = vm.trace_frame_args(func_name, raw);
+                    let mut args_arr = PhpArray::new();
+                    for arg in frame_args {
+                        args_arr.push(arg);
+                    }
+                    frame.set(key(b"args"), Value::Array(Rc::new(RefCell::new(args_arr))));
+                }
+            }
+            trace_arr.set(
+                ArrayKey::Int(idx as i64),
+                Value::Array(Rc::new(RefCell::new(frame))),
+            );
+        }
+        trace_arr
+    }
+
+    /// A fiber suspends: hand it the CV frames of its call_stack frames,
+    /// those from index `base` up, made relative to `base`.
+    pub(crate) fn fiber_take_cv_frames(&mut self, base: usize) -> Vec<CvFrame> {
+        let at = self
+            .cv_frames
+            .iter()
+            .position(|f| f.depth >= base)
+            .unwrap_or(self.cv_frames.len());
+        let mut out = self.cv_frames.split_off(at);
+        for f in &mut out {
+            f.depth -= base;
+        }
+        out
+    }
+
+    /// A fiber resumes: re-install its CV frames, before its call_stack
+    /// frames are appended (their names move with them).
+    pub(crate) fn fiber_restore_cv_frames(&mut self, frames: &mut Vec<CvFrame>) {
+        let base = self.call_stack.len();
+        for f in frames.iter_mut() {
+            f.depth += base;
         }
         self.cv_frames.append(frames);
     }
 
-    /// A fiber ended: drop the CV frames of its root frame (at `root`) and above.
-    pub(crate) fn fiber_drop_cv_frames(&mut self, root: usize) {
-        while self.cv_frames.last().is_some_and(|f| f.depth >= root) {
+    /// A fiber ended: drop the CV frames of its frames (from index `base` up).
+    pub(crate) fn fiber_drop_cv_frames(&mut self, base: usize) {
+        while self.cv_frames.last().is_some_and(|f| f.depth >= base) {
             self.cv_frames.pop();
         }
     }
@@ -634,7 +813,8 @@ pub fn implicit_args(op_array: &crate::opcode::OpArray) -> usize {
 
 /// Whether call_stack frame `name` is the frame of a call to `op_array`.
 fn frame_is_for(name: &str, op_array: &crate::opcode::OpArray) -> bool {
-    if name.starts_with("{closure") {
+    // `{closure:...}`, or `Class::{closure:...}` for a closure with a scope
+    if name.starts_with("{closure") || name.contains("::{closure") {
         return crate::closure::is_closure_fn_name(&op_array.name);
     }
     let last = |s: &[u8]| -> usize {

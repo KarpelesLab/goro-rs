@@ -793,6 +793,9 @@ pub struct Vm {
     /// generator-based path above is kept for compatibility while it is
     /// still wired into a few code paths.
     pub fiber_coroutines: HashMap<u64, crate::fiber::PhpFiber>,
+    /// Running fibers (object id) and the call_stack index of their bottom
+    /// frame, innermost last
+    pub(crate) fiber_bases: Vec<(u64, usize)>,
     /// Depth of fiber execution (0 = not in fiber, >0 = inside fiber start/resume)
     pub fiber_depth: u32,
     /// Whether we're currently force-closing a fiber (running its finally blocks)
@@ -927,6 +930,8 @@ pub struct Vm {
     pub(crate) builtin_frames: Vec<crate::internal_frames::BuiltinFrame>,
     /// Parameter CVs of running user functions (see internal_frames.rs)
     pub(crate) cv_frames: Vec<crate::internal_frames::CvFrame>,
+    /// `$this` of running internal method calls (see internal_frames.rs)
+    pub(crate) frame_this: Vec<crate::internal_frames::FrameThis>,
     /// Locals of the running user functions (see gc::GcFrame).
     pub(crate) gc_frames: Vec<crate::gc::GcFrame>,
     /// Deprecations of `callable` type checks (see callable.rs), raised by
@@ -1118,6 +1123,7 @@ impl Vm {
             fiber_resume_value: Value::Null,
             fiber_generators: HashMap::new(),
             fiber_coroutines: HashMap::new(),
+            fiber_bases: Vec::new(),
             fiber_depth: 0,
             fiber_force_closing: false,
             generator_caller: None,
@@ -2071,6 +2077,7 @@ impl Vm {
             zpp_return_names: Default::default(),
             builtin_frames: Vec::new(),
             cv_frames: Vec::new(),
+            frame_this: Vec::new(),
             gc_frames: Vec::new(),
             pending_callable_deprecations: RefCell::new(Vec::new()),
             ucf_call_line: None,
@@ -6614,7 +6621,26 @@ impl Vm {
                 } else {
                     self.current_line
                 };
+                // (raised by the callee's RECV, inside its frame, which shows
+                // the arguments as RECV left them)
+                let own = !matches!(self.call_stack.last(), Some((n, f, 0, _, _)) if (f.is_empty() || f == "[internal function]") && *n == frame_display);
+                if own {
+                    let is_instance = this_cv == 1
+                        && lead > 0
+                        && matches!(call.args.first(), Some(Value::Object(_)));
+                    let (file, fline) = match self.ucf_call_line {
+                        Some(l) => (self.current_file.clone(), l),
+                        None => (String::new(), 0),
+                    };
+                    let passed: Vec<Value> =
+                        call.args.iter().skip(lead).map(|v| v.deref()).collect();
+                    self.call_stack
+                        .push((frame_display.clone(), file, fline, passed, is_instance));
+                }
                 let exc_val = self.create_exception(b"TypeError", &msg, line);
+                if own {
+                    self.call_stack.pop();
+                }
                 if !op_array.filename.is_empty() {
                     if let Value::Object(ref o) = exc_val {
                         o.borrow_mut().set_property(
@@ -22178,12 +22204,14 @@ impl Vm {
                                 line: op.line,
                             });
                         }
-                        self.call_stack.pop();
-
                         // If we're running inside a corosensei-backed fiber, use the
                         // yielder to truly suspend the OS stack and resume later.
                         if crate::fiber::in_fiber() {
-                            match crate::fiber::suspend_current(suspend_val) {
+                            // (the Fiber::suspend() frame is the suspended
+                            // fiber's top frame, for ReflectionFiber::getTrace())
+                            let resumed = crate::fiber::suspend_current(suspend_val);
+                            self.call_stack.pop();
+                            match resumed {
                                 Some(crate::fiber::FiberResume::Value(v)) => {
                                     self.write_operand(
                                         &op.result,
@@ -22239,6 +22267,7 @@ impl Vm {
                             }
                             return Ok(Flow::Continue);
                         }
+                        self.call_stack.pop();
 
                         // Legacy generator-backed fiber path
                         self.fiber_suspended = true;
@@ -22261,7 +22290,13 @@ impl Vm {
                         let r = match call.args.first() {
                             Some(Value::Generator(g)) => {
                                 let g = g.clone();
-                                self.generator_method(&g, &method, &call.args[1..], op.line)
+                                self.generator_method(
+                                    &g,
+                                    &call.args[0],
+                                    &method,
+                                    &call.args[1..],
+                                    op.line,
+                                )
                             }
                             _ => Ok(Value::Null),
                         };
@@ -22316,6 +22351,7 @@ impl Vm {
                             extra_args.clone(),
                             true,
                         ));
+                        self.note_frame_this(&fiber_obj);
 
                         let observed = self
                             .observer
@@ -23727,6 +23763,9 @@ impl Vm {
                                     extra_args,
                                     true,
                                 ));
+                                if let Some(this) = call.args.first() {
+                                    self.note_frame_this(this);
+                                }
                                 let mut spl_args = call.args.clone();
                                 let mut named_err = None;
                                 let mut named_ok = true;
@@ -49917,7 +49956,22 @@ impl Vm {
                             });
                             return Ok(Flow::Continue);
                         }
-                        let builtin_result = if is_throwable && !has_user_method {
+                        let throwable_string = if is_throwable && !has_user_method {
+                            match method_name_lower.as_slice() {
+                                b"gettraceasstring" => {
+                                    let trace = obj.borrow().get_property(b"trace");
+                                    let max_len = self.exception_string_param_max_len;
+                                    Some(self.trace_to_string(&trace, true, max_len))
+                                }
+                                b"__tostring" => Some(self.throwable_chain_string(obj)),
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        };
+                        let builtin_result = if let Some(t) = throwable_string {
+                            Some(Value::String(PhpString::from_string(t)))
+                        } else if is_throwable && !has_user_method {
                             let obj_borrow = obj.borrow();
                             match method_name_lower.as_slice() {
                                 b"getmessage" => Some(obj_borrow.get_property(b"message")),
@@ -49925,87 +49979,7 @@ impl Vm {
                                 b"getfile" => Some(obj_borrow.get_property(b"file")),
                                 b"getline" => Some(obj_borrow.get_property(b"line")),
                                 b"gettrace" => Some(obj_borrow.get_property(b"trace")),
-                                b"gettraceasstring" => {
-                                    let trace = obj_borrow.get_property(b"trace");
-                                    let trace_str = if let Value::Array(arr) = &trace {
-                                        let arr = arr.borrow();
-                                        let mut lines = Vec::new();
-                                        let mut idx = 0;
-                                        for (_key, frame_val) in arr.iter() {
-                                            if let Value::Array(frame) = frame_val {
-                                                let frame = frame.borrow();
-                                                let file = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"file"),
-                                                    ))
-                                                    .map(|v| v.to_php_string().to_string_lossy())
-                                                    .unwrap_or_default();
-                                                let line = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"line"),
-                                                    ))
-                                                    .map(|v| v.to_long())
-                                                    .unwrap_or(0);
-                                                let function = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"function"),
-                                                    ))
-                                                    .map(|v| v.to_php_string().to_string_lossy())
-                                                    .unwrap_or_default();
-                                                let class = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"class"),
-                                                    ))
-                                                    .map(|v| v.to_php_string().to_string_lossy())
-                                                    .unwrap_or_default();
-                                                let type_str = frame
-                                                    .get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"type"),
-                                                    ))
-                                                    .map(|v| v.to_php_string().to_string_lossy())
-                                                    .unwrap_or_default();
-                                                // Format args
-                                                let args_str = if let Some(args_val) =
-                                                    frame.get(&crate::array::ArrayKey::String(
-                                                        PhpString::from_bytes(b"args"),
-                                                    )) {
-                                                    if let Value::Array(args_arr) = args_val {
-                                                        let args_arr = args_arr.borrow();
-                                                        let formatted: Vec<String> = args_arr
-                                                            .iter()
-                                                            .map(|(_k, v)| {
-                                                                Self::format_trace_arg_with_limit(
-                                                                    v,
-                                                                    self.exception_string_param_max_len,
-                                                                )
-                                                            })
-                                                            .collect();
-                                                        formatted.join(", ")
-                                                    } else {
-                                                        String::new()
-                                                    }
-                                                } else {
-                                                    String::new()
-                                                };
-                                                let loc = if file.is_empty() {
-                                                    "[internal function]".to_string()
-                                                } else {
-                                                    format!("{}({})", file, line)
-                                                };
-                                                lines.push(format!(
-                                                    "#{} {}: {}{}{}({})",
-                                                    idx, loc, class, type_str, function, args_str
-                                                ));
-                                            }
-                                            idx += 1;
-                                        }
-                                        lines.push(format!("#{} {{main}}", idx));
-                                        lines.join("\n")
-                                    } else {
-                                        "#0 {main}".to_string()
-                                    };
-                                    Some(Value::String(PhpString::from_string(trace_str)))
-                                }
+                                b"gettraceasstring" | b"__tostring" => None,
                                 b"getprevious" => Some(obj_borrow.get_property(b"previous")),
                                 b"getseverity" => {
                                     let severity = obj_borrow.get_property(b"severity");
@@ -50015,9 +49989,6 @@ impl Vm {
                                         severity
                                     })
                                 }
-                                b"__tostring" => Some(Value::String(PhpString::from_string(
-                                    self.throwable_chain_string(obj),
-                                ))),
                                 _ => None,
                             }
                         } else if !has_user_method {
@@ -50043,6 +50014,8 @@ impl Vm {
                                     | b"reflectionconstant"
                                     | b"reflectionenumunitcase"
                                     | b"reflectionenumbackedcase"
+                                    | b"reflectionfiber"
+                                    | b"reflectiongenerator"
                             ) {
                                 let class_disp = crate::value::display_class_name(&class_name_orig);
                                 let func_disp =
@@ -50054,6 +50027,7 @@ impl Vm {
                                     Vec::new(),
                                     true,
                                 ));
+                                self.note_frame_this(&Value::Object(obj.clone()));
                                 true
                             } else {
                                 false
@@ -51001,7 +50975,11 @@ impl Vm {
 
     /// Convert a value to string, but throw an Error for objects without __toString
     /// One exception's part of Exception::__toString().
-    fn throwable_single_string(&self, obj: &Rc<RefCell<PhpObject>>) -> String {
+    fn throwable_single_string(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+        warnings: &mut Vec<String>,
+    ) -> String {
         let obj_borrow = obj.borrow();
         let class_display = crate::value::display_class_name(&obj_borrow.class_name);
         let message = obj_borrow
@@ -51018,83 +50996,9 @@ impl Vm {
         } else {
             file
         };
-        // Build trace string from stored trace data
         let trace = obj_borrow.get_property(b"trace");
-        let trace_str = if let Value::Array(arr) = &trace {
-            let arr = arr.borrow();
-            let mut trace_lines = Vec::new();
-            let mut tidx = 0;
-            for (_key, frame_val) in arr.iter() {
-                if let Value::Array(frame) = frame_val {
-                    let frame = frame.borrow();
-                    let ff = frame
-                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                            b"file",
-                        )))
-                        .map(|v| v.to_php_string().to_string_lossy())
-                        .unwrap_or_default();
-                    let fl = frame
-                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                            b"line",
-                        )))
-                        .map(|v| v.to_long())
-                        .unwrap_or(0);
-                    let func = frame
-                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                            b"function",
-                        )))
-                        .map(|v| v.to_php_string().to_string_lossy())
-                        .unwrap_or_default();
-                    let cls = frame
-                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                            b"class",
-                        )))
-                        .map(|v| v.to_php_string().to_string_lossy())
-                        .unwrap_or_default();
-                    let typ = frame
-                        .get(&crate::array::ArrayKey::String(PhpString::from_bytes(
-                            b"type",
-                        )))
-                        .map(|v| v.to_php_string().to_string_lossy())
-                        .unwrap_or_default();
-                    let args_str = if let Some(args_val) = frame.get(
-                        &crate::array::ArrayKey::String(PhpString::from_bytes(b"args")),
-                    ) {
-                        if let Value::Array(args_arr) = args_val {
-                            let args_arr = args_arr.borrow();
-                            let formatted: Vec<String> = args_arr
-                                .iter()
-                                .map(|(_k, v)| {
-                                    Self::format_trace_arg_with_limit(
-                                        v,
-                                        self.exception_string_param_max_len,
-                                    )
-                                })
-                                .collect();
-                            formatted.join(", ")
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    };
-                    let loc = if ff.is_empty() {
-                        "[internal function]".to_string()
-                    } else {
-                        format!("{}({})", ff, fl)
-                    };
-                    trace_lines.push(format!(
-                        "#{} {}: {}{}{}({})",
-                        tidx, loc, cls, typ, func, args_str
-                    ));
-                }
-                tidx += 1;
-            }
-            trace_lines.push(format!("#{} {{main}}", tidx));
-            trace_lines.join("\n")
-        } else {
-            "#0 {main}".to_string()
-        };
+        let trace_str =
+            Self::trace_text(&trace, true, self.exception_string_param_max_len, warnings);
         if message.is_empty() {
             format!(
                 "{} in {}:{}\nStack trace:\n{}",
@@ -51111,12 +51015,25 @@ impl Vm {
 
     /// Exception::__toString(): the previous chain from the innermost one,
     /// each followed by "Next" and the exception it led to.
-    pub fn throwable_chain_string(&self, obj: &Rc<RefCell<PhpObject>>) -> String {
+    pub fn throwable_chain_string(&mut self, obj: &Rc<RefCell<PhpObject>>) -> String {
+        let mut warnings = Vec::new();
+        let s = self.throwable_chain_text(obj, &mut warnings);
+        for w in warnings {
+            self.emit_warning(&w);
+        }
+        s
+    }
+
+    fn throwable_chain_text(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+        warnings: &mut Vec<String>,
+    ) -> String {
         let mut out = String::new();
         let mut cur = Some(obj.clone());
         let mut guard = 0;
         while let Some(o) = cur {
-            let part = self.throwable_single_string(&o);
+            let part = self.throwable_single_string(&o, warnings);
             out = if out.is_empty() {
                 part
             } else {
@@ -51782,7 +51699,16 @@ impl Vm {
             }
             // If inside a corosensei coroutine, suspend via the yielder.
             if crate::fiber::in_fiber() {
-                match crate::fiber::suspend_current(suspend_val.clone()) {
+                self.call_stack.push((
+                    "Fiber::suspend".to_string(),
+                    self.current_file.clone(),
+                    line,
+                    call.args.clone(),
+                    false,
+                ));
+                let resumed = crate::fiber::suspend_current(suspend_val.clone());
+                self.call_stack.pop();
+                match resumed {
                     Some(crate::fiber::FiberResume::Value(v)) => return Ok(v),
                     Some(crate::fiber::FiberResume::Throw(exc)) => {
                         self.current_exception = Some(exc);
@@ -51849,7 +51775,13 @@ impl Vm {
             return match call.args.first() {
                 Some(Value::Generator(g)) => {
                     let g = g.clone();
-                    self.generator_method(&g, &func_name_lower[8..], &call.args[1..], line)
+                    self.generator_method(
+                        &g,
+                        &call.args[0],
+                        &func_name_lower[8..],
+                        &call.args[1..],
+                        line,
+                    )
                 }
                 _ => Ok(Value::Null),
             };
@@ -51875,6 +51807,7 @@ impl Vm {
                 extra_args.clone(),
                 true,
             ));
+            self.note_frame_this(&fiber_obj);
             let result = self.fiber_dispatch_method(&fiber_obj, method, &extra_args, line);
             match &result {
                 Ok(_) => {
@@ -52465,6 +52398,7 @@ impl Vm {
         // Keep a copy to push onto the outer call_stack each time the
         // fiber runs (the body closure consumes the original).
         let display_name_for_stack = display_name.clone();
+        let callback_frame_name = display_name.clone();
 
         // Build the coroutine body. We capture `callback` and `args` by
         // value into the closure. The VM is reached through a raw pointer
@@ -52481,7 +52415,16 @@ impl Vm {
 
             let mut args_owned = args_owned;
             if let Some((msg, def_line)) = vm.check_callback_arg_types(&callback, &mut args_owned) {
+                // (raised inside the callback's frame)
+                vm.call_stack.push((
+                    callback_frame_name,
+                    String::new(),
+                    0,
+                    args_owned.clone(),
+                    false,
+                ));
                 let exc = vm.create_exception(b"TypeError", &msg, def_line);
+                vm.call_stack.pop();
                 return crate::fiber::FiberOutcome::Threw(exc);
             }
             match vm.call_callback(&callback, &args_owned) {
@@ -52540,22 +52483,17 @@ impl Vm {
         // resume; the body wrapper will install the real one).
         let prev_yielder = crate::fiber::set_current_yielder(fiber.yielder_ptr());
 
-        // Push a call_stack frame so the fiber's callback appears in
-        // backtraces captured INSIDE the fiber. We pop it when control
-        // returns out (suspend or terminate) so the outer code sees a
-        // clean stack.
+        // The fiber's frames (from its callback's, called from internal
+        // code, up) sit on top of the resumer's frames while it runs: its
+        // backtraces end with the Fiber->start()/resume() call that runs it
+        // (zend_fiber_execute links the fiber's bottom frame to that one).
         let fiber_stack_base = self.call_stack.len();
-        self.call_stack.push((
-            display_name_for_stack.clone(),
-            "[internal function]".to_string(),
-            0,
-            fiber.start_args.clone(),
-            false,
-        ));
-
         let bases = self.fiber_stack_bases();
         let caller_file = self.current_file.clone();
+        let fiber_id = obj_rc.borrow().object_id;
+        self.fiber_bases.push((fiber_id, fiber_stack_base));
         let result = fiber.resume(crate::fiber::FiberResume::Value(Value::Null));
+        self.fiber_bases.pop();
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
         self.fiber_switch_out(&obj_rc, switched_from, &result);
 
@@ -53387,8 +53325,7 @@ impl Vm {
                 .map(|i| i - h)
                 .collect();
             fiber.saved_builtin_frames = self.fiber_take_builtin_frames(e, a);
-            // (the fiber function's frame, pushed just before `bases`, is its root)
-            fiber.saved_cv_frames = self.fiber_take_cv_frames(a.saturating_sub(1));
+            fiber.saved_cv_frames = self.fiber_take_cv_frames(a);
             if self.call_stack.len() > a {
                 fiber.saved_call_stack = self.call_stack.split_off(a);
             }
@@ -53406,7 +53343,7 @@ impl Vm {
             self.pending_calls.truncate(h);
             self.closure_pending_calls.retain(|&i| i < h);
             self.builtin_frames.truncate(e);
-            self.fiber_drop_cv_frames(a.saturating_sub(1));
+            self.fiber_drop_cv_frames(a);
             self.call_stack.truncate(a);
             self.class_scope_stack.truncate(b);
             self.called_class_stack.truncate(c);
@@ -53459,14 +53396,6 @@ impl Vm {
         let self_ptr: *mut Vm = self as *mut Vm;
         set_current_vm_ptr(self_ptr);
         let prev_yielder = crate::fiber::set_current_yielder(fiber.yielder_ptr());
-        let fiber_display_name = fiber.display_name.clone();
-        self.call_stack.push((
-            fiber_display_name,
-            "[internal function]".to_string(),
-            0,
-            fiber.start_args.clone(),
-            false,
-        ));
         let bases = self.fiber_stack_bases();
         self.fiber_enter_stacks(&mut fiber);
         // The fiber resumes in the file it was suspended in.
@@ -53474,14 +53403,15 @@ impl Vm {
             Some((f, _)) => std::mem::replace(&mut self.current_file, f.clone()),
             None => self.current_file.clone(),
         };
+        self.fiber_bases.push((fiber_id, bases.0));
         let result = fiber.resume(input);
+        self.fiber_bases.pop();
         self.fiber_leave_stacks(&mut fiber, bases, result.is_ok());
         self.fiber_switch_out(&obj_rc, switched_from, &result);
         let fiber_susp_pos = (
             std::mem::replace(&mut self.current_file, caller_file),
             self.current_line,
         );
-        self.call_stack.pop();
         clear_current_vm_ptr();
         crate::fiber::restore_current_yielder(prev_yielder);
 

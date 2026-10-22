@@ -343,6 +343,13 @@ final class StreamBucket {
     vm.constants
         .entry(b"zend.enable_gc".to_vec())
         .or_insert(Value::String(PhpString::from_bytes(b"1")));
+    vm.constants
+        .entry(b"zend.exception_string_param_max_len".to_vec())
+        .or_insert(Value::String(PhpString::from_bytes(b"15")));
+    vm.ini_validators.insert(
+        b"zend.exception_string_param_max_len".to_vec(),
+        on_set_exception_string_param_max_len,
+    );
     vm.register_function(goro_core::gc::DESTRUCTOR_FIBER_FN, gc_destructor_fiber_fn);
     goro_core::gc::gc_request_startup();
     vm.register_function(b"debug_zval_dump", debug_zval_dump_fn);
@@ -13587,151 +13594,39 @@ pub(crate) fn strip_os_error(msg: &str) -> String {
     }
 }
 
-fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Frames of the builtins being run (not debug_backtrace() itself)
-    vm.materialize_builtin_frames(true);
-    vm.sync_frame_args();
-    let options = args.first().map(|v| v.to_long()).unwrap_or(0);
-    let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2
-    let _provide_object = (options & 1) != 0; // DEBUG_BACKTRACE_PROVIDE_OBJECT = 1
-
-    let mut trace_arr = PhpArray::new();
-    // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
-    // Ordered outermost to innermost. Reversed for backtrace output.
-    let stack_len = vm.call_stack.len();
-    let max_frames = if limit > 0 { limit as usize } else { stack_len };
-
-    let frames: Vec<(String, String, u32, Vec<Value>, bool)> =
-        vm.call_stack.iter().rev().cloned().collect();
-    for (idx, (func_name, file, line, _, is_method)) in frames.iter().enumerate() {
-        let frame_args = &vm.trace_frame_args(func_name, Vm::trace_frame_args_at(&frames, idx));
-        if idx >= max_frames {
-            break;
-        }
-        let mut frame = PhpArray::new();
-        if !file.is_empty() {
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"file")),
-                Value::String(PhpString::from_string(file.clone())),
-            );
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"line")),
-                Value::Long(*line as i64),
-            );
-        }
-        // Parse class::method or class->method from func_name. For closures
-        // (`{closure:...}`) we never split on `::` even if the closure name
-        // embeds `Class::method()`.
-        if !func_name.starts_with("{closure:") && func_name.find("::").is_some() {
-            let sep = func_name.find("::").unwrap();
-            let class_name = &func_name[..sep];
-            let method_name = &func_name[sep + 2..];
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"function")),
-                Value::String(PhpString::from_string(method_name.to_string())),
-            );
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"class")),
-                Value::String(PhpString::from_string(class_name.to_string())),
-            );
-            // Use -> for instance methods, :: for static methods
-            let type_str = if *is_method { b"->" as &[u8] } else { b"::" };
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"type")),
-                Value::String(PhpString::from_bytes(type_str)),
-            );
-        } else if !func_name.starts_with("{closure:") && func_name.find("->").is_some() {
-            let sep = func_name.find("->").unwrap();
-            let class_name = &func_name[..sep];
-            let method_name = &func_name[sep + 2..];
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"function")),
-                Value::String(PhpString::from_string(method_name.to_string())),
-            );
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"class")),
-                Value::String(PhpString::from_string(class_name.to_string())),
-            );
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"type")),
-                Value::String(PhpString::from_bytes(b"->")),
-            );
-        } else {
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"function")),
-                Value::String(PhpString::from_string(func_name.clone())),
-            );
-        }
-        // Add args array unless DEBUG_BACKTRACE_IGNORE_ARGS is set
-        if !ignore_args {
-            let mut args_arr = PhpArray::new();
-            for arg in frame_args {
-                args_arr.push(arg.clone());
-            }
-            frame.set(
-                ArrayKey::String(PhpString::from_bytes(b"args")),
-                Value::Array(Rc::new(RefCell::new(args_arr))),
-            );
-        }
-        trace_arr.set(
-            ArrayKey::Int(idx as i64),
-            Value::Array(Rc::new(RefCell::new(frame))),
-        );
+/// OnSetExceptionStringParamMaxLen: 0 to 1000000 (ZEND_ATOL of the value).
+fn on_set_exception_string_param_max_len(vm: &mut Vm, value: &[u8], _startup: bool) -> bool {
+    let s = String::from_utf8_lossy(value);
+    let t = s.trim_start();
+    let end = t
+        .char_indices()
+        .find(|&(i, c)| !(c.is_ascii_digit() || (i == 0 && (c == '-' || c == '+'))))
+        .map_or(t.len(), |(i, _)| i);
+    let n = t[..end].parse::<i64>().unwrap_or(0);
+    if (0..=1_000_000).contains(&n) {
+        vm.exception_string_param_max_len = n as usize;
+        true
+    } else {
+        false
     }
-    Ok(Value::Array(Rc::new(RefCell::new(trace_arr))))
+}
+
+fn debug_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // DEBUG_BACKTRACE_PROVIDE_OBJECT (1) is the default
+    let options = args.first().map(|v| v.to_long()).unwrap_or(1);
+    let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let trace = vm.debug_backtrace_array(options, limit, None);
+    Ok(Value::Array(Rc::new(RefCell::new(trace))))
 }
 
 fn debug_print_backtrace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Frames of the builtins being run (not debug_backtrace() itself)
-    vm.materialize_builtin_frames(true);
-    vm.sync_frame_args();
     let options = args.first().map(|v| v.to_long()).unwrap_or(0);
     let limit = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    let ignore_args = (options & 2) != 0; // DEBUG_BACKTRACE_IGNORE_ARGS = 2
+    // zend_trace_to_string() of the backtrace, without objects or {main}
+    let trace = vm.debug_backtrace_array(options & !1, limit, None);
+    let trace = Value::Array(Rc::new(RefCell::new(trace)));
     let max_len = vm.exception_string_param_max_len;
-
-    let stack_len = vm.call_stack.len();
-    let max_frames = if limit > 0 { limit as usize } else { stack_len };
-
-    let mut lines = Vec::new();
-    let frames: Vec<(String, String, u32, Vec<Value>, bool)> =
-        vm.call_stack.iter().rev().cloned().collect();
-    for (i, (func_name, file, line, _, is_instance)) in frames.iter().enumerate() {
-        let frame_args = &vm.trace_frame_args(func_name, Vm::trace_frame_args_at(&frames, i));
-        if i >= max_frames {
-            break;
-        }
-        let args_str = if ignore_args {
-            String::new()
-        } else {
-            goro_core::vm::format_trace_args_with_limit(frame_args, max_len)
-        };
-        // For instance methods, replace :: with ->
-        let display_name = if *is_instance {
-            func_name.replacen("::", "->", 1)
-        } else {
-            func_name.clone()
-        };
-        // Frames with empty file/line=0 represent an internal-engine call
-        // (e.g. a generator body resumed by VM machinery, or a Fiber callback).
-        let loc = if *line == 0 || file.is_empty() {
-            "[internal function]".to_string()
-        } else {
-            let file_display = if file == "Unknown.php" {
-                vm.current_file.as_str()
-            } else {
-                file.as_str()
-            };
-            format!("{}({})", file_display, line)
-        };
-        lines.push(format!("#{} {}: {}({})", i, loc, display_name, args_str));
-    }
-
-    let mut output = lines.join("\n");
-    if !output.is_empty() {
-        output.push('\n');
-    }
+    let output = vm.trace_to_string(&trace, false, max_len);
     vm.write_output(output.as_bytes());
     Ok(Value::Null)
 }

@@ -402,6 +402,9 @@ fn with_internal_ctor_frame(
         frame_args,
         true,
     ));
+    if let Some(this) = args.first() {
+        vm.note_frame_this(this);
+    }
     let r = f(vm, args, line);
     vm.call_stack.pop();
     r
@@ -9852,7 +9855,7 @@ pub fn reflection_fiber_method(
             }
             Some(
                 fib_obj
-                    .map(|f| f.borrow().get_property(b"__fiber_callable"))
+                    .map(|f| f.borrow().get_property(b"__fiber_callback"))
                     .unwrap_or(Value::Null),
             )
         }
@@ -9877,25 +9880,36 @@ pub fn reflection_fiber_method(
             if invalid {
                 return invalid_error(vm);
             }
+            // zend_fetch_debug_backtrace() from the fiber's current frame
+            // down to its bottom one (DEBUG_BACKTRACE_PROVIDE_OBJECT)
             if is_running {
-                return Some(vm.build_exception_trace());
+                vm.sync_builtin_frames();
+                let Some(at) = vm.fiber_bases.iter().rposition(|f| f.0 == fiber_id) else {
+                    return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+                };
+                let base = vm.fiber_bases[at].1;
+                let end = vm
+                    .fiber_bases
+                    .get(at + 1)
+                    .map_or(vm.call_stack.len(), |f| f.1);
+                let trace = vm.debug_backtrace_array(1, 0, Some((base, end)));
+                return Some(Value::Array(Rc::new(RefCell::new(trace))));
             }
-            let mut frames = vm
-                .fiber_coroutines
-                .get(&fiber_id)
-                .map(|f| f.saved_call_stack.clone())
-                .unwrap_or_default();
-            if let Some((file, line)) = vm
-                .fiber_coroutines
-                .get(&fiber_id)
-                .and_then(|f| f.suspended_at.clone())
-            {
-                frames.push(("Fiber::suspend".to_string(), file, line, Vec::new(), false));
-            }
-            let saved = std::mem::replace(&mut vm.call_stack, frames);
-            let trace = vm.build_exception_trace();
-            vm.call_stack = saved;
-            Some(trace)
+            let Some(mut fiber) = vm.fiber_coroutines.remove(&fiber_id) else {
+                return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+            };
+            vm.sync_builtin_frames();
+            // (the suspended fiber's frames, put back on top of the stack
+            // for the time being)
+            let base = vm.call_stack.len();
+            vm.fiber_restore_cv_frames(&mut fiber.saved_cv_frames);
+            vm.call_stack.append(&mut fiber.saved_call_stack);
+            let end = vm.call_stack.len();
+            let trace = vm.debug_backtrace_array(1, 0, Some((base, end)));
+            fiber.saved_call_stack = vm.call_stack.split_off(base);
+            fiber.saved_cv_frames = vm.fiber_take_cv_frames(base);
+            vm.fiber_coroutines.insert(fiber_id, fiber);
+            Some(Value::Array(Rc::new(RefCell::new(trace))))
         }
         _ => None,
     }
