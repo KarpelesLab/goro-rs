@@ -172,7 +172,60 @@ fn get_string_param(vm: &mut Vm, ht: &PhpArray, idx: i64, what: &str) -> Result<
 /// exception, Err(None) is a plain failure (proc_open() returns false).
 type DescResult = Result<(), Option<VmError>>;
 
-fn desc_from_array(vm: &mut Vm, ht: &PhpArray, descs: &mut Vec<Desc>, index: i32) -> DescResult {
+/// The PTY shared by the 'pty' descriptors (master, slave), closed when the
+/// child has been started (or proc_open() failed).
+struct Pty([i32; 2]);
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        for fd in self.0 {
+            if fd >= 0 {
+                unsafe { libc::close(fd) };
+            }
+        }
+    }
+}
+
+/// openpty()
+fn open_pty() -> Option<[i32; 2]> {
+    unsafe {
+        let m = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+        if m < 0 {
+            return None;
+        }
+        if libc::grantpt(m) != 0 || libc::unlockpt(m) != 0 {
+            let e = errno();
+            libc::close(m);
+            *libc::__errno_location() = e;
+            return None;
+        }
+        let mut name = [0 as libc::c_char; 128];
+        if libc::ptsname_r(m, name.as_mut_ptr(), name.len()) != 0 {
+            let e = errno();
+            libc::close(m);
+            *libc::__errno_location() = e;
+            return None;
+        }
+        let sl = libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+        if sl < 0 {
+            let e = errno();
+            libc::close(m);
+            *libc::__errno_location() = e;
+            return None;
+        }
+        set_cloexec(m);
+        set_cloexec(sl);
+        Some([m, sl])
+    }
+}
+
+fn desc_from_array(
+    vm: &mut Vm,
+    ht: &PhpArray,
+    descs: &mut Vec<Desc>,
+    index: i32,
+    pty: &mut Pty,
+) -> DescResult {
     let ty = get_string_param(vm, ht, 0, "handle qualifier").map_err(Some)?;
     let mut d = Desc {
         index,
@@ -295,8 +348,25 @@ fn desc_from_array(vm: &mut Vm, ht: &PhpArray, descs: &mut Vec<Desc>, index: i32
             d.childend = fd;
         }
         b"pty" => {
-            vm.emit_warning("proc_open(): PTY (pseudoterminal) not supported on this system");
-            return Err(None);
+            // set_proc_descriptor_to_pty()
+            if pty.0[0] == -1 {
+                match open_pty() {
+                    Some(fds) => pty.0 = fds,
+                    None => {
+                        let e = errno();
+                        vm.emit_warning(&format!(
+                            "proc_open(): Could not open PTY (pseudoterminal): {}",
+                            xp_socket::strerror(e)
+                        ));
+                        return Err(None);
+                    }
+                }
+            }
+            d.ty = DescType::Pipe;
+            d.childend = unsafe { libc::dup(pty.0[1]) };
+            d.parentend = unsafe { libc::dup(pty.0[0]) };
+            set_cloexec(d.parentend);
+            d.mode_flags = libc::O_RDWR;
         }
         _ => {
             vm.emit_warning(&format!(
@@ -481,6 +551,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // Walk the descriptor spec.
     let mut descs: Vec<Desc> = Vec::new();
+    let mut pty = Pty([-1, -1]);
     let entries: Vec<(ArrayKey, Value)> = spec
         .borrow()
         .iter()
@@ -531,7 +602,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             Value::Array(a) => {
                 let a = a.borrow().clone();
-                desc_from_array(vm, &a, &mut descs, index)
+                desc_from_array(vm, &a, &mut descs, index, &mut pty)
             }
             _ => {
                 close_all(&descs);
