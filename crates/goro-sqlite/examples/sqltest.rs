@@ -26,7 +26,7 @@
 //!   (error codes and message), `.typed 0|1|2` (rows
 //!   as `T<bytes>:value`; 2 also shows column_int64/column_double);
 //! * `.func NAME NARG [FLAGS]` (FLAGS: d deterministic, D directonly,
-//!   i innocuous, s subtype), `.agg NAME`, `.coll NAME`: register test
+//!   i innocuous, s subtype, x extended argument dump), `.agg NAME`, `.coll NAME`: register test
 //!   functions and a reverse-binary collation;
 //! * `.blob DB TABLE COL ROWID n | r OFF N | w OFF HEX`: incremental blob I/O;
 //! * `.backup FILE` / `.restore FILE`: backup API to/from another file;
@@ -468,12 +468,28 @@ fn meta_command(db: &mut Sqlite3, last: Option<StmtId>, zLine: &[u8], st: &mut S
                 }
             }
             let name = az[1].clone();
+            let bx = n >= 4 && az[3].contains(&b'x');
             let f: XSFunc = Rc::new(move |ctx: &mut Context, argv: &mut [Mem]| {
                 let mut r = name.clone();
                 r.push(b'(');
                 for (i, a) in argv.iter_mut().enumerate() {
                     if i > 0 {
                         r.push(b',');
+                    }
+                    if bx {
+                        // extended: int64, double, bytes, numeric_type (which
+                        // applies the numeric affinity), then the value
+                        let iv = sqlite3_value_int64(a);
+                        let dv = sqlite3_value_double(a);
+                        let nb = sqlite3_value_bytes(a);
+                        let nt = goro_sqlite::vdbe::sqlite3_value_numeric_type(ctx.db, a);
+                        let zd = goro_sqlite::printf::sqlite3_mprintf(
+                            b"%!.17g",
+                            &[goro_sqlite::printf::PfArg::Dbl(dv)],
+                        );
+                        r.extend_from_slice(format!("[{} ", iv).as_bytes());
+                        r.extend_from_slice(&zd);
+                        r.extend_from_slice(format!(" {} {}]", nb, nt).as_bytes());
                     }
                     append_value(&mut r, a);
                 }
