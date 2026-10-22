@@ -4169,6 +4169,29 @@ fn sort_regular_cmp(vm: &mut Vm, a: &Value, b: &Value) -> i64 {
             }
         }
     }
+    // zend_std_compare_objects(): an object compared with a string is cast
+    // with __toString() (or is greater when it cannot be).
+    let obj_str = match (&a, &b) {
+        (Value::Object(o), Value::String(_)) => Some((o.clone(), true)),
+        (Value::String(_), Value::Object(o)) => Some((o.clone(), false)),
+        _ => None,
+    };
+    if let Some((o, object_lhs)) = obj_str {
+        let cl = o.borrow().class_name.to_ascii_lowercase();
+        let has_tostring = vm
+            .classes
+            .get(&cl)
+            .is_some_and(|c| c.get_method(b"__tostring").is_some());
+        if !has_tostring {
+            return if object_lhs { 1 } else { -1 };
+        }
+        let casted = Value::String(vm.value_to_string(&Value::Object(o)));
+        return if object_lhs {
+            casted.compare(&b)
+        } else {
+            a.compare(&casted)
+        };
+    }
     a.compare(&b)
 }
 
@@ -16793,6 +16816,24 @@ fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fpassthru_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
+    // A write-only plain file: read() fails with EBADF (php_stdiop_read()).
+    let write_only = FILE_HANDLES.with(|h| {
+        h.borrow().get(&fid).is_some_and(|fh| {
+            fh.special == SpecialStream::None
+                && fh.sock.is_none()
+                && fh.user_wrapper.is_none()
+                && !fh.mode.contains('+')
+                && matches!(fh.mode.chars().next(), Some('w' | 'a' | 'x' | 'c'))
+        })
+    });
+    if write_only {
+        let line = vm.current_line;
+        vm.emit_notice_at(
+            "fpassthru(): Read of 8192 bytes failed with errno=9 Bad file descriptor",
+            line,
+        );
+        return Ok(Value::Long(0));
+    }
     let has_read_filters =
         crate::stream_filters::chain_has_direction(fid, crate::stream_filters::STREAM_FILTER_READ);
     if has_read_filters {
@@ -20156,6 +20197,9 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     use std::process::{Command, Stdio};
+    // A child writing to our stdout: when the script's output is not
+    // written straight to it, collect the child's and emit it at pclose().
+    let capture_stdout = !mode_str.contains('r') && !vm.cli_direct_output;
     let child = if mode_str.contains('r') {
         Command::new("sh")
             .arg("-c")
@@ -20164,14 +20208,39 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             .stderr(Stdio::inherit())
             .spawn()
     } else {
-        Command::new("sh")
-            .arg("-c")
-            .arg(&*cmd_str)
-            .stdin(Stdio::piped())
-            .spawn()
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(&*cmd_str).stdin(Stdio::piped());
+        if capture_stdout {
+            c.stdout(Stdio::piped());
+        }
+        c.spawn()
     };
     match child {
-        Ok(child) => {
+        Ok(mut child) => {
+            let drain = if capture_stdout {
+                child.stdout.take()
+            } else {
+                None
+            }
+            .map(|mut out| {
+                let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                let b2 = buf.clone();
+                let h = std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut chunk = [0u8; 8192];
+                    loop {
+                        match out.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if let Ok(mut b) = b2.lock() {
+                                    b.extend_from_slice(&chunk[..n]);
+                                }
+                            }
+                        }
+                    }
+                });
+                (h, buf)
+            });
             use std::os::unix::io::{FromRawFd, IntoRawFd};
             // php_stream_fopen_from_pipe(): no wrapper, not seekable.
             let pipe_stream = |file: std::fs::File| {
@@ -20187,27 +20256,58 @@ fn popen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 goro_core::value::register_resource(fid, b"stream");
                 fid
             };
-            if mode_str.contains('r') {
-                if let Some(stdout) = child.stdout {
-                    let fid =
-                        pipe_stream(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) });
-                    return Ok(Value::Resource(fid));
+            let fid = if mode_str.contains('r') {
+                child.stdout.take().map(|stdout| {
+                    pipe_stream(unsafe { std::fs::File::from_raw_fd(stdout.into_raw_fd()) })
+                })
+            } else {
+                child.stdin.take().map(|stdin| {
+                    pipe_stream(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) })
+                })
+            };
+            match fid {
+                Some(fid) => {
+                    POPEN_CHILDREN.with(|p| p.borrow_mut().insert(fid, (child, drain)));
+                    Ok(Value::Resource(fid))
                 }
-            } else if let Some(stdin) = child.stdin {
-                let fid = pipe_stream(unsafe { std::fs::File::from_raw_fd(stdin.into_raw_fd()) });
-                return Ok(Value::Resource(fid));
+                None => Ok(Value::False),
             }
-            Ok(Value::False)
         }
         Err(_) => Ok(Value::False),
     }
 }
 
-fn pclose_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// The output drain of a popen()ed child whose stdout is collected.
+type PopenDrain = (
+    std::thread::JoinHandle<()>,
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+);
+
+thread_local! {
+    /// popen() children, by stream id.
+    static POPEN_CHILDREN: RefCell<StdHashMap<i64, (std::process::Child, Option<PopenDrain>)>> =
+        RefCell::new(StdHashMap::new());
+}
+
+fn pclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let fid = args.first().unwrap_or(&Value::Null).to_long();
+    // Closing our end of the pipe lets the child finish.
     FILE_HANDLES.with(|h| h.borrow_mut().remove(&fid));
     goro_core::value::close_resource(fid);
-    Ok(Value::Long(0))
+    let Some((mut child, drain)) = POPEN_CHILDREN.with(|p| p.borrow_mut().remove(&fid)) else {
+        return Ok(Value::Long(-1));
+    };
+    let status = child.wait();
+    if let Some((h, buf)) = drain {
+        let _ = h.join();
+        let out = buf.lock().map(|b| b.clone()).unwrap_or_default();
+        vm.write_output(&out);
+    }
+    // FG(pclose_ret): the exit status.
+    Ok(Value::Long(match status {
+        Ok(st) => st.code().unwrap_or(-1) as i64,
+        Err(_) => -1,
+    }))
 }
 
 fn rewinddir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
