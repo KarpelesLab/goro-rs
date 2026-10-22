@@ -2654,9 +2654,9 @@ pub fn sqlite3BuiltinFunctionDefs() -> Vec<FuncDef> {
         MFUNCTION("cosh", 1, m1(f64::cosh), math1Func),
         MFUNCTION("sinh", 1, m1(f64::sinh), math1Func),
         MFUNCTION("tanh", 1, m1(f64::tanh), math1Func),
-        MFUNCTION("acosh", 1, m1(f64::acosh), math1Func),
-        MFUNCTION("asinh", 1, m1(f64::asinh), math1Func),
-        MFUNCTION("atanh", 1, m1(f64::atanh), math1Func),
+        MFUNCTION("acosh", 1, m1(libm_acosh), math1Func),
+        MFUNCTION("asinh", 1, m1(libm_asinh), math1Func),
+        MFUNCTION("atanh", 1, m1(libm_atanh), math1Func),
         MFUNCTION("sqrt", 1, m1(f64::sqrt), math1Func),
         MFUNCTION("radians", 1, m1(degToRad), math1Func),
         MFUNCTION("degrees", 1, m1(radToDeg), math1Func),
@@ -2666,6 +2666,24 @@ pub fn sqlite3BuiltinFunctionDefs() -> Vec<FuncDef> {
         INLINE_FUNC("iif", -4, INLINEFUNC_iif, 0),
         INLINE_FUNC("if", -4, INLINEFUNC_iif, 0),
     ]
+}
+
+// Rust's f64::acosh/asinh/atanh are not the C library functions (they are
+// computed in Rust from ln/ln_1p and can differ in the last bit); call the
+// system libm (always linked by std) like the C code does.
+unsafe extern "C" {
+    fn acosh(x: f64) -> f64;
+    fn asinh(x: f64) -> f64;
+    fn atanh(x: f64) -> f64;
+}
+fn libm_acosh(x: f64) -> f64 {
+    unsafe { acosh(x) }
+}
+fn libm_asinh(x: f64) -> f64 {
+    unsafe { asinh(x) }
+}
+fn libm_atanh(x: f64) -> f64 {
+    unsafe { atanh(x) }
 }
 
 /// C fmod()

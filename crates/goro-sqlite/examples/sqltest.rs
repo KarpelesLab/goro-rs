@@ -11,7 +11,7 @@ use goro_sqlite::int::*;
 use goro_sqlite::mainapi::*;
 use goro_sqlite::prepare::sqlite3_prepare_v2;
 use goro_sqlite::vdbeapi::*;
-use std::io::Read;
+use std::io::{Read, Write};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -33,6 +33,8 @@ fn main() {
         println!("Error: open {}", rc);
         return;
     }
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
     let mut off = 0usize;
     while off < sql.len() {
         let mut stmt: Option<StmtId> = None;
@@ -47,7 +49,9 @@ fn main() {
         );
         if rc != SQLITE_OK {
             let msg = sqlite3_errmsg(&mut db).unwrap_or_default();
-            println!("Error: {} {}", rc, String::from_utf8_lossy(&msg));
+            out.write_all(format!("Error: {} ", rc).as_bytes()).unwrap();
+            out.write_all(&msg).unwrap();
+            out.write_all(b"\n").unwrap();
             if tail == 0 {
                 break;
             }
@@ -82,11 +86,14 @@ fn main() {
                         }
                     }
                 }
-                println!("{}", String::from_utf8_lossy(&line));
+                line.push(b'\n');
+                out.write_all(&line).unwrap();
             } else {
                 if rc != SQLITE_DONE {
                     let msg = sqlite3_errmsg(&mut db).unwrap_or_default();
-                    println!("Error: {} {}", rc, String::from_utf8_lossy(&msg));
+                    out.write_all(format!("Error: {} ", rc).as_bytes()).unwrap();
+                    out.write_all(&msg).unwrap();
+                    out.write_all(b"\n").unwrap();
                 }
                 break;
             }
