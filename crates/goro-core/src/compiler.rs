@@ -6445,10 +6445,7 @@ impl Compiler {
                                             &qualified_name,
                                             expr.span.line,
                                         );
-                                        if matches!(v, Value::Null)
-                                            && lower != b"null"
-                                            && !*is_static
-                                        {
+                                        if matches!(v, Value::Null) && lower != b"null" {
                                             // User constant: resolved when the object is created.
                                             let mut marker =
                                                 b"__deferred_global_const__::".to_vec();
