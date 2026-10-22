@@ -8,6 +8,7 @@
 //! declared by the stubs; their methods are a native class handler and each
 //! object carries its parsed URI as native data.
 
+mod assigned16;
 pub mod idna;
 pub mod rfc3986;
 pub mod whatwg;

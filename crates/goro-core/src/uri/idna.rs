@@ -18,9 +18,23 @@ fn adapter() -> &'static idna_adapter::Adapter {
     &A
 }
 
+/// Whether `cp` is assigned in Unicode 16.0, the version of lexbor's IDNA
+/// data (the others are disallowed there).
+fn assigned16(cp: u32) -> bool {
+    let t = super::assigned16::ASSIGNED_16;
+    match t.binary_search_by(|&(a, _)| a.cmp(&cp)) {
+        Ok(_) => true,
+        Err(0) => false,
+        Err(i) => cp <= t[i - 1].1,
+    }
+}
+
 /// Whether `cp` is a valid (or deviation) code point for UTS #46
 /// non-transitional processing.
 fn is_valid_cp(cp: u32) -> bool {
+    if !assigned16(cp) {
+        return false;
+    }
     let Some(c) = char::from_u32(cp) else {
         return false;
     };
@@ -63,11 +77,13 @@ fn processing(data: &[u8], cb: &mut dyn FnMut(&[u32]) -> Result<(), ()>) -> Resu
     }
     // Code points that are not scalar values are disallowed: the label
     // holding them fails the validity criteria.
+    // So are the code points not assigned in Unicode 16.0 (lexbor keeps
+    // them, then rejects their label).
     let mut chars = Vec::with_capacity(cps.len());
     for cp in cps {
         match char::from_u32(cp) {
-            Some(c) => chars.push(c),
-            None => return Err(()),
+            Some(c) if assigned16(cp) => chars.push(c),
+            _ => return Err(()),
         }
     }
     // Map + NFC (disallowed code points come out as U+FFFD, which fails
