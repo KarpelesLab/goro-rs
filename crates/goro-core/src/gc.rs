@@ -797,6 +797,14 @@ impl Node {
     }
 }
 
+
+/// How a garbage array counts in gc_collect_cycles()'s result: like Zend
+/// (an empty one is usually the immutable zend_empty_array), never (VM
+/// bookkeeping), or always (a refcounted array even when empty).
+const COUNT_NORMAL: u8 = 0;
+const COUNT_NEVER: u8 = 1;
+const COUNT_ALWAYS: u8 = 2;
+
 struct Graph<'a> {
     /// Does this class keep a real PHP array in `__spl_array`
     /// (ArrayObject / ArrayIterator)? Other hidden storage arrays of native
@@ -810,7 +818,7 @@ struct Graph<'a> {
     opaque: Vec<bool>,
     /// Arrays that are a Closure's internal capture storage (not PHP values,
     /// so not counted as collected).
-    uncounted: Vec<bool>,
+    uncounted: Vec<u8>,
     /// WeakMap entries (ephemerons). Like Zend, an entry's value reference
     /// is accounted for once the map or the key is part of the graph, and
     /// the value is reachable through the entry only while both are live.
@@ -857,7 +865,7 @@ impl<'a> Graph<'a> {
         self.children.push(Vec::new());
         self.internal.push(0);
         self.opaque.push(false);
-        self.uncounted.push(false);
+        self.uncounted.push(COUNT_NORMAL);
         i
     }
     fn add_value(&mut self, v: &Value) -> Option<usize> {
@@ -877,12 +885,16 @@ impl<'a> Graph<'a> {
                 Ok(b) => {
                     for (k, v) in b.properties.iter() {
                         if let Some(c) = self.add_value(v) {
-                            if matches!(v, Value::Array(_))
-                                && crate::spl_array::is_hidden_prop(k)
-                                && !(k == b"__spl_array"
-                                    && self.class_has_array_storage(&b.class_name))
-                            {
-                                self.uncounted[c] = true;
+                            if matches!(v, Value::Array(_)) && crate::spl_array::is_hidden_prop(k) {
+                                self.uncounted[c] = if k == b"__spl_array"
+                                    && self.class_has_array_storage(&b.class_name)
+                                {
+                                    // (ArrayObject's own array: allocated even
+                                    // when empty)
+                                    COUNT_ALWAYS
+                                } else {
+                                    COUNT_NEVER
+                                };
                             }
                             kids.push(c);
                         }
@@ -890,7 +902,7 @@ impl<'a> Graph<'a> {
                     if let Some(cv) = &b.closure {
                         if let Some(c) = self.add_value(cv) {
                             if matches!(**cv, Value::Array(_)) {
-                                self.uncounted[c] = true;
+                                self.uncounted[c] = COUNT_NEVER;
                             }
                             kids.push(c);
                         }
@@ -1715,7 +1727,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
             .collect();
         // Keep the plain garbage (our clones) for the free phase; release
         // every other clone so destructors see true refcounts.
-        let free_nodes: Vec<(Node, bool)> = (0..len)
+        let free_nodes: Vec<(Node, u8)> = (0..len)
             .filter(|&i| free[i])
             .map(|i| (an.graph.nodes[i].clone(), an.graph.uncounted[i]))
             .collect();
@@ -1802,7 +1814,7 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                             // An empty array is almost always Zend's
                             // immutable zend_empty_array, which is not
                             // refcounted and so never counted.
-                            if !uncounted && !b.is_empty() {
+                            if *uncounted == COUNT_ALWAYS || (*uncounted == COUNT_NORMAL && !b.is_empty()) {
                                 count += 1;
                             }
                             dead_arrays.push(std::mem::take(&mut *b));
