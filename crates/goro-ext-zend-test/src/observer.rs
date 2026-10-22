@@ -357,10 +357,18 @@ fn init_backtrace(vm: &mut Vm, f: &Func, depth: usize) {
             .last()
             .is_some_and(|top| top == n || n.ends_with(&format!("::{top}")))
     }));
-    for n in names.iter().rev().skip(skip) {
-        match n.as_str() {
-            "include" | "include_once" | "require" | "require_once" | "eval" => continue,
-            _ => out.push_str(&format!("{}{}()\n", inner, n)),
+    // A fiber's bottom frame is called from the fiber's own (empty) entry
+    // frame: "{main}" without a file.
+    let bases = vm.fiber_frame_bases();
+    for (i, n) in names.iter().enumerate().rev() {
+        if i + skip < names.len() {
+            match n.as_str() {
+                "include" | "include_once" | "require" | "require_once" | "eval" => {}
+                _ => out.push_str(&format!("{}{}()\n", inner, n)),
+            }
+        }
+        if bases.contains(&i) {
+            out.push_str(&format!("{}{{main}} [no active file]\n", inner));
         }
     }
     let main = if f.name.is_none() {
@@ -391,10 +399,13 @@ fn end(vm: &mut Vm, frame: &ObservedFrame, retval: Option<&Value>) {
     let depth = STATE.with(|s| s.borrow().depth);
     let mut out = String::new();
     if let Some(Value::Object(e)) = &vm.current_exception {
+        // (the engine's unwinding exits are named with a leading NUL)
+        let cn = e.borrow().class_name.clone();
+        let cn = cn.strip_prefix(b"\0").unwrap_or(&cn);
         out.push_str(&format!(
             "{}<!-- Exception: {} -->\n",
             indent(depth),
-            String::from_utf8_lossy(&e.borrow().class_name)
+            String::from_utf8_lossy(cn)
         ));
     }
     let depth = depth.saturating_sub(1);

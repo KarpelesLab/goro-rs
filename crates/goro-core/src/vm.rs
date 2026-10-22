@@ -5572,6 +5572,12 @@ impl Vm {
         ))
     }
 
+    /// call_stack indexes of the running fibers' bottom frames (outermost
+    /// first): a fiber's frames are linked to its resumer's below that.
+    pub fn fiber_frame_bases(&self) -> Vec<usize> {
+        self.fiber_bases.iter().map(|f| f.1).collect()
+    }
+
     /// call_stack index of the running fiber's bottom frame (0 outside fibers)
     #[inline]
     pub(crate) fn fiber_call_base(&self) -> usize {
@@ -9077,6 +9083,9 @@ impl Vm {
                 FiberSwitch::Destroyed
             }
             Err(crate::fiber::FiberOutcome::Returned(_)) => FiberSwitch::Returned,
+            // A fatal error (ZEND_FIBER_FLAG_BAILOUT): not a throw.
+            Err(crate::fiber::FiberOutcome::Failed(..)) if destroyed => FiberSwitch::Destroyed,
+            Err(crate::fiber::FiberOutcome::Failed(..)) => FiberSwitch::Returned,
             Err(_) => FiberSwitch::Threw,
         };
         self.fiber_event(FiberEvent::Switch { from: id, to, kind });
