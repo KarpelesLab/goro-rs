@@ -10493,6 +10493,12 @@ impl Compiler {
         r
     }
 
+    /// A non-Unused op2 marking an opcode that reads its op1 quietly (no
+    /// "Undefined variable" warning): BooleanNot of empty().
+    fn quiet_operand_flag(&mut self) -> OperandType {
+        OperandType::Const(self.op_array.add_literal(Value::True))
+    }
+
     /// Whether an assignment target has keys / property names that must be
     /// evaluated before the assigned value (anything but literals and plain
     /// variables, which PHP reads when the target is fetched).
@@ -11708,16 +11714,23 @@ impl Compiler {
                 {
                     return self.compile_incdec_dynvar(expr, *op, operand, *prefix);
                 }
-                // Unary plus just coerces to number - return the operand directly
-                if matches!(op, UnaryOp::Plus) {
+                // zend_compile_unary_pm(): `+x` / `-x` are `x * 1` / `x * -1`
+                // (an undefined variable warns, arrays / objects / non-numeric
+                // strings are unsupported operands of `*`).
+                if matches!(op, UnaryOp::Plus | UnaryOp::Negate) {
                     let val = self.compile_expr(operand)?;
-                    // PHP unary + coerces to number but preserves negative zero
-                    // Use a dedicated UnaryPlus opcode
+                    let factor =
+                        self.op_array
+                            .add_literal(Value::Long(if matches!(op, UnaryOp::Plus) {
+                                1
+                            } else {
+                                -1
+                            }));
                     let tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
-                        opcode: OpCode::UnaryPlus,
+                        opcode: OpCode::Mul,
                         op1: val,
-                        op2: OperandType::Unused,
+                        op2: OperandType::Const(factor),
                         result: OperandType::Tmp(tmp),
                         line: expr.span.line,
                     });
@@ -12698,10 +12711,14 @@ impl Compiler {
                         } = &elem.value.kind
                         {
                             // [&$obj->prop]: the element binds to the property slot.
+                            // The key is compiled first (zend_compile_array).
+                            let key = match &elem.key {
+                                Some(k) => Some(self.compile_expr(k)?),
+                                None => None,
+                            };
                             let ref_tmp =
                                 self.compile_property_ref(object, property, expr.span.line)?;
-                            if let Some(key_expr) = &elem.key {
-                                let key = self.compile_expr(key_expr)?;
+                            if let Some(key) = key {
                                 self.op_array.emit(Op {
                                     opcode: OpCode::ArraySetRef,
                                     op1: OperandType::Tmp(arr_tmp),
@@ -12720,6 +12737,27 @@ impl Compiler {
                             }
                             continue;
                         }
+                        let key = match &elem.key {
+                            Some(k) => Some(self.compile_expr(k)?),
+                            None => None,
+                        };
+                        // [&$a[k]]: the element binds to the (created) dimension.
+                        if let ExprKind::ArrayAccess { array, index } = &elem.value.kind {
+                            let ref_tmp =
+                                self.compile_dim_ref(array, index.as_deref(), expr.span.line)?;
+                            self.op_array.emit(Op {
+                                opcode: if key.is_some() {
+                                    OpCode::ArraySetRef
+                                } else {
+                                    OpCode::ArrayAppendRef
+                                },
+                                op1: OperandType::Tmp(arr_tmp),
+                                op2: OperandType::Tmp(ref_tmp),
+                                result: key.unwrap_or(OperandType::Unused),
+                                line: expr.span.line,
+                            });
+                            continue;
+                        }
                         let val = self.compile_expr(&elem.value)?;
                         if let OperandType::Cv(cv) = val {
                             self.op_array.emit(Op {
@@ -12729,8 +12767,7 @@ impl Compiler {
                                 result: OperandType::Unused,
                                 line: expr.span.line,
                             });
-                            if let Some(key_expr) = &elem.key {
-                                let key = self.compile_expr(key_expr)?;
+                            if let Some(key) = key {
                                 self.op_array.emit(Op {
                                     opcode: OpCode::ArraySetRef,
                                     op1: OperandType::Tmp(arr_tmp),
@@ -12749,8 +12786,7 @@ impl Compiler {
                             }
                         } else {
                             // Fallback: not a simple variable, treat as regular value
-                            if let Some(key_expr) = &elem.key {
-                                let key = self.compile_expr(key_expr)?;
+                            if let Some(key) = key {
                                 self.op_array.emit(Op {
                                     opcode: OpCode::ArraySet,
                                     op1: OperandType::Tmp(arr_tmp),
@@ -12769,8 +12805,8 @@ impl Compiler {
                             }
                         }
                     } else if let Some(key_expr) = &elem.key {
-                        let val = self.compile_expr(&elem.value)?;
                         let key = self.compile_expr(key_expr)?;
+                        let val = self.compile_expr(&elem.value)?;
                         self.op_array.emit(Op {
                             opcode: OpCode::ArraySet,
                             op1: OperandType::Tmp(arr_tmp),
@@ -14017,10 +14053,12 @@ impl Compiler {
 
                     // Value exists: check if it's empty (BooleanNot)
                     let not_tmp = self.op_array.alloc_temp();
+                    let quiet = self.quiet_operand_flag();
                     self.op_array.emit(Op {
                         opcode: OpCode::BooleanNot,
                         op1: current,
-                        op2: OperandType::Unused,
+                        // empty(): reads quietly (op2 set).
+                        op2: quiet,
                         result: OperandType::Tmp(not_tmp),
                         line: expr.span.line,
                     });
@@ -14086,10 +14124,12 @@ impl Compiler {
                         line,
                     });
                     let tmp = self.op_array.alloc_temp();
+                    let quiet = self.quiet_operand_flag();
                     self.op_array.emit(Op {
                         opcode: OpCode::BooleanNot,
                         op1: val,
-                        op2: OperandType::Unused,
+                        // empty(): reads quietly (op2 set).
+                        op2: quiet,
                         result: OperandType::Tmp(tmp),
                         line,
                     });
@@ -14134,10 +14174,12 @@ impl Compiler {
                         line: expr.span.line,
                     });
                     let result_tmp = self.op_array.alloc_temp();
+                    let quiet = self.quiet_operand_flag();
                     self.op_array.emit(Op {
                         opcode: OpCode::BooleanNot,
                         op1: OperandType::Tmp(val_tmp),
-                        op2: OperandType::Unused,
+                        // empty(): reads quietly (op2 set).
+                        op2: quiet,
                         result: OperandType::Tmp(result_tmp),
                         line: expr.span.line,
                     });
@@ -14179,10 +14221,12 @@ impl Compiler {
                     line: expr.span.line,
                 });
                 let tmp = self.op_array.alloc_temp();
+                let quiet = self.quiet_operand_flag();
                 self.op_array.emit(Op {
                     opcode: OpCode::BooleanNot,
                     op1: val,
-                    op2: OperandType::Unused,
+                    // empty(): reads quietly (op2 set).
+                    op2: quiet,
                     result: OperandType::Tmp(tmp),
                     line: expr.span.line,
                 });

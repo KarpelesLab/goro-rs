@@ -18212,7 +18212,14 @@ impl Vm {
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                 }
                 OpCode::BitwiseNot => match outlined(|| -> Result<Flow, VmError> {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     // Check for GMP unary
                     if let Some(handler) = self.object_do_unary {
                         if let Some(is_type) = self.object_is_operator_type {
@@ -18230,12 +18237,16 @@ impl Vm {
                             }
                         }
                     }
-                    let result = if matches!(a.deref(), Value::Array(_)) {
-                        let exc = self.create_exception(
-                            b"TypeError",
-                            "Cannot perform bitwise not on array",
-                            op.line,
+                    // bitwise_not_function(): only ints, floats and strings.
+                    let result = if !matches!(
+                        a.deref(),
+                        Value::Long(_) | Value::Double(_) | Value::String(_)
+                    ) {
+                        let msg = format!(
+                            "Cannot perform bitwise not on {}",
+                            Self::value_type_name(&a.deref())
                         );
+                        let exc = self.create_exception(b"TypeError", &msg, op.line);
                         self.current_exception = Some(exc);
                         if let Some((catch_target, finally_target, _, _, eh_pc_depth)) =
                             exception_handlers.last()
@@ -18250,8 +18261,7 @@ impl Vm {
                             }
                         }
                         return Err(VmError {
-                            message: "Uncaught TypeError: Cannot perform bitwise not on array"
-                                .to_string(),
+                            message: format!("Uncaught TypeError: {}", msg),
                             line: op.line,
                         });
                     } else if matches!(a.deref(), Value::String(_)) {
@@ -18293,8 +18303,22 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
                 OpCode::ShiftLeft => match outlined(|| -> Result<Flow, VmError> {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let b = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
@@ -18393,8 +18417,22 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
                 OpCode::ShiftRight => match outlined(|| -> Result<Flow, VmError> {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    let a = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let b = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     if let Some(handler) = self.object_do_operation {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
@@ -18494,7 +18532,19 @@ impl Vm {
                 },
 
                 OpCode::BooleanNot => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // op2 is set when empty() compiled it: no undefined warning.
+                    let a = if matches!(op.op2, OperandType::Unused) {
+                        self.read_operand_warn(
+                            &op.op1,
+                            &cvs,
+                            &tmps,
+                            &op_array.literals,
+                            op_array,
+                            op.line,
+                        )
+                    } else {
+                        self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                    };
                     self.write_operand(
                         &op.result,
                         if a.is_truthy() {
@@ -21312,7 +21362,14 @@ impl Vm {
                     // Collect (is_named, name_bytes, value) tuples first so we can release
                     // any borrows before mutating pending_calls (generator resumption calls
                     // back into self).
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
 
                     // Look up callee's by_ref_params for by-reference unpacking
                     let (callee_by_ref, callee_variadic_is_ref): (Option<Vec<bool>>, bool) = self
@@ -30749,7 +30806,14 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
                 OpCode::CastFloat => match outlined(|| -> Result<Flow, VmError> {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     let double_val = if let Some(handler) = self.object_to_double {
                         handler(&val)
                     } else {
@@ -30841,7 +30905,14 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
                 OpCode::CastBool => match outlined(|| -> Result<Flow, VmError> {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     self.warn_nan_coercion(&val, "bool", op.line);
                     // For objects that opt in to scalar casts (e.g. GMP),
                     // use the registered to_long handler to decide truthiness.
@@ -30872,7 +30943,14 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
                 OpCode::CastArray => match outlined(|| -> Result<Flow, VmError> {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     self.warn_nan_coercion(&val, "array", op.line);
                     let arr = match val {
                         Value::Array(a) => a,
@@ -30911,7 +30989,14 @@ impl Vm {
                 },
 
                 OpCode::CastObject => match outlined(|| -> Result<Flow, VmError> {
-                    let val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
                     self.warn_nan_coercion(&val, "object", op.line);
                     let obj = match val {
                         Value::Object(o) => Value::Object(o),
@@ -34731,7 +34816,14 @@ impl Vm {
                 },
 
                 OpCode::Throw => match outlined(|| -> Result<Flow, VmError> {
-                    let exc_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    let exc_val = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
 
                     // Restore error_reporting to the depth it was at when the nearest
                     // exception handler was registered. This handles the case where
@@ -39248,8 +39340,14 @@ impl Vm {
                         }
                     } else if let Value::Array(arr) = arr_val {
                         arr.borrow_mut().push(raw_val);
-                    } else if matches!(arr_val, Value::Null | Value::Undef) {
+                    } else if matches!(arr_val, Value::Null | Value::Undef | Value::False) {
                         // `$undef[] = &$x`: the write vivifies an array.
+                        if matches!(arr_val, Value::False) {
+                            self.emit_deprecated_at(
+                                "Automatic conversion of false to array is deprecated",
+                                op.line,
+                            );
+                        }
                         if let OperandType::Cv(ci) = op.op1 {
                             let mut na = PhpArray::new();
                             na.push(raw_val);
@@ -39300,6 +39398,28 @@ impl Vm {
                         self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                     };
 
+                    // zend_illegal_container_offset() for an array / object key.
+                    if matches!(
+                        &arr_val,
+                        Value::Array(_) | Value::Null | Value::Undef | Value::False
+                    ) && matches!(key_val.deref(), Value::Array(_) | Value::Object(_))
+                    {
+                        let msg = format!(
+                            "Cannot access offset of type {} on array",
+                            Self::value_type_name(&key_val.deref())
+                        );
+                        let exc = self.create_exception(b"TypeError", &msg, op.line);
+                        self.current_exception = Some(exc);
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: format!("Uncaught TypeError: {}", msg),
+                            line: op.line,
+                        });
+                    }
                     if let Value::Object(_) = &arr_val {
                         if !self.assign_ref_to_object_dim(&arr_val, Some(key_val), op.line) {
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -48180,31 +48300,13 @@ impl Vm {
                         });
                     } else {
                         // Accessing property on non-object
-                        match &obj_val {
-                            Value::Null | Value::False => {
-                                let type_name = Self::value_type_name(&obj_val);
-                                let prop_str = prop_name.to_string_lossy();
-                                self.emit_warning_at(
-                                    &format!(
-                                        "Attempt to read property \"{}\" on {}",
-                                        prop_str, type_name
-                                    ),
-                                    op.line,
-                                );
-                            }
-                            Value::True | Value::Long(_) | Value::Double(_) | Value::String(_) => {
-                                let type_name = Self::value_type_name(&obj_val);
-                                let prop_str = prop_name.to_string_lossy();
-                                self.emit_warning_at(
-                                    &format!(
-                                        "Attempt to read property \"{}\" on {}",
-                                        prop_str, type_name
-                                    ),
-                                    op.line,
-                                );
-                            }
-                            _ => {} // Undef, Array, etc. - no warning
-                        }
+                        // zend_wrong_property_read()
+                        let type_name = Self::value_type_name(&obj_val);
+                        let prop_str = prop_name.to_string_lossy();
+                        self.emit_warning_at(
+                            &format!("Attempt to read property \"{}\" on {}", prop_str, type_name),
+                            op.line,
+                        );
                         Value::Null
                     };
                     if let Some((rid, pname)) = propagate_get_guard_to_real {
