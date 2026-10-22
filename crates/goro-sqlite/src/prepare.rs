@@ -14,12 +14,14 @@ pub fn sqlite3IndexHasDuplicateRootPage(pIndex: &IndexRef) -> i32 {
 }
 
 /// C: `int sqlite3InitCallback(void *pInit, int argc, char **argv, char **NotUsed)`
+/// Rust: argv holds the column values of one sqlite_schema row (None for
+/// NULL); NotUsed (column names) is unused.
 pub fn sqlite3InitCallback(
     db: &mut Sqlite3,
-    pInit: &mut [u8],
+    pInit: &mut InitData,
     argc: i32,
-    argv: &mut Option<ZStr>,
-    NotUsed: &mut Option<ZStr>,
+    argv: &[Option<&[u8]>],
+    NotUsed: &[&[u8]],
 ) -> i32 {
     todo!("sqlite3InitCallback")
 }

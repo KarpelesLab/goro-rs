@@ -416,8 +416,8 @@ pub fn sqlite3BtreePager(p: &BtreeP) -> crate::pager::PagerP {
 pub fn sqlite3BtreeIntegrityCheck(
     db: &mut Sqlite3,
     p: &BtreeP,
-    aRoot: &mut Pgno,
-    aCnt: &mut Mem,
+    aRoot: &[Pgno],
+    aCnt: &mut [Mem],
     nRoot: i32,
     mxErr: i32,
     pnErr: &mut i32,

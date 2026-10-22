@@ -3935,7 +3935,7 @@ pub fn sqlite3VdbeGetBoundValue(
     if 0 == (pMem.flags & MEM_Null) {
         let mut pRet = Box::new(Mem::default());
         crate::vdbemem::sqlite3VdbeMemCopy(&mut pRet, pMem);
-        crate::vdbe::sqlite3ValueApplyAffinity(&mut pRet, aff, SQLITE_UTF8);
+        crate::vdbe::sqlite3ValueApplyAffinity(db, &mut pRet, aff, SQLITE_UTF8);
         return Some(pRet);
     }
     None
