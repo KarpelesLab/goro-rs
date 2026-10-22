@@ -405,6 +405,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_bcmath::register(&mut vm);
                 goro_ext_filter::register(&mut vm);
                 goro_ext_iconv::register(&mut vm);
+                goro_ext_ftp::register(&mut vm);
                 goro_ext_pcntl::register(&mut vm);
                 goro_ext_posix::register(&mut vm);
                 goro_ext_calendar::register(&mut vm);
@@ -1269,6 +1270,11 @@ fn execute_php_with_timeout_and_filename(
                 unsafe {
                     libc::kill(-pid, libc::SIGKILL);
                 }
+                // A test that replaced itself (pcntl_exec()) did not remove
+                // its file.
+                if !filename.is_empty() && filename != "Unknown.php" {
+                    let _ = std::fs::remove_file(filename);
+                }
                 break; // Child exited
             }
             let got_out = drain(cap_r, &mut captured);
@@ -1652,6 +1658,7 @@ fn execute_php_inner_impl(
     goro_ext_bcmath::register(&mut vm);
     goro_ext_filter::register(&mut vm);
     goro_ext_iconv::register(&mut vm);
+    goro_ext_ftp::register(&mut vm);
     goro_ext_pcntl::register(&mut vm);
     goro_ext_posix::register(&mut vm);
     goro_ext_calendar::register(&mut vm);
