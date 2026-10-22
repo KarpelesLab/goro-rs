@@ -409,6 +409,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_soap::register(&mut vm);
                 goro_ext_iconv::register(&mut vm);
                 goro_ext_gettext::register(&mut vm);
+                goro_ext_xsl::register(&mut vm);
                 goro_ext_sysvipc::register(&mut vm);
                 goro_ext_ftp::register(&mut vm);
                 goro_ext_pcntl::register(&mut vm);
@@ -1700,6 +1701,7 @@ fn execute_php_inner_impl(
     goro_ext_soap::register(&mut vm);
     goro_ext_iconv::register(&mut vm);
     goro_ext_gettext::register(&mut vm);
+    goro_ext_xsl::register(&mut vm);
     goro_ext_sysvipc::register(&mut vm);
     goro_ext_ftp::register(&mut vm);
     goro_ext_pcntl::register(&mut vm);

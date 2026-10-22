@@ -1,0 +1,14 @@
+[package]
+name = "goro-ext-xsl"
+version = "0.1.0"
+edition = "2024"
+description = "PHP xsl extension (XSLT 1.0 processor, a libxslt/libexslt port) for goro-rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-parser = { path = "../goro-parser" }
+goro-ext-xml = { path = "../goro-ext-xml" }
+goro-ext-hash = { path = "../goro-ext-hash" }

@@ -47,6 +47,7 @@ $dirs = [
     'ext/filter' => 'filter',
     'ext/iconv' => 'iconv',
     'ext/gettext' => 'gettext',
+    'ext/xsl' => 'xsl',
     'ext/shmop' => 'shmop',
     'ext/sysvsem' => 'sysvsem',
     'ext/sysvshm' => 'sysvshm',

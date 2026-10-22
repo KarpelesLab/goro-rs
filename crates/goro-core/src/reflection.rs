@@ -10331,6 +10331,7 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         ],
         "bcmath" => &["BcMath\\Number"],
         "ftp" => &["FTP\\Connection"],
+        "xsl" => &["XSLTProcessor"],
         "shmop" => &["Shmop"],
         "sysvsem" => &["SysvSemaphore"],
         "sysvshm" => &["SysvSharedMemory"],

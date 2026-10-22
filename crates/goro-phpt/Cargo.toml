@@ -37,6 +37,7 @@ goro-ext-filter = { path = "../goro-ext-filter" }
 goro-ext-soap = { path = "../goro-ext-soap" }
 goro-ext-iconv = { path = "../goro-ext-iconv" }
 goro-ext-gettext = { path = "../goro-ext-gettext" }
+goro-ext-xsl = { path = "../goro-ext-xsl" }
 goro-ext-sysvipc = { path = "../goro-ext-sysvipc" }
 goro-ext-ftp = { path = "../goro-ext-ftp" }
 goro-ext-pcntl = { path = "../goro-ext-pcntl" }
