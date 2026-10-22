@@ -40,7 +40,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/mysqli (embedded MySQL fixture) | 401 | 419 | 95.7% |
 | ext/pdo_mysql (embedded MySQL fixture) | 160 | 160 | 100% |
 | ext/pgsql (libpq port, embedded PostgreSQL fixture) | 95 | 95 | 100% |
-| ext/pdo_pgsql (embedded PostgreSQL fixture) | 58 | 59 | 98.3% |
+| ext/pdo_pgsql (embedded PostgreSQL fixture) | 59 | 59 | 100% |
 | ext/pdo (generic PDO tests, run against pdo_mysql and pdo_pgsql) | 241 | 247 | 97.6% |
 | ext/session | 255 | 256 | 99.6% |
 | ext/pcre (PCRE2 port) | 154 | 154 | 100% |
