@@ -426,17 +426,11 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
     if let Some(skipif) = test.skipif_section() {
         let skipif_trimmed = skipif.trim();
         if !skipif_trimmed.is_empty() {
-            // run-tests.php runs SKIPIF before merging the test's --INI--,
-            // with output_handler= and zlib.output_compression=Off: an
-            // output handler must not mangle the "skip" message.
-            let skipif_ini: Vec<(String, String)> = ini_settings
-                .iter()
-                .filter(|(k, _)| k != "output_handler" && k != "zlib.output_compression")
-                // (The zend_test observer settings would trace the SKIPIF
-                // code itself.)
-                .filter(|(k, _)| !k.starts_with("zend_test."))
-                .cloned()
-                .collect();
+            // run-tests.php runs SKIPIF with only its own ini overwrites
+            // ($orig_ini_settings), before merging the test's --INI--: e.g.
+            // an unsupported default_charset must not print startup
+            // warnings in front of the "skip" message.
+            let skipif_ini: Vec<(String, String)> = Vec::new();
             // Written next to the test as run-tests.php does, so that
             // include('skipif.inc') and __DIR__ resolve.
             let skip_filename = match filename.strip_suffix(".php") {
