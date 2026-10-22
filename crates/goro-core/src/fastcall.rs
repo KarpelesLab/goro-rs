@@ -447,14 +447,6 @@ impl Vm {
         let op = &op_array.ops[ip];
         let fname = func_name.as_bytes();
         let is_ctor = fname[sep + 2..].eq_ignore_ascii_case(b"__construct");
-        // INIT_METHOD_CALL consumes a temporary object operand (`new` keeps
-        // its result for the constructor call).
-        let obj_val = match op.op1 {
-            OperandType::Tmp(t) if !is_ctor => {
-                std::mem::replace(&mut tmps[t as usize], Value::Undef)
-            }
-            _ => Value::Object(obj),
-        };
         // Register the method as a user function (usually it is already).
         if reg_gen != self.user_functions.len() + 1 {
             if !self
@@ -475,35 +467,47 @@ impl Vm {
                 s.reg_gen = fn_gen;
             }
         }
-        let mut args = self.take_values(0);
-        if !is_static {
-            args.push(obj_val.clone());
+        let plain = !(fname[sep + 2..].eq_ignore_ascii_case(b"tokenize") || fname[0] == b'_');
+        let fn_gen = self.user_functions.len() + 1;
+        // The call is built in place (see push_resolved_call), and $this
+        // stored into its slot there: a value built apart and moved in is
+        // copied by wide loads of its just stored narrow fields, which wait
+        // for them.
+        self.pending_calls
+            .extend(std::iter::once_with(move || PendingCall {
+                name: func_name,
+                args: Vec::new(),
+                named_args: Vec::new(),
+                target: CallTarget::NONE,
+            }));
+        let Some(call) = self.pending_calls.last_mut() else {
+            return;
+        };
+        if let Some(buf) = self.value_pool.pop() {
+            call.args = buf;
+        }
+        // INIT_METHOD_CALL consumes a temporary object operand (`new` keeps
+        // its result for the constructor call; a static method's is
+        // released with the rest).
+        let mut _released = None;
+        match op.op1 {
+            OperandType::Tmp(t) if !is_ctor => {
+                let v = std::mem::replace(&mut tmps[t as usize], Value::Undef);
+                if is_static {
+                    _released = Some(v);
+                } else {
+                    call.args.push(v);
+                }
+            }
+            _ if !is_static => call.args.push(Value::Object(obj)),
+            _ => {}
         }
         // What DO_FCALL's fast path looks up again (see fast_fcall_target;
         // it leaves PhpToken::tokenize() to the general path).
-        let target =
-            if fname[sep + 2..].eq_ignore_ascii_case(b"tokenize") || fname[0] == b'_' {
-                CallTarget::NONE
-            } else {
-                CallTarget {
-                    user: Some(method_op_array),
-                    builtin: None,
-                    has_builtin: false,
-                    method: Some((sep, is_static)),
-                    no_ctor: false,
-                    no_ns_fallback: false,
-                    closure: false,
-                    forward: None,
-                    forward_this: false,
-                    fn_gen: self.user_functions.len() + 1,
-                    via_invoke: false,
-                }
-            };
-        self.pending_calls.push(PendingCall {
-            name: func_name,
-            args,
-            named_args: Vec::new(),
-            target,
-        });
+        if plain {
+            call.target.user = Some(method_op_array);
+            call.target.method = Some((sep, is_static));
+            call.target.fn_gen = fn_gen;
+        }
     }
 }
