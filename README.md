@@ -16,7 +16,7 @@ extensions run the official php-src test suite.
 | Total tests | 21455 |
 | Pass | 14141 (65.9% of all, **92.7% of runnable**) |
 | Fail | 1098 |
-| Skip | 6199 (mostly extensions that are not implemented: intl, gd, soap, phar, pdo, …) |
+| Skip | 6199 (mostly extensions that are not implemented: intl, gd, soap, phar, sqlite, …) |
 | Error | 11 |
 | XFail / XPass | 5 / 1 |
 
@@ -38,6 +38,8 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/mbstring | 389 | 414 | 94.0% |
 | ext/openssl (incl. TLS streams) | 205 | 212 | 96.7% |
 | ext/mysqli (embedded MySQL fixture) | 405 | 422 | 96.0% |
+| ext/pdo_mysql (embedded MySQL fixture) | 160 | 160 | 100% |
+| ext/pdo (generic PDO tests, run against pdo_mysql) | 122 | 125 | 97.6% |
 | ext/session | 254 | 256 | 99.2% |
 | ext/pcre (PCRE2 port) | 152 | 152 | 100% |
 | ext/hash / ext/random / ext/zlib | 283 | 284 | 99.6% |
@@ -54,7 +56,7 @@ closures 88.1%, lazy_objects 89.7%, property_hooks 87.5%, fibers 90.7%, gc 89.5%
 attributes 91.3%.
 
 *The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
-EXPECTF/EXPECTREGEX matching, XFAIL, per-test timeouts and an embedded MySQL fixture for ext/mysqli.*
+EXPECTF/EXPECTREGEX matching, XFAIL, per-test timeouts and an embedded MySQL fixture for ext/mysqli, ext/pdo_mysql and the generic ext/pdo tests.*
 
 ## Features
 
@@ -76,10 +78,10 @@ Highlights beyond the core language:
   hash, random, zlib (zlib port, byte-identical output), json, ctype, mbstring, spl,
   reflection, session, dom/simplexml/xml/xmlreader/xmlwriter (libxml2-style tree, lexbor
   HTML5 parser port), openssl (on [purecrypto](https://crates.io/crates/purecrypto)),
-  mysqli (mysqlnd port), gmp, sockets, curl, bz2, tokenizer.
+  mysqli (mysqlnd port), PDO with pdo_mysql (over the same mysqlnd), gmp, sockets, curl, bz2, tokenizer.
 
 ### Not Yet Implemented
-- intl, gd, soap, phar, pdo_*, ffi, ldap, pgsql, sqlite3, exif, zip, xsl, iconv (mostly)
+- intl, gd, soap, phar, pdo_sqlite/pdo_pgsql/…, ffi, ldap, pgsql, sqlite3, exif, zip, xsl, iconv (mostly)
 - PCRE JIT (the PCRE2 port is the interpreter only; `PCRE_JIT_SUPPORT` is false)
 - Exact opcache optimizer behaviour
 
@@ -118,6 +120,7 @@ Workspace crates:
 - `goro-ext-hash` - Hash extension (all php-src algorithms, HMAC/HKDF/PBKDF2)
 - `goro-ext-reflection` - Reflection extension (stub; most logic lives in `goro-core::reflection`)
 - `goro-ext-spl` - SPL extension (autoload helpers; SPL classes are compiled into `goro-core`)
+- `goro-ext-pdo` - PDO (ext/pdo) and the MySQL driver (ext/pdo_mysql)
 - `goro-ext-{bz2,curl,gmp,mbstring,mysqli,openssl,session,sockets,xml,zlib}` - misc extensions
 - `goro-phpt` - PHPT test file runner
 
