@@ -10,8 +10,9 @@ pub struct IterState {
     pub index: i64,
     pub cur: Value,
     /// The zend_object_iterator the InternalIterator wraps (it takes an
-    /// object handle of its own)
-    pub _handle: Obj,
+    /// object handle of its own; None when the InternalIterator itself
+    /// stands for it, under foreach)
+    pub _handle: Option<Obj>,
 }
 
 /// zend_iterator_init(): an internal class's iterator is an object too, and
@@ -509,9 +510,18 @@ fn m_get_named_item_ns(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
 
 fn m_get_iterator(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
     args(a).count(vm, 0, 0)?;
-    let handle = iterator_handle(vm);
-    let first = get_item(vm, o, 0);
-    let it = new_object(vm, b"InternalIterator");
+    // foreach uses php_dom_get_iterator() directly: the iterator takes one
+    // handle, before the first item is fetched.
+    let (handle, it, first) = if vm.foreach_native_iter == 1 {
+        vm.foreach_native_iter = 2;
+        let it = new_object(vm, b"InternalIterator");
+        let first = get_item(vm, o, 0);
+        (None, it, first)
+    } else {
+        let handle = iterator_handle(vm);
+        let first = get_item(vm, o, 0);
+        (Some(handle), new_object(vm, b"InternalIterator"), first)
+    };
     attach(
         &it,
         Kind::Iter(RefCell::new(IterState {

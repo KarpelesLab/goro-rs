@@ -59,7 +59,7 @@ pub struct TokenIter {
     tag: u64,
     rewound: Cell<bool>,
     /// The wrapped zend_object_iterator's handle
-    _handle: Obj,
+    _handle: Option<Obj>,
 }
 
 fn element_node(tl: &TokenList) -> Option<NodeId> {
@@ -504,7 +504,12 @@ fn m_get_iterator(vm: &mut Vm, o: &Obj, a: &[Value]) -> R<Value> {
         tl.tag.get()
     })
     .unwrap_or(0);
-    let handle = crate::dom::lists::iterator_handle(vm);
+    let handle = if vm.foreach_native_iter == 1 {
+        vm.foreach_native_iter = 2;
+        None
+    } else {
+        Some(crate::dom::lists::iterator_handle(vm))
+    };
     let it = new_object(vm, b"InternalIterator");
     let st = TokenIter {
         list: o.clone(),

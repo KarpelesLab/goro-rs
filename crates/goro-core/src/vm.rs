@@ -1216,6 +1216,11 @@ pub struct Vm {
     pub(crate) exec_frame_len: usize,
     /// unserialize() one value at a byte position (set by ext/standard).
     pub unserialize_value_hook: Option<fn(&mut Vm, &[u8], &mut usize) -> Option<Value>>,
+    /// foreach over a native IteratorAggregate (ce->get_iterator): 1 while
+    /// its getIterator() runs, set to 2 by an extension whose returned
+    /// iterator stands for the zend_object_iterator (one handle, no
+    /// separate InternalIterator).
+    pub foreach_native_iter: u8,
     /// PHP_VAR_SERIALIZE_INIT (true) / _DESTROY (false) around the pieces an
     /// internal Serializable::serialize() serializes with one var_hash
     /// (set by ext/standard).
@@ -2464,6 +2469,7 @@ impl Vm {
             spl_internal_frames: Vec::new(),
             exec_frame_len: 0,
             unserialize_value_hook: None,
+            foreach_native_iter: 0,
             serialize_scope_hook: None,
             unserialize_scope_hook: None,
             loaded_extensions: {
@@ -36478,7 +36484,9 @@ impl Vm {
                         {
                             // IteratorAggregate: call getIterator() and iterate the result
                             let had_exc = self.current_exception.is_some();
+                            self.foreach_native_iter = u8::from(obj.borrow().native.is_some());
                             let mut iter_obj = self.spl_call_method(&arr_val, b"getIterator", &[]);
+                            let native_iter = std::mem::take(&mut self.foreach_native_iter) == 2;
                             // zend_user_it_get_new_iterator(): what getIterator()
                             // returns must be traversable (an aggregate is asked in
                             // turn).
@@ -36552,8 +36560,10 @@ impl Vm {
                                 OperandType::Tmp(t),
                             ) = (&iter_obj, op.result)
                             {
-                                let h = self.foreach_iterator_handle();
-                                foreach_iter_handles.insert(t, h);
+                                if !native_iter {
+                                    let h = self.foreach_iterator_handle();
+                                    foreach_iter_handles.insert(t, h);
+                                }
                                 // FE_RESET frees a temporary aggregate once
                                 // it has its iterator.
                                 if let OperandType::Tmp(src) = op.op1 {
