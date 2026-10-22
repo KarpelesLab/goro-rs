@@ -28,6 +28,9 @@ pub mod datecore;
 pub mod error;
 pub mod obj;
 pub mod zpp;
+// misc area helpers (break iterator rules, UnicodeSet patterns)
+pub mod breakiter_rules;
+pub mod uset;
 
 pub use zpp::Obj;
 
