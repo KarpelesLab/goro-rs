@@ -421,6 +421,18 @@ impl PhpGenerator {
         }
     }
 
+    /// Was this generator destroyed while it ran in a suspended fiber (see
+    /// Vm::forced_close_generators)?
+    fn check_forced_close(&mut self, vm: &mut Vm) {
+        if !self.force_closed && !vm.forced_close_generators.is_empty() {
+            let me = self as *const PhpGenerator as usize;
+            if let Some(i) = vm.forced_close_generators.iter().position(|&p| p == me) {
+                vm.forced_close_generators.swap_remove(i);
+                self.force_closed = true;
+            }
+        }
+    }
+
     /// Values owned by the suspended generator frame (for the cycle collector).
     pub(crate) fn for_each_gc_child(&self, f: &mut dyn FnMut(&Value)) {
         for v in self
@@ -1279,6 +1291,7 @@ impl PhpGenerator {
 
             match op.opcode {
                 OpCode::Yield => {
+                    self.check_forced_close(vm);
                     // If generator is force-closed, yield in finally is an error
                     if self.force_closed {
                         let err_msg = "Cannot yield from finally in a force-closed generator";
@@ -1357,6 +1370,7 @@ impl PhpGenerator {
                 }
 
                 OpCode::YieldFrom => {
+                    self.check_forced_close(vm);
                     // If generator is force-closed, yield-from in finally is an error.
                     if self.force_closed && self.yield_from_source.is_none() {
                         let err_msg = "Cannot use \"yield from\" in a force-closed generator";

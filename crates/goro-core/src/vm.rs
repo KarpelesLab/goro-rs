@@ -989,6 +989,9 @@ pub struct Vm {
     /// Generators whose body has a `finally`: destroying one while it is
     /// suspended runs its finally blocks (zend_generator_dtor_storage).
     pub(crate) finally_generators: Vec<Rc<RefCell<crate::generator::PhpGenerator>>>,
+    /// Generators (RefCell::as_ptr) destroyed while running in a suspended
+    /// fiber: force-closed when they run again (see PhpGenerator::force_closed).
+    pub(crate) forced_close_generators: Vec<usize>,
     /// Generators executing now (address, function name for var_dump()).
     pub(crate) running_generators: Vec<(usize, String, u64)>,
     /// Closure objects being called: (pending_calls index of the call, the
@@ -1527,6 +1530,7 @@ impl Vm {
             magic_prop_guards: std::collections::HashSet::new(),
             destructible_objects: Vec::new(),
             finally_generators: Vec::new(),
+            forced_close_generators: Vec::new(),
             running_generators: Vec::new(),
             closure_call_objs: Vec::new(),
             closure_frames: Vec::new(),
@@ -17293,8 +17297,12 @@ impl Vm {
         // (zend_generator_dtor_storage()).
         let gens = std::mem::take(&mut self.finally_generators);
         for g in &gens {
-            if let Ok(mut gb) = g.try_borrow_mut() {
-                gb.close(self);
+            match g.try_borrow_mut() {
+                Ok(mut gb) => gb.close(self),
+                // Running in a suspended fiber: it is closed when the fiber
+                // is destroyed, and its finally blocks may not yield
+                // (ZEND_GENERATOR_FORCED_CLOSE).
+                Err(_) => self.forced_close_generators.push(g.as_ptr() as usize),
             }
             if self.shutdown_exception_check() {
                 return;
@@ -59132,12 +59140,19 @@ impl Vm {
             .set_property(b"__fiber_destroyed".to_vec(), Value::True);
         let ge = self.create_graceful_exit();
         let line = self.current_line;
+        // Its suspension unlinked the fiber's bottom frame from its resumer
+        // (zend_fiber_suspend), and destroying it does not link it again:
+        // its backtraces end with its own frames.
+        self.sync_builtin_frames();
+        let below = std::mem::take(&mut self.call_stack);
         let r = self.fiber_drive_coroutine(
             obj_rc.clone(),
             fiber,
             crate::fiber::FiberResume::Throw(ge),
             line,
         );
+        let mut above = std::mem::replace(&mut self.call_stack, below);
+        self.call_stack.append(&mut above);
         if r.is_err() {
             if let Some(exc) = self.current_exception.clone() {
                 if let Some(prev) = saved_exc {

@@ -1748,7 +1748,13 @@ impl GcHost for crate::vm::Vm {
             // released (and so destroyed) right away.
             let suspended = fiber.borrow().get_property(b"__fiber_state").to_long()
                 == crate::fiber::FiberState::Suspended as i64;
-            if suspended && Rc::strong_count(&fiber) <= 2 {
+            // (the VM's lists of destructible objects do not own it)
+            let listed = self
+                .destructible_objects
+                .iter()
+                .filter(|v| matches!(v, Value::Object(o) if Rc::ptr_eq(o, &fiber)))
+                .count();
+            if suspended && Rc::strong_count(&fiber) <= 1 + listed {
                 if let Some(exc) = self.current_exception.take() {
                     if let Some(prev) = exception.take() {
                         crate::vm::Vm::exception_set_previous(&exc, prev);
