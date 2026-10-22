@@ -1649,11 +1649,18 @@ pub fn sqlite3AddReturning(db: &mut Sqlite3, pList: ExprListId) {
         pTabSchema: sid,
         ..Default::default()
     }));
-    let zName: ZStr = format!(
-        "sqlite_returning_{:x}",
-        Rc::as_ptr(&retTrig) as *const u8 as usize
-    )
-    .into_bytes();
+    // C names the trigger after the Parse ("sqlite_returning_%p"), so a
+    // second RETURNING clause in the same parse (possible in the body of a
+    // CREATE TRIGGER IF NOT EXISTS for an existing trigger) replaces the
+    // first one in the hash: reuse the name of the parse's first trigger.
+    let zName: ZStr = match db.ppr().u1.d.pReturning.as_ref() {
+        Some(r) => r.zName.clone(),
+        None => format!(
+            "sqlite_returning_{:x}",
+            Rc::as_ptr(&retTrig) as *const u8 as usize
+        )
+        .into_bytes(),
+    };
     let step = db.arena.new_tstep(TriggerStep {
         op: TK_RETURNING,
         pTrig: Rc::downgrade(&retTrig),
