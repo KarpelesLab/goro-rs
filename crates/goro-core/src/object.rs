@@ -12,6 +12,8 @@ pub enum TraitAdaptation {
         method: Vec<u8>,
         new_name: Option<Vec<u8>>,
         new_visibility: Option<Visibility>,
+        /// `as final`
+        new_final: bool,
     },
     /// Precedence: trait_name::method insteadof other_trait(s)
     Precedence {

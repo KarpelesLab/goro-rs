@@ -4583,6 +4583,16 @@ impl Vm {
         }
     }
 
+    /// `as final` in a trait alias (zend_traits_copy_functions): true when
+    /// the method became private and final, which warns.
+    fn trait_alias_make_final(m: &mut crate::object::MethodDef, name: &[u8]) -> bool {
+        let warn = !m.is_final
+            && m.visibility == crate::object::Visibility::Private
+            && !name.eq_ignore_ascii_case(b"__construct");
+        m.is_final = true;
+        warn
+    }
+
     /// exit(string|int $status): prints a string status and returns the
     /// exit code, or the TypeError message for an invalid status.
     pub fn exit_status_of(&mut self, val: &Value, line: u32) -> Result<i64, String> {
@@ -43895,6 +43905,7 @@ impl Vm {
                                         method: alias_method,
                                         new_name,
                                         new_visibility,
+                                        ..
                                     } => {
                                         let method_lower: Vec<u8> = alias_method
                                             .iter()
@@ -44016,6 +44027,7 @@ impl Vm {
                                         continue;
                                     }
                                     // Does an alias rule apply to this trait's method?
+                                    let mut final_warnings = 0usize;
                                     let alias_applies = |alias_trait: &Option<Vec<u8>>| -> bool {
                                         match alias_trait {
                                             Some(t) => {
@@ -44054,6 +44066,7 @@ impl Vm {
                                             method: am,
                                             new_name: Some(nn),
                                             new_visibility,
+                                            new_final,
                                         } = adapt
                                         {
                                             if am.eq_ignore_ascii_case(method_name)
@@ -44062,6 +44075,11 @@ impl Vm {
                                                 let mut m = method.clone();
                                                 if let Some(v) = new_visibility {
                                                     m.visibility = *v;
+                                                }
+                                                if *new_final
+                                                    && Vm::trait_alias_make_final(&mut m, nn)
+                                                {
+                                                    final_warnings += 1;
                                                 }
                                                 copies.push((
                                                     nn.iter()
@@ -44116,17 +44134,33 @@ impl Vm {
                                                 trait_name: at,
                                                 method: am,
                                                 new_name: None,
-                                                new_visibility: Some(v),
+                                                new_visibility,
+                                                new_final,
                                             } = adapt
                                             {
                                                 if am.eq_ignore_ascii_case(method_name)
                                                     && alias_applies(at)
                                                 {
-                                                    m.visibility = *v;
+                                                    if let Some(v) = new_visibility {
+                                                        m.visibility = *v;
+                                                    }
+                                                    if *new_final {
+                                                        let n = m.name.clone();
+                                                        if Vm::trait_alias_make_final(&mut m, &n) {
+                                                            final_warnings += 1;
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
                                         copies.push((method_name.clone(), method.name.clone(), m));
+                                    }
+                                    for _ in 0..final_warnings {
+                                        let line = self.current_line;
+                                        self.emit_warning_at(
+                                            "Private methods cannot be final as they are never overridden by other classes",
+                                            line,
+                                        );
                                     }
                                     for (key, display, mut m) in copies {
                                         if let Some(existing) = class.methods.get(&key) {
@@ -44692,6 +44726,7 @@ impl Vm {
                                 method: alias_method,
                                 new_name,
                                 new_visibility,
+                                ..
                             } = adapt
                             {
                                 let method_lower: Vec<u8> = alias_method

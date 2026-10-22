@@ -2161,6 +2161,143 @@ impl Parser {
         self.parse_simple_type()
     }
 
+    /// A class_name in a trait use / adaptation (`static` is reserved).
+    fn parse_trait_name(&mut self) -> ParseResult<Vec<u8>> {
+        if matches!(self.peek(), TokenKind::Static) {
+            return Err(self.static_trait_name_error());
+        }
+        let span = self.current().span;
+        let n = self.parse_class_name_ref()?;
+        if n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent") {
+            return Err(ParseError {
+                message: format!(
+                    "Cannot use \"{}\" as trait name, as it is reserved",
+                    String::from_utf8_lossy(&n)
+                ),
+                span,
+            });
+        }
+        Ok(n)
+    }
+
+    /// An `identifier` (T_STRING or any semi-reserved word).
+    fn parse_member_identifier(&mut self) -> ParseResult<Vec<u8>> {
+        match self.peek().clone() {
+            TokenKind::Identifier(name) => {
+                self.advance();
+                Ok(name)
+            }
+            _ if self.is_semi_reserved_keyword() => {
+                let kw = self.keyword_to_identifier();
+                self.advance();
+                Ok(kw)
+            }
+            _ => Err(ParseError {
+                message: format!(
+                    "syntax error, unexpected {}",
+                    self.peek().to_php_unexpected()
+                ),
+                span: self.span(),
+            }),
+        }
+    }
+
+    /// trait_adaptation: trait_precedence ';' | trait_alias ';'
+    fn parse_trait_adaptation(&mut self) -> ParseResult<TraitAdaptation> {
+        // trait_method_reference: identifier | class_name '::' identifier
+        let is_absolute = matches!(self.peek(), TokenKind::Backslash | TokenKind::Static)
+            || matches!(
+                self.peek_at(1),
+                TokenKind::DoubleColon | TokenKind::Backslash
+            );
+        let (trait_name, method) = if is_absolute {
+            let t = self.parse_trait_name()?;
+            self.expect(&TokenKind::DoubleColon)?;
+            (Some(t), self.parse_member_identifier()?)
+        } else {
+            (None, self.parse_member_identifier()?)
+        };
+        let adaptation = if let (Some(t), true) =
+            (&trait_name, matches!(self.peek(), TokenKind::Insteadof))
+        {
+            self.advance();
+            let mut instead_of = Vec::new();
+            loop {
+                instead_of.push(self.parse_trait_name()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            TraitAdaptation::Precedence {
+                trait_name: t.clone(),
+                method,
+                instead_of,
+            }
+        } else {
+            self.expect(&TokenKind::As)?;
+            let mut new_visibility = None;
+            let mut has_modifier = false;
+            let mut new_final = false;
+            loop {
+                let m = match self.peek() {
+                    TokenKind::Public => Some(Visibility::Public),
+                    TokenKind::Protected => Some(Visibility::Protected),
+                    TokenKind::Private => Some(Visibility::Private),
+                    TokenKind::Final => {
+                        new_final = true;
+                        None
+                    }
+                    TokenKind::Static => {
+                        return Err(ParseError {
+                            message: "Cannot use \"static\" as method modifier in trait alias"
+                                .into(),
+                            span: self.span(),
+                        });
+                    }
+                    TokenKind::Abstract => {
+                        return Err(ParseError {
+                            message: "Cannot use \"abstract\" as method modifier in trait alias"
+                                .into(),
+                            span: self.span(),
+                        });
+                    }
+                    TokenKind::Readonly => {
+                        return Err(ParseError {
+                            message: "Cannot use the readonly modifier on a method".into(),
+                            span: self.span(),
+                        });
+                    }
+                    _ => break,
+                };
+                if m.is_some() {
+                    if new_visibility.is_some() {
+                        return Err(ParseError {
+                            message: "Multiple access type modifiers are not allowed".into(),
+                            span: self.span(),
+                        });
+                    }
+                    new_visibility = m;
+                }
+                has_modifier = true;
+                self.advance();
+            }
+            let new_name = if matches!(self.peek(), TokenKind::Semicolon) && has_modifier {
+                None
+            } else {
+                Some(self.parse_member_identifier()?)
+            };
+            TraitAdaptation::Alias {
+                trait_name,
+                method,
+                new_name,
+                new_visibility,
+                new_final,
+            }
+        };
+        self.expect(&TokenKind::Semicolon)?;
+        Ok(adaptation)
+    }
+
     /// Parse a class/interface/trait name reference that may be qualified.
     /// Handles: Foo, Foo\Bar, \Foo\Bar (fully qualified, prefixed with \)
     fn parse_class_name_ref(&mut self) -> ParseResult<Vec<u8>> {
@@ -2700,22 +2837,14 @@ impl Parser {
                 self.advance();
                 let mut traits = Vec::new();
                 loop {
-                    if matches!(self.peek(), TokenKind::Static) {
-                        return Err(self.static_trait_name_error());
-                    }
-                    if matches!(self.peek(), TokenKind::Identifier(_) | TokenKind::Backslash) {
-                        let span = self.current().span;
-                        let n = self.parse_class_name_ref()?;
-                        if n.eq_ignore_ascii_case(b"self") || n.eq_ignore_ascii_case(b"parent") {
-                            return Err(ParseError {
-                                message: format!(
-                                    "Cannot use \"{}\" as trait name, as it is reserved",
-                                    String::from_utf8_lossy(&n)
-                                ),
-                                span,
-                            });
-                        }
-                        traits.push(n);
+                    if matches!(
+                        self.peek(),
+                        TokenKind::Identifier(_)
+                            | TokenKind::Backslash
+                            | TokenKind::Static
+                            | TokenKind::Namespace
+                    ) {
+                        traits.push(self.parse_trait_name()?);
                     } else {
                         break;
                     }
@@ -2728,118 +2857,7 @@ impl Parser {
                 if matches!(self.peek(), TokenKind::OpenBrace) {
                     self.advance(); // consume {
                     while !matches!(self.peek(), TokenKind::CloseBrace | TokenKind::Eof) {
-                        // Parse: TraitName::method insteadof OtherTrait;
-                        //    or: TraitName::method as [visibility] [newName];
-                        //    or: method as [visibility] [newName];
-                        let first_name = match self.peek().clone() {
-                            TokenKind::Identifier(name) => {
-                                self.advance();
-                                name
-                            }
-                            TokenKind::Static
-                                if matches!(self.peek_at(1), TokenKind::DoubleColon) =>
-                            {
-                                return Err(self.static_trait_name_error());
-                            }
-                            _ => {
-                                self.advance(); // skip unexpected
-                                continue;
-                            }
-                        };
-
-                        if self.eat(&TokenKind::DoubleColon) {
-                            // TraitName::method
-                            let method_name = match self.peek().clone() {
-                                TokenKind::Identifier(name) => {
-                                    self.advance();
-                                    name
-                                }
-                                _ => {
-                                    self.advance();
-                                    continue;
-                                }
-                            };
-
-                            if matches!(self.peek(), TokenKind::Insteadof) {
-                                self.advance(); // consume insteadof
-                                let mut instead_of = Vec::new();
-                                loop {
-                                    if matches!(self.peek(), TokenKind::Static) {
-                                        return Err(self.static_trait_name_error());
-                                    }
-                                    let iname = self.parse_class_name_ref()?;
-                                    instead_of.push(iname);
-                                    if !self.eat(&TokenKind::Comma) {
-                                        break;
-                                    }
-                                }
-                                adaptations.push(TraitAdaptation::Precedence {
-                                    trait_name: first_name,
-                                    method: method_name,
-                                    instead_of,
-                                });
-                            } else if matches!(self.peek(), TokenKind::As) {
-                                self.advance(); // consume as
-                                let mut new_visibility = None;
-                                let mut new_name = None;
-                                match self.peek() {
-                                    TokenKind::Public => {
-                                        new_visibility = Some(Visibility::Public);
-                                        self.advance();
-                                    }
-                                    TokenKind::Protected => {
-                                        new_visibility = Some(Visibility::Protected);
-                                        self.advance();
-                                    }
-                                    TokenKind::Private => {
-                                        new_visibility = Some(Visibility::Private);
-                                        self.advance();
-                                    }
-                                    _ => {}
-                                }
-                                if let TokenKind::Identifier(name) = self.peek().clone() {
-                                    new_name = Some(name);
-                                    self.advance();
-                                }
-                                adaptations.push(TraitAdaptation::Alias {
-                                    trait_name: Some(first_name),
-                                    method: method_name,
-                                    new_name,
-                                    new_visibility,
-                                });
-                            }
-                        } else if matches!(self.peek(), TokenKind::As) {
-                            // method as [visibility] [newName]
-                            self.advance(); // consume as
-                            let mut new_visibility = None;
-                            let mut new_name = None;
-                            match self.peek() {
-                                TokenKind::Public => {
-                                    new_visibility = Some(Visibility::Public);
-                                    self.advance();
-                                }
-                                TokenKind::Protected => {
-                                    new_visibility = Some(Visibility::Protected);
-                                    self.advance();
-                                }
-                                TokenKind::Private => {
-                                    new_visibility = Some(Visibility::Private);
-                                    self.advance();
-                                }
-                                _ => {}
-                            }
-                            if let TokenKind::Identifier(name) = self.peek().clone() {
-                                new_name = Some(name);
-                                self.advance();
-                            }
-                            adaptations.push(TraitAdaptation::Alias {
-                                trait_name: None,
-                                method: first_name,
-                                new_name,
-                                new_visibility,
-                            });
-                        }
-                        self.eat(&TokenKind::Semicolon);
+                        adaptations.push(self.parse_trait_adaptation()?);
                     }
                     self.eat(&TokenKind::CloseBrace);
                 } else {

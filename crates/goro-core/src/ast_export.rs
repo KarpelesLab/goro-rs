@@ -1153,6 +1153,7 @@ fn export_member(s: &mut String, m: &ClassMember, indent: usize) {
                             method,
                             new_name,
                             new_visibility,
+                            new_final,
                         } => {
                             if let Some(t) = trait_name {
                                 s.push_str(&lossy(t));
@@ -1163,8 +1164,11 @@ fn export_member(s: &mut String, m: &ClassMember, indent: usize) {
                                 Some(Visibility::Public) => s.push_str(" as public"),
                                 Some(Visibility::Protected) => s.push_str(" as protected"),
                                 Some(Visibility::Private) => s.push_str(" as private"),
-                                None if new_name.is_some() => s.push_str(" as"),
+                                None if new_name.is_some() || *new_final => s.push_str(" as"),
                                 None => {}
+                            }
+                            if *new_final {
+                                s.push_str(" final");
                             }
                             if let Some(n) = new_name {
                                 s.push(' ');

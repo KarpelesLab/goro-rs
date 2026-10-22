@@ -9401,9 +9401,11 @@ impl Compiler {
                                         method,
                                         new_name,
                                         new_visibility,
+                                        new_final,
                                     } => {
                                         class.trait_adaptations.push(
                                             crate::object::TraitAdaptation::Alias {
+                                                new_final: *new_final,
                                                 trait_name: trait_name
                                                     .as_ref()
                                                     .map(|n| self.resolve_class_name(n)),
@@ -13335,7 +13337,12 @@ impl Compiler {
                     b"__namespace__" => {
                         Value::String(PhpString::from_vec(self.current_namespace.clone()))
                     }
-                    b"__trait__" => Value::String(PhpString::empty()),
+                    b"__trait__" => match &self.current_class {
+                        Some(t) if self.is_in_trait => {
+                            Value::String(PhpString::from_vec(t.clone()))
+                        }
+                        _ => Value::String(PhpString::empty()),
+                    },
                     // PHP constants
                     b"php_eol" => Value::String(PhpString::from_bytes(b"\n")),
                     b"php_int_max" => Value::Long(i64::MAX),
@@ -14464,6 +14471,7 @@ impl Compiler {
                 closure_compiler.op_array.filename = self.source_file.clone();
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
+                closure_compiler.is_in_trait = self.is_in_trait;
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
                 closure_compiler.anon_class_name_map = self.anon_class_name_map.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
@@ -14886,6 +14894,7 @@ impl Compiler {
                 }
                 closure_compiler.source_file = self.source_file.clone();
                 closure_compiler.current_class = self.current_class.clone();
+                closure_compiler.is_in_trait = self.is_in_trait;
                 closure_compiler.current_parent_class = self.current_parent_class.clone();
                 closure_compiler.anon_class_name_map = self.anon_class_name_map.clone();
                 // Inherit scope_class from the enclosing function for visibility checks
