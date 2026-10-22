@@ -1,6 +1,7 @@
 //! PHP Data Objects: php-src's ext/pdo (the PDO, PDOStatement, PDORow and
 //! PDOException classes, the SQL placeholder parser) and ext/pdo_mysql (the
-//! MySQL driver and Pdo\Mysql, over goro-ext-mysqli's mysqlnd port).
+//! MySQL driver and Pdo\Mysql, over goro-ext-mysqli's mysqlnd port), and the
+//! PostgreSQL and SQLite drivers.
 
 #![allow(clippy::result_unit_err)]
 
@@ -13,6 +14,7 @@ pub mod parser;
 pub mod pgsql;
 #[rustfmt::skip]
 pub mod scanner;
+pub mod sqlite;
 pub mod sqlstate;
 pub mod stmt;
 
@@ -149,6 +151,37 @@ const METHODS: &[(&str, &str, Impl, bool)] = &[
         pgsql::set_notice_callback,
         false,
     ),
+    (
+        "Pdo\\Sqlite",
+        "createAggregate",
+        sqlite::create_aggregate,
+        false,
+    ),
+    (
+        "Pdo\\Sqlite",
+        "createCollation",
+        sqlite::create_collation,
+        false,
+    ),
+    (
+        "Pdo\\Sqlite",
+        "createFunction",
+        sqlite::create_function,
+        false,
+    ),
+    (
+        "Pdo\\Sqlite",
+        "loadExtension",
+        sqlite::load_extension,
+        false,
+    ),
+    ("Pdo\\Sqlite", "openBlob", sqlite::open_blob, false),
+    (
+        "Pdo\\Sqlite",
+        "setAuthorizer",
+        sqlite::driver::set_authorizer,
+        false,
+    ),
 ];
 
 /// The internal ancestors of a native class, nearest first
@@ -156,6 +189,7 @@ fn native_chain(class_lower: &[u8]) -> &'static [&'static str] {
     match class_lower {
         b"pdo\\mysql" => &["Pdo\\Mysql", "PDO"],
         b"pdo\\pgsql" => &["Pdo\\Pgsql", "PDO"],
+        b"pdo\\sqlite" => &["Pdo\\Sqlite", "PDO"],
         b"pdo" => &["PDO"],
         b"pdostatement" => &["PDOStatement"],
         _ => &[],
@@ -192,14 +226,19 @@ fn has_method(class: &[u8], method: &[u8], is_static: bool) -> bool {
     if m == b"__construct" {
         return false;
     }
-    if is_connect(&m) && matches!(class, b"pdo" | b"pdo\\mysql" | b"pdo\\pgsql") {
+    let pdo_class = matches!(
+        class,
+        b"pdo" | b"pdo\\mysql" | b"pdo\\pgsql" | b"pdo\\sqlite"
+    );
+    if is_connect(&m) && pdo_class {
         return true;
     }
     // the driver methods (dbh_method_get): resolved against the handle
     if !is_static
-        && matches!(class, b"pdo" | b"pdo\\mysql" | b"pdo\\pgsql")
+        && pdo_class
         && pgsql::EXT_METHODS
             .iter()
+            .chain(sqlite::EXT_METHODS.iter())
             .any(|(n, _)| n.as_bytes().eq_ignore_ascii_case(&m))
     {
         return true;
@@ -291,11 +330,15 @@ fn call_method(
     }
     if pgsql::EXT_METHODS
         .iter()
+        .chain(sqlite::EXT_METHODS.iter())
         .any(|(n, _)| n.as_bytes().eq_ignore_ascii_case(&ml))
         && find_method(class, &ml).is_none()
     {
         let this_o = this_obj(this);
         if let Some(r) = pgsql::call_ext_method(vm, &ml, this_o.as_ref(), args) {
+            return r;
+        }
+        if let Some(r) = sqlite::call_ext_method(vm, &ml, this_o.as_ref(), args) {
             return r;
         }
         let cname = match &this_o {
@@ -304,6 +347,7 @@ fn call_method(
         };
         let name = pgsql::EXT_METHODS
             .iter()
+            .chain(sqlite::EXT_METHODS.iter())
             .find(|(n, _)| n.as_bytes().eq_ignore_ascii_case(&ml))
             .map(|(n, _)| *n)
             .unwrap_or("");
@@ -498,9 +542,12 @@ fn register_constants(vm: &mut Vm) {
         list.push((old.into_bytes(), Value::Long(*v), Some(msg)));
     }
     list.extend(pgsql::pdo_constants());
+    list.extend(sqlite::pdo_constants());
     vm.ext_class_constants.insert(b"pdo".to_vec(), list);
     vm.ext_class_constants
         .insert(b"pdo\\pgsql".to_vec(), pgsql::class_constants());
+    vm.ext_class_constants
+        .insert(b"pdo\\sqlite".to_vec(), sqlite::class_constants());
     let my: Vec<(Vec<u8>, Value, Option<String>)> = mysql::CONSTANTS
         .iter()
         .map(|(n, v)| (n.as_bytes().to_vec(), Value::Long(*v), None))
@@ -589,6 +636,7 @@ pub fn register(vm: &mut Vm) {
         b"pdorow",
         b"pdo\\mysql",
         b"pdo\\pgsql",
+        b"pdo\\sqlite",
     ] {
         vm.native_class_handlers.insert(c.to_vec(), h);
     }
@@ -616,6 +664,8 @@ pub fn register(vm: &mut Vm) {
     vm.object_create_handlers
         .insert(b"pdo\\pgsql".to_vec(), create_dbh);
     vm.object_create_handlers
+        .insert(b"pdo\\sqlite".to_vec(), create_dbh);
+    vm.object_create_handlers
         .insert(b"pdostatement".to_vec(), create_stmt);
     vm.object_construct_handlers
         .insert(b"pdo".to_vec(), construct_pdo);
@@ -624,10 +674,13 @@ pub fn register(vm: &mut Vm) {
     vm.object_construct_handlers
         .insert(b"pdo\\pgsql".to_vec(), construct_pdo);
     vm.object_construct_handlers
+        .insert(b"pdo\\sqlite".to_vec(), construct_pdo);
+    vm.object_construct_handlers
         .insert(b"pdorow".to_vec(), construct_row);
 
     mysql::register(vm);
     pgsql::register(vm);
+    sqlite::register(vm);
     vm.ini_set_hooks
         .insert(b"pdo_mysql.default_socket".to_vec(), ini_readonly);
     register_constants(vm);

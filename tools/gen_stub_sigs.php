@@ -42,6 +42,7 @@ $dirs = [
     'ext/pdo_mysql' => 'pdo_mysql',
     'ext/pgsql' => 'pgsql',
     'ext/pdo_pgsql' => 'pdo_pgsql',
+    'ext/pdo_sqlite' => 'pdo_sqlite',
     'ext/uri' => 'uri',
     'ext/bcmath' => 'bcmath',
     'ext/filter' => 'filter',

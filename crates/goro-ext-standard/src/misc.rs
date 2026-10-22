@@ -18283,6 +18283,7 @@ const MODULE_ORDER: &[&str] = &[
     "PDO",
     "pdo_mysql",
     "pdo_pgsql",
+    "pdo_sqlite",
     "Phar",
     "posix",
     "random",
