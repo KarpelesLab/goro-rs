@@ -2812,6 +2812,7 @@ pub fn reflection_class_method(
         b"getextension" | b"getextensionname" => {
             let ext = if is_internal_class(vm, &class_lower) {
                 crate::stubs::find_class(&class_lower)
+                    .or_else(|| crate::stubs::find_self_declared_class(&class_lower))
                     .map(|c| c.ext)
                     .or_else(|| {
                         // ext/dom has no stubs here.
