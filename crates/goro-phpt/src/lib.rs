@@ -636,7 +636,6 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
 /// keeps the pass-rate honest.
 ///
 /// Categories:
-/// 1. opcache JIT tests — we don't have a JIT.
 /// 2. phpdbg tests — we don't have phpdbg.
 /// 4. Real MySQL tests (bind_param/bind_result on a live server).
 /// 5. External `php` binary spawn (proc_open/shell_exec/popen of $PHP_BINARY).
@@ -649,19 +648,9 @@ pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
     let file_section = test.file_section().unwrap_or("");
     let test_name = &test.name;
 
-    // 1. opcache JIT — we don't implement a JIT. Most JIT tests already have
-    //    `--EXTENSIONS-- opcache` and skip via the EXTENSIONS check. But some
-    //    JIT tests omit EXTENSIONS and rely solely on the JIT INI directives.
-    //    We only skip those that EXPLICITLY require an active JIT mode (i.e.
-    //    set opcache.jit=tracing, opcache.jit=function, or a numeric JIT
-    //    mode like opcache.jit=1255). Tests with only opcache.jit_debug (a
-    //    debug knob that doesn't affect behavior) or just `opcache.enable=1`
-    //    aren't really JIT-dependent — many pass trivially without JIT.
-    //    This avoids PASS→SKIP regressions for tests that happen to live in
-    //    the jit/ directory but don't depend on JIT semantics.
-    if filename.contains("/ext/opcache/tests/jit/") && requires_active_jit(test) {
-        return Some("opcache JIT not implemented in goro".into());
-    }
+    // 1. opcache JIT: run-tests.php does not skip JIT tests when the JIT is
+    //    unavailable; the opcache.jit* directives are simply ineffective and
+    //    the tests run (their own SKIPIF / EXTENSIONS sections decide).
 
     // 2. phpdbg — we don't implement the phpdbg SAPI.
     //    Either the test lives under sapi/phpdbg, or it has a --PHPDBG-- section.
@@ -719,44 +708,6 @@ pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
 
     let _ = test_name; // kept for future use
     None
-}
-
-/// True if the test EXPLICITLY requires an active JIT mode via INI. We look
-/// for `opcache.jit=tracing`, `opcache.jit=function`, or `opcache.jit=<N>`
-/// where N is a non-zero numeric mode. We ignore commented-out lines and
-/// `opcache.jit=0`/`off`/`disable` (which means JIT off).
-fn requires_active_jit(test: &PhptTest) -> bool {
-    let ini = match test.ini_section() {
-        Some(s) => s,
-        None => return false,
-    };
-    for line in ini.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with(';') || trimmed.starts_with('#') {
-            continue;
-        }
-        // Look for opcache.jit= setting.
-        if let Some(rest) = trimmed.strip_prefix("opcache.jit=") {
-            let val = rest.trim().trim_matches(|c| c == '"' || c == '\'');
-            let val_lower = val.to_lowercase();
-            // Off-values:
-            if val_lower == "0" || val_lower == "off" || val_lower == "disable" {
-                continue;
-            }
-            // tracing, function, or any non-zero mode.
-            if !val.is_empty() {
-                return true;
-            }
-        }
-        // opcache.jit_buffer_size=<nonzero> also strongly signals JIT-required.
-        if let Some(rest) = trimmed.strip_prefix("opcache.jit_buffer_size=") {
-            let val = rest.trim();
-            if !val.is_empty() && val != "0" {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Check whether a FILE section makes a network call to something that isn't
