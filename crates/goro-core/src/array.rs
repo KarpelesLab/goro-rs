@@ -158,6 +158,9 @@ impl Clone for PhpArray {
         let self_ptr = self as *const PhpArray;
         let is_closure = matches!(self.live().first(), Some((_, Value::String(s)))
             if s.as_bytes().starts_with(b"__closure_") || s.as_bytes().starts_with(b"__arrow_"));
+        // A copy holding nested arrays does not stand for this array: they
+        // are copies too, written in place without separating this one.
+        let mut nested = is_closure;
         let entries = if is_closure {
             self.live().to_vec()
         } else {
@@ -184,6 +187,7 @@ impl Clone for PhpArray {
                         Value::Array(a) => dup_nested_array(a).unwrap_or_else(|| v.clone()),
                         _ => v.clone(),
                     };
+                    nested |= matches!(v2, Value::Array(_));
                     (k.clone(), v2)
                 })
                 .collect();
@@ -203,7 +207,7 @@ impl Clone for PhpArray {
             zcap,
             zpacked,
             untracked: false,
-            ident: std::cell::Cell::new(self.identity()),
+            ident: std::cell::Cell::new(if nested { 0 } else { self.identity() }),
         };
         if self.head == 0 {
             copy.index = self.index.clone();
