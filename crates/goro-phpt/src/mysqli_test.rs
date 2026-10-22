@@ -130,6 +130,9 @@ pub fn try_start() -> Option<EmbeddedMysql> {
     let socket = tmpdir.join("mysql.sock");
     let pidfile = tmpdir.join("mysql.pid");
     let errlog = tmpdir.join("err.log");
+    // SELECT ... INTO OUTFILE / LOAD DATA INFILE directory (secure_file_priv)
+    let files_dir = tmpdir.join("files");
+    let _ = std::fs::create_dir_all(&files_dir);
     let port = find_free_port()?;
 
     // 1. Initialize the data directory.
@@ -185,6 +188,7 @@ pub fn try_start() -> Option<EmbeddedMysql> {
         .arg(format!("--log-error={}", errlog.display()))
         .arg(format!("--port={}", port))
         .arg("--bind-address=127.0.0.1")
+        .arg(format!("--secure-file-priv={}", files_dir.display()))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

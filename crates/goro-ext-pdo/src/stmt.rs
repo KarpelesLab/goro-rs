@@ -874,7 +874,11 @@ pub fn do_fetch(
                     o.borrow_mut().set_property(column_name, val);
                 } else {
                     let scope = ce.clone().unwrap_or_default();
-                    update_property(vm, &scope, &o, &column_name, val);
+                    if !update_property(vm, &scope, &o, &column_name, val)
+                        && vm.current_exception.is_some()
+                    {
+                        fail!();
+                    }
                 }
             }
             PDO_FETCH_FUNC => func_params.push(val),

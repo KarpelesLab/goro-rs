@@ -967,13 +967,19 @@ pub fn run_in_scope(
             cvs[i] = val.clone();
         }
     }
-    vm.called_class_stack.push(scope.to_vec());
-    vm.push_class_scope(scope.to_vec());
+    // An empty scope keeps the scope of the calling code.
+    let scoped = !scope.is_empty();
+    if scoped {
+        vm.called_class_stack.push(scope.to_vec());
+        vm.push_class_scope(scope.to_vec());
+    }
     let was_global = std::mem::replace(&mut vm.is_global_scope, false);
     let r = vm.execute_op_array_pub(&op_array, cvs);
     vm.is_global_scope = was_global;
-    vm.called_class_stack.pop();
-    vm.pop_class_scope();
+    if scoped {
+        vm.called_class_stack.pop();
+        vm.pop_class_scope();
+    }
     vm.current_line = line;
     if vm.current_exception.is_some() {
         return None;
@@ -983,6 +989,40 @@ pub fn run_in_scope(
 
 /// zend_update_property_ex(scope, obj, name, value)
 pub fn update_property(vm: &mut Vm, scope: &[u8], obj: &Obj, name: &[u8], value: Value) -> bool {
+    // An empty scope is the scope of the calling code.
+    let eff_scope: Option<Vec<u8>> = if scope.is_empty() {
+        vm.current_class_scope().map(|s| s.to_ascii_lowercase())
+    } else {
+        Some(scope.to_vec())
+    };
+    let cl = obj.borrow().class_name.to_ascii_lowercase();
+    if let Some(vis) = inaccessible_property(vm, &cl, eff_scope.as_deref(), name) {
+        let has_set = vm
+            .classes
+            .get(&cl)
+            .is_some_and(|c| c.get_method(b"__set").is_some());
+        if !has_set {
+            let m = format!(
+                "Cannot access {} property {}::${}",
+                vis,
+                goro_core::value::display_class_name(&obj.borrow().class_name),
+                String::from_utf8_lossy(name)
+            );
+            throw(vm, b"Error", &m);
+            return false;
+        }
+        return run_in_scope(
+            vm,
+            "$__o->__set($__n, $__v);",
+            &[
+                ("__o", Value::Object(obj.clone())),
+                ("__n", vstr(name)),
+                ("__v", value),
+            ],
+            scope,
+        )
+        .is_some();
+    }
     run_in_scope(
         vm,
         "$__o->{$__n} = $__v;",
@@ -996,24 +1036,67 @@ pub fn update_property(vm: &mut Vm, scope: &[u8], obj: &Obj, name: &[u8], value:
     .is_some()
 }
 
+/// The visibility ("protected" / "private") of a declared property the
+/// scope may not access (zend_get_property_offset's wrong cases).
+fn inaccessible_property(
+    vm: &Vm,
+    class_lower: &[u8],
+    scope: Option<&[u8]>,
+    name: &[u8],
+) -> Option<&'static str> {
+    use goro_core::object::Visibility;
+    let mut cur = class_lower.to_vec();
+    for _ in 0..64 {
+        let c = vm.classes.get(&cur)?;
+        if let Some(p) = c.properties.iter().find(|p| p.name == name && !p.is_static) {
+            let decl = p.declaring_class.to_ascii_lowercase();
+            return match p.visibility {
+                Visibility::Public => None,
+                Visibility::Protected => {
+                    let ok = scope.is_some_and(|s| {
+                        s == decl.as_slice() || instanceof(vm, s, &decl) || instanceof(vm, &decl, s)
+                    });
+                    if ok { None } else { Some("protected") }
+                }
+                Visibility::Private => {
+                    if scope == Some(decl.as_slice()) || decl.as_slice() != class_lower {
+                        None
+                    } else {
+                        Some("private")
+                    }
+                }
+            };
+        }
+        cur = c.parent.as_ref()?.to_ascii_lowercase();
+    }
+    None
+}
+
 /// The declaring class (lowercase) of a class's constructor, if any.
 pub fn constructor_of(vm: &Vm, class_lower: &[u8]) -> Option<Vec<u8>> {
+    let stub_ctor = |cl: &[u8]| {
+        goro_core::stubs::find_method(cl, b"__construct")
+            .map(|(sc, _)| sc.name.to_ascii_lowercase().into_bytes())
+    };
     match vm.classes.get(class_lower) {
         Some(c) => match c.get_method(b"__construct") {
             Some(m) => Some(m.declaring_class.to_ascii_lowercase()),
-            // an internal ancestor's constructor
-            None => {
-                let p = c.parent.as_ref()?.to_ascii_lowercase();
-                if vm.classes.contains_key(&p) {
-                    constructor_of(vm, &p)
-                } else {
-                    goro_core::stubs::find_method(&p, b"__construct")
-                        .map(|(sc, _)| sc.name.to_ascii_lowercase().into_bytes())
+            None => match c.parent.as_ref() {
+                // an ancestor's constructor
+                Some(p) => {
+                    let p = p.to_ascii_lowercase();
+                    if vm.classes.contains_key(&p) {
+                        constructor_of(vm, &p)
+                    } else {
+                        stub_ctor(&p)
+                    }
                 }
-            }
+                // an internal class registered by its extension
+                None if c.filename.is_none() => stub_ctor(class_lower),
+                None => None,
+            },
         },
-        None => goro_core::stubs::find_method(class_lower, b"__construct")
-            .map(|(sc, _)| sc.name.to_ascii_lowercase().into_bytes()),
+        None => stub_ctor(class_lower),
     }
 }
 
@@ -1141,6 +1224,23 @@ pub fn object_init_ex(vm: &mut Vm, class_lower: &[u8]) -> Option<Obj> {
     let id = vm.alloc_object_id();
     let mut obj = PhpObject::new(name, id);
     vm.apply_class_property_defaults(&mut obj, class_lower);
+    if !vm.classes.contains_key(class_lower) {
+        // object_properties_init of an internal class: typed properties
+        // without a default start uninitialized
+        if let Some(sc) = goro_core::stubs::find_class(class_lower) {
+            for p in sc.props {
+                if p.flags & goro_core::stubs::F_STATIC != 0 || obj.has_property(p.name.as_bytes())
+                {
+                    continue;
+                }
+                let v = p
+                    .default
+                    .and_then(goro_core::stubs::literal_value)
+                    .unwrap_or(Value::Undef);
+                obj.set_property(p.name.as_bytes().to_vec(), v);
+            }
+        }
+    }
     let o = Rc::new(RefCell::new(obj));
     goro_core::gc::track_object(&o);
     let has_dtor = vm

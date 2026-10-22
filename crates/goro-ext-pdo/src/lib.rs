@@ -198,6 +198,7 @@ fn run_method(
     imp: impl FnOnce(&mut Vm, &Func, &[Value]) -> Value,
 ) -> Value {
     let mut pushed = false;
+    let named = frame.is_some();
     if let Some(frame) = frame {
         let has = vm
             .call_stack
@@ -211,9 +212,13 @@ fn run_method(
             pushed = true;
         }
     }
-    push_active(&f.name);
+    if named {
+        push_active(&f.name);
+    }
     let r = imp(vm, f, args);
-    pop_active();
+    if named {
+        pop_active();
+    }
     if pushed {
         vm.call_stack.pop();
     }
@@ -266,12 +271,16 @@ fn call_method(
         return Value::Null;
     }
     let f = Func::method(m.0, m.1, if m.3 { None } else { this_o.clone() });
-    let frame = if this_o.is_some() {
-        format!("{}->{}", m.0, m.1)
+    // foreach reaches getIterator() for the statement's get_iterator
+    // handler, which is not a call (no frame).
+    let frame = if ml == b"getiterator" {
+        None
+    } else if this_o.is_some() {
+        Some(format!("{}->{}", m.0, m.1))
     } else {
-        format!("{}::{}", m.0, m.1)
+        Some(format!("{}::{}", m.0, m.1))
     };
-    run_method(vm, &f, Some(frame), args, m.2)
+    run_method(vm, &f, frame, args, m.2)
 }
 
 fn param_names(class: &[u8], method: &[u8]) -> Option<&'static [&'static str]> {
