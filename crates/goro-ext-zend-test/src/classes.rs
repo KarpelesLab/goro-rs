@@ -26,7 +26,12 @@ pub(crate) fn register(vm: &mut Vm) {
         .collect();
     let saved_file = std::mem::take(&mut vm.current_file);
     let saved_line = vm.current_line;
+    let user_consts = vm.user_constant_names.len();
     let _ = vm.run_compiled(&op_array, classes);
+    // Its constants are the extension's.
+    for (k, _) in vm.user_constant_names.split_off(user_consts) {
+        vm.constant_files.remove(&k);
+    }
     vm.current_file = saved_file;
     vm.current_line = saved_line;
     vm.current_exception = None;
@@ -62,6 +67,11 @@ pub(crate) fn register(vm: &mut Vm) {
             param_names: Some(test_class_param_names),
         },
     );
+    // zend_forbid_dynamic_call()
+    for m in ["call", "callstatic"] {
+        vm.forbid_dynamic_call_methods
+            .push((b"zendtestforbiddynamiccall".to_vec(), m.as_bytes().to_vec()));
+    }
     // _ZendTestClass is also registered as _ZendTestClassAlias (@alias).
     if let Some(ce) = vm.classes.get(b"_zendtestclass".as_slice()).cloned() {
         let alias = b"_zendtestclassalias".to_vec();

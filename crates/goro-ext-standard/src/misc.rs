@@ -1026,6 +1026,8 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let file = vm.current_file.clone();
     vm.constant_files.insert(normalized.clone(), file);
+    vm.user_constant_names
+        .push((normalized.clone(), name_bytes.to_vec()));
     vm.constants.insert(normalized, value);
     Ok(Value::True)
 }
@@ -14635,6 +14637,7 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
         // Return categorized array. Constants do not record the module
         // that registered them; the libxml ones are recognised by prefix.
         let mut user = PhpArray::new();
+        let mut core = PhpArray::new();
         let mut libxml = PhpArray::new();
         let mut mysqli = PhpArray::new();
         // Constants of extensions that list theirs (in module order).
@@ -14658,18 +14661,26 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             if vm.module_constants.iter().any(|(_, n)| n.contains(name)) {
                 continue;
             }
+            if vm.constant_files.contains_key(name) {
+                continue;
+            }
+            // (other internal constants do not record their module)
             let target = if name.starts_with(b"LIBXML_") {
                 &mut libxml
             } else if name.starts_with(b"MYSQLI_") {
                 &mut mysqli
             } else {
-                &mut user
+                &mut core
             };
             target.set(
                 goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
                 val.clone(),
             );
         }
+        result.set(
+            goro_core::array::ArrayKey::String(PhpString::from_bytes(b"Core")),
+            Value::Array(Rc::new(RefCell::new(core))),
+        );
         if !libxml.is_empty() {
             result.set(
                 goro_core::array::ArrayKey::String(PhpString::from_bytes(b"libxml")),
@@ -14690,19 +14701,39 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
                 );
             }
         }
-        result.set(
-            goro_core::array::ArrayKey::String(PhpString::from_bytes(b"user")),
-            Value::Array(Rc::new(RefCell::new(user))),
-        );
+        for (key, name) in &vm.user_constant_names {
+            if let Some(v) = vm.constants.get(key) {
+                user.set(
+                    goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
+                    v.clone(),
+                );
+            }
+        }
+        // (only when there are any)
+        if !user.is_empty() {
+            result.set(
+                goro_core::array::ArrayKey::String(PhpString::from_bytes(b"user")),
+                Value::Array(Rc::new(RefCell::new(user))),
+            );
+        }
     } else {
         for (name, val) in &vm.constants {
-            if is_ini_entry_name(name) {
+            if is_ini_entry_name(name) || vm.constant_files.contains_key(name) {
                 continue;
             }
             result.set(
                 goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
                 val.clone(),
             );
+        }
+        // User constants last, in definition order, named as defined.
+        for (key, name) in &vm.user_constant_names {
+            if let Some(v) = vm.constants.get(key) {
+                result.set(
+                    goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
+                    v.clone(),
+                );
+            }
         }
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))

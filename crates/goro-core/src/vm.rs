@@ -1017,6 +1017,10 @@ pub struct Vm {
     /// File each userland global constant was defined in (define() and
     /// `const`), keyed like `constants`.
     pub constant_files: HashMap<Vec<u8>, String>,
+    /// User constants in definition order: (lookup key, name as defined).
+    pub user_constant_names: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Methods (lowercase class, method) that call zend_forbid_dynamic_call().
+    pub forbid_dynamic_call_methods: Vec<(Vec<u8>, Vec<u8>)>,
     /// Shutdown functions registered via register_shutdown_function
     pub shutdown_functions: Vec<(Value, Vec<Value>)>,
     /// Object operator overloading handler (e.g., GMP)
@@ -1387,6 +1391,8 @@ impl Vm {
             autoload_functions: Vec::new(),
             gen_call_this: None,
             constant_files: HashMap::new(),
+            user_constant_names: Vec::new(),
+            forbid_dynamic_call_methods: Vec::new(),
             shutdown_functions: Vec::new(),
             constants: {
                 let mut c = crate::fxhash::FxHashMap::default();
@@ -3288,6 +3294,47 @@ impl Vm {
             .iter()
             .find(|f| n.eq_ignore_ascii_case(f))
             .map(|l| format!("Cannot call {}() dynamically", String::from_utf8_lossy(l)))
+    }
+
+    /// zend_forbid_dynamic_call() in a method of `forbid_dynamic_call_methods`
+    /// called through the [class-or-object, method] callable `callable`.
+    fn forbidden_dynamic_method(&self, callable: &Value) -> Option<String> {
+        let Value::Array(a) = callable else {
+            return None;
+        };
+        let (target, method) = {
+            let a = a.borrow();
+            (a.get_int(0)?.deref(), a.get_int(1)?.deref())
+        };
+        let class = match &target {
+            Value::Object(o) => o.borrow().class_name.to_ascii_lowercase(),
+            Value::String(s) => s.as_bytes().to_ascii_lowercase(),
+            _ => return None,
+        };
+        let Value::String(m) = &method else {
+            return None;
+        };
+        let ml = m.as_bytes().to_ascii_lowercase();
+        let ce = self.classes.get(&class)?;
+        let md = ce.get_method(&ml)?;
+        let decl = md.declaring_class.to_ascii_lowercase();
+        if !self
+            .forbid_dynamic_call_methods
+            .iter()
+            .any(|(c, n)| *c == decl && *n == ml)
+        {
+            return None;
+        }
+        let decl_name = self
+            .classes
+            .get(&decl)
+            .map(|c| c.name.clone())
+            .unwrap_or(decl);
+        Some(format!(
+            "Cannot call {}::{}() dynamically",
+            String::from_utf8_lossy(&decl_name),
+            String::from_utf8_lossy(&md.name)
+        ))
     }
 
     /// `class_name` and its ancestors are user classes, none declaring a
@@ -23659,6 +23706,12 @@ impl Vm {
                             ),
                         )),
                         _ => None,
+                    };
+                    let dyn_err = match dyn_err {
+                        None if !self.forbid_dynamic_call_methods.is_empty() => self
+                            .forbidden_dynamic_method(dyn_check_val)
+                            .map(|m| (b"Error".as_slice(), m)),
+                        e => e,
                     };
                     if let Some((cls, msg)) = dyn_err {
                         // An exception thrown by the error handler wins.

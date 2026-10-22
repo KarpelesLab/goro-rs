@@ -4038,6 +4038,19 @@ pub fn register(vm: &mut Vm) {
         .insert(b"PHP_SESSION_NONE".to_vec(), Value::Long(1));
     vm.constants
         .insert(b"PHP_SESSION_ACTIVE".to_vec(), Value::Long(2));
+    // (SID once a session sets it)
+    vm.module_constants.push((
+        b"session".to_vec(),
+        [
+            "PHP_SESSION_DISABLED",
+            "PHP_SESSION_NONE",
+            "PHP_SESSION_ACTIVE",
+            "SID",
+        ]
+        .iter()
+        .map(|n| n.as_bytes().to_vec())
+        .collect(),
+    ));
 
     for (name, default, _) in INI_ENTRIES {
         vm.constants
