@@ -288,6 +288,11 @@ pub enum OpCode {
     GetClassName,
     /// Check if object property is set (calls __isset if available)
     PropertyIsset,
+    /// The container fetch of a nested isset (`isset($o->p[k])`,
+    /// `isset($o->p->q)`): like PropertyIsset, gating the PropertyGet that
+    /// follows it, with FETCH_OBJ_IS semantics: __get() is reached when
+    /// __isset() is absent or already running for the property.
+    PropertyIssetFetch,
 
     // ---- Print ----
     /// print expr (returns 1)

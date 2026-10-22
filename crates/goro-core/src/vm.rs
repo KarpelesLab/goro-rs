@@ -42753,7 +42753,7 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
 
-                OpCode::PropertyIsset => match outlined(|| -> Result<Flow, VmError> {
+                OpCode::PropertyIsset | OpCode::PropertyIssetFetch => match outlined(|| -> Result<Flow, VmError> {
                     // Check if object property is set (with __isset support)
                     let obj_val_raw = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let prop_name = self
@@ -42824,8 +42824,19 @@ impl Vm {
                             let guard_active =
                                 self.magic_prop_guards.contains(&(oid, pn.to_vec(), 1u8));
                             let is_lazy_uninit = (is_proxy && !already_real) || is_ghost;
+                            // (a nested isset's fetch inside __isset() calls
+                            // __get() on the lazy object first)
+                            let fetch_get = matches!(op.opcode, OpCode::PropertyIssetFetch)
+                                && (guard_active || !has_isset)
+                                && !prop_declared
+                                && self.isset_fetch_reaches_get(
+                                    &obj_val_raw,
+                                    &class_lower,
+                                    &prop_name,
+                                );
                             let skip_init = is_lazy_uninit
                                 && ((has_isset && !prop_declared && !guard_active)
+                                    || fetch_get
                                     || self.has_unguarded_get_hook(&class_lower, pn));
                             if !skip_init {
                                 self.maybe_run_lazy_init(obj);
@@ -43106,6 +43117,12 @@ impl Vm {
                                 } else {
                                     Value::False
                                 }
+                            } else if matches!(op.opcode, OpCode::PropertyIssetFetch)
+                                && self.isset_fetch_reaches_get(&obj_val, &class_lower, &prop_name)
+                            {
+                                // FETCH_OBJ_IS without (or inside) __isset():
+                                // the PropertyGet that follows calls __get().
+                                Value::True
                             } else {
                                 Value::False
                             }
@@ -59924,6 +59941,30 @@ impl Vm {
             }
             _ => false,
         }
+    }
+
+    /// FETCH_OBJ_IS of an undefined property whose __isset() is absent or
+    /// already running: __get() is called when the class has one and it is
+    /// not running for that property.
+    fn isset_fetch_reaches_get(
+        &self,
+        obj_val: &Value,
+        class_lower: &[u8],
+        prop: &PhpString,
+    ) -> bool {
+        let Value::Object(o) = obj_val else {
+            return false;
+        };
+        let has_get = self
+            .classes
+            .get(class_lower)
+            .is_some_and(|c| c.methods.contains_key(b"__get".as_slice()));
+        has_get
+            && !self.magic_prop_guards.contains(&(
+                o.borrow().object_id,
+                prop.as_bytes().to_vec(),
+                0u8,
+            ))
     }
 
     /// zend_exception_set_previous(): append `prev` at the end of `exc`'s

@@ -10576,7 +10576,7 @@ impl Compiler {
                 let prop_op = self.snapshot_cv(prop_op, line);
                 let isset_tmp = self.op_array.alloc_temp();
                 self.op_array.emit(Op {
-                    opcode: OpCode::PropertyIsset,
+                    opcode: OpCode::PropertyIssetFetch,
                     op1: base,
                     op2: prop_op,
                     result: OperandType::Tmp(isset_tmp),
@@ -15715,7 +15715,7 @@ impl Compiler {
                             let prop_op = self.compile_property_name(property)?;
                             let isset_tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
-                                opcode: OpCode::PropertyIsset,
+                                opcode: OpCode::PropertyIssetFetch,
                                 op1: obj_op,
                                 op2: prop_op,
                                 result: OperandType::Tmp(isset_tmp),
