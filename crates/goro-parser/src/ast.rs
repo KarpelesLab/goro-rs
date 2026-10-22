@@ -355,6 +355,8 @@ pub struct Argument {
 }
 #[derive(Debug, Clone)]
 pub struct Param {
+    /// Line of the parameter's first token after its attributes.
+    pub line: u32,
     pub name: Vec<u8>,
     pub type_hint: Option<TypeHint>,
     pub default: Option<Expr>,

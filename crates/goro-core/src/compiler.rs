@@ -112,6 +112,9 @@ pub type CompileResult<T> = Result<T, CompileError>;
 
 /// Loop context for break/continue support
 struct LoopContext {
+    /// Unique id (brk_cont_array index): a goto may only jump to a label in
+    /// a loop it is itself inside.
+    id: u32,
     /// Jump targets to patch with the loop's end address (for break)
     break_jumps: Vec<u32>,
     /// Jump targets to patch with the loop's continue address
@@ -275,6 +278,10 @@ pub struct Compiler {
     finally_id_counter: u32,
     /// label -> enclosing finally path; gotos -> (label, path, line)
     label_finally_paths: HashMap<Vec<u8>, Vec<u32>>,
+    /// label -> ids of the loops/switches enclosing it
+    label_loop_paths: HashMap<Vec<u8>, Vec<u32>>,
+    /// (label, ids of the loops/switches enclosing the goto, line)
+    goto_loop_paths: Vec<(Vec<u8>, Vec<u32>, u32)>,
     goto_finally_paths: Vec<(Vec<u8>, Vec<u32>, u32)>,
     /// Unique id of this compilation's top-level op_array, keying its
     /// static variables (each file / eval'd string has its own).
@@ -543,6 +550,8 @@ impl Compiler {
             finally_path: Vec::new(),
             finally_id_counter: 0,
             label_finally_paths: HashMap::new(),
+            label_loop_paths: HashMap::new(),
+            goto_loop_paths: Vec::new(),
             goto_finally_paths: Vec::new(),
             main_static_id: 0,
         }
@@ -596,6 +605,17 @@ impl Compiler {
                 message: format!("'goto' to undefined label '{}'", label),
                 line,
             });
+        }
+        // zend_resolve_goto_label(): the label's loops must all enclose the goto.
+        for (label, goto_path, line) in &self.goto_loop_paths {
+            if let Some(label_path) = self.label_loop_paths.get(label) {
+                if !goto_path.starts_with(label_path) {
+                    return Err(CompileError {
+                        message: "'goto' into loop or switch statement is disallowed".into(),
+                        line: *line,
+                    });
+                }
+            }
         }
         // zend_check_finally_breakout(): goto may not cross finally boundaries.
         for (label, goto_path, line) in &self.goto_finally_paths {
@@ -3313,6 +3333,7 @@ impl Compiler {
 
             StmtKind::While { condition, body } => {
                 self.loop_stack.push(LoopContext {
+                    id: next_loop_id(),
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
@@ -3365,6 +3386,7 @@ impl Compiler {
 
             StmtKind::DoWhile { body, condition } => {
                 self.loop_stack.push(LoopContext {
+                    id: next_loop_id(),
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
@@ -3413,6 +3435,7 @@ impl Compiler {
                 }
 
                 self.loop_stack.push(LoopContext {
+                    id: next_loop_id(),
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
@@ -3582,6 +3605,7 @@ impl Compiler {
                     }))
                 };
                 self.loop_stack.push(LoopContext {
+                    id: next_loop_id(),
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
@@ -3846,6 +3870,7 @@ impl Compiler {
                 };
 
                 self.loop_stack.push(LoopContext {
+                    id: next_loop_id(),
                     break_jumps: Vec::new(),
                     continue_jumps: Vec::new(),
                     continue_target: None,
@@ -4242,36 +4267,7 @@ impl Compiler {
                 }
 
                 // Check for duplicate parameter names and reserved names
-                {
-                    let mut seen_params = std::collections::HashSet::new();
-                    for param in params {
-                        if param.name == b"this" {
-                            return Err(CompileError {
-                                message: "Cannot use $this as parameter".into(),
-                                line: func_compiler.op_array.decl_line,
-                            });
-                        }
-                        if !seen_params.insert(&param.name) {
-                            return Err(CompileError {
-                                message: format!(
-                                    "Redefinition of parameter ${}",
-                                    String::from_utf8_lossy(&param.name)
-                                ),
-                                line: func_compiler.op_array.decl_line,
-                            });
-                        }
-                        if let Some(message) = param
-                            .default
-                            .as_ref()
-                            .and_then(|d| Self::const_expr_error(d, true))
-                        {
-                            return Err(CompileError {
-                                message,
-                                line: func_compiler.op_array.decl_line,
-                            });
-                        }
-                    }
-                }
+                check_duplicate_params(params, func_compiler.op_array.decl_line)?;
 
                 // Set up parameter CVs and default values
                 func_compiler.op_array.param_count = params.len() as u32;
@@ -4773,6 +4769,14 @@ impl Compiler {
                                 if matches!(self.op_array.literals.get(k as usize),
                                     Some(Value::String(s)) if s.as_bytes() == key.as_slice()))
                     });
+                    // A closure's `use` variables live in the same static table.
+                    let dup = dup
+                        || (name.as_slice() != b"this"
+                            && self
+                                .op_array
+                                .closure_capture_names
+                                .iter()
+                                .any(|n| n.as_slice() == name.as_slice()));
                     if dup {
                         return Err(CompileError {
                             message: format!(
@@ -4882,6 +4886,24 @@ impl Compiler {
                         return Err(CompileError {
                             message: "Can't use nullsafe operator in write context".into(),
                             line: stmt.span.line,
+                        });
+                    }
+                    // zend_compile_unset() -> zend_ensure_writable_variable()
+                    let call_msg = match &expr.kind {
+                        ExprKind::FunctionCall { .. } => {
+                            Some("Can't use function return value in write context")
+                        }
+                        ExprKind::MethodCall { .. }
+                        | ExprKind::StaticMethodCall { .. }
+                        | ExprKind::DynamicStaticMethodCall { .. } => {
+                            Some("Can't use method return value in write context")
+                        }
+                        _ => None,
+                    };
+                    if let Some(msg) = call_msg {
+                        return Err(CompileError {
+                            message: msg.into(),
+                            line: expr.span.line,
                         });
                     }
                     // zend_compile_var_inner(): the base of an unset
@@ -5781,15 +5803,7 @@ impl Compiler {
                             }
                             // Properties cannot have type callable
                             if let Some(hint) = type_hint {
-                                let check_callable = |h: &TypeHint| -> bool {
-                                    match h {
-                                        TypeHint::Simple(n) => n.eq_ignore_ascii_case(b"callable"),
-                                        TypeHint::Nullable(inner) => matches!(inner.as_ref(), TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"callable")),
-                                        TypeHint::Union(types) => types.iter().any(|t| matches!(t, TypeHint::Simple(n) if n.eq_ignore_ascii_case(b"callable"))),
-                                        _ => false,
-                                    }
-                                };
-                                if check_callable(hint) {
+                                if type_hint_has_callable(hint) {
                                     return Err(CompileError {
                                         message: format!(
                                             "Property {}::${} cannot have type {}",
@@ -7604,7 +7618,9 @@ impl Compiler {
                                     }
                                 }
                                 // Check for promoted properties in abstract constructors
-                                if mn_lower == b"__construct" && *is_abstract {
+                                if mn_lower == b"__construct"
+                                    && (*is_abstract || modifiers.is_interface)
+                                {
                                     for param in params {
                                         if param.visibility.is_some()
                                             || param.readonly
@@ -7718,6 +7734,14 @@ impl Compiler {
                                                         &self.use_map,
                                                     )
                                                 });
+                                            if param.variadic {
+                                                return Err(CompileError {
+                                                    message:
+                                                        "Cannot declare variadic promoted property"
+                                                            .to_string(),
+                                                    line: *method_line,
+                                                });
+                                            }
                                             // Check for duplicate property from promotion
                                             if class.properties.iter().any(|p| p.name == param.name)
                                             {
@@ -7728,6 +7752,21 @@ impl Compiler {
                                                         String::from_utf8_lossy(&param.name)
                                                     ),
                                                     line: *method_line,
+                                                });
+                                            }
+                                            if let Some(hint) = param
+                                                .type_hint
+                                                .as_ref()
+                                                .filter(|h| type_hint_has_callable(h))
+                                            {
+                                                return Err(CompileError {
+                                                    message: format!(
+                                                        "Property {}::${} cannot have type {}",
+                                                        String::from_utf8_lossy(name),
+                                                        String::from_utf8_lossy(&param.name),
+                                                        type_hint_display(hint)
+                                                    ),
+                                                    line: param.line,
                                                 });
                                             }
                                             let pa = self.compile_attributes_target(
@@ -9913,6 +9952,8 @@ impl Compiler {
                 self.label_offsets.insert(name.clone(), offset);
                 self.label_finally_paths
                     .insert(name.clone(), self.finally_path.clone());
+                let loop_path = self.loop_stack.iter().map(|l| l.id).collect();
+                self.label_loop_paths.insert(name.clone(), loop_path);
                 self.label_try_finally
                     .insert(name.clone(), self.try_finally_ids.clone());
                 // Forward gotos that may leave try/finally regions.
@@ -9953,6 +9994,9 @@ impl Compiler {
                     self.finally_path.clone(),
                     stmt.span.line,
                 ));
+                let loop_path = self.loop_stack.iter().map(|l| l.id).collect();
+                self.goto_loop_paths
+                    .push((name.clone(), loop_path, stmt.span.line));
                 // The loops it leaves free their variables first
                 // (zend_resolve_goto_label() keeps the frees of the loops the
                 // label is in).
@@ -10148,22 +10192,11 @@ impl Compiler {
                 });
                 Ok(OperandType::Cv(cv))
             }
-            ExprKind::ArrayAccess {
+            ExprKind::ArrayAccess { array, index } => Ok(OperandType::Tmp(self.compile_dim_ref(
                 array,
-                index: Some(index),
-            } => {
-                let arr = self.compile_dim_write_base(array)?;
-                let idx = self.compile_expr(index)?;
-                let t = self.op_array.alloc_temp();
-                self.op_array.emit(Op {
-                    opcode: OpCode::ArrayGetRef,
-                    op1: arr,
-                    op2: idx,
-                    result: OperandType::Tmp(t),
-                    line,
-                });
-                Ok(OperandType::Tmp(t))
-            }
+                index.as_deref(),
+                line,
+            )?)),
             ExprKind::PropertyAccess {
                 object,
                 property,
@@ -11541,7 +11574,7 @@ impl Compiler {
     /// zend_compile_var_inner() in write context: the base of a dimension
     /// or property chain being written must itself be a variable or a call
     /// (`"abc"[0] = 1`, `[1][0]++`, `(new A)->x = 1` are compile errors).
-    fn check_writable_base(target: &Expr) -> CompileResult<()> {
+    fn check_writable_base(&self, target: &Expr) -> CompileResult<()> {
         let mut root = target;
         loop {
             match &root.kind {
@@ -11553,6 +11586,9 @@ impl Compiler {
                 } => root = object,
                 _ => break,
             }
+        }
+        if !std::ptr::eq(root, target) && self.is_special_builtin_call(root) {
+            return Err(Self::builtin_write_context_error(root.span.line));
         }
         if std::ptr::eq(root, target)
             || matches!(
@@ -11576,6 +11612,46 @@ impl Compiler {
         })
     }
 
+    /// zend_separate_if_call_and_write(): a call compiled to a VM builtin
+    /// yields a TMP, which cannot be written through or referenced.
+    fn builtin_write_context_error(line: u32) -> CompileError {
+        CompileError {
+            message: "Cannot use result of built-in function in write context".into(),
+            line,
+        }
+    }
+
+    /// A call zend_try_compile_special_func() turns into an opcode (the
+    /// commonly used subset): a global internal function, unqualified only
+    /// outside a namespace, called with plain positional arguments.
+    fn is_special_builtin_call(&self, e: &Expr) -> bool {
+        let ExprKind::FunctionCall { name, args } = &e.kind else {
+            return false;
+        };
+        let ExprKind::Identifier(n) = &name.kind else {
+            return false;
+        };
+        let n: &[u8] = match n.strip_prefix(b"\\") {
+            Some(rest) => rest,
+            None if self.current_namespace.is_empty() => n,
+            None => return false,
+        };
+        if n.contains(&b'\\') || args.iter().any(|a| a.unpack || a.name.is_some()) {
+            return false;
+        }
+        let lower = n.to_ascii_lowercase();
+        let argc = args.len();
+        match lower.as_slice() {
+            b"strlen" | b"is_null" | b"is_bool" | b"is_long" | b"is_int" | b"is_integer"
+            | b"is_float" | b"is_double" | b"is_string" | b"is_array" | b"is_object"
+            | b"is_resource" | b"is_scalar" | b"boolval" | b"intval" | b"floatval"
+            | b"doubleval" | b"strval" | b"gettype" => argc == 1,
+            b"count" | b"sizeof" => argc == 1,
+            b"get_called_class" | b"func_num_args" | b"func_get_args" => argc == 0,
+            _ => false,
+        }
+    }
+
     fn compile_expr(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         self.zend_lineno = expr.span.line;
         if self.memoize_mode != 0
@@ -11586,11 +11662,14 @@ impl Compiler {
         }
         match &expr.kind {
             ExprKind::Assign { target, .. } | ExprKind::CompoundAssign { target, .. } => {
-                Self::check_writable_base(target)?
+                self.check_writable_base(target)?
             }
             ExprKind::AssignRef { target, value } => {
-                Self::check_writable_base(target)?;
-                Self::check_writable_base(value)?;
+                self.check_writable_base(target)?;
+                self.check_writable_base(value)?;
+                if self.is_special_builtin_call(value) {
+                    return Err(Self::builtin_write_context_error(value.span.line));
+                }
             }
             ExprKind::UnaryOp {
                 op:
@@ -11600,7 +11679,7 @@ impl Compiler {
                     | UnaryOp::PostDecrement,
                 operand,
                 ..
-            } => Self::check_writable_base(operand)?,
+            } => self.check_writable_base(operand)?,
             _ => {}
         }
         match &expr.kind {
@@ -12579,6 +12658,46 @@ impl Compiler {
                     // Increment/decrement on array element: $arr[$key]++ / --$arr[$key]
                     // Without explicit read-modify-write the inc would land on a
                     // throwaway temp and the array element would never change.
+                    // `$a[]++`: FETCH_DIM_RW appends a null element, which is then
+                    // incremented/decremented in place.
+                    if let ExprKind::ArrayAccess { array, index: None } = &operand.kind {
+                        let arr_op =
+                            self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::Rw)?;
+                        let is_inc = matches!(op, UnaryOp::PostIncrement | UnaryOp::PreIncrement);
+                        let new_val = if is_inc { Value::Long(1) } else { Value::Null };
+                        let new_idx = self.op_array.add_literal(new_val);
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayAppend,
+                            op1: arr_op,
+                            op2: OperandType::Const(new_idx),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        let null_idx = self.op_array.add_literal(Value::Null);
+                        let old_tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::Assign,
+                            op1: OperandType::Tmp(old_tmp),
+                            op2: OperandType::Const(null_idx),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        if !is_inc {
+                            // "Decrement on type null has no effect"
+                            let t = self.op_array.alloc_temp();
+                            self.op_array.emit(Op {
+                                opcode: OpCode::PostDecrement,
+                                op1: OperandType::Tmp(old_tmp),
+                                op2: OperandType::Unused,
+                                result: OperandType::Tmp(t),
+                                line: expr.span.line,
+                            });
+                        }
+                        return Ok(match op {
+                            UnaryOp::PreIncrement => OperandType::Const(new_idx),
+                            _ => OperandType::Tmp(old_tmp),
+                        });
+                    }
                     if let ExprKind::ArrayAccess { array, index } = &operand.kind {
                         let arr_op =
                             self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::Rw)?;
@@ -13097,18 +13216,18 @@ impl Compiler {
             }
 
             ExprKind::Cast(cast_type, inner) => {
+                if matches!(cast_type, CastType::Unset) {
+                    return Err(CompileError {
+                        message: "The (unset) cast is no longer supported".into(),
+                        line: expr.span.line,
+                    });
+                }
                 if matches!(cast_type, CastType::Void) {
                     // (void) cast: evaluate inner expression for side effects, discard result
                     let _val = self.compile_expr(inner)?;
                     // Just return a Null literal - the expression was already evaluated
                     let null_idx = self.op_array.add_literal(Value::Null);
                     return Ok(OperandType::Const(null_idx));
-                }
-                if matches!(cast_type, CastType::Unset) {
-                    return Err(CompileError {
-                        message: "The (unset) cast is no longer supported".into(),
-                        line: expr.span.line,
-                    });
                 }
                 let val = self.compile_expr(inner)?;
                 let tmp = self.op_array.alloc_temp();
@@ -13119,8 +13238,7 @@ impl Compiler {
                     CastType::Bool => OpCode::CastBool,
                     CastType::Array => OpCode::CastArray,
                     CastType::Object => OpCode::CastObject,
-                    CastType::Unset => OpCode::Nop, // (unset) is deprecated
-                    CastType::Void => unreachable!(), // handled above
+                    CastType::Unset | CastType::Void => unreachable!(), // handled above
                 };
                 self.op_array.emit(Op {
                     opcode,
@@ -17681,6 +17799,9 @@ impl Compiler {
                 rec(operand)
             }
             E::Cast(ct, inner) => {
+                if *ct == goro_parser::ast::CastType::Unset {
+                    return Some("The (unset) cast is no longer supported".into());
+                }
                 if *ct == goro_parser::ast::CastType::Object && !allow_dynamic {
                     return Some("Object casts are not supported in this context".into());
                 }
@@ -20450,6 +20571,21 @@ fn args_to_source_string(args: &[Argument]) -> String {
         .join(", ")
 }
 
+fn next_loop_id() -> u32 {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether a type declaration includes `callable` (not allowed on properties).
+fn type_hint_has_callable(h: &TypeHint) -> bool {
+    match h {
+        TypeHint::Simple(n) => n.eq_ignore_ascii_case(b"callable"),
+        TypeHint::Nullable(inner) => type_hint_has_callable(inner),
+        TypeHint::Union(types) => types.iter().any(type_hint_has_callable),
+        _ => false,
+    }
+}
+
 /// zend_check_magic_method_arg_type(): whether a declared parameter type
 /// admits `ty` ("string" or "array"), e.g. `mixed`, `?string`, `string|int`.
 fn type_hint_admits(th: &TypeHint, ty: &[u8]) -> bool {
@@ -20466,9 +20602,34 @@ fn type_hint_admits(th: &TypeHint, ty: &[u8]) -> bool {
 }
 
 /// "Redefinition of parameter $x" for duplicate parameter names.
+/// Also the other per-parameter checks of zend_compile_params(), in its order:
+/// auto-globals, `$this`, a variadic that is not last, a variadic default.
 fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
     let mut seen = std::collections::HashSet::new();
+    let mut saw_variadic = false;
     for p in params {
+        // CG(zend_lineno) is the parameter's line.
+        let line = if p.line > 0 { p.line } else { line };
+        if matches!(
+            p.name.as_slice(),
+            b"GLOBALS"
+                | b"_GET"
+                | b"_POST"
+                | b"_COOKIE"
+                | b"_SERVER"
+                | b"_ENV"
+                | b"_REQUEST"
+                | b"_FILES"
+                | b"_SESSION"
+        ) {
+            return Err(CompileError {
+                message: format!(
+                    "Cannot re-assign auto-global variable {}",
+                    String::from_utf8_lossy(&p.name)
+                ),
+                line,
+            });
+        }
         if !seen.insert(p.name.as_slice()) {
             return Err(CompileError {
                 message: format!(
@@ -20477,6 +20638,27 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
                 ),
                 line,
             });
+        }
+        if p.name == b"this" {
+            return Err(CompileError {
+                message: "Cannot use $this as parameter".into(),
+                line,
+            });
+        }
+        if saw_variadic {
+            return Err(CompileError {
+                message: "Only the last parameter can be variadic".into(),
+                line,
+            });
+        }
+        if p.variadic {
+            saw_variadic = true;
+            if p.default.is_some() {
+                return Err(CompileError {
+                    message: "Variadic parameter cannot have a default value".into(),
+                    line,
+                });
+            }
         }
         if let Some(message) = p
             .default

@@ -1858,6 +1858,7 @@ impl Parser {
             // to the first token of the parameter, whichever comes first).
             let param_doc_comment = self.take_doc_comment();
             let param_attributes = self.parse_attributes()?;
+            let param_line = self.current().span.line;
             let mut visibility = None;
             let mut set_visibility = None;
             let mut readonly = false;
@@ -1945,6 +1946,7 @@ impl Parser {
             };
 
             params.push(Param {
+                line: param_line,
                 name,
                 type_hint,
                 default,
