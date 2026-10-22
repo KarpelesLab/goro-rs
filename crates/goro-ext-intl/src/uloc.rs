@@ -1276,20 +1276,81 @@ pub fn is_right_to_left(id: &[u8]) -> bool {
 // ---------------------------------------------------------------------------
 // locdispnames.cpp
 
-/// The display-data locales to search for display locale `display`: its
-/// language (or, as ures_open() falls back, the default locale's), then
-/// root.
+/// The parent of a display-data locale (CLDR parentLocales, else
+/// truncation; root after a language).
+fn disp_parent(l: &str) -> String {
+    if let Some((_, p)) = data::PARENTS.iter().find(|(c, _)| *c == l) {
+        return p.to_string();
+    }
+    match l.rfind('_') {
+        Some(p) => l[..p].to_string(),
+        None => "root".to_string(),
+    }
+}
+
+/// The display-data locales to search for display locale `display`, as
+/// ures_open() resolves it: the best available locale (by truncation; else
+/// the default locale's), then its parents, then root.
 fn disp_chain(display: &str) -> Vec<&'static str> {
-    let find = |id: &str| -> Option<&'static str> {
-        let l = get_language(id.as_bytes()).ok()?;
-        data::LOCALES.iter().copied().find(|x| *x == l && *x != "root")
-    };
     let mut v = Vec::new();
-    if let Some(l) = find(display).or_else(|| find(&crate::common::icu_default_locale())) {
-        v.push(l);
+    if let Some(l) = disp_best(display).or_else(|| disp_best(&crate::common::icu_default_locale())) {
+        let mut cur = l.to_string();
+        while cur != "root" {
+            if let Some(x) = data::LOCALES.iter().copied().find(|x| *x == cur) {
+                v.push(x);
+            }
+            cur = disp_parent(&cur);
+        }
     }
     v.push("root");
     v
+}
+
+/// Whether display locale `display` has no data of its own (ures_open()
+/// then uses the default locale, with U_USING_DEFAULT_WARNING).
+fn disp_is_default(display: &str) -> bool {
+    disp_best(display).is_none()
+}
+
+/// The best available display-data locale for an ID (not root).
+fn disp_best(id: &str) -> Option<&'static str> {
+    let find = |id: &str| -> Option<&'static str> {
+        let mut cur = get_base_name(id.as_bytes()).ok()?;
+        // zh_TW is an alias of zh_Hant_TW: a likely script other than the
+        // language's own
+        if let Ok(st) = get_subtags(cur.as_bytes()) {
+            if st.script.is_empty() && !st.region.is_empty() {
+                let (l, r) = (s(&st.language), s(&st.region));
+                let likely = |t: &str| intl::locale::Locale::parse(t).ok().map(|x| x.maximize().script);
+                if let (Some(Some(sc)), Some(Some(dsc))) = (likely(&format!("{}-{}", l, r)), likely(&l)) {
+                    if sc != dsc {
+                        let mut v = format!("{}_{}_{}", l, sc, r);
+                        if !st.variant.is_empty() {
+                            v.push('_');
+                            v.push_str(&s(&st.variant));
+                        }
+                        cur = v;
+                    }
+                }
+            }
+        }
+        while !cur.is_empty() {
+            if let Some(l) = data::LOCALES.iter().copied().find(|x| *x == cur && *x != "root") {
+                return Some(l);
+            }
+            match cur.rfind('_') {
+                Some(p) => {
+                    cur.truncate(p);
+                    while cur.ends_with('_') {
+                        cur.pop();
+                    }
+                }
+                None => break,
+            }
+        }
+        None
+    };
+    find(id)
 }
 
 type Table = &'static [(&'static str, &'static str, &'static str)];
@@ -1344,8 +1405,12 @@ pub fn display_script(id: &[u8], display: &str) -> Result<String, i32> {
     if sc.is_empty() {
         return Ok(sc);
     }
-    if let Some(n) = chain_lookup(data::SCRIPTS_STANDALONE, display, &sc) {
-        return Ok(n.to_string());
+    // (a display locale without data of its own reports
+    // U_USING_DEFAULT_WARNING, taken as the stand-alone form missing)
+    if !disp_is_default(display) {
+        if let Some(n) = chain_lookup(data::SCRIPTS_STANDALONE, display, &sc) {
+            return Ok(n.to_string());
+        }
     }
     display_script_in_context(id, display)
 }
