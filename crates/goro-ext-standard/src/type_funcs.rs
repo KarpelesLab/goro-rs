@@ -449,6 +449,23 @@ fn settype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Value::False
                 }
             }
+            // convert_to_array() of a NAN wraps whatever the error handler
+            // left in the variable.
+            "array" if matches!(current, Value::Double(d) if d.is_nan()) => {
+                let line = _vm.current_line;
+                _vm.warn_nan_coercion(&current, "array", line);
+                let mut arr = goro_core::array::PhpArray::new();
+                arr.push(r.borrow().clone());
+                Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr)))
+            }
+            "object" if matches!(current, Value::Double(d) if d.is_nan()) => {
+                let line = _vm.current_line;
+                _vm.warn_nan_coercion(&current, "object", line);
+                let mut obj =
+                    goro_core::object::PhpObject::new(b"stdClass".to_vec(), _vm.alloc_object_id());
+                obj.set_property(b"scalar".to_vec(), r.borrow().clone());
+                Value::Object(std::rc::Rc::new(std::cell::RefCell::new(obj)))
+            }
             "array" => match {
                 let line = _vm.current_line;
                 _vm.warn_nan_coercion(&current, "array", line);
