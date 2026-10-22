@@ -1100,6 +1100,9 @@ pub struct Vm {
     /// An internal tick function (php_add_tick_function()), run before the
     /// user ones.
     pub tick_hook: Option<fn(&mut Vm)>,
+    /// zend_fiber_switch_blocking: >0 while tick functions or signal
+    /// handlers run (Fiber::start/resume/throw/suspend throw).
+    pub fiber_switch_blocking: u32,
     /// Indices into `pending_calls` of calls dispatched through a Closure
     /// object (closures bypass method visibility checks).
     pub closure_pending_calls: Vec<usize>,
@@ -1587,6 +1590,7 @@ impl Vm {
             tick_functions: Vec::new(),
             interrupt_hook: None,
             tick_hook: None,
+            fiber_switch_blocking: 0,
             closure_pending_calls: Vec::new(),
             error_handler_threw: false,
             fatal_bailout: false,
@@ -27077,9 +27081,14 @@ impl Vm {
                                 line: op.line,
                             });
                         }
-                        if self.fiber_depth == 0 && !crate::fiber::in_fiber() {
-                            // Not inside a fiber
-                            let msg = "Cannot suspend outside of a fiber";
+                        let outside = self.fiber_depth == 0 && !crate::fiber::in_fiber();
+                        if outside || self.fiber_switch_blocking > 0 {
+                            // Not inside a fiber / zend_fiber_switch_blocked()
+                            let msg = if outside {
+                                "Cannot suspend outside of a fiber"
+                            } else {
+                                "Cannot switch fibers in current execution context"
+                            };
                             let exc = self.create_exception(b"FiberError", msg, op.line);
                             self.current_exception = Some(exc);
                             self.call_stack.pop();
@@ -57678,7 +57687,8 @@ impl Vm {
                     line,
                 });
             }
-            if self.fiber_depth == 0 && !crate::fiber::in_fiber() {
+            let outside = self.fiber_depth == 0 && !crate::fiber::in_fiber();
+            if outside || self.fiber_switch_blocking > 0 {
                 self.call_stack.push((
                     "Fiber::suspend".to_string(),
                     self.current_file.clone(),
@@ -57686,7 +57696,11 @@ impl Vm {
                     call.args.clone(),
                     false,
                 ));
-                let msg = "Cannot suspend outside of a fiber";
+                let msg = if outside {
+                    "Cannot suspend outside of a fiber"
+                } else {
+                    "Cannot switch fibers in current execution context"
+                };
                 let exc = self.create_exception(b"FiberError", msg, line);
                 self.call_stack.pop();
                 self.current_exception = Some(exc);
@@ -58365,6 +58379,15 @@ impl Vm {
         args: &[Value],
         line: u32,
     ) -> Result<Value, VmError> {
+        if self.fiber_switch_blocking > 0 {
+            let msg = "Cannot switch fibers in current execution context";
+            let exc = self.create_exception(b"FiberError", msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught FiberError: {}", msg),
+                line,
+            });
+        }
         let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
         if state != FiberState::Created as i64 {
             let msg = "Cannot start a fiber that has already been started";
@@ -59555,6 +59578,15 @@ impl Vm {
         args: &[Value],
         line: u32,
     ) -> Result<Value, VmError> {
+        if self.fiber_switch_blocking > 0 {
+            let msg = "Cannot switch fibers in current execution context";
+            let exc = self.create_exception(b"FiberError", msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught FiberError: {}", msg),
+                line,
+            });
+        }
         let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
         if state != FiberState::Suspended as i64 {
             let msg = "Cannot resume a fiber that is not suspended";
@@ -59673,6 +59705,15 @@ impl Vm {
         args: &[Value],
         line: u32,
     ) -> Result<Value, VmError> {
+        if self.fiber_switch_blocking > 0 {
+            let msg = "Cannot switch fibers in current execution context";
+            let exc = self.create_exception(b"FiberError", msg, line);
+            self.current_exception = Some(exc);
+            return Err(VmError {
+                message: format!("Uncaught FiberError: {}", msg),
+                line,
+            });
+        }
         let state = obj_rc.borrow().get_property(b"__fiber_state").to_long();
         if state != FiberState::Suspended as i64 {
             let msg = "Cannot resume a fiber that is not suspended";

@@ -413,6 +413,13 @@ impl Vm {
     /// run_user_tick_functions(): call each registered tick function (one
     /// already running is skipped).
     pub fn run_tick_functions(&mut self) {
+        // ZEND_TICKS: zend_fiber_switch_block() around zend_ticks_function.
+        self.fiber_switch_blocking += 1;
+        self.run_tick_functions_blocked();
+        self.fiber_switch_blocking -= 1;
+    }
+
+    fn run_tick_functions_blocked(&mut self) {
         if let Some(hook) = self.tick_hook {
             hook(self);
         }
@@ -424,7 +431,10 @@ impl Vm {
             let (cb, args, calling) = self.tick_functions[i].clone();
             if !calling {
                 self.tick_functions[i].2 = true;
+                // (called from the ticked statement's code)
+                self.ucf_call_line = Some(self.current_line);
                 let _ = self.call_callback(&cb, &args);
+                self.ucf_call_line = None;
                 // The list may have changed while the function ran.
                 if let Some(e) = self.tick_functions.get_mut(i) {
                     if callables_equal(&e.0, &cb) {

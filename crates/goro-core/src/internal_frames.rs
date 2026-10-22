@@ -350,6 +350,12 @@ impl Vm {
         r
     }
 
+    #[cold]
+    #[inline(never)]
+    fn fcall_interrupt(&mut self) {
+        self.interrupt_after_internal_call();
+    }
+
     /// zend_call_function() after an internal function returned: a pending
     /// EG(vm_interrupt) runs zend_interrupt_function (a timeout is left to
     /// the executor).
@@ -411,6 +417,11 @@ impl Vm {
         } else {
             self.call_builtin_with_observer(f, lname, args)
         };
+        // ZEND_VM_FCALL_INTERRUPT_CHECK(call): a signal that arrived during
+        // the call is handled while its frame is still the current one.
+        if crate::value::VM_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed) {
+            self.fcall_interrupt();
+        }
         if let Ok(Value::Resource(res)) = &r {
             if res.id() >= first_res {
                 crate::value::adopt_new_resource(res.id());

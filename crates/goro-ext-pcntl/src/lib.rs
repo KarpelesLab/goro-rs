@@ -130,6 +130,8 @@ pub fn dispatch(vm: &mut Vm) {
         unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
         return;
     }
+    // Prevent switching fibers when handling signals
+    vm.fiber_switch_blocking += 1;
     PROCESSING.with(|p| p.set(true));
     let queue: Vec<(i32, libc::siginfo_t)> = (0..n)
         .map(|i| unsafe { (*QUEUE.slots.get())[i].assume_init() })
@@ -150,6 +152,7 @@ pub fn dispatch(vm: &mut Vm) {
     }
     PENDING.store(false, Ordering::Release);
     PROCESSING.with(|p| p.set(false));
+    vm.fiber_switch_blocking -= 1;
     unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
 }
 
