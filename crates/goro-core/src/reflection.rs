@@ -9917,11 +9917,11 @@ fn reflection_running_generator(
     let start = vm
         .running_generators
         .iter()
-        .rposition(|(a, _)| *a == addr)
+        .rposition(|(a, _, _)| *a == addr)
         .unwrap_or(vm.running_generators.len().saturating_sub(1));
     let names: Vec<String> = vm.running_generators[start..]
         .iter()
-        .map(|(_, n)| n.clone())
+        .map(|(_, n, _)| n.clone())
         .collect();
     match method {
         b"getexecutingfile" => Value::String(PhpString::from_string(vm.current_file.clone())),

@@ -174,6 +174,16 @@ pub fn write_resource(vm: &mut Vm, filename: &str, data: &[u8]) -> bool {
         );
         return matches!(r, Ok(Value::Long(_)));
     }
+    // php_libxml_streams_IO_open_write_wrapper(): the plain files wrapper
+    // with REPORT_ERRORS checks open_basedir.
+    let f = crate::dom::active_fn(vm);
+    if !vm.check_open_basedir(&f, &path) {
+        vm.emit_warning(&format!(
+            "{}({}): Failed to open stream: Operation not permitted",
+            f, filename
+        ));
+        return false;
+    }
     let full = resolve_path(vm, &path);
     std::fs::write(full, data).is_ok()
 }

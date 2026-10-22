@@ -17713,7 +17713,9 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
                             }
                             continue;
                         }
-                        vm.functions.remove(&lower);
+                        if let Some(f) = vm.functions.remove(&lower) {
+                            vm.disabled_function_impls.insert(lower.clone(), f);
+                        }
                         vm.disabled_functions.insert(lower);
                     }
                 }

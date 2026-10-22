@@ -1279,6 +1279,9 @@ pub struct Vm {
     pub(crate) anon_pending: HashMap<Vec<u8>, ClassEntry>,
     /// A deferred anonymous class is being bound.
     pub(crate) declaring_anon: bool,
+    /// The implementations of the disabled functions: internal code that
+    /// calls the C function directly (SplFileObject::fstat()) still can.
+    pub disabled_function_impls: std::collections::HashMap<Vec<u8>, BuiltinFn>,
 }
 
 /// See `Vm::socket_stream_hooks`.
@@ -2444,6 +2447,7 @@ impl Vm {
             disabled_functions: std::collections::HashSet::new(),
             anon_pending: HashMap::new(),
             declaring_anon: false,
+            disabled_function_impls: std::collections::HashMap::new(),
         };
         // Built-in enum: Random\IntervalBoundary
         let mut iv = ClassEntry::new(b"Random\\IntervalBoundary".to_vec());
@@ -54943,10 +54947,22 @@ impl Vm {
     /// The "Cannot create dynamic property" error of a write fetch
     /// (`$o->p[] = v`, `&$o->p`) on an internal class that forbids dynamic
     /// properties, when `prop` is not set.
-    pub(crate) fn forbidden_dynamic_prop_w(&self, obj: &Value, prop: &[u8]) -> Option<String> {
+    pub(crate) fn forbidden_dynamic_prop_w(&mut self, obj: &Value, prop: &[u8]) -> Option<String> {
         let Value::Object(o) = obj else {
             return None;
         };
+        // An internal class's get_property_ptr_ptr may refuse (DatePeriod's
+        // readonly properties): the Error it throws.
+        if !self.native_class_handlers.is_empty() && !self.native_prop_write_allowed(o, prop, 0) {
+            if let Some(Value::Object(e)) = self.current_exception.take() {
+                return Some(
+                    e.borrow()
+                        .get_property(b"message")
+                        .to_php_string()
+                        .to_string_lossy(),
+                );
+            }
+        }
         let ob = o.borrow();
         let cl = ob.class_name.to_ascii_lowercase();
         if !matches!(

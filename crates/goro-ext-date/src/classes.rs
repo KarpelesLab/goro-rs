@@ -588,7 +588,48 @@ fn prop_visibility(vm: &Vm, class_name: &[u8], prop: &[u8]) -> Option<(bool, boo
 }
 
 /// restore_custom_*_properties + update_property
-fn restore_custom_props(vm: &Vm, o: &Obj, a: &PhpArray, internal: &[&[u8]]) {
+fn restore_custom_props(vm: &mut Vm, o: &Obj, a: &PhpArray, internal: &[&[u8]]) {
+    // zend_update_property() creating a public property the class does not
+    // declare: "Creation of dynamic property" (unless it allows them).
+    let cl = o.borrow().class_name.to_ascii_lowercase();
+    let mut dynamic: Vec<Vec<u8>> = Vec::new();
+    {
+        let ob = o.borrow();
+        for (k, v) in a.iter() {
+            if let ArrayKey::String(name) = k {
+                let nb = name.as_bytes();
+                if matches!(v, Value::Reference(_))
+                    || internal.contains(&nb)
+                    || nb.first() == Some(&0)
+                    || ob.has_property(nb)
+                {
+                    continue;
+                }
+                let mut declared = false;
+                let mut allows = false;
+                let mut cur = Some(cl.clone());
+                while let Some(c) = cur.take() {
+                    let Some(ce) = vm.classes.get(&c) else { break };
+                    declared |= ce.properties.iter().any(|p| p.name == nb && !p.is_static);
+                    allows |= ce.allow_dynamic_properties;
+                    cur = ce.parent.as_ref().map(|p| p.to_ascii_lowercase());
+                }
+                if !declared && !allows {
+                    dynamic.push(nb.to_vec());
+                }
+            }
+        }
+    }
+    if !dynamic.is_empty() {
+        let disp = goro_core::value::display_class_name(&o.borrow().class_name).to_string();
+        for n in dynamic {
+            vm.emit_deprecated(&format!(
+                "Creation of dynamic property {}::${} is deprecated",
+                disp,
+                String::from_utf8_lossy(&n)
+            ));
+        }
+    }
     let mut ob = o.borrow_mut();
     for (k, v) in a.iter() {
         if let ArrayKey::String(name) = k {

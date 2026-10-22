@@ -74,6 +74,21 @@ pub fn user_entity_load(
     };
     let resource: Option<String> = match &rv {
         Value::String(st) => Some(st.to_string_lossy()),
+        Value::Resource(_)
+            if rv
+                .resource_type_name()
+                .is_some_and(|t| t != b"stream" && t != b"persistent stream") =>
+        {
+            // php_stream_from_zval_no_verify() found no stream
+            let name = String::from_utf8_lossy(&vm.callable_name(&cb)).into_owned();
+            let msg = format!(
+                "{}(): The user entity loader callback \"{}\" has returned a resource, but it is not a stream",
+                fname, name
+            );
+            let e = vm.create_exception(b"Error", &msg, vm.current_line);
+            vm.current_exception = Some(e);
+            return Some(None);
+        }
         Value::Resource(_) => {
             let data = vm
                 .functions

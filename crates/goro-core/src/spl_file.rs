@@ -91,7 +91,12 @@ impl Vm {
     /// Call a registered builtin function by name. Returns None when the
     /// function failed (an exception may be set).
     pub(crate) fn spl_call_builtin(&mut self, name: &[u8], args: &[Value]) -> Option<Value> {
-        let f = self.functions.get(name).copied()?;
+        // (the stream layer itself: a disabled function still works here)
+        let f = self
+            .functions
+            .get(name)
+            .or_else(|| self.disabled_function_impls.get(name))
+            .copied()?;
         f(self, args).ok()
     }
 
@@ -678,12 +683,50 @@ impl Vm {
             let _ = fname;
             file_name.to_vec()
         };
+        // intern->path / orig_path come from the opened stream's orig_path:
+        // the file found through the include path.
+        let resolved = if use_include_path
+            && !fname_str.contains("://")
+            && !fname_str.starts_with('/')
+            && !std::path::Path::new(&fname_str).exists()
+        {
+            // php_resolve_path(): the include path, then the directory of
+            // the executing script.
+            let inc = self
+                .constants
+                .get(b"include_path".as_slice())
+                .map(|v| v.to_php_string().to_string_lossy())
+                .unwrap_or_else(|| ".".to_string());
+            let script_dir = std::path::Path::new(&self.current_file)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned());
+            inc.split(':')
+                .filter(|d| !d.is_empty())
+                .map(|d| d.to_string())
+                .chain(script_dir)
+                .map(|d| format!("{}/{}", d, fname_str))
+                .find(|c| std::path::Path::new(c).is_file())
+                .map(|c| {
+                    std::fs::canonicalize(&c)
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or(c)
+                        .into_bytes()
+                })
+        } else {
+            None
+        };
         let mut ob = obj.borrow_mut();
         ob.set_property(b"__spl_stream".to_vec(), res);
         ob.set_property(
             b"__spl_file_path".to_vec(),
             Value::String(PhpString::from_vec(fname)),
         );
+        if let Some(r) = resolved {
+            ob.set_property(
+                b"__spl_orig_path".to_vec(),
+                Value::String(PhpString::from_vec(r)),
+            );
+        }
         ob.set_property(
             b"__spl_open_mode".to_vec(),
             Value::String(PhpString::from_vec(mode.to_vec())),
@@ -797,11 +840,14 @@ impl Vm {
         if !self.sfo_open(obj, &file_name, &mode, use_include_path, context, func) {
             return false;
         }
-        // path: directory part of the opened path
-        let orig = prop(obj, b"__spl_file_path")
-            .to_php_string()
-            .as_bytes()
-            .to_vec();
+        // path: directory part of the opened path (stream->orig_path)
+        let orig = match prop(obj, b"__spl_orig_path") {
+            Value::String(s) => s.as_bytes().to_vec(),
+            _ => prop(obj, b"__spl_file_path")
+                .to_php_string()
+                .as_bytes()
+                .to_vec(),
+        };
         let mut path_len = orig.len();
         if path_len > 1 && orig[path_len - 1] == b'/' {
             path_len -= 1;
