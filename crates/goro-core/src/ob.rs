@@ -291,6 +291,9 @@ impl Vm {
                     Value::String(PhpString::from_vec(data)),
                     Value::Long(ctx.op),
                 ];
+                // The diagnostics after the call are raised at the line that
+                // ran the handler.
+                let call_line = self.current_line;
                 let r = self.call_callback(&cb, &args);
                 match r {
                     Ok(retval) if self.current_exception.is_none() => {
@@ -301,10 +304,14 @@ impl Vm {
                                 let name =
                                     String::from_utf8_lossy(&self.ob_handlers[i].name).to_string();
                                 let origin = self.ob_origin();
-                                self.emit_deprecated(&format!(
-                                    "{}(): Producing output from user output handler {} is deprecated",
-                                    origin, name
-                                ));
+                                self.current_line = call_line;
+                                self.emit_deprecated_at(
+                                    &format!(
+                                        "{}(): Producing output from user output handler {} is deprecated",
+                                        origin, name
+                                    ),
+                                    call_line,
+                                );
                                 still_have_handler = false;
                                 if let Some(j) = self.ob_index_of(id) {
                                     self.ob_handlers[j].flags &= !OBH_DISABLED;

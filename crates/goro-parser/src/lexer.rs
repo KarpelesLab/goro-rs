@@ -725,7 +725,16 @@ impl<'a> Lexer<'a> {
                                     Span::new(self.pos as u32, self.pos as u32, self.line),
                                 ));
                             }
-                            Some(b'\'') | Some(b'"') => {
+                            // <ST_VAR_OFFSET>[ \n\r\t\\'#]: "Invalid char in
+                            // var offset", an empty T_ENCAPSED_AND_WHITESPACE
+                            // the grammar rejects.
+                            Some(b'\'' | b' ' | b'\n' | b'\r' | b'\t' | b'\\' | b'#') => {
+                                crate::push_lexer_error(
+                                    "syntax error, unexpected string content \"\", expecting \"-\" or identifier or variable or number".into(),
+                                    self.line,
+                                );
+                            }
+                            Some(b'"') => {
                                 // Skip for now - string key in interpolation
                             }
                             _ => {

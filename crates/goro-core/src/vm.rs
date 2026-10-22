@@ -1300,6 +1300,9 @@ impl Vm {
                     Value::String(PhpString::from_string(crate::php_build_date())),
                 );
                 c.insert(b"PHP_DEBUG".to_vec(), Value::Long(0));
+                // zend_constants.stub.php
+                c.insert(b"ZEND_THREAD_SAFE".to_vec(), Value::False);
+                c.insert(b"ZEND_DEBUG_BUILD".to_vec(), Value::False);
                 c.insert(b"PHP_ZTS".to_vec(), Value::Long(0));
                 c.insert(
                     b"PHP_PREFIX".to_vec(),
@@ -37338,8 +37341,15 @@ impl Vm {
                                         let eval_result = match exec_r {
                                             Ok(v) => v,
                                             Err(e) => {
-                                                // Propagate errors from eval
-                                                self.current_file = saved_file;
+                                                // Propagate errors from eval. A fatal
+                                                // error raised in the eval'd code is
+                                                // reported in it.
+                                                if self.current_exception.is_some()
+                                                    || self.exit_requested
+                                                    || self.fatal_emitted
+                                                {
+                                                    self.current_file = saved_file;
+                                                }
                                                 self.pending_classes = eval_saved_pending;
                                                 if self.current_exception.is_some() {
                                                     if let Some((
