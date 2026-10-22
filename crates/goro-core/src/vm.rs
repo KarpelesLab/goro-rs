@@ -826,6 +826,8 @@ pub struct Vm {
     /// Emptied buffers of finished calls (locals, temporaries, backtrace
     /// frames), reused by the next ones.
     value_pool: Vec<Vec<Value>>,
+    /// Emptied buffers of the class stack entries of finished calls.
+    bytes_pool: Vec<Vec<u8>>,
     /// Emptied foreach states of finished frames (see execute_op_array_inner).
     #[allow(clippy::vec_box)] // (the boxes are handed to frames)
     foreach_pool: Vec<Box<ForeachState>>,
@@ -1261,6 +1263,7 @@ impl Vm {
             fast_fcall_sep: None,
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),
+            bytes_pool: Vec::new(),
             string_pool: Vec::new(),
             call_stack: Vec::new(),
             error_reporting_stack: Vec::new(),
@@ -16683,6 +16686,16 @@ impl Vm {
         }
     }
 
+    /// Keep the buffer of a finished call's class stack entry (see
+    /// bytes_pool).
+    #[inline]
+    fn recycle_bytes(&mut self, mut v: Vec<u8>) {
+        if v.capacity() <= 256 && self.bytes_pool.len() < 32 {
+            v.clear();
+            self.bytes_pool.push(v);
+        }
+    }
+
     /// A finished call's arguments are released (in order): keep the
     /// buffer for the next call's.
     #[inline]
@@ -23796,12 +23809,14 @@ impl Vm {
                             // Late static binding: the object's class (the class
                             // named by a static call); the scope: the class
                             // declaring the method.
-                            let called_class = match call.args.first() {
+                            // (in the buffers of finished calls' entries)
+                            let mut called_class = self.bytes_pool.pop().unwrap_or_default();
+                            match call.args.first() {
                                 Some(Value::Object(obj)) if has_this => {
-                                    obj.borrow().class_name.clone()
+                                    called_class.extend_from_slice(&obj.borrow().class_name)
                                 }
-                                _ => call.name.as_bytes()[..sep].to_vec(),
-                            };
+                                _ => called_class.extend_from_slice(&call.name.as_bytes()[..sep]),
+                            }
                             self.called_class_stack.push(called_class);
                             let name = call.name.as_bytes();
                             let mut buf = [0u8; 128];
@@ -23809,12 +23824,15 @@ impl Vm {
                                 *d = s.to_ascii_lowercase();
                             }
                             let class_lower = &buf[..sep];
-                            let defining_class = self
+                            let mut defining_class = self.bytes_pool.pop().unwrap_or_default();
+                            match self
                                 .classes
                                 .get(class_lower)
-                                .and_then(|c| c.get_method(&name[sep + 2..]))
-                                .map(|m| m.declaring_class.clone())
-                                .unwrap_or_else(|| class_lower.to_vec());
+                                .and_then(|c| c.get_method(&buf[sep + 2..name.len()]))
+                            {
+                                Some(m) => defining_class.extend_from_slice(&m.declaring_class),
+                                None => defining_class.extend_from_slice(class_lower),
+                            }
                             self.class_scope_stack.push(defining_class);
                         }
                         let mut func_cvs = self.take_values(user_fn.cv_names.len());
@@ -23870,8 +23888,12 @@ impl Vm {
                             }
                         }
                         if is_method {
-                            self.called_class_stack.pop();
-                            self.class_scope_stack.pop();
+                            for v in [self.called_class_stack.pop(), self.class_scope_stack.pop()]
+                                .into_iter()
+                                .flatten()
+                            {
+                                self.recycle_bytes(v);
+                            }
                         }
                         self.is_global_scope = was_global;
                         let result = match call_result {
