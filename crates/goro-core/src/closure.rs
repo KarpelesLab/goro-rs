@@ -81,6 +81,52 @@ fn str_val(s: &[u8]) -> Value {
 }
 
 impl Vm {
+    /// zend_create_closure(): a non-static closure created in a frame with a
+    /// `$this` is bound to it, also when the code declaring it had none (a
+    /// closure declared in a closure that bindTo()/bind() gave a `$this`).
+    pub fn closure_inherit_this(
+        &mut self,
+        inner: Value,
+        frame: &crate::opcode::OpArray,
+        cvs: &[Value],
+    ) -> Value {
+        if frame.cv_names.first().map(|n| n.as_slice()) != Some(b"this") {
+            return inner;
+        }
+        let this = match cvs.first().map(|v| v.deref()) {
+            Some(v @ Value::Object(_)) => v,
+            _ => return inner,
+        };
+        let (name, caps) = closure_parts(&inner);
+        if !is_closure_fn_name(&name) {
+            return inner;
+        }
+        let l = lower(&name);
+        match self.user_functions.get(&l) {
+            Some(op)
+                if !op.is_static_closure
+                    && op.closure_capture_names.first().map(|n| n.as_slice()) != Some(b"this") => {}
+            _ => return inner,
+        }
+        // The bound variant's captures are [$this, ...use values].
+        if let Some(bound) = self.closure_this_variants.get(&l) {
+            let mut arr = PhpArray::new();
+            arr.push(str_val(bound));
+            arr.push(this);
+            for c in caps {
+                arr.push(c);
+            }
+            return Value::Array(Rc::new(RefCell::new(arr)));
+        }
+        let r = self.bind_closure_raw(&inner, this, Value::Null, false);
+        if matches!(r, Value::Null) {
+            return inner;
+        }
+        let (bound, _) = closure_parts(&r);
+        self.closure_this_variants.insert(l, bound);
+        r
+    }
+
     /// Wrap an internal callable (closure name, capture array, function
     /// name, bound-method array) into a `Closure` object with its own object
     /// id. Closure objects and Null (failure) are returned unchanged.

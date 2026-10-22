@@ -783,6 +783,9 @@ pub struct Vm {
     pub exception_handler_stack: Vec<Option<Value>>,
     /// Next ID for bound closure names
     next_bound_closure_id: u64,
+    /// Closure function (lowercase) declared without `$this` -> its variant
+    /// bound to a `$this` taken from the creating frame (closure_inherit_this).
+    pub(crate) closure_this_variants: HashMap<Vec<u8>, Vec<u8>>,
     /// JSON last error code (0 = no error)
     pub json_last_error: i64,
     /// Object pointers currently being serialized by json_encode via jsonSerialize.
@@ -1165,6 +1168,7 @@ impl Vm {
             exception_handler: None,
             exception_handler_stack: Vec::new(),
             next_bound_closure_id: 0,
+            closure_this_variants: HashMap::new(),
             json_last_error: 0,
             json_encoding_objects: std::collections::HashSet::new(),
             preg_last_error: 0,
@@ -8279,6 +8283,10 @@ impl Vm {
             return Value::Array(Rc::new(RefCell::new(arr)));
         }
 
+        // A closure without captures gets `$this` as its only one.
+        if needs_this_cv && captured_values.is_empty() {
+            new_op.closure_capture_names = vec![b"this".to_vec()];
+        }
         // Register the new function
         self.register_user_function(&new_closure_name, new_op);
 
@@ -34711,6 +34719,7 @@ impl Vm {
                     let inner = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                     let inner =
                         self.closure_scope_at_creation(inner, op_array.scope_class.as_ref());
+                    let inner = self.closure_inherit_this(inner, op_array, &cvs);
                     let inner = self.closure_with_own_statics(inner, None);
                     let obj = self.make_closure_object(inner);
                     self.write_operand(&op.result, obj, &mut cvs, &mut tmps, &static_cv_keys);
