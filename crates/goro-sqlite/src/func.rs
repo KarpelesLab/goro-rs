@@ -2687,8 +2687,7 @@ pub fn sqlite3RegisterBuiltinFunctions(pHash: &mut crate::callback::FuncDefHash)
     crate::callback::sqlite3InsertBuiltinFuncs(pHash, &crate::alter::sqlite3AlterFunctions());
     crate::window::sqlite3WindowFunctions(pHash);
     crate::date::sqlite3RegisterDateTimeFunctions(pHash);
-    /* sqlite3RegisterJsonFunctions(pHash): json.c is not ported yet, so the
-     ** JSON functions are not registered. */
+    crate::json::sqlite3RegisterJsonFunctions(pHash);
     crate::callback::sqlite3InsertBuiltinFuncs(pHash, &sqlite3BuiltinFunctionDefs());
 }
 
