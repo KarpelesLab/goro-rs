@@ -16,6 +16,30 @@ use crate::tags;
 
 const EINVAL: i32 = 22;
 
+/// Above this many input bytes / nodes, the recursive parser, cleaner
+/// and printer run on a thread with a large stack: tidy recurses once
+/// per nesting level, and Rust frames are bigger than C's.
+const BIG_STACK_THRESHOLD: usize = 2048;
+const BIG_STACK_SIZE: usize = 1 << 30;
+
+fn on_big_stack<R: Send>(hint: usize, f: impl FnOnce() -> R + Send) -> R {
+    if hint < BIG_STACK_THRESHOLD {
+        return f();
+    }
+    std::thread::scope(|s| {
+        match std::thread::Builder::new()
+            .stack_size(BIG_STACK_SIZE)
+            .spawn_scoped(s, f)
+        {
+            Ok(h) => match h.join() {
+                Ok(r) => r,
+                Err(e) => std::panic::resume_unwind(e),
+            },
+            Err(_) => panic!("tidy: cannot start a worker thread"),
+        }
+    })
+}
+
 impl Doc {
     /// tidyCreate() / tidyDocCreate()
     pub fn new() -> Doc {
@@ -244,6 +268,11 @@ pub fn general_info(doc: &mut Doc) {
 
 /// tidyParseBuffer() / tidyParseString(): parse a document from memory
 pub fn parse_buffer(doc: &mut Doc, content: Vec<u8>) -> i32 {
+    let hint = content.len();
+    on_big_stack(hint, move || parse_buffer_impl(doc, content))
+}
+
+fn parse_buffer_impl(doc: &mut Doc, content: Vec<u8>) -> i32 {
     let enc = doc.cfg(OptId::InCharEncoding);
     let input = streamio::buffer_input(content, enc);
     doc_parse_stream(doc, input)
@@ -550,6 +579,11 @@ fn check_html_tags_attribs_versions(doc: &mut Doc, node: Option<NodeId>) {
 
 /// tidyCleanAndRepair()
 pub fn clean_and_repair(doc: &mut Doc) -> i32 {
+    let hint = doc.nodes.len();
+    on_big_stack(hint, move || clean_and_repair_impl(doc))
+}
+
+fn clean_and_repair_impl(doc: &mut Doc) -> i32 {
     let word2k = doc.cfg_bool(OptId::Word2000);
     let logical = doc.cfg_bool(OptId::LogicalEmphasis);
     let clean = doc.cfg_bool(OptId::MakeClean);
@@ -656,6 +690,11 @@ fn show_body_only(doc: &mut Doc, body_only: u32) -> bool {
 
 /// tidyDocSaveStream()
 pub fn save_stream(doc: &mut Doc, out: StreamOut) -> (i32, StreamOut) {
+    let hint = doc.nodes.len();
+    on_big_stack(hint, move || save_stream_impl(doc, out))
+}
+
+fn save_stream_impl(doc: &mut Doc, out: StreamOut) -> (i32, StreamOut) {
     let show_markup = doc.cfg_bool(OptId::ShowMarkup);
     let force_output = doc.cfg_bool(OptId::ForceOutput);
     let output_bom = doc.cfg_auto_bool(OptId::OutputBOM) == TIDY_YES_STATE;
@@ -726,6 +765,11 @@ pub fn save_buffer(doc: &mut Doc) -> (i32, Vec<u8>) {
 
 /// tidyNodeGetText(): the pretty-printed markup of a node
 pub fn node_get_text(doc: &mut Doc, node: NodeId) -> Vec<u8> {
+    let hint = doc.nodes.len();
+    on_big_stack(hint, move || node_get_text_impl(doc, node))
+}
+
+fn node_get_text_impl(doc: &mut Doc, node: NodeId) -> Vec<u8> {
     let outenc = doc.cfg(OptId::OutCharEncoding);
     let nl = doc.cfg(OptId::Newline);
     let xml_out = doc.cfg_bool(OptId::XmlOut);

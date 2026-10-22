@@ -1,7 +1,7 @@
 //! tags.c: the tag dictionary (built-in tags, user-declared tags) and the
 //! element attribute checks.
 
-use std::cell::Cell;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::attrdict::AttrVersion;
 use crate::attrs;
@@ -57,12 +57,10 @@ pub struct TagsImpl {
     pub list: Vec<u32>,
 }
 
-thread_local! {
-    /// tidy's static tag_defs[] is modified in place by AdjustTags() (HTML4
-    /// mode) and ResetTags() (HTML5 mode); this records which state the
-    /// process-wide table is in.
-    static TAGS_HTML5: Cell<bool> = const { Cell::new(true) };
-}
+/// tidy's static tag_defs[] is modified in place by AdjustTags() (HTML4
+/// mode) and ResetTags() (HTML5 mode); this records which state the
+/// process-wide table is in.
+static TAGS_HTML5: AtomicBool = AtomicBool::new(true);
 
 fn tag_index(tid: TagId) -> usize {
     thread_local! {
@@ -85,7 +83,7 @@ pub fn builtin_def(tid: TagId) -> &'static TagDef {
 /// `np->model` of a built-in tag, as adjusted by AdjustTags().
 pub fn builtin_model(tid: TagId) -> u32 {
     let d = builtin_def(tid);
-    if TAGS_HTML5.with(|c| c.get()) {
+    if TAGS_HTML5.load(Ordering::Relaxed) {
         return d.model;
     }
     match tid {
@@ -98,7 +96,7 @@ pub fn builtin_model(tid: TagId) -> u32 {
 /// `np->parser` of a built-in tag, as adjusted by AdjustTags().
 pub fn builtin_parser(tid: TagId) -> Option<ParserFn> {
     let d = builtin_def(tid);
-    if TAGS_HTML5.with(|c| c.get()) {
+    if TAGS_HTML5.load(Ordering::Relaxed) {
         return d.parser;
     }
     match tid {
@@ -311,7 +309,7 @@ pub fn free_declared_tags(doc: &mut Doc, tag_type: UserTagType) {
 
 /// AdjustTags(): switch the (process-wide) tag table to HTML4 mode
 pub fn adjust_tags(doc: &mut Doc) {
-    TAGS_HTML5.with(|c| c.set(false));
+    TAGS_HTML5.store(false, Ordering::Relaxed);
     doc.html5_mode = false;
 }
 
@@ -322,7 +320,7 @@ pub fn is_html5_mode(doc: &Doc) -> bool {
 
 /// ResetTags(): reset the table to the default HTML5 mode
 pub fn reset_tags(doc: &mut Doc) {
-    TAGS_HTML5.with(|c| c.set(true));
+    TAGS_HTML5.store(true, Ordering::Relaxed);
     doc.html5_mode = true;
 }
 

@@ -1,7 +1,7 @@
 //! pprint.c: the pretty printer (indentation, wrapping, entities), writing
 //! to `doc.doc_out`.
 
-use std::cell::Cell;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::attrs;
 use crate::config;
@@ -45,19 +45,17 @@ pub struct PrintImpl {
     pub indent: [TidyIndent; 2],
 }
 
-thread_local! {
-    /// tidy's static `indent_char`
-    static INDENT_CHAR: Cell<u32> = const { Cell::new(' ' as u32) };
-}
+/// tidy's static `indent_char`
+static INDENT_CHAR: AtomicU32 = AtomicU32::new(' ' as u32);
 
 /// PPrintTabs(): indent with tabs (process-wide, like tidy's static)
 pub fn pprint_tabs() {
-    INDENT_CHAR.with(|c| c.set('\t' as u32));
+    INDENT_CHAR.store('\t' as u32, Ordering::Relaxed);
 }
 
 /// PPrintSpaces(): indent with spaces (process-wide, like tidy's static)
 pub fn pprint_spaces() {
-    INDENT_CHAR.with(|c| c.set(' ' as u32));
+    INDENT_CHAR.store(' ' as u32, Ordering::Relaxed);
 }
 
 // ---- Unicode wrap points
@@ -636,7 +634,7 @@ fn set_wrap_attr(doc: &mut Doc, indent: u32, attr_start: i32, str_start: i32) ->
 fn write_indent_char(doc: &mut Doc) {
     let mut spaces = doc.pprint.get_spaces();
     let tabsize = doc.cfg(OptId::TabSize);
-    let indent_char = INDENT_CHAR.with(|c| c.get());
+    let indent_char = INDENT_CHAR.load(Ordering::Relaxed);
     if spaces != 0 && indent_char == '\t' as u32 && tabsize != 0 {
         spaces /= tabsize;
         if spaces == 0 {
