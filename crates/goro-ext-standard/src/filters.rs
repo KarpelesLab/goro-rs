@@ -173,8 +173,43 @@ fn bucket_unlink(b: &BucketRef) {
 // Filters
 // ---------------------------------------------------------------------------
 
+/// A filter implemented by another extension (php_stream_filter_ops of a
+/// factory registered with `register_ext_filter_factory`).
+pub trait ExtFilter {
+    /// Filter the input buckets' data (`flags`: PSFS_FLAG_*).
+    fn filter(
+        &mut self,
+        vm: &mut Vm,
+        inp: &[Vec<u8>],
+        flags: i32,
+    ) -> crate::filters_conv::FilterOutput;
+}
+
+/// php_stream_filter_factory create: the filter for `name` with `params`,
+/// None when it cannot be created.
+pub type ExtFilterFactory = fn(&mut Vm, &[u8], Option<&Value>) -> Option<Box<dyn ExtFilter>>;
+
+thread_local! {
+    static EXT_FACTORIES: RefCell<Vec<(&'static [u8], ExtFilterFactory)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// php_stream_filter_register_factory() for one of the built-in factory
+/// names (e.g. "convert.iconv.*").
+pub fn register_ext_filter_factory(key: &'static [u8], f: ExtFilterFactory) {
+    EXT_FACTORIES.with(|e| {
+        let mut e = e.borrow_mut();
+        e.retain(|(k, _)| *k != key);
+        e.push((key, f));
+    });
+}
+
+fn ext_factory(key: &[u8]) -> Option<ExtFilterFactory> {
+    EXT_FACTORIES.with(|e| e.borrow().iter().find(|(k, _)| *k == key).map(|(_, f)| *f))
+}
+
 /// The built-in filter implementations (php_stream_filter_ops).
 pub enum Builtin {
+    Ext(Box<dyn ExtFilter>),
     Rot13,
     ToUpper,
     ToLower,
@@ -431,8 +466,7 @@ fn builtin_create(vm: &mut Vm, key: &[u8], name: &[u8], params: Option<&Value>) 
         },
         b"zlib.*" => zlib_create(vm, name, params)?,
         b"bzip2.*" => bz2_create(vm, name, params)?,
-        // convert.iconv.* needs the iconv extension.
-        _ => return None,
+        _ => Builtin::Ext(ext_factory(key)?(vm, name, params)?),
     };
     Some(Ops::Builtin(b))
 }
@@ -488,6 +522,11 @@ fn builtin_filter(
         c
     };
     match b {
+        Builtin::Ext(f) => {
+            let bufs = inp.bufs();
+            let r = f.filter(vm, &bufs, flags);
+            finish_conv(vm, r, out, consumed)
+        }
         Builtin::Rot13 => {
             let c = simple(inp, out, |x| match x {
                 b'a'..=b'm' | b'A'..=b'M' => x + 13,
