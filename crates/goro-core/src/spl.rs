@@ -881,36 +881,68 @@ impl Vm {
     ) -> Option<Value> {
         let frame = match obj_val {
             Value::Object(o) => {
-                let cl = obj_class_lower(o);
-                let ml: Vec<u8> = method.iter().map(|b| b.to_ascii_lowercase()).collect();
-                self.classes
-                    .get(&cl)
-                    .and_then(|c| c.get_method(&ml))
-                    .map(|m| {
-                        let decl = self
-                            .classes
-                            .get(&m.declaring_class)
-                            .map(|dc| crate::value::display_class_name(&dc.name))
-                            .unwrap_or_else(|| {
-                                String::from_utf8_lossy(&m.declaring_class).to_string()
-                            });
-                        let sep = if m.is_static { "::" } else { "->" };
-                        format!("{}{}{}", decl, sep, String::from_utf8_lossy(&m.name))
-                    })
+                // (lowercased in buffers when the names fit)
+                let mut cbuf = [0u8; 64];
+                let mut mbuf = [0u8; 64];
+                let lower = |s: &[u8], buf: &'_ mut [u8; 64]| -> Option<usize> {
+                    let out = buf.get_mut(..s.len())?;
+                    for (d, c) in out.iter_mut().zip(s) {
+                        *d = c.to_ascii_lowercase();
+                    }
+                    Some(s.len())
+                };
+                let cl_owned;
+                let cl: &[u8] = {
+                    let ob = o.borrow();
+                    match lower(&ob.class_name, &mut cbuf) {
+                        Some(n) => &cbuf[..n],
+                        None => {
+                            cl_owned = ob.class_name.to_ascii_lowercase();
+                            &cl_owned
+                        }
+                    }
+                };
+                let ml_owned;
+                let ml: &[u8] = match lower(method, &mut mbuf) {
+                    Some(n) => &mbuf[..n],
+                    None => {
+                        ml_owned = method.to_ascii_lowercase();
+                        &ml_owned
+                    }
+                };
+                match self.classes.get(cl).and_then(|c| c.get_method(ml)) {
+                    Some(m) => {
+                        // (in the buffer of a finished call's frame)
+                        let mut name = self.string_pool.pop().unwrap_or_default();
+                        match self.classes.get(&m.declaring_class) {
+                            Some(dc) => name.push_str(&crate::value::display_class_name(&dc.name)),
+                            None => name.push_str(&String::from_utf8_lossy(&m.declaring_class)),
+                        }
+                        name.push_str(if m.is_static { "::" } else { "->" });
+                        name.push_str(&String::from_utf8_lossy(&m.name));
+                        Some(name)
+                    }
+                    None => None,
+                }
             }
             _ => None,
         };
         match frame {
             Some(name) => {
-                let (file, line) = if internal {
-                    (String::new(), 0)
+                let mut file = self.string_pool.pop().unwrap_or_default();
+                let line = if internal {
+                    0
                 } else {
-                    (self.current_file.clone(), self.current_line)
+                    file.push_str(&self.current_file);
+                    self.current_line
                 };
-                self.call_stack
-                    .push((name, file, line, args.to_vec(), true));
+                let mut frame_args = self.take_values(0);
+                frame_args.extend_from_slice(args);
+                self.call_stack.push((name, file, line, frame_args, true));
                 let r = self.call_object_method(obj_val, method, args);
-                self.call_stack.pop();
+                if let Some(f) = self.call_stack.pop() {
+                    self.recycle_frame(f);
+                }
                 r
             }
             None => self.call_object_method(obj_val, method, args),

@@ -185,13 +185,18 @@ impl Vm {
                 }
             }
         }
-        let (file, line) = if internal {
-            (String::new(), 0)
+        // (in the buffers of finished calls' frames)
+        let mut file = self.string_pool.pop().unwrap_or_default();
+        let line = if internal {
+            0
         } else {
-            (self.current_file.clone(), self.current_line)
+            file.push_str(&self.current_file);
+            self.current_line
         };
-        let args = args.iter().map(|v| v.deref()).collect();
-        self.call_stack.push((name, file, line, args, is_instance));
+        let mut frame_args = self.take_values(0);
+        frame_args.extend(args.iter().map(|v| v.deref()));
+        self.call_stack
+            .push((name, file, line, frame_args, is_instance));
         true
     }
 
@@ -1051,6 +1056,35 @@ fn frame_is_for(name: &str, op_array: &crate::opcode::OpArray) -> bool {
 /// Whether two call_stack frame names name the same function ("A->f" and
 /// "A::f" alike, case-insensitively).
 fn same_frame_name(a: &str, b: &str) -> bool {
-    let norm = |s: &str| s.replace("->", "::").to_ascii_lowercase();
-    a.len() == b.len() && norm(a) == norm(b)
+    // `s.replace("->", "::").to_ascii_lowercase()`, without building it.
+    struct Norm<'a> {
+        s: &'a [u8],
+        i: usize,
+        pending: bool,
+    }
+    impl Iterator for Norm<'_> {
+        type Item = u8;
+        fn next(&mut self) -> Option<u8> {
+            if self.pending {
+                self.pending = false;
+                return Some(b':');
+            }
+            let c = *self.s.get(self.i)?;
+            if c == b'-' && self.s.get(self.i + 1) == Some(&b'>') {
+                self.i += 2;
+                self.pending = true;
+                return Some(b':');
+            }
+            self.i += 1;
+            Some(c.to_ascii_lowercase())
+        }
+    }
+    fn norm(s: &str) -> Norm<'_> {
+        Norm {
+            s: s.as_bytes(),
+            i: 0,
+            pending: false,
+        }
+    }
+    a.len() == b.len() && norm(a).eq(norm(b))
 }

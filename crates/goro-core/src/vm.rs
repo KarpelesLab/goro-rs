@@ -16052,7 +16052,9 @@ impl Vm {
             if let Some(class_def) = self.classes.get(&class_lower) {
                 if let Some(method) = class_def.get_method(&method_lower) {
                     let method_op = method.op_array.clone();
-                    let mut fn_cvs = vec![Value::Undef; method_op.cv_names.len()];
+                    // (take_values(), by field: the class is borrowed)
+                    let mut fn_cvs = self.value_pool.pop().unwrap_or_default();
+                    fn_cvs.resize(method_op.cv_names.len(), Value::Undef);
                     // CV[0] = $this
                     if !fn_cvs.is_empty() {
                         fn_cvs[0] = obj_val.clone();
@@ -16090,18 +16092,24 @@ impl Vm {
                         self.watch_generator_finally(&gen_rc);
                         return Some(Value::Generator(gen_rc));
                     }
-                    let frame_name = format!(
-                        "{}{}{}",
-                        self.classes
+                    // (in the buffer of a finished call's frame)
+                    let mut frame_name = self.string_pool.pop().unwrap_or_default();
+                    frame_name.push_str(
+                        &self
+                            .classes
                             .get(&method.declaring_class)
                             .map(|c| crate::value::display_class_name(&c.name))
                             .unwrap_or_else(|| crate::value::display_class_name(&class_def.name)),
-                        if method.is_static { "::" } else { "->" },
-                        String::from_utf8_lossy(&method.name)
                     );
+                    frame_name.push_str(if method.is_static { "::" } else { "->" });
+                    frame_name.push_str(&String::from_utf8_lossy(&method.name));
                     let is_static = method.is_static;
-                    let declaring = method.declaring_class.clone();
-                    self.called_class_stack.push(class_lower.clone());
+                    // (in the buffers of finished calls' entries)
+                    let mut declaring = self.bytes_pool.pop().unwrap_or_default();
+                    declaring.extend_from_slice(&method.declaring_class);
+                    let mut called = self.bytes_pool.pop().unwrap_or_default();
+                    called.extend_from_slice(&class_lower);
+                    self.called_class_stack.push(called);
                     self.class_scope_stack.push(declaring);
                     // Diagnostics raised by the caller after the call report
                     // the caller's line, not the callee's last line.
@@ -16113,12 +16121,18 @@ impl Vm {
                     let was_global = std::mem::replace(&mut self.is_global_scope, false);
                     let result = self.execute_op_array(&method_op, fn_cvs).ok();
                     if framed {
-                        self.call_stack.pop();
+                        if let Some(f) = self.call_stack.pop() {
+                            self.recycle_frame(f);
+                        }
                     }
                     self.is_global_scope = was_global;
                     self.current_line = saved_line;
-                    self.called_class_stack.pop();
-                    self.class_scope_stack.pop();
+                    for v in [self.called_class_stack.pop(), self.class_scope_stack.pop()]
+                        .into_iter()
+                        .flatten()
+                    {
+                        self.recycle_bytes(v);
+                    }
                     return result;
                 }
             }
