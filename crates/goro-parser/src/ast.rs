@@ -211,6 +211,8 @@ pub enum ExprKind {
         end_line: u32,
         doc_comment: Option<Vec<u8>>,
         returns_by_ref: bool,
+        /// Written in parentheses (ZEND_PARENTHESIZED_ARROW_FUNC).
+        parenthesized: bool,
     },
     New {
         class: Box<Expr>,
@@ -373,6 +375,9 @@ pub struct HookAttrs {
     pub get: Vec<Attribute>,
     pub set: Vec<Attribute>,
     pub set_param: Vec<Attribute>,
+    /// `get => expr;` / `set => expr;` (short bodies, expanded by the parser).
+    pub get_short: bool,
+    pub set_short: bool,
 }
 #[derive(Debug, Clone)]
 pub enum TypeHint {

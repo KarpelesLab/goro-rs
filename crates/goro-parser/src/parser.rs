@@ -3444,6 +3444,7 @@ impl Parser {
                     get_hook = Some(body);
                 } else if self.eat(&TokenKind::DoubleArrow) {
                     // get => expr;
+                    self.last_hook_attrs.get_short = true;
                     let span = self.span();
                     let expr = self.parse_expression()?;
                     self.expect_semicolon()?;
@@ -3603,6 +3604,7 @@ impl Parser {
                     set_hook = Some((param_name, body));
                 } else if self.eat(&TokenKind::DoubleArrow) {
                     // set => expr; is shorthand for set { $this->propname = expr; }
+                    self.last_hook_attrs.set_short = true;
                     let span = self.span();
                     let expr = self.parse_expression()?;
                     self.expect_semicolon()?;
@@ -4331,7 +4333,7 @@ impl Parser {
     }
 
     fn parse_bitwise_and(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_pipe()?;
+        let mut left = self.parse_equality()?;
         while matches!(self.peek(), TokenKind::Ampersand) {
             self.advance();
             let right = self.parse_equality()?;
@@ -4347,13 +4349,13 @@ impl Parser {
         Ok(left)
     }
 
-    /// Parse pipe operator (|>), left-associative
-    /// Precedence between equality and comparison
+    /// Parse pipe operator (|>), left-associative: it binds tighter than
+    /// the comparisons and looser than `.` (zend_language_parser.y).
     fn parse_pipe(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_equality()?;
+        let mut left = self.parse_concat()?;
         while matches!(self.peek(), TokenKind::PipeGreater) {
             self.advance();
-            let right = self.parse_equality()?;
+            let right = self.parse_concat()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::Pipe {
@@ -4390,7 +4392,7 @@ impl Parser {
     }
 
     fn parse_comparison(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_shift()?;
+        let mut left = self.parse_pipe()?;
         loop {
             let op = match self.peek() {
                 TokenKind::Less => BinaryOp::Less,
@@ -4400,7 +4402,7 @@ impl Parser {
                 TokenKind::Spaceship => BinaryOp::Spaceship,
                 TokenKind::Instanceof => {
                     self.advance();
-                    let right = self.parse_shift()?;
+                    let right = self.parse_pipe()?;
                     left = Expr {
                         span: left.span.merge(right.span),
                         kind: ExprKind::Instanceof {
@@ -4413,11 +4415,29 @@ impl Parser {
                 _ => break,
             };
             self.advance();
-            let right = self.parse_shift()?;
+            let right = self.parse_pipe()?;
             left = Expr {
                 span: left.span.merge(right.span),
                 kind: ExprKind::BinaryOp {
                     op,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                },
+            };
+        }
+        Ok(left)
+    }
+
+    /// `.` binds looser than the shifts and `+`/`-` (PHP 8).
+    fn parse_concat(&mut self) -> ParseResult<Expr> {
+        let mut left = self.parse_shift()?;
+        while matches!(self.peek(), TokenKind::Dot) {
+            self.advance();
+            let right = self.parse_shift()?;
+            left = Expr {
+                span: left.span.merge(right.span),
+                kind: ExprKind::BinaryOp {
+                    op: BinaryOp::Concat,
                     left: Box::new(left),
                     right: Box::new(right),
                 },
@@ -4454,7 +4474,6 @@ impl Parser {
             let op = match self.peek() {
                 TokenKind::Plus => BinaryOp::Add,
                 TokenKind::Minus => BinaryOp::Sub,
-                TokenKind::Dot => BinaryOp::Concat,
                 _ => break,
             };
             self.advance();
@@ -5395,6 +5414,7 @@ impl Parser {
                                 attributes,
                                 end_line,
                                 doc_comment: attr_doc,
+                                parenthesized: false,
                                 returns_by_ref: by_ref_return,
                             },
                         })
@@ -5663,8 +5683,15 @@ impl Parser {
             }
             TokenKind::OpenParen => {
                 self.advance();
-                let expr = self.parse_expression()?;
+                let mut expr = self.parse_expression()?;
                 self.expect(&TokenKind::CloseParen)?;
+                // `(fn() => ...)` keeps its parentheses in AST exports
+                // (not as a callee: `(fn() => ...)()`).
+                if let ExprKind::ArrowFunction { parenthesized, .. } = &mut expr.kind {
+                    if !matches!(self.peek(), TokenKind::OpenParen) {
+                        *parenthesized = true;
+                    }
+                }
                 // `(NAME)(...)` calls the value of constant NAME, not a
                 // function called NAME: mark the name as a constant fetch.
                 if let ExprKind::Identifier(name) = &expr.kind {
@@ -6284,6 +6311,7 @@ impl Parser {
                         attributes: Vec::new(),
                         end_line,
                         doc_comment: arrow_doc,
+                        parenthesized: false,
                         returns_by_ref: by_ref_return,
                     },
                 })
@@ -6323,6 +6351,7 @@ impl Parser {
                             attributes: Vec::new(),
                             end_line,
                             doc_comment: static_doc,
+                            parenthesized: false,
                             returns_by_ref: by_ref_return,
                         },
                     })

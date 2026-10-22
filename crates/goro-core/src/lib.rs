@@ -1,5 +1,6 @@
 pub mod arginfo;
 pub mod array;
+pub mod ast_export;
 pub mod basedir;
 pub mod callable;
 pub mod class_table;

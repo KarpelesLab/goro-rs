@@ -1860,6 +1860,7 @@ impl Compiler {
         program: &Program,
     ) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
         self.is_top_level = true;
+        crate::ast_export::register_program(program);
         let warnings_base = COMPILE_WARNINGS.with(|w| w.borrow().len());
         // Pre-pass: build the anonymous class name map (NUL-byte PHP names)
         self.build_anon_class_name_map(&program.statements);
@@ -12046,7 +12047,7 @@ impl Compiler {
                         && args[0].name.is_none()
                         && !args[0].unpack
                     {
-                        let expr_str = expr_to_source_string(&args[0].value);
+                        let expr_str = crate::ast_export::export_expr(&args[0].value);
                         let assert_str = format!("assert({})", expr_str);
                         // Emit: InitFCall("assert", 2)
                         let assert_name_idx = self
