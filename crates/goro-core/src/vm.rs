@@ -818,6 +818,10 @@ pub struct Vm {
     /// fetch at (call depth, op index): the write-back two ops later uses
     /// it instead of reading (and warning about) `$k` again.
     dim_rw_key: Option<(u32, usize, Value)>,
+    /// `$a[$k] op= v` / `$a[$k]++` abandoned by its RW fetch (an error
+    /// handler replaced the container while the key was reported): the
+    /// write-back of that frame (call depth) is skipped.
+    dim_rw_abort: Option<u32>,
     /// Current executing line number (updated during execution for warning/error reporting)
     pub current_line: u32,
     /// Cached enum case singleton objects: key = "classname_lower::CaseName"
@@ -1180,6 +1184,7 @@ impl Vm {
             recorded_errors: None,
             incdec_skip_set: false,
             dim_rw_key: None,
+            dim_rw_abort: None,
             current_line: 0,
             enum_case_cache: HashMap::new(),
             fiber_suspended: false,
@@ -31526,6 +31531,11 @@ impl Vm {
                 },
                 OpCode::ArraySet | OpCode::ArraySetIncDec => {
                     match outlined(|| -> Result<Flow, VmError> {
+                        // The write-back of an abandoned `$a[$k] op= v`.
+                        if self.dim_rw_abort.is_some_and(|d| d == self.call_depth) {
+                            self.dim_rw_abort = None;
+                            return Ok(Flow::Next);
+                        }
                         let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
                         // The write-back of `$obj[k]++`: FETCH_DIM_RW never calls
                         // offsetSet().
@@ -31546,19 +31556,44 @@ impl Vm {
                             }
                             _ => None,
                         };
-                        // An undefined key CV warns; the error handler may then
-                        // replace the container or throw, which abandons the
-                        // assignment (slow_index_convert_w()).
-                        let container_before =
-                            match Self::read_operand_raw(&cvs, &op.result).deref() {
-                                _ if rw_key.is_some() => None,
-                                Value::Undef => Some(Self::dim_container_identity(
-                                    &Self::read_operand_raw(&cvs, &op.op1),
-                                )),
-                                _ => None,
-                            };
+                        // The key's diagnostic (an undefined key variable; a null,
+                        // float or resource offset of an array) may run an error
+                        // handler that replaces the container or throws: the
+                        // assignment is then abandoned (slow_index_convert_w()).
+                        // A variable becoming an array is converted first, so a
+                        // handler overwriting it frees the new array.
+                        let key_peek = match op.result {
+                            OperandType::Cv(_) => Self::read_operand_raw(&cvs, &op.result).deref(),
+                            _ => self.read_operand(&op.result, &cvs, &tmps, &op_array.literals),
+                        };
+                        // (not the write-back of `$a[k] op= v`, whose fetch did it)
+                        let diag = rw_key.is_none()
+                            && self.rw_dim_set
+                                != Some((op_array as *const OpArray as usize, ip - 1))
+                            && !matches!(op.result, OperandType::Unused)
+                            && matches!(
+                                key_peek,
+                                Value::Undef | Value::Null | Value::Double(_) | Value::Resource(_)
+                            );
+                        let mut arr_val = arr_val;
+                        if diag && matches!(op.op1, OperandType::Cv(_))
+                            && matches!(arr_val.deref(), Value::Null | Value::Undef)
+                        {
+                            let fresh = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                            if let OperandType::Cv(i) = op.op1 {
+                                match cvs.get_mut(i as usize) {
+                                    Some(Value::Reference(r)) => *r.borrow_mut() = fresh.clone(),
+                                    Some(slot) => *slot = fresh.clone(),
+                                    None => {}
+                                }
+                            }
+                            arr_val = fresh;
+                        }
+                        let container_before = diag.then(|| {
+                            Self::dim_container_identity(&Self::read_operand_raw(&cvs, &op.op1))
+                        });
                         let key_val = match rw_key {
-                            Some(k) => k,
+                            Some(ref k) => k.clone(),
                             None => self.read_operand_warn(
                                 &op.result,
                                 &cvs,
@@ -31568,23 +31603,46 @@ impl Vm {
                                 op.line,
                             ),
                         };
-                        if let Some(before) = container_before {
-                            if self.current_exception.is_some() {
-                                self.error_handler_threw = false;
-                                native_exc_check!(
-                                    self,
-                                    exception_handlers,
-                                    pending_calls_catch_depth,
-                                    ip,
-                                    op.line
-                                );
+                        let key_val = if let Some(before) = container_before {
+                            let mut key_val = key_val;
+                            for convert in [false, true] {
+                                if self.current_exception.is_some() {
+                                    self.error_handler_threw = false;
+                                    native_exc_check!(
+                                        self,
+                                        exception_handlers,
+                                        pending_calls_catch_depth,
+                                        ip,
+                                        op.line
+                                    );
+                                }
+                                // A variable the handler created through $GLOBALS
+                                // is bound to this frame first.
+                                if let Some(fs) = fsym.as_mut() {
+                                    if fs.bind.seen_gen != fs.tab.generation.get() {
+                                        self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                                    }
+                                }
+                                if Self::dim_container_identity(&Self::read_operand_raw(
+                                    &cvs, &op.op1,
+                                )) != before
+                                {
+                                    return Ok(Flow::Next);
+                                }
+                                if convert || !matches!(arr_val, Value::Array(_)) {
+                                    break;
+                                }
+                                // The offset of an array is converted (and reported) now.
+                                key_val =
+                                    match self.value_to_array_key_checked(&key_val, op.line) {
+                                        crate::array::ArrayKey::Int(n) => Value::Long(n),
+                                        crate::array::ArrayKey::String(s) => Value::String(s),
+                                    };
                             }
-                            if Self::dim_container_identity(&Self::read_operand_raw(&cvs, &op.op1))
-                                != before
-                            {
-                                return Ok(Flow::Next);
-                            }
-                        }
+                            key_val
+                        } else {
+                            key_val
+                        };
                         let val = self.read_operand_warn(
                             &op.op2,
                             &cvs,
@@ -32206,6 +32264,37 @@ impl Vm {
                     if matches!(arr_val, Value::Undef | Value::Null) {
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     }
+                    // The key's diagnostic may run an error handler that replaces
+                    // the container: the read-modify-write is then abandoned
+                    // (slow_index_convert_w()). A variable becoming an array is
+                    // converted first, so a handler overwriting it frees it.
+                    let rw_container_before = if is_rw
+                        && matches!(op.op1, OperandType::Cv(_))
+                        && !matches!(op.op2, OperandType::Unused)
+                        && matches!(
+                            match op.op2 {
+                                OperandType::Cv(_) => Self::read_operand_raw(&cvs, &op.op2).deref(),
+                                _ => self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals),
+                            },
+                            Value::Undef | Value::Null | Value::Double(_) | Value::Resource(_)
+                        ) {
+                        if matches!(arr_val, Value::Null | Value::Undef) {
+                            let fresh = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                            if let OperandType::Cv(i) = op.op1 {
+                                match cvs.get_mut(i as usize) {
+                                    Some(Value::Reference(r)) => *r.borrow_mut() = fresh.clone(),
+                                    Some(slot) => *slot = fresh.clone(),
+                                    None => {}
+                                }
+                            }
+                            arr_val = fresh;
+                        }
+                        Some(Self::dim_container_identity(&Self::read_operand_raw(
+                            &cvs, &op.op1,
+                        )))
+                    } else {
+                        None
+                    };
                     // FETCH_DIM_R reads its key operand for reading (warns),
                     // FETCH_DIM_IS too.
                     if matches!(op.opcode, OpCode::ArrayGet)
@@ -32384,7 +32473,44 @@ impl Vm {
                         }
                     }
                     let result = if let Value::Array(arr) = &arr_val {
-                        let key = self.value_to_array_key_checked(&key_val, op.line);
+                        // (checked after the undefined key variable's warning,
+                        // then after the offset's own diagnostic)
+                        let mut key = None;
+                        for convert in [false, true] {
+                            if let Some(before) = rw_container_before {
+                                native_exc_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                                if let Some(fs) = fsym.as_mut() {
+                                    if fs.bind.seen_gen != fs.tab.generation.get() {
+                                        self.symtab_rebind_all(&mut cvs, &op_array.cv_names, fs);
+                                    }
+                                }
+                                if Self::dim_container_identity(&Self::read_operand_raw(
+                                    &cvs, &op.op1,
+                                )) != before
+                                {
+                                    self.dim_rw_abort = Some(self.call_depth);
+                                    self.write_operand(
+                                        &op.result,
+                                        Value::Null,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    return Ok(Flow::Continue);
+                                }
+                            }
+                            if convert {
+                                break;
+                            }
+                            key = Some(self.value_to_array_key_checked(&key_val, op.line));
+                        }
+                        let key = key.unwrap_or_else(|| Self::value_to_array_key(key_val.clone()));
                         // Read-modify-write (ASSIGN_DIM_OP / ++): the key is
                         // converted once; the write-back two ops later
                         // (ArraySet / ArraySetIncDec) does not report it again.
