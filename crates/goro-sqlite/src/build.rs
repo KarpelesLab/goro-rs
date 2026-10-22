@@ -2850,7 +2850,7 @@ pub fn sqlite3MarkAllShadowTablesOf(db: &mut Sqlite3, pTab: &TableRef) {
     if iDb < 0 {
         return;
     }
-    let tables = db.aDb[iDb as usize].pSchema.tblHash.values();
+    let tables = db.aDb[iDb as usize].pSchema.borrow().tblHash.values();
     for pOther in tables.iter() {
         let mut o = pOther.borrow_mut();
         if !o.IsOrdinaryTable() {

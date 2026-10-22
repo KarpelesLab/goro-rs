@@ -701,6 +701,7 @@ pub fn sqlite3VtabFinishParse(db: &mut Sqlite3, pEnd: Option<&Token>) {
         let iDb = db.schema_index(pSchema);
         let pOld = db.aDb[iDb as usize]
             .pSchema
+            .borrow_mut()
             .tblHash
             .insert(&zName, pTab.clone());
         if pOld.is_some() {
@@ -1474,7 +1475,7 @@ pub fn sqlite3VtabEponymousTableInit(db: &mut Sqlite3, pMod: &ModuleRef) -> i32 
     if pModule.has_xCreate() && !pModule.create_is_connect() {
         return 0;
     }
-    let pSchema = db.aDb[0].pSchema.id;
+    let pSchema = db.aDb[0].pSchema.borrow().id;
     let pTab = Rc::new(RefCell::new(Table {
         zName: zName.clone(),
         nTabRef: 1,
