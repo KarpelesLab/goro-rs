@@ -1,0 +1,14 @@
+[package]
+name = "goro-ext-pgsql"
+version = "0.1.0"
+edition = "2024"
+description = "PHP pgsql extension for goro-rs, over a pure-Rust port of libpq"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-pcre = { path = "../goro-pcre" }
+purecrypto = { version = "0.10", default-features = false, features = ["std", "hash", "kdf", "rng", "tls"] }
+libc = "0.2"

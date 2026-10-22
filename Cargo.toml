@@ -17,6 +17,7 @@ members = [
     "crates/goro-ext-curl",
     "crates/goro-ext-mysqli",
     "crates/goro-ext-pdo",
+    "crates/goro-ext-pgsql",
     "crates/goro-ext-session",
     "crates/goro-ext-sockets",
     "crates/goro-ext-mbstring",

@@ -26,6 +26,7 @@ goro-ext-xml = { path = "../goro-ext-xml" }
 goro-ext-session = { path = "../goro-ext-session" }
 goro-ext-mysqli = { path = "../goro-ext-mysqli" }
 goro-ext-pdo = { path = "../goro-ext-pdo" }
+goro-ext-pgsql = { path = "../goro-ext-pgsql" }
 goro-ext-sockets = { path = "../goro-ext-sockets" }
 goro-ext-mbstring = { path = "../goro-ext-mbstring" }
 goro-ext-spl = { path = "../goro-ext-spl" }

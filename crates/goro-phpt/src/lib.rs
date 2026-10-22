@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub mod mysqli_test;
+pub mod pgsql_test;
 
 const VALID_SECTIONS: &[&str] = &[
     "TEST",
@@ -1162,6 +1163,8 @@ fn execute_php_with_timeout_and_filename(
                 libc::dup2(cap_w, 2);
                 libc::close(cap_w);
             }
+
+            pgsql_test::child_env(filename);
 
             // Like run-tests.php, a test runs from the directory the runner
             // was started in (its files are addressed by absolute paths).
@@ -2631,10 +2634,23 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
         if let Some((i, n)) = spec.split_once('/') {
             if let (Ok(i), Ok(n)) = (i.trim().parse::<usize>(), n.trim().parse::<usize>()) {
                 if n > 0 && i < n {
+                    // The pgsql tests depend on each other (01createdb
+                    // creates the tables the others use): each of their
+                    // directories goes to the shard of its first test.
+                    let mut group_shard: std::collections::HashMap<std::path::PathBuf, usize> =
+                        std::collections::HashMap::new();
                     files = files
                         .into_iter()
                         .enumerate()
-                        .filter(|(k, _)| k % n == i)
+                        .filter(|(k, f)| {
+                            let s = f.to_string_lossy();
+                            if pgsql_test::is_pgsql_test(&s) {
+                                let d = f.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+                                let first = *group_shard.entry(d).or_insert(*k);
+                                return first % n == i;
+                            }
+                            k % n == i
+                        })
                         .map(|(_, f)| f)
                         .collect();
                 }
@@ -2660,6 +2676,28 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
                 has_mysqli_tests = true;
                 *p = abs;
             }
+        }
+    }
+    let mut has_pgsql_tests = false;
+    for p in files.iter_mut() {
+        if let Ok(abs) = std::fs::canonicalize(&*p) {
+            if pgsql_test::is_pgsql_test(&abs.to_string_lossy()) {
+                has_pgsql_tests = true;
+                *p = abs;
+            }
+        }
+    }
+    if has_pgsql_tests {
+        let start = std::time::Instant::now();
+        if pgsql_test::ensure_started() {
+            eprintln!(
+                "[goro-phpt] embedded PostgreSQL fixture ready in {:.2}s",
+                start.elapsed().as_secs_f32()
+            );
+        } else {
+            eprintln!(
+                "[goro-phpt] no embedded PostgreSQL fixture available; pgsql tests will be skipped"
+            );
         }
     }
     if has_mysqli_tests {
@@ -2763,8 +2801,9 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
         }
     }
 
-    // Stop the embedded MySQL server, if one was started.
+    // Stop the embedded database servers, if they were started.
     mysqli_test::shutdown();
+    pgsql_test::shutdown();
     TestCounts {
         pass,
         fail,
