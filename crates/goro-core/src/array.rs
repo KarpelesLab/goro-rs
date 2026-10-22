@@ -357,6 +357,11 @@ impl PhpArray {
         Self::index_insert_slot(&mut self.index, h, pos);
     }
 
+    /// Integer keys 0..n in order (no string keys).
+    pub fn is_packed(&self) -> bool {
+        self.packed
+    }
+
     /// Whether PHP would hold this array as a packed array (HT_IS_PACKED),
     /// as far as can be told from its contents: integer keys in ascending
     /// order (holes allowed) that fit the packed table PHP would have

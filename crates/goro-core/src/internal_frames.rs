@@ -481,6 +481,9 @@ pub struct CvFrame {
     nfixed: u32,
     /// CV 0 is `$this` (a method or a closure bound to an object)
     has_this: bool,
+    /// CV index + 1 of the variadic parameter (0: none), whose string keys
+    /// are the call's extra named arguments
+    variadic: u32,
 }
 
 impl Vm {
@@ -506,6 +509,7 @@ impl Vm {
     pub(crate) fn register_cv_frame(&mut self, op_array: &crate::opcode::OpArray) -> bool {
         // debug_backtrace() shows the frame's `$this` as its "object"
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+        let variadic = op_array.variadic_param.map_or(0, |v| v + 1);
         if op_array.param_count == 0 && !has_this {
             return false;
         }
@@ -536,7 +540,7 @@ impl Vm {
         let nfixed = op_array
             .param_count
             .saturating_sub(base + op_array.variadic_param.is_some() as u32);
-        if nfixed == 0 && !has_this {
+        if nfixed == 0 && !has_this && variadic == 0 {
             return false;
         }
         self.cv_frames.push(CvFrame {
@@ -546,6 +550,7 @@ impl Vm {
             base,
             nfixed,
             has_this,
+            variadic,
         });
         true
     }
@@ -600,6 +605,65 @@ impl Vm {
         } else {
             self.call_stack.iter().rposition(|e| e.0.as_ptr() == f.name)
         }
+    }
+
+    /// The extra named arguments (ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) of the
+    /// running variadic functions' frames: (call_stack index, name, value).
+    pub fn frame_named_args(&self) -> Vec<(usize, PhpString, Value)> {
+        let mut out = Vec::new();
+        for f in &self.cv_frames {
+            if f.variadic == 0 || f.cvs.is_null() {
+                continue;
+            }
+            // SAFETY: see CvFrame; the function owning `cvs` is still running.
+            let cvs = unsafe { &*f.cvs };
+            let Some(Value::Array(a)) = cvs.get(f.variadic as usize - 1).map(|v| v.deref()) else {
+                continue;
+            };
+            let a = a.borrow();
+            if a.is_packed() {
+                continue;
+            }
+            let Some(at) = self.cv_frame_index(f) else {
+                continue;
+            };
+            for (k, v) in a.iter() {
+                if let crate::array::ArrayKey::String(name) = k {
+                    out.push((at, name.clone(), v.deref()));
+                }
+            }
+        }
+        out
+    }
+
+    /// A frame's "args": its positional arguments, then its extra named
+    /// ones (string keys); #[\SensitiveParameter] ones wrapped.
+    pub(crate) fn frame_args_array(
+        &mut self,
+        func_name: &str,
+        args: &[Value],
+        named: Vec<(PhpString, Value)>,
+    ) -> PhpArray {
+        let mut out = PhpArray::new();
+        if named.is_empty() {
+            for arg in self.trace_frame_args(func_name, args) {
+                out.push(arg);
+            }
+            return out;
+        }
+        // (the named ones go to the variadic parameter)
+        let mut all = args.to_vec();
+        all.extend(named.iter().map(|n| n.1.clone()));
+        let mut wrapped = self.trace_frame_args(func_name, &all).into_iter();
+        for _ in 0..args.len() {
+            if let Some(v) = wrapped.next() {
+                out.push(v);
+            }
+        }
+        for ((name, _), v) in named.into_iter().zip(wrapped) {
+            out.set(ArrayKey::String(name), v);
+        }
+        out
     }
 
     /// The internal method call whose frame was just pushed (the top
@@ -696,6 +760,11 @@ impl Vm {
         } else {
             Vec::new()
         };
+        let named_args = if ignore_args {
+            Vec::new()
+        } else {
+            vm.frame_named_args()
+        };
 
         let (lo, hi) = range.unwrap_or((0, stack_len));
         let frames: Vec<(String, String, u32, Vec<Value>, bool)> =
@@ -747,11 +816,13 @@ impl Vm {
                         "eval" | "include" | "include_once" | "require" | "require_once"
                     );
                 if !skip {
-                    let frame_args = vm.trace_frame_args(func_name, raw);
-                    let mut args_arr = PhpArray::new();
-                    for arg in frame_args {
-                        args_arr.push(arg);
-                    }
+                    let at = hi - 1 - idx;
+                    let named: Vec<(PhpString, Value)> = named_args
+                        .iter()
+                        .filter(|n| n.0 == at)
+                        .map(|n| (n.1.clone(), n.2.clone()))
+                        .collect();
+                    let args_arr = vm.frame_args_array(func_name, raw, named);
                     frame.set(key(b"args"), Value::Array(Rc::new(RefCell::new(args_arr))));
                 }
             }

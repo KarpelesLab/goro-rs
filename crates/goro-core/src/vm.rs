@@ -4733,15 +4733,9 @@ impl Vm {
         &f.3
     }
 
-    pub fn build_exception_trace(&mut self) -> Value {
-        self.sync_builtin_frames();
-        self.sync_frame_args();
-        let mut trace_arr = PhpArray::new();
-        // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
-        let sensitive = self.any_sensitive_params();
-        // zend.exception_ignore_args: frames carry no "args"
-        let ignore_args = self
-            .constants
+    /// zend.exception_ignore_args (OnUpdateBool), as currently set.
+    pub fn exception_ignore_args(&self) -> bool {
+        self.constants
             .get(b"zend.exception_ignore_args".as_slice())
             .is_some_and(|v| {
                 let s = v
@@ -4751,9 +4745,24 @@ impl Vm {
                     .to_ascii_lowercase();
                 matches!(s.as_str(), "1" | "on" | "yes" | "true")
                     || s.parse::<i64>().is_ok_and(|n| n != 0)
-            });
+            })
+    }
+
+    pub fn build_exception_trace(&mut self) -> Value {
+        self.sync_builtin_frames();
+        self.sync_frame_args();
+        let mut trace_arr = PhpArray::new();
+        // call_stack entries: (function_name, file, line_called_from, args, is_instance_method)
+        let sensitive = self.any_sensitive_params();
+        // zend.exception_ignore_args: frames carry no "args"
+        let ignore_args = self.exception_ignore_args();
         let frame_list: Vec<(String, String, u32, Vec<Value>, bool)> =
             self.call_stack.iter().rev().cloned().collect();
+        let named_args = if ignore_args {
+            Vec::new()
+        } else {
+            self.frame_named_args()
+        };
         for (idx, (func_name, file, line, _, is_method)) in frame_list.iter().enumerate() {
             let args: &[Value] = Self::trace_frame_args_at(&frame_list, idx);
             let wrapped;
@@ -4820,10 +4829,22 @@ impl Vm {
             }
             // Add args array (an eval() frame has none)
             if !ignore_args && func_name != "eval" {
-                let mut args_arr = PhpArray::new();
-                for arg in args {
-                    args_arr.push(arg.clone());
-                }
+                let at = frame_list.len() - 1 - idx;
+                let args_arr = if named_args.iter().any(|n| n.0 == at) {
+                    let named: Vec<(PhpString, Value)> = named_args
+                        .iter()
+                        .filter(|n| n.0 == at)
+                        .map(|n| (n.1.clone(), n.2.clone()))
+                        .collect();
+                    let raw = Self::trace_frame_args_at(&frame_list, idx).to_vec();
+                    self.frame_args_array(func_name, &raw, named)
+                } else {
+                    let mut args_arr = PhpArray::new();
+                    for arg in args {
+                        args_arr.push(arg.clone());
+                    }
+                    args_arr
+                };
                 frame.set(
                     ArrayKey::String(PhpString::from_bytes(b"args")),
                     Value::Array(Rc::new(RefCell::new(args_arr))),
@@ -41109,54 +41130,41 @@ impl Vm {
                 OpCode::MatchError => match outlined(|| -> Result<Flow, VmError> {
                     // Throw UnhandledMatchError with the unmatched value
                     let subject = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let subject_repr = match &subject {
-                        Value::True => "true".to_string(),
-                        Value::False => "false".to_string(),
-                        Value::Null | Value::Undef => "NULL".to_string(),
-                        Value::Long(n) => n.to_string(),
-                        Value::Double(f) => {
-                            // PHP shows 5.0 not 5 for floats
-                            let s = format!("{}", f);
-                            if !s.contains('.') && !s.contains('E') && !s.contains('e') {
-                                format!("{}.0", s)
-                            } else {
-                                s
+                    // zend_match_unhandled_error(): smart_str_append_zval() of
+                    // the value, or its type
+                    let subject = subject.deref();
+                    let max_len = self.exception_string_param_max_len;
+                    let is_enum = matches!(&subject, Value::Object(o) if o.borrow().has_property(b"__enum_case"));
+                    let subject_repr = if self.exception_ignore_args()
+                        || (matches!(subject, Value::String(_)) && max_len == 0)
+                        || !(is_enum
+                            || matches!(
+                                subject,
+                                Value::Null
+                                    | Value::Undef
+                                    | Value::True
+                                    | Value::False
+                                    | Value::Long(_)
+                                    | Value::Double(_)
+                                    | Value::String(_)
+                            )) {
+                        let ty = match &subject {
+                            Value::Null | Value::Undef => "null".to_string(),
+                            Value::True | Value::False => "bool".to_string(),
+                            Value::Long(_) => "int".to_string(),
+                            Value::Double(_) => "float".to_string(),
+                            Value::String(_) => "string".to_string(),
+                            Value::Array(_) => "array".to_string(),
+                            Value::Object(o) => {
+                                crate::value::display_class_name(&o.borrow().class_name)
                             }
-                        }
-                        Value::String(s) => {
-                            let lossy = s.to_string_lossy();
-                            let escape_str = |input: &str| -> String {
-                                input
-                                    .replace('\\', "\\\\")
-                                    .replace('\n', "\\n")
-                                    .replace('\r', "\\r")
-                                    .replace('\t', "\\t")
-                                    .replace('\0', "\\0")
-                            };
-                            if lossy.len() > 15 {
-                                // Truncate the raw string to 15 chars, then escape
-                                let truncated: String = lossy.chars().take(15).collect();
-                                format!("'{}...'", escape_str(&truncated))
-                            } else {
-                                format!("'{}'", escape_str(&lossy))
-                            }
-                        }
-                        Value::Array(_) => "of type array".to_string(),
-                        Value::Object(obj) => {
-                            let obj_borrow = obj.borrow();
-                            let name = crate::value::display_class_name(&obj_borrow.class_name);
-                            if obj_borrow.has_property(b"__enum_case") {
-                                // For enums, show ClassName::CaseName
-                                if let Value::String(case_name) = obj_borrow.get_property(b"name") {
-                                    format!("{}::{}", name, case_name.to_string_lossy())
-                                } else {
-                                    format!("of type {}", name)
-                                }
-                            } else {
-                                format!("of type {}", name)
-                            }
-                        }
-                        _ => subject.to_php_string().to_string_lossy(),
+                            Value::Generator(_) => "Generator".to_string(),
+                            Value::Resource(_) => "resource".to_string(),
+                            Value::Reference(_) => "reference".to_string(),
+                        };
+                        format!("of type {}", ty)
+                    } else {
+                        Self::format_trace_arg_with_limit(&subject, max_len)
                     };
                     let msg = format!("Unhandled match case {}", subject_repr);
 

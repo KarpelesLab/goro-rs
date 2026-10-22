@@ -112,9 +112,16 @@ impl Vm {
             match frame.get(&key(b"args")).map(|v| v.deref()) {
                 Some(Value::Array(args_arr)) => {
                     let args_arr = args_arr.borrow();
+                    // (extra named arguments are shown as `name: value`)
                     let formatted: Vec<String> = args_arr
                         .iter()
-                        .map(|(_k, v)| Vm::format_trace_arg_with_limit(&v.deref(), max_len))
+                        .map(|(k, v)| {
+                            let v = Vm::format_trace_arg_with_limit(&v.deref(), max_len);
+                            match k {
+                                ArrayKey::String(n) => format!("{}: {}", n.to_string_lossy(), v),
+                                ArrayKey::Int(_) => v,
+                            }
+                        })
                         .collect();
                     out.push_str(&formatted.join(", "));
                 }
