@@ -33,6 +33,15 @@ pub(crate) fn is_internal_property(name: &[u8]) -> bool {
 }
 
 fn var_dump(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.is_empty() {
+        let msg = "var_dump() expects at least 1 argument, 0 given";
+        let exc = vm.create_exception(b"ArgumentCountError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg.into(),
+            line: vm.current_line,
+        });
+    }
     // Objects an outer var_dump() is dumping while it runs __debugInfo()
     // stay protected (ZEND_GUARD_PROTECT_RECURSION(guard, DEBUG)).
     let mut seen = DUMPING.with(|d| d.borrow().clone());

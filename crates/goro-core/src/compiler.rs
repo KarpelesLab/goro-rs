@@ -3521,14 +3521,22 @@ impl Compiler {
 
             StmtKind::Switch { expr, cases } => {
                 let subject = self.compile_expr(expr)?;
-                let subject_tmp = self.op_array.alloc_temp();
-                self.op_array.emit(Op {
-                    opcode: OpCode::Assign,
-                    op1: OperandType::Tmp(subject_tmp),
-                    op2: subject,
-                    result: OperandType::Unused,
-                    line: stmt.span.line,
-                });
+                // zend_compile_switch(): a CV subject is compared as is by
+                // each CASE (so an undefined one warns per case); anything
+                // else is evaluated once.
+                let subject_op = if matches!(subject, OperandType::Cv(_)) {
+                    subject
+                } else {
+                    let subject_tmp = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Assign,
+                        op1: OperandType::Tmp(subject_tmp),
+                        op2: subject,
+                        result: OperandType::Unused,
+                        line: stmt.span.line,
+                    });
+                    OperandType::Tmp(subject_tmp)
+                };
 
                 self.loop_stack.push(LoopContext {
                     break_jumps: Vec::new(),
@@ -3556,10 +3564,10 @@ impl Compiler {
                         let cmp_tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
                             opcode: OpCode::Equal,
-                            op1: OperandType::Tmp(subject_tmp),
+                            op1: subject_op,
                             op2: case_op,
                             result: OperandType::Tmp(cmp_tmp),
-                            line: stmt.span.line,
+                            line: case_val.span.line,
                         });
                         // If match, jump to this case's body
                         let jmp = self.op_array.emit(Op {

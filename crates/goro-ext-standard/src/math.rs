@@ -1779,51 +1779,171 @@ fn extension_loaded_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(if loaded { Value::True } else { Value::False })
 }
 
-fn version_compare_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let v1 = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let v2 = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let op = args.get(2).map(|v| v.to_php_string().to_string_lossy());
-
-    // Simple version comparison: split by dots and compare parts
-    let parts1: Vec<i64> = v1.split('.').map(|s| s.parse().unwrap_or(0)).collect();
-    let parts2: Vec<i64> = v2.split('.').map(|s| s.parse().unwrap_or(0)).collect();
-    let max_len = parts1.len().max(parts2.len());
-    let mut cmp = 0i64;
-    for i in 0..max_len {
-        let a = parts1.get(i).copied().unwrap_or(0);
-        let b = parts2.get(i).copied().unwrap_or(0);
-        if a < b {
-            cmp = -1;
-            break;
+/// php_canonicalize_version(): separate digit runs from the rest with
+/// dots; `-`, `_`, `+` and other non-alphanumerics become a single dot.
+fn canonicalize_version(v: &[u8]) -> Vec<u8> {
+    let mut q = Vec::with_capacity(v.len() * 2);
+    let Some((&first, rest)) = v.split_first() else {
+        return q;
+    };
+    let isdig = |c: u8| c.is_ascii_digit();
+    let isndig = |c: u8| !c.is_ascii_digit() && c != b'.';
+    let mut lp = first;
+    q.push(first);
+    for &p in rest {
+        let lq = *q.last().unwrap();
+        if matches!(p, b'-' | b'_' | b'+') {
+            if lq != b'.' {
+                q.push(b'.');
+            }
+        } else if (isndig(lp) && isdig(p)) || (isdig(lp) && isndig(p)) {
+            if lq != b'.' {
+                q.push(b'.');
+            }
+            q.push(p);
+        } else if !p.is_ascii_alphanumeric() {
+            if lq != b'.' {
+                q.push(b'.');
+            }
+        } else {
+            q.push(p);
         }
-        if a > b {
-            cmp = 1;
-            break;
-        }
+        lp = p;
     }
+    q
+}
 
-    if let Some(operator) = op {
-        let result = match operator.as_str() {
-            "<" | "lt" => cmp < 0,
-            "<=" | "le" => cmp <= 0,
-            ">" | "gt" => cmp > 0,
-            ">=" | "ge" => cmp >= 0,
-            "==" | "eq" => cmp == 0,
-            "!=" | "ne" => cmp != 0,
-            _ => false,
+/// compare_special_version_forms()
+fn compare_special_version_forms(a: &[u8], b: &[u8]) -> i64 {
+    const FORMS: [(&[u8], i64); 10] = [
+        (b"dev", 0),
+        (b"alpha", 1),
+        (b"a", 1),
+        (b"beta", 2),
+        (b"b", 2),
+        (b"RC", 3),
+        (b"rc", 3),
+        (b"#", 4),
+        (b"pl", 5),
+        (b"p", 5),
+    ];
+    let order = |f: &[u8]| {
+        FORMS
+            .iter()
+            .find(|(n, _)| f.starts_with(n))
+            .map_or(-1, |&(_, o)| o)
+    };
+    (order(a) - order(b)).signum()
+}
+
+/// strtol(s, NULL, 10) of a leading digit run (saturating like strtol).
+fn version_strtol(s: &[u8]) -> i64 {
+    let mut n: i64 = 0;
+    for &c in s.iter().take_while(|c| c.is_ascii_digit()) {
+        n = n.saturating_mul(10).saturating_add((c - b'0') as i64);
+    }
+    n
+}
+
+/// php_version_compare()
+pub(crate) fn php_version_compare(v1: &[u8], v2: &[u8]) -> i64 {
+    if v1.is_empty() || v2.is_empty() {
+        return match (v1.is_empty(), v2.is_empty()) {
+            (true, true) => 0,
+            (false, _) => 1,
+            _ => -1,
         };
-        Ok(if result { Value::True } else { Value::False })
-    } else {
-        Ok(Value::Long(cmp))
     }
+    let c1 = if v1[0] == b'#' {
+        v1.to_vec()
+    } else {
+        canonicalize_version(v1)
+    };
+    let c2 = if v2[0] == b'#' {
+        v2.to_vec()
+    } else {
+        canonicalize_version(v2)
+    };
+    // The C code walks NUL-terminated buffers, cutting each element at the
+    // next '.'; `n1` / `n2` are None once an element had no '.' after it.
+    let at = |b: &[u8], p: usize| b.get(p).copied().unwrap_or(0);
+    let (mut p1, mut p2) = (0usize, 0usize);
+    let (mut n1, mut n2) = (Some(0usize), Some(0usize));
+    let mut compare = 0;
+    while p1 < c1.len() && p2 < c2.len() && n1.is_some() && n2.is_some() {
+        n1 = c1[p1..].iter().position(|&c| c == b'.').map(|k| p1 + k);
+        n2 = c2[p2..].iter().position(|&c| c == b'.').map(|k| p2 + k);
+        let a = &c1[p1..n1.unwrap_or(c1.len())];
+        let b = &c2[p2..n2.unwrap_or(c2.len())];
+        let (da, db) = (at(a, 0).is_ascii_digit(), at(b, 0).is_ascii_digit());
+        compare = if da && db {
+            (version_strtol(a).wrapping_sub(version_strtol(b))).signum()
+        } else if !da && !db {
+            compare_special_version_forms(a, b)
+        } else if da {
+            compare_special_version_forms(b"#N#", b)
+        } else {
+            compare_special_version_forms(a, b"#N#")
+        };
+        if compare != 0 {
+            break;
+        }
+        if let Some(n) = n1 {
+            p1 = n + 1;
+        }
+        if let Some(n) = n2 {
+            p2 = n + 1;
+        }
+    }
+    if compare == 0 {
+        if n1.is_some() {
+            compare = if at(&c1, p1).is_ascii_digit() {
+                1
+            } else {
+                php_version_compare(&c1[p1.min(c1.len())..], b"#N#")
+            };
+        } else if n2.is_some() {
+            compare = if at(&c2, p2).is_ascii_digit() {
+                -1
+            } else {
+                php_version_compare(b"#N#", &c2[p2.min(c2.len())..])
+            };
+        }
+    }
+    compare
+}
+
+fn version_compare_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let cstr = |v: Option<&Value>| {
+        let s = v.unwrap_or(&Value::Null).to_php_string();
+        let b = s.as_bytes();
+        // The C implementation stops at a NUL byte.
+        b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())].to_vec()
+    };
+    let compare = php_version_compare(&cstr(args.first()), &cstr(args.get(1)));
+    let op = match args.get(2).map(|v| v.deref()) {
+        None | Some(Value::Null) => return Ok(Value::Long(compare)),
+        Some(v) => v.to_php_string(),
+    };
+    let r = match op.as_bytes() {
+        b"<" | b"lt" => compare == -1,
+        b"<=" | b"le" => compare != 1,
+        b">" | b"gt" => compare == 1,
+        b">=" | b"ge" => compare != -1,
+        b"==" | b"=" | b"eq" => compare == 0,
+        b"!=" | b"<>" | b"ne" => compare != 0,
+        _ => {
+            let msg =
+                "version_compare(): Argument #3 ($operator) must be a valid comparison operator";
+            let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: msg.into(),
+                line: vm.current_line,
+            });
+        }
+    };
+    Ok(if r { Value::True } else { Value::False })
 }
 
 fn floatval_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

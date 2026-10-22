@@ -857,6 +857,11 @@ impl Vm {
                 .position(|p| p.name.as_bytes() == name.as_slice());
             let Some(idx) = idx else {
                 if info.is_variadic() {
+                    // Collected as extra named params: zpp checks the
+                    // positional argument count before rejecting them.
+                    if let Some(msg) = info.arity_error(positional) {
+                        return Err(ZppError::Throw(b"ArgumentCountError", msg));
+                    }
                     return Err(ZppError::Throw(
                         b"ArgumentCountError",
                         format!("{}() does not accept unknown named parameters", info.name),
