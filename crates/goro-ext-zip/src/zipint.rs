@@ -48,6 +48,8 @@ pub const CM_STORE: u16 = 0;
 pub const CM_DEFLATE: u16 = 8;
 pub const CM_BZIP2: u16 = 12;
 pub const CM_LZMA: u16 = 14;
+pub const CM_ZSTD: u16 = 93;
+pub const CM_XZ: u16 = 95;
 pub const CM_WINZIP_AES: u16 = 99;
 
 pub const EM_NONE: u16 = 0;
@@ -3392,7 +3394,6 @@ impl Archive {
             let de = self.get_dirent(idx, flags)?;
             (de.last_mod, de.bitflags)
         };
-        let _ = de_bitflags;
         let off = self.file_get_offset(idx)? as usize;
         let src = self.src();
         let end = off.saturating_add(st.comp_size as usize);
@@ -3437,7 +3438,10 @@ impl Archive {
             if !codec::compression_supported(st.comp_method as i32, false) {
                 return Err(ZipError::new(ER_COMPNOTSUPP, 0));
             }
-            let (d, e) = codec::decompress(&data, st.comp_method);
+            // zip_algorithm_xz.c start(): the real size when general
+            // purpose bits 1 and 2 are clear (no LZMA end-of-stream marker)
+            let size = (de_bitflags & 0x6 == 0 && st.valid & STAT_SIZE != 0).then_some(st.size);
+            let (d, e) = codec::decompress(&data, st.comp_method, size);
             data = d;
             if end_error.is_none() {
                 end_error = e;
@@ -3749,6 +3753,19 @@ impl Archive {
                 st.size + st.size.div_ceil(16384) * 5 + 6
             } else if cm == CM_BZIP2 {
                 (st.size as f64 * 1.006) as u64
+            } else if cm == CM_LZMA || cm == CM_XZ {
+                // zip_algorithm_xz.c
+                let m = (st.size as f64 * 1.1) as u64 + 64 * 1024 + 13;
+                if m < st.size { u64::MAX } else { m }
+            } else if cm == CM_ZSTD {
+                // ZSTD_compressBound()
+                let s = st.size;
+                s + (s >> 8)
+                    + if s < (128 << 10) {
+                        ((128 << 10) - s) >> 11
+                    } else {
+                        0
+                    }
             } else {
                 u64::MAX
             };

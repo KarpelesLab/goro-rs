@@ -89,12 +89,13 @@ Highlights beyond the core language:
   reflection, session, dom/simplexml/xml/xmlreader/xmlwriter (libxml2-style tree, lexbor
   HTML5 parser port), openssl (on [purecrypto](https://crates.io/crates/purecrypto)),
   mysqli (mysqlnd port), pgsql (libpq port: SCRAM/MD5 auth, TLS, COPY, async, large objects),
-  PDO with pdo_mysql (over the same mysqlnd) and pdo_pgsql (over the same libpq), gmp (on [puremp](https://crates.io/crates/puremp), with GMP's exact Mersenne Twister streams), sockets, curl, bz2, tokenizer,
+  PDO with pdo_mysql (over the same mysqlnd) and pdo_pgsql (over the same libpq), gmp (on [puremp](https://crates.io/crates/puremp), with GMP's exact Mersenne Twister streams), sockets, curl, bz2 (on
+  [compcol](https://crates.io/crates/compcol)'s bzip2, libbzip2's streaming/flush semantics), tokenizer,
   bcmath (libbcmath port), filter, iconv (glibc iconv emulation), calendar, posix,
   pcntl (fork, signals with async dispatch), ftp (with FTPS), shmop/sysvsem/sysvshm/sysvmsg,
   gettext (libintl emulation reading .mo catalogs), sodium (libsodium API on purecrypto,
   argon2i/argon2id `password_hash()`), soap (WSDL/XML Schema, SoapClient over HTTP/HTTPS with
-  keep-alive, proxies, Basic/Digest auth, compression; SoapServer), phar (phar/tar/zip archives, phar:// wrapper, signatures), zip (libzip port, zip://),
+  keep-alive, proxies, Basic/Digest auth, compression; SoapServer), phar (phar/tar/zip archives, phar:// wrapper, signatures), zip (libzip port, zip://; store, deflate, bzip2, LZMA, XZ and Zstandard methods, the latter on compcol),
   exif, fileinfo (libmagic 5.46 port with the bundled magic database), uri (RFC 3986 + WHATWG URL),
   intl (on the [intl](https://crates.io/crates/intl) crate), xsl (an XSLT 1.0 processor ported
   from libxslt 1.1.45 with all of EXSLT; it matches libxslt on its own test suite and the DocBook

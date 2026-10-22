@@ -1,6 +1,7 @@
 //! The data layers of libzip's sources: compression algorithms
-//! (zip_algorithm_deflate.c / zip_algorithm_bzip2.c and the "better of
-//! deflate or store" logic of zip_source_compress.c), traditional PKWARE
+//! (zip_algorithm_deflate.c / zip_algorithm_bzip2.c / zip_algorithm_xz.c /
+//! zip_algorithm_zstd.c, the codecs being goro-zlib and compcol, and the
+//! "better of deflate or store" logic of zip_source_compress.c), traditional PKWARE
 //! encryption (zip_pkware.c, zip_source_pkware_{en,de}code.c) and WinZip
 //! AES (zip_winzip_aes.c, zip_source_winzip_aes_{en,de}code.c).
 //!
@@ -14,7 +15,10 @@ const BUFSIZE: usize = 8192;
 
 /// zip_compression_method_supported()
 pub fn compression_supported(method: i32, _compress: bool) -> bool {
-    matches!(ZipInt::cm_actual(method), CM_STORE | CM_DEFLATE | CM_BZIP2)
+    matches!(
+        ZipInt::cm_actual(method),
+        CM_STORE | CM_DEFLATE | CM_BZIP2 | CM_LZMA | CM_XZ | CM_ZSTD
+    )
 }
 
 /// zip_encryption_method_supported()
@@ -29,6 +33,8 @@ pub fn encryption_supported(method: u16, _encode: bool) -> bool {
 pub fn version_needed(method: u16) -> u16 {
     match method {
         CM_BZIP2 => 46,
+        // zip_algorithm_xz.c / zip_algorithm_zstd.c: 20 (WinZip does not
+        // unpack 63)
         _ => 20,
     }
 }
@@ -95,11 +101,26 @@ pub fn compress(input: &[u8], method: i32, flags: u32) -> Result<Compressed, Zip
         }
         CM_BZIP2 => {
             let level = if (1..=9).contains(&flags) { flags } else { 9 };
-            use std::io::Write;
-            let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::new(level));
-            enc.write_all(input)
-                .map_err(|_| ZipError::new(ER_INTERNAL, 0))?;
-            (enc.finish().map_err(|_| ZipError::new(ER_INTERNAL, 0))?, 0)
+            (
+                goro_ext_standard::bz2codec::compress_run_finish(input, level, 30),
+                0,
+            )
+        }
+        CM_LZMA => (lzma_compress(input, flags)?, 1 << 1),
+        CM_XZ => {
+            let level = if flags <= 9 { flags as u8 } else { 6 };
+            let enc = compcol::xz::Encoder::with_config(compcol::xz::EncoderConfig { level });
+            (encode_all(enc, input)?, 0)
+        }
+        CM_ZSTD => {
+            // the (16-bit) flags if a zstd level, else 0: zstd's default (3)
+            let level = if (1..=22).contains(&flags) {
+                flags as u8
+            } else {
+                3
+            };
+            let enc = compcol::zstd::Encoder::with_config(compcol::zstd::EncoderConfig { level });
+            (encode_all(enc, input)?, 0)
         }
         _ => return Err(ZipError::new(ER_COMPNOTSUPP, 0)),
     };
@@ -122,21 +143,110 @@ pub fn compress(input: &[u8], method: i32, flags: u32) -> Result<Compressed, Zip
 }
 
 /// zip_source_decompress() of a whole stream: the data decoded and the
-/// error hit (if any).
-pub fn decompress(input: &[u8], method: u16) -> (Vec<u8>, Option<ZipError>) {
+/// error hit (if any). `size`: the uncompressed size for an LZMA stream
+/// written without end-of-stream marker (general purpose bits 1 and 2
+/// clear). A truncated stream ends the data without error (libzip leaves
+/// that to the CRC check).
+pub fn decompress(input: &[u8], method: u16, size: Option<u64>) -> (Vec<u8>, Option<ZipError>) {
     match method {
         CM_STORE => (input.to_vec(), None),
         CM_DEFLATE => inflate_raw(input),
-        CM_BZIP2 => {
-            use std::io::Read;
-            let mut out = Vec::new();
-            let mut dec = bzip2::read::BzDecoder::new(input);
-            match dec.read_to_end(&mut out) {
-                Ok(_) => (out, None),
-                Err(_) => (out, Some(ZipError::new(ER_COMPRESSED_DATA, 0))),
+        CM_BZIP2 => match goro_ext_standard::bz2codec::decompress(input) {
+            (out, Ok(_)) => (out, None),
+            (out, Err(_)) => (out, Some(ZipError::new(ER_COMPRESSED_DATA, 0))),
+        },
+        CM_LZMA => {
+            // 2 bytes LZMA SDK version, 2 bytes properties size (5), the
+            // properties: rebuilt into an "lzma alone" header
+            if input.len() < 9 {
+                return (Vec::new(), None);
             }
+            if input[2] != 0x05 || input[3] != 0x00 {
+                return (Vec::new(), Some(ZipError::new(ER_COMPRESSED_DATA, 0)));
+            }
+            let mut alone = Vec::with_capacity(input.len() + 4);
+            alone.extend_from_slice(&input[4..9]);
+            alone.extend_from_slice(&size.unwrap_or(u64::MAX).to_le_bytes());
+            alone.extend_from_slice(&input[9..]);
+            decode_all(compcol::lzma::Decoder::new(), &alone)
         }
+        CM_XZ => decode_all(compcol::xz::Decoder::new(), input),
+        CM_ZSTD => decode_all(compcol::zstd::Decoder::new(), input),
         _ => (Vec::new(), Some(ZipError::new(ER_COMPNOTSUPP, 0))),
+    }
+}
+
+/// zip_algorithm_xz.c for ZIP_CM_LZMA: the "lzma alone" stream with its
+/// 8-byte size replaced by the LZMA SDK version (9.20) and properties
+/// size; an end-of-stream marker ends the data.
+fn lzma_compress(input: &[u8], flags: u32) -> Result<Vec<u8>, ZipError> {
+    let level = if flags <= 9 { flags as u8 } else { 6 };
+    let enc = compcol::lzma::Encoder::with_config(compcol::lzma::EncoderConfig { level });
+    let alone = encode_all(enc, input)?;
+    if alone.len() < 13 {
+        return Err(ZipError::new(ER_INTERNAL, 0));
+    }
+    let mut out = Vec::with_capacity(alone.len() - 4);
+    out.extend_from_slice(&[0x09, 0x14, 0x05, 0x00]);
+    out.extend_from_slice(&alone[..5]);
+    out.extend_from_slice(&alone[13..]);
+    Ok(out)
+}
+
+fn encode_all<E: compcol::Encoder>(mut enc: E, input: &[u8]) -> Result<Vec<u8>, ZipError> {
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 65536];
+    let mut pos = 0;
+    while pos < input.len() {
+        let (p, _) = enc
+            .encode(&input[pos..], &mut buf)
+            .map_err(|_| ZipError::new(ER_INTERNAL, 0))?;
+        out.extend_from_slice(&buf[..p.written]);
+        pos += p.consumed;
+    }
+    loop {
+        let (p, s) = enc
+            .finish(&mut buf)
+            .map_err(|_| ZipError::new(ER_INTERNAL, 0))?;
+        out.extend_from_slice(&buf[..p.written]);
+        if s == compcol::Status::StreamEnd {
+            return Ok(out);
+        }
+    }
+}
+
+fn decode_all<D: compcol::Decoder>(mut dec: D, input: &[u8]) -> (Vec<u8>, Option<ZipError>) {
+    let mut out = Vec::new();
+    let mut buf = vec![0u8; 65536];
+    let mut pos = 0;
+    loop {
+        match dec.decode(&input[pos..], &mut buf) {
+            Ok((p, s)) => {
+                out.extend_from_slice(&buf[..p.written]);
+                pos += p.consumed;
+                if s == compcol::Status::StreamEnd {
+                    return (out, None);
+                }
+                if pos >= input.len() && p.written < buf.len() {
+                    break;
+                }
+            }
+            Err(_) => return (out, Some(ZipError::new(ER_COMPRESSED_DATA, 0))),
+        }
+    }
+    // end of input: drain what the codec still holds
+    loop {
+        match dec.finish(&mut buf) {
+            Ok((p, s)) => {
+                out.extend_from_slice(&buf[..p.written]);
+                if s == compcol::Status::StreamEnd || p.written == 0 {
+                    return (out, None);
+                }
+            }
+            // truncated: the CRC check reports it
+            Err(compcol::Error::UnexpectedEnd) => return (out, None),
+            Err(_) => return (out, Some(ZipError::new(ER_COMPRESSED_DATA, 0))),
+        }
     }
 }
 
