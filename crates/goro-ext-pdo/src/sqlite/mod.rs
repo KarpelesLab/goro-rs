@@ -438,7 +438,7 @@ pub fn open_blob(vm: &mut Vm, f: &Func, args: &[Value]) -> Value {
     };
     let mode = if sqlite_flags != 0 { "r+b" } else { "rb" };
     match goro_core::ext_stream::alloc(vm, Rc::new(RefCell::new(s)), mode) {
-        Some(id) => Value::Resource(id),
+        Some(id) => Value::Resource(goro_core::value::ResourceRef::new(id)),
         None => Value::False,
     }
 }

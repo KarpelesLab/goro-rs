@@ -226,5 +226,5 @@ pub fn open_blob(vm: &mut Vm, f: &Func, this: Option<&Obj>, args: &[Value]) -> V
         flags,
     }));
     let id = ext_io::ext_alloc_stream(s, mode, None);
-    Value::Resource(id)
+    Value::Resource(goro_core::value::ResourceRef::new(id))
 }

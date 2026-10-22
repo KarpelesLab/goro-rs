@@ -309,7 +309,7 @@ fn bind_params(vm: &mut Vm, s: &StmtData, d: &DbData) -> Result<(), ()> {
                             );
                             return Err(());
                         }
-                        Bind::Blob(goro_ext_standard::ext_io::read_all(vm, *id))
+                        Bind::Blob(goro_ext_standard::ext_io::read_all(vm, id.id()))
                     } else {
                         Bind::Blob(try_string(vm, &parameter).unwrap_or_default())
                     }
