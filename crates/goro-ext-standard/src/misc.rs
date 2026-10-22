@@ -5051,6 +5051,9 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
+    if let Some(msg) = ini_handler_deprecation(&key, &value) {
+        vm.emit_deprecated(&msg);
+    }
     if key.starts_with(b"assert.") {
         if key == b"assert.callback" {
             ASSERT_CALLBACK.with(|c| *c.borrow_mut() = None);
@@ -5239,6 +5242,18 @@ fn ini_parse_bool(v: &Value) -> bool {
 
 fn assert_ini_bool(vm: &Vm, key: &[u8], default: bool) -> bool {
     vm.constants.get(key).map(ini_parse_bool).unwrap_or(default)
+}
+
+/// E_DEPRECATED raised (with zend_error(), no function prefix) by an INI
+/// handler for the new value.
+pub fn ini_handler_deprecation(key: &[u8], value: &Value) -> Option<String> {
+    match key {
+        // OnUpdateAutoDetectLineEndings
+        b"auto_detect_line_endings" if ini_parse_bool(value) => {
+            Some("auto_detect_line_endings is deprecated".to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Deprecations emitted by the assert.* INI handlers when a value is changed
@@ -7896,8 +7911,34 @@ fn get_meta_tags_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
+/// Z_PARAM_PATH: a ValueError for a path with NUL bytes.
+fn path_arg_nul_error(
+    vm: &mut Vm,
+    path: &[u8],
+    func: &str,
+    argn: u32,
+    name: &str,
+) -> Option<VmError> {
+    if !path.contains(&0) {
+        return None;
+    }
+    let msg = format!(
+        "{}(): Argument #{} (${}) must not contain any null bytes",
+        func, argn, name
+    );
+    let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    Some(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
+}
+
 fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "file_get_contents", 1, "filename") {
+        return Err(e);
+    }
     // Empty filename → ValueError, matching PHP's behavior.
     if path.as_bytes().is_empty() {
         let msg = "Path must not be empty";
@@ -8088,6 +8129,19 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "file_put_contents", 1, "filename") {
+        return Err(e);
+    }
+    // php_stream_open_wrapper_ex(): an empty path is a ValueError.
+    if path.as_bytes().is_empty() {
+        let msg = "Path must not be empty";
+        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg.to_string(),
+            line: vm.current_line,
+        });
+    }
     if !vm.check_open_basedir("file_put_contents", &path.to_string_lossy()) {
         return Ok(Value::False);
     }
@@ -8143,12 +8197,17 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let append = flags & 8 != 0; // FILE_APPEND
     let lock_ex = flags & 2 != 0; // LOCK_EX
 
+    // An object without __toString(): the file is still opened (and
+    // truncated) before file_put_contents() fails.
+    let mut fail_after_open = false;
     let data_bytes = match data_val {
         Value::Array(arr) => {
-            let arr = arr.borrow();
+            let vals: Vec<Value> = arr.borrow().values().cloned().collect();
             let mut buf = Vec::new();
-            for (_, v) in arr.iter() {
-                buf.extend_from_slice(v.to_php_string().as_bytes());
+            for v in vals {
+                // zval_get_tmp_string()
+                let s = crate::strings::zval_get_string(vm, &v)?;
+                buf.extend_from_slice(s.as_bytes());
             }
             buf
         }
@@ -8162,14 +8221,14 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .map(|c| c.get_method(b"__tostring").is_some())
                 .unwrap_or(false);
             if !has_tostring {
-                // PHP's file_put_contents silently returns false rather than
-                // emitting a warning for objects without __toString.
                 let _ = class_name;
-                return Ok(Value::False);
-            }
-            match vm.call_object_method(data_val, b"__tostring", &[]) {
-                Some(result) => result.to_php_string().as_bytes().to_vec(),
-                None => return Ok(Value::False),
+                fail_after_open = true;
+                Vec::new()
+            } else {
+                match vm.call_object_method(data_val, b"__tostring", &[]) {
+                    Some(result) => result.to_php_string().as_bytes().to_vec(),
+                    None => return Ok(Value::False),
+                }
             }
         }
         // A stream: what remains of it (php_stream_copy_to_stream_ex()).
@@ -8238,6 +8297,9 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             goro_core::value::alloc_resource_id();
         }
         file_result.and_then(|mut f| {
+            if fail_after_open {
+                return Ok(usize::MAX);
+            }
             if lock_ex {
                 #[cfg(unix)]
                 {
@@ -8249,6 +8311,7 @@ fn file_put_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         })
     };
     match result {
+        Ok(usize::MAX) => Ok(Value::False),
         Ok(len) => Ok(Value::Long(len as i64)),
         Err(e) => {
             vm.emit_warning(&format!(
@@ -8594,7 +8657,8 @@ fn stat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
     let res = stat_path(&path_str, false)?;
-    if matches!(res, Value::False) {
+    // php_stat(): an empty filename fails silently.
+    if matches!(res, Value::False) && !path_str.is_empty() {
         vm.emit_warning(&format!("stat(): stat failed for {}", path_str));
     }
     Ok(res)
@@ -9995,10 +10059,14 @@ thread_local! {
     static USER_WRAPPERS: RefCell<StdHashMap<Vec<u8>, UserWrapper>> = RefCell::new(StdHashMap::new());
 }
 
+/// Context options: wrapper => option => value, in insertion order.
+pub(crate) type CtxOptions =
+    goro_core::fxhash::FxIndexMap<Vec<u8>, goro_core::fxhash::FxIndexMap<Vec<u8>, Value>>;
+
 #[derive(Clone, Default)]
 pub(crate) struct StreamContext {
-    /// Map: wrapper_name -> map(option_name -> Value)
-    pub options: std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>,
+    /// Map: wrapper_name -> map(option_name -> Value), in insertion order.
+    pub options: CtxOptions,
     /// Notification callback (or null if unset).
     pub notification: Option<Value>,
 }
@@ -10027,6 +10095,54 @@ fn read_dir_entries(path: &str) -> std::io::Result<Vec<String>> {
     // in ascending order.
     names.reverse();
     Ok(names)
+}
+
+/// The glob:// wrapper (php_glob_stream_opener): the base names of the
+/// pattern's matches, those outside open_basedir left out.
+fn glob_stream_entries(vm: &mut Vm, pattern: &str) -> Vec<String> {
+    let mut glob_buf: libc::glob_t = unsafe { std::mem::zeroed() };
+    let c_pattern = std::ffi::CString::new(pattern.as_bytes()).unwrap_or_default();
+    let ret = unsafe { libc::glob(c_pattern.as_ptr(), 0, None, &mut glob_buf) };
+    let mut names = Vec::new();
+    if ret == 0 {
+        for i in 0..glob_buf.gl_pathc {
+            let path = unsafe {
+                let p = *glob_buf.gl_pathv.add(i);
+                std::ffi::CStr::from_ptr(p).to_string_lossy().to_string()
+            };
+            if !goro_core::basedir::check_open_basedir_ex(vm, "", &path, false) {
+                continue;
+            }
+            let base = match path.trim_end_matches('/').rfind('/') {
+                Some(p) => path[p + 1..].to_string(),
+                None => path.clone(),
+            };
+            names.push(base);
+        }
+    }
+    unsafe {
+        libc::globfree(&mut glob_buf);
+    }
+    names
+}
+
+/// A directory handle over a fixed list of entries (glob://).
+fn alloc_dir_handle_entries(path: String, mut names: Vec<String>) -> i64 {
+    // readdir() pops from the end.
+    names.reverse();
+    let did = goro_core::value::alloc_resource_id();
+    DIR_HANDLES.with(|dh| {
+        dh.borrow_mut().insert(
+            did,
+            DirHandle {
+                path,
+                remaining: names,
+            },
+        );
+    });
+    goro_core::value::register_resource(did, b"stream");
+    CURRENT_DIR_RESOURCE.with(|c| c.set(Some(did)));
+    did
 }
 
 fn alloc_dir_handle(path: String) -> i64 {
@@ -10129,7 +10245,38 @@ struct FileHandle {
     pub pipe_pos: Option<i64>,
     /// Socket streams with the TLS layer set up (php_openssl_netstream_data_t).
     pub crypto: Option<Box<dyn goro_core::crypto::CryptoStream>>,
+    /// PHP_STREAM_FLAG_DETECT_EOL / PHP_STREAM_FLAG_EOL_MAC (EOL_*).
+    pub eol: u8,
+    /// Plain files opened for appending: stream->position, which starts at
+    /// 0 and advances by what is written (while the descriptor jumps to the
+    /// end): (position, descriptor offset) at the last write or seek.
+    pub append_pos: Option<(u64, u64)>,
 }
+
+impl FileHandle {
+    /// The descriptor offset minus what is buffered.
+    fn logical_os_pos(&mut self) -> Option<u64> {
+        let buffered = self.filter_read_ready.len() as u64;
+        self.file
+            .stream_position()
+            .ok()
+            .map(|p| p.saturating_sub(buffered))
+    }
+
+    /// stream->position of an append-mode file.
+    fn append_position(&mut self) -> Option<u64> {
+        let (base, os_base) = self.append_pos?;
+        let os = self.logical_os_pos()?;
+        Some(base + os.saturating_sub(os_base))
+    }
+}
+
+/// FileHandle::eol: not decided yet (auto_detect_line_endings is looked
+/// up on the first line read), "\n" lines, detection pending, "\r" lines.
+const EOL_UNSET: u8 = 0;
+const EOL_LF: u8 = 1;
+const EOL_DETECT: u8 = 2;
+const EOL_MAC: u8 = 3;
 
 impl Drop for FileHandle {
     /// php_openssl_sockop_close(): an active TLS layer sends close_notify
@@ -10332,6 +10479,8 @@ fn register_std_streams() {
                     data_meta: None,
                     crypto: None,
                     pipe_pos: if seekable { None } else { Some(-1) },
+                    eol: EOL_UNSET,
+                    append_pos: None,
                 },
             );
         }
@@ -10347,6 +10496,13 @@ fn alloc_file_handle(file: std::fs::File, mode: &str) -> i64 {
 
 fn alloc_file_handle_uri(file: std::fs::File, mode: &str, uri: &str) -> i64 {
     let fid = alloc_file_handle_special(file, mode, SpecialStream::None);
+    if mode.starts_with('a') {
+        FILE_HANDLES.with(|h| {
+            if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                fh.append_pos = Some((0, 0));
+            }
+        });
+    }
     FILE_HANDLES.with(|h| {
         if let Some(fh) = h.borrow_mut().get_mut(&fid) {
             fh.uri = uri.to_string();
@@ -10626,6 +10782,8 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
                     data_meta: None,
                     crypto: None,
                     pipe_pos,
+                    eol: EOL_UNSET,
+                    append_pos: None,
                 },
             );
         });
@@ -11629,6 +11787,26 @@ pub(crate) fn alloc_resource_id() -> i64 {
 }
 
 fn fwrite_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let fid = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let before = FILE_HANDLES.with(|h| {
+        h.borrow_mut()
+            .get_mut(&fid)
+            .and_then(|fh| fh.append_position())
+    });
+    let r = fwrite_fn_impl(vm, args)?;
+    if let (Value::Long(n), Some(before)) = (&r, before) {
+        FILE_HANDLES.with(|h| {
+            if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                if let Some(os) = fh.logical_os_pos() {
+                    fh.append_pos = Some((before + (*n).max(0) as u64, os));
+                }
+            }
+        });
+    }
+    Ok(r)
+}
+
+fn fwrite_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     // For STDOUT/STDERR (1/2/3) without FILE_HANDLES entry, accept long IDs.
     let raw_fid = arg.to_long();
@@ -11953,12 +12131,37 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::from_vec(out)));
     }
 
+    let detect_eol = vm
+        .constants
+        .get(b"auto_detect_line_endings".as_slice())
+        .map(ini_parse_bool)
+        .unwrap_or(false);
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
+            if fh.eol == EOL_UNSET {
+                fh.eol = if detect_eol { EOL_DETECT } else { EOL_LF };
+            }
             let mut buf = Vec::new();
             let mut byte = [0u8; 1];
             let mut failed = false;
+            if fh.eol == EOL_DETECT {
+                // php_stream_locate_eol(): decide from the buffered data.
+                if let Ok(1) = fh.read_raw(&mut byte, false) {
+                    fh.filter_read_ready.insert(0, byte[0]);
+                }
+                let data = &fh.filter_read_ready;
+                let cr = data.iter().position(|&c| c == b'\r');
+                let lf = data.iter().position(|&c| c == b'\n');
+                match (cr, lf) {
+                    (Some(c), l) if l != Some(c + 1) && !l.is_some_and(|l| l < c) => {
+                        fh.eol = EOL_MAC;
+                    }
+                    (_, Some(_)) => fh.eol = EOL_LF,
+                    _ => {}
+                }
+            }
+            let terminator = if fh.eol == EOL_MAC { b'\r' } else { b'\n' };
             for _ in 0..limit {
                 match fh.read_raw(&mut byte, false) {
                     Ok(0) => {
@@ -11967,7 +12170,7 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     Ok(_) => {
                         buf.push(byte[0]);
-                        if byte[0] == b'\n' {
+                        if byte[0] == terminator {
                             break;
                         }
                     }
@@ -12050,6 +12253,23 @@ fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn rewind_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let r = rewind_fn_impl(vm, args)?;
+    resync_append_pos(args.first().map(|v| v.to_long()).unwrap_or(0));
+    Ok(r)
+}
+
+/// A seek moved an append-mode file: its position is the offset again.
+fn resync_append_pos(fid: i64) {
+    FILE_HANDLES.with(|h| {
+        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+            if fh.append_pos.is_some() {
+                fh.append_pos = fh.logical_os_pos().map(|p| (p, p));
+            }
+        }
+    });
+}
+
+fn rewind_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, &called_as(vm, "rewind"))?;
     flush_write_filters(vm, fid, false);
@@ -12068,7 +12288,25 @@ fn rewind_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 
+fn is_dir_handle(v: &Value) -> bool {
+    matches!(v.deref(), Value::Resource(id) if DIR_HANDLES.with(|dh| dh.borrow().contains_key(&id)))
+}
+
 fn fseek_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    // A directory stream's seek rewinds it (php_plain_files_dirstream_rewind).
+    if is_dir_handle(arg) {
+        rewinddir_fn(vm, std::slice::from_ref(arg))?;
+        return Ok(Value::Long(0));
+    }
+    let r = fseek_fn_impl(vm, args)?;
+    if matches!(r, Value::Long(0)) {
+        resync_append_pos(arg.to_long());
+    }
+    Ok(r)
+}
+
+fn fseek_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     let fid = require_open_stream(vm, arg, &called_as(vm, "fseek"))?;
     let offset = args.get(1).map(|v| v.to_long()).unwrap_or(0);
@@ -12146,6 +12384,11 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
+            if fh.append_pos.is_some() {
+                if let Some(p) = fh.append_position() {
+                    return Ok(Value::Long(p as i64));
+                }
+            }
             let buffered = fh.filter_read_ready.len() as u64;
             if let Some(p) = fh.pipe_pos {
                 // PHP_FUNCTION(ftell): a position of -1 is reported as false.
@@ -12368,6 +12611,16 @@ fn rmdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let pattern = args.first().unwrap_or(&Value::Null).to_php_string();
+    // Z_PARAM_PATH
+    if pattern.as_bytes().contains(&0) {
+        let msg = "glob(): Argument #1 ($pattern) must not contain any null bytes";
+        let exc = _vm.create_exception(b"ValueError", msg, _vm.current_line);
+        _vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg.to_string(),
+            line: _vm.current_line,
+        });
+    }
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let pattern_str = pattern.to_string_lossy();
 
@@ -12440,6 +12693,20 @@ fn scandir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let dir_str = dir.to_string_lossy();
     let sort_order = args.get(1).map(|v| v.to_long()).unwrap_or(0); // 0 = ascending, 1 = descending
 
+    if let Some(pattern) = dir_str.strip_prefix("glob://") {
+        let mut names = glob_stream_entries(vm, pattern);
+        if sort_order == 1 {
+            names.sort_by(|a, b| b.cmp(a));
+        } else if sort_order == 0 {
+            names.sort();
+        }
+        let mut arr = PhpArray::new();
+        for name in names {
+            arr.push(Value::String(PhpString::from_string(name)));
+        }
+        goro_core::value::alloc_resource_id();
+        return Ok(Value::Array(Rc::new(RefCell::new(arr))));
+    }
     match std::fs::read_dir(&*dir_str) {
         Ok(entries) => {
             let mut names: Vec<String> = vec![".".to_string(), "..".to_string()];
@@ -14084,6 +14351,13 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn opendir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
+    if let Some(pattern) = path_str.strip_prefix("glob://") {
+        let names = glob_stream_entries(vm, pattern);
+        return Ok(Value::Resource(alloc_dir_handle_entries(
+            path_str.to_string(),
+            names,
+        )));
+    }
     let dir_path = std::path::Path::new(&*path_str);
     if dir_path.is_dir() {
         match std::fs::read_dir(dir_path) {
@@ -14356,6 +14630,11 @@ fn chmod_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn symlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let target = args.first().unwrap_or(&Value::Null).to_php_string();
     let link = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, target.as_bytes(), "symlink", 1, "target")
+        .or_else(|| path_arg_nul_error(vm, link.as_bytes(), "symlink", 2, "link"))
+    {
+        return Err(e);
+    }
     let target_s = target.to_string_lossy();
     let link_s = link.to_string_lossy();
     #[cfg(unix)]
@@ -14644,7 +14923,9 @@ fn filetype_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let md = match std::fs::symlink_metadata(p) {
         Ok(m) => m,
         Err(_) => {
-            vm.emit_warning(&format!("filetype(): Lstat failed for {}", path_str));
+            if !path_str.is_empty() {
+                vm.emit_warning(&format!("filetype(): Lstat failed for {}", path_str));
+            }
             return Ok(Value::False);
         }
     };
@@ -14771,6 +15052,11 @@ fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 fn link_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let target = args.first().unwrap_or(&Value::Null).to_php_string();
     let link = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, target.as_bytes(), "link", 1, "target")
+        .or_else(|| path_arg_nul_error(vm, link.as_bytes(), "link", 2, "link"))
+    {
+        return Err(e);
+    }
     match std::fs::hard_link(&*target.to_string_lossy(), &*link.to_string_lossy()) {
         Ok(_) => Ok(Value::True),
         Err(e) => {
@@ -14919,6 +15205,9 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
+    if let Some(e) = path_arg_nul_error(vm, path.as_bytes(), "readfile", 1, "filename") {
+        return Err(e);
+    }
     let path_str = path.to_string_lossy();
     if path_str.is_empty() {
         let msg = "Path must not be empty".to_string();
@@ -15084,7 +15373,7 @@ fn lstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = args.first().unwrap_or(&Value::Null).to_php_string();
     let path_str = path.to_string_lossy();
     let res = stat_path(&path_str, true)?;
-    if matches!(res, Value::False) {
+    if matches!(res, Value::False) && !path_str.is_empty() {
         vm.emit_warning(&format!("lstat(): Lstat failed for {}", path_str));
     }
     Ok(res)
@@ -15134,54 +15423,108 @@ fn tempnam_fn3(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     let dir = args.first().unwrap_or(&Value::Null).to_php_string();
-    let raw_dir_str = if dir.is_empty() {
-        std::env::temp_dir().to_string_lossy().to_string()
-    } else {
-        dir.to_string_lossy()
-    };
-    // Resolve the directory to a canonical path (like PHP's expand_filepath
-    // before opening). If the requested directory doesn't exist or isn't
-    // writable, fall back to the system temp dir.
-    let dir_path = std::path::Path::new(&raw_dir_str);
-    let canonical = dir_path.canonicalize().ok();
-    let dir_str = match canonical {
-        Some(p) if p.is_dir() => p.to_string_lossy().to_string(),
-        _ => std::env::temp_dir().to_string_lossy().to_string(),
-    };
-    // PHP uses only the basename of the prefix and truncates to 64 chars.
+    if let Some(e) = path_arg_nul_error(vm, dir.as_bytes(), "tempnam", 1, "directory") {
+        return Err(e);
+    }
+    // php_basename() of the prefix, at most 63 bytes.
     let prefix_bytes = prefix.as_bytes();
-    let prefix_base: Vec<u8> = match prefix_bytes.iter().rposition(|&c| c == b'/') {
+    let mut pfx: Vec<u8> = match prefix_bytes.iter().rposition(|&c| c == b'/') {
         Some(pos) => prefix_bytes[pos + 1..].to_vec(),
         None => prefix_bytes.to_vec(),
     };
-    let prefix_truncated: Vec<u8> = prefix_base.iter().take(64).copied().collect();
-    let prefix_str = String::from_utf8_lossy(&prefix_truncated).to_string();
+    pfx.truncate(63);
 
-    // Try a few names with random suffix until one doesn't exist.
-    use std::os::unix::fs::OpenOptionsExt;
-    use std::time::SystemTime;
-    for attempt in 0..16u32 {
-        let nanos = SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let mix = (nanos as u64).wrapping_add(attempt as u64 * 1_000_003);
-        let name = format!("{}/{}{}", dir_str, prefix_str, mix);
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&name)
-        {
-            Ok(_) => return Ok(Value::String(PhpString::from_string(name))),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(_) => {
-                vm.emit_warning("tempnam(): file created in the system's temporary directory");
-                return Ok(Value::False);
-            }
+    // php_open_temporary_fd_ex(dir, pfx, PHP_TMP_FILE_OPEN_BASEDIR_CHECK_ALWAYS)
+    let dir_s = dir.to_string_lossy();
+    if !dir_s.is_empty() {
+        if !vm.check_open_basedir("tempnam", &dir_s) {
+            return Ok(Value::False);
         }
+        if let Some(p) = do_open_temporary_file(vm, &dir_s, &pfx) {
+            return Ok(Value::String(PhpString::from_vec(p)));
+        }
+        let line = vm.current_line;
+        vm.emit_notice_at(
+            "tempnam(): file created in the system's temporary directory",
+            line,
+        );
     }
-    Ok(Value::False)
+    let temp_dir = php_get_temporary_directory(vm);
+    if temp_dir.is_empty() || !vm.check_open_basedir("tempnam", &temp_dir) {
+        return Ok(Value::False);
+    }
+    match do_open_temporary_file(vm, &temp_dir, &pfx) {
+        Some(p) => Ok(Value::String(PhpString::from_vec(p))),
+        None => Ok(Value::False),
+    }
+}
+
+/// php_get_temporary_directory(): sys_temp_dir, $TMPDIR or /tmp, without
+/// a trailing slash.
+pub(crate) fn php_get_temporary_directory(vm: &Vm) -> String {
+    let sys = vm
+        .constants
+        .get(b"sys_temp_dir".as_slice())
+        .map(|v| v.to_php_string().to_string_lossy())
+        .unwrap_or_default();
+    let pick = |s: String| -> Option<String> {
+        if s.len() >= 2 && s.ends_with('/') {
+            Some(s[..s.len() - 1].to_string())
+        } else if !s.is_empty() && !s.ends_with('/') {
+            Some(s)
+        } else {
+            None
+        }
+    };
+    if let Some(d) = pick(sys) {
+        return d;
+    }
+    if let Some(d) = std::env::var("TMPDIR").ok().filter(|s| !s.is_empty()) {
+        let d = if d.len() > 1 {
+            d.trim_end_matches('/').to_string()
+        } else {
+            d
+        };
+        return if d.is_empty() { "/".to_string() } else { d };
+    }
+    "/tmp".to_string()
+}
+
+/// php_do_open_temporary_file(): mkstemp() of "<realpath(dir)>/<pfx>XXXXXX".
+fn do_open_temporary_file(_vm: &mut Vm, dir: &str, pfx: &[u8]) -> Option<Vec<u8>> {
+    use std::os::unix::ffi::OsStrExt;
+    let real = std::fs::canonicalize(dir).ok()?;
+    let mut path = real.as_os_str().as_bytes().to_vec();
+    if path.last() != Some(&b'/') {
+        path.push(b'/');
+    }
+    path.extend_from_slice(pfx);
+    // The prefix is extended with 13 base32 digits of a random number.
+    const B32: &[u8; 32] = b"0123456789abcdefghijklmnopqrstuv";
+    let mut random = [0u8; 8];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut random);
+    }
+    let mut r = u64::from_le_bytes(random);
+    for _ in 0..13 {
+        path.push(B32[(r % 32) as usize]);
+        r /= 32;
+    }
+    path.extend_from_slice(b"XXXXXX");
+    if path.len() >= 4096 {
+        return None;
+    }
+    let mut buf = path.clone();
+    buf.push(0);
+    let fd = unsafe { libc::mkstemp(buf.as_mut_ptr() as *mut libc::c_char) };
+    if fd < 0 {
+        return None;
+    }
+    unsafe {
+        libc::close(fd);
+    }
+    buf.pop();
+    Some(buf)
 }
 
 fn sys_get_temp_dir_fn3(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
@@ -16083,7 +16426,17 @@ fn ftruncate_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             match fh.file.set_len(size) {
-                Ok(_) => Ok(Value::True),
+                Ok(_) => {
+                    // A memory stream's position is clamped to the new size.
+                    if matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp) {
+                        if let Ok(pos) = fh.file.stream_position() {
+                            if pos > size {
+                                let _ = fh.file.seek(std::io::SeekFrom::Start(size));
+                            }
+                        }
+                    }
+                    Ok(Value::True)
+                }
                 Err(_) => Ok(Value::False),
             }
         } else {
@@ -16401,7 +16754,7 @@ fn linkinfo_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        match std::fs::metadata(&*path_s) {
+        match std::fs::symlink_metadata(&*path_s) {
             Ok(meta) => Ok(Value::Long(meta.dev() as i64)),
             Err(e) => {
                 let msg = strip_os_error(&e.to_string());
@@ -16643,8 +16996,11 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
         if key == "error_reporting" {
             vm.error_reporting = val.to_long();
         }
-        if let Some(msg) = assert_ini_deprecation(key.as_bytes(), &val) {
+        if let Some(msg) = ini_handler_deprecation(key.as_bytes(), &val) {
             startup_deprecations.push(msg);
+        }
+        if let Some(msg) = assert_ini_deprecation(key.as_bytes(), &val) {
+            startup_deprecations.push(format!("PHP Startup: {}", msg));
         }
         if let Some(validate) = vm.ini_validators.get(key.as_bytes()).copied() {
             if !validate(vm, value.as_bytes(), true) {
@@ -16667,9 +17023,8 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
     let mut startup_messages: Vec<u8> = Vec::new();
     for msg in startup_deprecations {
         startup_messages.extend_from_slice(&prepend);
-        startup_messages.extend_from_slice(
-            format!("\nDeprecated: PHP Startup: {} in Unknown on line 0\n", msg).as_bytes(),
-        );
+        startup_messages
+            .extend_from_slice(format!("\nDeprecated: {} in Unknown on line 0\n", msg).as_bytes());
         startup_messages.extend_from_slice(&append);
     }
     // OnChangeMemoryLimit at startup: memory_limit above max_memory_limit is
@@ -17298,6 +17653,10 @@ fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn fstat_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().cloned().unwrap_or(Value::Null);
+    // Directory streams have no stat operation.
+    if is_dir_handle(&arg) {
+        return Ok(Value::False);
+    }
     let fid = require_open_stream(vm, &arg, "fstat")?;
     FILE_HANDLES.with(|handles| {
         let handles = handles.borrow();
@@ -18578,12 +18937,8 @@ fn stream_filter_remove_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError
 }
 /// Validate that `arr` has shape ["wrapper"]["opt"] = value (i.e. two levels of arrays).
 /// On invalid, throws a ValueError matching PHP.
-fn validate_context_options(
-    vm: &mut Vm,
-    arr: &Value,
-) -> Result<std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>, VmError>
-{
-    let mut out = std::collections::BTreeMap::new();
+fn validate_context_options(vm: &mut Vm, arr: &Value) -> Result<CtxOptions, VmError> {
+    let mut out = CtxOptions::default();
     let outer = match arr {
         Value::Array(a) => a.clone(),
         _ => {
@@ -18626,13 +18981,14 @@ fn validate_context_options(
             }
         };
         let inner_b = inner.borrow();
-        let mut opts = std::collections::BTreeMap::new();
+        let mut opts = goro_core::fxhash::FxIndexMap::default();
         for (ik, iv) in inner_b.iter() {
             let ikey: Vec<u8> = match ik {
                 ArrayKey::String(s) => s.as_bytes().to_vec(),
                 ArrayKey::Int(n) => n.to_string().into_bytes(),
             };
-            opts.insert(ikey, iv.clone());
+            // php_stream_context_set_option() stores a dereferenced copy.
+            opts.insert(ikey, iv.deref());
         }
         out.insert(key_bytes, opts);
     }
@@ -18729,9 +19085,7 @@ fn apply_context_params(
     Ok(())
 }
 
-fn context_options_to_array(
-    opts: &std::collections::BTreeMap<Vec<u8>, std::collections::BTreeMap<Vec<u8>, Value>>,
-) -> PhpArray {
+fn context_options_to_array(opts: &CtxOptions) -> PhpArray {
     let mut arr = PhpArray::new();
     for (wrapper, inner) in opts {
         let mut inner_arr = PhpArray::new();
@@ -20552,6 +20906,17 @@ fn stream_resolve_include_path_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, 
     Ok(Value::False)
 }
 
-fn stream_supports_lock_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True) // Most streams support locking
+fn stream_supports_lock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let arg = args.first().unwrap_or(&Value::Null);
+    let fid = require_open_stream(vm, arg, "stream_supports_lock")?;
+    // PHP_STREAM_OPTION_LOCKING: plain files (and descriptor streams);
+    // memory/temp and data: streams have no lock support.
+    let supports = FILE_HANDLES.with(|h| {
+        h.borrow().get(&fid).is_some_and(|fh| {
+            fh.user_wrapper.is_none()
+                && fh.data_meta.is_none()
+                && !matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp)
+        })
+    });
+    Ok(if supports { Value::True } else { Value::False })
 }

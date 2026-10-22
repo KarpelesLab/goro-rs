@@ -990,7 +990,7 @@ fn http_wrap_ex(
 
         if !reqok || (info.location.is_some() && info.follow_location) {
             if !info.follow_location || ((headers_only || ignore_errors) && redirect_max <= 1) {
-                return finish(vm, ctx, &info, body, reqok, func, orig_url, &status_line);
+                return finish(vm, ctx, &info, body);
             }
             if let Some(loc) = &info.location {
                 notify(
@@ -1085,35 +1085,14 @@ fn http_wrap_ex(
             path = new_path;
             continue;
         }
-        return finish(vm, ctx, &info, body, true, func, orig_url, &status_line);
+        return finish(vm, ctx, &info, body);
     }
 }
 
-/// The `out:` path of php_stream_url_wrap_http_ex(): a usable stream
-/// (Some(body)), or the "HTTP request failed!" error.
-#[allow(clippy::too_many_arguments)]
-fn finish(
-    vm: &mut Vm,
-    ctx: Option<&Value>,
-    info: &HeaderInfo,
-    body: &[u8],
-    reqok: bool,
-    func: &str,
-    orig_url: &str,
-    status_line: &[u8],
-) -> Option<Vec<u8>> {
-    if !reqok {
-        fail(
-            vm,
-            func,
-            orig_url,
-            &format!(
-                "HTTP request failed! {}",
-                String::from_utf8_lossy(status_line)
-            ),
-        );
-        return None;
-    }
+/// The `out:` path of php_stream_url_wrap_http_ex() with an open stream:
+/// it is returned whatever the status (a redirect not followed, or
+/// ignore_errors).
+fn finish(vm: &mut Vm, ctx: Option<&Value>, info: &HeaderInfo, body: &[u8]) -> Option<Vec<u8>> {
     // php_stream_notify_progress_init()
     notify(
         vm,
