@@ -16023,19 +16023,11 @@ impl Compiler {
                             | ExprKind::StaticPropertyAccess { .. }
                             | ExprKind::DynamicStaticPropertyAccess { .. }
                             | ExprKind::ArrayAccess { .. } => {}
-                            ExprKind::FunctionCall { .. } => {
-                                // Conservative: emit Notice for any function-call
-                                // result yielded by reference. PHP also emits in
-                                // most cases; the rare exception is when the
-                                // callee is itself declared `function &name()`,
-                                // but we don't have a function table at compile
-                                // time here.
-                                emit_notice = true;
-                            }
-                            ExprKind::MethodCall { .. } | ExprKind::StaticMethodCall { .. } => {
-                                // Methods can return by-reference; defer at compile
-                                // time. The runtime detects and emits.
-                            }
+                            // A call: the notice depends on whether the callee
+                            // returned a reference (below, once it ran).
+                            ExprKind::FunctionCall { .. }
+                            | ExprKind::MethodCall { .. }
+                            | ExprKind::StaticMethodCall { .. } => {}
                             _ => {
                                 emit_notice = true;
                             }
@@ -16070,6 +16062,32 @@ impl Compiler {
                         )
                     {
                         self.compile_ref_fetch(val_expr)?
+                    } else if self.op_array.returns_by_ref
+                        && matches!(
+                            val_expr.kind,
+                            ExprKind::FunctionCall { .. }
+                                | ExprKind::MethodCall { .. }
+                                | ExprKind::StaticMethodCall { .. }
+                        )
+                    {
+                        // ZEND_YIELD of a call result: a returned reference is
+                        // yielded, a value gets the notice.
+                        let v = self.compile_expr(val_expr)?;
+                        self.mark_ref_call(&v);
+                        let msg_idx =
+                            self.op_array
+                                .add_literal(Value::String(PhpString::from_bytes(
+                                    b"Only variable references should be yielded by reference",
+                                )));
+                        let cond_idx = self.op_array.add_literal(Value::Long(1));
+                        self.op_array.emit(Op {
+                            opcode: OpCode::EmitNotice,
+                            op1: OperandType::Const(msg_idx),
+                            op2: OperandType::Const(cond_idx),
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        v
                     } else {
                         self.compile_expr(val_expr)?
                     }
