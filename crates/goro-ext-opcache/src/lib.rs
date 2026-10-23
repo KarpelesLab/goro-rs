@@ -815,12 +815,39 @@ fn fatal(vm: &mut Vm, msg: &str) -> ! {
 fn startup(vm: &mut Vm) {
     startup_ini(vm);
     let enable_cli = ini_bool(vm, "opcache.enable_cli");
-    // php_sapi_name() is "cli" (accel_sapi_is_cli()).
-    let is_cli = true;
-    if !enable_cli && is_cli {
+    // accel_find_sapi(): the SAPIs opcache supports (goro's web server
+    // SAPI among them); the CLI ones only with opcache.enable_cli.
+    let sapi = match vm.constants.get(b"PHP_SAPI".as_slice()) {
+        Some(Value::String(s)) => s.as_bytes().to_vec(),
+        _ => b"cli".to_vec(),
+    };
+    let is_cli = matches!(sapi.as_slice(), b"cli" | b"phpdbg");
+    const SUPPORTED: &[&[u8]] = &[
+        b"apache",
+        b"fastcgi",
+        b"cli-server",
+        b"cgi-fcgi",
+        b"fpm-fcgi",
+        b"fpmi-fcgi",
+        b"apache2handler",
+        b"litespeed",
+        b"uwsgi",
+        b"frankenphp",
+        b"goro-httpd",
+    ];
+    if is_cli && !enable_cli {
         with(|s| {
             s.startup_ok = false;
             s.failure = Some("Opcode Caching is disabled for CLI");
+        });
+        return;
+    }
+    if !is_cli && !SUPPORTED.contains(&sapi.as_slice()) {
+        with(|s| {
+            s.startup_ok = false;
+            s.failure = Some(
+                "Opcode Caching is only supported in Apache, FPM, FastCGI, FrankenPHP, LiteSpeed and uWSGI SAPIs",
+            );
         });
         return;
     }

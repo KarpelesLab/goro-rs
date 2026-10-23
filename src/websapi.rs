@@ -115,8 +115,26 @@ impl PhpRun {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from_utf8_lossy(path).into_owned());
         self.vm.current_file = name.as_str().into();
+        // opcache: the script's compilation from an earlier request.
+        if let Some(c) = goro_core::script_cache::lookup(&name) {
+            self.vm.replay_cached_diags(&c.diags);
+            for class in c.classes.iter().cloned() {
+                self.vm.register_class(class);
+            }
+            return self.vm.execute_chunk(&c.op_array);
+        }
         match engine::compile(&src, &name, true) {
             Ok(mut c) => {
+                if goro_core::script_cache::enabled() {
+                    goro_core::script_cache::store_compiled(
+                        &name,
+                        goro_core::script_cache::Compiled {
+                            op_array: c.op_array.clone(),
+                            classes: c.classes.clone(),
+                            diags: Vec::new(),
+                        },
+                    );
+                }
                 engine::load(&mut self.vm, &mut c);
                 self.vm.execute_chunk(&c.op_array)
             }

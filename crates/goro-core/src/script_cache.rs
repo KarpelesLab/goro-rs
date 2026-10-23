@@ -547,7 +547,7 @@ impl crate::vm::Vm {
     /// zend_emit_recorded_errors(): the diagnostics of a cached script's
     /// compilation (recorded with opcache.record_warnings).
     #[inline(never)]
-    pub(crate) fn replay_cached_diags(&mut self, diags: &[Diag]) {
+    pub fn replay_cached_diags(&mut self, diags: &[Diag]) {
         for d in diags {
             match d {
                 Diag::Lex(true, m, l) => self.emit_deprecated_at(m, *l),
