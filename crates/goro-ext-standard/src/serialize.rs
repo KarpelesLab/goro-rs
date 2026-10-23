@@ -117,11 +117,6 @@ fn is_closure_name(b: &[u8]) -> bool {
     b.starts_with(b"__closure_") || b.starts_with(b"__arrow_") || b.starts_with(b"__bound_closure_")
 }
 
-/// Internal bookkeeping properties that must never show up in serialized data.
-pub(crate) fn is_internal_property(name: &[u8]) -> bool {
-    crate::output::is_internal_property(name)
-}
-
 /// zend_is_valid_class_name()
 fn is_valid_class_name(name: &[u8]) -> bool {
     name.iter()
@@ -330,104 +325,20 @@ pub(crate) fn unmangle(key: &[u8]) -> Option<(Option<&[u8]>, &[u8])> {
 /// properties HashTable is keyed (with private/protected mangling).
 pub(crate) struct PropEntry {
     pub(crate) php_key: Vec<u8>,
-    pub(crate) storage_key: Vec<u8>,
     pub(crate) value: Value,
 }
 
-/// Build the mangled property table of an object (zend_std_get_properties).
-pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
-    let class_lower = lower(&obj.class_name);
-    let ce = vm.classes.get(&class_lower);
-    let layout = vm.class_layout_of(&obj.class_name);
-    let exc_base = throwable_base(vm, &class_lower);
-    let mut out: Vec<PropEntry> = Vec::new();
-    if let Some(base) = exc_base {
-        // Builtin Exception/Error properties, in declaration order.
-        let order: [(&[u8], bool); 7] = [
-            (b"message", false),
-            (b"string", true),
-            (b"code", false),
-            (b"file", false),
-            (b"line", false),
-            (b"trace", true),
-            (b"previous", true),
-        ];
-        for (name, private) in order {
-            let user_override = ce
-                .map(|c| {
-                    c.properties.iter().any(|p| {
-                        p.name == name
-                            && !p.is_static
-                            && lower(&p.declaring_class) != b"exception"
-                            && lower(&p.declaring_class) != b"error"
-                    })
-                })
-                .unwrap_or(false);
-            if user_override {
-                continue;
-            }
-            // (a private one moved to its mangled key by a dynamic property)
-            let moved = if private {
-                obj.throwable_private_key(name)
-            } else {
-                None
-            };
-            let value = if let Some(i) = moved {
-                obj.properties[i].1.clone()
-            } else if obj.has_property(name) {
-                obj.get_property(name)
-            } else if name == b"string" {
-                Value::String(PhpString::empty())
-            } else if name == b"trace" {
-                Value::Array(Rc::new(RefCell::new(PhpArray::new())))
-            } else {
-                continue;
-            };
-            let php_key = if private {
-                mangle(base, name)
-            } else {
-                mangle(b"*", name)
-            };
-            out.push(PropEntry {
-                php_key,
-                storage_key: match moved {
-                    Some(i) => obj.properties[i].0.clone(),
-                    None => name.to_vec(),
-                },
-                value,
-            });
-        }
-    }
-    for (key, value) in obj.properties.iter() {
-        if is_internal_property(key) {
-            continue;
-        }
-        if exc_base.is_some() && out.iter().any(|e| e.storage_key == *key) {
-            continue;
-        }
-        if key.first() == Some(&0) {
-            out.push(PropEntry {
-                php_key: key.clone(),
-                storage_key: key.clone(),
-                value: value.clone(),
-            });
-            continue;
-        }
-        // The slot stored under this bare name, unless it is a private one
-        // that moved away from a dynamic property (Vm::prop_access_key).
-        let php_key = match layout.slots.iter().find(|sl| {
-            sl.storage_key == *key && sl.moved_key.as_ref().is_none_or(|mk| !obj.has_property(mk))
-        }) {
-            Some(sl) if ce.is_some() => sl.mangled(),
-            _ => key.clone(),
-        };
-        out.push(PropEntry {
-            php_key,
-            storage_key: key.clone(),
-            value: value.clone(),
-        });
-    }
-    out
+/// Build the mangled property table of an object (zend_std_get_properties):
+/// the declared slots in slot order, with their declared visibility, then
+/// the dynamic properties (Vm::object_prop_table).
+pub(crate) fn mangled_props(vm: &Vm, obj: &Rc<RefCell<PhpObject>>) -> Vec<PropEntry> {
+    vm.object_prop_table(obj)
+        .into_iter()
+        .map(|e| PropEntry {
+            php_key: e.key,
+            value: e.value,
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -865,7 +776,8 @@ impl Serializer {
             let names: Vec<Value> = names.borrow().values().map(|v| v.deref()).collect();
             // __sleep() may have initialized a lazy proxy: its instance holds
             // the properties.
-            let props = mangled_props(vm, &vm.proxy_redirect(&obj).borrow());
+            let target = vm.proxy_redirect(&obj);
+            let props = mangled_props(vm, &target);
             let mut chosen: Vec<(Vec<u8>, Value)> = Vec::new();
             for name_val in &names {
                 if !matches!(name_val, Value::String(_)) {
@@ -923,7 +835,7 @@ impl Serializer {
         }
 
         // Default: all initialized properties.
-        let props = mangled_props(vm, &obj.borrow());
+        let props = mangled_props(vm, &obj);
         let out_name = if incomplete {
             match obj.borrow().get_property(MAGIC_MEMBER) {
                 Value::String(s) => s.as_bytes().to_vec(),

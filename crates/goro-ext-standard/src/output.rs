@@ -2268,7 +2268,7 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                     _ => Vec::new(),
                 }
             } else {
-                crate::serialize::mangled_props(vm, &obj.borrow())
+                crate::serialize::mangled_props(vm, &obj)
                     .into_iter()
                     .filter(|e| !matches!(e.value, Value::Undef))
                     .map(|e| (e.php_key, e.value))
