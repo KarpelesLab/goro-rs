@@ -788,6 +788,9 @@ enum Node {
     Arr(Rc<RefCell<PhpArray>>),
     Ref(Rc<RefCell<Value>>),
     Gen(Rc<RefCell<PhpGenerator>>),
+    /// The storage arrays share copy-on-write (see array::Store): held by
+    /// each of them, it holds their values. Not a PHP value of its own.
+    Store(Rc<crate::array::Store>),
 }
 
 impl Node {
@@ -797,6 +800,7 @@ impl Node {
             Node::Arr(a) => Rc::as_ptr(a) as *const u8 as usize,
             Node::Ref(r) => Rc::as_ptr(r) as *const u8 as usize,
             Node::Gen(g) => Rc::as_ptr(g) as *const u8 as usize,
+            Node::Store(s) => Rc::as_ptr(s) as *const u8 as usize,
         }
     }
     fn strong(&self) -> usize {
@@ -805,6 +809,7 @@ impl Node {
             Node::Arr(a) => Rc::strong_count(a),
             Node::Ref(r) => Rc::strong_count(r),
             Node::Gen(g) => Rc::strong_count(g),
+            Node::Store(s) => Rc::strong_count(s),
         }
     }
     fn of(v: &Value) -> Option<Node> {
@@ -1009,16 +1014,32 @@ impl<'a> Graph<'a> {
                 Err(_) => false,
             },
             Node::Arr(a) => match a.try_borrow() {
-                Ok(b) => {
-                    for v in b.values() {
-                        if let Some(c) = self.add_value(v) {
-                            kids.push(c);
-                        }
+                // (storage shared with copies of the array: its node holds
+                // the values)
+                Ok(b) => match b.shared_store() {
+                    Some(st) => {
+                        kids.push(self.add(Node::Store(st.clone())));
+                        true
                     }
-                    true
-                }
+                    None => {
+                        for v in b.values() {
+                            if let Some(c) = self.add_value(v) {
+                                kids.push(c);
+                            }
+                        }
+                        true
+                    }
+                },
                 Err(_) => false,
             },
+            Node::Store(st) => {
+                for v in st.values() {
+                    if let Some(c) = self.add_value(v) {
+                        kids.push(c);
+                    }
+                }
+                true
+            }
             Node::Ref(r) => match r.try_borrow() {
                 Ok(b) => {
                     if let Some(c) = self.add_value(&b) {
@@ -1143,7 +1164,7 @@ fn buffer_order(an: &Analysis) -> Vec<usize> {
             out.push(r);
         }
     }
-    let counted = |i: usize| !matches!(g.nodes[i], Node::Ref(_));
+    let counted = |i: usize| !matches!(g.nodes[i], Node::Ref(_) | Node::Store(_));
     let mut stack: Vec<usize> = Vec::new();
     for &r in &roots {
         if black[r] {
@@ -1291,6 +1312,7 @@ fn analyze<'a>(
                 Node::Arr(_) => "arr".into(),
                 Node::Ref(_) => "ref".into(),
                 Node::Gen(_) => "gen".into(),
+                Node::Store(_) => "store".into(),
             };
             eprintln!(
                 "gc node {} {} ptr={:#x} strong={} internal={} extra={} opaque={} live={} kids={:?}",
@@ -1862,6 +1884,8 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                             count += 1;
                         }
                     }
+                    // (released with the last of the garbage arrays holding it)
+                    Node::Store(_) => {}
                 }
             }
         }

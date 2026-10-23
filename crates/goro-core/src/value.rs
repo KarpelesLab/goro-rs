@@ -849,7 +849,7 @@ impl Value {
     pub fn deref_for_storage(&self) -> Value {
         match self.deref() {
             Value::Array(a) if Rc::strong_count(&a) > 1 => {
-                let copy = a.borrow().clone();
+                let copy = crate::array::cow_copy(&a);
                 Value::Array(Rc::new(RefCell::new(copy)))
             }
             v => v,

@@ -6234,7 +6234,7 @@ impl Vm {
         for slot in cvs.iter_mut() {
             if let Value::Array(a) = slot {
                 if Rc::strong_count(a) > 1 {
-                    let copy = a.borrow().clone();
+                    let copy = crate::array::cow_copy(a);
                     *slot = Value::Array(Rc::new(RefCell::new(copy)));
                 }
             }
@@ -9285,7 +9285,7 @@ impl Vm {
             }
             if let Value::Array(a) = slot {
                 if Rc::strong_count(a) > 1 {
-                    let copy = a.borrow().clone();
+                    let copy = crate::array::cow_copy(a);
                     *slot = Value::Array(Rc::new(RefCell::new(copy)));
                 }
             }
@@ -27542,7 +27542,7 @@ impl Vm {
                                     1
                                 };
                                 if Rc::strong_count(a) > held {
-                                    let copy = a.borrow().clone();
+                                    let copy = crate::array::cow_copy(a);
                                     *slot = Value::Array(Rc::new(RefCell::new(copy)));
                                 }
                             }
@@ -31734,7 +31734,7 @@ impl Vm {
                             }
                             if let Value::Array(a) = slot {
                                 if Rc::strong_count(a) > 1 {
-                                    let copy = a.borrow().clone();
+                                    let copy = crate::array::cow_copy(a);
                                     *slot = Value::Array(Rc::new(RefCell::new(copy)));
                                 }
                             }
@@ -39190,7 +39190,29 @@ impl Vm {
                     // the iterator and `stored`) cannot change: iterate it live.
                     let unshared = matches!(op.op1, OperandType::Tmp(_) | OperandType::Const(_))
                         && matches!(&stored, Some(Value::Array(a)) if Rc::strong_count(a) <= 3);
-                    if let Some(Value::Array(arr)) = stored.filter(|_| !live_iteration && !unshared)
+                    // A copy of the array sharing its storage (copy-on-write,
+                    // see PhpArray::cow_clone()) is iterated live: a write to
+                    // the array separates it from the loop's copy.
+                    let view = match &stored {
+                        Some(Value::Array(arr))
+                            if !live_iteration && !unshared && !Rc::ptr_eq(arr, &self.globals) =>
+                        {
+                            arr.try_borrow_mut()
+                                .ok()
+                                .map(|mut a| a.cow_clone())
+                                .filter(|c| c.shared_store().is_some())
+                        }
+                        _ => None,
+                    };
+                    if let (Some(view), OperandType::Tmp(t)) = (view, &op.result) {
+                        if let Some(slot) = tmps.get_mut(*t as usize) {
+                            *slot = Value::Array(Rc::new(RefCell::new(view)));
+                        }
+                        if !foreach_snap.is_empty() {
+                            foreach_snap.remove(&iter_idx);
+                        }
+                    } else if let Some(Value::Array(arr)) =
+                        stored.filter(|_| !live_iteration && !unshared)
                     {
                         // The buffer of an earlier run of this loop is reused.
                         let ab = arr.borrow();
@@ -43642,6 +43664,13 @@ impl Vm {
                             let tab = self.symtab_ensure(fsym, &mut cvs, op_array).tab.clone();
                             bound = true;
                             track = true;
+                            // (EXTR_REFS writes the elements: the array's
+                            // storage is its own first)
+                            if refs {
+                                if let Ok(mut a) = arr.try_borrow_mut() {
+                                    a.make_unique();
+                                }
+                            }
                             let entries: Vec<(crate::array::ArrayKey, Value)> = arr
                                 .borrow()
                                 .iter()
@@ -46319,6 +46348,9 @@ impl Vm {
                         }
                         let key = self.value_to_array_key_checked(&key_val, op.line);
                         let mut arr_mut = arr.borrow_mut();
+                        // (the element is inspected for writing: the array's
+                        // storage is its own, see PhpArray::make_unique())
+                        arr_mut.make_unique();
                         // Check if the element is already a Reference
                         let existing = arr_mut.get(&key).cloned();
                         let ref_val = if let Some(Value::Reference(r)) = existing {
@@ -59425,6 +59457,14 @@ impl Vm {
         };
         // (holders: the container's own slot, the fetch's temporary and
         // `container` itself; more means a copy shares it)
+        if Rc::strong_count(c) <= 2 {
+            return value;
+        }
+        // A copy still sharing its source's storage holds the container
+        // without counting it: it gets its own storage first.
+        if let Ok(mut b) = v.try_borrow_mut() {
+            b.make_unique();
+        }
         if Rc::strong_count(c) <= 3 {
             return value;
         }
@@ -59480,9 +59520,24 @@ impl Vm {
     pub(crate) fn dup_array_value(&self, value: Value) -> Value {
         match &value {
             Value::Array(arr) => {
-                // zend_array_dup(): references held only by the source
-                // array (refcount 1) are copied as plain values.
-                let mut copy = arr.borrow().clone();
+                // A copy that shares the array's storage until either is
+                // written (copy-on-write, see PhpArray::cow_clone()), unless
+                // the array holds references or is the symbol table.
+                let shareable = !Rc::ptr_eq(arr, &self.globals);
+                let cow = if shareable {
+                    arr.try_borrow_mut().ok().map(|mut src| src.cow_clone())
+                } else {
+                    None
+                };
+                let mut copy = match cow {
+                    Some(copy) if copy.shared_store().is_some() => {
+                        return Value::Array(Rc::new(RefCell::new(copy)));
+                    }
+                    Some(copy) => copy,
+                    // zend_array_dup(): references held only by the source
+                    // array (refcount 1) are copied as plain values.
+                    None => arr.borrow().clone(),
+                };
                 // Closures with captured variables are represented as
                 // [name, captures...]; their by-ref captures must stay bound.
                 let is_closure = matches!(copy.values().next(), Some(Value::String(s))

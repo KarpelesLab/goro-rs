@@ -44,7 +44,8 @@ impl std::fmt::Display for ArrayKey {
 pub struct PhpArray {
     /// Current storage mode. `entries[..head]` are dead slots left by
     /// removals at the front (see `head`); positions handed out by the
-    /// public API count live entries only.
+    /// public API count live entries only. (Empty while the storage is
+    /// `shared`: see ents().)
     entries: Vec<(ArrayKey, Value)>,
     /// Number of dead slots at the start of `entries` (always 0 while the
     /// array is packed), so removing the first entry or inserting before it
@@ -84,6 +85,43 @@ pub struct PhpArray {
     /// every array, most of which never have one.)
     #[allow(clippy::box_collection)]
     iters: Option<Box<Vec<std::rc::Weak<std::cell::Cell<usize>>>>>,
+    /// The storage (entries and hash index) this array shares with copies
+    /// of it (see cow_clone()): PHP's refcounted zend_array, separated by
+    /// the first write to any of them. None: `entries` / `index` are this
+    /// array's own.
+    shared: Option<std::rc::Rc<Store>>,
+}
+
+/// The storage of an array shared by copies of it, copy-on-write. Only
+/// storage holding no references is shared: an element that is a
+/// reference is written through without the array itself being written
+/// (and zend_array_dup() turns the references only the array holds into
+/// values when a copy is made).
+#[derive(Debug)]
+pub(crate) struct Store {
+    entries: Vec<(ArrayKey, Value)>,
+    index: Vec<u32>,
+    /// The memory_limit accounting of the table (zend_size() of the array
+    /// that made it shared), released with the storage.
+    charged: usize,
+}
+
+impl Store {
+    /// The values the storage holds (for the cycle collector).
+    pub(crate) fn values(&self) -> impl Iterator<Item = &Value> {
+        self.entries.iter().map(|(_, v)| v)
+    }
+}
+
+impl Drop for Store {
+    fn drop(&mut self) {
+        if self.charged > 0 {
+            memory_free(self.charged);
+        }
+        for (_, v) in self.entries.iter() {
+            crate::gc::on_child_released(v);
+        }
+    }
 }
 
 /// Size of a zend_array (56-byte header) whose data block holds `cap`
@@ -162,8 +200,22 @@ pub fn separate_shared(v: &mut Value) {
     }
 }
 
+/// A copy of the array `a` for another holder (a by-value parameter, an
+/// assignment): it shares the storage until either is written when it can
+/// (see PhpArray::cow_clone()).
+pub fn cow_copy(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> PhpArray {
+    match a.try_borrow_mut() {
+        Ok(mut b) => b.cow_clone(),
+        Err(_) => a.borrow().clone(),
+    }
+}
+
 impl Clone for PhpArray {
     fn clone(&self) -> Self {
+        // (a copy of shared storage shares it too)
+        if self.shared.is_some() {
+            return self.share_header();
+        }
         // zend_array_dup(): a table of the same size.
         let zcap = if self.is_empty() { 0 } else { self.zcap.max(8) };
         let zpacked = if self.untracked {
@@ -223,6 +275,7 @@ impl Clone for PhpArray {
             untracked: false,
             ident: std::cell::Cell::new(if is_closure { 0 } else { self.identity() }),
             iters: None,
+            shared: None,
         };
         if self.head == 0 {
             copy.index = self.index.clone();
@@ -249,6 +302,7 @@ impl PhpArray {
             untracked: false,
             ident: std::cell::Cell::new(0),
             iters: None,
+            shared: None,
         }
     }
 
@@ -267,6 +321,7 @@ impl PhpArray {
             untracked: false,
             ident: std::cell::Cell::new(0),
             iters: None,
+            shared: None,
         }
     }
 
@@ -296,6 +351,129 @@ impl PhpArray {
     #[inline(always)]
     fn separate(&mut self) {
         *self.ident.get_mut() = 0;
+        if self.shared.is_some() {
+            self.unshare();
+        }
+    }
+
+    /* ----- copy-on-write storage ----- */
+
+    /// This array's entries (its own, or the storage it shares).
+    #[inline(always)]
+    fn ents(&self) -> &Vec<(ArrayKey, Value)> {
+        match &self.shared {
+            Some(s) => &s.entries,
+            None => &self.entries,
+        }
+    }
+
+    /// This array's hash index (its own, or the shared storage's).
+    #[inline(always)]
+    fn idx(&self) -> &[u32] {
+        match &self.shared {
+            Some(s) => &s.index,
+            None => &self.index,
+        }
+    }
+
+    /// The storage this array shares with copies of it, if any.
+    pub(crate) fn shared_store(&self) -> Option<&std::rc::Rc<Store>> {
+        self.shared.as_ref()
+    }
+
+    /// A copy of this array (`$b = $a`) that shares its storage until
+    /// either is written (PHP's refcounted zend_array): the storage moves
+    /// into a Store both hold. Storage holding references is copied at
+    /// once, as clone() does (see Store).
+    pub fn cow_clone(&mut self) -> PhpArray {
+        if self.shared.is_none() {
+            // (nor the global symbol table: the variables' cells are its own)
+            if self.is_empty()
+                || self.untracked
+                || self
+                    .live()
+                    .iter()
+                    .any(|(_, v)| matches!(v, Value::Reference(_)))
+            {
+                return self.clone();
+            }
+            // (the table's accounting goes with it)
+            let charged = self.zend_size();
+            self.shared = Some(std::rc::Rc::new(Store {
+                entries: std::mem::take(&mut self.entries),
+                index: std::mem::take(&mut self.index),
+                charged,
+            }));
+        }
+        self.share_header()
+    }
+
+    /// Make this array's storage its own (before an element of it is
+    /// inspected for writing: an element array is shared by the copies
+    /// sharing the storage, whatever its own count says).
+    #[inline]
+    pub fn make_unique(&mut self) {
+        if self.shared.is_some() {
+            self.separate();
+        }
+    }
+
+    /// A copy of this array, which shares its storage.
+    fn share_header(&self) -> PhpArray {
+        // zend_array_dup(): a table of the same size (accounted once the
+        // copy is separated).
+        let zcap = if self.is_empty() { 0 } else { self.zcap.max(8) };
+        let zpacked = if self.untracked {
+            self.packed
+        } else {
+            self.zpacked
+        };
+        PhpArray {
+            entries: Vec::new(),
+            head: self.head,
+            next_int_key: self.next_int_key,
+            pointer: self.pointer,
+            packed: self.packed,
+            mixed: self.mixed,
+            index: Vec::new(),
+            gc_buffered: crate::object::GcSlot::default(),
+            zcap,
+            zpacked,
+            untracked: false,
+            ident: std::cell::Cell::new(self.identity()),
+            iters: None,
+            shared: self.shared.clone(),
+        }
+    }
+
+    /// The first write to an array sharing its storage: the storage becomes
+    /// its own again when no other array holds it any more, else it gets
+    /// its own copy (zend_array_dup(); the storage holds no references).
+    #[cold]
+    #[inline(never)]
+    fn unshare(&mut self) {
+        let Some(rc) = self.shared.take() else {
+            return;
+        };
+        let charged = match std::rc::Rc::try_unwrap(rc) {
+            Ok(mut st) => {
+                self.entries = std::mem::take(&mut st.entries);
+                self.index = std::mem::take(&mut st.index);
+                std::mem::replace(&mut st.charged, 0)
+            }
+            Err(rc) => {
+                self.entries = rc.entries.clone();
+                self.index = rc.index.clone();
+                0
+            }
+        };
+        // (this array's table is accounted to it again)
+        let want = self.zend_size();
+        if want > charged {
+            memory_charge(want - charged);
+        } else if charged > want {
+            memory_free(charged - want);
+        }
     }
 
     /* ----- foreach-by-reference iterators ----- */
@@ -386,23 +564,25 @@ impl PhpArray {
 
     #[inline]
     pub fn len(&self) -> usize {
-        self.entries.len() - self.head as usize
+        self.ents().len() - self.head as usize
     }
 
     /// The live entries.
     #[inline]
     fn live(&self) -> &[(ArrayKey, Value)] {
-        &self.entries[self.head as usize..]
+        &self.ents()[self.head as usize..]
     }
 
     #[inline]
     fn live_mut(&mut self) -> &mut [(ArrayKey, Value)] {
+        debug_assert!(self.shared.is_none());
         let h = self.head as usize;
         &mut self.entries[h..]
     }
 
     /// Drop the dead front slots (positions move: the index is rebuilt).
     fn compact(&mut self) {
+        debug_assert!(self.shared.is_none());
         if self.head > 0 {
             self.entries.drain(..self.head as usize);
             self.head = 0;
@@ -424,6 +604,7 @@ impl PhpArray {
     /// Exclude this array from memory accounting (the global symbol
     /// table, which the engine preallocates).
     pub fn set_untracked(&mut self) {
+        self.make_unique();
         let size = self.zend_size();
         if size > 0 {
             memory_free(size);
@@ -500,6 +681,7 @@ impl PhpArray {
     }
 
     fn rebuild_index(&mut self) {
+        debug_assert!(self.shared.is_none());
         if self.packed
             || self.len() < INDEX_THRESHOLD
             || self.entries.len() >= u32::MAX as usize / 4
@@ -518,6 +700,7 @@ impl PhpArray {
 
     /// Called after pushing a new entry at the end of `entries`
     fn after_push(&mut self) {
+        debug_assert!(self.shared.is_none());
         let pos = self.entries.len() - 1;
         if self.packed {
             if matches!(self.entries[pos].0, ArrayKey::Int(n) if n == pos as i64) {
@@ -584,22 +767,24 @@ impl PhpArray {
 
     #[inline]
     fn find_int(&self, key: i64) -> Option<usize> {
+        let entries = self.ents();
         if self.packed {
-            if key >= 0 && (key as usize) < self.entries.len() {
+            if key >= 0 && (key as usize) < entries.len() {
                 return Some(key as usize);
             }
             return None;
         }
-        if !self.index.is_empty() {
-            let mask = self.index.len() - 1;
+        let index = self.idx();
+        if !index.is_empty() {
+            let mask = index.len() - 1;
             let mut i = (hash_int(key) as usize) & mask;
             loop {
-                let slot = self.index[i];
+                let slot = index[i];
                 if slot == 0 {
                     return None;
                 }
                 let pos = (slot - 1) as usize;
-                if let ArrayKey::Int(n) = &self.entries[pos].0 {
+                if let ArrayKey::Int(n) = &entries[pos].0 {
                     if *n == key {
                         return Some(pos);
                     }
@@ -619,16 +804,18 @@ impl PhpArray {
         if self.packed {
             return None;
         }
-        if !self.index.is_empty() {
-            let mask = self.index.len() - 1;
+        let index = self.idx();
+        if !index.is_empty() {
+            let entries = self.ents();
+            let mask = index.len() - 1;
             let mut i = (hash_bytes(key) as usize) & mask;
             loop {
-                let slot = self.index[i];
+                let slot = index[i];
                 if slot == 0 {
                     return None;
                 }
                 let pos = (slot - 1) as usize;
-                if let ArrayKey::String(s) = &self.entries[pos].0 {
+                if let ArrayKey::String(s) = &entries[pos].0 {
                     if s.as_bytes() == key {
                         return Some(pos);
                     }
@@ -653,12 +840,12 @@ impl PhpArray {
 
     /// Get a value by integer key
     pub fn get_int(&self, key: i64) -> Option<&Value> {
-        self.find_int(key).map(|p| &self.entries[p].1)
+        self.find_int(key).map(|p| &self.ents()[p].1)
     }
 
     /// Get a value by string key
     pub fn get_str(&self, key: &[u8]) -> Option<&Value> {
-        self.find_str(key).map(|p| &self.entries[p].1)
+        self.find_str(key).map(|p| &self.ents()[p].1)
     }
 
     /// Get a value by a variable name used as a key (a numeric name is an
@@ -814,6 +1001,7 @@ impl PhpArray {
     /// Remove the index slot of the entry at (physical) position `pos`,
     /// re-inserting the rest of its probe cluster (backward-shift).
     fn index_remove(&mut self, pos: usize) {
+        debug_assert!(self.shared.is_none());
         if self.index.is_empty() {
             return;
         }
@@ -839,6 +1027,7 @@ impl PhpArray {
 
     /// Remove the first entry (O(1) amortized: its slot becomes dead).
     fn remove_front_raw(&mut self) -> Value {
+        debug_assert!(self.shared.is_none());
         self.iters_removed_at(0);
         let pos = self.head as usize;
         if self.packed {
@@ -905,6 +1094,7 @@ impl PhpArray {
     /// Index maintenance after an entry was placed at (physical) `pos`
     /// outside of the append path.
     fn rebuild_index_after_insert(&mut self, pos: usize) {
+        debug_assert!(self.shared.is_none());
         if self.index.is_empty() || self.len() * 2 > self.index.len() {
             self.rebuild_index();
         } else {
@@ -1152,6 +1342,10 @@ impl Drop for PhpArray {
     fn drop(&mut self) {
         if self.gc_buffered.get() {
             crate::gc::root_freed(self.gc_buffered.slot());
+        }
+        // (shared storage is released by its last holder: see Store)
+        if self.shared.is_some() {
+            return;
         }
         // Release the accounted table.
         let bytes = self.zend_size();

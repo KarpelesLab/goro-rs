@@ -895,6 +895,12 @@ impl Vm {
         mode: DimFetch,
         line: u32,
     ) -> Option<Value> {
+        // An element is fetched for writing: the array's storage is its own
+        // first (an element array in storage shared with copies is held by
+        // all of them, whatever its count says).
+        if let Ok(mut a) = arr.try_borrow_mut() {
+            a.make_unique();
+        }
         let Some(key_val) = key else {
             // `$a[]->p = v`: the new element is null (the property write
             // on it then fails).

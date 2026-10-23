@@ -3938,6 +3938,11 @@ fn php_array_walk_arr(
             break;
         };
         let entry = {
+            // (the element is written: the array's storage is its own
+            // first, see PhpArray::make_unique())
+            if let Ok(mut a) = arr.try_borrow_mut() {
+                a.make_unique();
+            }
             let a = arr.borrow();
             a.entry_at(pos).map(|(k, v)| (k.clone(), v.clone()))
         };
