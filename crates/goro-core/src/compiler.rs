@@ -13359,7 +13359,7 @@ impl Compiler {
                     } else {
                         None
                     };
-                let mut val = self.compile_expr(value)?;
+                let mut val = self.compile_assigned_value(target, value)?;
                 // The value of `$o->p = $v` is the value assigned, even if a
                 // magic method / lazy initializer run by the store changes $v:
                 // read the variable once.
@@ -19987,6 +19987,92 @@ impl Compiler {
         self.memoized_exprs = saved_exprs;
         self.memoize_root = saved_root;
         result
+    }
+
+    /// The value operand of `target = value`: `$v = [<constants>]` assigns
+    /// an array built once (see fold_const_array(); the assignment copies
+    /// it), anything else is compiled.
+    #[inline(never)]
+    fn compile_assigned_value(
+        &mut self,
+        target: &Expr,
+        value: &Expr,
+    ) -> Result<OperandType, CompileError> {
+        if matches!(target.kind, ExprKind::Variable(_)) {
+            if let Some(arr) = Self::fold_const_array(value, 0) {
+                return Ok(OperandType::Const(self.op_array.add_literal(arr)));
+            }
+        }
+        self.compile_expr(value)
+    }
+
+    /// An array literal of constant elements (ints, floats, strings, bools,
+    /// null and such arrays, under int or string keys), built at compile
+    /// time the way INIT_ARRAY / ADD_ARRAY_ELEMENT build it at run time
+    /// (string keys that are canonical integers become integer keys, an
+    /// append takes the next integer key). None when it is not one, or when
+    /// building it could raise anything (a float / bool / null key, an
+    /// append past the last integer key). Assigned to a variable, the
+    /// literal is copied (the copy shares its storage until written).
+    #[inline(never)]
+    fn fold_const_array(expr: &Expr, depth: usize) -> Option<Value> {
+        let ExprKind::Array(elements) = &expr.kind else {
+            return None;
+        };
+        if depth > 16 || elements.len() > 4096 {
+            return None;
+        }
+        fn scalar(e: &Expr) -> Option<Value> {
+            Some(match &e.kind {
+                ExprKind::Int(n) => Value::Long(*n),
+                ExprKind::Float(f) => Value::Double(*f),
+                ExprKind::String(s) => Value::String(PhpString::from_vec(s.clone())),
+                ExprKind::True => Value::True,
+                ExprKind::False => Value::False,
+                ExprKind::Null => Value::Null,
+                ExprKind::UnaryOp {
+                    op: UnaryOp::Negate,
+                    operand,
+                    ..
+                } => match &operand.kind {
+                    ExprKind::Int(n) => Value::Long(n.checked_neg()?),
+                    ExprKind::Float(f) => Value::Double(-f),
+                    _ => return None,
+                },
+                _ => return None,
+            })
+        }
+        let mut arr = crate::array::PhpArray::new();
+        for elem in elements {
+            // (an empty element, `[1, , 2]`, is a compile error: compile_expr's)
+            let empty = elem.key.is_none()
+                && matches!(elem.value.kind, ExprKind::Null)
+                && elem.value.span.start == elem.value.span.end;
+            if elem.unpack || elem.by_ref || empty {
+                return None;
+            }
+            let val = match &elem.value.kind {
+                ExprKind::Array(_) => Self::fold_const_array(&elem.value, depth + 1)?,
+                _ => scalar(&elem.value)?,
+            };
+            match &elem.key {
+                None => arr.try_push(val).ok()?,
+                Some(k) => {
+                    let key = match scalar(k)? {
+                        Value::Long(n) => crate::array::ArrayKey::Int(n),
+                        Value::String(s) => {
+                            match crate::fastpath::canonical_int_key(s.as_bytes()) {
+                                Some(n) => crate::array::ArrayKey::Int(n),
+                                None => crate::array::ArrayKey::String(s),
+                            }
+                        }
+                        _ => return None,
+                    };
+                    arr.set(key, val);
+                }
+            }
+        }
+        Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
     }
 
     fn eval_const_expr(expr: &Expr) -> Option<Value> {
