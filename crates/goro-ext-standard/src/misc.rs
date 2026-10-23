@@ -4873,6 +4873,7 @@ fn php_builtin_sort_inner(
     let first = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, first, fname, "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
+        let next_free = arr.borrow().next_free_key();
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
         let entries: Vec<(ArrayKey, Value)> = arr
             .borrow()
@@ -4903,6 +4904,9 @@ fn php_builtin_sort_inner(
             } else {
                 new_arr.set(k, v);
             }
+        }
+        if !renumber {
+            new_arr.set_next_free_key(next_free);
         }
         *arr.borrow_mut() = new_arr;
     }
@@ -14586,6 +14590,7 @@ fn php_user_sort(
     require_array_arg(vm, &first, fname, "array", 1)?;
     if let (Value::Array(arr), Some(callback)) = (&first, args.get(1)) {
         let cb = callback.clone();
+        let next_free = arr.borrow().next_free_key();
         let entries: Vec<(ArrayKey, Value)> = arr
             .borrow()
             .iter()
@@ -14626,6 +14631,9 @@ fn php_user_sort(
             } else {
                 new_arr.set(k, v);
             }
+        }
+        if !renumber {
+            new_arr.set_next_free_key(next_free);
         }
         match (holder, arr) {
             (Some(r), _) => {
@@ -15887,12 +15895,14 @@ fn php_natsort(
         } else {
             SORT_NATURAL
         };
+        let next_free = arr.borrow().next_free_key();
         let sorted =
             crate::zsort::zend_sort_stable(entries, |x, y| php_data_cmp(vm, &x.1, &y.1, flags));
         let mut new_arr = PhpArray::new();
         for (k, v) in sorted {
             new_arr.set(k, v);
         }
+        new_arr.set_next_free_key(next_free);
         *arr.borrow_mut() = new_arr;
     }
     Ok(Value::True)
