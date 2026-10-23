@@ -235,6 +235,8 @@ enum Map {
     Affine(Aff),
     Perspective([f64; 8]),
     Bilinear([f64; 8]),
+    /// Source -> destination bilinear, inverted per pixel.
+    BilinearForward([f64; 8]),
     Poly(usize, Vec<f64>, Vec<f64>),
     /// ImageMagick's coefficients: c0 the centre angle, c1 columns per
     /// turn, c2 the top radius, c3 rows per radius unit, c4 the centre
@@ -244,6 +246,14 @@ enum Map {
     /// scales (ImageMagick's c0..c7).
     Polar([f64; 8]),
     DePolar([f64; 8]),
+    /// Plane2Cylinder (p2c) or Cylinder2Plane: radius, destination and
+    /// source centres.
+    Cylinder {
+        p2c: bool,
+        r: f64,
+        dc: (f64, f64),
+        sc: (f64, f64),
+    },
     Barrel {
         a: [f64; 4],
         b: [f64; 4],
@@ -270,6 +280,36 @@ impl Map {
             let r = r2.sqrt();
             let k = c[6] / (2.0 * std::f64::consts::PI);
             return [[k * jj / r2, -k * ii / r2], [c[7] * ii / r, c[7] * jj / r]];
+        }
+        if let Map::Poly(order, cu, cv) = self {
+            let mut j = [[0.0; 2]; 2];
+            let mut k = 0;
+            for total in 0..=*order {
+                for py in 0..=total {
+                    let px = total - py;
+                    let fx = (px as f64).min(1.0);
+                    let fy = (py as f64).min(1.0);
+                    let dx = if px > 0 {
+                        fx * x.powi(px as i32 - 1) * y.powi(py as i32)
+                    } else {
+                        0.0
+                    };
+                    let dy = if py > 0 {
+                        fy * x.powi(px as i32) * y.powi(py as i32 - 1)
+                    } else {
+                        0.0
+                    };
+                    j[0][0] += cu[k] * dx;
+                    j[0][1] += cu[k] * dy;
+                    j[1][0] += cv[k] * dx;
+                    j[1][1] += cv[k] * dy;
+                    k += 1;
+                }
+            }
+            return j;
+        }
+        if let Map::BilinearForward(_) | Map::Shepards(_) = self {
+            return [[1.0, 0.0], [0.0, 1.0]];
         }
         if let Map::DePolar(_) = self {
             // no scaling: a unit-circle filter everywhere
@@ -329,6 +369,38 @@ impl Map {
                     (ii.hypot(jj) - c[1]) * c[7],
                 )
             }
+            Map::BilinearForward(c) => {
+                // x = a0 + a1·u + a2·v + a3·u·v (and b for y), solved for v
+                let (ii, jj) = (x - c[0], y - c[4]);
+                let (a1, a2, a3) = (c[1], c[2], c[3]);
+                let (b1, b2, b3) = (c[5], c[6], c[7]);
+                let qa = b2 * a3 - b3 * a2;
+                let qb = b3 * ii - a3 * jj + (b2 * a1 - b1 * a2);
+                let qc = b1 * ii - a1 * jj;
+                let v = if qa.abs() < 1e-12 {
+                    if qb.abs() < 1e-300 {
+                        return (f64::NAN, f64::NAN);
+                    }
+                    -qc / qb
+                } else {
+                    let rt = qb * qb - 4.0 * qa * qc;
+                    if rt < 0.0 {
+                        return (f64::NAN, f64::NAN);
+                    }
+                    (-qb + rt.sqrt()) / (2.0 * qa)
+                };
+                ((ii - a2 * v) / (a1 + a3 * v), v)
+            }
+            Map::Cylinder { p2c, r, dc, sc } => {
+                let (ii, jj) = (x - dc.0, y - dc.1);
+                if *p2c {
+                    let a = ii / r;
+                    (r * a.tan() + sc.0, jj / a.cos() + sc.1)
+                } else {
+                    let a = (ii / r).atan();
+                    (r * a + sc.0, jj * a.cos() + sc.1)
+                }
+            }
             Map::DePolar(c) => {
                 let aa = x * c[6] + c[4];
                 let rr = y * c[7] + c[1];
@@ -386,7 +458,22 @@ pub fn distort(img: &Image, method: i64, args: &[f64], bestfit: bool) -> MResult
     let mut forward: Option<Box<dyn Fn(f64, f64) -> (f64, f64)>> = None;
     let map = match method {
         AFFINE | RIGID_AFFINE => {
-            let fwd = affine_from_points(&pairs(args)).ok_or_else(|| bad_args("Affine"))?;
+            let p = pairs(args);
+            let fwd = if method == RIGID_AFFINE && p.len() >= 2 {
+                // least-squares similarity: x = a·u − b·v + c, y = b·u + a·v + d
+                let mut rows = Vec::new();
+                let mut vals = Vec::new();
+                for &(u, v, x, y) in &p {
+                    rows.push(vec![u, -v, 1.0, 0.0]);
+                    vals.push(x);
+                    rows.push(vec![v, u, 0.0, 1.0]);
+                    vals.push(y);
+                }
+                let c = least_squares(&rows, &vals).ok_or_else(|| bad_args("RigidAffine"))?;
+                Aff([c[0], -c[1], c[2], c[1], c[0], c[3]])
+            } else {
+                affine_from_points(&p).ok_or_else(|| bad_args("Affine"))?
+            };
             let inv = fwd.inverse().ok_or_else(|| bad_args("Affine"))?;
             forward = Some(Box::new(move |x, y| fwd.apply(x, y)));
             Map::Affine(inv)
@@ -452,19 +539,27 @@ pub fn distort(img: &Image, method: i64, args: &[f64], bestfit: bool) -> MResult
             if p.len() < 4 {
                 return Err(bad_args("Bilinear"));
             }
-            // fit dest -> src (reverse) bilinearly
-            let rows: Vec<Vec<f64>> = p
-                .iter()
-                .map(|&(_, _, x, y)| vec![1.0, x, y, x * y])
-                .collect();
-            let us: Vec<f64> = p.iter().map(|q| q.0).collect();
-            let vs: Vec<f64> = p.iter().map(|q| q.1).collect();
-            let cu = least_squares(&rows, &us).ok_or_else(|| bad_args("Bilinear"))?;
-            let cv = least_squares(&rows, &vs).ok_or_else(|| bad_args("Bilinear"))?;
-            if let Some(f) = affine_from_points(&p) {
-                forward = Some(Box::new(move |x, y| f.apply(x, y)));
+            let fit = |pts: &[(f64, f64, f64, f64)]| -> Option<[f64; 8]> {
+                // (x, y) -> (u, v): c0 + c1·x + c2·y + c3·x·y
+                let rows: Vec<Vec<f64>> = pts
+                    .iter()
+                    .map(|&(_, _, x, y)| vec![1.0, x, y, x * y])
+                    .collect();
+                let us: Vec<f64> = pts.iter().map(|q| q.0).collect();
+                let vs: Vec<f64> = pts.iter().map(|q| q.1).collect();
+                let cu = least_squares(&rows, &us)?;
+                let cv = least_squares(&rows, &vs)?;
+                Some([cu[0], cu[1], cu[2], cu[3], cv[0], cv[1], cv[2], cv[3]])
+            };
+            if method == BILINEAR_REVERSE {
+                // (no best fit: ImageMagick keeps the image's size)
+                Map::Bilinear(fit(&p).ok_or_else(|| bad_args("Bilinear"))?)
+            } else {
+                // the bilinear fits source -> destination; each destination
+                // pixel solves its quadratic back
+                let swapped: Vec<_> = p.iter().map(|&(u, v, x, y)| (x, y, u, v)).collect();
+                Map::BilinearForward(fit(&swapped).ok_or_else(|| bad_args("Bilinear"))?)
             }
-            Map::Bilinear([cu[0], cu[1], cu[2], cu[3], cv[0], cv[1], cv[2], cv[3]])
         }
         POLYNOMIAL => {
             if args.is_empty() {
@@ -487,9 +582,7 @@ pub fn distort(img: &Image, method: i64, args: &[f64], bestfit: bool) -> MResult
             let vs: Vec<f64> = p.iter().map(|q| q.1).collect();
             let cu = least_squares(&rows, &us).ok_or_else(|| bad_args("Polynomial"))?;
             let cv = least_squares(&rows, &vs).ok_or_else(|| bad_args("Polynomial"))?;
-            if let Some(f) = affine_from_points(&p) {
-                forward = Some(Box::new(move |x, y| f.apply(x, y)));
-            }
+            // (no best fit, as for Bilinear, Shepards and Barrel)
             Map::Poly(order, cu, cv)
         }
         ARC => {
@@ -662,20 +755,67 @@ pub fn distort(img: &Image, method: i64, args: &[f64], bestfit: bool) -> MResult
             return render(img, &m, out_rect, false);
         }
         CYLINDER2PLANE | PLANE2CYLINDER => {
-            // a horizontal stretch around the centre
             let fov = args.first().copied().unwrap_or(90.0).to_radians();
-            let r = w / fov;
-            let cx = w / 2.0;
-            let inverse = method == CYLINDER2PLANE;
-            let m = Map::Barrel {
-                a: [0.0, 0.0, 0.0, 1.0],
-                b: [0.0, 0.0, 0.0, 1.0],
-                cx,
-                cy: h / 2.0,
-                rscale: r.max(1.0),
-                inverse,
+            let p2c = method == PLANE2CYLINDER;
+            let half = fov / 2.0;
+            if half.abs() < MAGICK_EPSILON {
+                return Err(bad_args(if p2c {
+                    "Plane2Cylinder"
+                } else {
+                    "Cylinder2Plane"
+                }));
+            }
+            // the radius puts the image's half width at half the field of view
+            let r = if p2c {
+                w / 2.0 / half.tan()
+            } else {
+                w / 2.0 / half
             };
-            m.apply(0.0, 0.0);
+            let scx = args.get(1).copied().unwrap_or(w / 2.0);
+            let scy = args.get(2).copied().unwrap_or(h / 2.0);
+            let (mut dcx, mut dcy) = (scx, scy);
+            if bestfit {
+                // corners and edge midpoints, forward; the result keeps a
+                // zero page with the centre in its middle
+                let fwd = |u: f64, v: f64| -> (f64, f64) {
+                    let (du, dv) = (u - scx, v - scy);
+                    if p2c {
+                        let a = (du / r).atan();
+                        (r * a, dv * a.cos())
+                    } else {
+                        let a = du / r;
+                        (r * a.tan(), dv / a.cos())
+                    }
+                };
+                let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+                for (u, v) in [
+                    (0.0, 0.0),
+                    (w, 0.0),
+                    (0.0, h),
+                    (w, h),
+                    (scx, 0.0),
+                    (scx, h),
+                    (0.0, scy),
+                    (w, scy),
+                ] {
+                    let (x, y) = fwd(u, v);
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                }
+                let nw = ((x1 + scx).ceil() - (x0 + scx).floor()).max(1.0);
+                let nh = ((y1 + scy).ceil() - (y0 + scy).floor()).max(1.0);
+                out_rect = Rect::new(nw as usize, nh as usize, 0, 0);
+                dcx = nw / 2.0;
+                dcy = nh / 2.0;
+            }
+            let m = Map::Cylinder {
+                p2c,
+                r,
+                dc: (dcx, dcy),
+                sc: (scx, scy),
+            };
             return render(img, &m, out_rect, false);
         }
         _ => {
