@@ -383,6 +383,14 @@ impl Vm {
         if named.is_empty() {
             return self.call_builtin_from_internal(f, lname, args);
         }
+        // Builtins collecting extra named arguments for a callback
+        // (Z_PARAM_VARIADIC_WITH_NAMED) receive them as they are.
+        if matches!(lname, b"call_user_func" | b"forward_static_call")
+            || self.builtin_named_variadics.contains(lname)
+        {
+            self.pending_named_args = named;
+            return self.call_builtin_from_internal(f, lname, args);
+        }
         let Some(info) = crate::arginfo::lookup(lname) else {
             self.pending_named_args = named;
             return f(self, args);

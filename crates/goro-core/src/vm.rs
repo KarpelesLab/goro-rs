@@ -8355,6 +8355,37 @@ impl Vm {
             hidden_cvs
         };
         let cv_shift = hidden_cvs - lead; // 1 when $this is expected but absent from args
+        // zend_handle_undef_args(): a required parameter skipped by the
+        // named arguments was not passed.
+        if call.args.iter().any(|a| matches!(a, Value::Undef)) {
+            for i in lead..call.args.len() {
+                let cv_idx = i + cv_shift;
+                let Some(p) = cv_idx.checked_sub(hidden_cvs) else {
+                    continue;
+                };
+                if matches!(call.args[i], Value::Undef) && p < op_array.required_param_count as usize
+                {
+                    let fname = if !op_array.display_name.is_empty() {
+                        String::from_utf8_lossy(&op_array.display_name).to_string()
+                    } else {
+                        String::from_utf8_lossy(op_array.effective_name()).to_string()
+                    };
+                    let pname = op_array
+                        .cv_names
+                        .get(cv_idx)
+                        .map(|n| String::from_utf8_lossy(n).to_string())
+                        .unwrap_or_default();
+                    let msg = format!("{}(): Argument #{} (${}) not passed", fname, p + 1, pname);
+                    let line = self.current_line;
+                    let exc = self.create_exception(b"ArgumentCountError", &msg, line);
+                    self.current_exception = Some(exc);
+                    return Err(VmError {
+                        message: format!("Uncaught ArgumentCountError: {}", msg),
+                        line,
+                    });
+                }
+            }
+        }
         // By-value parameters receive the dereferenced value; by-reference
         // parameters given a plain value warn (PHP's zend_call_function behaviour).
         {
