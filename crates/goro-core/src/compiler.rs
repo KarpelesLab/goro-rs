@@ -7356,21 +7356,20 @@ impl Compiler {
                             });
                             // zend_compile_typename(): with the class known,
                             // self and parent name the classes.
-                            let prop_type = if modifiers.is_trait
-                                || name.starts_with(b"__anonymous_class_")
-                            {
-                                // (an anonymous class's name is not known when
-                                // it is compiled: GH-19304)
-                                prop_type
-                            } else {
-                                prop_type.map(|t| {
-                                    Self::resolve_relative_type(
-                                        t,
-                                        &qualified_name,
-                                        class.parent.as_deref(),
-                                    )
-                                })
-                            };
+                            let prop_type =
+                                if modifiers.is_trait || name.starts_with(b"__anonymous_class_") {
+                                    // (an anonymous class's name is not known when
+                                    // it is compiled: GH-19304)
+                                    prop_type
+                                } else {
+                                    prop_type.map(|t| {
+                                        Self::resolve_relative_type(
+                                            t,
+                                            &qualified_name,
+                                            class.parent.as_deref(),
+                                        )
+                                    })
+                                };
                             // Check for duplicate property names
                             if class.properties.iter().any(|p| p.name == *prop_name) {
                                 return Err(CompileError {
@@ -7380,7 +7379,11 @@ impl Compiler {
                                         crate::string::msg_str(prop_name)
                                     ),
                                     // (at the redeclared property)
-                                    line: if *prop_line > 0 { *prop_line } else { stmt.span.line },
+                                    line: if *prop_line > 0 {
+                                        *prop_line
+                                    } else {
+                                        stmt.span.line
+                                    },
                                 });
                             }
                             // Determine if property is virtual (hooks don't access backing store)
@@ -12595,9 +12598,9 @@ impl Compiler {
                 Some(p) => ParamType::Simple(p.to_vec()),
                 None => ParamType::Simple(n),
             },
-            ParamType::Nullable(inner) => ParamType::Nullable(Box::new(Self::resolve_relative_type(
-                *inner, self_name, parent,
-            ))),
+            ParamType::Nullable(inner) => ParamType::Nullable(Box::new(
+                Self::resolve_relative_type(*inner, self_name, parent),
+            )),
             ParamType::Union(ts) => ParamType::Union(
                 ts.into_iter()
                     .map(|t| Self::resolve_relative_type(t, self_name, parent))

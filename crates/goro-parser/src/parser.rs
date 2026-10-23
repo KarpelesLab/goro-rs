@@ -4872,7 +4872,10 @@ impl Parser {
                     }
                 }
                 let folded = match &inner.kind {
-                    ExprKind::BinaryOp { op: BinaryOp::Concat, .. } => folded_name(&inner),
+                    ExprKind::BinaryOp {
+                        op: BinaryOp::Concat,
+                        ..
+                    } => folded_name(&inner),
                     _ => None,
                 };
                 if let Some(name) = folded {

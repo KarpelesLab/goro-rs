@@ -3875,7 +3875,11 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     ArrayKey::Int(n) => Value::Long(*n),
                     ArrayKey::String(s) => Value::String(s.clone()),
                 };
-                let val = &if internal_cb { val.deref() } else { val.clone() };
+                let val = &if internal_cb {
+                    val.deref()
+                } else {
+                    val.clone()
+                };
                 let keep = match mode {
                     1 => {
                         // ARRAY_FILTER_USE_BOTH - pass value and key
@@ -4397,7 +4401,10 @@ fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let size = size as usize;
         let preserve_keys = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
         let arr = arr.borrow();
-        let entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), unwrap_rc1_ref(v))).collect();
+        let entries: Vec<_> = arr
+            .iter()
+            .map(|(k, v)| (k.clone(), unwrap_rc1_ref(v)))
+            .collect();
         let mut result = PhpArray::new();
         for chunk in entries.chunks(size) {
             let mut sub = PhpArray::new();
@@ -12583,7 +12590,9 @@ fn fread_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         }
                     });
                 }
-                let fname = vm.current_builtin_name().unwrap_or_else(|| "fread".to_string());
+                let fname = vm
+                    .current_builtin_name()
+                    .unwrap_or_else(|| "fread".to_string());
                 let line = vm.current_line;
                 vm.emit_notice_at(
                     &format!(
@@ -13191,7 +13200,9 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Err(e) => {
                         failed = e.kind() != std::io::ErrorKind::WouldBlock;
                         if fh.sock.is_none() {
-                            if let Some(n) = e.raw_os_error().filter(|n| *n != 9 && *n != libc::EAGAIN) {
+                            if let Some(n) =
+                                e.raw_os_error().filter(|n| *n != 9 && *n != libc::EAGAIN)
+                            {
                                 read_errno = n;
                                 fh.eof = true;
                             }
@@ -15546,7 +15557,11 @@ fn symlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if i + 1 == comps.len() {
                 break;
             }
-            match std::fs::metadata(if cur.as_os_str().is_empty() { std::path::Path::new(".") } else { &cur }) {
+            match std::fs::metadata(if cur.as_os_str().is_empty() {
+                std::path::Path::new(".")
+            } else {
+                &cur
+            }) {
                 Ok(m) if !m.is_dir() => {
                     vm.emit_warning("symlink(): No such file or directory");
                     return Ok(Value::False);
@@ -16148,10 +16163,7 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(f) => f,
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
-            vm.emit_warning(&format!(
-                "copy({}): Failed to open stream: {}",
-                to_str, msg
-            ));
+            vm.emit_warning(&format!("copy({}): Failed to open stream: {}", to_str, msg));
             return Ok(Value::False);
         }
     };
@@ -18403,7 +18415,11 @@ fn fgetc_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// PHP reads with).
 fn read_failed_notice(vm: &mut Vm, fname: &str, errno: i32) {
     let msg = std::io::Error::from_raw_os_error(errno).to_string();
-    let msg = msg.split(" (os error").next().unwrap_or("Unknown error").to_string();
+    let msg = msg
+        .split(" (os error")
+        .next()
+        .unwrap_or("Unknown error")
+        .to_string();
     let line = vm.current_line;
     vm.emit_notice_at(
         &format!(

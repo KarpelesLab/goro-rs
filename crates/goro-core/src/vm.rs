@@ -18065,9 +18065,11 @@ impl Vm {
             // (in the declaring class's source order)
             if let Some(decl) = decl {
                 for name in decl {
-                    if let Some(i) = ce.properties.iter().position(|p| {
-                        &p.name == name && p.declaring_class.eq_ignore_ascii_case(c)
-                    }) {
+                    if let Some(i) = ce
+                        .properties
+                        .iter()
+                        .position(|p| &p.name == name && p.declaring_class.eq_ignore_ascii_case(c))
+                    {
                         if !order.contains(&i) {
                             order.push(i);
                         }

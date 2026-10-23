@@ -505,11 +505,12 @@ impl Vm {
                             }
                             // (a variable only in the table, such as one
                             // extract() made, is held by the table alone)
-                            let held = if names.iter().any(|n| n.as_slice() == key_name(k).as_slice()) {
-                                3
-                            } else {
-                                1
-                            };
+                            let held =
+                                if names.iter().any(|n| n.as_slice() == key_name(k).as_slice()) {
+                                    3
+                                } else {
+                                    1
+                                };
                             if Rc::strong_count(r) > held {
                                 Value::Reference(r.clone())
                             } else {

@@ -332,7 +332,10 @@ pub fn compile(
 /// class declarations.
 pub fn load(vm: &mut Vm, compiled: &mut Compiled) {
     vm.replay_cached_diags(&goro_core::script_cache::merged_compile_diags(
-        &goro_parser::order_lexer_diagnostics(&compiled.lexer_deprecations, &compiled.lexer_warnings),
+        &goro_parser::order_lexer_diagnostics(
+            &compiled.lexer_deprecations,
+            &compiled.lexer_warnings,
+        ),
         &compiled.compile_warnings,
     ));
     for class in std::mem::take(&mut compiled.classes) {
