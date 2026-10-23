@@ -22,6 +22,7 @@ pub mod codec;
 pub mod color;
 mod color_names;
 pub mod colorspace;
+pub mod compare;
 pub mod composite;
 pub mod convolve;
 pub mod diffuse;

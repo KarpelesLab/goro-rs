@@ -2459,55 +2459,9 @@ fn distortion(a: &Image, b: &Image, metric: i64) -> f64 {
     distortion_ch(a, b, metric, channel::DEFAULT)
 }
 
-/// A metric over the colour channels `ch` selects.
+/// A metric over the channels `ch` selects.
 pub(crate) fn distortion_ch(a: &Image, b: &Image, metric: i64, ch: i64) -> f64 {
-    let mask = channel_mask(ch, false);
-    let nch = (0..3).filter(|&c| mask[c]).count().max(1) as f64;
-    let (w, h) = (a.columns.min(b.columns), a.rows.min(b.rows));
-    let n = (w * h).max(1) as f64;
-    let mut abs_err = 0usize;
-    let mut sum_abs = 0.0;
-    let mut sum_sq = 0.0;
-    let mut peak: f64 = 0.0;
-    for y in 0..h {
-        for x in 0..w {
-            let (p, q) = (a.px(x, y), b.px(x, y));
-            let mut diff_any = false;
-            let mut pix_sq = 0.0;
-            for c in (0..3).filter(|&c| mask[c]) {
-                let d = (p[c] as f64 - q[c] as f64) / 65535.0;
-                if d != 0.0 {
-                    diff_any = true;
-                }
-                sum_abs += d.abs();
-                pix_sq += d * d;
-                peak = peak.max(d.abs());
-            }
-            sum_sq += pix_sq;
-            if diff_any {
-                abs_err += 1;
-            }
-        }
-    }
-    let mse = sum_sq / (n * nch);
-    // ImageMagick 7.1.2 reports normalised metrics: AE as the fraction
-    // of differing pixels, MEPP as the mean error, PSNR over 120 dB
-    match metric {
-        1 => abs_err as f64 / n,
-        3 | 4 => sum_abs / (n * nch),
-        5 => mse,
-        7 => peak,
-        8 => {
-            if mse == 0.0 {
-                1.0
-            } else {
-                (-10.0 * mse.log10() / 120.0).min(1.0)
-            }
-        }
-        10 => mse.sqrt(),
-        2 => mse.sqrt(),
-        _ => mse,
-    }
+    goro_imagick::compare::distortion(a, b, goro_imagick::types::MetricType(metric as i32), ch)
 }
 
 fn compare_images(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
