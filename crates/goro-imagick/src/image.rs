@@ -583,18 +583,12 @@ impl Image {
 
     /// StripImage(): profiles, comments and the like go.
     pub fn strip(&mut self) {
+        // StripImage(): the profiles, the comment and the file dates
         self.profiles.clear();
         self.properties.remove("comment");
-        self.properties.remove("label");
-        self.properties.0.retain(|(k, _)| {
-            let k = k.to_ascii_lowercase();
-            !(k.starts_with("exif:")
-                || k.starts_with("xmp:")
-                || k.starts_with("png:")
-                || k.starts_with("icc:")
-                || k.starts_with("8bim:")
-                || k.starts_with("iptc:"))
-        });
+        self.properties
+            .0
+            .retain(|(k, _)| !k.to_ascii_lowercase().starts_with("date:"));
     }
 
     /// SetImageAlphaChannel(Set/Activate...): ensure an alpha channel.

@@ -372,13 +372,55 @@ fn sample_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     })
 }
 
-/// MagickThumbnailImage(): resize, then strip the profiles and comments.
+/// MagickThumbnailImage(): a LanczosSharp resize (through a Box resize
+/// to twice the size when shrinking by more than ten times in area),
+/// colour profiles kept and the other profiles removed, 8 bits deep,
+/// with the freedesktop.org thumbnail properties.
 fn thumbnail_of(i: &Image, w: i64, h: i64) -> MResult<Image> {
     if w <= 0 || h <= 0 {
         return Err(zero_size());
     }
-    let mut n = transform::resize(i, w as usize, h as usize, FilterType::Undefined)?;
-    n.strip();
+    let (w, h) = (w as usize, h as usize);
+    let area = (w as f64 / i.columns as f64) * (h as f64 / i.rows as f64);
+    let mut n = if area > 0.1 {
+        transform::resize(i, w, h, FilterType::LanczosSharp)?
+    } else {
+        let pre = transform::resize(i, 2 * w, 2 * h, FilterType::Box)?;
+        transform::resize(&pre, w, h, FilterType::LanczosSharp)?
+    };
+    n.profiles
+        .retain(|(k, _)| k.eq_ignore_ascii_case("icc") || k.eq_ignore_ascii_case("icm"));
+    n.properties.set("software", "https://imagemagick.org");
+    let path = std::path::Path::new(&i.filename);
+    let meta = if i.filename.is_empty() || i.filename.contains(':') {
+        None
+    } else {
+        std::fs::metadata(path).ok()
+    };
+    match &meta {
+        Some(m) => {
+            let abs = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(path)
+            };
+            n.properties
+                .set("Thumb::URI", &format!("file://{}", abs.display()));
+            if let Ok(t) = m.modified() {
+                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                    n.properties.set("Thumb::MTime", &d.as_secs().to_string());
+                }
+            }
+        }
+        None => n.properties.set("Thumb::URI", "./"),
+    }
+    n.properties.set("Thumb::Size", &i.file_size.to_string());
+    n.properties
+        .set("Thumb::Image::Width", &i.columns.to_string());
+    n.properties
+        .set("Thumb::Image::Height", &i.rows.to_string());
+    n.properties.set("Thumb::Document::Pages", "1");
+    n.depth = 8;
     Ok(n)
 }
 
@@ -454,7 +496,10 @@ fn interpolative_resize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Va
 fn resample_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "ddld", args)?;
     let (xr, yr) = (a[0].double_or(72.0), a[1].double_or(72.0));
-    let filter = FilterType(a[2].long_or(0) as i32);
+    // the filter argument is not used (ImageMagick 7 resamples with the
+    // default filter)
+    let _ = a[2].long_or(0);
+    let filter = FilterType::Undefined;
     replace_op(vm, &d_(o), "Unable to resample image", |i| {
         let (ox, oy) = (
             if i.x_resolution > 0.0 {

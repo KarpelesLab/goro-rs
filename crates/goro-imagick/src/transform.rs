@@ -595,11 +595,8 @@ pub fn scale(img: &Image, w: usize, h: usize) -> Image {
     out
 }
 
-/// ResizeImage() through oxideav-image-filter's 16-bit resampler; the
-/// ImageMagick filter is mapped to the closest kernel there.
+/// ResizeImage() with ImageMagick's filters (see resize.rs).
 pub fn resize(img: &Image, w: usize, h: usize, filter: FilterType) -> MResult<Image> {
-    use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-    use oxideav_image_filter::{ImageFilter, Interpolation, Resize, VideoStreamParams};
     if w == img.columns && h == img.rows {
         return Ok(img.clone());
     }
@@ -612,95 +609,20 @@ pub fn resize(img: &Image, w: usize, h: usize, filter: FilterType) -> MResult<Im
         ));
     }
     let shrink = w * h < img.columns * img.rows;
-    let interp = match filter {
-        FilterType::Point => Interpolation::Nearest,
-        FilterType::Box => {
-            if shrink {
-                Interpolation::Area
-            } else {
-                Interpolation::Nearest
-            }
-        }
-        FilterType::Triangle | FilterType::Hermite => Interpolation::Bilinear,
-        FilterType::Catrom | FilterType::Cubic | FilterType::CubicSpline => Interpolation::Bicubic,
-        FilterType::Mitchell | FilterType::Robidoux | FilterType::RobidouxSharp => {
-            Interpolation::Mitchell
-        }
-        FilterType::Gaussian | FilterType::Spline | FilterType::Quadratic => Interpolation::BSpline,
-        FilterType::Lanczos2 | FilterType::Lanczos2Sharp => Interpolation::Lanczos { a: 2 },
-        FilterType::Undefined => {
-            if shrink && !img.alpha {
-                Interpolation::Lanczos { a: 3 }
-            } else {
-                Interpolation::Mitchell
-            }
-        }
-        _ => Interpolation::Lanczos { a: 3 },
-    };
-    // premultiply so that transparent colours do not bleed
-    let mut src = img.clone();
-    src.cmyk_to_rgb();
-    let alpha = src.alpha;
-    let mut data = Vec::with_capacity(src.pixels.len() * 2);
-    for p in src.pixels.chunks_exact(4) {
-        let a = if alpha { p[3] as u32 } else { 65535 };
-        for (c, &v) in p.iter().enumerate() {
-            let v = if c < 3 && alpha {
-                ((v as u32 * a + 32767) / 65535) as u16
-            } else {
-                v
-            };
-            data.extend_from_slice(&v.to_le_bytes());
-        }
-    }
-    let frame = VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane {
-            stride: src.columns * 8,
-            data,
-        }],
-    };
-    let params = VideoStreamParams {
-        format: PixelFormat::Rgba64Le,
-        width: src.columns as u32,
-        height: src.rows as u32,
-    };
-    let res = Resize::new(w as u32, h as u32)
-        .with_interpolation(interp)
-        .apply(&frame, params)
-        .map_err(|e| {
-            MagickError::with_desc(
-                severity::FILTER_ERROR,
-                &format!("{}", e),
-                "",
-                "error/resize.c/ResizeImage",
-            )
-        })?;
+    let f = crate::resize::Filter::new(filter, shrink && !img.alpha);
     let mut out = img.clone_attributes(w, h);
-    out.colorspace = src.colorspace;
-    out.black = None;
-    let plane = &res.planes[0];
-    for y in 0..h {
-        let row = &plane.data[y * plane.stride..];
-        for x in 0..w {
-            let s = &row[x * 8..x * 8 + 8];
-            let rd = |i: usize| u16::from_le_bytes([s[i * 2], s[i * 2 + 1]]);
-            let a = rd(3);
-            let mut p = [rd(0), rd(1), rd(2), if alpha { a } else { 65535 }];
-            if alpha {
-                for v in p.iter_mut().take(3) {
-                    *v = if a == 0 {
-                        0
-                    } else {
-                        ((*v as u32 * 65535 + a as u32 / 2) / a as u32).min(65535) as u16
-                    };
-                }
-            }
-            out.set_px(x, y, p);
+    out.pixels = crate::resize::resize_pixels(img, w, h, &f);
+    out.alpha = img.alpha;
+    if let Some(k) = &img.black {
+        // the black channel through the same filter
+        let mut kimg = Image::blank(img.columns, img.rows);
+        for (p, &v) in kimg.pixels.chunks_exact_mut(4).zip(k.iter()) {
+            p[0] = v;
         }
-    }
-    if img.colorspace == Colorspace::CMYK {
-        out.rgb_to_cmyk();
+        let kp = crate::resize::resize_pixels(&kimg, w, h, &f);
+        out.black = Some(kp.chunks_exact(4).map(|p| p[0]).collect());
+    } else {
+        out.black = None;
     }
     let sx = w as f64 / img.columns as f64;
     let sy = h as f64 / img.rows as f64;
