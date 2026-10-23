@@ -414,134 +414,299 @@ fn iso_week_based(tm: &Tm) -> (i64, i64) {
     (year, days / 7 + 1)
 }
 
-/// glibc-compatible strftime in the C locale
-pub fn strftime(format: &[u8], tm: &Tm) -> Vec<u8> {
+/// glibc-compatible strftime in the C locale (a port of glibc's
+/// __strftime_internal: flags `_ - 0 ^ #`, a field width, `E`/`O`
+/// modifiers falling back to the C locale's representations).
+///
+/// `maxsize` is the size of the buffer: None when the result (and its NUL
+/// terminator) does not fit, as strftime() returning 0.
+pub fn strftime(format: &[u8], tm: &Tm, maxsize: usize) -> Option<Vec<u8>> {
+    // strftime() sees a C string
+    let format = match format.iter().position(|&b| b == 0) {
+        Some(n) => &format[..n],
+        None => format,
+    };
     let mut out = Vec::new();
-    let mut i = 0;
-    let h12 = if tm.hour % 12 == 0 { 12 } else { tm.hour % 12 };
-    while i < format.len() {
-        let c = format[i];
-        if c != b'%' {
-            out.push(c);
-            i += 1;
+    strftime_internal(&mut out, maxsize, format, tm, false)?;
+    Some(out)
+}
+
+/// glibc's add(): `n` bytes produced by `f`, right-aligned in `width`
+/// (padded with zeros under the `0` flag, spaces otherwise).
+fn strftime_add(
+    out: &mut Vec<u8>,
+    max: usize,
+    width: i64,
+    pad: u8,
+    n: usize,
+    f: impl FnOnce(&mut Vec<u8>),
+) -> Option<()> {
+    let delta = width - n as i64;
+    let incr = n as i64 + delta.max(0);
+    if incr as u64 >= max.saturating_sub(out.len()) as u64 {
+        return None;
+    }
+    if delta > 0 {
+        let c = if pad == b'0' { b'0' } else { b' ' };
+        out.extend(std::iter::repeat_n(c, delta as usize));
+    }
+    f(out);
+    Some(())
+}
+
+/// glibc's cpy(): add() of a text, with the case conversions.
+fn strftime_cpy(
+    out: &mut Vec<u8>,
+    max: usize,
+    s: &[u8],
+    width: i64,
+    pad: u8,
+    low: bool,
+    up: bool,
+) -> Option<()> {
+    strftime_add(out, max, width, pad, s.len(), |o| {
+        if low {
+            o.extend(s.iter().map(|c| c.to_ascii_lowercase()));
+        } else if up {
+            o.extend(s.iter().map(|c| c.to_ascii_uppercase()));
+        } else {
+            o.extend_from_slice(s);
+        }
+    })
+}
+
+enum StrftimeAct {
+    Text(Vec<u8>),
+    Sub(&'static [u8]),
+    /// DO_NUMBER(digits, value)
+    Num(i64, i32),
+    /// DO_NUMBER_SPACEPAD(digits, value)
+    NumSpace(i64, i32),
+    Bad,
+}
+
+fn strftime_internal(
+    out: &mut Vec<u8>,
+    max: usize,
+    format: &[u8],
+    tm: &Tm,
+    upcase: bool,
+) -> Option<()> {
+    use StrftimeAct::*;
+    let hour12 = match tm.hour {
+        h if h > 12 => h - 12,
+        0 => 12,
+        h => h,
+    };
+    // tm_year + TM_YEAR_BASE, as a C int
+    let year = (tm.year + 1900) as i32;
+    let at = |i: usize| -> u8 { format.get(i).copied().unwrap_or(0) };
+    let mut f = 0usize;
+    while f < format.len() {
+        if format[f] != b'%' {
+            strftime_add(out, max, -1, 0, 1, |_| ())?;
+            out.push(format[f]);
+            f += 1;
             continue;
         }
-        i += 1;
-        // flags / width (minimal support)
-        let mut pad: Option<u8> = None;
-        while i < format.len() && matches!(format[i], b'_' | b'-' | b'0' | b'^' | b'#') {
-            pad = Some(format[i]);
-            i += 1;
-        }
-        while i < format.len() && (format[i] == b'E' || format[i] == b'O') {
-            i += 1;
-        }
-        if i >= format.len() {
-            out.push(b'%');
-            break;
-        }
-        let spec = format[i];
-        i += 1;
-        let num = |v: i64, w: usize, default_pad: u8| -> String {
-            let p = pad.unwrap_or(default_pad);
-            match p {
-                b'-' => format!("{}", v),
-                b'_' | b' ' => format!("{:>w$}", v, w = w),
-                _ => {
-                    if v < 0 {
-                        format!("-{:0>w$}", -v, w = w.saturating_sub(1))
-                    } else {
-                        format!("{:0>w$}", v, w = w)
-                    }
-                }
+        let pct = f;
+        let mut pad = 0u8;
+        let mut width: i64 = -1;
+        let mut to_lowcase = false;
+        let mut to_uppcase = upcase;
+        let mut change_case = false;
+        // flags
+        loop {
+            f += 1;
+            match at(f) {
+                b'_' | b'-' | b'0' => pad = at(f),
+                b'^' => to_uppcase = true,
+                b'#' => change_case = true,
+                _ => break,
             }
+        }
+        // field width (a GNU extension)
+        if at(f).is_ascii_digit() {
+            width = 0;
+            while at(f).is_ascii_digit() {
+                width = (width * 10 + (at(f) - b'0') as i64).min(i32::MAX as i64);
+                f += 1;
+            }
+        }
+        let modifier = match at(f) {
+            c @ (b'E' | b'O') => {
+                f += 1;
+                c
+            }
+            _ => 0,
         };
-        let s: String = match spec {
-            b'a' => DAY_SHORT[tm.wday.rem_euclid(7) as usize].to_string(),
-            b'A' => DAY_FULL[tm.wday.rem_euclid(7) as usize].to_string(),
-            b'b' | b'h' => MON_SHORT[tm.mon.clamp(0, 11) as usize].to_string(),
-            b'B' => MON_FULL[tm.mon.clamp(0, 11) as usize].to_string(),
-            b'c' => format!(
-                "{} {} {:>2} {:02}:{:02}:{:02} {}",
-                DAY_SHORT[tm.wday.rem_euclid(7) as usize],
-                MON_SHORT[tm.mon.clamp(0, 11) as usize],
-                tm.mday,
-                tm.hour,
-                tm.min,
-                tm.sec,
-                tm.year + 1900
-            ),
-            b'C' => num((tm.year + 1900).div_euclid(100), 2, b'0'),
-            b'd' => num(tm.mday, 2, b'0'),
-            b'D' => format!(
-                "{:02}/{:02}/{:02}",
-                tm.mon + 1,
-                tm.mday,
-                (tm.year + 1900).rem_euclid(100)
-            ),
-            b'e' => num(tm.mday, 2, b'_'),
-            b'F' => format!(
-                "{}-{:02}-{:02}",
-                num(tm.year + 1900, 1, b'0'),
-                tm.mon + 1,
-                tm.mday
-            ),
-            b'g' => num(iso_week_based(tm).0.rem_euclid(100), 2, b'0'),
-            b'G' => num(iso_week_based(tm).0, 1, b'0'),
-            b'H' => num(tm.hour, 2, b'0'),
-            b'I' => num(h12, 2, b'0'),
-            b'j' => num(tm.yday + 1, 3, b'0'),
-            b'k' => num(tm.hour, 2, b'_'),
-            b'l' => num(h12, 2, b'_'),
-            b'm' => num(tm.mon + 1, 2, b'0'),
-            b'M' => num(tm.min, 2, b'0'),
-            b'n' => "\n".to_string(),
-            b'p' => (if tm.hour >= 12 { "PM" } else { "AM" }).to_string(),
-            b'P' => (if tm.hour >= 12 { "pm" } else { "am" }).to_string(),
-            b'r' => format!(
-                "{:02}:{:02}:{:02} {}",
-                h12,
-                tm.min,
-                tm.sec,
-                if tm.hour >= 12 { "PM" } else { "AM" }
-            ),
-            b'R' => format!("{:02}:{:02}", tm.hour, tm.min),
-            b's' => format!("{}", tm.ts),
-            b'S' => num(tm.sec, 2, b'0'),
-            b't' => "\t".to_string(),
-            b'T' | b'X' => format!("{:02}:{:02}:{:02}", tm.hour, tm.min, tm.sec),
-            b'u' => format!("{}", if tm.wday == 0 { 7 } else { tm.wday }),
-            b'U' => num((tm.yday - tm.wday + 7) / 7, 2, b'0'),
-            b'V' => num(iso_week_based(tm).1, 2, b'0'),
-            b'w' => format!("{}", tm.wday),
-            b'W' => num((tm.yday - (tm.wday - 1 + 7) % 7 + 7) / 7, 2, b'0'),
-            b'x' => format!(
-                "{:02}/{:02}/{:02}",
-                tm.mon + 1,
-                tm.mday,
-                (tm.year + 1900).rem_euclid(100)
-            ),
-            b'y' => num((tm.year + 1900).rem_euclid(100), 2, b'0'),
-            b'Y' => num(tm.year + 1900, 1, b'0'),
-            b'z' => {
-                let o = tm.gmtoff;
-                let a = o.abs();
-                format!(
-                    "{}{:02}{:02}",
-                    if o < 0 { '-' } else { '+' },
-                    a / 3600,
-                    (a % 3600) / 60
+        let fc = at(f);
+        let wday = tm.wday.rem_euclid(7) as usize;
+        let mon = tm.mon.clamp(0, 11) as usize;
+        let act = match fc {
+            b'%' => Text(b"%".to_vec()),
+            b'a' | b'A' if modifier == 0 => {
+                if change_case {
+                    to_uppcase = true;
+                    to_lowcase = false;
+                }
+                Text(
+                    if fc == b'a' {
+                        DAY_SHORT[wday]
+                    } else {
+                        DAY_FULL[wday]
+                    }
+                    .into(),
                 )
             }
-            b'Z' => tm.zone.clone(),
-            b'%' => "%".to_string(),
-            other => {
-                out.push(b'%');
-                out.push(other);
-                continue;
+            b'b' | b'h' | b'B' => {
+                if change_case {
+                    to_uppcase = true;
+                    to_lowcase = false;
+                }
+                if modifier == b'E' {
+                    Bad
+                } else {
+                    Text(
+                        if fc == b'B' {
+                            MON_FULL[mon]
+                        } else {
+                            MON_SHORT[mon]
+                        }
+                        .into(),
+                    )
+                }
             }
+            b'c' if modifier != b'O' => Sub(b"%a %b %e %H:%M:%S %Y"),
+            b'C' => Num(1, year / 100 - (year % 100 < 0) as i32),
+            b'x' if modifier != b'O' => Sub(b"%m/%d/%y"),
+            b'D' if modifier == 0 => Sub(b"%m/%d/%y"),
+            b'd' if modifier != b'E' => Num(2, tm.mday as i32),
+            b'e' if modifier != b'E' => NumSpace(2, tm.mday as i32),
+            b'F' if modifier == 0 => Sub(b"%Y-%m-%d"),
+            b'H' if modifier != b'E' => Num(2, tm.hour as i32),
+            b'I' if modifier != b'E' => Num(2, hour12 as i32),
+            b'k' if modifier != b'E' => NumSpace(2, tm.hour as i32),
+            b'l' if modifier != b'E' => NumSpace(2, hour12 as i32),
+            b'j' if modifier != b'E' => Num(3, (tm.yday + 1) as i32),
+            b'M' if modifier != b'E' => Num(2, tm.min as i32),
+            b'm' if modifier != b'E' => Num(2, (tm.mon + 1) as i32),
+            b'n' => Text(b"\n".to_vec()),
+            b't' => Text(b"\t".to_vec()),
+            b'P' | b'p' => {
+                if fc == b'P' {
+                    to_lowcase = true;
+                }
+                if change_case {
+                    to_uppcase = false;
+                    to_lowcase = true;
+                }
+                Text(if tm.hour >= 12 { b"PM" } else { b"AM" }.to_vec())
+            }
+            b'R' => Sub(b"%H:%M"),
+            b'r' => Sub(b"%I:%M:%S %p"),
+            b'S' if modifier != b'E' => Num(2, tm.sec as i32),
+            // (digits = 1: only the width pads it)
+            b's' => Text(tm.ts.to_string().into_bytes()),
+            b'X' if modifier != b'O' => Sub(b"%H:%M:%S"),
+            b'T' => Sub(b"%H:%M:%S"),
+            b'u' => Num(1, ((tm.wday - 1 + 7) % 7 + 1) as i32),
+            b'U' if modifier != b'E' => Num(2, ((tm.yday - tm.wday + 7) / 7) as i32),
+            b'V' | b'g' | b'G' if modifier != b'E' => {
+                let (y, w) = iso_week_based(tm);
+                let y = y as i32;
+                match fc {
+                    b'g' => Num(2, (y % 100 + 100) % 100),
+                    b'G' => Num(1, y),
+                    _ => Num(2, w as i32),
+                }
+            }
+            b'W' if modifier != b'E' => Num(2, ((tm.yday - (tm.wday - 1 + 7) % 7 + 7) / 7) as i32),
+            b'w' if modifier != b'E' => Num(1, tm.wday as i32),
+            b'Y' if modifier != b'O' => Num(1, year),
+            b'y' => Num(2, (year % 100 + 100) % 100),
+            b'Z' => {
+                if change_case {
+                    to_uppcase = false;
+                    to_lowcase = true;
+                }
+                Text(tm.zone.as_bytes().to_vec())
+            }
+            b'z' => {
+                let mut diff = tm.gmtoff as i32;
+                strftime_add(out, max, width, pad, 1, |o| {
+                    o.push(if diff < 0 { b'-' } else { b'+' })
+                })?;
+                diff = diff.wrapping_abs() / 60;
+                Num(4, (diff / 60) * 100 + diff % 60)
+            }
+            0 => {
+                // a '%' at the end of the format
+                f -= 1;
+                Bad
+            }
+            _ => Bad,
         };
-        out.extend_from_slice(s.as_bytes());
+        match act {
+            Text(t) => strftime_cpy(out, max, &t, width, pad, to_lowcase, to_uppcase)?,
+            Sub(sub) => {
+                let mut inner = Vec::new();
+                strftime_internal(&mut inner, usize::MAX, sub, tm, to_uppcase)?;
+                let old = out.len();
+                strftime_add(out, max, width, pad, inner.len(), |o| {
+                    o.extend_from_slice(&inner)
+                })?;
+                if to_uppcase {
+                    out[old..].make_ascii_uppercase();
+                }
+            }
+            Num(d, v) | NumSpace(d, v) => {
+                let mut pad = pad;
+                if matches!(act, NumSpace(..)) && pad != b'0' && pad != b'-' {
+                    pad = b'_';
+                }
+                let digits = d.max(width);
+                let negative = v < 0;
+                let mut buf = (v as i64).unsigned_abs().to_string().into_bytes();
+                if negative {
+                    buf.insert(0, b'-');
+                }
+                let mut body: &[u8] = &buf;
+                if pad != b'-' {
+                    let padding = digits - buf.len() as i64;
+                    if padding > 0 {
+                        let room = max.saturating_sub(out.len()) as u64;
+                        if (if pad == b'_' { padding } else { digits }) as u64 >= room {
+                            return None;
+                        }
+                        if pad == b'_' {
+                            out.extend(std::iter::repeat_n(b' ', padding as usize));
+                        } else {
+                            if negative {
+                                body = &buf[1..];
+                                out.push(b'-');
+                            }
+                            out.extend(std::iter::repeat_n(b'0', padding as usize));
+                        }
+                        // (the sign written ahead counts too)
+                        let used = padding + (buf.len() - body.len()) as i64;
+                        width = (width - used).max(0);
+                    }
+                }
+                strftime_cpy(out, max, body, width, pad, to_lowcase, to_uppcase)?;
+            }
+            // Unknown conversion: the whole directive, as written.
+            Bad => strftime_cpy(
+                out,
+                max,
+                &format[pct..=f],
+                width,
+                pad,
+                to_lowcase,
+                to_uppcase,
+            )?,
+        }
+        f += 1;
     }
-    out
+    Some(())
 }

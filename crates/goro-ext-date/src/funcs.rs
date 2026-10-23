@@ -306,11 +306,12 @@ fn php_strftime(vm: &mut Vm, args: &[Value], fname: &str, gmt: bool) -> R<Value>
         zone,
         ts,
     };
-    let out = strftime(&format, &tm);
-    if out.is_empty() {
-        return Ok(Value::False);
+    // The buffer starts at 256 bytes and is doubled while strftime() returns
+    // 0, up to 4096 bytes; an empty result is a failure too.
+    match strftime(&format, &tm, 4096) {
+        Some(out) if !out.is_empty() => Ok(bytes(out)),
+        _ => Ok(Value::False),
     }
-    Ok(bytes(out))
 }
 
 pub fn strftime_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
