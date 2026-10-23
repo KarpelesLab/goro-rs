@@ -20,6 +20,7 @@ pub mod cipher;
 pub mod codec;
 pub mod color;
 mod color_names;
+pub mod colorspace;
 pub mod composite;
 pub mod distort;
 pub mod draw;

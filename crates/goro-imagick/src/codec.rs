@@ -1159,6 +1159,12 @@ impl WriteOptions {
 /// `adjoin`) in a format.
 pub fn encode(images: &[&Image], magick: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
     let m = canonical_format(magick);
+    let converted: Vec<std::borrow::Cow<'_, Image>> = images
+        .iter()
+        .map(|i| crate::colorspace::for_output(i))
+        .collect();
+    let refs: Vec<&Image> = converted.iter().map(|c| c.as_ref()).collect();
+    let images = &refs[..];
     let first = images[0];
     match m.as_str() {
         "PNG" | "PNG8" | "PNG24" | "PNG32" | "PNG48" | "PNG64" | "PNG00" => {

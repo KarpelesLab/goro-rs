@@ -18,7 +18,7 @@ int_enum!(Colorspace {
     LMS = 16, Luv = 17, OHTA = 18, Rec601YCbCr = 19, Rec709YCbCr = 20, RGB = 21,
     scRGB = 22, SRGB = 23, Transparent = 24, XyY = 25, XYZ = 26, YCbCr = 27, YCC = 28,
     YDbDr = 29, YIQ = 30, YPbPr = 31, YUV = 32, LinearGray = 33, Jzazbz = 34,
-    DisplayP3 = 35, Adobe98 = 36, ProPhoto = 37,
+    DisplayP3 = 35, Adobe98 = 36, ProPhoto = 37, Oklab = 38, Oklch = 39,
 });
 
 impl Colorspace {
@@ -62,6 +62,8 @@ impl Colorspace {
             "DisplayP3",
             "Adobe98",
             "ProPhoto",
+            "Oklab",
+            "Oklch",
         ];
         N.get(self.0 as usize).copied().unwrap_or("Undefined")
     }

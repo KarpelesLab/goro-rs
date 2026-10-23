@@ -957,34 +957,9 @@ fn negate_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     })
 }
 
-/// TransformImageColorspace(): convert the pixels.
+/// TransformImageColorspace().
 pub(crate) fn transform_colorspace(i: &mut Image, cs: Colorspace) {
-    if cs == i.colorspace {
-        return;
-    }
-    if i.colorspace == Colorspace::CMYK {
-        i.cmyk_to_rgb();
-    }
-    match cs {
-        Colorspace::Gray | Colorspace::LinearGray => {
-            for p in i.pixels.chunks_exact_mut(4) {
-                let v = to_q16(Image::intensity(p));
-                p[0] = v;
-                p[1] = v;
-                p[2] = v;
-            }
-            i.colorspace = cs;
-        }
-        Colorspace::CMYK => i.rgb_to_cmyk(),
-        Colorspace::SRGB | Colorspace::RGB | Colorspace::Undefined => {
-            i.colorspace = Colorspace::SRGB;
-        }
-        _ => {
-            // other colourspaces: tagged only
-            i.colorspace = cs;
-        }
-    }
-    i.colors = None;
+    goro_imagick::colorspace::transform(i, cs);
 }
 
 fn transform_image_colorspace(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
