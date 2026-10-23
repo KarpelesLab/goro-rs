@@ -4650,6 +4650,9 @@ fn php_builtin_sort_inner(
         if entries.len() <= 1 && !(renumber && !entries.is_empty()) {
             return Ok(Value::True);
         }
+        // A comparison (__toString()) writing to the array separates it
+        // from the one being sorted in php-src: the sorted copy is dropped.
+        let before = arr.borrow().identity();
         let sorted = crate::zsort::zend_sort_stable(entries, |x, y| {
             let r = if by_key {
                 php_key_cmp(vm, &x.0, &y.0, flags)
@@ -4658,6 +4661,9 @@ fn php_builtin_sort_inner(
             };
             if reverse { -r } else { r }
         });
+        if arr.borrow().identity() != before {
+            return Ok(Value::True);
+        }
         let mut new_arr = PhpArray::new();
         for (k, v) in sorted {
             if renumber {
