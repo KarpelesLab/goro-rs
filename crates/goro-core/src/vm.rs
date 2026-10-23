@@ -4309,6 +4309,20 @@ impl Vm {
         }
     }
 
+    /// Loose `==` of two values as internal functions see it
+    /// (zend_compare()): objects meeting strings are cast with __toString()
+    /// and objects meeting numbers emit the conversion notice.
+    pub fn loose_equals(&mut self, a: &Value, b: &Value) -> bool {
+        let (a, b) = match (a.deref(), b.deref()) {
+            (Value::Object(_), _) | (_, Value::Object(_)) => {
+                let line = self.current_line;
+                self.compare_operands(a.deref(), b.deref(), line)
+            }
+            _ => return a.equals(b),
+        };
+        self.current_exception.is_none() && a.equals(&b)
+    }
+
     /// The operands of a comparison of an object with a string, the
     /// object cast to string by its __toString() (zend_std_compare_objects():
     /// an object that cannot be cast is greater); the notices of comparing

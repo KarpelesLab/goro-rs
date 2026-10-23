@@ -3273,17 +3273,24 @@ fn array_search(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         v => v.clone(),
     };
     if let Value::Array(arr) = &haystack {
-        let arr = arr.borrow();
-        for (key, val) in arr.iter() {
+        let entries: Vec<(ArrayKey, Value)> = arr
+            .borrow()
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (key, val) in entries {
             let matches = if strict {
                 val.identical(needle)
             } else {
-                val.equals(needle)
+                vm.loose_equals(needle, &val)
             };
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
+            }
             if matches {
                 return Ok(match key {
-                    goro_core::array::ArrayKey::Int(n) => Value::Long(*n),
-                    goro_core::array::ArrayKey::String(s) => Value::String(s.clone()),
+                    ArrayKey::Int(n) => Value::Long(n),
+                    ArrayKey::String(s) => Value::String(s),
                 });
             }
         }
@@ -3312,13 +3319,17 @@ fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     if let Value::Array(arr) = &haystack {
         let strict = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
-        let arr = arr.borrow();
-        for (_, val) in arr.iter() {
-            if strict {
-                if val.identical(needle) {
-                    return Ok(Value::True);
-                }
-            } else if val.equals(needle) {
+        if strict {
+            let found = arr.borrow().values().any(|val| val.identical(needle));
+            return Ok(if found { Value::True } else { Value::False });
+        }
+        let values: Vec<Value> = arr.borrow().values().cloned().collect();
+        for val in values {
+            let eq = vm.loose_equals(needle, &val);
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
+            }
+            if eq {
                 return Ok(Value::True);
             }
         }
