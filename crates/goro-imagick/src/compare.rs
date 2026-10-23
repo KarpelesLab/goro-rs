@@ -13,7 +13,8 @@
 //! - Fuzz is the mean squared difference over the samples that differ;
 //! - NCC is (1 − r) / 2, r the mean over the channels of the channel
 //!   covariance over the product of the images' composite (pooled)
-//!   standard deviations;
+//!   standard deviations, the deviations being those of the
+//!   alpha-weighted samples from the plain channel means;
 //! - SSIM and DSSIM both report the structural dissimilarity (1 − SSIM)/2
 //!   averaged over the channels, from an 11×11 Gaussian window (σ 1.5,
 //!   k1 0.01, k2 0.03) on the raw samples, a missing alpha reading 0;
@@ -105,6 +106,12 @@ pub fn distortion(a: &Image, b: &Image, metric: MetricType, ch: i64) -> f64 {
     }
     match metric {
         MetricType::NormalizedCrossCorrelationError | MetricType::DotProductCorrelation => {
+            // alpha correlates only when both images have it
+            let chans: Vec<usize> = chans
+                .iter()
+                .copied()
+                .filter(|&c| c < 3 || b.alpha)
+                .collect();
             ncc(a, b, &chans)
         }
         MetricType::StructuralSimilarity | MetricType::StructuralDissimilarity => {
@@ -193,14 +200,29 @@ fn ncc(a: &Image, b: &Image, chans: &[usize]) -> f64 {
     for i in 0..k {
         ma[i] /= n;
         mb[i] /= n;
+        // a gray image has no green or blue statistics: their mean is 0,
+        // though its samples read as the gray
+        if b.colorspace == Colorspace::Gray && (1..3).contains(&chans[i]) {
+            mb[i] = 0.0;
+        }
     }
+    // the deviations are of the alpha-weighted colour samples from the
+    // plain channel means
+    let weighted = |img: &Image, p: &[u16; 4], c: usize| -> f64 {
+        let s = sample(img, p, c);
+        if c < 3 && img.alpha {
+            s * p[3] as f64 / Q
+        } else {
+            s
+        }
+    };
     let (mut va, mut vb, mut cov) = (vec![0.0; k], vec![0.0; k], vec![0.0; k]);
     for y in 0..pr.h {
         for x in 0..pr.w {
             let (p, q) = pr.px(x, y);
             for (i, &c) in chans.iter().enumerate() {
-                let da = sample(a, &p, c) - ma[i];
-                let db = sample(b, &q, c) - mb[i];
+                let da = weighted(a, &p, c) - ma[i];
+                let db = weighted(b, &q, c) - mb[i];
                 va[i] += da * da;
                 vb[i] += db * db;
                 cov[i] += da * db;
