@@ -10312,435 +10312,6 @@ impl Vm {
         }
     }
 
-    /// Get the output buffer contents
-    /// Format the current call stack as a PHP-style stack trace string
-    /// Check method signature compatibility between child and parent methods.
-    /// Returns None if compatible, Some(error_message) if not.
-    fn check_method_compatibility(
-        child_class: &[u8],
-        child_method: &crate::object::MethodDef,
-        parent_class: &[u8],
-        parent_method: &crate::object::MethodDef,
-    ) -> Option<String> {
-        let child_op = &child_method.op_array;
-        let parent_op = &parent_method.op_array;
-
-        // Subtract $this from param counts for non-static methods
-        let child_offset: u32 = if child_method.is_static { 0 } else { 1 };
-        let parent_offset: u32 = if parent_method.is_static { 0 } else { 1 };
-        let child_params = child_op.param_count.saturating_sub(child_offset);
-        let parent_params = parent_op.param_count.saturating_sub(parent_offset);
-        let child_required = child_op.required_param_count;
-        let parent_required = parent_op.required_param_count;
-        let child_variadic = child_op.variadic_param.is_some();
-        let parent_variadic = parent_op.variadic_param.is_some();
-
-        // Build parameter signature strings for error messages
-        let format_param_sig = |op: &crate::opcode::OpArray, class_name: &[u8]| -> String {
-            let mut parts = Vec::new();
-            // Determine offset: methods have $this at CV 0, functions don't
-            let cv_offset = if op.scope_class.is_some() { 1usize } else { 0 };
-            let actual_param_count = (op.param_count as usize).saturating_sub(cv_offset);
-            for i in 0..actual_param_count {
-                let cv_idx = i + cv_offset;
-                let param_name = op
-                    .cv_names
-                    .get(cv_idx)
-                    .map(|n| String::from_utf8_lossy(n).to_string())
-                    .unwrap_or_else(|| format!("arg{}", i));
-
-                let mut part = String::new();
-                // Add type hint if available
-                // param_types are indexed by CV index, so use cv_idx
-                if let Some(Some(pt)) = op.param_types.get(cv_idx) {
-                    let type_str = Self::format_param_type_for_sig(&pt.param_type, class_name);
-                    if !type_str.is_empty() {
-                        part.push_str(&type_str);
-                        part.push(' ');
-                    }
-                }
-
-                // Check if by-ref
-                if op.by_ref_params.get(cv_idx).copied().unwrap_or(false) {
-                    part.push('&');
-                }
-
-                // Check if variadic
-                if op.variadic_param == Some(cv_idx as u32) {
-                    part.push_str("...");
-                }
-
-                part.push('$');
-                part.push_str(param_name.trim_start_matches('$'));
-
-                // Check if has default value (optional)
-                if i as u32 >= op.required_param_count && op.variadic_param != Some(cv_idx as u32) {
-                    // zend_get_function_declaration's rendering of the default
-                    let shown = if let Some(v) =
-                        crate::reflection::extract_param_default(op, cv_idx as u32)
-                    {
-                        match v {
-                            Value::Null | Value::Undef => "null".to_string(),
-                            Value::True => "true".to_string(),
-                            Value::False => "false".to_string(),
-                            Value::Long(n) => n.to_string(),
-                            Value::Double(f) => crate::value::format_php_float(f),
-                            Value::String(st) => {
-                                let b = st.as_bytes();
-                                if b.len() > 10 {
-                                    format!("'{}...'", String::from_utf8_lossy(&b[..10]))
-                                } else {
-                                    format!("'{}'", String::from_utf8_lossy(b))
-                                }
-                            }
-                            Value::Array(a) => {
-                                if a.borrow().is_empty() {
-                                    "[]".to_string()
-                                } else {
-                                    "[...]".to_string()
-                                }
-                            }
-                            _ => "null".to_string(),
-                        }
-                    } else if let Some(c) =
-                        crate::reflection::extract_param_default_constant(op, cv_idx as u32)
-                    {
-                        c.strip_prefix("global:")
-                            .or_else(|| c.strip_prefix("class:"))
-                            .unwrap_or(&c)
-                            .to_string()
-                    } else {
-                        "null".to_string()
-                    };
-                    part.push_str(" = ");
-                    part.push_str(&shown);
-                }
-
-                parts.push(part);
-            }
-            parts.join(", ")
-        };
-
-        // Check: child must not have more required parameters than parent
-        // Check: child must accept at least as many parameters as parent
-        let incompatible = if !parent_variadic && !child_variadic {
-            // Neither is variadic
-            child_required > parent_required || child_params < parent_params
-        } else if parent_variadic && !child_variadic {
-            // Parent is variadic but child is not - child must accept at least parent's non-variadic params
-            child_params < (parent_params.saturating_sub(1))
-        } else {
-            // Child is variadic - generally OK as long as required params match
-            child_required > parent_required
-        };
-
-        // Check parameter type compatibility (contravariant - child can accept wider types)
-        let child_offset_usize = child_offset as usize;
-        let parent_offset_usize = parent_offset as usize;
-        let mut param_type_incompatible = false;
-        if !incompatible {
-            let check_count = std::cmp::min(
-                child_op.param_count.saturating_sub(child_offset) as usize,
-                parent_op.param_count.saturating_sub(parent_offset) as usize,
-            );
-            for i in 0..check_count {
-                // param_types are indexed by CV index, so add the offset for $this
-                let parent_cv_idx = i + parent_offset_usize;
-                let child_cv_idx = i + child_offset_usize;
-                let parent_type = parent_op
-                    .param_types
-                    .get(parent_cv_idx)
-                    .and_then(|t| t.as_ref());
-                let child_type = child_op
-                    .param_types
-                    .get(child_cv_idx)
-                    .and_then(|t| t.as_ref());
-                match (parent_type, child_type) {
-                    (Some(pt), Some(ct)) => {
-                        // Both have types - check that the child's type is compatible
-                        // Parameter types are contravariant: child can accept wider types
-                        let p_str = Self::format_param_type_for_sig(&pt.param_type, parent_class);
-                        let c_str = Self::format_param_type_for_sig(&ct.param_type, child_class);
-                        if !p_str.is_empty() && !c_str.is_empty() && p_str != c_str {
-                            // Types differ - check if child type is a supertype of parent type
-                            if !Self::is_param_type_compatible(&ct.param_type, &pt.param_type) {
-                                param_type_incompatible = true;
-                                break;
-                            }
-                        }
-                    }
-                    (Some(pt), None) => {
-                        // Parent has type but child doesn't - child is wider, which is OK for contravariance
-                        // Actually in PHP this is incompatible (you can't drop a type hint)
-                        let p_str = Self::format_param_type_for_sig(&pt.param_type, parent_class);
-                        if !p_str.is_empty() && !p_str.eq_ignore_ascii_case("mixed") {
-                            // param_type_incompatible = true; // PHP allows dropping type hints for BC
-                        }
-                    }
-                    (None, Some(_ct)) => {
-                        // Parent has no type but child adds one - this is narrowing (incompatible for contravariance)
-                        // In PHP this is allowed but generates a deprecation warning in some versions
-                    }
-                    (None, None) => {}
-                }
-            }
-        }
-
-        // Check return type compatibility (covariant return types)
-        let return_type_incompatible = if let Some(parent_rt) = &parent_op.return_type {
-            if let Some(child_rt) = &child_op.return_type {
-                // Both have return types - check if they're compatible
-                // Simple check: if the string representations differ and the child type
-                // is not a subtype of the parent type, they're incompatible
-                let parent_type_str = Self::format_param_type_for_sig(parent_rt, parent_class);
-                let child_type_str = Self::format_param_type_for_sig(child_rt, child_class);
-                if parent_type_str == child_type_str {
-                    false
-                } else {
-                    // Check basic covariance: child return type must be subtype of parent
-                    // For simple types: int is not compatible with string, etc.
-                    !Self::is_return_type_compatible(child_rt, parent_rt)
-                }
-            } else {
-                // Parent has return type but child doesn't - incompatible
-                // (except for void return type, which is compatible with no return type)
-                !matches!(parent_rt, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"void"))
-            }
-        } else {
-            // Parent has no return type - child can add one (covariant)
-            false
-        };
-
-        if incompatible || return_type_incompatible || param_type_incompatible {
-            let child_class_str = String::from_utf8_lossy(child_class);
-            let parent_class_str = String::from_utf8_lossy(parent_class);
-            // Property hooks are shown as `$prop::get` / `$prop::set`, and set
-            // hooks have an implicit `void` return type.
-            let hook_display = |name: &[u8]| -> Option<(String, bool)> {
-                if let Some(p) = name.strip_prefix(b"__property_get_".as_slice()) {
-                    Some((format!("${}::get", String::from_utf8_lossy(p)), false))
-                } else {
-                    name.strip_prefix(b"__property_set_".as_slice())
-                        .map(|p| (format!("${}::set", String::from_utf8_lossy(p)), true))
-                }
-            };
-            let child_hook = hook_display(&child_method.name);
-            let parent_hook = hook_display(&parent_method.name);
-            let method_name = child_hook
-                .as_ref()
-                .map(|h| h.0.clone())
-                .unwrap_or_else(|| String::from_utf8_lossy(&child_method.name).to_string());
-            let parent_method_name = parent_hook
-                .as_ref()
-                .map(|h| h.0.clone())
-                .unwrap_or_else(|| String::from_utf8_lossy(&parent_method.name).to_string());
-
-            let child_sig = format_param_sig(child_op, child_class);
-            let parent_sig = format_param_sig(parent_op, parent_class);
-
-            // Format return types
-            let child_ret = if child_hook.as_ref().is_some_and(|h| h.1) {
-                ": void".to_string()
-            } else {
-                child_op
-                    .return_type
-                    .as_ref()
-                    .map(|rt| format!(": {}", Self::format_param_type_for_sig(rt, child_class)))
-                    .unwrap_or_default()
-            };
-            let parent_ret = if parent_hook.as_ref().is_some_and(|h| h.1) {
-                ": void".to_string()
-            } else {
-                parent_op
-                    .return_type
-                    .as_ref()
-                    .map(|rt| format!(": {}", Self::format_param_type_for_sig(rt, parent_class)))
-                    .unwrap_or_default()
-            };
-
-            Some(format!(
-                "Declaration of {}::{}({}){} must be compatible with {}::{}({}){}",
-                child_class_str,
-                method_name,
-                child_sig,
-                child_ret,
-                parent_class_str,
-                parent_method_name,
-                parent_sig,
-                parent_ret,
-            ))
-        } else {
-            None
-        }
-    }
-
-    /// Check if child return type is compatible (covariant) with parent return type.
-    /// This is a simplified check - only flags definitely-incompatible cases.
-    /// Returns true if types are compatible (or we can't determine).
-    #[allow(clippy::if_same_then_else)] // branches mirror php-src
-    fn is_return_type_compatible(
-        child_rt: &crate::opcode::ParamType,
-        parent_rt: &crate::opcode::ParamType,
-    ) -> bool {
-        use crate::opcode::ParamType;
-        match (child_rt, parent_rt) {
-            // Same type is always compatible
-            (ParamType::Simple(a), ParamType::Simple(b)) if a.eq_ignore_ascii_case(b) => true,
-            // void is only compatible with void
-            (ParamType::Simple(a), _) if a.eq_ignore_ascii_case(b"void") => {
-                matches!(parent_rt, ParamType::Simple(b) if b.eq_ignore_ascii_case(b"void"))
-            }
-            (_, ParamType::Simple(b)) if b.eq_ignore_ascii_case(b"void") => false,
-            // never is compatible with anything (bottom type)
-            (ParamType::Simple(a), _) if a.eq_ignore_ascii_case(b"never") => true,
-            // anything is compatible with mixed (top type)
-            (_, ParamType::Simple(b)) if b.eq_ignore_ascii_case(b"mixed") => true,
-            // Nullable types: ?T is compatible with ?T
-            (ParamType::Nullable(a), ParamType::Nullable(b)) => {
-                Self::is_return_type_compatible(a, b)
-            }
-            // ?T is NOT compatible with T for return types (widening is forbidden)
-            (ParamType::Nullable(_), ParamType::Simple(b)) if !b.eq_ignore_ascii_case(b"mixed") => {
-                false
-            }
-            // T is compatible with ?T (covariant - narrowing)
-            (_, ParamType::Nullable(inner)) => Self::is_return_type_compatible(child_rt, inner),
-            // For intersection types, union types, and class types, we can't easily check
-            // covariance without resolving the class hierarchy. Be permissive.
-            (ParamType::Intersection(_), _) => true,
-            (_, ParamType::Intersection(_)) => true,
-            // Union in parent: child type should be a subset
-            (ParamType::Union(_), ParamType::Union(_)) => true, // too complex, be permissive
-            (ParamType::Simple(_name), ParamType::Union(parent_types)) => parent_types
-                .iter()
-                .any(|pt| Self::is_return_type_compatible(child_rt, pt)),
-            (ParamType::Union(_child_types), ParamType::Simple(_)) => {
-                // Union child -> simple parent: only compatible if all child types are compatible
-                // But this is complex (class types), be permissive
-                true
-            }
-            // Different simple types
-            (ParamType::Simple(a), ParamType::Simple(b)) => {
-                let a_lower: Vec<u8> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
-                let b_lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
-                let primitives = [
-                    b"int".as_slice(),
-                    b"float",
-                    b"string",
-                    b"bool",
-                    b"array",
-                    b"null",
-                    b"callable",
-                    b"iterable",
-                    b"object",
-                ];
-                let a_is_prim = primitives.contains(&a_lower.as_slice());
-                let b_is_prim = primitives.contains(&b_lower.as_slice());
-                if a_is_prim || b_is_prim {
-                    // If either is a primitive type and they're different -> incompatible
-                    // Exception: child is a class and parent is 'object' -> compatible (covariant)
-                    if b_lower == b"object" && !a_is_prim {
-                        true // any class is compatible with 'object' return
-                    } else if b_lower == b"iterable" && a_lower == b"array" {
-                        true // array is compatible with iterable
-                    } else if b_lower == b"self" || b_lower == b"static" || b_lower == b"parent" {
-                        true // special types, can't check statically
-                    } else if a_lower == b"self" || a_lower == b"static" || a_lower == b"parent" {
-                        true // special types, can't check statically
-                    } else {
-                        false
-                    }
-                } else {
-                    // Both are class names - check if they could be compatible
-                    // We can't resolve self/parent/static without class hierarchy access here
-                    if a_lower == b"self"
-                        || a_lower == b"static"
-                        || a_lower == b"parent"
-                        || b_lower == b"self"
-                        || b_lower == b"static"
-                        || b_lower == b"parent"
-                    {
-                        true // can't check statically
-                    } else {
-                        // Different concrete class names are incompatible
-                        // unless child class extends parent class
-                        false
-                    }
-                }
-            }
-            _ => true,
-        }
-    }
-
-    /// Check if a child parameter type is compatible (contravariant) with a parent parameter type.
-    /// For parameters, the child type must be a supertype of the parent type (or equal).
-    /// Returns true if compatible.
-    fn is_param_type_compatible(
-        child_pt: &crate::opcode::ParamType,
-        parent_pt: &crate::opcode::ParamType,
-    ) -> bool {
-        use crate::opcode::ParamType;
-        match (child_pt, parent_pt) {
-            // Same type is always compatible
-            (ParamType::Simple(a), ParamType::Simple(b)) if a.eq_ignore_ascii_case(b) => true,
-            // mixed accepts anything (top type)
-            (ParamType::Simple(a), _) if a.eq_ignore_ascii_case(b"mixed") => true,
-            // Child is nullable, parent is same inner type - compatible (child is wider)
-            (ParamType::Nullable(inner), ParamType::Simple(_)) => {
-                Self::is_param_type_compatible(inner, parent_pt)
-            }
-            // Both nullable - check inner types
-            (ParamType::Nullable(a), ParamType::Nullable(b)) => {
-                Self::is_param_type_compatible(a, b)
-            }
-            // Child is not nullable but parent is - incompatible (child is narrower)
-            (ParamType::Simple(_), ParamType::Nullable(_)) => false,
-            // Union/intersection - be permissive
-            (ParamType::Union(_), _) | (_, ParamType::Union(_)) => true,
-            (ParamType::Intersection(_), _) | (_, ParamType::Intersection(_)) => true,
-            // Different simple types
-            (ParamType::Simple(a), ParamType::Simple(b)) => {
-                let a_lower: Vec<u8> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
-                let b_lower: Vec<u8> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
-                // self/parent/static can't be resolved statically
-                if a_lower == b"self"
-                    || a_lower == b"static"
-                    || a_lower == b"parent"
-                    || b_lower == b"self"
-                    || b_lower == b"static"
-                    || b_lower == b"parent"
-                {
-                    true
-                } else {
-                    let primitives = [
-                        b"int".as_slice(),
-                        b"float",
-                        b"string",
-                        b"bool",
-                        b"array",
-                        b"null",
-                        b"object",
-                        b"callable",
-                        b"iterable",
-                    ];
-                    let a_is_prim = primitives.contains(&a_lower.as_slice());
-                    let b_is_prim = primitives.contains(&b_lower.as_slice());
-                    if a_is_prim || b_is_prim {
-                        // child is 'object' and parent is a class -> compatible (contravariant widening)
-                        if a_lower == b"object" && !b_is_prim {
-                            true
-                        } else {
-                            a_lower == b"iterable" && b_lower == b"array"
-                        }
-                    } else {
-                        // Both are class names - different class names are incompatible
-                        false
-                    }
-                }
-            }
-        }
-    }
-
     /// Check whether a class is a subclass of another class (including itself)
     /// or implements it as an interface, transitively.
     fn class_is_subclass_of(&self, sub_lower: &[u8], super_lower: &[u8]) -> bool {
@@ -10764,26 +10335,8 @@ impl Vm {
         false
     }
 
-    /// Format a ParamType for signature display
-    fn format_param_type_for_sig(pt: &crate::opcode::ParamType, _class_name: &[u8]) -> String {
-        use crate::opcode::ParamType;
-        match pt {
-            ParamType::Simple(name) => String::from_utf8_lossy(name).to_string(),
-            ParamType::Nullable(inner) => {
-                format!("?{}", Self::format_param_type_for_sig(inner, _class_name))
-            }
-            ParamType::Union(types) => types
-                .iter()
-                .map(|t| Self::format_param_type_for_sig(t, _class_name))
-                .collect::<Vec<_>>()
-                .join("|"),
-            ParamType::Intersection(types) => types
-                .iter()
-                .map(|t| Self::format_param_type_for_sig(t, _class_name))
-                .collect::<Vec<_>>()
-                .join("&"),
-        }
-    }
+    /// Get the output buffer contents
+    /// Format the current call stack as a PHP-style stack trace string
 
     pub fn format_stack_trace(&self) -> String {
         let mut lines = Vec::new();
@@ -44952,6 +44505,18 @@ impl Vm {
                                 None => {}
                             }
                         }
+                    } else if matches!(
+                        &arr_val,
+                        Value::True | Value::Long(_) | Value::Double(_) | Value::Resource(_)
+                    ) {
+                        self.throw_error_msg_pub("Cannot use a scalar value as an array", op.line);
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
                     }
                     Ok(Flow::Next)
                 })? {
@@ -45123,6 +44688,18 @@ impl Vm {
                                 }
                             }
                         }
+                    } else if matches!(
+                        &arr_val,
+                        Value::True | Value::Long(_) | Value::Double(_) | Value::Resource(_)
+                    ) {
+                        self.throw_error_msg_pub("Cannot use a scalar value as an array", op.line);
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
                     }
                     Ok(Flow::Next)
                 })? {
@@ -48068,15 +47645,26 @@ impl Vm {
                                             None
                                         };
                                         if let Some((proto_class, proto_method)) = &ctor_proto {
-                                            if let Some(err_msg) = Self::check_method_compatibility(
-                                                &class.name,
-                                                child_method,
-                                                proto_class,
-                                                proto_method,
-                                            ) {
+                                            if let Some((err_msg, unresolved)) = self
+                                                .variance_check_method(
+                                                    &class,
+                                                    child_method,
+                                                    proto_class,
+                                                    proto_method,
+                                                )
+                                            {
+                                                if unresolved && is_early_attempt {
+                                                    variance::defer(&class.name);
+                                                    return Ok(Flow::Continue);
+                                                }
+                                                let l = if child_method.op_array.decl_line > 0 {
+                                                    child_method.op_array.decl_line
+                                                } else {
+                                                    op.line
+                                                };
                                                 return Err(VmError {
                                                     message: err_msg,
-                                                    line: op.line,
+                                                    line: l,
                                                 });
                                             }
                                         }
@@ -50171,6 +49759,15 @@ impl Vm {
                                                             } else {
                                                                 op.line
                                                             };
+                                                            // (reported where the trait
+                                                            // method is declared)
+                                                            if !m.op_array.filename.is_empty() {
+                                                                self.current_file =
+                                                                    String::from_utf8_lossy(
+                                                                        &m.op_array.filename,
+                                                                    )
+                                                                    .into_owned();
+                                                            }
                                                             return Err(VmError {
                                                                 message: err_msg,
                                                                 line: l,
@@ -60145,6 +59742,12 @@ impl Vm {
                     crate::compiler::Compiler::is_array_ref_builtin(Some(&n))
                 })
             })
+    }
+
+    /// Set an Error with `msg` as the pending exception.
+    fn throw_error_msg_pub(&mut self, msg: &str, line: u32) {
+        let exc = self.create_exception(b"Error", msg, line);
+        self.current_exception = Some(exc);
     }
 
     /// FETCH_OBJ_IS of an undefined property whose __isset() is absent or
