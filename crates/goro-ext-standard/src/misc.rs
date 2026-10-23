@@ -7267,36 +7267,17 @@ fn validate_values_arg3(vm: &mut Vm, func_name: &str, values_arg: &Value) -> Res
     })
 }
 
-/// Validate that arg #1 is a resource (or an int treated as one). Returns the
-/// type name PHP would print on mismatch.
+/// Validate that arg #1 is a resource (TypeError otherwise).
 fn validate_stream_arg1(vm: &mut Vm, func_name: &str, stream_arg: &Value) -> Result<(), VmError> {
+    // Z_PARAM_RESOURCE
     let derefed = stream_arg.deref();
-    let type_name = match &derefed {
-        Value::Resource(_) | Value::Long(_) => return Ok(()),
-        Value::Double(_) => "float",
-        Value::Null | Value::Undef => "null",
-        Value::True => "true",
-        Value::False => "false",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(obj) => {
-            let name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-            let msg = format!(
-                "{}(): Argument #1 ($stream) must be of type resource, {} given",
-                func_name, name
-            );
-            let exc = vm.create_exception(b"TypeError", &msg, 0);
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-        _ => "unknown",
-    };
+    if matches!(derefed, Value::Resource(_)) {
+        return Ok(());
+    }
     let msg = format!(
         "{}(): Argument #1 ($stream) must be of type resource, {} given",
-        func_name, type_name
+        func_name,
+        Vm::value_type_name(&derefed)
     );
     let exc = vm.create_exception(b"TypeError", &msg, 0);
     vm.current_exception = Some(exc);
