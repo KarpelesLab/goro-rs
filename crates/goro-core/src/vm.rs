@@ -4763,6 +4763,161 @@ impl Vm {
         released
     }
 
+    /// The objects and arrays an opcode left in the temporaries it was the
+    /// last user of (`mask`, see OpArray::free_mask()) are released, as
+    /// Zend's handler frees its TMP operands; true when one was.
+    #[inline(always)]
+    fn free_consumed_tmps(op_array: &OpArray, p: usize, mask: u8, tmps: &mut [Value]) -> bool {
+        let ops = &op_array.ops;
+        #[inline(always)]
+        fn heap(o: &OperandType, tmps: &[Value]) -> bool {
+            matches!(o, OperandType::Tmp(i)
+                if matches!(tmps.get(*i as usize), Some(Value::Object(_) | Value::Array(_))))
+        }
+        let op = &ops[p];
+        (mask & 24 != 0
+            || mask & 1 != 0 && heap(&op.op1, tmps)
+            || mask & 2 != 0 && heap(&op.op2, tmps)
+            || mask & 4 != 0 && heap(&op.result, tmps))
+            && Self::free_consumed_tmps_slow(op_array, p, mask, tmps)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn free_consumed_tmps_slow(op_array: &OpArray, p: usize, mask: u8, tmps: &mut [Value]) -> bool {
+        let ops = &op_array.ops;
+        let op = &ops[p];
+        let mut freed = false;
+        // (bit 4: the Closure the call ended went through)
+        if mask & 16 != 0 {
+            if let Some(slot) = op_array
+                .call_end_free(p)
+                .and_then(|t| tmps.get_mut(t as usize))
+            {
+                if matches!(slot, Value::Object(_)) {
+                    *slot = Value::Undef;
+                    freed = true;
+                }
+            }
+        }
+        let prev_op2 = (mask & 8 != 0 && p > 0).then(|| &ops[p - 1].op2);
+        for (b, o) in [&op.op1, &op.op2, &op.result]
+            .into_iter()
+            .enumerate()
+            .map(|(b, o)| (1u8 << b, o))
+            .chain(prev_op2.map(|o| (8u8, o)))
+        {
+            let b = b.trailing_zeros();
+            if mask & (1 << b) == 0 {
+                continue;
+            }
+            if let OperandType::Tmp(i) = o {
+                if let Some(slot) = tmps.get_mut(*i as usize) {
+                    if matches!(slot, Value::Object(_) | Value::Array(_)) {
+                        let old = std::mem::replace(slot, Value::Undef);
+                        drop(old);
+                        freed = true;
+                    }
+                }
+            }
+        }
+        freed
+    }
+
+    /// The objects and arrays in the temporaries the FreeTmps starting a
+    /// catch block (at `ip`) releases, released as the exception is handled
+    /// (before the catch's own destructor run). `exc` is the catch's
+    /// exception slot.
+    #[inline(never)]
+    fn free_catch_live_tmps(op_array: &OpArray, ip: usize, exc: &OperandType, tmps: &mut [Value]) {
+        let Some(next) = op_array.ops.get(ip) else {
+            return;
+        };
+        let (OpCode::FreeTmps, OperandType::Tmp(a), OperandType::Tmp(b)) =
+            (next.opcode, next.op1, next.op2)
+        else {
+            return;
+        };
+        let end = (b as usize).min(tmps.len());
+        for (i, slot) in tmps.iter_mut().enumerate().take(end).skip(a as usize) {
+            if *exc != OperandType::Tmp(i as u32)
+                && matches!(slot, Value::Object(_) | Value::Array(_))
+            {
+                *slot = Value::Undef;
+            }
+        }
+    }
+
+    /// zend_pre/post_incdec_overloaded_property(): `$obj->p++` read through
+    /// __get (PropertyGetIncDec, the ++ of its copy, PropertySet) writes the
+    /// copy back even when incrementing it threw (an object, an array): no
+    /// __set runs with the exception pending, but a dynamic property is
+    /// created.
+    #[inline(never)]
+    fn incdec_overloaded_writeback(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        op: &crate::opcode::Op,
+        cvs: &[Value],
+        tmps: &[Value],
+        val: &Value,
+    ) {
+        let OperandType::Tmp(t) = op.op1 else {
+            return;
+        };
+        let (Some(fetch), Some(set)) = (
+            ip.checked_sub(2).and_then(|i| op_array.ops.get(i)),
+            op_array.ops.get(ip),
+        ) else {
+            return;
+        };
+        if fetch.opcode != OpCode::PropertyGetIncDec
+            || fetch.result != op.op1
+            || set.opcode != OpCode::PropertySet
+            || set.op2 != OperandType::Tmp(t)
+        {
+            return;
+        }
+        let Value::Object(obj) = self
+            .read_operand(&set.op1, cvs, tmps, &op_array.literals)
+            .deref()
+        else {
+            return;
+        };
+        let name = self.read_operand(&set.result, cvs, tmps, &op_array.literals);
+        let Value::String(name) = name else {
+            return;
+        };
+        let class_lower = obj.borrow().class_name.to_ascii_lowercase();
+        let has_get = self
+            .classes
+            .get(&class_lower)
+            .is_some_and(|c| c.methods.contains_key(b"__get".as_slice()));
+        if !has_get
+            || obj.borrow().has_property(name.as_bytes())
+            || self
+                .find_property_def(&class_lower, name.as_bytes())
+                .is_some()
+            || self
+                .classes
+                .get(&class_lower)
+                .is_some_and(|c| c.methods.contains_key(b"__set".as_slice()))
+        {
+            return;
+        }
+        if self.dynamic_property_deprecated(&class_lower) {
+            let class_display = crate::value::display_class_name(&obj.borrow().class_name);
+            self.emit_deprecated(&format!(
+                "Creation of dynamic property {}::${} is deprecated",
+                class_display,
+                name.to_msg_string()
+            ));
+        }
+        obj.borrow_mut()
+            .set_property(name.as_bytes().to_vec(), val.deref());
+    }
+
     /// Release the temporaries an instruction consumed (its TMP operands).
     fn release_tmp_operands(op: &crate::opcode::Op, tmps: &mut [Value]) {
         for o in [&op.op1, &op.op2] {
@@ -9440,7 +9595,10 @@ impl Vm {
     /// (chained to a pending exception) and report no instance.
     #[inline(never)]
     fn lazy_check_released(&mut self, obj: &Rc<RefCell<PhpObject>>, r: bool) -> bool {
-        let listed = obj.try_borrow().map(|b| b.dtor_listed.get()).unwrap_or(false);
+        let listed = obj
+            .try_borrow()
+            .map(|b| b.dtor_listed.get())
+            .unwrap_or(false);
         if Rc::strong_count(obj) > 1 + listed as usize {
             return r;
         }
@@ -17623,7 +17781,10 @@ impl Vm {
         self.enum_cases_resolving.push(cache_key.to_vec());
         // (another case of this enum, folded at compile time)
         let other_case = match &backing_value {
-            Value::String(s) => s.as_bytes().strip_prefix(b"__enum_case__::").map(|c| c.to_vec()),
+            Value::String(s) => s
+                .as_bytes()
+                .strip_prefix(b"__enum_case__::")
+                .map(|c| c.to_vec()),
             _ => None,
         };
         let v = match other_case {
@@ -17656,7 +17817,8 @@ impl Vm {
         case_name: &[u8],
         case_val: &Value,
     ) -> Value {
-        if !matches!(case_val, Value::String(s) if s.as_bytes().starts_with(b"__deferred_thunk__::")) {
+        if !matches!(case_val, Value::String(s) if s.as_bytes().starts_with(b"__deferred_thunk__::"))
+        {
             return self.resolve_deferred_value(case_val);
         }
         match self.get_enum_case(class_lower, case_name) {
@@ -21128,6 +21290,7 @@ impl Vm {
         self.gc_frames.push(crate::gc::GcFrame::new(
             &cvs, &tmps, &sym, &fe, &fin, args, has_this,
         ));
+        let calls_base = self.pending_calls.len();
         let r = self.execute_frame(
             op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin, &mut sym, &mut fe,
         );
@@ -21161,6 +21324,12 @@ impl Vm {
                         Self::exception_set_previous(&cur, prev);
                     }
                 }
+            }
+            // cleanup_unfinished_execution(): the calls the exception
+            // interrupted (their arguments, then the objects they were
+            // called on) go before the frame's live temporaries.
+            if self.pending_calls.len() > calls_base {
+                self.pending_calls.truncate(calls_base);
             }
         }
         // The CVs are released before the symbol table's other variables
@@ -21352,7 +21521,18 @@ impl Vm {
             };
         }
 
+        // The opcode that just ran, when it is the last user of temporaries
+        // (see OpArray::free_mask()).
+        let free_mask = op_array.free_mask();
+        let mut pending_free: usize = usize::MAX;
         'exec: loop {
+            if pending_free != usize::MAX {
+                let p = std::mem::replace(&mut pending_free, usize::MAX);
+                // (not when the opcode runs again)
+                if ip != p && Self::free_consumed_tmps(op_array, p, free_mask[p], &mut tmps) {
+                    release_point!('exec);
+                }
+            }
             if single_step.is_some() {
                 if stepped {
                     if let Some(fs) = fsym.as_mut() {
@@ -21524,6 +21704,9 @@ impl Vm {
             }
 
             let op = &op_array.ops[ip];
+            if free_mask.get(ip).is_some_and(|m| *m != 0) {
+                pending_free = ip;
+            }
             ip += 1;
             if !internal_code {
                 self.current_line = op.line;
@@ -25732,6 +25915,7 @@ impl Vm {
                     if let Some(err) = check_inc_dec_type(&val, true) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
+                        self.incdec_overloaded_writeback(op_array, ip, op, &cvs, &tmps, &val);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -25807,6 +25991,7 @@ impl Vm {
                     if let Some(err) = check_inc_dec_type(&val, false) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
+                        self.incdec_overloaded_writeback(op_array, ip, op, &cvs, &tmps, &val);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -25880,6 +26065,7 @@ impl Vm {
                     if let Some(err) = check_inc_dec_type(&val, true) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
+                        self.incdec_overloaded_writeback(op_array, ip, op, &cvs, &tmps, &val);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -25947,6 +26133,7 @@ impl Vm {
                     if let Some(err) = check_inc_dec_type(&val, false) {
                         let exc = self.create_exception(b"TypeError", &err, op.line);
                         self.current_exception = Some(exc);
+                        self.incdec_overloaded_writeback(op_array, ip, op, &cvs, &tmps, &val);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
                             ip = catch_target as usize;
@@ -41480,9 +41667,11 @@ impl Vm {
                         self.pending_calls.truncate(depth);
                     }
                     // ZEND_HANDLE_EXCEPTION: what unwinding released (the
-                    // unfinished calls' arguments, the frames left) is
+                    // unfinished calls' arguments, the frames left, the live
+                    // temporaries of the try: cleanup_live_vars()) is
                     // destroyed before the catch runs; an exception a
                     // destructor throws takes the in-flight one as previous.
+                    Self::free_catch_live_tmps(op_array, ip, &op.op1, &mut tmps);
                     if self.has_release_work() {
                         self.run_pending_destructors();
                     }

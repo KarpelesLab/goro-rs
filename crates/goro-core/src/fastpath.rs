@@ -980,6 +980,21 @@ fn cv_operands_bound(op: &Op, cvs: &[Value], globals: Option<u32>) -> bool {
 }
 
 /// The temporaries whose foreach iteration state (snapshot, object or
+/// Whether an op1/op2 temporary the opcode at `ip` is the last user of
+/// holds an object or an array.
+#[inline]
+fn consumes_heap_tmp(free_mask: &[u8], ip: usize, op: &Op, tmps: &[Value]) -> bool {
+    let m = free_mask.get(ip).copied().unwrap_or(0);
+    // (bit 3: a compound assignment's operand, released after its write)
+    m & 8 != 0
+        || m & 3 != 0
+            && [(1u8, &op.op1), (2u8, &op.op2)].into_iter().any(|(b, o)| {
+                m & b != 0
+                    && matches!(o, OperandType::Tmp(i)
+                    if matches!(tmps.get(*i as usize), Some(Value::Object(_) | Value::Array(_))))
+            })
+}
+
 /// iterator handle) a frame holds, for FreeTmps (a few; more count as all).
 #[derive(Clone, Copy)]
 pub(crate) struct FeTmps {
@@ -1211,6 +1226,11 @@ impl crate::vm::Vm {
     ) -> usize {
         let ops = &op_array.ops;
         let literals = &op_array.literals;
+        // An opcode consuming a temporary object or array is left to the
+        // dispatch loop, which releases it after the opcode (see
+        // OpArray::free_mask()). (Only the property and dimension opcodes
+        // here take such operands.)
+        let free_mask = op_array.free_mask();
         // (the line of the last opcode run: the dispatch loop's current line
         // once control goes back to it; nothing here reads it)
         let mut line = None;
@@ -1291,19 +1311,31 @@ impl crate::vm::Vm {
                 | OpCode::PropertyGetIncDec
                 | OpCode::PropertyIsset
                 | OpCode::PropertyIssetFetch => {
-                    if self.isset_get_cache.is_some() {
+                    if self.isset_get_cache.is_some() || consumes_heap_tmp(free_mask, ip, op, tmps)
+                    {
                         break 'run ip;
                     }
                     self.fast_prop_op(op_array, ip, cvs, tmps)
                 }
                 OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
+                    if consumes_heap_tmp(free_mask, ip, op, tmps) {
+                        break 'run ip;
+                    }
                     self.fast_dim_op(op, cvs, tmps, literals)
                 }
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
                 OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
+                    if consumes_heap_tmp(free_mask, ip, op, tmps) {
+                        break 'run ip;
+                    }
                     self.fast_dim_isset(op, cvs, tmps, literals)
                 }
-                OpCode::IssetCheck => fast_isset_check(op, cvs, tmps, literals),
+                OpCode::IssetCheck => {
+                    if consumes_heap_tmp(free_mask, ip, op, tmps) {
+                        break 'run ip;
+                    }
+                    fast_isset_check(op, cvs, tmps, literals)
+                }
                 // A class constant its site resolved (see fast_class_const).
                 OpCode::StaticPropGet => {
                     if !tmp_writable(&op.result, tmps) {

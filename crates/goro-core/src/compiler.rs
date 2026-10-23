@@ -14300,6 +14300,11 @@ impl Compiler {
                     return Ok(OperandType::Tmp(tmp));
                 }
 
+                if *prefix {
+                    if let Some(e) = Self::prefix_incdec_relined(expr, operand) {
+                        return self.compile_expr(&e);
+                    }
+                }
                 // Handle increment/decrement on property access: $obj->prop++ etc.
                 if matches!(
                     op,
@@ -20698,6 +20703,27 @@ impl Compiler {
 
     /// Try to resolve an expression as a class constant reference.
     /// This handles `self::CONST`, `ClassName::CONST` etc. during class compilation.
+    /// `++$obj->p` / `--$a[k]` spanning lines: Zend's PRE_INC_OBJ /
+    /// PRE_INC (of a dimension) has the line its operand ends on (the
+    /// property name, the offset). The expression with that line, if it
+    /// differs.
+    #[inline(never)]
+    fn prefix_incdec_relined(expr: &Expr, operand: &Expr) -> Option<Expr> {
+        let line = match &operand.kind {
+            ExprKind::PropertyAccess { property, .. } => property.span.line,
+            ExprKind::ArrayAccess {
+                index: Some(index), ..
+            } => index.span.line,
+            _ => return None,
+        };
+        if line <= expr.span.line {
+            return None;
+        }
+        let mut e = expr.clone();
+        e.span.line = line;
+        Some(e)
+    }
+
     fn eval_class_const_expr(
         expr: &Expr,
         class: &ClassEntry,
