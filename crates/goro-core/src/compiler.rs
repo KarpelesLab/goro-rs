@@ -429,6 +429,11 @@ pub struct Compiler {
     in_hoisting_pass: bool,
     /// compiled_classes index of each hoisted class (lowercase qualified name).
     hoisted_class_idx: HashMap<Vec<u8>, i64>,
+    /// The declarations of the top-level classes extending a class this file
+    /// does not declare first (ZEND_DECLARE_CLASS_DELAYED candidates): run
+    /// after the other early-bound ones, they are bound when the parent
+    /// exists by then (see the DeclareClass handler, flag 3).
+    delayed_hoist_ops: Vec<Op>,
 }
 
 impl Default for Compiler {
@@ -682,6 +687,7 @@ impl Compiler {
             is_top_level: false,
             in_hoisting_pass: false,
             hoisted_class_idx: HashMap::new(),
+            delayed_hoist_ops: Vec::new(),
             deferred_fatal_errors: Vec::new(),
             in_hook_attrs: false,
             attrs_scope_unknown: false,
@@ -2872,6 +2878,7 @@ impl Compiler {
         // First pass: process namespace/use declarations and compile function/class declarations
         // Namespace/use must be processed in order so that class/function names are prefixed correctly
         self.compile_hoisting_pass(&program.statements)?;
+        self.emit_delayed_hoisted_decls();
         // Reset namespace state for second pass (will be re-applied by NamespaceDecl/UseDecl)
         self.current_namespace = Vec::new();
         self.use_map = HashMap::new();
@@ -3086,12 +3093,60 @@ impl Compiler {
                         self.hoisted_class_names.insert(qn_lower);
                         self.hoisted_class_stmts
                             .insert(stmt as *const Statement as usize);
+                    } else if self.class_is_delayed_bindable(modifiers, extends, implements, body)
+                        && !crate::vm::is_known_builtin_class_name(&qn_lower)
+                    {
+                        // (its declaration goes after the other early-bound ones)
+                        let at = self.op_array.ops.len();
+                        self.in_hoisting_pass = true;
+                        let r = self.compile_stmt(stmt);
+                        self.in_hoisting_pass = false;
+                        r?;
+                        let ops: Vec<Op> = self.op_array.ops.drain(at..).collect();
+                        self.delayed_hoist_ops.extend(ops);
+                        self.hoisted_class_idx
+                            .insert(qn_lower, self.compiled_classes.len() as i64 - 1);
+                        self.hoisted_class_stmts
+                            .insert(stmt as *const Statement as usize);
                     }
                 }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    /// A top-level class that is not early-bindable only because its parent
+    /// is not declared before it in this file: PHP binds it early when the
+    /// parent exists at compile time (another file declared it), or, with
+    /// opcache, when the parent exists as the script is loaded
+    /// (ZEND_DECLARE_CLASS_DELAYED).
+    fn class_is_delayed_bindable(
+        &self,
+        modifiers: &ClassModifiers,
+        extends: &Option<Vec<u8>>,
+        implements: &[Vec<u8>],
+        body: &[ClassMember],
+    ) -> bool {
+        !(modifiers.is_enum || modifiers.is_interface || modifiers.is_trait)
+            && extends.is_some()
+            && implements.is_empty()
+            && !body
+                .iter()
+                .any(|m| matches!(m, ClassMember::TraitUse { .. }))
+    }
+
+    /// Append the delayed early-binding declarations (flag 3: see
+    /// class_is_delayed_bindable) after the other hoisted ones.
+    #[inline(never)]
+    fn emit_delayed_hoisted_decls(&mut self) {
+        let ops = std::mem::take(&mut self.delayed_hoist_ops);
+        for mut op in ops {
+            if op.opcode == OpCode::DeclareClass {
+                op.result = OperandType::Const(self.op_array.add_literal(Value::Long(3)));
+            }
+            self.op_array.ops.push(op);
+        }
     }
 
     /// At the source position of a hoisted class, emit a DeclareClass flagged as

@@ -19588,6 +19588,24 @@ impl Vm {
         true
     }
 
+    /// Whether the parent of `class` (a delayed early-binding candidate)
+    /// lets it be bound at the start of its file (see DeclareClass flag 3).
+    #[inline(never)]
+    fn delayed_bind_parent_ok(&self, class: &crate::object::ClassEntry) -> bool {
+        let Some(parent) = class.parent.as_ref() else {
+            return false;
+        };
+        let pl = parent.strip_prefix(b"\\").unwrap_or(parent).to_ascii_lowercase();
+        let Some(pce) = self.classes.get(&pl) else {
+            return false;
+        };
+        if crate::script_cache::enabled() {
+            return true;
+        }
+        // (a class of this file was not there when it was compiled)
+        pce.filename.as_deref() != class.filename.as_deref()
+    }
+
     /// check_unrecoverable_load_failure(): class `name`, used by a variance
     /// check while it was being linked, failed to load its parent /
     /// interface `dep_lower` (an exception is pending): that is fatal.
@@ -47720,10 +47738,20 @@ impl Vm {
                             class_opt = None;
                         }
                     }
-                    let is_early_attempt = decl_flag == 1;
+                    let is_early_attempt = decl_flag == 1 || decl_flag == 3;
                     if let Some(class) = &class_opt {
                         if self.defer_anon_class(class) {
                             return Ok(Flow::Next);
+                        }
+                        // A class extending one this file does not declare
+                        // first: early bound when the parent was there when
+                        // the file was compiled (declared by another file),
+                        // with opcache when it is there as the script loads
+                        // (ZEND_DECLARE_CLASS_DELAYED); else declared at its
+                        // source position.
+                        if decl_flag == 3 && !self.delayed_bind_parent_ok(class) {
+                            variance::defer(&class.name);
+                            return Ok(Flow::Continue);
                         }
                         // A class whose name is already taken is not early
                         // bound (zend_hash_add() fails at compile time): it is
