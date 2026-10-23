@@ -440,3 +440,56 @@ pub fn wavelet_denoise(img: &mut Image, threshold: f64, softness: f64) {
     }
     img.colors = None;
 }
+
+/// BilateralBlurImage() as pecl's bilateralBlurImage(radius, sigma,
+/// intensity_sigma, spatial_sigma) drives it: a ⌊radius⌋ × ⌊sigma⌋
+/// window (offsets from -n/2), each neighbour weighted by the spatial
+/// gaussian and by a gaussian of the difference of the intensities taken
+/// to 8 bits (intensity_sigma in those units).
+pub fn bilateral_blur(img: &mut Image, width: f64, height: f64, isigma: f64, ssigma: f64) {
+    let (w, h) = (img.columns, img.rows);
+    let (kw, kh) = (width.max(0.0) as i64, height.max(0.0) as i64);
+    if w == 0 || h == 0 || kw == 0 || kh == 0 {
+        return;
+    }
+    let src = img.clone();
+    let int8: Vec<f64> = src
+        .pixels
+        .chunks_exact(4)
+        .map(|p| {
+            let v = 0.212656 * p[0] as f64 + 0.715158 * p[1] as f64 + 0.072186 * p[2] as f64;
+            ((v + 128.0) / 257.0).floor()
+        })
+        .collect();
+    let (x0, y0) = (-(kw / 2), -(kh / 2));
+    let is2 = 2.0 * isigma * isigma;
+    let ss2 = 2.0 * ssigma * ssigma;
+    for y in 0..h as i64 {
+        for x in 0..w as i64 {
+            let ci = int8[y as usize * w + x as usize];
+            let mut acc = [0f64; 4];
+            let mut tot = 0f64;
+            for v in y0..y0 + kh {
+                let yy = (y + v).clamp(0, h as i64 - 1) as usize;
+                for u in x0..x0 + kw {
+                    let xx = (x + u).clamp(0, w as i64 - 1) as usize;
+                    let d = int8[yy * w + xx] - ci;
+                    let wt = (-((u * u + v * v) as f64) / ss2).exp() * (-(d * d) / is2).exp();
+                    let p = src.px(xx, yy);
+                    for k in 0..4 {
+                        acc[k] += wt * p[k] as f64;
+                    }
+                    tot += wt;
+                }
+            }
+            let idx = (y as usize * w + x as usize) * 4;
+            for k in 0..3 {
+                img.pixels[idx + k] = clamp_to_quantum(acc[k] / tot) as u16;
+            }
+            if img.alpha {
+                img.pixels[idx + 3] = clamp_to_quantum(acc[3] / tot) as u16;
+            }
+        }
+    }
+    img.colors = None;
+}

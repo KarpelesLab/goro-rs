@@ -1040,17 +1040,15 @@ fn auto_threshold_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) 
 
 fn bilateral_blur_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dddd", args)?;
-    let (r, s, ss) = (
+    let (r, s, is, ss) = (
         a[0].double_or(0.0),
         a[1].double_or(1.0),
         a[2].double_or(1.0),
+        a[3].double_or(1.0),
     );
     image_op(vm, &d_(o), "Unable to bilateralBlurImage", |i| {
-        let radius = if r >= 1.0 { r as u32 } else { 3 };
-        apply_oxideav(
-            i,
-            &of::BilateralBlur::new(radius, ss.max(0.1) as f32, (s * 2.55).max(1.0) as f32),
-        )
+        goro_imagick::effects::bilateral_blur(i, r, s, is, ss);
+        Ok(())
     })
 }
 
