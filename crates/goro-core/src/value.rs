@@ -98,8 +98,20 @@ fn note_peak(total: usize) {
 /// Set when a comparison ran into a container already being compared
 /// (zend_hash_compare / zend_std_compare_objects recursion protection); the
 /// VM raises "Nesting level too deep - recursive dependency?".
-pub static COMPARE_RECURSION: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+/// (per thread: goro-httpd runs requests on several threads)
+pub fn compare_recursion_set() {
+    COMPARE_RECURSION.with(|c| c.set(true));
+}
+
+/// Take the COMPARE_RECURSION flag.
+#[inline]
+pub fn compare_recursion_take() -> bool {
+    COMPARE_RECURSION.with(|c| c.replace(false))
+}
+
+thread_local! {
+    static COMPARE_RECURSION: Cell<bool> = const { Cell::new(false) };
+}
 
 thread_local! {
     /// Arrays/objects (left operands) currently being compared.
@@ -121,7 +133,7 @@ impl CmpGuard {
             }
         });
         if recursive {
-            COMPARE_RECURSION.store(true, std::sync::atomic::Ordering::Relaxed);
+            compare_recursion_set();
             None
         } else {
             Some(CmpGuard(p))
@@ -1216,7 +1228,7 @@ impl Value {
             n
         });
         let r = if depth > 1000 {
-            COMPARE_RECURSION.store(true, std::sync::atomic::Ordering::Relaxed);
+            compare_recursion_set();
             false
         } else {
             self.equals_inner(other)
@@ -1519,7 +1531,7 @@ impl Value {
             n
         });
         let r = if depth > 1000 {
-            COMPARE_RECURSION.store(true, std::sync::atomic::Ordering::Relaxed);
+            compare_recursion_set();
             0
         } else {
             self.compare_inner(other)

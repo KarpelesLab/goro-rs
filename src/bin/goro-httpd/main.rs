@@ -309,6 +309,11 @@ fn main() {
             }
         }
     }
+    if opts.workers > 0 {
+        // The max_execution_time timer is per process: with requests on
+        // several threads it is not enforced (see the ini default above).
+        goro_ext_standard::misc::disable_execution_timeouts();
+    }
     let site = Arc::new(Site::new(
         opts.docroot.clone(),
         opts.ini.clone(),

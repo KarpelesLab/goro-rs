@@ -20226,10 +20226,7 @@ impl Vm {
             }
             // A comparison of the previous op recursed into a container
             // already being compared (zend_hash_compare()).
-            if crate::value::COMPARE_RECURSION.load(std::sync::atomic::Ordering::Relaxed)
-                && crate::value::COMPARE_RECURSION.swap(false, std::sync::atomic::Ordering::Relaxed)
-                && self.current_exception.is_none()
-            {
+            if crate::value::compare_recursion_take() && self.current_exception.is_none() {
                 let msg = "Nesting level too deep - recursive dependency?";
                 let line = self.current_line;
                 let exc = self.create_exception(b"Error", msg, line);

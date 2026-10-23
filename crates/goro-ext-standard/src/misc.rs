@@ -4730,7 +4730,7 @@ fn php_builtin_sort(
     let r = php_builtin_sort_inner(vm, args, fname, by_key, reverse, renumber);
     // Sorting arrays nested into themselves does not raise the comparison
     // recursion error (bug63882_2).
-    goro_core::value::COMPARE_RECURSION.store(false, std::sync::atomic::Ordering::Relaxed);
+    let _ = goro_core::value::compare_recursion_take();
     r
 }
 
@@ -5826,10 +5826,26 @@ fn arm_prof_timer(secs: i64) {
     }
 }
 
+/// Set by SAPIs running requests on several threads: the max_execution_time
+/// timer (ITIMER_PROF, SIGPROF) is per process, so one request's
+/// set_time_limit() would end another's (and the hard timeout would end
+/// the server). The directive and set_time_limit() are then accepted but
+/// not enforced.
+static NO_EXECUTION_TIMEOUTS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Disable the max_execution_time timer for the process (see above).
+pub fn disable_execution_timeouts() {
+    NO_EXECUTION_TIMEOUTS.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// zend_set_timeout(): (re)arm the max_execution_time CPU timer; 0 disarms.
 pub fn set_execution_timeout(secs: i64) {
     use goro_core::value::{TIMED_OUT, TIMEOUT_SECONDS};
     use std::sync::atomic::Ordering;
+    if NO_EXECUTION_TIMEOUTS.load(Ordering::Relaxed) {
+        return;
+    }
     let secs = if (0..=999_999_999).contains(&secs) {
         secs
     } else {
