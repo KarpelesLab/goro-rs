@@ -302,6 +302,11 @@ fn throwable_base(vm: &Vm, class_lower: &[u8]) -> Option<&'static [u8]> {
     None
 }
 
+/// The bytes a `%s` of a zend_string prints: up to the first NUL.
+fn c_str(b: &[u8]) -> &[u8] {
+    &b[..b.iter().position(|&c| c == 0).unwrap_or(b.len())]
+}
+
 fn mangle(cls: &[u8], name: &[u8]) -> Vec<u8> {
     let mut k = Vec::with_capacity(cls.len() + name.len() + 2);
     k.push(0);
@@ -806,7 +811,7 @@ impl Serializer {
                             vm.emit_warning_at(
                                 &format!(
                                     "serialize(): \"{}\" is returned from __sleep() multiple times",
-                                    goro_core::string::msg_str(&name)
+                                    goro_core::string::msg_str(c_str(&name))
                                 ),
                                 saved_line,
                             );
@@ -819,7 +824,7 @@ impl Serializer {
                 if !found {
                     vm.emit_warning_at(&format!(
                         "serialize(): \"{}\" returned as member variable from __sleep() but does not exist",
-                        goro_core::string::msg_str(&name)), saved_line);
+                        goro_core::string::msg_str(c_str(&name))), saved_line);
                 }
             }
             push_class_name(&mut self.buf, &display);
