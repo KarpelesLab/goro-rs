@@ -256,11 +256,10 @@ fn deskew_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "d", args)?;
     let t = a[0].double_or(0.0);
     replace_op(vm, &d_(o), "Unable to deskew image", |i| {
-        // the skew angle (oxideav), then an affine rotation about the
-        // origin onto the best-fit canvas, the uncovered area in the
-        // background colour (as DeskewImage() does)
-        let thr = (t / 65535.0 * 255.0).clamp(0.0, 255.0) as u8;
-        let angle = -goro_imagick::filters::deskew_angle(i, thr);
+        // the skew angle (a Radon transform), then an affine rotation
+        // about the origin onto the best-fit canvas, the uncovered area in
+        // the background colour (as DeskewImage() does)
+        let angle = goro_imagick::filters::deskew_angle(i, t);
         let (s, c) = angle.to_radians().sin_cos();
         let mut src = i.clone();
         src.virtual_pixel = VirtualPixelMethod::Background;
@@ -272,9 +271,34 @@ fn deskew_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
         )?;
         out.virtual_pixel = i.virtual_pixel;
         out.alpha = i.alpha || i.background_color.to_rgba16()[3] < 65535;
-        out.artifacts.set("deskew:angle", &format!("{}", angle));
+        out.artifacts.set("deskew:angle", &format_g20(angle));
         Ok(out)
     })
+}
+
+/// printf("%.20g").
+fn format_g20(v: f64) -> String {
+    let e = format!("{:.19e}", v);
+    let (mant, exp) = e.split_once('e').unwrap_or((&e, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let strip = |s: String| -> String {
+        if s.contains('.') {
+            s.trim_end_matches('0').trim_end_matches('.').to_string()
+        } else {
+            s
+        }
+    };
+    if !(-4..20).contains(&exp) {
+        format!(
+            "{}e{}{:02}",
+            strip(mant.to_string()),
+            if exp < 0 { '-' } else { '+' },
+            exp.abs()
+        )
+    } else {
+        let decimals = (19 - exp).max(0) as usize;
+        strip(format!("{:.*}", decimals, v))
+    }
 }
 
 fn floodfill_paint_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {

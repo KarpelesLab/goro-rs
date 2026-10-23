@@ -78,25 +78,67 @@ pub fn apply_oxideav<F: oxideav_image_filter::ImageFilter>(img: &mut Image, f: &
     Ok(())
 }
 
-/// The skew angle (degrees) of an image's text lines / edges, as the
-/// oxideav Deskew filter estimates it.
-pub fn deskew_angle(img: &Image, threshold: u8) -> f64 {
-    use oxideav_core::{PixelFormat, VideoFrame, VideoPlane};
-    let frame = VideoFrame {
-        pts: None,
-        planes: vec![VideoPlane {
-            stride: img.columns * 4,
-            data: img.to_rgba8(),
-        }],
-    };
-    let params = oxideav_image_filter::VideoStreamParams {
-        format: PixelFormat::Rgba,
-        width: img.columns as u32,
-        height: img.rows as u32,
-    };
-    oxideav_image_filter::Deskew::new(threshold)
-        .estimate_angle(&frame, params)
-        .unwrap_or(0.0) as f64
+/// DeskewImage()'s skew angle (degrees): a fast (recursive, Brady-style)
+/// Radon transform of the pixels darker than `threshold` (quantum scale)
+/// over slopes k/N, N the width rounded up to a power of two, for both
+/// directions (the second on the image flipped vertically). The slope
+/// whose projection has the largest sum of squared differences between
+/// adjacent bins wins; the angle is −atan(k/N).
+pub fn deskew_angle(img: &Image, threshold: f64) -> f64 {
+    let (w, h) = (img.columns, img.rows);
+    if w == 0 || h == 0 {
+        return 0.0;
+    }
+    let mut n = 1usize;
+    while n < w {
+        n *= 2;
+    }
+    let len = h + n;
+    let bit = |x: usize, y: usize| -> i64 { (Image::intensity(&img.px(x, y)) < threshold) as i64 };
+    let mut best = (i64::MIN, 0i64);
+    for flip in [false, true] {
+        // one block per column, each holding one slope
+        let mut blocks: Vec<Vec<Vec<i64>>> = (0..n)
+            .map(|x| {
+                let mut c = vec![0i64; len];
+                if x < w {
+                    for y in 0..h {
+                        c[y] = bit(x, if flip { h - 1 - y } else { y });
+                    }
+                }
+                vec![c]
+            })
+            .collect();
+        let mut size = 1;
+        while size < n {
+            let mut next = Vec::with_capacity(blocks.len() / 2);
+            let mut it = blocks.into_iter();
+            while let (Some(l), Some(r)) = (it.next(), it.next()) {
+                let mut out = Vec::with_capacity(2 * size);
+                for k in 0..2 * size {
+                    let (a, b) = (&l[k / 2], &r[k / 2]);
+                    let d = k.div_ceil(2);
+                    let mut s = a.clone();
+                    for y in 0..len - d {
+                        s[y] += b[y + d];
+                    }
+                    out.push(s);
+                }
+                next.push(out);
+            }
+            blocks = next;
+            size *= 2;
+        }
+        // ImageMagick only searches slopes below N/8 (about 7°)
+        for (k, p) in blocks[0].iter().enumerate().take(n / 8) {
+            let score: i64 = p.windows(2).map(|q| (q[1] - q[0]) * (q[1] - q[0])).sum();
+            let kk = if flip { -(k as i64) } else { k as i64 };
+            if score > best.0 {
+                best = (score, kk);
+            }
+        }
+    }
+    -(180.0 * (best.1 as f64 / n as f64).atan() / std::f64::consts::PI)
 }
 
 /// The channels a ChannelType selects among R, G, B, A.
