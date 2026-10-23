@@ -205,13 +205,26 @@ fn check_int_arg(
     param_name: &str,
     param_num: u32,
 ) -> Result<bool, VmError> {
+    check_int_arg_as(vm, val, func_name, param_name, param_num, "int")
+}
+
+/// check_int_arg() for a parameter whose declared type, as errors name it,
+/// is `ty` (e.g. round()'s RoundingMode|int $mode).
+fn check_int_arg_as(
+    vm: &mut Vm,
+    val: &Value,
+    func_name: &str,
+    param_name: &str,
+    param_num: u32,
+    ty: &str,
+) -> Result<bool, VmError> {
     match val {
         Value::Null => {
             // null is accepted with deprecation in PHP 8.1+
             vm.emit_deprecated_at(
                 &format!(
-                    "{}(): Passing null to parameter #{} (${}) of type int is deprecated",
-                    func_name, param_num, param_name
+                    "{}(): Passing null to parameter #{} (${}) of type {} is deprecated",
+                    func_name, param_num, param_name, ty
                 ),
                 vm.current_line,
             );
@@ -234,8 +247,8 @@ fn check_int_arg(
                 throw_math_type_error(
                     vm,
                     format!(
-                        "{}(): Argument #{} (${}) must be of type int, {} given",
-                        func_name, param_num, param_name, type_name
+                        "{}(): Argument #{} (${}) must be of type {}, {} given",
+                        func_name, param_num, param_name, ty, type_name
                     ),
                 );
                 Ok(false)
@@ -273,8 +286,8 @@ fn check_int_arg(
                 throw_math_type_error(
                     vm,
                     format!(
-                        "{}(): Argument #{} (${}) must be of type int, {} given",
-                        func_name, param_num, param_name, type_name
+                        "{}(): Argument #{} (${}) must be of type {}, {} given",
+                        func_name, param_num, param_name, ty, type_name
                     ),
                 );
                 Ok(false)
@@ -282,15 +295,15 @@ fn check_int_arg(
         }
         Value::Reference(r) => {
             let inner = r.borrow().clone();
-            check_int_arg(vm, &inner, func_name, param_name, param_num)
+            check_int_arg_as(vm, &inner, func_name, param_name, param_num, ty)
         }
         _ => {
             let type_name = Vm::value_type_name(val);
             throw_math_type_error(
                 vm,
                 format!(
-                    "{}(): Argument #{} (${}) must be of type int, {} given",
-                    func_name, param_num, param_name, type_name
+                    "{}(): Argument #{} (${}) must be of type {}, {} given",
+                    func_name, param_num, param_name, ty, type_name
                 ),
             );
             Ok(false)
@@ -403,7 +416,7 @@ fn round(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             Value::Long(n) => *n,
             Value::Double(_) | Value::String(_) | Value::True | Value::False | Value::Null => {
-                if !check_int_arg(vm, &mode_val, "round", "mode", 3)? {
+                if !check_int_arg_as(vm, &mode_val, "round", "mode", 3, "RoundingMode|int")? {
                     return Ok(Value::Null);
                 }
                 mode_val.to_long_coerced()
@@ -836,7 +849,28 @@ fn pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
-    // pow_function(): operands that cannot become numbers.
+    // pow_function(): op1 then op2 are converted to numbers
+    // (zendi_try_convert_scalar_to_number): a leading-numeric string warns,
+    // an operand that cannot be converted stops there.
+    for v in [base, exp] {
+        if Vm::check_unsupported_operand_types(v, &Value::Long(0), "**").is_some() {
+            break;
+        }
+        if let Value::String(s) = v.deref() {
+            if matches!(
+                goro_core::value::parse_numeric_str(s.as_bytes(), true),
+                Some((_, true))
+            ) {
+                vm.emit_warning_at("A non-numeric value encountered", vm.current_line);
+                if vm.current_exception.is_some() {
+                    return Err(VmError {
+                        message: vm.uncaught_exception_message(),
+                        line: vm.current_line,
+                    });
+                }
+            }
+        }
+    }
     if let Some(msg) = Vm::check_unsupported_operand_types(base, exp, "**") {
         return throw_err(vm, b"TypeError", msg);
     }
@@ -1540,7 +1574,8 @@ fn intval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
-    Ok(Value::Long(c_strtol(&s, base)))
+    // (ZEND_STRTOL() takes the base as a C int)
+    Ok(Value::Long(c_strtol(&s, base as i32 as i64)))
 }
 
 /// php_canonicalize_version(): separate digit runs from the rest with
