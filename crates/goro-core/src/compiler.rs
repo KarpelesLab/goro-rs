@@ -10979,6 +10979,63 @@ impl Compiler {
     }
 
     /// Whether a destructuring target list assigns the variable `name`.
+    /// Whether a destructuring target writes an element of variable `name`
+    /// (`[$a[1], $a[0]] = ...`).
+    fn list_writes_dim_of(elems: &[ArrayElement], name: &[u8]) -> bool {
+        fn root_is(e: &Expr, name: &[u8]) -> bool {
+            match &e.kind {
+                ExprKind::ArrayAccess { array, .. } => match &array.kind {
+                    ExprKind::Variable(n) => n == name,
+                    _ => root_is(array, name),
+                },
+                _ => false,
+            }
+        }
+        elems.iter().any(|e| match &e.value.kind {
+            ExprKind::Array(sub) => Self::list_writes_dim_of(sub, name),
+            _ => root_is(&e.value, name),
+        })
+    }
+
+    /// Destructure a copy of the CV `src` (bound to a hidden variable, which
+    /// separates it from `src`); the expression's value is that copy.
+    #[inline(never)]
+    fn compile_list_destructure_copy(
+        &mut self,
+        elems: &[ArrayElement],
+        src: OperandType,
+        line: u32,
+    ) -> CompileResult<OperandType> {
+        let mut hname = b"\0vl".to_vec();
+        hname.extend_from_slice(self.dynvar_count.to_string().as_bytes());
+        self.dynvar_count += 1;
+        let hcv = self.op_array.get_or_create_cv(&hname);
+        self.op_array.emit(Op {
+            opcode: OpCode::Assign,
+            op1: OperandType::Cv(hcv),
+            op2: src,
+            result: OperandType::Unused,
+            line,
+        });
+        self.compile_list_destructure(elems, OperandType::Cv(hcv), line)?;
+        let t = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::Assign,
+            op1: OperandType::Tmp(t),
+            op2: OperandType::Cv(hcv),
+            result: OperandType::Unused,
+            line,
+        });
+        self.op_array.emit(Op {
+            opcode: OpCode::UnsetCv,
+            op1: OperandType::Cv(hcv),
+            op2: OperandType::Unused,
+            result: OperandType::Unused,
+            line,
+        });
+        Ok(OperandType::Tmp(t))
+    }
+
     fn list_targets_var(elems: &[ArrayElement], name: &[u8]) -> bool {
         elems.iter().any(|e| match &e.value.kind {
             ExprKind::Variable(n) => n == name,
@@ -13397,6 +13454,19 @@ impl Compiler {
                             }
                         };
 
+                        // `[$a[1], $a[0]] = $a` writes into the destructured
+                        // array: destructure an own copy of it.
+                        if let ExprKind::Variable(n) = &value.kind {
+                            if matches!(val, OperandType::Cv(_))
+                                && Self::list_writes_dim_of(&elems, n)
+                            {
+                                return self.compile_list_destructure_copy(
+                                    &elems,
+                                    val,
+                                    expr.span.line,
+                                );
+                            }
+                        }
                         // Snapshot a CV source: `[$a, $b] = $a` must read the
                         // original array, not $a after its first element is assigned.
                         let arr_op = if matches!(val, OperandType::Cv(_)) {
