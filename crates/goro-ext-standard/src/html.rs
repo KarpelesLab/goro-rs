@@ -1101,69 +1101,74 @@ fn get_html_translation_table_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
     let all = table_kind != 0 && !cs.is_partial() && doctype != ENT_HTML_DOC_XML1;
     let table = pick_encode_table(doctype, all);
 
+    // write_s3row_data(): an entry for the code point's own entity, then one
+    // per HTML5 multi-code-point entity it leads (the second code point is
+    // mapped to the charset, or written truncated for UTF-8/ISO-8859-1).
+    let multi = pick_multi_cp_table(doctype, all);
     let mut result = PhpArray::new();
-    for &(cp, name) in table {
-        if cp == 0x22 && !quote_double {
-            continue;
+    let row = |result: &mut PhpArray, key1: Vec<u8>, uni: u32| {
+        let put = |result: &mut PhpArray, key: Vec<u8>, name: &str| {
+            result.set(
+                ArrayKey::String(PhpString::from_vec(key)),
+                Value::String(PhpString::from_string(format!("&{};", name))),
+            );
+        };
+        if let Some(name) = lookup_entity_encode(uni, table) {
+            put(result, key1.clone(), name);
         }
-        if cp == 0x27 && !quote_single {
-            continue;
+        let mut seconds: Vec<(u32, &str)> = multi
+            .iter()
+            .filter(|(c1, _, _)| *c1 == uni)
+            .map(|&(_, c2, n)| (c2, n))
+            .collect();
+        seconds.sort_by_key(|&(c2, _)| c2);
+        for (c2, name) in seconds {
+            let mut key = key1.clone();
+            match cs {
+                Charset::Utf8 => append_utf8(&mut key, c2),
+                Charset::Iso88591 => key.push(c2 as u8),
+                _ => match map_unicode_to_byte(c2, cs) {
+                    Some(b) => key.push(b),
+                    None => continue,
+                },
+            }
+            put(result, key, name);
         }
-        // Key is the codepoint encoded in the requested charset.
-        let key_bytes: Vec<u8> = if cs == Charset::Utf8 {
-            if let Some(ch) = char::from_u32(cp) {
-                let mut buf = [0u8; 4];
-                ch.encode_utf8(&mut buf).as_bytes().to_vec()
-            } else {
+    };
+    let quote_ok = |c: u32| !(c == 0x22 && !quote_double || c == 0x27 && !quote_single);
+    if cs == Charset::Utf8 || cs == Charset::Iso88591 || !all {
+        // Code point order (ISO-8859-1 and the basic table: up to U+00FF).
+        let mut cps: Vec<u32> = table
+            .iter()
+            .map(|&(c, _)| c)
+            .chain(multi.iter().map(|&(c, _, _)| c))
+            .filter(|&c| cs == Charset::Utf8 && all || c <= 0xFF)
+            .collect();
+        cps.sort_unstable();
+        cps.dedup();
+        for cp in cps {
+            if !quote_ok(cp) {
                 continue;
             }
-        } else if let Some(b) = map_unicode_to_byte(cp, cs) {
-            vec![b]
-        } else if cp < 0x80 {
-            // Every supported charset is ASCII-compatible (the multi-byte
-            // ones only get the basic entities).
-            vec![cp as u8]
-        } else {
-            continue;
-        };
-
-        // PHP also skips entities not representable in target charset.
-        let val = format!("&{};", name);
-        result.set(
-            ArrayKey::String(PhpString::from_vec(key_bytes)),
-            Value::String(PhpString::from_string(val)),
-        );
-    }
-
-    // Multi-codepoint entities (HTML5 only). Keyed by the concatenated UTF-8
-    // (or charset) encoding of cp1+cp2.
-    for &(cp1, cp2, name) in pick_multi_cp_table(doctype, all) {
-        let mut key_bytes: Vec<u8> = Vec::new();
-        let mut skip = false;
-        for cp in [cp1, cp2] {
-            if cs == Charset::Utf8 {
-                if let Some(ch) = char::from_u32(cp) {
-                    let mut buf = [0u8; 4];
-                    key_bytes.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
-                } else {
-                    skip = true;
-                    break;
-                }
-            } else if let Some(b) = map_unicode_to_byte(cp, cs) {
-                key_bytes.push(b);
+            let mut key = Vec::new();
+            if cs == Charset::Utf8 && all {
+                append_utf8(&mut key, cp);
             } else {
-                skip = true;
-                break;
+                key.push(cp as u8);
             }
+            row(&mut result, key, cp);
         }
-        if skip {
-            continue;
+    } else {
+        // Other single-byte charsets: their byte order, mapped to Unicode.
+        for byte in 0..=0xFFu32 {
+            if !quote_ok(byte) {
+                continue;
+            }
+            let Some(uni) = map_byte_to_unicode(byte, cs) else {
+                continue;
+            };
+            row(&mut result, vec![byte as u8], uni);
         }
-        let val = format!("&{};", name);
-        result.set(
-            ArrayKey::String(PhpString::from_vec(key_bytes)),
-            Value::String(PhpString::from_string(val)),
-        );
     }
 
     Ok(Value::Array(Rc::new(RefCell::new(result))))
