@@ -28,7 +28,7 @@ const STREAM_CRYPTO_METHOD_TLS_CLIENT: i64 = 121;
 /// Call a builtin function by name (None when it does not exist or failed).
 fn call(vm: &mut Vm, name: &str, args: &[Value]) -> Option<Value> {
     let f = vm.functions.get(name.as_bytes()).copied()?;
-    f(vm, args).ok()
+    crate::php::call_adopting(vm, f, args)
 }
 
 fn bytes_of(v: &Value) -> Option<Vec<u8>> {

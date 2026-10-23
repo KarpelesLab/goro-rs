@@ -158,7 +158,7 @@ pub fn soap_create_typemap(
 
 fn call_builtin(vm: &mut Vm, name: &str, args: &[Value]) -> Option<Value> {
     let f = vm.functions.get(name.as_bytes()).copied()?;
-    f(vm, args).ok()
+    crate::php::call_adopting(vm, f, args)
 }
 
 pub fn construct(vm: &mut Vm, f: &Func, this: &Obj, args: &[Value]) -> SR<Value> {
