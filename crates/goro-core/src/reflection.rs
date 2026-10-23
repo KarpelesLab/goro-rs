@@ -739,6 +739,30 @@ fn enum_builtin_props(vm: &Vm, lower: &[u8]) -> &'static [crate::object::Propert
     leaked
 }
 
+/// The properties class `ce` (lowercase `lower`) declares itself, in
+/// declaration order.
+pub fn own_declared_props<'a>(
+    ce: &'a crate::object::ClassEntry,
+    lower: &[u8],
+) -> Vec<&'a crate::object::PropertyDef> {
+    let own = |p: &&crate::object::PropertyDef| p.declaring_class.eq_ignore_ascii_case(lower);
+    if ce.own_prop_order.is_empty() {
+        return ce.properties.iter().filter(own).collect();
+    }
+    let mut out: Vec<&crate::object::PropertyDef> = ce
+        .own_prop_order
+        .iter()
+        .filter_map(|n| ce.properties.iter().filter(own).find(|p| &p.name == n))
+        .collect();
+    // (declared later, e.g. by a trait)
+    for p in ce.properties.iter().filter(own) {
+        if !out.iter().any(|x| std::ptr::eq(*x, p)) {
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// All declared properties of a class, including the implicit enum
 /// properties and those inherited from internal ancestors (which user
 /// `ClassEntry`s don't copy).
@@ -784,10 +808,8 @@ pub(crate) fn rprops<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::Pro
         // Zend's properties_info order: the engine's enum props, the
         // class's own declarations, then inherited ones (parent's order).
         out.extend(enum_builtin_props(vm, lower).iter());
-        for p in &ce.properties {
-            if p.declaring_class.eq_ignore_ascii_case(lower)
-                && !out.iter().any(|x| x.name == p.name)
-            {
+        for p in own_declared_props(ce, lower) {
+            if !out.iter().any(|x| x.name == p.name) {
                 out.push(p);
             }
         }
@@ -2990,8 +3012,8 @@ pub fn reflection_class_method(
             let mut entries: Vec<(Vec<u8>, Value)> = Vec::new();
             for (idx, link) in chain.iter().enumerate() {
                 if let Some(lce) = rcls(vm, link) {
-                    for prop in &lce.properties {
-                        if !prop.is_static || !prop.declaring_class.eq_ignore_ascii_case(link) {
+                    for prop in own_declared_props(lce, link) {
+                        if !prop.is_static {
                             continue;
                         }
                         if idx > 0 && prop.visibility == Visibility::Private {

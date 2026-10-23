@@ -92,6 +92,11 @@ pub struct ClassEntry {
     /// What NEW gives an object of the class, once known (see
     /// Vm::new_object_fast).
     pub new_template: std::cell::RefCell<Option<std::rc::Rc<NewTemplate>>>,
+    /// The names of the properties the class declares itself, in
+    /// declaration order (the start of Zend's properties_info), once
+    /// inheritance put `properties` in slot order; empty when `properties`
+    /// is in that order already.
+    pub own_prop_order: Vec<Vec<u8>>,
 }
 
 /// What NEW gives an object of a plain user class (all its hierarchy user
@@ -219,6 +224,7 @@ impl ClassEntry {
             const_closures: Vec::new(),
             allow_dynamic_properties: false,
             new_template: Default::default(),
+            own_prop_order: Vec::new(),
         }
     }
 

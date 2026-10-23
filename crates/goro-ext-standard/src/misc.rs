@@ -14953,6 +14953,30 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
+/// The properties of `class` declared by its ancestor (or itself) `level`,
+/// in that class's declaration order (Zend's properties_info order).
+fn class_level_props<'a>(
+    vm: &Vm,
+    class: &'a goro_core::object::ClassEntry,
+    level: &[u8],
+) -> Vec<&'a goro_core::object::PropertyDef> {
+    let order: Vec<&[u8]> = match vm.classes.get(level) {
+        Some(c) => goro_core::reflection::own_declared_props(c, level)
+            .into_iter()
+            .map(|p| p.name.as_slice())
+            .collect(),
+        None => Vec::new(),
+    };
+    let mut v: Vec<&goro_core::object::PropertyDef> = class.properties.iter().collect();
+    v.sort_by_key(|p| {
+        order
+            .iter()
+            .position(|n| *n == p.name.as_slice())
+            .unwrap_or(usize::MAX)
+    });
+    v
+}
+
 fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_name = args.first().unwrap_or(&Value::Null).to_php_string();
     let name_lower: Vec<u8> = class_name
@@ -15054,7 +15078,7 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let class = vm.classes.get(&name_lower).unwrap();
         // Non-static, walking child → parent
         for cls_lower in &chain {
-            for prop in &class.properties {
+            for prop in class_level_props(vm, class, cls_lower) {
                 if prop.is_static || prop.is_virtual {
                     continue;
                 }
@@ -15101,7 +15125,7 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         // Static, walking child → parent
         for cls_lower in &chain {
-            for prop in &class.properties {
+            for prop in class_level_props(vm, class, cls_lower) {
                 if !prop.is_static {
                     continue;
                 }

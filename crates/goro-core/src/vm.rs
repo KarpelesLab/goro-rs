@@ -49591,6 +49591,7 @@ impl Vm {
                                 // belong to their declaring class). When the child redeclares
                                 // a same-named property, both coexist.
                                 let child_props_orig = std::mem::take(&mut class.properties);
+                                class.own_prop_order = own_prop_order(&child_props_orig);
                                 let mut used_child: std::collections::HashSet<usize> =
                                     std::collections::HashSet::new();
                                 let mut new_props: Vec<_> = Vec::with_capacity(
@@ -63660,4 +63661,11 @@ fn vm_is_valid_timezone(tz_name: &str) -> bool {
         return true;
     }
     false
+}
+
+/// The names of `props` (a class's own declarations, in order), for
+/// `ClassEntry::own_prop_order`.
+#[inline(never)]
+fn own_prop_order(props: &[crate::object::PropertyDef]) -> Vec<Vec<u8>> {
+    props.iter().map(|p| p.name.clone()).collect()
 }
