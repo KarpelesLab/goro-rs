@@ -334,6 +334,7 @@ fn reflected(k: &Kernel) -> Kernel {
         x: k.width - 1 - k.x,
         y: k.height - 1 - k.y,
         values,
+        user: false,
     }
 }
 

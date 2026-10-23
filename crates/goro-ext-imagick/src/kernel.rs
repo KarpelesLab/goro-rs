@@ -32,6 +32,9 @@ pub struct Kernel {
     pub x: usize,
     pub y: usize,
     pub values: Vec<f64>,
+    /// From fromMatrix(): its unused (false) entries poison the sums
+    /// ScaleKernelInfo() normalises by, as pecl computes them.
+    pub user: bool,
 }
 
 #[derive(Default)]
@@ -218,6 +221,7 @@ fn from_matrix(vm: &mut Vm, f: &Func, _o: Option<&Obj>, args: &[Value]) -> R {
         x: ox,
         y: oy,
         values,
+        user: true,
     };
     Ok(new_kernel_object(vm, vec![k]))
 }
@@ -245,6 +249,7 @@ fn pat(s: &str, origin: Option<(usize, usize)>) -> Kernel {
         x,
         y,
         values,
+        user: false,
     }
 }
 
@@ -255,6 +260,7 @@ fn mat3(v: [f64; 9]) -> Kernel {
         x: 1,
         y: 1,
         values: v.to_vec(),
+        user: false,
     }
 }
 
@@ -286,6 +292,7 @@ fn rotate90(k: &Kernel) -> Kernel {
         x: h - 1 - k.y,
         y: k.x,
         values,
+        user: false,
     }
 }
 
@@ -339,6 +346,7 @@ fn square_of(r: usize, f: &dyn Fn(i64, i64) -> f64) -> Kernel {
         x: r,
         y: r,
         values: v,
+        user: false,
     }
 }
 
@@ -397,6 +405,7 @@ fn builtin(kind: i64, args: &[f64]) -> Option<Vec<Kernel>> {
             x: 0,
             y: 0,
             values: vec![arg(0, 1.0)],
+            user: false,
         }),
         // Gaussian
         2 => {
@@ -462,6 +471,7 @@ fn builtin(kind: i64, args: &[f64]) -> Option<Vec<Kernel>> {
                     x: w,
                     y: 0,
                     values,
+                    user: false,
                 }
             } else {
                 let n = if rho > 0.0 {
@@ -485,6 +495,7 @@ fn builtin(kind: i64, args: &[f64]) -> Option<Vec<Kernel>> {
                     x: 0,
                     y: 0,
                     values,
+                    user: false,
                 }
             };
             let sum: f64 = k.values.iter().sum();
@@ -509,6 +520,7 @@ fn builtin(kind: i64, args: &[f64]) -> Option<Vec<Kernel>> {
                             -4., -1., 0., -1., -4., -1., 2., 3., 2., -1., 0., 3., 4., 3., 0., -1.,
                             2., 3., 2., -1., -4., -1., 0., -1., -4.,
                         ],
+                        user: false,
                     });
                 }
                 7 => {
@@ -523,6 +535,7 @@ fn builtin(kind: i64, args: &[f64]) -> Option<Vec<Kernel>> {
                             6., 3., -2., -5., 0., 3., 4., 3., 0., -5., -10., -5., -2., -1., -2.,
                             -5., -10.,
                         ],
+                        user: false,
                     });
                 }
                 15 => {
@@ -535,6 +548,7 @@ fn builtin(kind: i64, args: &[f64]) -> Option<Vec<Kernel>> {
                             0., 0., -1., 0., 0., 0., -1., -2., -1., 0., -1., -2., 16., -2., -1.,
                             0., -1., -2., -1., 0., 0., 0., -1., 0., 0.,
                         ],
+                        user: false,
                     });
                 }
                 19 => {
@@ -551,6 +565,7 @@ fn builtin(kind: i64, args: &[f64]) -> Option<Vec<Kernel>> {
                             -5., -3., 0., -3., -5., -4., -1., -1., -2., -4., -5., -5., -5., -4.,
                             -2., -1., 0., -1., -1., -2., -2., -2., -1., -1., 0.,
                         ],
+                        user: false,
                     });
                 }
                 _ => vec![-1., -1., -1., -1., 8., -1., -1., -1., -1.],
@@ -561,6 +576,7 @@ fn builtin(kind: i64, args: &[f64]) -> Option<Vec<Kernel>> {
                 x: 1,
                 y: 1,
                 values: v,
+                user: false,
             })
         }
         // Sobel, Roberts, Prewitt, Compass, Kirsch (rho turns them)
@@ -622,6 +638,7 @@ fn builtin(kind: i64, args: &[f64]) -> Option<Vec<Kernel>> {
                 x,
                 y,
                 values: vec![1.0; w * h],
+                user: false,
             })
         }
         // Octagon
@@ -988,38 +1005,54 @@ fn get_matrix(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     Ok(arr_val(values_to_array(&l[0])))
 }
 
-/// ScaleKernelInfo(), as documented: plain scaling, or normalization first
-/// (NormalizeValue: by the sum, or the positive sum for zero-sum kernels;
-/// CorrelateNormalizeValue: positive and negative parts apart), then the
-/// factor (PercentValue: as a percentage).
+/// ScaleKernelInfo() as pecl's scale() reaches it (black-box): the
+/// percent flag has no effect; NormalizeValue divides by the sum (by the
+/// positive sum for zero-sum kernels), CorrelateNormalizeValue scales
+/// the positive and negative parts to ±1 apart, then everything is
+/// multiplied by the factor. For fromMatrix() kernels the positive sum
+/// takes the unused entries along (making it NaN): a NaN divisor leaves
+/// a normalised kernel all unused, a NaN positive part of a correlate
+/// normalisation unscaled.
 pub(crate) fn scale_kernel(k: &mut Kernel, scale: f64, flags: i64) {
-    let mut scale = scale;
-    if flags & 0x1000 != 0 {
-        scale /= 100.0;
+    let mut pos = 0.0;
+    let mut neg = 0.0;
+    for &v in &k.values {
+        if v < 0.0 {
+            neg += v;
+        } else if !v.is_nan() || k.user {
+            pos += v;
+        }
     }
-    let pos: f64 = k.values.iter().filter(|v| **v > 0.0).sum();
-    let neg: f64 = -k.values.iter().filter(|v| **v < 0.0).sum::<f64>();
+    let eps = 1e-12;
     if flags & 0x10000 != 0 {
-        // correlate normalize: positives to +1, negatives to -1
+        let ps = if pos.abs() >= eps { 1.0 / pos } else { 1.0 };
+        let ns = if neg.abs() >= eps { 1.0 / -neg } else { 1.0 };
         for v in k.values.iter_mut() {
-            if *v > 0.0 && pos > 0.0 {
-                *v = *v / pos * scale;
-            } else if *v < 0.0 && neg > 0.0 {
-                *v = *v / neg * scale;
+            if *v > 0.0 {
+                *v *= ps * scale;
+            } else if *v < 0.0 {
+                *v *= ns * scale;
             }
         }
         return;
     }
+    let mut factor = scale;
     if flags & 0x2000 != 0 {
-        let sum = pos - neg;
-        let div = if sum.abs() < 1e-12 { pos } else { sum.abs() };
-        if div > 0.0 {
-            scale /= div;
+        let sum = pos + neg;
+        let div = if sum.abs() < eps { pos } else { sum };
+        if div.is_nan() {
+            for v in k.values.iter_mut() {
+                *v = f64::NAN;
+            }
+            return;
+        }
+        if div.abs() >= eps {
+            factor /= div;
         }
     }
     for v in k.values.iter_mut() {
         if !v.is_nan() {
-            *v *= scale;
+            *v *= factor;
         }
     }
 }
@@ -1042,12 +1075,9 @@ fn add_unity_kernel(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R
     let o = o.unwrap();
     kernels_of(vm, o)?;
     for k in data(o).list.borrow_mut().iter_mut() {
+        // an unused origin stays unused
         let i = k.y * k.width + k.x;
-        if k.values[i].is_nan() {
-            k.values[i] = s;
-        } else {
-            k.values[i] += s;
-        }
+        k.values[i] += s;
     }
     Ok(Value::Null)
 }
