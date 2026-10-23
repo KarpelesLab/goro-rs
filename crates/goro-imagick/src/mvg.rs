@@ -535,6 +535,76 @@ enum Piece {
     Disc(Pt, f64),
 }
 
+/// A zero-length path stroked by distance: full within w/2 − 0.25 of the
+/// point, (1 − excess)² beyond, over its box grown by w/2.
+fn point_stroke(img: &mut Image, c: Pt, st: &StrokeStyle) {
+    let mid = st.width / 2.0;
+    let Some(win) = Window::new(
+        img,
+        rnd(c.0 - mid),
+        rnd(c.1 - mid),
+        rnd(c.0 + mid),
+        rnd(c.1 + mid),
+    ) else {
+        return;
+    };
+    let hw = mid - 0.25;
+    for yy in 0..win.h {
+        for xx in 0..win.w {
+            let (x, y) = (win.x0 + xx as i64, win.y0 + yy as i64);
+            let d = (x as f64 - c.0).hypot(y as f64 - c.1);
+            let e = d - hw;
+            let a = if e <= 0.0 || d == 0.0 {
+                1.0
+            } else if e < 1.0 {
+                (1.0 - e) * (1.0 - e)
+            } else {
+                0.0
+            };
+            over(img, x as usize, y as usize, &st.color, a);
+        }
+    }
+}
+
+/// A round join: the fan from `v` over the outer arc from `a` to `b`,
+/// in ⌈√r·θ/2⌉ equal steps (θ the arc's angle), as ImageMagick tessellates
+/// it.
+fn round_fan(v: Pt, a: Pt, b: Pt, r: f64) -> Piece {
+    let a0 = (a.1 - v.1).atan2(a.0 - v.0);
+    let mut d = (b.1 - v.1).atan2(b.0 - v.0) - a0;
+    while d > std::f64::consts::PI {
+        d -= 2.0 * std::f64::consts::PI;
+    }
+    while d < -std::f64::consts::PI {
+        d += 2.0 * std::f64::consts::PI;
+    }
+    fan(v, a0, d, r)
+}
+
+/// A half-turn fan from `a` to `b` around `v`, bulging along `dir`.
+fn round_fan_through(v: Pt, a: Pt, _b: Pt, dir: Pt, r: f64) -> Piece {
+    let a0 = (a.1 - v.1).atan2(a.0 - v.0);
+    // turn toward the direction of travel
+    let mid = a0 - std::f64::consts::FRAC_PI_2;
+    let (mx, my) = (mid.cos(), mid.sin());
+    let d = if mx * dir.0 + my * dir.1 >= 0.0 {
+        -std::f64::consts::PI
+    } else {
+        std::f64::consts::PI
+    };
+    fan(v, a0, d, r)
+}
+
+fn fan(v: Pt, a0: f64, d: f64, r: f64) -> Piece {
+    let n = ((r.sqrt() * d.abs() / 2.0).ceil() as usize).max(1);
+    let mut pts = vec![v];
+    for i in 0..=n {
+        let t = a0 + d * i as f64 / n as f64;
+        pts.push((v.0 + r * t.cos(), v.1 + r * t.sin()));
+    }
+    Piece::Poly(pts)
+}
+
 fn piece_dist(p: &Piece, x: f64, y: f64) -> f64 {
     match p {
         Piece::Disc(c, r) => ((x - c.0).hypot(y - c.1) - r).max(0.0),
@@ -572,6 +642,9 @@ fn piece_dist(p: &Piece, x: f64, y: f64) -> f64 {
 fn stroke_outline(img: &mut Image, subs: &[Sub], st: &StrokeStyle) {
     let hw = st.width / 2.0;
     let mut pieces: Vec<Piece> = Vec::new();
+    // round caps: ImageMagick strokes a zero-length path at each end,
+    // with the distance rule of thin strokes
+    let mut caps: Vec<Pt> = Vec::new();
     for s in subs {
         let mut p = s.pts.clone();
         let closed = s.closed || (p.len() > 2 && p[0] == p[p.len() - 1]);
@@ -636,14 +709,14 @@ fn stroke_outline(img: &mut Image, subs: &[Sub], st: &StrokeStyle) {
             if cross.abs() < 1e-12 && ix * ox + iy * oy > 0.0 {
                 continue;
             }
-            if st.join == 2 {
-                pieces.push(Piece::Disc(v, hw));
-                continue;
-            }
             // the outer side of the turn
             let sgn = if cross > 0.0 { -1.0 } else { 1.0 };
             let a = (v.0 - iy * hw * sgn, v.1 + ix * hw * sgn);
             let b = (v.0 - oy * hw * sgn, v.1 + ox * hw * sgn);
+            if st.join == 2 {
+                pieces.push(round_fan(v, a, b, hw));
+                continue;
+            }
             let cos_t = (ix * ox + iy * oy).clamp(-1.0, 1.0);
             // miter length over half width: 1/sin(θ/2), θ the angle between
             // the segments
@@ -668,9 +741,19 @@ fn stroke_outline(img: &mut Image, subs: &[Sub], st: &StrokeStyle) {
             }
         }
         if !closed && st.cap == 2 {
-            pieces.push(Piece::Disc(p[0], hw));
-            pieces.push(Piece::Disc(p[n - 1], hw));
+            caps.push(p[0]);
+            caps.push(p[n - 1]);
+        } else if !closed && st.join == 2 {
+            // ImageMagick also rounds the far side of the path's end
+            let (ux, uy) = dir(n - 2);
+            let e = p[n - 1];
+            let a = (e.0 - uy * hw, e.1 + ux * hw);
+            let b = (e.0 + uy * hw, e.1 - ux * hw);
+            pieces.push(round_fan_through(e, a, b, (ux, uy), hw));
         }
+    }
+    for &c in &caps {
+        point_stroke(img, c, st);
     }
     if pieces.is_empty() {
         return;

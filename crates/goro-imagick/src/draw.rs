@@ -1530,7 +1530,7 @@ impl DrawingWand {
     ) -> bool {
         let gc = &p.gc;
         let stroked = gc.stroke_width > 0.0 && gc.stroke.alpha > 0.0;
-        if gc.clip_path.is_some() || gc.fill_pattern.is_some() || stroked {
+        if gc.clip_path.is_some() || gc.fill_pattern.is_some() || gc.stroke_pattern.is_some() {
             return false;
         }
         let Some((cmds, m, ox, oy)) = self.text_place(p, x, y, text, img.columns, img.rows) else {
@@ -1698,7 +1698,106 @@ impl DrawingWand {
             );
         }
         mvg::composite_coverage(img, &cov, gx0, gy0, gw, &color);
+        if stroked {
+            self.stroke_glyphs(img, gc, &cmds, ox, oy);
+        }
         true
+    }
+
+    /// A stroked text: ImageMagick draws each glyph's outline as an MVG
+    /// path (coordinates printed with six significant digits) translated
+    /// to the origin, filled and stroked over the rendered glyphs.
+    fn stroke_glyphs(
+        &self,
+        img: &mut Image,
+        gc: &GraphicContext,
+        cmds: &[v::PathCommand],
+        ox: f64,
+        oy: f64,
+    ) {
+        let r6 = |v: f32| -> f64 { fmt_g_prec(v as f64, 6).parse().unwrap_or(v as f64) };
+        let a = gc.affine;
+        let place = |x: f64, y: f64| {
+            let (x, y) = (x + ox, y + oy);
+            (a.sx * x + a.ry * y + a.tx, a.rx * x + a.sy * y + a.ty)
+        };
+        let mut subs: Vec<Sub> = Vec::new();
+        let mut cur = (0.0, 0.0);
+        for c in cmds {
+            match c {
+                v::PathCommand::MoveTo(q) => {
+                    cur = (r6(q.x), r6(q.y));
+                    subs.push(Sub {
+                        pts: vec![cur],
+                        closed: false,
+                    });
+                }
+                v::PathCommand::LineTo(q) => {
+                    cur = (r6(q.x), r6(q.y));
+                    if let Some(s) = subs.last_mut() {
+                        s.pts.push(cur);
+                    }
+                }
+                v::PathCommand::QuadCurveTo { control, end } => {
+                    let (c1, e) = ((r6(control.x), r6(control.y)), (r6(end.x), r6(end.y)));
+                    let pts = mvg::bezier_points(&[cur, c1, e]);
+                    if let Some(s) = subs.last_mut() {
+                        s.pts.extend_from_slice(&pts[1..]);
+                    }
+                    cur = e;
+                }
+                v::PathCommand::CubicCurveTo { c1, c2, end } => {
+                    let (b1, b2, e) = (
+                        (r6(c1.x), r6(c1.y)),
+                        (r6(c2.x), r6(c2.y)),
+                        (r6(end.x), r6(end.y)),
+                    );
+                    let pts = mvg::bezier_points(&[cur, b1, b2, e]);
+                    if let Some(s) = subs.last_mut() {
+                        s.pts.extend_from_slice(&pts[1..]);
+                    }
+                    cur = e;
+                }
+                v::PathCommand::Close => {
+                    if let Some(s) = subs.last_mut() {
+                        if let Some(&f) = s.pts.first() {
+                            if s.pts.last() != Some(&f) {
+                                s.pts.push(f);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for s in &mut subs {
+            for q in s.pts.iter_mut() {
+                *q = place(q.0, q.1);
+            }
+        }
+        let expand = (a.sx * a.sy - a.rx * a.ry).abs().sqrt();
+        let width = gc.stroke_width * expand;
+        let c = &gc.stroke;
+        let st = mvg::StrokeStyle {
+            color: [
+                c.red,
+                c.green,
+                c.blue,
+                (c.alpha * gc.opacity).clamp(0.0, 65535.0),
+            ],
+            width,
+            join: gc.line_join,
+            cap: gc.line_cap,
+            miter_limit: gc.miter_limit,
+        };
+        let f = &gc.fill;
+        let fill = [
+            f.red,
+            f.green,
+            f.blue,
+            (f.alpha * gc.fill_opacity * gc.opacity).clamp(0.0, 65535.0),
+        ];
+        mvg::draw(img, &subs, Some((fill, gc.fill_rule == 2)), Some(st), width);
     }
 
     pub fn render_onto(&self, img: &mut Image) -> crate::error::MResult<()> {
