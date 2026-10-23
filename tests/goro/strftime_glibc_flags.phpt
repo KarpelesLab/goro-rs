@@ -2,6 +2,7 @@
 strftime() follows glibc's flags, widths and modifiers
 --FILE--
 <?php
+putenv("TZ=UTC"); // %s goes through the C library's mktime()
 $t = 1704110745; // 2024-01-01 12:05:45 UTC, a Monday
 foreach (['%^a', '%^B', '%#Z', '%#a', '%#p', '%^P', '%05d', '%5Y', '%10H', '%-5d', '%_5H', '%010a', '%10z', '%^c', '%20T', '%10s',
           '%^', '%#', '%-', '%E', '%O', '%5', '%E%', '%5E%', '%Ed', '%5Ed', '%Ob', '%EY', '%OY', '%Ex', "%Y\0%m"] as $f) {
