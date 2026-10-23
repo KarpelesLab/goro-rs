@@ -548,11 +548,59 @@ fn sparse_color_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) ->
         if pts.is_empty() {
             return Ok(());
         }
+        // barycentric (1) and bilinear (7): a least-squares fit per channel
+        // of c = a·x + b·y + d (bilinear adds an x·y term)
+        let fit = |terms: usize| -> Option<Vec<[f64; 4]>> {
+            let basis = |x: f64, y: f64| [x, y, 1.0, x * y];
+            let mut out = vec![[0.0; 4]; 3];
+            for (c, o) in out.iter_mut().enumerate() {
+                let mut m = vec![vec![0.0; terms + 1]; terms];
+                for p in &pts {
+                    let b = basis(p.0, p.1);
+                    for r in 0..terms {
+                        for k in 0..terms {
+                            m[r][k] += b[r] * b[k];
+                        }
+                        m[r][terms] += b[r] * p.2[c];
+                    }
+                }
+                for col in 0..terms {
+                    let piv = (col..terms)
+                        .max_by(|&a, &b| m[a][col].abs().partial_cmp(&m[b][col].abs()).unwrap())?;
+                    if m[piv][col].abs() < 1e-12 {
+                        return None;
+                    }
+                    m.swap(col, piv);
+                    for r in 0..terms {
+                        if r != col {
+                            let f = m[r][col] / m[col][col];
+                            for k in col..=terms {
+                                m[r][k] -= f * m[col][k];
+                            }
+                        }
+                    }
+                }
+                for k in 0..terms {
+                    o[k] = m[k][terms] / m[k][k];
+                }
+            }
+            Some(out)
+        };
+        let affine = match method {
+            1 => fit(3),
+            7 => fit(4),
+            _ => None,
+        };
         for y in 0..i.rows {
             for x in 0..i.columns {
                 let (fx, fy) = (x as f64, y as f64);
-                let col = match method {
-                    18 => {
+                let col = match (&affine, method) {
+                    (Some(k), _) => {
+                        let b = [fx, fy, 1.0, fx * fy];
+                        let v = |c: usize| (0..4).map(|t| k[c][t] * b[t]).sum::<f64>();
+                        [v(0), v(1), v(2)]
+                    }
+                    (None, 18) => {
                         // voronoi: the nearest point
                         let n = pts
                             .iter()
@@ -564,7 +612,7 @@ fn sparse_color_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) ->
                             .unwrap();
                         n.2
                     }
-                    20 => {
+                    (None, 20) => {
                         // manhattan voronoi
                         let n = pts
                             .iter()
