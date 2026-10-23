@@ -34756,7 +34756,14 @@ impl Vm {
                                     } else if let Some(v) = arg0_object {
                                         (v, true)
                                     } else {
-                                        (cv0_object.unwrap_or(Value::Null), false)
+                                        // ZEND_INIT_STATIC_METHOD_CALL: $this is only
+                                        // passed when it is an instance of the named class.
+                                        (
+                                            cv0_object
+                                                .filter(|v| self.obj_instanceof(v, &class_lower))
+                                                .unwrap_or(Value::Null),
+                                            false,
+                                        )
                                     };
                                     // parent::m() naming a user class that inherits m from a
                                     // built-in SPL class: dispatch on that built-in.
