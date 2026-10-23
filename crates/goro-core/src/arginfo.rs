@@ -302,6 +302,12 @@ pub fn lookup(lname: &[u8]) -> Option<&'static FuncInfo> {
 
 /// CHECK_* flags verified for `lname`.
 pub fn verified_flags(lname: &[u8]) -> u8 {
+    // implode() calls are frameless (ZEND_FRAMELESS_FUNCTION(implode, n)),
+    // whose argument parsing differs from the stub's: implode() checks its
+    // argument types itself.
+    if lname == b"implode" {
+        return CHECK_ARITY;
+    }
     let t = verified::VERIFIED;
     t.binary_search_by(|(n, _)| n.as_bytes().cmp(lname))
         .map(|i| t[i].1)

@@ -116,7 +116,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"str_ends_with", vec![s(), s()]);
     vm.register_builtin_param_types(b"str_repeat", vec![s(), i()]);
     vm.register_builtin_param_types(b"explode", vec![s(), s(), i()]);
-    vm.register_builtin_param_types(b"implode", vec![s(), None]);
     vm.register_builtin_param_types(b"join", vec![s(), None]);
     vm.register_builtin_param_types(b"nl2br", vec![s(), None]);
     vm.register_builtin_param_types(b"str_pad", vec![s(), i(), s(), i()]);
@@ -864,188 +863,141 @@ fn join_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     implode_named(vm, args, "join")
 }
 
+fn implode_type_error(vm: &mut Vm, msg: String) -> VmError {
+    let exc = vm.create_exception(b"TypeError", &msg, 0);
+    vm.current_exception = Some(exc);
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
+}
+
 fn implode_named(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, VmError> {
-    // PHP 8 implode signatures:
-    //   implode(array $array): string                    (single-arg form)
-    //   implode(string $separator, array $array): string (canonical two-arg form)
-    //
-    // Legacy compatibility note: PHP's argument parser still distinguishes the
-    // "first arg is array" case from "first arg is something else" — when the
-    // first arg is an array, the error message says "must be of type string"
-    // (singular). For other non-string, non-stringable separators, the message
-    // says "must be of type array|string".
-    let (glue, pieces) = if args.len() >= 2 {
-        let a0 = args[0].deref();
-        match &a0 {
-            Value::Array(_) => {
-                // implode(array, X) — first arg as array no longer accepted in PHP 8.
+    let null_pieces = || {
+        format!(
+            "{}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given",
+            func_name
+        )
+    };
+    let (glue, arr) = if func_name == "implode" {
+        // A direct implode() call is frameless in php-src (its arginfo is
+        // only arity-checked here): ZEND_FRAMELESS_FUNCTION(implode, 1/2)
+        // parse the separator as a plain string, then the array.
+        match args {
+            [] => {
+                let msg = "implode() expects at least 1 argument, 0 given".to_string();
+                let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return Err(VmError {
+                    message: msg,
+                    line: vm.current_line,
+                });
+            }
+            [one] => match one.deref() {
+                Value::Array(arr) => (PhpString::empty(), arr),
+                _ => return Err(implode_type_error(vm, null_pieces())),
+            },
+            [sep, arr, ..] => {
+                let sep = sep.deref();
+                let strict = vm.caller_strict_types;
+                let line = vm.current_line;
+                let glue = if matches!(sep, Value::Null | Value::Undef) && !strict {
+                    vm.emit_deprecated_at(
+                        "implode(): Passing null to parameter #1 ($separator) of type array|string is deprecated",
+                        line,
+                    );
+                    if vm.current_exception.is_some() {
+                        return Err(VmError {
+                            message: String::new(),
+                            line,
+                        });
+                    }
+                    PhpString::empty()
+                } else {
+                    match vm.zpp_coerce_scalar(goro_core::arginfo::T_STRING, &sep, strict, line) {
+                        Ok(Some(Value::String(s))) => s,
+                        Ok(Some(v)) => vm.value_to_string(&v),
+                        Ok(None) => {
+                            let msg = format!(
+                                "implode(): Argument #1 ($separator) must be of type string, {} given",
+                                Vm::value_type_name(&sep)
+                            );
+                            return Err(implode_type_error(vm, msg));
+                        }
+                        Err(()) => {
+                            return Err(VmError {
+                                message: String::new(),
+                                line,
+                            });
+                        }
+                    }
+                };
+                match arr.deref() {
+                    Value::Array(a) => (glue, a),
+                    Value::Null | Value::Undef => {
+                        return Err(implode_type_error(vm, null_pieces()));
+                    }
+                    other => {
+                        let msg = format!(
+                            "implode(): Argument #2 ($array) must be of type ?array, {} given",
+                            Vm::value_type_name(&other)
+                        );
+                        return Err(implode_type_error(vm, msg));
+                    }
+                }
+            }
+        }
+    } else {
+        // PHP_FUNCTION(implode) after zpp (array|string $separator,
+        // ?array $array = null, checked from the arginfo).
+        let a0 = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+        let a1 = args.get(1).map(|v| v.deref()).unwrap_or(Value::Null);
+        match (a0, a1) {
+            (Value::Array(arr), Value::Null | Value::Undef) => (PhpString::empty(), arr),
+            (_, Value::Null | Value::Undef) => {
+                return Err(implode_type_error(vm, null_pieces()));
+            }
+            (Value::Array(_), _) => {
                 let msg = format!(
                     "{}(): Argument #1 ($separator) must be of type string, array given",
                     func_name
                 );
-                let exc = vm.create_exception(b"TypeError", &msg, 0);
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
+                return Err(implode_type_error(vm, msg));
             }
-            // Stringable scalars and null: PHP coerces these to string for the separator.
-            Value::String(_)
-            | Value::Long(_)
-            | Value::Double(_)
-            | Value::True
-            | Value::False
-            | Value::Null
-            | Value::Undef => (vm.value_to_string(&args[0]), &args[1]),
-            Value::Object(obj) => {
-                // Only accept objects implementing __toString (Stringable).
-                let class_lower: Vec<u8> = obj
-                    .borrow()
-                    .class_name
-                    .iter()
-                    .map(|b| b.to_ascii_lowercase())
-                    .collect();
-                let has_tostring = vm
-                    .classes
-                    .get(&class_lower)
-                    .map(|c| c.methods.contains_key(&b"__tostring".to_vec()))
-                    .unwrap_or(false);
-                if !has_tostring {
-                    let cls = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-                    let msg = format!(
-                        "{}(): Argument #1 ($separator) must be of type array|string, {} given",
-                        func_name, cls
-                    );
-                    let exc = vm.create_exception(b"TypeError", &msg, 0);
-                    vm.current_exception = Some(exc);
-                    return Err(VmError {
-                        message: msg,
-                        line: vm.current_line,
-                    });
-                }
-                (vm.value_to_string(&args[0]), &args[1])
-            }
-            Value::Resource(_) => {
+            (sep, Value::Array(arr)) => (vm.value_to_string(&sep), arr),
+            (_, other) => {
                 let msg = format!(
-                    "{}(): Argument #1 ($separator) must be of type array|string, resource given",
-                    func_name
+                    "{}(): Argument #2 ($array) must be of type ?array, {} given",
+                    func_name,
+                    Vm::value_type_name(&other)
                 );
-                let exc = vm.create_exception(b"TypeError", &msg, 0);
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
-            }
-            _ => {
-                let type_name = Vm::value_type_name(&a0);
-                let msg = format!(
-                    "{}(): Argument #1 ($separator) must be of type array|string, {} given",
-                    func_name, type_name
-                );
-                let exc = vm.create_exception(b"TypeError", &msg, 0);
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
+                return Err(implode_type_error(vm, msg));
             }
         }
-    } else if let Some(first) = args.first() {
-        let first_d = first.deref();
-        if matches!(&first_d, Value::Array(_)) {
-            // implode(array) - no glue
-            (PhpString::empty(), first)
-        } else {
-            // implode(non-array) with no second arg - TypeError.
-            // PHP collapses several types into the same "...argument #2 must be array, null given" message.
-            let msg = format!(
-                "{}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given",
-                func_name
-            );
-            let exc = vm.create_exception(b"TypeError", &msg, 0);
-            vm.current_exception = Some(exc);
+    };
+
+    // php_implode()
+    let values: Vec<Value> = arr.borrow().values().cloned().collect();
+    let mut result = Vec::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            result.extend_from_slice(glue.as_bytes());
+        }
+        let v = v.deref();
+        if matches!(v, Value::Array(_)) {
+            vm.emit_warning_at("Array to string conversion", vm.current_line);
+        }
+        let s = vm.value_to_string_checked(&v)?;
+        // If __toString raised an exception, propagate it.
+        if vm.current_exception.is_some() {
             return Err(VmError {
-                message: msg,
+                message: String::new(),
                 line: vm.current_line,
             });
         }
-    } else {
-        let msg = format!("{}() expects at least 1 argument, 0 given", func_name);
-        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    };
-
-    let pieces_d = pieces.deref();
-    match &pieces_d {
-        Value::Array(arr) => {
-            let values: Vec<Value> = {
-                let arr = arr.borrow();
-                arr.values().cloned().collect()
-            };
-            let mut result = Vec::new();
-            for (i, v) in values.iter().enumerate() {
-                if i > 0 {
-                    result.extend_from_slice(glue.as_bytes());
-                }
-                // Emit "Array to string conversion" warning for array elements,
-                // matching PHP's behavior when joining a sub-array.
-                if matches!(v.deref(), Value::Array(_)) {
-                    vm.emit_warning_at("Array to string conversion", vm.current_line);
-                }
-                let s = vm.value_to_string(v);
-                // If __toString raised an exception, propagate it.
-                if vm.current_exception.is_some() {
-                    return Err(VmError {
-                        message: String::new(),
-                        line: vm.current_line,
-                    });
-                }
-                result.extend_from_slice(s.as_bytes());
-            }
-            Ok(Value::String(PhpString::from_vec(result)))
-        }
-        Value::Null | Value::Undef => {
-            // Two-arg case: implode(glue, null) - now a TypeError in PHP 8.1+
-            let msg = format!(
-                "{}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given",
-                func_name
-            );
-            let exc = vm.create_exception(b"TypeError", &msg, 0);
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            })
-        }
-        _ => {
-            let type_name = match &pieces_d {
-                Value::True => "true".to_string(),
-                Value::False => "false".to_string(),
-                Value::Long(_) => "int".to_string(),
-                Value::Double(_) => "float".to_string(),
-                Value::String(_) => "string".to_string(),
-                Value::Resource(_) => "resource".to_string(),
-                Value::Object(o) => String::from_utf8_lossy(&o.borrow().class_name).to_string(),
-                _ => "unknown".to_string(),
-            };
-            let msg = format!(
-                "{}(): Argument #2 ($array) must be of type ?array, {} given",
-                func_name, type_name
-            );
-            let exc = vm.create_exception(b"TypeError", &msg, 0);
-            vm.current_exception = Some(exc);
-            Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            })
-        }
+        result.extend_from_slice(s.as_bytes());
     }
+    Ok(Value::String(PhpString::from_vec(result)))
 }
 
 fn chr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
