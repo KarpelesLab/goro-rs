@@ -40766,6 +40766,9 @@ impl Vm {
                         } else {
                             Value::Long(actual_pos as i64)
                         };
+                        if !foreach_obj.is_empty() && foreach_obj.contains_key(&iter_idx) {
+                            self.foreach_key_notice(&key_val, op.line);
+                        }
                         self.write_operand(
                             &op.result,
                             key_val,

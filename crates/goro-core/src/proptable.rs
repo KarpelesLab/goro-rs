@@ -120,6 +120,31 @@ pub fn invalidate_class_layouts() {
 }
 
 /// VM bookkeeping stored among the properties.
+/// zend_unmangle_property_name_ex(): the (class, name) of a property table
+/// key, class None for an unmangled one. A key starting with a NUL that is
+/// no mangled name is Err with the notice PHP raises for it (the name is
+/// then the whole key).
+pub fn unmangle_property_name_ex(key: &[u8]) -> Result<(Option<&[u8]>, &[u8]), &'static str> {
+    let len = key.len();
+    if len == 0 || key[0] != 0 {
+        return Ok((None, key));
+    }
+    if len < 3 || key[1] == 0 {
+        return Err("Illegal member variable name");
+    }
+    let strnlen = |s: &[u8]| s.iter().position(|&c| c == 0).unwrap_or(s.len());
+    let mut class_len = strnlen(&key[1..len - 1]);
+    if class_len >= len - 2 {
+        return Err("Corrupt member variable name");
+    }
+    // (an anonymous class name holds a NUL itself)
+    let anon_len = strnlen(&key[class_len + 2..]);
+    if class_len + anon_len + 2 != len {
+        class_len += anon_len + 1;
+    }
+    Ok((Some(&key[1..1 + class_len]), &key[class_len + 2..]))
+}
+
 pub fn is_internal_prop_name(name: &[u8]) -> bool {
     const P: &[&[u8]] = &[
         b"__spl_",

@@ -115,26 +115,14 @@ pub(crate) fn debug_zval_dump(vm: &mut Vm, args: &[Value]) {
     ZVAL_DUMP.with(|z| z.set(prev));
 }
 
-/// zend_unmangle_property_name(): (class, property) of a `\0Class\0name`
-/// key (an anonymous class name holds a NUL itself).
-fn unmangle_prop_name(key: &[u8]) -> Option<(&[u8], &[u8])> {
-    if key.first() != Some(&0) {
-        return None;
-    }
-    let rest = &key[1..];
-    let mut sep = rest.iter().position(|&b| b == 0)?;
-    if let Some(more) = rest[sep + 1..].iter().position(|&b| b == 0) {
-        sep += 1 + more;
-    }
-    Some((&rest[..sep], &rest[sep + 1..]))
-}
-
 /// php_object_property_dump()'s key: `"name"`, `"name":protected` or
 /// `"name":"Class":private` from a property table key (int-like keys of
-/// GMP's table print bare).
-fn debug_prop_key(key: &[u8], int_keys: bool) -> String {
-    if let Some((class, name)) = unmangle_prop_name(key) {
-        {
+/// GMP's table print bare). A key starting with a NUL that is no mangled
+/// name raises a notice and prints as it is (debug_zval_dump(): up to its
+/// first NUL, zval_object_property_dump() prints it with `%s`).
+fn debug_prop_key(vm: &mut Vm, key: &[u8], int_keys: bool) -> String {
+    match goro_core::proptable::unmangle_property_name_ex(key) {
+        Ok((Some(class), name)) => {
             let name = String::from_utf8_lossy(name);
             if class == b"*" {
                 return format!("\"{}\":protected", name);
@@ -144,6 +132,15 @@ fn debug_prop_key(key: &[u8], int_keys: bool) -> String {
                 name,
                 goro_core::value::display_class_name(class)
             );
+        }
+        Ok((None, _)) => {}
+        Err(notice) => {
+            let line = vm.current_line;
+            vm.emit_notice_at(notice, line);
+            if ZVAL_DUMP.with(|z| z.get()) {
+                let end = key.iter().position(|&c| c == 0).unwrap_or(key.len());
+                return format!("\"{}\"", String::from_utf8_lossy(&key[..end]));
+            }
         }
     }
     let name = String::from_utf8_lossy(key);
@@ -686,10 +683,10 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                         goro_core::array::ArrayKey::Int(n) => {
                             vm.write_output(format!("{}  [{}]=>\n", prefix, n).as_bytes())
                         }
-                        goro_core::array::ArrayKey::String(s) => vm.write_output(
-                            format!("{}  [{}]=>\n", prefix, debug_prop_key(s.as_bytes(), false))
-                                .as_bytes(),
-                        ),
+                        goro_core::array::ArrayKey::String(s) => {
+                            let k = debug_prop_key(vm, s.as_bytes(), false);
+                            vm.write_output(format!("{}  [{}]=>\n", prefix, k).as_bytes())
+                        }
                     }
                     var_dump_value(vm, value, indent + 2, seen);
                 }
@@ -1353,7 +1350,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     Value::Reference(r) if std::rc::Rc::strong_count(&r) == 2 => r.borrow().clone(),
                     v => v,
                 };
-                let display_name = debug_prop_key(&key, class_lower.as_slice() == b"gmp");
+                let display_name = debug_prop_key(vm, &key, class_lower.as_slice() == b"gmp");
                 // A non-UTF-8 name is printed verbatim.
                 let bare = match key.iter().rposition(|&c| c == 0) {
                     Some(p) => &key[p + 1..],
@@ -1509,8 +1506,13 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         None => args,
     };
     PRINT_R_NANS.with(|n| n.set(0));
+    PRINT_R_NOTICES.with(|n| n.borrow_mut().clear());
     let mut buf = Vec::new();
     print_r_value(&args[0], &mut buf, 0, &classes, &closure_info_table);
+    for notice in PRINT_R_NOTICES.with(|n| std::mem::take(&mut *n.borrow_mut())) {
+        let line = vm.current_line;
+        vm.emit_notice_at(notice, line);
+    }
     // zend_double_to_str() of each NAN printed
     for _ in 0..PRINT_R_NANS.with(|n| n.replace(0)) {
         vm.emit_warning("unexpected NAN value was coerced to string");
@@ -1526,6 +1528,9 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 thread_local! {
     /// NAN values print_r() converted (it builds its output without the VM).
     static PRINT_R_NANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The notices of zend_unmangle_property_name_ex() print_r() raised.
+    static PRINT_R_NOTICES: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 thread_local! {
@@ -2296,9 +2301,14 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
             if !is_enum {
                 for (key, value) in &props {
                     var_export_spaces(buf, level + 2);
-                    let name = crate::serialize::unmangle(key)
-                        .map(|(_, n)| n.to_vec())
-                        .unwrap_or_else(|| key.clone());
+                    let name = match goro_core::proptable::unmangle_property_name_ex(key) {
+                        Ok((_, n)) => n.to_vec(),
+                        Err(notice) => {
+                            let line = vm.current_line;
+                            vm.emit_notice_at(notice, line);
+                            key.clone()
+                        }
+                    };
                     let is_int = native_int_keys.contains(&name)
                         || is_array_object && !name.is_empty() && {
                             let s = std::str::from_utf8(&name).unwrap_or("");
@@ -2445,7 +2455,11 @@ fn is_print_r_shadow(o: &goro_core::object::PhpObject) -> bool {
 /// print_hash()'s object key: `name`, `name:protected` or
 /// `name:Class:private` from a property table key.
 fn print_r_key(buf: &mut Vec<u8>, key: &[u8]) {
-    if let Some((class, name)) = unmangle_prop_name(key) {
+    let unmangled = goro_core::proptable::unmangle_property_name_ex(key);
+    if let Err(notice) = unmangled {
+        PRINT_R_NOTICES.with(|n| n.borrow_mut().push(notice));
+    }
+    if let Ok((Some(class), name)) = unmangled {
         {
             buf.extend_from_slice(name);
             if class == b"*" {

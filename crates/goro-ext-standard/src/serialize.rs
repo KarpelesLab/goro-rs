@@ -2393,9 +2393,12 @@ impl<'a> Parser<'a> {
         }
         // is_property_visibility_changed()
         if !decl.is_empty() {
-            let (ucls, uname) = match unmangle(key) {
-                Some(x) => x,
-                None => return Err(()),
+            let (ucls, uname) = match goro_core::proptable::unmangle_property_name_ex(key) {
+                Ok(x) => x,
+                Err(notice) => {
+                    vm.emit_notice_at(notice, self.line);
+                    return Err(());
+                }
             };
             let class_display = canonical_class_name(vm, class_lower, class_lower);
             let candidate = match ucls {
@@ -2461,9 +2464,18 @@ impl<'a> Parser<'a> {
                 )),
             )
         };
-        let uname = unmangle(key)
-            .map(|(_, n)| n.to_vec())
-            .unwrap_or_else(|| key.to_vec());
+        // zend_get_unmangled_property_name(), printed as a C string
+        let uname = if readonly || is_enum || !allow_dynamic {
+            match goro_core::proptable::unmangle_property_name_ex(key) {
+                Ok((_, n)) => c_str(n).to_vec(),
+                Err(notice) => {
+                    vm.emit_notice_at(notice, self.line);
+                    c_str(key).to_vec()
+                }
+            }
+        } else {
+            Vec::new()
+        };
         if readonly || is_enum {
             throw(
                 vm,

@@ -60,6 +60,20 @@ pub fn is_date_view_prop(ob: &PhpObject, name: &[u8]) -> bool {
 }
 
 impl Vm {
+    /// The key fetch of a foreach over an object: a property name starting
+    /// with a NUL that is no mangled name raises the notice of
+    /// zend_unmangle_property_name_ex() (ZEND_FE_FETCH_R's key result).
+    #[inline(never)]
+    pub(crate) fn foreach_key_notice(&mut self, key: &Value, line: u32) {
+        if let Value::String(s) = key {
+            if s.as_bytes().first() == Some(&0) {
+                if let Err(notice) = crate::proptable::unmangle_property_name_ex(s.as_bytes()) {
+                    self.emit_notice_at(notice, line);
+                }
+            }
+        }
+    }
+
     /// The foreach key of property slot `name` of an object of class
     /// `obj_class_lower` seen from `scope_lower`, or None when the slot is
     /// not visible there (zend_check_property_access).
@@ -70,10 +84,13 @@ impl Vm {
         name: &[u8],
     ) -> Option<Vec<u8>> {
         if name.first() == Some(&0) {
-            // Mangled \0Class\0name (private) or \0*\0name (protected).
-            let sep = name[1..].iter().position(|&b| b == 0)?;
-            let decl = &name[1..1 + sep];
-            let bare = &name[1 + sep + 1..];
+            // Mangled \0Class\0name (private) or \0*\0name (protected); a
+            // dynamic property named like neither is accessible, its key
+            // is the name itself (the key fetch raises the notice:
+            // foreach_key_notice).
+            let Ok((Some(decl), bare)) = crate::proptable::unmangle_property_name_ex(name) else {
+                return Some(name.to_vec());
+            };
             // A dynamic property merely named like a mangled one (e.g. from
             // an array cast) is accessible (zend_check_property_access).
             let declared = if decl == b"*" {
