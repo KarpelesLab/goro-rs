@@ -752,7 +752,18 @@ pub fn distort(img: &Image, method: i64, args: &[f64], bestfit: bool) -> MResult
             let (nw, nh) = (args[0].max(1.0), args[1].max(1.0));
             out_rect = Rect::new(nw as usize, nh as usize, 0, 0);
             let m = Map::Affine(Aff([w / nw, 0.0, 0.0, 0.0, h / nh, 0.0]));
-            return render(img, &m, out_rect, false);
+            // edges average only the pixels inside the image
+            let mut src = img.clone();
+            src.virtual_pixel = crate::types::VirtualPixelMethod::Transparent;
+            let mut out = render(&src, &m, out_rect, false)?;
+            out.virtual_pixel = img.virtual_pixel;
+            if !img.alpha {
+                out.alpha = false;
+                for p in out.pixels.chunks_exact_mut(4) {
+                    p[3] = 65535;
+                }
+            }
+            return Ok(out);
         }
         CYLINDER2PLANE | PLANE2CYLINDER => {
             let fov = args.first().copied().unwrap_or(90.0).to_radians();
@@ -856,6 +867,15 @@ pub fn distort(img: &Image, method: i64, args: &[f64], bestfit: bool) -> MResult
 }
 
 fn render(img: &Image, map: &Map, r: Rect, own_coords: bool) -> MResult<Image> {
+    // the distort:viewport artifact picks the output window
+    let r = match img
+        .artifacts
+        .get("distort:viewport")
+        .and_then(crate::geometry::Geometry::parse)
+    {
+        Some(g) if !own_coords && g.to_rect().width > 0 && g.to_rect().height > 0 => g.to_rect(),
+        _ => r,
+    };
     let mut src = img.clone();
     src.cmyk_to_rgb();
     let mut out = img.clone_attributes(r.width, r.height);
