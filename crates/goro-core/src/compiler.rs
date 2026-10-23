@@ -75,6 +75,43 @@ fn fcc_variadic_mixed(op: &mut OpArray) {
     }));
 }
 
+/// The body of the closure of `$class::method(...)`: a static call on the
+/// captured class value (cv0) forwarding the arguments.
+#[inline(never)]
+fn emit_fcc_dynamic_static_body(op: &mut OpArray, method: &[u8], args_cv: u32, line: u32) {
+    let method_idx = op.add_literal(Value::String(PhpString::from_vec(method.to_vec())));
+    let arg_count = op.add_literal(Value::Long(0));
+    op.emit(Op {
+        opcode: OpCode::InitDynamicStaticCall,
+        op1: OperandType::Cv(0),
+        op2: OperandType::Const(method_idx),
+        result: OperandType::Const(arg_count),
+        line,
+    });
+    op.emit(Op {
+        opcode: OpCode::SendUnpack,
+        op1: OperandType::Cv(args_cv),
+        op2: OperandType::Unused,
+        result: OperandType::Unused,
+        line,
+    });
+    let result_tmp = op.alloc_temp();
+    op.emit(Op {
+        opcode: OpCode::DoFCall,
+        op1: OperandType::Unused,
+        op2: OperandType::Unused,
+        result: OperandType::Tmp(result_tmp),
+        line,
+    });
+    op.emit(Op {
+        opcode: OpCode::Return,
+        op1: OperandType::Tmp(result_tmp),
+        op2: OperandType::Unused,
+        result: OperandType::Unused,
+        line,
+    });
+}
+
 /// The config of internal attribute `name` (resolved, any case).
 fn internal_attribute(name: &[u8]) -> Option<InternalAttribute> {
     let n = name
@@ -18853,7 +18890,12 @@ impl Compiler {
                     d.extend_from_slice(method);
                     Some(d)
                 }
-                _ => None,
+                // `$class::method(...)`: the class is evaluated at run time.
+                _ => {
+                    let mut d = b"D:".to_vec();
+                    d.extend_from_slice(method);
+                    Some(d)
+                }
             },
         };
 
@@ -18884,7 +18926,9 @@ impl Compiler {
                 !matches!(name_expr.kind, ExprKind::Identifier(_))
             }
             CallableTarget::Method { .. } => true,
-            CallableTarget::StaticMethod { .. } => false,
+            CallableTarget::StaticMethod { class, .. } => {
+                !matches!(class.kind, ExprKind::Identifier(_))
+            }
         };
 
         if needs_capture {
@@ -18991,60 +19035,62 @@ impl Compiler {
                 let class_name = match &class.kind {
                     ExprKind::Identifier(name) => self.resolve_class_name(name),
                     _ => {
-                        return Err(CompileError {
-                            message: "unsupported static method callable target".into(),
-                            line,
-                        });
+                        emit_fcc_dynamic_static_body(&mut cc.op_array, method, args_cv, line);
+                        b"".to_vec()
                     }
                 };
-                let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
-                    self.current_class.clone().unwrap_or(class_name.clone())
-                } else if class_name.eq_ignore_ascii_case(b"static") {
-                    b"static".to_vec()
-                } else if class_name.eq_ignore_ascii_case(b"parent") {
-                    self.current_parent_class
-                        .clone()
-                        .unwrap_or(class_name.clone())
+                if class_name.is_empty() {
+                    // (the body is emitted)
                 } else {
-                    class_name.clone()
-                };
-                let mut func_name = resolved_class;
-                func_name.extend_from_slice(b"::");
-                func_name.extend_from_slice(method);
-                cc.op_array.fcc_target_name = Some(func_name.clone());
-                let name_idx = cc
-                    .op_array
-                    .add_literal(Value::String(PhpString::from_vec(func_name)));
-                let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
-                cc.op_array.emit(Op {
-                    opcode: OpCode::InitFCall,
-                    op1: OperandType::Const(name_idx),
-                    op2: OperandType::Const(arg_count_idx),
-                    result: OperandType::Unused,
-                    line,
-                });
-                cc.op_array.emit(Op {
-                    opcode: OpCode::SendUnpack,
-                    op1: OperandType::Cv(args_cv),
-                    op2: OperandType::Unused,
-                    result: OperandType::Unused,
-                    line,
-                });
-                let result_tmp = cc.op_array.alloc_temp();
-                cc.op_array.emit(Op {
-                    opcode: OpCode::DoFCall,
-                    op1: OperandType::Unused,
-                    op2: OperandType::Unused,
-                    result: OperandType::Tmp(result_tmp),
-                    line,
-                });
-                cc.op_array.emit(Op {
-                    opcode: OpCode::Return,
-                    op1: OperandType::Tmp(result_tmp),
-                    op2: OperandType::Unused,
-                    result: OperandType::Unused,
-                    line,
-                });
+                    let resolved_class = if class_name.eq_ignore_ascii_case(b"self") {
+                        self.current_class.clone().unwrap_or(class_name.clone())
+                    } else if class_name.eq_ignore_ascii_case(b"static") {
+                        b"static".to_vec()
+                    } else if class_name.eq_ignore_ascii_case(b"parent") {
+                        self.current_parent_class
+                            .clone()
+                            .unwrap_or(class_name.clone())
+                    } else {
+                        class_name.clone()
+                    };
+                    let mut func_name = resolved_class;
+                    func_name.extend_from_slice(b"::");
+                    func_name.extend_from_slice(method);
+                    cc.op_array.fcc_target_name = Some(func_name.clone());
+                    let name_idx = cc
+                        .op_array
+                        .add_literal(Value::String(PhpString::from_vec(func_name)));
+                    let arg_count_idx = cc.op_array.add_literal(Value::Long(0));
+                    cc.op_array.emit(Op {
+                        opcode: OpCode::InitFCall,
+                        op1: OperandType::Const(name_idx),
+                        op2: OperandType::Const(arg_count_idx),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    cc.op_array.emit(Op {
+                        opcode: OpCode::SendUnpack,
+                        op1: OperandType::Cv(args_cv),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    let result_tmp = cc.op_array.alloc_temp();
+                    cc.op_array.emit(Op {
+                        opcode: OpCode::DoFCall,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(result_tmp),
+                        line,
+                    });
+                    cc.op_array.emit(Op {
+                        opcode: OpCode::Return,
+                        op1: OperandType::Tmp(result_tmp),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line,
+                    });
+                }
             }
         }
 
@@ -19072,7 +19118,7 @@ impl Compiler {
             let captured_op = match target {
                 CallableTarget::Method { object, .. } => self.compile_expr(object)?,
                 CallableTarget::Function(name_expr) => self.compile_expr(name_expr)?,
-                _ => unreachable!(),
+                CallableTarget::StaticMethod { class, .. } => self.compile_expr(class)?,
             };
 
             let arr_tmp = self.op_array.alloc_temp();

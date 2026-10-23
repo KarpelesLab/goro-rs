@@ -2070,9 +2070,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             (
                                 class.name.clone(),
                                 class.methods.get(&method_lower).cloned(),
-                                class
-                                    .get_method(b"__callstatic")
-                                    .map(|m| m.op_array.clone()),
+                                class.get_method(b"__callstatic").cloned(),
                             )
                         });
                         if let Some((class_name, class_method, call_static)) = found {
@@ -2148,24 +2146,14 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 // Method not accessible - fall through to __callStatic
                             }
                             // Method not found or not accessible - check for __callStatic magic method
-                            if let Some(op) = call_static {
-                                let mut args_array = goro_core::array::PhpArray::new();
-                                for arg in &call_args {
-                                    args_array.push(arg.clone());
-                                }
-                                let magic_args = vec![
-                                    Value::String(PhpString::from_vec(
-                                        method_name.as_bytes().to_vec(),
-                                    )),
-                                    Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
-                                        args_array,
-                                    ))),
-                                ];
-                                return vm.execute_fn_with_named_args(
-                                    &op,
-                                    magic_args,
-                                    vec![],
-                                    None,
+                            if let Some(cs) = call_static {
+                                let called = (!is_forwarding).then(|| class_name.clone());
+                                return vm.call_static_trampoline(
+                                    &cs,
+                                    called,
+                                    method_name.as_bytes(),
+                                    &call_args,
+                                    named_args,
                                 );
                             }
                             return Ok(Value::Null);
@@ -2518,17 +2506,15 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     // Check __callStatic
                     if let Some(call_static) = class.get_method(b"__callstatic") {
-                        let op = call_static.op_array.clone();
                         let orig_method = &func_name[pos + 2..];
-                        let mut args_array = goro_core::array::PhpArray::new();
-                        for arg in &call_args {
-                            args_array.push(arg.clone());
-                        }
-                        let magic_args = vec![
-                            Value::String(PhpString::from_vec(orig_method.to_vec())),
-                            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
-                        ];
-                        return vm.execute_fn_with_named_args(&op, magic_args, vec![], None);
+                        let called = (!is_forwarding).then(|| class.name.clone());
+                        return vm.call_static_trampoline(
+                            call_static,
+                            called,
+                            orig_method,
+                            &call_args,
+                            named_args,
+                        );
                     }
                 } else if !is_forwarding && !vm.is_known_builtin_class(&resolved_class_lower) {
                     // Class still not found after autoload: PHP throws a TypeError.

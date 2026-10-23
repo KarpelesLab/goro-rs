@@ -4030,6 +4030,44 @@ impl Vm {
         r
     }
 
+    /// The __callStatic() trampoline of a callable `called::method`
+    /// (zend_get_call_trampoline_func()): it runs in its declaring class's
+    /// scope with `called` as the called scope (static::), and gets the
+    /// method name and the argument list.
+    #[inline(never)]
+    pub fn call_static_trampoline(
+        &mut self,
+        cs_method: &crate::object::MethodDef,
+        called: Option<Vec<u8>>,
+        method_name: &[u8],
+        args: &[Value],
+        named: Vec<(Vec<u8>, Value)>,
+    ) -> Result<Value, VmError> {
+        let op = cs_method.op_array.clone();
+        let mut arr = crate::array::PhpArray::new();
+        for a in args {
+            arr.push(a.clone());
+        }
+        for (k, v) in named {
+            arr.set(crate::array::ArrayKey::String(PhpString::from_vec(k)), v);
+        }
+        let magic_args = vec![
+            Value::String(PhpString::from_vec(method_name.to_vec())),
+            Value::Array(Rc::new(RefCell::new(arr))),
+        ];
+        let pushed = called.is_some();
+        if let Some(c) = called {
+            self.called_class_stack.push(c);
+        }
+        self.push_class_scope(cs_method.declaring_class.clone());
+        let r = self.execute_fn_with_named_args(&op, magic_args, vec![], None);
+        self.pop_class_scope();
+        if pushed {
+            self.called_class_stack.pop();
+        }
+        r
+    }
+
     pub fn call_callback(&mut self, callback: &Value, args: &[Value]) -> Result<Value, VmError> {
         let closure = match callback {
             Value::Object(o) if o.borrow().closure.is_some() => Some(Rc::downgrade(o)),
@@ -4146,6 +4184,15 @@ impl Vm {
                             if let Some(method) = class.methods.get(method_lower) {
                                 let op = method.op_array.clone();
                                 return self.call_static_method_callback(&class, method, op, args);
+                            }
+                            if let Some(cs) = class.get_method(b"__callstatic") {
+                                return self.call_static_trampoline(
+                                    cs,
+                                    Some(class.name.clone()),
+                                    &func_name.strip_prefix(b"\\").unwrap_or(&func_name)[pos + 2..],
+                                    args,
+                                    Vec::new(),
+                                );
                             }
                         }
                     }
@@ -4311,6 +4358,15 @@ impl Vm {
                         if let Some(method) = class.methods.get(&method_lower) {
                             let op = method.op_array.clone();
                             return self.call_static_method_callback(&class, method, op, args);
+                        }
+                        if let Some(cs) = class.get_method(b"__callstatic") {
+                            return self.call_static_trampoline(
+                                cs,
+                                Some(class.name.clone()),
+                                method_name.as_bytes(),
+                                args,
+                                Vec::new(),
+                            );
                         }
                     }
                 }

@@ -661,6 +661,20 @@ impl Vm {
             let callable = caps.first().map(|v| v.deref()).unwrap_or(Value::Null);
             return self.fcc_dynamic(callable, wrapper, scope);
         }
+        // `$class::method(...)`: the class (name or object) is captured.
+        if let Some(m) = desc.strip_prefix(b"D:") {
+            let cls = match caps.first().map(|v| v.deref()) {
+                Some(Value::Object(o)) => o.borrow().class_name.clone(),
+                Some(Value::String(s)) => s.as_bytes().to_vec(),
+                _ => {
+                    return Err((
+                        b"Error",
+                        "Class name must be a valid object or a string".to_string(),
+                    ));
+                }
+            };
+            return self.fcc_static(&cls, m, this, wrapper, scope);
+        }
         if let Some(m) = desc.strip_prefix(b"m:") {
             let obj = caps.first().map(|v| v.deref()).unwrap_or(Value::Null);
             return self.fcc_method(obj, m, wrapper, scope, false);
