@@ -856,6 +856,15 @@ impl PendingCall {
             }
         }
 
+        // Parameters after the last one passed are not passed at all (they
+        // take their defaults without counting for func_num_args()).
+        if extra_positional.is_empty() {
+            let passed = resolved
+                .iter()
+                .rposition(|s| s.is_some())
+                .map_or(0, |i| i + 1);
+            resolved.truncate(passed);
+        }
         // Rebuild self.args: resolved regular params + extra positional args
         self.args.clear();
         for slot in resolved {
