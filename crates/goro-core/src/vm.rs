@@ -6788,9 +6788,17 @@ impl Vm {
         }
         let class_lower = b.class_name.to_ascii_lowercase();
         let scope = self.current_class_scope().map(|s| s.to_ascii_lowercase());
-        let (_, decl, readonly, _, _) =
+        let (vis, decl, readonly, _, _) =
             self.find_property_def_for_scope(&class_lower, name, scope.as_deref())?;
         if !readonly || !b.has_property(name) || matches!(b.get_property(name), Value::Undef) {
+            return None;
+        }
+        // (an inaccessible property reports its visibility instead)
+        let cur_scope = self.current_class_scope();
+        if self
+            .check_visibility(vis, &decl, &b.class_name, "", true, cur_scope.as_deref())
+            .is_some()
+        {
             return None;
         }
         let decl_name = self
@@ -57284,6 +57292,11 @@ impl Vm {
                             }
                         }
 
+                        // zend_get_property_offset(): a property not visible
+                        // from the scope is inaccessible before it is readonly.
+                        if visibility_error.is_some() && !is_avis_error {
+                            readonly_error = None;
+                        }
                         if let Some(err_msg) = type_error {
                             // Property type violation - throw TypeError
                             let exc = self.create_exception(b"TypeError", &err_msg, op.line);
