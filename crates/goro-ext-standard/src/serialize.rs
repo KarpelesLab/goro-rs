@@ -1109,7 +1109,19 @@ fn unser_destroy(vm: &mut Vm, d: &Rc<RefCell<UnserData>>) {
         }
         match item.data {
             None => {
-                with_lock(|| vm.call_object_method(&item.obj, b"__wakeup", &[]));
+                let builtin = match &item.obj {
+                    Value::Object(o) => {
+                        let cl = lower(&o.borrow().class_name);
+                        (!has_user_method(vm, &cl, b"__wakeup")).then(|| o.clone())
+                    }
+                    _ => None,
+                };
+                match builtin {
+                    Some(o) => exception_wakeup(&o),
+                    None => {
+                        with_lock(|| vm.call_object_method(&item.obj, b"__wakeup", &[]));
+                    }
+                }
             }
             Some(data) => {
                 with_lock(|| vm.call_object_method(&item.obj, b"__unserialize", &[data]));
@@ -1121,6 +1133,23 @@ fn unser_destroy(vm: &mut Vm, d: &Rc<RefCell<UnserData>>) {
         } else if let Value::Object(o) = &item.obj {
             // The object is complete: its destructor is armed.
             o.borrow_mut().remove_property(b"__ctor_pending");
+        }
+    }
+}
+
+/// Exception::__wakeup() (CHECK_EXC_TYPE): a message that is not a string
+/// or a code that is not an int is unset (the other properties are typed).
+fn exception_wakeup(obj: &Rc<RefCell<PhpObject>>) {
+    let mut o = obj.borrow_mut();
+    for (name, is_message) in [(&b"message"[..], true), (&b"code"[..], false)] {
+        let bad = match o.get_property(name).deref() {
+            Value::Null | Value::Undef => false,
+            Value::String(_) => !is_message,
+            Value::Long(_) => is_message,
+            _ => true,
+        };
+        if bad && o.has_property(name) {
+            o.set_property(name.to_vec(), Value::Undef);
         }
     }
 }
@@ -2026,10 +2055,12 @@ impl<'a> Parser<'a> {
         }
 
         let has_wakeup = !incomplete && has_user_method(vm, &class_lower, b"__wakeup");
+        // (Exception::__wakeup() / Error::__wakeup(), not overridden)
+        let exc_wakeup = !incomplete && !has_wakeup && throwable_base(vm, &class_lower).is_some();
         if !self.nested_object(vm, p, &obj, &class_lower, elements) {
             return None;
         }
-        if has_wakeup {
+        if has_wakeup || exc_wakeup {
             self.d.borrow_mut().delayed.push(Delayed {
                 obj: obj_val.clone(),
                 data: None,
