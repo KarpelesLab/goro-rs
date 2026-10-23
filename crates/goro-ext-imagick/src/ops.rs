@@ -6,6 +6,7 @@ use goro_core::value::Value;
 use goro_core::vm::Vm;
 use goro_imagick::color::{PixelInfo, clamp_to_quantum, to_q16};
 use goro_imagick::composite::{ComposeArgs, composite_image};
+use goro_imagick::enhance;
 use goro_imagick::filters::{apply_oxideav, channel_mask};
 use goro_imagick::geometry::Rect;
 use goro_imagick::image::Image;
@@ -1553,67 +1554,6 @@ fn modulate_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     })
 }
 
-/// ContrastStretchImage(): the black point is the first histogram bin
-/// whose cumulative count (from the bottom) exceeds `black`, the white
-/// point the last bin whose count from the top exceeds `n - white`. With
-/// the default channels the histogram is of the pixel intensity
-/// (Rec. 709 luma, rounded to a bin) and one stretch applies to R, G and
-/// B; otherwise every selected channel is stretched on its own
-/// histogram. A degenerate range leaves the channel alone.
-fn histogram_stretch(i: &mut Image, ch: i64, black: f64, white: f64) {
-    let n = (i.columns * i.rows) as f64;
-    let range = |hist: &[u32]| -> Option<(f64, f64)> {
-        let mut acc = 0f64;
-        let mut lo = 65535usize;
-        for (v, &h) in hist.iter().enumerate() {
-            acc += h as f64;
-            if acc > black {
-                lo = v;
-                break;
-            }
-        }
-        let mut acc = 0f64;
-        let mut hi = 0usize;
-        for v in (0..65536).rev() {
-            acc += hist[v] as f64;
-            if acc > n - white {
-                hi = v;
-                break;
-            }
-        }
-        (hi > lo).then_some((lo as f64, hi as f64))
-    };
-    let all = ch == channel::DEFAULT || ch == 0 || ch == 0x7fffffff;
-    let mut ranges = [None; 3];
-    if all {
-        let mut hist = vec![0u32; 65536];
-        for p in i.pixels.chunks_exact(4) {
-            hist[clamp_to_quantum(Image::intensity(p)) as usize] += 1;
-        }
-        let r = range(&hist);
-        ranges = [r, r, r];
-    } else {
-        let mask = channel_mask(ch, i.alpha);
-        for c in 0..3 {
-            if mask[c] {
-                let mut hist = vec![0u32; 65536];
-                for p in i.pixels.chunks_exact(4) {
-                    hist[p[c] as usize] += 1;
-                }
-                ranges[c] = range(&hist);
-            }
-        }
-    }
-    for p in i.pixels.chunks_exact_mut(4) {
-        for c in 0..3 {
-            if let Some((lo, hi)) = ranges[c] {
-                p[c] = to_q16((p[c] as f64 - lo) * 65535.0 / (hi - lo));
-            }
-        }
-    }
-    i.colors = None;
-}
-
 /// The histogram-based stretch of normalize/auto-level/contrast-stretch.
 fn stretch(i: &mut Image, ch: i64, black_frac: f64, white_frac: f64, per_channel: bool) {
     let mask = channel_mask(ch, i.alpha);
@@ -1653,7 +1593,7 @@ fn normalize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
     image_op(vm, &d_(o), "Unable to normalize image", |i| {
         // NormalizeImage(): a 2% / 1% contrast stretch
         let n = (i.columns * i.rows) as f64;
-        histogram_stretch(i, ch, 0.02 * n, 0.99 * n);
+        enhance::histogram_stretch(i, ch, 0.02 * n, 0.99 * n);
         Ok(())
     })
 }
@@ -1661,32 +1601,7 @@ fn normalize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
 fn equalize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
     image_op(vm, &d_(o), "Unable to equalize image", |i| {
-        // EqualizeImage(): one map for R, G and B, from the cumulative
-        // histogram of the intensity, with the black bin's count taken off
-        let mut hist = vec![0u32; 65536];
-        for p in i.pixels.chunks_exact(4) {
-            hist[clamp_to_quantum(Image::intensity(p)) as usize] += 1;
-        }
-        let mut cdf = vec![0f64; 65536];
-        let mut acc = 0f64;
-        for (v, &h) in hist.iter().enumerate() {
-            acc += h as f64;
-            cdf[v] = acc;
-        }
-        let (lo, hi) = (cdf[0], cdf[65535]);
-        if hi <= lo {
-            return Ok(());
-        }
-        let map: Vec<u16> = cdf
-            .iter()
-            .map(|&c| to_q16((c - lo) * 65535.0 / (hi - lo)))
-            .collect();
-        for p in i.pixels.chunks_exact_mut(4) {
-            for c in p.iter_mut().take(3) {
-                *c = map[*c as usize];
-            }
-        }
-        i.colors = None;
+        enhance::equalize(i);
         Ok(())
     })
 }
@@ -1726,7 +1641,7 @@ fn contrast_stretch_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]
     let (b, w) = (a[0].double_or(0.0), a[1].double_or(0.0));
     let ch = a[2].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to contrast strech image", |i| {
-        histogram_stretch(i, ch, b, w);
+        enhance::histogram_stretch(i, ch, b, w);
         Ok(())
     })
 }
@@ -1737,7 +1652,7 @@ fn linear_stretch_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) 
     image_op(vm, &d_(o), "Unable to linear strech image", |i| {
         // LinearStretchImage() counts the white point from the top
         let n = (i.columns * i.rows) as f64;
-        histogram_stretch(i, channel::DEFAULT, b, n - w);
+        enhance::histogram_stretch(i, channel::DEFAULT, b, n - w);
         Ok(())
     })
 }
@@ -1779,31 +1694,11 @@ fn brightness_contrast_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Val
     })
 }
 
-/// ContrastImage(): the HSB brightness is pushed away from (or toward)
-/// mid-gray along a sine curve, hue and saturation kept, so the RGB
-/// samples scale together.
-fn contrast_hsb(i: &mut Image, sharpen: bool) {
-    let sign = if sharpen { 0.5 } else { -0.5 };
-    for p in i.pixels.chunks_exact_mut(4) {
-        let v = p[0].max(p[1]).max(p[2]) as f64 / 65535.0;
-        if v <= 0.0 {
-            continue;
-        }
-        let s = 0.5 * ((std::f64::consts::PI * (v - 0.5)).sin() + 1.0);
-        let nv = (v + sign * (s - v)).clamp(0.0, 1.0);
-        let k = nv / v;
-        for c in p.iter_mut().take(3) {
-            *c = to_q16(*c as f64 * k);
-        }
-    }
-    i.colors = None;
-}
-
 fn contrast_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "b", args)?;
     let sharpen = a[0].bool_or(true);
     image_op(vm, &d_(o), "Unable to contrast image", |i| {
-        contrast_hsb(i, sharpen);
+        enhance::contrast_hsb(i, sharpen);
         Ok(())
     })
 }
@@ -1839,8 +1734,8 @@ fn sepia_tone_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R
             p[2] = to_q16(b.max(floor));
         }
         let n = (i.columns * i.rows) as f64;
-        histogram_stretch(i, channel::DEFAULT, 0.02 * n, 0.99 * n);
-        contrast_hsb(i, true);
+        enhance::histogram_stretch(i, channel::DEFAULT, 0.02 * n, 0.99 * n);
+        enhance::contrast_hsb(i, true);
         Ok(())
     })
 }
@@ -1901,19 +1796,20 @@ fn motion_blur_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> 
         a[1].double_or(1.0),
         a[2].double_or(0.0),
     );
+    let ch = a[3].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to motion blur image", |i| {
-        apply_oxideav(
-            i,
-            &of::MotionBlur::new(radius_of(r, s), s.max(0.01) as f32, ang as f32),
-        )
+        goro_imagick::convolve::motion_blur(i, r, s, ang, ch);
+        Ok(())
     })
 }
 
 fn sharpen_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dd|l", args)?;
     let (r, s) = (a[0].double_or(0.0), a[1].double_or(1.0));
+    let ch = a[2].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to sharpen image", |i| {
-        apply_oxideav(i, &of::Sharpen::new(radius_of(r, s), s.max(0.01) as f32))
+        goro_imagick::convolve::sharpen(i, r, s, ch);
+        Ok(())
     })
 }
 
@@ -1933,31 +1829,28 @@ fn unsharp_mask_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) ->
         a[2].double_or(1.0),
         a[3].double_or(0.05),
     );
+    let ch = a[4].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to unsharp mask image", |i| {
-        apply_oxideav(
-            i,
-            &of::Unsharp::new(
-                radius_of(r, s),
-                s.max(0.01) as f32,
-                amount as f32,
-                (thr.clamp(0.0, 1.0) * 255.0) as u8,
-            ),
-        )
+        goro_imagick::convolve::unsharp(i, r, s, amount, thr, ch);
+        Ok(())
     })
 }
 
 fn edge_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
-    zpp::parse(vm, f, "d", args)?;
+    let a = zpp::parse(vm, f, "d", args)?;
+    let r = a[0].double_or(0.0);
     image_op(vm, &d_(o), "Unable to edge image", |i| {
-        apply_oxideav(i, &of::Edge::new())
+        goro_imagick::convolve::edge(i, r);
+        Ok(())
     })
 }
 
 fn emboss_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dd", args)?;
-    let r = radius_of(a[0].double_or(0.0), a[1].double_or(1.0));
+    let (r, s) = (a[0].double_or(0.0), a[1].double_or(1.0));
     image_op(vm, &d_(o), "Unable to emboss image", |i| {
-        apply_oxideav(i, &of::Emboss::new(r))
+        goro_imagick::convolve::emboss(i, r, s);
+        Ok(())
     })
 }
 
@@ -1965,7 +1858,8 @@ fn charcoal_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dd", args)?;
     let (r, s) = (a[0].double_or(0.0), a[1].double_or(1.0));
     image_op(vm, &d_(o), "Unable to charcoal image", |i| {
-        apply_oxideav(i, &of::Charcoal::new(1.0).with_radius(radius_of(r, s)))
+        goro_imagick::convolve::charcoal(i, r, s);
+        Ok(())
     })
 }
 
@@ -2216,7 +2110,8 @@ fn shade_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
         a[2].double_or(30.0),
     );
     image_op(vm, &d_(o), "Unable to shade image", |i| {
-        apply_oxideav(i, &of::Shade::new(az as f32, el as f32).with_color(!gray))
+        goro_imagick::convolve::shade(i, gray, az, el);
+        Ok(())
     })
 }
 

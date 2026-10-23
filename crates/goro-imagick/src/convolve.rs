@@ -15,8 +15,8 @@ use crate::color::clamp_to_quantum;
 use crate::filters::channel_mask;
 use crate::image::Image;
 
-/// The kernel half-width for `radius` (when ≥ 1) or from `sigma`, for a
-/// 1-D kernel.
+/// The kernel half-width: the integer part of `radius` (at least 1) when
+/// it is positive, else from `sigma`, for a 1-D kernel.
 pub fn kernel_radius(radius: f64, sigma: f64) -> usize {
     width_for(radius, sigma, false)
 }
@@ -27,8 +27,8 @@ pub fn kernel_radius_2d(radius: f64, sigma: f64) -> usize {
 }
 
 fn width_for(radius: f64, sigma: f64, two_d: bool) -> usize {
-    if radius >= 1.0 {
-        return radius as usize;
+    if radius > 0.0 {
+        return (radius as usize).max(1);
     }
     let s = sigma.abs().max(1e-6);
     let norm = if two_d {
@@ -184,4 +184,205 @@ pub fn gaussian_blur(img: &mut Image, radius: f64, sigma: f64, ch: i64) {
     let w = kernel_radius_2d(radius, sigma);
     let k = gaussian_kernel(w, sigma);
     convolve(img, 2 * w + 1, 2 * w + 1, &k, ch, 0.0);
+}
+
+/// EdgeImage(): a (2w+1)² kernel of -1 with the centre balancing it; the
+/// half-width is ⌈radius⌉, or 2 for radius 0.
+pub fn edge(img: &mut Image, radius: f64) {
+    let w = if radius > 0.0 {
+        radius.ceil() as usize
+    } else {
+        kernel_radius(0.0, 0.5)
+    };
+    let n = 2 * w + 1;
+    let mut k = vec![-1.0; n * n];
+    k[w * n + w] = (n * n) as f64 - 1.0;
+    convolve(img, n, n, &k, crate::types::channel::DEFAULT, 0.0);
+}
+
+/// EmbossImage(): a gaussian-weighted anti-diagonal, positive at the
+/// centre and negative elsewhere, normalised to a unit sum, then
+/// EqualizeImage().
+pub fn emboss(img: &mut Image, radius: f64, sigma: f64) {
+    let w = kernel_radius(radius, sigma);
+    let n = 2 * w + 1;
+    let s = sigma.abs().max(1e-6);
+    let mut k = vec![0.0; n * n];
+    for v in 0..n {
+        let dv = v as f64 - w as f64;
+        let u = n - 1 - v;
+        let du = u as f64 - w as f64;
+        let g = (-(du * du + dv * dv) / (2.0 * s * s)).exp();
+        k[v * n + u] = if u == w { g } else { -g };
+    }
+    let sum: f64 = k.iter().sum();
+    if sum.abs() > 1e-12 {
+        for x in &mut k {
+            *x /= sum;
+        }
+    }
+    convolve(img, n, n, &k, crate::types::channel::DEFAULT, 0.0);
+    crate::enhance::equalize(img);
+}
+
+/// ShadeImage(): the normal from the 3×3 sums of the rounded intensity
+/// (z = 2·QuantumRange) lit from (azimuth, elevation); `gray` gives the
+/// shade itself, else it scales the pixel.
+pub fn shade(img: &mut Image, gray: bool, azimuth: f64, elevation: f64) {
+    let (w, h) = (img.columns, img.rows);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let q = 65535.0;
+    let (az, el) = (azimuth.to_radians(), elevation.to_radians());
+    let light = [
+        q * az.cos() * el.cos(),
+        q * az.sin() * el.cos(),
+        q * el.sin(),
+    ];
+    let (src, pw) = padded(img, 1, 1);
+    let int: Vec<f64> = src
+        .chunks_exact(4)
+        .map(|p| clamp_to_quantum(0.212656 * p[0] + 0.715158 * p[1] + 0.072186 * p[2]))
+        .collect();
+    let at = |x: usize, y: usize| int[y * pw + x];
+    let nz = 2.0 * q;
+    for y in 0..h {
+        for x in 0..w {
+            let (cx, cy) = (x + 1, y + 1);
+            let nx = at(cx - 1, cy - 1) + at(cx - 1, cy) + at(cx - 1, cy + 1)
+                - at(cx + 1, cy - 1)
+                - at(cx + 1, cy)
+                - at(cx + 1, cy + 1);
+            let ny = at(cx - 1, cy + 1) + at(cx, cy + 1) + at(cx + 1, cy + 1)
+                - at(cx - 1, cy - 1)
+                - at(cx, cy - 1)
+                - at(cx + 1, cy - 1);
+            let s = if nx == 0.0 && ny == 0.0 {
+                light[2]
+            } else {
+                let dot = nx * light[0] + ny * light[1] + nz * light[2];
+                if dot > 0.0 {
+                    dot / (nx * nx + ny * ny + nz * nz).sqrt()
+                } else {
+                    0.0
+                }
+            };
+            let idx = (y * w + x) * 4;
+            for c in 0..3 {
+                img.pixels[idx + c] = if gray {
+                    clamp_to_quantum(s) as u16
+                } else {
+                    clamp_to_quantum(s * img.pixels[idx + c] as f64 / q) as u16
+                };
+            }
+        }
+    }
+    img.colors = None;
+}
+
+/// SharpenImage(): a negated 2-D gaussian whose centre is twice the
+/// gaussian's sum, normalised to a unit sum.
+pub fn sharpen(img: &mut Image, radius: f64, sigma: f64, ch: i64) {
+    let w = kernel_radius_2d(radius, sigma);
+    let n = 2 * w + 1;
+    let s = sigma.abs().max(1e-6);
+    let mut k = vec![0.0; n * n];
+    let mut total = 0.0;
+    for v in 0..n {
+        for u in 0..n {
+            let (du, dv) = (u as f64 - w as f64, v as f64 - w as f64);
+            let g = (-(du * du + dv * dv) / (2.0 * s * s)).exp();
+            k[v * n + u] = -g;
+            total += g;
+        }
+    }
+    k[w * n + w] = 2.0 * total;
+    let sum: f64 = k.iter().sum();
+    for x in &mut k {
+        *x /= sum;
+    }
+    convolve(img, n, n, &k, ch, 0.0);
+}
+
+/// UnsharpMaskImage(): BlurImage(radius, sigma); a channel whose
+/// difference from the blur is at least half the threshold moves by
+/// `amount` times that difference.
+pub fn unsharp(img: &mut Image, radius: f64, sigma: f64, amount: f64, threshold: f64, ch: i64) {
+    let mut b = img.clone();
+    blur(&mut b, radius, sigma, ch);
+    let mask = channel_mask(ch, img.alpha);
+    let thr = threshold * 65535.0;
+    for (p, q) in img.pixels.chunks_exact_mut(4).zip(b.pixels.chunks_exact(4)) {
+        for c in 0..4 {
+            if !mask[c] {
+                continue;
+            }
+            let d = p[c] as f64 - q[c] as f64;
+            if (2.0 * d).abs() >= thr {
+                p[c] = clamp_to_quantum(p[c] as f64 + d * amount) as u16;
+            }
+        }
+    }
+    img.colors = None;
+}
+
+/// MotionBlurImage(): 2r+1 one-sided gaussian taps (or twice the
+/// sigma-derived half-width plus one) along `angle`, at rounded offsets.
+pub fn motion_blur(img: &mut Image, radius: f64, sigma: f64, angle: f64, ch: i64) {
+    let n = 2 * kernel_radius(radius, sigma) + 1;
+    let s = sigma.abs().max(1e-6);
+    let mut k: Vec<f64> = (0..n)
+        .map(|i| (-((i * i) as f64) / (2.0 * s * s)).exp())
+        .collect();
+    let sum: f64 = k.iter().sum();
+    for x in &mut k {
+        *x /= sum;
+    }
+    let t = angle.to_radians();
+    let offs: Vec<(i64, i64)> = (0..n)
+        .map(|i| {
+            let f = i as f64;
+            (
+                (f * t.cos() - 0.5).ceil() as i64,
+                (f * t.sin() - 0.5).ceil() as i64,
+            )
+        })
+        .collect();
+    let src = img.clone();
+    let mask = channel_mask(ch, img.alpha);
+    let (w, h) = (img.columns, img.rows);
+    for y in 0..h {
+        for x in 0..w {
+            let mut acc = [0f64; 4];
+            for (kv, &(dx, dy)) in k.iter().zip(&offs) {
+                let p = src.virtual_px(x as i64 + dx, y as i64 + dy);
+                for c in 0..4 {
+                    acc[c] += kv * p[c] as f64;
+                }
+            }
+            let idx = (y * w + x) * 4;
+            for c in 0..4 {
+                if mask[c] {
+                    img.pixels[idx + c] = clamp_to_quantum(acc[c]) as u16;
+                }
+            }
+        }
+    }
+    img.colors = None;
+}
+
+/// CharcoalImage() as pecl's charcoalImage(radius, sigma) drives it:
+/// EdgeImage(sigma), BlurImage(sigma, radius), NormalizeImage(),
+/// NegateImage(), then grayscale.
+pub fn charcoal(img: &mut Image, radius: f64, sigma: f64) {
+    edge(img, sigma);
+    blur(img, sigma, radius, crate::types::channel::DEFAULT);
+    crate::enhance::normalize(img, crate::types::channel::DEFAULT);
+    for p in img.pixels.chunks_exact_mut(4) {
+        for c in p.iter_mut().take(3) {
+            *c = 65535 - *c;
+        }
+    }
+    crate::enhance::grayscale(img);
 }

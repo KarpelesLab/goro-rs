@@ -28,6 +28,7 @@ pub mod diffuse;
 pub mod distort;
 pub mod dither;
 pub mod draw;
+pub mod enhance;
 pub mod error;
 pub mod filters;
 pub mod fonts;
