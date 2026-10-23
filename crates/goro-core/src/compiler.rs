@@ -15080,6 +15080,7 @@ impl Compiler {
 
                 let result_tmp = self.op_array.alloc_temp();
                 let mut end_jumps = Vec::new();
+                let mut default_start: Option<u32> = None;
 
                 for arm in arms {
                     if let Some(conditions) = &arm.conditions {
@@ -15142,7 +15143,16 @@ impl Compiler {
                         let next_arm = self.op_array.current_offset();
                         self.op_array.patch_jump(jmp_next, next_arm);
                     } else {
-                        // Default arm
+                        // Default arm: taken only once every other arm
+                        // failed, wherever it is written.
+                        let jmp_skip = self.op_array.emit(Op {
+                            opcode: OpCode::Jmp,
+                            op1: OperandType::JmpTarget(0),
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                        default_start = Some(self.op_array.current_offset());
                         let body_val = self.compile_expr(&arm.body)?;
                         self.op_array.emit(Op {
                             opcode: OpCode::Assign,
@@ -15159,12 +15169,20 @@ impl Compiler {
                             line: expr.span.line,
                         });
                         end_jumps.push(jmp_end);
+                        let after = self.op_array.current_offset();
+                        self.op_array.patch_jump(jmp_skip, after);
                     }
                 }
 
-                // If no default arm was present, throw UnhandledMatchError
-                let has_default = arms.iter().any(|a| a.conditions.is_none());
-                if !has_default {
+                if let Some(target) = default_start {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::Jmp,
+                        op1: OperandType::JmpTarget(target),
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                } else {
                     // Use MatchError opcode to throw UnhandledMatchError with the subject value
                     self.op_array.emit(Op {
                         opcode: OpCode::MatchError,
