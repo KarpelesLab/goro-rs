@@ -489,11 +489,14 @@ pub fn sniff(data: &[u8]) -> Option<&'static str> {
             _ => "PPM",
         });
     }
-    if data.len() >= 6
+    // an icon directory needs at least one entry (a type-1/2 TGA header
+    // starts 00 00 01/02 00 too, with a zero colour-map origin)
+    if data.len() >= 22
         && data[0] == 0
         && data[1] == 0
         && (data[2] == 1 || data[2] == 2)
         && data[3] == 0
+        && u16::from_le_bytes([data[4], data[5]]) > 0
     {
         return Some(if data[2] == 2 { "CUR" } else { "ICO" });
     }
@@ -653,6 +656,11 @@ fn decode_png(data: &[u8]) -> MResult<Vec<Image>> {
     };
     if matches!(png.format, P::Gray8 | P::Gray16Le | P::Ya8) {
         img.colorspace = Colorspace::Gray;
+    }
+    // a gray PNG below 8 bits keeps its bit depth (IHDR byte 24, colour
+    // type 0 at byte 25)
+    if data.len() > 25 && data[25] == 0 && data[24] < 8 {
+        img.depth = data[24] as u32;
     }
     if png.format == P::Pal8 {
         img.colors = png.palette.as_ref().map(|p| p.entries.len());
