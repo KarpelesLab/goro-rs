@@ -1346,6 +1346,9 @@ pub struct Vm {
     /// The shutdown destructors are running (shutdown_destructors()): with
     /// no frame on the call stack, EG(current_execute_data) is NULL.
     pub in_shutdown_dtors: bool,
+    /// An object whose declared property is being unset, while the value
+    /// is released: (object address, properties still counted).
+    pub(crate) unset_slot_pending: Option<(usize, usize)>,
     /// User exception handler callback (from set_exception_handler)
     pub exception_handler: Option<Value>,
     /// Stack of previous exception handlers (for restore_exception_handler)
@@ -1863,6 +1866,7 @@ impl Vm {
             error_handler_threw: false,
             fatal_bailout: false,
             in_shutdown_dtors: false,
+            unset_slot_pending: None,
             exception_handler: None,
             exception_handler_stack: Vec::new(),
             next_bound_closure_id: 0,
@@ -18223,6 +18227,50 @@ impl Vm {
                     self.destructor_fatal();
                 }
             }
+        }
+    }
+
+    /// zend_std_unset_property() of a declared property: the slot is made
+    /// UNDEF and its old value released before the properties table learns
+    /// it has an empty slot (HASH_FLAG_HAS_EMPTY_IND), so code a released
+    /// object's destructor runs still counts the property (var_dump()'s
+    /// count). Whether the release may run destructors.
+    #[inline(never)]
+    fn unset_slot_stale_count(&self, obj: &Rc<RefCell<PhpObject>>, name: &[u8]) -> bool {
+        let Ok(ob) = obj.try_borrow() else {
+            return false;
+        };
+        if !matches!(
+            ob.get_property(name).deref(),
+            Value::Object(_) | Value::Array(_)
+        ) || self.destructible_objects.is_empty()
+        {
+            return false;
+        }
+        let class_lower = ob.class_name.to_ascii_lowercase();
+        drop(ob);
+        self.find_property_def(&class_lower, name).is_some()
+    }
+
+    /// The release of an unset declared property's value (see
+    /// unset_slot_stale_count), with the object's count still including it.
+    #[cold]
+    #[inline(never)]
+    fn release_unset_slot(&mut self, obj: &Rc<RefCell<PhpObject>>) {
+        let key = Rc::as_ptr(obj) as usize;
+        let saved = self.unset_slot_pending.replace((key, 1));
+        if self.has_release_work() {
+            self.run_pending_destructors();
+        }
+        self.unset_slot_pending = saved;
+    }
+
+    /// The properties var_dump() counts for `obj` beyond its initialized
+    /// ones (see unset_slot_stale_count).
+    pub fn stale_prop_count(&self, obj: &Rc<RefCell<PhpObject>>) -> usize {
+        match self.unset_slot_pending {
+            Some((k, n)) if k == Rc::as_ptr(obj) as usize => n,
+            _ => 0,
         }
     }
 
@@ -44843,6 +44891,7 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
+                            let stale = self.unset_slot_stale_count(obj, prop_name.as_bytes());
                             // Remove the property from the object entirely.
                             // For typed properties: this allows __set/__get to be triggered on subsequent access.
                             // var_dump reconstructs uninitialized typed properties from the class definition.
@@ -44868,6 +44917,9 @@ impl Vm {
                                 });
                             }
                             drop(ob);
+                            if stale {
+                                self.release_unset_slot(obj);
+                            }
                         } else {
                             // Try __unset magic method (or throw avis error if no __unset)
                             let class_lower: Vec<u8> = obj

@@ -1292,7 +1292,8 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
             let prop_count = table
                 .iter()
                 .filter(|(_, v, _)| !matches!(v, Value::Undef))
-                .count();
+                .count()
+                + vm.stale_prop_count(obj);
             // Lazy object prefix: "lazy ghost " / "lazy proxy " before object(...)
             let lazy_prefix: &str = match obj_borrow.get_property(b"__lazy_state") {
                 Value::String(s) if s.as_bytes() == b"ghost" => "lazy ghost ",
