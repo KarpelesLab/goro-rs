@@ -1981,8 +1981,10 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
             Fmt::YearExpanded => {
                 check_signed_number!();
                 t.y = get_signed_nr(&mut errs, &mut ptr, 19);
+                // timelib_get_signed_nr() reports through add_error(), whose
+                // s->tok is NULL here: position 0, character NUL.
                 for (c, m) in errs.drain(..) {
-                    add_pbf_error(&mut errors, c, m, string, begin);
+                    add_pbf_error(&mut errors, c, m, b"", 0);
                 }
                 if t.y == UNSET {
                     add_pbf_error(
@@ -2128,8 +2130,10 @@ pub fn parse_from_format(format: &[u8], string: &[u8]) -> (Time, ErrorContainer)
             Fmt::EpochSeconds => {
                 check_signed_number!();
                 let tmp = get_signed_nr(&mut errs, &mut ptr, 24);
+                // timelib_get_signed_nr() reports through add_error(), whose
+                // s->tok is NULL here: position 0, character NUL.
                 for (c, m) in errs.drain(..) {
-                    add_pbf_error(&mut errors, c, m, string, begin);
+                    add_pbf_error(&mut errors, c, m, b"", 0);
                 }
                 t.have_zone = 1;
                 t.sse = tmp;
