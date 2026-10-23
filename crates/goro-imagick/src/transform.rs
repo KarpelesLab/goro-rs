@@ -509,13 +509,16 @@ pub fn trim(img: &Image, fuzz: f64) -> Image {
     }
 }
 
-/// SampleImage(): point sampling at pixel centres.
+/// SampleImage(): point sampling at pixel centres (a centre exactly on a
+/// pixel edge takes the pixel before it).
 pub fn sample(img: &Image, w: usize, h: usize) -> Image {
     let (sw, sh) = (img.columns, img.rows);
     let mut out = remap(img, w, h, |x, y| {
         (
-            (((x as f64 + 0.5) * sw as f64 / w as f64) as usize).min(sw - 1),
-            (((y as f64 + 0.5) * sh as f64 / h as f64) as usize).min(sh - 1),
+            ((((x as f64 + 0.5) * sw as f64 / w as f64).ceil() - 1.0).max(0.0) as usize)
+                .min(sw - 1),
+            ((((y as f64 + 0.5) * sh as f64 / h as f64).ceil() - 1.0).max(0.0) as usize)
+                .min(sh - 1),
         )
     });
     out.page = Rect::new(w, h, 0, 0);
@@ -768,6 +771,64 @@ pub fn merge_layers(images: &[&Image], method: i32, background: &PixelInfo) -> I
     } else {
         Rect::new(w, h, 0, 0)
     };
+    out.colors = None;
+    out
+}
+
+/// MagnifyImage(): pixel-art doubling (Scale2x): each pixel becomes four,
+/// a quarter taking an edge neighbour's value where the two neighbours
+/// meeting at that corner agree and the opposite ones differ.
+pub fn magnify(img: &Image) -> Image {
+    let (w, h) = (img.columns, img.rows);
+    let mut out = img.clone_attributes(w * 2, h * 2);
+    let at = |x: i64, y: i64| {
+        img.px(
+            x.clamp(0, w as i64 - 1) as usize,
+            y.clamp(0, h as i64 - 1) as usize,
+        )
+    };
+    for y in 0..h {
+        for x in 0..w {
+            let (xi, yi) = (x as i64, y as i64);
+            let p = img.px(x, y);
+            let a = at(xi, yi - 1);
+            let b = at(xi + 1, yi);
+            let c = at(xi - 1, yi);
+            let d = at(xi, yi + 1);
+            let e0 = if c == a && c != d && a != b { a } else { p };
+            let e1 = if a == b && a != c && b != d { b } else { p };
+            let e2 = if d == c && d != b && c != a { c } else { p };
+            let e3 = if b == d && b != a && d != c { d } else { p };
+            out.set_px(2 * x, 2 * y, e0);
+            out.set_px(2 * x + 1, 2 * y, e1);
+            out.set_px(2 * x, 2 * y + 1, e2);
+            out.set_px(2 * x + 1, 2 * y + 1, e3);
+        }
+    }
+    out.page = Rect::new(w * 2, h * 2, 0, 0);
+    out.colors = None;
+    out
+}
+
+/// InterpolativeResizeImage(): each destination pixel centre mapped back
+/// and interpolated with `method`.
+pub fn interpolative_resize(
+    img: &Image,
+    w: usize,
+    h: usize,
+    method: PixelInterpolateMethod,
+) -> Image {
+    let mut out = img.clone_attributes(w, h);
+    let (sx, sy) = (img.columns as f64 / w as f64, img.rows as f64 / h as f64);
+    for y in 0..h {
+        let v = (y as f64 + 0.5) * sy - 0.5;
+        for x in 0..w {
+            let u = (x as f64 + 0.5) * sx - 0.5;
+            let p = crate::interp::interpolate(img, method, u, v, img.virtual_pixel);
+            out.set_px(x, y, crate::interp::to_q16(p));
+        }
+    }
+    out.page = Rect::new(w, h, 0, 0);
     out.colors = None;
     out
 }

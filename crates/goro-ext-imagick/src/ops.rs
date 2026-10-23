@@ -478,24 +478,26 @@ fn adaptive_resize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value])
         if nw <= 0 || nh <= 0 {
             return Err(zero_size());
         }
-        transform::resize(i, nw as usize, nh as usize, FilterType::Mitchell)
+        Ok(transform::interpolative_resize(
+            i,
+            nw as usize,
+            nh as usize,
+            PixelInterpolateMethod::Mesh,
+        ))
     })
 }
 
 fn interpolative_resize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "lll", args)?;
     let (w, h) = (a[0].long_or(0), a[1].long_or(0));
-    let filter = match a[2].long_or(0) {
-        10 | 8 => FilterType::Point,
-        7 => FilterType::Catrom,
-        11 => FilterType::Spline,
-        _ => FilterType::Triangle,
-    };
+    let method = PixelInterpolateMethod(a[2].long_or(0) as i32);
     replace_op(vm, &d_(o), "Unable to interpolativeResizeImage", |i| {
         if w <= 0 || h <= 0 {
             return Err(zero_size());
         }
-        transform::resize(i, w as usize, h as usize, filter)
+        Ok(transform::interpolative_resize(
+            i, w as usize, h as usize, method,
+        ))
     })
 }
 
@@ -531,7 +533,7 @@ fn resample_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 fn magnify_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
     replace_op(vm, &d_(o), "Unable to magnify image", |i| {
-        transform::resize(i, i.columns * 2, i.rows * 2, FilterType::Spline)
+        Ok(transform::magnify(i))
     })
 }
 
@@ -542,7 +544,7 @@ fn minify_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
             i,
             (i.columns / 2).max(1),
             (i.rows / 2).max(1),
-            FilterType::Box,
+            FilterType::Spline,
         )
     })
 }
