@@ -4181,6 +4181,7 @@ impl Compiler {
                         kind: ExprKind::Variable(self.op_array.cv_names[cv as usize].clone()),
                         span: value.span,
                     };
+                    let tmp_start = self.op_array.temp_count;
                     self.compile_list_destructure_ref(elems, &hidden, stmt.span.line)?;
                     self.op_array.emit(Op {
                         opcode: OpCode::UnsetCv,
@@ -4189,6 +4190,10 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: stmt.span.line,
                     });
+                    // The element references fetched for the bindings are
+                    // not kept past them.
+                    let tmp_end = self.op_array.temp_count;
+                    self.emit_free_tmps((tmp_start, tmp_end), stmt.span.line);
                 } else if *by_ref {
                     // Plain variables were bound by ForeachNextRef; other
                     // targets are bound to the element's reference.
