@@ -1872,6 +1872,12 @@ fn h_read_property(vm: &mut Vm, o: &Obj, name: &[u8], mode: u8) -> Option<Value>
     Some(prop_dim_read(vm, o, Some(&mv), Access::Elements, bp))
 }
 
+/// sxe_property_get_adr() for a by-reference fetch: a missing element is
+/// created; an existing one is read for write (read_property BP_VAR_W).
+pub fn prop_ptr(vm: &mut Vm, o: &Obj, name: &[u8]) -> Option<Value> {
+    h_read_property(vm, o, name, 1)
+}
+
 fn h_write_property(vm: &mut Vm, o: &Obj, name: &[u8], v: &Value) -> bool {
     if sxe_of(o).is_none() {
         return false;
@@ -2982,6 +2988,8 @@ pub fn register(vm: &mut Vm) {
         &[b"node", b"class_name"],
     );
     vm.register_extension(b"simplexml");
+    vm.prop_ptr_handlers
+        .insert(b"simplexmlelement".to_vec(), prop_ptr);
 
     let mut ce = ClassEntry::new(b"SimpleXMLElement".to_vec());
     ce.interfaces = vec![

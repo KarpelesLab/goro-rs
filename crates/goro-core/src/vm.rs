@@ -1468,6 +1468,14 @@ pub struct Vm {
     /// the property with an Error.
     pub ref_fetch_handlers:
         crate::fxhash::FxHashMap<Vec<u8>, fn(&Rc<RefCell<PhpObject>>, &[u8]) -> Option<String>>,
+    /// get_property_ptr_ptr of extension objects keyed by lowercase
+    /// built-in class name (subclasses included), for by-reference fetches:
+    /// Some(value) is what the fetch yields (SimpleXMLElement creates the
+    /// element), None leaves the fetch to the standard handler.
+    pub prop_ptr_handlers: crate::fxhash::FxHashMap<
+        Vec<u8>,
+        fn(&mut Vm, &Rc<RefCell<PhpObject>>, &[u8]) -> Option<Value>,
+    >,
     /// Extension-provided method handlers keyed by lowercase built-in class name.
     pub native_class_handlers: crate::fxhash::FxHashMap<Vec<u8>, NativeClassHandler>,
     /// Constants of natively implemented internal classes registered by
@@ -2781,6 +2789,7 @@ impl Vm {
             object_create_handlers: Default::default(),
             trace_without_args_classes: Vec::new(),
             ref_fetch_handlers: Default::default(),
+            prop_ptr_handlers: Default::default(),
             native_class_handlers: Default::default(),
             ext_class_constants: Default::default(),
             ini_validators: std::collections::HashMap::new(),
@@ -5535,6 +5544,31 @@ impl Vm {
             }
         }
         true
+    }
+
+    /// An extension's get_property_ptr_ptr for a by-reference fetch of
+    /// `$obj->name` (prop_ptr_handlers), when it handles the fetch.
+    #[inline(never)]
+    fn native_prop_ptr(&mut self, obj_val: &Value, name: &[u8]) -> Option<Value> {
+        if self.prop_ptr_handlers.is_empty() {
+            return None;
+        }
+        let Value::Object(obj) = obj_val else {
+            return None;
+        };
+        let mut cur = obj.borrow().class_name.to_ascii_lowercase();
+        for _ in 0..64 {
+            if let Some(h) = self.prop_ptr_handlers.get(&cur).copied() {
+                return h(self, obj, name);
+            }
+            cur = self
+                .classes
+                .get(&cur)?
+                .parent
+                .as_ref()?
+                .to_ascii_lowercase();
+        }
+        None
     }
 
     /// zend_std_get_property_ptr_ptr() creating dynamic property `name` of
@@ -46156,6 +46190,17 @@ impl Vm {
                             message: format!("Uncaught Error: {}", msg),
                             line: op.line,
                         });
+                    }
+                    if let Some(v) = self.native_prop_ptr(&obj_val, prop_name.as_bytes()) {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
+                        self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Ok(Flow::Next);
                     }
                     let mut ref_error: Option<String> = None;
                     let mut magic_type_error: Option<String> = None;
