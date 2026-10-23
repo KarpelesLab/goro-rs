@@ -10453,6 +10453,10 @@ impl Vm {
         };
         if op_array.is_generator
             || (op_array.name.is_empty() && !std::mem::take(&mut self.observe_code))
+            // (a constant expression's evaluation is not a function call)
+            || op_array
+                .name
+                .starts_with(crate::compiler::CONST_THUNK_PREFIX.as_bytes())
         {
             return false;
         }

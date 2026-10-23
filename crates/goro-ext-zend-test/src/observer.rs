@@ -41,6 +41,8 @@ struct State {
     inited: HashMap<String, bool>,
     /// Per running call: whether its begin handler printed (end must too).
     stack: Vec<bool>,
+    /// The request after the preload one has started.
+    after_preload: bool,
 }
 
 thread_local! {
@@ -273,6 +275,17 @@ fn begin(vm: &mut Vm, frame: &ObservedFrame) {
     if !enabled {
         STATE.with(|s| s.borrow_mut().stack.push(false));
         return;
+    }
+    // The run-time caches (where fcall_init's result is kept) belong to a
+    // request: the preload request's are gone in the next one.
+    if goro_core::preload::done() {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            if !s.after_preload {
+                s.after_preload = true;
+                s.inited.clear();
+            }
+        });
     }
     let cached = f
         .key
