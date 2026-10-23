@@ -1511,15 +1511,26 @@ fn png_auto_layout(img: &Image) -> PngLayout {
     let w = img.columns;
     let px = || img.pixels.chunks_exact(4);
     let opaque = !img.alpha || px().all(|p| p[3] == 65535);
-    let needs16 = img.depth > 8
-        && px().any(|p| p[..3].iter().any(|v| v % 257 != 0) || (img.alpha && p[3] % 257 != 0));
+    // 16 bits only when the colour samples need them (an alpha that does
+    // not fit 8 bits is truncated, as in a shadowImage() result)
+    let needs16 = img.depth > 8 && px().any(|p| p[..3].iter().any(|v| v % 257 != 0));
     let bg = img.background_color.to_rgba16();
     if needs16 {
         let gray = px().all(|p| p[0] == p[1] && p[1] == p[2]);
-        let (format, stride, data) = if gray && opaque {
+        // a lone fully transparent gray, unused by the opaque pixels
+        let key = if gray && !opaque && px().all(|p| p[3] == 0 || p[3] == 65535) {
+            let t: Vec<u16> = px().filter(|p| p[3] == 0).map(|p| p[0]).collect();
+            (t.iter().all(|&v| v == t[0]) && !px().any(|p| p[3] == 65535 && p[0] == t[0]))
+                .then_some(t[0])
+        } else {
+            None
+        };
+        let gray_only = gray && (opaque || key.is_some());
+        let (format, stride, data) = if gray_only {
             (P::Gray16Le, w * 2, le16(px().map(|p| p[0])))
         } else if img.alpha {
-            // (oxideav-png has no 16-bit gray+alpha)
+            // (ImageMagick writes 16-bit gray+alpha for gray pixels;
+            // oxideav-png has no such format)
             (P::Rgba64Le, w * 8, le16(img.pixels.iter().copied()))
         } else {
             (
@@ -1528,7 +1539,7 @@ fn png_auto_layout(img: &Image) -> PngLayout {
                 le16(px().flat_map(|p| [p[0], p[1], p[2]])),
             )
         };
-        let bkgd = if gray && opaque {
+        let bkgd = if gray_only {
             Bkgd::Grayscale(bg[0])
         } else {
             Bkgd::Rgb(bg[0], bg[1], bg[2])
@@ -1540,7 +1551,7 @@ fn png_auto_layout(img: &Image) -> PngLayout {
             bit_depth: None,
             palette: None,
             bkgd: Some(bkgd),
-            trns: None,
+            trns: key.map(Trns::Grayscale),
         };
     }
     let p8: Vec<[u8; 4]> = px()
