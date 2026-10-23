@@ -982,9 +982,11 @@ fn range_threshold_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value])
 }
 
 fn auto_threshold_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
-    zpp::parse(vm, f, "l", args)?;
+    let a = zpp::parse(vm, f, "l", args)?;
+    let method = a[0].long_or(2);
     image_op(vm, &d_(o), "Unable to autoThresholdImage", |i| {
-        apply_oxideav(i, &of::OtsuThreshold::new())
+        goro_imagick::enhance::auto_threshold(i, method);
+        Ok(())
     })
 }
 

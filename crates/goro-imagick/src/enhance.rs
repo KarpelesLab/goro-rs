@@ -134,3 +134,96 @@ pub fn grayscale(i: &mut Image) {
     i.colorspace = crate::types::Colorspace::Gray;
     i.colors = None;
 }
+
+/// AutoThresholdImage(): a threshold bin from the 256-bin histogram of
+/// the rounded intensity (Kapur 1, Otsu 2, Triangle 3); pixels whose
+/// intensity exceeds bin·257 go white, the rest black, in all channels.
+pub fn auto_threshold(i: &mut Image, method: i64) {
+    let mut h = [0f64; 256];
+    for p in i.pixels.chunks_exact(4) {
+        h[(Image::intensity(p) / 257.0 + 0.5)
+            .floor()
+            .clamp(0.0, 255.0) as usize] += 1.0;
+    }
+    let n: f64 = h.iter().sum();
+    if n == 0.0 {
+        return;
+    }
+    let p: Vec<f64> = h.iter().map(|v| v / n).collect();
+    let t = match method {
+        1 => {
+            // Kapur: the largest sum of the two classes' entropies
+            let (mut best, mut bt) = (f64::MIN, 0usize);
+            for t in 0..256 {
+                let w0: f64 = p[..=t].iter().sum();
+                let w1 = 1.0 - w0;
+                if w0 <= 0.0 || w1 <= 0.0 {
+                    continue;
+                }
+                let ent = |s: &[f64], w: f64| {
+                    s.iter()
+                        .filter(|&&v| v > 0.0)
+                        .map(|&v| -(v / w) * (v / w).ln())
+                        .sum::<f64>()
+                };
+                let e = ent(&p[..=t], w0) + ent(&p[t + 1..], w1);
+                if e > best {
+                    best = e;
+                    bt = t;
+                }
+            }
+            bt
+        }
+        3 => {
+            // Triangle: the bin farthest from the line joining the peak to
+            // the far end of the histogram (one past its outermost
+            // non-empty bin)
+            let first = h.iter().position(|&v| v > 0.0).unwrap_or(0);
+            let last = h.iter().rposition(|&v| v > 0.0).unwrap_or(255);
+            let peak = (0..256).fold(0, |b, k| if h[k] > h[b] { k } else { b });
+            let (x0, x1) = if peak - first > last - peak {
+                (first.saturating_sub(1), peak)
+            } else {
+                (peak, (last + 1).min(255))
+            };
+            let (y0, y1) = (h[x0], h[x1]);
+            let (dx, dy) = ((x1 - x0) as f64, y1 - y0);
+            let (mut best, mut bt) = (-1.0, x0);
+            for x in x0..=x1 {
+                let d = (dy * x as f64 - dx * h[x] + x1 as f64 * y0 - y1 * x0 as f64).abs();
+                if d > best {
+                    best = d;
+                    bt = x;
+                }
+            }
+            bt
+        }
+        _ => {
+            // Otsu: the largest between-class variance
+            let (mut best, mut bt) = (-1.0, 0usize);
+            for t in 0..256 {
+                let w0: f64 = p[..=t].iter().sum();
+                let w1 = 1.0 - w0;
+                if w0 <= 0.0 || w1 <= 0.0 {
+                    continue;
+                }
+                let m0: f64 = (0..=t).map(|k| k as f64 * p[k]).sum::<f64>() / w0;
+                let m1: f64 = (t + 1..256).map(|k| k as f64 * p[k]).sum::<f64>() / w1;
+                let v = w0 * w1 * (m0 - m1) * (m0 - m1);
+                if v > best {
+                    best = v;
+                    bt = t;
+                }
+            }
+            bt
+        }
+    };
+    let thr = t as f64 * 257.0;
+    for px in i.pixels.chunks_exact_mut(4) {
+        let v = if Image::intensity(px) > thr { 65535 } else { 0 };
+        px[0] = v;
+        px[1] = v;
+        px[2] = v;
+    }
+    i.colors = None;
+}
