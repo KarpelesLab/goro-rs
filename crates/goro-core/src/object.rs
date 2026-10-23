@@ -113,6 +113,9 @@ pub struct NewTemplate {
     /// The class's declared name, and the name it is looked up by.
     pub(crate) class_name: Vec<u8>,
     pub(crate) lower: Vec<u8>,
+    /// Where the class table held `lower` when last looked up (checked
+    /// against its key before use: no hashing of the name).
+    pub(crate) class_idx: std::cell::Cell<usize>,
     /// The declared property slots and their defaults (an array default
     /// is a placeholder here, see `arrays`).
     pub(crate) slots: Vec<(Vec<u8>, Value)>,

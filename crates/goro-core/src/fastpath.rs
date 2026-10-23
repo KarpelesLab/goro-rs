@@ -660,16 +660,22 @@ pub(crate) fn fast_op(
 /// awaiting its destructor (the destructible list would hold it too), not
 /// a WeakMap or a WeakMap key, has no native state or closure payload, no
 /// internal markers, and holds only plain values (no object or array whose
-/// release could be due). Its handle is then just recycled.
+/// release could be due). Its handle is then just recycled. The only weak
+/// handles on it are the cycle collector's own (its list of objects, its
+/// root buffer slot: PhpObject's drop releases the slot); any other one
+/// (WeakReference, a foreach over it...) takes the general handler.
 #[inline]
 pub(crate) fn object_release_quiet(o: &Rc<RefCell<crate::object::PhpObject>>) -> bool {
-    if Rc::strong_count(o) != 1 || Rc::weak_count(o) != 0 {
+    if Rc::strong_count(o) != 1 {
         return false;
     }
     let Ok(ob) = o.try_borrow() else {
         return false;
     };
-    !ob.dtor_listed.get()
+    let gc_weak = ob.gc_tracked.get() as usize + ob.gc_buffered.get() as usize;
+    Rc::weak_count(o) <= gc_weak
+        && !crate::gc::gc_pending()
+        && !ob.dtor_listed.get()
         && !ob.weak_key.get()
         && ob.native.is_none()
         && ob.closure.is_none()
@@ -1864,7 +1870,7 @@ impl crate::vm::Vm {
                 .ops
                 .get(ip + 2)
                 .is_some_and(|f| tmp_writable(&f.result, tmps))
-            && self.new_skips_ctor_call(op_array, ip + 1, &obj);
+            && self.new_skips_ctor_call(op_array, ip + 1, &obj, false);
         // (write_operand() registers the object with the cycle collector)
         if let Value::Object(o) = &obj {
             crate::gc::track_object(o);

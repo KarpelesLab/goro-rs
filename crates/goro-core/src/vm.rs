@@ -53860,7 +53860,7 @@ impl Vm {
                             // ZEND_NEW of a class without a constructor, with
                             // no arguments: the constructor call is skipped.
                             let skip = no_ctor
-                                && self.new_skips_ctor_call(op_array, ip, &obj_value);
+                                && self.new_skips_ctor_call(op_array, ip, &obj_value, true);
                             self.write_operand(
                                 &op.result,
                                 obj_value,

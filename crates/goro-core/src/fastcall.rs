@@ -228,6 +228,9 @@ impl Vm {
                     methods_len: ce.methods.len(),
                     class_name: ce.name.clone(),
                     lower: name_lower.to_vec(),
+                    class_idx: std::cell::Cell::new(
+                        self.classes.get_index_of(name_lower).unwrap_or(usize::MAX),
+                    ),
                     slots,
                     arrays,
                     has_destruct,
@@ -255,7 +258,14 @@ impl Vm {
             .borrow()
             .as_ref()
             .and_then(|s| s.new_sites.get(&(ip as u32)).cloned())?;
-        let same = self.classes.get(t.lower.as_slice()).is_some_and(|ce| {
+        let ce = match self.classes.get_index(t.class_idx.get()) {
+            Some((k, ce)) if k.as_slice() == t.lower.as_slice() => Some(ce),
+            _ => self.classes.get_full(t.lower.as_slice()).map(|(i, _, ce)| {
+                t.class_idx.set(i);
+                ce
+            }),
+        };
+        let same = ce.is_some_and(|ce| {
             ce.new_template
                 .borrow()
                 .as_ref()
@@ -270,28 +280,24 @@ impl Vm {
     /// ZEND_NEW then jumps over them (what DO_FCALL would do for the call of
     /// the missing constructor is done by the caller: a NULL result). Not
     /// with an observer (it watches the call), nor with an exception or an
-    /// error handler's throw to dispatch.
+    /// error handler's throw to dispatch. `has_destruct`: the class has a
+    /// destructor (its new object is marked as awaiting its constructor).
     #[inline(never)]
     pub(crate) fn new_skips_ctor_call(
         &mut self,
         op_array: &OpArray,
         ip: usize,
         obj: &Value,
+        has_destruct: bool,
     ) -> bool {
         let (Some(init), Some(fcall)) = (op_array.ops.get(ip), op_array.ops.get(ip + 1)) else {
             return false;
         };
         let new_op = &op_array.ops[ip - 1];
-        let ctor_named = match init.op2 {
-            OperandType::Const(c) => matches!(op_array.literals.get(c as usize),
-                Some(Value::String(s)) if s.as_bytes().eq_ignore_ascii_case(b"__construct")),
-            _ => false,
-        };
         if init.opcode != crate::opcode::OpCode::InitMethodCall
-            || !ctor_named
+            || fcall.opcode != crate::opcode::OpCode::DoFCall
             || init.op1 != new_op.result
             || !matches!(new_op.result, OperandType::Tmp(_))
-            || fcall.opcode != crate::opcode::OpCode::DoFCall
             || !matches!(fcall.op1, OperandType::Unused)
             || !matches!(fcall.result, OperandType::Tmp(_) | OperandType::Unused)
             || self.observer.is_some()
@@ -300,13 +306,23 @@ impl Vm {
         {
             return false;
         }
+        let ctor_named = match init.op2 {
+            OperandType::Const(c) => matches!(op_array.literals.get(c as usize),
+                Some(Value::String(s)) if s.as_bytes().eq_ignore_ascii_case(b"__construct")),
+            _ => false,
+        };
+        if !ctor_named {
+            return false;
+        }
         // (what the DO_FCALL of the missing constructor does)
         self.last_call_by_ref = false;
         self.call_result_unused = None;
-        if let Value::Object(o) = obj {
-            let mut ob = o.borrow_mut();
-            if ob.has_property(b"__ctor_pending") {
-                ob.properties.retain(|(k, _)| k != b"__ctor_pending");
+        if has_destruct {
+            if let Value::Object(o) = obj {
+                let mut ob = o.borrow_mut();
+                if ob.has_property(b"__ctor_pending") {
+                    ob.properties.retain(|(k, _)| k != b"__ctor_pending");
+                }
             }
         }
         true
