@@ -111,6 +111,9 @@ fn dtoa(d: f64, mode: u8, ndigit: i32) -> (Vec<u8>, i32) {
     while digits.len() > 1 && digits.last() == Some(&b'0') {
         digits.pop();
     }
+    if mode == 0 {
+        goro_core::value::shortest_tie_to_even(a, &mut digits, exp);
+    }
     (digits, exp + 1)
 }
 

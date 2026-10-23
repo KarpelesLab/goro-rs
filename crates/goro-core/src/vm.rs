@@ -4548,6 +4548,25 @@ impl Vm {
     /// an object that cannot be cast is greater); the notices of comparing
     /// an object with a number. An exception thrown by the cast is left
     /// pending.
+    /// zend_compare() as the comparison operators do it (extension objects'
+    /// compare handlers, objects meeting strings through __toString(), the
+    /// object conversion notices), for builtins comparing values (max()...).
+    pub fn zend_compare(&mut self, a: &Value, b: &Value) -> i64 {
+        if let (Some(cmp_fn), Some(is_type)) = (self.object_compare, self.object_is_operator_type) {
+            if is_type(a) || is_type(b) {
+                if let Some(ord) = cmp_fn(self, a, b) {
+                    return ord as i64;
+                }
+                if self.current_exception.is_some() {
+                    return 0;
+                }
+            }
+        }
+        let line = self.current_line;
+        let (a, b) = self.compare_operands(a.clone(), b.clone(), line);
+        a.compare_zend(&b)
+    }
+
     fn compare_operands(&mut self, a: Value, b: Value, line: u32) -> (Value, Value) {
         self.emit_object_comparison_notice(&a, &b, line);
         let cast = |vm: &mut Vm, o: &Value| -> Option<Value> {
@@ -23660,6 +23679,20 @@ impl Vm {
                                 }
                             }
                         }
+                    }
+                    // (objects meet scalars as zend_compare() converts them:
+                    // __toString(), "could not be converted" notices)
+                    let (a, b) = self.compare_operands(a, b, op.line);
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = catch_target as usize;
+                            return Ok(Flow::Continue);
+                        }
+                        return Err(VmError {
+                            message: self.uncaught_exception_message(),
+                            line: op.line,
+                        });
                     }
                     self.write_operand(
                         &op.result,

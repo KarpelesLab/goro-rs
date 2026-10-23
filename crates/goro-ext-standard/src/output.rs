@@ -2295,78 +2295,10 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
     }
 }
 
-/// This is what PHP 8 uses for var_dump, var_export, json_encode, etc.
+/// var_dump()'s `%.*H` with serialize_precision -1: zend_gcvt() of the
+/// shortest round-trip digits (smart_str_append_double()).
 fn format_php_float_serialize(f: f64) -> String {
-    if f.is_infinite() {
-        return if f.is_sign_positive() {
-            "INF".to_string()
-        } else {
-            "-INF".to_string()
-        };
-    }
-    if f.is_nan() {
-        return "NAN".to_string();
-    }
-    // Handle negative zero
-    if f == 0.0 && f.is_sign_negative() {
-        return "-0".to_string();
-    }
-    // PHP serialize_precision=-1: shortest exact representation
-    // PHP's zend_gcvt switches to scientific notation when decpt > 17 or decpt < -3.
-    // decpt > 17 corresponds to abs >= 1e17, decpt < -3 corresponds to abs < 1e-4.
-    let abs = f.abs();
-    if abs != 0.0 && !(1e-4..1e17).contains(&abs) {
-        // Use scientific notation like PHP
-        // Find shortest scientific representation that roundtrips
-        for prec in 0..20 {
-            let s = format!("{:.prec$e}", f, prec = prec);
-            if let Ok(parsed) = s.parse::<f64>() {
-                if parsed == f {
-                    if let Some(pos) = s.find('e') {
-                        let mantissa = &s[..pos];
-                        let exp: i32 = s[pos + 1..].parse().unwrap_or(0);
-                        // Ensure at least one decimal digit
-                        let mantissa = if !mantissa.contains('.') {
-                            format!("{}.0", mantissa)
-                        } else if mantissa.ends_with('.') {
-                            format!("{}0", mantissa)
-                        } else {
-                            mantissa.to_string()
-                        };
-                        let exp_str = if exp >= 0 {
-                            format!("E+{}", exp)
-                        } else {
-                            format!("E{}", exp)
-                        };
-                        return format!("{}{}", mantissa, exp_str);
-                    }
-                }
-            }
-        }
-    }
-
-    // PHP serialize_precision=-1: shortest roundtrip representation
-    // Use ryu-style formatting for exact roundtrip
-    let mut buf = ryu_format(f);
-    // Ensure no trailing dot
-    if buf.ends_with('.') {
-        buf.push('0');
-    }
-    buf
-}
-
-/// Format float with shortest roundtrip representation (like PHP serialize_precision=-1)
-fn ryu_format(f: f64) -> String {
-    // Try increasing precision until roundtrip works
-    for prec in 0..20 {
-        let s = format!("{:.prec$}", f, prec = prec);
-        if let Ok(parsed) = s.parse::<f64>() {
-            if parsed == f {
-                return s;
-            }
-        }
-    }
-    format!("{}", f)
+    String::from_utf8(goro_core::value::zend_gcvt(f, -1, b'.', b'E')).unwrap_or_default()
 }
 
 /// var_dump an object given its (mangled-key) property table, as produced by

@@ -626,10 +626,15 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             let mut max_val = Value::Null;
             let mut first = true;
-            for (_, v) in arr.iter() {
-                if first || v.compare_zend(&max_val) > 0 {
-                    max_val = v.clone();
+            let vals: Vec<Value> = arr.values().cloned().collect();
+            drop(arr);
+            for v in vals {
+                if first || vm.zend_compare(&v, &max_val) > 0 {
+                    max_val = v;
                     first = false;
+                }
+                if vm.current_exception.is_some() {
+                    return Ok(Value::Null);
                 }
             }
             return Ok(max_val);
@@ -650,8 +655,11 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let mut max_val = args[0].clone();
     for arg in &args[1..] {
-        if arg.compare_zend(&max_val) > 0 {
+        if vm.zend_compare(arg, &max_val) > 0 {
             max_val = arg.clone();
+        }
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
         }
     }
     Ok(max_val)
@@ -683,10 +691,15 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             let mut min_val = Value::Null;
             let mut first = true;
-            for (_, v) in arr.iter() {
-                if first || v.compare_zend(&min_val) < 0 {
-                    min_val = v.clone();
+            let vals: Vec<Value> = arr.values().cloned().collect();
+            drop(arr);
+            for v in vals {
+                if first || vm.zend_compare(&v, &min_val) < 0 {
+                    min_val = v;
                     first = false;
+                }
+                if vm.current_exception.is_some() {
+                    return Ok(Value::Null);
                 }
             }
             return Ok(min_val);
@@ -707,8 +720,11 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     let mut min_val = args[0].clone();
     for arg in &args[1..] {
-        if arg.compare_zend(&min_val) < 0 {
+        if vm.zend_compare(arg, &min_val) < 0 {
             min_val = arg.clone();
+        }
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
         }
     }
     Ok(min_val)

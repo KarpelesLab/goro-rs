@@ -1341,38 +1341,7 @@ impl Value {
             // Generator objects have no properties: any two compare equal
             // (zend_std_compare_objects()).
             (Value::Generator(_), Value::Generator(_)) => true,
-            (Value::String(a), Value::String(b)) => {
-                // PHP 8: if both strings are numeric, compare as numbers
-                // First try comparing as integers (handles large numbers that lose f64 precision)
-                let a_bytes = a.as_bytes();
-                let b_bytes = b.as_bytes();
-                let a_str = std::str::from_utf8(a_bytes).unwrap_or("");
-                let b_str = std::str::from_utf8(b_bytes).unwrap_or("");
-                let a_trimmed = a_str.trim();
-                let b_trimmed = b_str.trim();
-
-                // Check if both are pure integer strings
-                let a_is_int = is_integer_string(a_trimmed);
-                let b_is_int = is_integer_string(b_trimmed);
-
-                if a_is_int && b_is_int {
-                    // Try parsing as i64 first
-                    match (a_trimmed.parse::<i64>(), b_trimmed.parse::<i64>()) {
-                        (Ok(na), Ok(nb)) => na == nb,
-                        _ => {
-                            // Too large for i64 - compare the numeric value as strings
-                            // by normalizing (strip leading zeros, compare)
-                            compare_integer_strings(a_trimmed, b_trimmed) == 0
-                        }
-                    }
-                } else if let (Some(na), Some(nb)) =
-                    (parse_numeric_string(a_bytes), parse_numeric_string(b_bytes))
-                {
-                    na == nb
-                } else {
-                    a_bytes == b_bytes
-                }
-            }
+            (Value::String(a), Value::String(b)) => smart_streq(a.as_bytes(), b.as_bytes()),
             (Value::String(s), Value::Long(n)) | (Value::Long(n), Value::String(s)) => {
                 // PHP 8: if string is numeric, compare numerically; otherwise false
                 let s_bytes = s.as_bytes();
@@ -1791,47 +1760,7 @@ impl Value {
                     0
                 }
             }
-            (Value::String(a), Value::String(b)) => {
-                // PHP 8: if both strings are numeric, compare as numbers
-                let a_str = std::str::from_utf8(a.as_bytes()).unwrap_or("");
-                let b_str = std::str::from_utf8(b.as_bytes()).unwrap_or("");
-                let a_trimmed = a_str.trim();
-                let b_trimmed = b_str.trim();
-                let a_is_int = is_integer_string(a_trimmed);
-                let b_is_int = is_integer_string(b_trimmed);
-
-                if a_is_int && b_is_int {
-                    match (a_trimmed.parse::<i64>(), b_trimmed.parse::<i64>()) {
-                        (Ok(na), Ok(nb)) => {
-                            if na < nb {
-                                -1
-                            } else if na > nb {
-                                1
-                            } else {
-                                0
-                            }
-                        }
-                        _ => compare_integer_strings(a_trimmed, b_trimmed),
-                    }
-                } else if let (Some(na), Some(nb)) = (
-                    parse_numeric_string(a.as_bytes()),
-                    parse_numeric_string(b.as_bytes()),
-                ) {
-                    if na < nb {
-                        -1
-                    } else if na > nb {
-                        1
-                    } else {
-                        0
-                    }
-                } else {
-                    match a.as_bytes().cmp(b.as_bytes()) {
-                        std::cmp::Ordering::Less => -1,
-                        std::cmp::Ordering::Equal => 0,
-                        std::cmp::Ordering::Greater => 1,
-                    }
-                }
-            }
+            (Value::String(a), Value::String(b)) => smart_strcmp(a.as_bytes(), b.as_bytes()),
             // PHP 8: int vs string - compare numerically if string is numeric, else string > int
             (Value::Long(n), Value::String(s)) | (Value::String(s), Value::Long(n)) => {
                 let is_left_long = matches!(self, Value::Long(_));
@@ -2110,6 +2039,46 @@ fn zend_gcvt_string(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> Str
         .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
+/// zend_dtoa() mode 0 rounds an exact tie between two shortest
+/// round-tripping digit strings to the even last digit; Rust's shortest
+/// formatting rounds it up. `digits` (exponent `exp`) is Rust's choice.
+pub fn shortest_tie_to_even(v: f64, digits: &mut [u8], exp: i32) {
+    let n = digits.len();
+    let last = digits[n - 1];
+    if (last - b'0') % 2 == 0 {
+        return;
+    }
+    // The candidate one unit lower in the last digit must round-trip too...
+    let mut alt = digits.to_vec();
+    alt[n - 1] = last - 1;
+    let text = |d: &[u8]| {
+        let mut t = String::with_capacity(d.len() + 8);
+        t.push(d[0] as char);
+        t.push('.');
+        for &c in &d[1..] {
+            t.push(c as char);
+        }
+        t.push('e');
+        t.push_str(&exp.to_string());
+        t
+    };
+    if text(&alt).parse::<f64>().ok() != Some(v) {
+        return;
+    }
+    // ...and the exact value lie halfway: its expansion is alt followed by
+    // 5 and zeros (a double has at most 767 significant digits).
+    let exact = format!("{:.800e}", v);
+    let (mant, _) = exact.split_once('e').unwrap_or((&exact, ""));
+    let ed: Vec<u8> = mant.bytes().filter(|c| c.is_ascii_digit()).collect();
+    if ed.len() > n
+        && ed[..n] == alt[..]
+        && ed[n] == b'5'
+        && ed[n + 1..].iter().all(|&c| c == b'0')
+    {
+        digits[n - 1] = last - 1;
+    }
+}
+
 /// zend_gcvt(): `ndigit` significant digits (mode 2), or the shortest
 /// round-trip digits when `ndigit` is negative (mode 0, 17 max).
 pub fn zend_gcvt(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> Vec<u8> {
@@ -2135,6 +2104,9 @@ pub fn zend_gcvt(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> Vec<u8
         let mut digits: Vec<u8> = mant.bytes().filter(|c| c.is_ascii_digit()).collect();
         while digits.len() > 1 && digits.last() == Some(&b'0') {
             digits.pop();
+        }
+        if ndigit < 0 {
+            shortest_tie_to_even(neg_zero_free, &mut digits, exp);
         }
         let decpt = if value == 0.0 { 1 } else { exp + 1 };
         (if ndigit < 0 { 17 } else { ndigit }, digits, decpt)
@@ -2473,42 +2445,131 @@ fn enum_compare(a: &Value, b: &Value) -> Option<i64> {
     })
 }
 
-/// Check if a trimmed string is a pure integer (digits only, with optional leading sign)
-fn is_integer_string(s: &str) -> bool {
-    if s.is_empty() {
-        return false;
+/// The `oflow` of `_is_numeric_string_ex()` for a numeric string: -1 / 1
+/// when an integer literal overflowed into a double (20+ integer digits, or
+/// 19 at or beyond 2**63), 0 otherwise.
+fn numeric_str_oflow(bytes: &[u8]) -> i64 {
+    let is_ws = |c: u8| matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0b | 0x0c);
+    let mut p = 0;
+    while p < bytes.len() && is_ws(bytes[p]) {
+        p += 1;
     }
-    let s = if s.starts_with('+') || s.starts_with('-') {
-        &s[1..]
-    } else {
-        s
-    };
-    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+    let neg = bytes.get(p) == Some(&b'-');
+    if matches!(bytes.get(p), Some(b'-' | b'+')) {
+        p += 1;
+    }
+    while bytes.get(p) == Some(&b'0') {
+        p += 1;
+    }
+    let start = p;
+    while p < bytes.len() && bytes[p].is_ascii_digit() {
+        p += 1;
+    }
+    let digits = p - start;
+    let sign = if neg { -1 } else { 1 };
+    if digits >= 20 {
+        return sign;
+    }
+    if digits == 19 {
+        // (a fraction or exponent makes it a double literal: no overflow)
+        let next = bytes.get(p).copied().unwrap_or(0);
+        if next == b'.' {
+            return 0;
+        }
+        if next == b'e' || next == b'E' {
+            let mut e = p + 1;
+            if matches!(bytes.get(e), Some(b'-' | b'+')) {
+                e += 1;
+            }
+            if bytes.get(e).is_some_and(|c| c.is_ascii_digit()) {
+                return 0;
+            }
+        }
+        let cmp = bytes[start..p].cmp(b"9223372036854775808".as_slice());
+        if !(cmp == std::cmp::Ordering::Less || (cmp == std::cmp::Ordering::Equal && neg)) {
+            return sign;
+        }
+    }
+    0
 }
 
-/// Compare two integer strings numerically (handling arbitrarily large numbers)
-fn compare_integer_strings(a: &str, b: &str) -> i64 {
-    let a_neg = a.starts_with('-');
-    let b_neg = b.starts_with('-');
-    if a_neg != b_neg {
-        return if a_neg { -1 } else { 1 };
+/// zend_binary_strcmp(), normalized.
+fn binary_strcmp(a: &[u8], b: &[u8]) -> i64 {
+    match a.cmp(b) {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
     }
-    let a_digits = a.trim_start_matches(['-', '+']).trim_start_matches('0');
-    let b_digits = b.trim_start_matches(['-', '+']).trim_start_matches('0');
-    let cmp = if a_digits.len() != b_digits.len() {
-        if a_digits.len() < b_digits.len() {
-            -1
-        } else {
-            1
-        }
-    } else {
-        match a_digits.cmp(b_digits) {
-            std::cmp::Ordering::Less => -1,
-            std::cmp::Ordering::Equal => 0,
-            std::cmp::Ordering::Greater => 1,
-        }
+}
+
+/// zendi_smart_streq(): `==` of two strings.
+pub fn smart_streq(a: &[u8], b: &[u8]) -> bool {
+    let (Some((n1, _)), Some((n2, _))) = (parse_numeric_str(a, false), parse_numeric_str(b, false))
+    else {
+        return a == b;
     };
-    if a_neg { -cmp } else { cmp }
+    let (o1, o2) = (numeric_str_oflow(a), numeric_str_oflow(b));
+    let d = |n: NumStr| match n {
+        NumStr::Long(l) => l as f64,
+        NumStr::Double(d) => d,
+    };
+    if o1 != 0 && o1 == o2 && d(n1) - d(n2) == 0.0 {
+        // both integers overflowed to the same side: compare the strings
+        return a == b;
+    }
+    match (n1, n2) {
+        (NumStr::Long(l1), NumStr::Long(l2)) => l1 == l2,
+        (NumStr::Long(l1), NumStr::Double(d2)) => o2 == 0 && l1 as f64 == d2,
+        (NumStr::Double(d1), NumStr::Long(l2)) => o1 == 0 && d1 == l2 as f64,
+        (NumStr::Double(d1), NumStr::Double(d2)) => {
+            if d1 == d2 && !d1.is_finite() {
+                a == b
+            } else {
+                d1 == d2
+            }
+        }
+    }
+}
+
+/// zendi_smart_strcmp(): `<=>` of two strings.
+pub fn smart_strcmp(a: &[u8], b: &[u8]) -> i64 {
+    let (Some((n1, _)), Some((n2, _))) = (parse_numeric_str(a, false), parse_numeric_str(b, false))
+    else {
+        return binary_strcmp(a, b);
+    };
+    let (o1, o2) = (numeric_str_oflow(a), numeric_str_oflow(b));
+    let d = |n: NumStr| match n {
+        NumStr::Long(l) => l as f64,
+        NumStr::Double(d) => d,
+    };
+    let norm = |x: f64| -> i64 { (x > 0.0) as i64 - (x < 0.0) as i64 };
+    if o1 != 0 && o1 == o2 && d(n1) - d(n2) == 0.0 {
+        return binary_strcmp(a, b);
+    }
+    match (n1, n2) {
+        (NumStr::Long(l1), NumStr::Long(l2)) => (l1 > l2) as i64 - (l1 < l2) as i64,
+        (NumStr::Long(l1), NumStr::Double(d2)) => {
+            if o2 != 0 {
+                -o2
+            } else {
+                norm(l1 as f64 - d2)
+            }
+        }
+        (NumStr::Double(d1), NumStr::Long(l2)) => {
+            if o1 != 0 {
+                o1
+            } else {
+                norm(d1 - l2 as f64)
+            }
+        }
+        (NumStr::Double(d1), NumStr::Double(d2)) => {
+            if d1 == d2 && !d1.is_finite() {
+                binary_strcmp(a, b)
+            } else {
+                norm(d1 - d2)
+            }
+        }
+    }
 }
 
 /// Result of `_is_numeric_string_ex`.
