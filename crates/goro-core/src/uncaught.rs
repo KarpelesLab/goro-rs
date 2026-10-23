@@ -410,12 +410,11 @@ impl Vm {
                     self.observe_uncaught_tostring(&exc, &chain, &fatal);
                 }
                 fatal.push_str("\n  thrown");
-                self.fatal_error_cb(
-                    crate::errdisplay::E_ERROR,
-                    &fatal,
-                    &thrown_file,
-                    thrown_line,
-                );
+                let severity = self
+                    .uncaught_severity
+                    .take()
+                    .unwrap_or(crate::errdisplay::E_ERROR);
+                self.fatal_error_cb(severity, &fatal, &thrown_file, thrown_line);
                 self.fatal_emitted = true;
                 return;
             }

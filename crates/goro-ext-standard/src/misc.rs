@@ -5894,6 +5894,31 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         vm.current_line = line;
         if vm.current_exception.is_some() {
+            // With assert.bail, the callback's exception is reported as a
+            // warning after the assertion's, and the script exits.
+            if !assert_ini_bool(vm, b"assert.exception", true)
+                && assert_ini_bool(vm, b"assert.bail", false)
+            {
+                if assert_ini_bool(vm, b"assert.warning", true) {
+                    let d = desc_str
+                        .as_ref()
+                        .map(|d| d.to_string_lossy())
+                        .unwrap_or_else(|| "Assertion".to_string());
+                    vm.emit_warning_at(&format!("assert(): {} failed", d), line);
+                }
+                let fatal_before = vm.fatal_emitted;
+                vm.uncaught_severity = Some(2);
+                let e = VmError {
+                    message: "Uncaught exception".into(),
+                    line,
+                };
+                vm.report_uncaught(&e);
+                vm.uncaught_severity = None;
+                vm.fatal_emitted = fatal_before;
+                vm.current_exception = None;
+                vm.exit_requested = true;
+                return Ok(Value::Null);
+            }
             return Err(VmError {
                 message: "Uncaught exception".into(),
                 line,

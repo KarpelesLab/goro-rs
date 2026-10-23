@@ -968,6 +968,9 @@ pub struct Vm {
     /// The dimension fetch in progress is bound by reference (FE_RESET_RW
     /// & co.: "Cannot create references to/from string offsets").
     pub(crate) str_wb_ref_ctx: bool,
+    /// The severity an uncaught exception is reported with
+    /// (zend_exception_error(ex, severity)); E_ERROR when None.
+    pub uncaught_severity: Option<i64>,
     /// Registered built-in functions
     pub functions: crate::fxhash::FxHashMap<Vec<u8>, BuiltinFn>,
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
@@ -1540,6 +1543,7 @@ impl Vm {
             str_wb_pending: None,
             str_wb_obj_ctx: false,
             str_wb_ref_ctx: false,
+            uncaught_severity: None,
             functions: Default::default(),
             builtin_param_names: HashMap::new(),
             user_functions: Default::default(),
