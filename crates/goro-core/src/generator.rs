@@ -176,6 +176,7 @@ impl Drop for PhpGenerator {
         // free_obj releases the frame before the handle goes back to the
         // free list (zend_objects_store_del).
         if self.object_id != 0 {
+            self.release_param_copies();
             drop(std::mem::take(&mut self.cvs));
             drop(std::mem::take(&mut self.tmps));
             drop(self.symtab.take());
@@ -489,6 +490,21 @@ impl PhpGenerator {
         }
     }
 
+    /// The frame's copies of its parameters' values (for backtraces, which
+    /// read the CVs while it runs) are released first: the parameters are
+    /// freed with the CVs, in declaration order.
+    fn release_param_copies(&mut self) {
+        let op = &self.op_array;
+        let base = crate::internal_frames::implicit_args(op);
+        let nfixed = (op.param_count as usize)
+            .saturating_sub(base + usize::from(op.variadic_param.is_some()));
+        for a in self.args.iter_mut().take(nfixed) {
+            if matches!(a, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
+                *a = Value::Null;
+            }
+        }
+    }
+
     /// Detach everything the frame owns (the generator is garbage).
     pub(crate) fn take_gc_children(&mut self) -> Vec<Value> {
         let mut out: Vec<Value> = Vec::new();
@@ -697,6 +713,7 @@ impl PhpGenerator {
         }
         if self.state == GeneratorState::Completed {
             let mut freed = false;
+            self.release_param_copies();
             for v in self.tmps.iter_mut().chain(self.cvs.iter_mut()) {
                 if matches!(v, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
                     freed = true;

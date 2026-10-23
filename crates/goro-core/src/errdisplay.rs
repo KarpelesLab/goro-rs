@@ -532,6 +532,7 @@ impl Vm {
                 ),
                 None => {
                     self.materialize_builtin_frames(false);
+                    self.sync_frame_args();
                     format!("\nStack trace:\n{}", self.format_stack_trace())
                 }
             }

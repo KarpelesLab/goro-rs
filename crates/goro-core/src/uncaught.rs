@@ -184,6 +184,7 @@ impl Vm {
     }
 
     pub fn report_uncaught(&mut self, e: &VmError) {
+        self.sync_frame_args();
         let stack_trace = self.format_stack_trace();
         let max_len = self.exception_string_param_max_len;
         if let Some(exc) = self.current_exception.take() {

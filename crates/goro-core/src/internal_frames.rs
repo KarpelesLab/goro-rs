@@ -784,6 +784,31 @@ impl Vm {
         }
     }
 
+    /// The frame registered last holds no copies of its parameters' values
+    /// (sync_frame_args() reads them from the CVs): the CVs are their only
+    /// holders, so they are released with them, in declaration order
+    /// (i_free_compiled_variables), or when a parameter is reassigned.
+    #[inline(never)]
+    pub(crate) fn release_cv_frame_arg_copies(&mut self) {
+        let Some(f) = self.cv_frames.last() else {
+            return;
+        };
+        let nfixed = f.nfixed as usize;
+        if nfixed == 0 {
+            return;
+        }
+        let Some(at) = self.cv_frame_index(f) else {
+            return;
+        };
+        let args = &mut self.call_stack[at].3;
+        let n = args.len().min(nfixed);
+        for a in args.iter_mut().take(n) {
+            if matches!(a, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
+                *a = Value::Null;
+            }
+        }
+    }
+
     /// The call_stack index of the frame `f` was registered for.
     fn cv_frame_index(&self, f: &CvFrame) -> Option<usize> {
         if self

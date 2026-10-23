@@ -20381,6 +20381,9 @@ impl Vm {
         let outer_exec = std::mem::replace(&mut self.exec_frame_len, self.call_stack.len());
         // Backtraces show the current values of the parameters.
         let cv_frame = self.register_cv_frame(op_array);
+        if cv_frame {
+            self.release_cv_frame_arg_copies();
+        }
         let prev_global = self.is_global_scope;
         self.is_global_scope = std::mem::take(&mut self.bind_next_frame);
         // The caller fetches the result of this by-ref function for writing.
@@ -20510,16 +20513,6 @@ impl Vm {
         // If result is Ok(Null) or Ok(Undef), and there was no explicit return, it's "none returned"
         // (Only needed with a declared return type: the scan over the ops
         // is skipped for the common untyped function.)
-        let implicit_return = op_array.return_type.is_some()
-            && matches!(result, Ok(Value::Undef) | Ok(Value::Null))
-            && op_array
-                .ops
-                .last()
-                .is_some_and(|op| op.opcode == OpCode::Return && op.line == 0)
-            && !op_array
-                .ops
-                .iter()
-                .any(|op| op.opcode == OpCode::Return && op.line != 0);
         let mut result = result.map(|v| {
             if matches!(v, Value::Undef) {
                 Value::Null
@@ -20542,28 +20535,61 @@ impl Vm {
                 ret_ref = Some(r);
             }
         }
-        // Coerce return value in weak mode (internal functions implemented in
-        // PHP don't verify their return values, like ZEND_INTERNAL_FUNCTIONs
-        // in release builds)
-        if let Ok(ref mut val) = result {
-            if let Some(ret_type) = op_array
-                .return_type
-                .as_ref()
-                .filter(|_| op_array.internal_sig.is_none())
-            {
-                self.verify_return_value(op_array, ret_type, val, implicit_return)?;
-            }
-        }
-
         match (result, ret_ref) {
-            (Ok(v), Some(r)) => {
-                // VERIFY_RETURN_TYPE coerces the referenced value in place.
-                if op_array.return_type.is_some() {
-                    *r.borrow_mut() = v;
-                }
+            (Ok(_), Some(r)) => Ok(Value::Reference(r)),
+            (result, _) => result,
+        }
+    }
+
+    /// VERIFY_RETURN_TYPE of a function's result, before its frame is left
+    /// (its parameters still show in the trace of a TypeError): checked
+    /// against the declared type and coerced in weak mode, a returned
+    /// reference's value in place. (Internal functions implemented in PHP
+    /// don't verify their return values, like ZEND_INTERNAL_FUNCTIONs in
+    /// release builds.)
+    #[inline(never)]
+    fn verify_return_in_frame(
+        &mut self,
+        op_array: &OpArray,
+        result: Result<Value, VmError>,
+    ) -> Result<Value, VmError> {
+        let Some(ret_type) = op_array
+            .return_type
+            .as_ref()
+            .filter(|_| op_array.internal_sig.is_none())
+        else {
+            return result;
+        };
+        let v = result?;
+        // Detect implicit return: the compiler emits `Return Null` with
+        // line=0 for implicit returns (nothing else returns then).
+        let implicit_return = matches!(v, Value::Undef | Value::Null)
+            && op_array
+                .ops
+                .last()
+                .is_some_and(|op| op.opcode == OpCode::Return && op.line == 0)
+            && !op_array
+                .ops
+                .iter()
+                .any(|op| op.opcode == OpCode::Return && op.line != 0);
+        match v {
+            Value::Reference(r) => {
+                let mut val = match &*r.borrow() {
+                    Value::Undef => Value::Null,
+                    v => v.clone(),
+                };
+                self.verify_return_value(op_array, ret_type, &mut val, implicit_return)?;
+                *r.borrow_mut() = val;
                 Ok(Value::Reference(r))
             }
-            (result, _) => result,
+            v => {
+                let mut val = match v {
+                    Value::Undef => Value::Null,
+                    v => v,
+                };
+                self.verify_return_value(op_array, ret_type, &mut val, implicit_return)?;
+                Ok(val)
+            }
         }
     }
 
@@ -20750,6 +20776,12 @@ impl Vm {
         let r = self.execute_frame(
             op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin, &mut sym, &mut fe,
         );
+        // VERIFY_RETURN_TYPE runs in the function, before its frame is left.
+        let r = if op_array.return_type.is_some() && r.is_ok() {
+            self.verify_return_in_frame(op_array, r)
+        } else {
+            r
+        };
         // (released as the temporary state of a frame used to be, right
         // after its execution)
         fe.clear();
@@ -27395,21 +27427,40 @@ impl Vm {
                         let mut func_cvs = self.take_values(user_fn.cv_names.len());
                         // Extra arguments are only reachable through func_get_args().
                         let bound = arg_cv_bound(&user_fn, func_cvs.len());
+                        // The parameters move to the callee's CVs (which then
+                        // release them in declaration order); `$this` stays,
+                        // and so do the extra arguments a variadic parameter
+                        // collects (freed after the CVs, zend_free_extra_args).
+                        let keep = usize::from(has_this);
+                        let take = |i: usize, arg: &mut Value| {
+                            if i < keep {
+                                arg.clone()
+                            } else {
+                                std::mem::replace(arg, Value::Undef)
+                            }
+                        };
                         match user_fn.variadic_param.filter(|_| captures.is_none()) {
                             None => {
-                                for (slot, arg) in
-                                    func_cvs.iter_mut().zip(call.args.iter()).take(bound)
+                                for (i, (slot, arg)) in func_cvs
+                                    .iter_mut()
+                                    .zip(call.args.iter_mut())
+                                    .take(bound)
+                                    .enumerate()
                                 {
-                                    *slot = arg.clone();
+                                    *slot = take(i, arg);
                                 }
                             }
                             Some(vi) => {
                                 // The arguments from the variadic parameter's
                                 // position on make its array.
                                 let vi = vi as usize;
-                                for (slot, arg) in func_cvs.iter_mut().zip(call.args.iter()).take(vi)
+                                for (i, (slot, arg)) in func_cvs
+                                    .iter_mut()
+                                    .zip(call.args.iter_mut())
+                                    .take(vi)
+                                    .enumerate()
                                 {
-                                    *slot = arg.clone();
+                                    *slot = take(i, arg);
                                 }
                                 let mut rest = crate::array::PhpArray::new();
                                 for arg in call.args.iter().skip(vi) {
@@ -27432,8 +27483,10 @@ impl Vm {
                                 continue;
                             }
                             if let Value::Array(a) = slot {
+                                // (moved from the argument list: the CV and
+                                // the frame's copy)
                                 let held = if plain_args && ci >= skip && ci < bound.min(nargs) {
-                                    3
+                                    2
                                 } else {
                                     1
                                 };
@@ -31569,12 +31622,23 @@ impl Vm {
 
                         // Set up parameters as CVs (handle variadic)
                         let mut func_cvs = vec![Value::Undef; user_fn.cv_names.len()];
+                        // The parameters move to the callee's CVs (which then
+                        // release them in declaration order); `$this` stays,
+                        // and so do the extra arguments a variadic parameter
+                        // collects (freed after the CVs, zend_free_extra_args).
+                        let keep = usize::from(
+                            user_fn.cv_names.first().map(|n| n.as_slice()) == Some(b"this"),
+                        );
                         if let Some(variadic_idx) = user_fn.variadic_param {
                             let vi = variadic_idx as usize;
                             // Regular params first
-                            for (i, arg) in call.args.iter().enumerate() {
+                            for (i, arg) in call.args.iter_mut().enumerate() {
                                 if i < vi && i < func_cvs.len() {
-                                    func_cvs[i] = arg.clone();
+                                    func_cvs[i] = if i < keep {
+                                        arg.clone()
+                                    } else {
+                                        std::mem::replace(arg, Value::Undef)
+                                    };
                                 }
                             }
                             // Pack remaining args into an array for the variadic param
@@ -31592,9 +31656,14 @@ impl Vm {
                                     Value::Array(Rc::new(RefCell::new(variadic_arr)));
                             }
                         } else {
-                            for (i, arg) in call.args.iter().enumerate() {
-                                if i < arg_cv_bound(&user_fn, func_cvs.len()) {
-                                    func_cvs[i] = arg.clone();
+                            let bound = arg_cv_bound(&user_fn, func_cvs.len());
+                            for (i, arg) in call.args.iter_mut().enumerate() {
+                                if i < bound {
+                                    func_cvs[i] = if i < keep {
+                                        arg.clone()
+                                    } else {
+                                        std::mem::replace(arg, Value::Undef)
+                                    };
                                 }
                             }
                         }
