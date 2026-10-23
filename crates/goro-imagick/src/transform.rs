@@ -830,3 +830,75 @@ pub fn interpolative_resize(
     out.colors = None;
     out
 }
+
+/// SmushImages(): append with `offset` pixels between neighbours, each
+/// moved back over the transparent edges the two share in every row
+/// (column, when stacked).
+pub fn smush(images: &[&Image], stack: bool, offset: i64, background: &PixelInfo) -> Image {
+    // transparent run at the start / end of line `k` of an image
+    let run = |img: &Image, k: usize, from_end: bool| -> usize {
+        let n = if stack { img.rows } else { img.columns };
+        let mut c = 0;
+        for t in 0..n {
+            let t = if from_end { n - 1 - t } else { t };
+            let (x, y) = if stack { (k, t) } else { (t, k) };
+            if img.alpha && img.px(x, y)[3] == 0 {
+                c += 1;
+            } else {
+                break;
+            }
+        }
+        c
+    };
+    let mut pos = vec![0i64; images.len()];
+    for i in 1..images.len() {
+        let (a, b) = (images[i - 1], images[i]);
+        let lines = if stack {
+            a.columns.min(b.columns)
+        } else {
+            a.rows.min(b.rows)
+        };
+        let shared = (0..lines)
+            .map(|k| run(a, k, true) + run(b, k, false))
+            .min()
+            .unwrap_or(0) as i64;
+        let len = if stack { a.rows } else { a.columns } as i64;
+        pos[i] = pos[i - 1] + len - shared + offset;
+    }
+    let extent = |i: usize| -> i64 {
+        pos[i]
+            + if stack {
+                images[i].rows
+            } else {
+                images[i].columns
+            } as i64
+    };
+    let total = (0..images.len()).map(extent).max().unwrap_or(0).max(1) as usize;
+    let across = images
+        .iter()
+        .map(|i| if stack { i.columns } else { i.rows })
+        .max()
+        .unwrap_or(1);
+    let (w, h) = if stack {
+        (across, total)
+    } else {
+        (total, across)
+    };
+    let mut out = images[0].clone_attributes(w, h);
+    out.alpha = images.iter().any(|i| i.alpha);
+    out.fill(background);
+    for (i, img) in images.iter().enumerate() {
+        let (x, y) = if stack { (0, pos[i]) } else { (pos[i], 0) };
+        composite_image(
+            &mut out,
+            img,
+            CompositeOp::Over,
+            x,
+            y,
+            &ComposeArgs::default(),
+        );
+    }
+    out.page = Rect::new(w, h, 0, 0);
+    out.colors = None;
+    out
+}

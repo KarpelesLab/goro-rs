@@ -1490,13 +1490,14 @@ fn stegano_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 fn smush_images(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "bl", args)?;
     let stack = a[0].bool_or(false);
+    let offset = a[1].long_or(0);
     let d = d_(o);
     not_empty(vm, &d)?;
     let out = {
         let w = d.wand.borrow();
         let bg = w.images[0].background_color.clone();
         let refs: Vec<&Image> = w.images.iter().collect();
-        transform::append(&refs, stack, &bg, w.settings.gravity)
+        transform::smush(&refs, stack, offset, &bg)
     };
     let nw = new_wand_from(&d, vec![out]);
     Ok(new_imagick(vm, nw))
