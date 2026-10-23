@@ -1030,7 +1030,7 @@ impl crate::vm::Vm {
                 return false;
             }
             let Some(pce) = self.classes.get(pl) else {
-                return false;
+                return plain_internal_base(pl, prop);
             };
             if pce.filename.is_none() {
                 return false;
@@ -1310,6 +1310,26 @@ impl crate::vm::Vm {
         }
         Fast::Jump(ip + 2)
     }
+}
+
+/// Whether internal class `lower` (and its ancestors) keeps its objects'
+/// properties as plain slots, declaring no property `prop`: the Exception
+/// and Error hierarchy, whose objects have no handlers of their own.
+fn plain_internal_base(lower: &[u8], prop: &[u8]) -> bool {
+    let mut cur = crate::stubs::find_class_lower(lower);
+    for _ in 0..16 {
+        let Some(c) = cur else {
+            return false;
+        };
+        if c.props.iter().any(|p| p.name.as_bytes() == prop) {
+            return false;
+        }
+        match c.parent {
+            None => return c.name == "Exception" || c.name == "Error",
+            Some(p) => cur = crate::stubs::find_class(p.as_bytes()),
+        }
+    }
+    false
 }
 
 #[cfg(test)]
