@@ -5183,6 +5183,37 @@ fn is_php_filter(p: &[u8]) -> bool {
 
 /// include/require of a php://filter/ URL: the resource read through its
 /// filters (php_stream_url_wrap_php()).
+/// The warnings opening a php://filter URL for inclusion raised besides
+/// its failure to open (a filter that cannot be created, ...): php_verror()
+/// names them after the include opline (`include`, `require_once`...), or,
+/// once an exception moved the opline to its handler, after the active
+/// function (`main` at the top level).
+#[inline(never)]
+fn include_filter_warnings(vm: &mut Vm, name: &str, captured: &[String], unprocessed: &str) {
+    for w in captured {
+        if w.contains("Failed to open stream") || w.contains(unprocessed) {
+            continue;
+        }
+        // (a docref prefix "fn(): " of the reading builtin)
+        let msg = match w.find("(): ") {
+            Some(i)
+                if w[..i]
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_') =>
+            {
+                &w[i + 4..]
+            }
+            _ => w.as_str(),
+        };
+        let func = match vm.call_stack.last() {
+            _ if vm.current_exception.is_none() => name.to_string(),
+            Some((f, ..)) if !f.is_empty() => f.replace("->", "::"),
+            _ => "main".to_string(),
+        };
+        vm.emit_warning(&format!("{}(): {}", func, msg));
+    }
+}
+
 fn include_php_filter(vm: &mut Vm, path: &str, kind: u8) -> Result<Vec<u8>, VmError> {
     let name = match kind {
         1 => "include_once",
@@ -5219,6 +5250,7 @@ fn include_php_filter(vm: &mut Vm, path: &str, kind: u8) -> Result<Vec<u8>, VmEr
         // file cannot be opened for inclusion (zend_stream_fixup()).
         const UNPROCESSED: &str = "Unprocessed filter buckets remaining on input brigade";
         filter_failed = captured.iter().any(|w| w.contains(UNPROCESSED));
+        include_filter_warnings(vm, name, &captured, UNPROCESSED);
         if filter_failed {
             vm.emit_warning(&format!("{}(): {}", name, UNPROCESSED));
         }
