@@ -26,6 +26,7 @@ mod consts;
 mod draw;
 mod imagick;
 mod kernel;
+mod morph;
 mod ops;
 mod ops2;
 mod pixel;

@@ -1317,119 +1317,6 @@ fn polaroid_with_text_and_method(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &
     )
 }
 
-/// MorphologyImage() with a kernel list.
-fn morphology_of(i: &mut Image, method: i64, iterations: i64, kernels: &[crate::kernel::Kernel]) {
-    let erode_dilate = |img: &Image, k: &crate::kernel::Kernel, dilate: bool| -> Image {
-        let mut out = img.clone();
-        for y in 0..img.rows {
-            for x in 0..img.columns {
-                let mut best = [if dilate { 0u16 } else { 65535 }; 3];
-                for ky in 0..k.height {
-                    for kx in 0..k.width {
-                        let w = k.values[ky * k.width + kx];
-                        if w.is_nan() || w <= 0.0 {
-                            continue;
-                        }
-                        let (sx, sy) = if dilate {
-                            (
-                                x as i64 - (kx as i64 - k.x as i64),
-                                y as i64 - (ky as i64 - k.y as i64),
-                            )
-                        } else {
-                            (
-                                x as i64 + kx as i64 - k.x as i64,
-                                y as i64 + ky as i64 - k.y as i64,
-                            )
-                        };
-                        let p = img.virtual_px(sx, sy);
-                        for c in 0..3 {
-                            best[c] = if dilate {
-                                best[c].max(p[c])
-                            } else {
-                                best[c].min(p[c])
-                            };
-                        }
-                    }
-                }
-                let mut p = img.px(x, y);
-                p[..3].copy_from_slice(&best);
-                out.set_px(x, y, p);
-            }
-        }
-        out
-    };
-    let convolve = |img: &Image, k: &crate::kernel::Kernel| -> Image {
-        let mut out = img.clone();
-        for y in 0..img.rows {
-            for x in 0..img.columns {
-                let mut acc = [0f64; 3];
-                for ky in 0..k.height {
-                    for kx in 0..k.width {
-                        let w = k.values[ky * k.width + kx];
-                        if w.is_nan() || w == 0.0 {
-                            continue;
-                        }
-                        let p = img.virtual_px(
-                            x as i64 + kx as i64 - k.x as i64,
-                            y as i64 + ky as i64 - k.y as i64,
-                        );
-                        for c in 0..3 {
-                            acc[c] += w * p[c] as f64;
-                        }
-                    }
-                }
-                let mut p = img.px(x, y);
-                for c in 0..3 {
-                    p[c] = to_q16(acc[c]);
-                }
-                out.set_px(x, y, p);
-            }
-        }
-        out
-    };
-    let n = if iterations < 0 { 1 } else { iterations.max(1) } as usize;
-    for k in kernels {
-        for _ in 0..n {
-            let src = i.clone();
-            let r = match method {
-                1 | 2 => convolve(&src, k),
-                3 | 5 => erode_dilate(&src, k, false),
-                4 | 6 => erode_dilate(&src, k, true),
-                8 | 10 => erode_dilate(&erode_dilate(&src, k, false), k, true),
-                9 | 11 => erode_dilate(&erode_dilate(&src, k, true), k, false),
-                12 => {
-                    let o = erode_dilate(&erode_dilate(&src, k, false), k, true);
-                    erode_dilate(&erode_dilate(&o, k, true), k, false)
-                }
-                13..=17 => {
-                    let e = erode_dilate(&src, k, false);
-                    let dl = erode_dilate(&src, k, true);
-                    let mut out = src.clone();
-                    for (idx, p) in out.pixels.chunks_exact_mut(4).enumerate() {
-                        for c in 0..3 {
-                            let s = src.pixels[idx * 4 + c] as i32;
-                            let ev = e.pixels[idx * 4 + c] as i32;
-                            let dv = dl.pixels[idx * 4 + c] as i32;
-                            let v = match method {
-                                13 => s - ev,
-                                14 => dv - s,
-                                15 => dv - ev,
-                                16 => s - ev.max(0),
-                                _ => dv - s,
-                            };
-                            p[c] = v.clamp(0, 65535) as u16;
-                        }
-                    }
-                    out
-                }
-                _ => convolve(&src, k),
-            };
-            *i = r;
-        }
-    }
-    i.colors = None;
-}
-
 fn morphology(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "llz|l", args)?;
     let method = a[0].long_or(1);
@@ -1439,8 +1326,16 @@ fn morphology(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
         _ => return Err(()),
     };
     let ks = crate::kernel::kernels_of(vm, &kobj)?;
+    let ch = a[3].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to morphology image", |i| {
-        morphology_of(i, method, iterations, &ks);
+        // ImageMagick refuses zero iterations
+        if iterations == 0 {
+            return Err(MagickError::new(
+                goro_imagick::error::severity::OPTION_ERROR,
+                String::new(),
+            ));
+        }
+        crate::morph::morphology(i, method, iterations, &ks, ch);
         Ok(())
     })
 }

@@ -2744,35 +2744,6 @@ fn color_matrix_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) ->
 }
 
 /// ConvolveImage() with an ImagickKernel (Q16, edge virtual pixels).
-fn convolve_of(i: &mut Image, k: &crate::kernel::Kernel) {
-    let src = i.clone();
-    for y in 0..i.rows {
-        for x in 0..i.columns {
-            let mut acc = [0f64; 3];
-            for ky in 0..k.height {
-                for kx in 0..k.width {
-                    let w = k.values[ky * k.width + kx];
-                    if w.is_nan() || w == 0.0 {
-                        continue;
-                    }
-                    let sx = x as i64 + kx as i64 - k.x as i64;
-                    let sy = y as i64 + ky as i64 - k.y as i64;
-                    let p = src.virtual_px(sx, sy);
-                    for c in 0..3 {
-                        acc[c] += w * p[c] as f64;
-                    }
-                }
-            }
-            let mut p = src.px(x, y);
-            for c in 0..3 {
-                p[c] = to_q16(acc[c]);
-            }
-            i.set_px(x, y, p);
-        }
-    }
-    i.colors = None;
-}
-
 fn convolve_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "z|l", args)?;
     let kobj = match &a[0] {
@@ -2780,10 +2751,9 @@ fn convolve_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
         _ => return Err(()),
     };
     let ks = crate::kernel::kernels_of(vm, &kobj)?;
+    let ch = a[1].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Failed to filter image", |i| {
-        for k in &ks {
-            convolve_of(i, k);
-        }
+        crate::morph::convolve(i, &ks, ch);
         Ok(())
     })
 }
