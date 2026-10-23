@@ -1085,6 +1085,7 @@ impl Vm {
             return self.spl_throw(b"Error", &msg);
         }
         let t = self.ao_table(obj);
+        let phys = self.ao_physical_pos(obj, &t);
         let copy = self.table_copy(&t);
         // Sort builtins sort their array argument in place.
         let sorted_rc = Rc::new(RefCell::new(copy));
@@ -1127,7 +1128,49 @@ impl Vm {
                 }
             }
         }
+        // The hash iterator keeps its bucket index over the sorted (and
+        // compacted) table.
+        if let Some(p) = phys {
+            let t = self.ao_table(obj);
+            let (_, k) = self.table_len_key_at(&t, p);
+            Self::ao_set_pos(obj, p, k.as_ref());
+        }
         Some(res.unwrap_or(Value::True))
+    }
+
+    /// The bucket index (HashPosition) of the iterator position, None while
+    /// no position was taken yet: a packed table is indexed by key, holes
+    /// included.
+    fn ao_physical_pos(&self, obj: &Rc<RefCell<PhpObject>>, t: &Table) -> Option<usize> {
+        let (pos, has_key) = {
+            let ob = obj.borrow();
+            (
+                match ob.get_property(b"__spl_pos") {
+                    Value::Long(n) if n >= 0 => n as usize,
+                    _ => 0,
+                },
+                matches!(
+                    ob.get_property(b"__spl_pos_key"),
+                    Value::Long(_) | Value::String(_)
+                ),
+            )
+        };
+        if !has_key && pos == 0 {
+            return None;
+        }
+        let packed = match t {
+            Table::Arr(a) => a.borrow().looks_packed(),
+            Table::Obj(_) => false,
+        };
+        match self.ao_current(obj) {
+            Some((_, ArrayKey::Int(n), _)) if packed => Some(n as usize),
+            Some((i, _, _)) => Some(i),
+            None if packed => match t {
+                Table::Arr(a) => Some(a.borrow().next_free_key().max(0) as usize),
+                Table::Obj(_) => Some(pos),
+            },
+            None => Some(pos),
+        }
     }
 
     fn disabled_functions_contains(&self, f: &[u8]) -> bool {
