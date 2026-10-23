@@ -1144,6 +1144,13 @@ impl Vm {
         if self.consts_updated.contains(class_lower) {
             return Ok(());
         }
+        // A class without constant-expression constants or defaults of its
+        // own or inherited is ZEND_ACC_CONSTANTS_UPDATED from the start: its
+        // parent's are not evaluated either (bug #78014).
+        if !self.has_ast_constants(class_lower) {
+            self.consts_updated.insert(class_lower.to_vec());
+            return Ok(());
+        }
         // The parent's constants first, then this class's constants (in
         // declaration order), then its property defaults.
         if let Some(parent) = self
@@ -1307,6 +1314,28 @@ impl Vm {
         }
         self.consts_updated.insert(class_lower.to_vec());
         Ok(())
+    }
+}
+
+impl Vm {
+    /// ZEND_ACC_HAS_AST_CONSTANTS / _PROPERTIES / _STATICS: the class's
+    /// tables (inherited entries included) hold an unevaluated constant
+    /// expression.
+    #[inline(never)]
+    fn has_ast_constants(&self, class_lower: &[u8]) -> bool {
+        const GC: &[u8] = b"__deferred_global_const__::";
+        let Some(c) = self.classes.get(class_lower) else {
+            return false;
+        };
+        c.constants.values().any(|v| thunk_marker_name(v).is_some())
+            || c.properties.iter().any(|p| {
+                thunk_marker_name(&p.default).is_some()
+                    || matches!(&p.default, Value::String(s) if s.as_bytes().starts_with(GC))
+            })
+            || c
+                .static_properties
+                .values()
+                .any(|v| thunk_marker_name(v).is_some())
     }
 }
 
