@@ -1,4 +1,4 @@
-//! Port of php-src ext/mbstring/php_mbregex.c on top of `crate::onig`.
+//! Port of php-src ext/mbstring/php_mbregex.c on top of `crate::oniguruma`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -11,7 +11,9 @@ use goro_core::vm::{Vm, VmError};
 
 use crate::mbfl::{self, Encoding};
 use crate::mbstring::check_encoding;
-use crate::onig::{self, Limits, RegEnc, Regex, Region, Syntax};
+use crate::oniguruma::{
+    self as onig, EncKind, MatchParam, ONIG_MISMATCH, ONIG_REGION_NOTPOS, Regex, Region, Syntax,
+};
 use crate::state;
 use crate::zpp::*;
 
@@ -35,16 +37,16 @@ pub fn register(vm: &mut Vm) {
 }
 
 /// (names, onig encoding) as in php_mbregex.c's enc_name_map
-static ENC_NAME_MAP: &[(&[&str], RegEnc)] = &[
+static ENC_NAME_MAP: &[(&[&str], EncKind)] = &[
     (
         &["EUC-JP", "EUCJP", "X-EUC-JP", "UJIS", "EUCJP", "EUCJP-WIN"],
-        RegEnc::EucJp,
+        EncKind::EucJp,
     ),
-    (&["UTF-8", "UTF8"], RegEnc::Utf8),
-    (&["UTF-16", "UTF-16BE"], RegEnc::Utf16Be),
-    (&["UTF-16LE"], RegEnc::Utf16Le),
-    (&["UCS-4", "UTF-32", "UTF-32BE"], RegEnc::Utf32Be),
-    (&["UCS-4LE", "UTF-32LE"], RegEnc::Utf32Le),
+    (&["UTF-8", "UTF8"], EncKind::Utf8),
+    (&["UTF-16", "UTF-16BE"], EncKind::Utf16Be),
+    (&["UTF-16LE"], EncKind::Utf16Le),
+    (&["UCS-4", "UTF-32", "UTF-32BE"], EncKind::Utf32Be),
+    (&["UCS-4LE", "UTF-32LE"], EncKind::Utf32Le),
     (
         &[
             "SJIS",
@@ -54,39 +56,39 @@ static ENC_NAME_MAP: &[(&[&str], RegEnc)] = &[
             "SJIS-WIN",
             "WINDOWS-31J",
         ],
-        RegEnc::Sjis,
+        EncKind::Sjis,
     ),
     (
         &["BIG5", "BIG-5", "BIGFIVE", "CN-BIG5", "BIG-FIVE"],
-        RegEnc::Big5,
+        EncKind::Big5,
     ),
     (
         &["EUC-CN", "EUCCN", "EUC_CN", "GB-2312", "GB2312"],
-        RegEnc::EucCn,
+        EncKind::EucCn,
     ),
-    (&["EUC-TW", "EUCTW", "EUC_TW"], RegEnc::EucTw),
-    (&["EUC-KR", "EUCKR", "EUC_KR"], RegEnc::EucKr),
-    (&["KOI8", "KOI-8"], RegEnc::Koi8),
-    (&["KOI8R", "KOI8-R", "KOI-8R"], RegEnc::Koi8R),
-    (&["ISO-8859-1", "ISO8859-1"], RegEnc::Latin1),
-    (&["ISO-8859-2", "ISO8859-2"], RegEnc::SingleByte),
-    (&["ISO-8859-3", "ISO8859-3"], RegEnc::SingleByte),
-    (&["ISO-8859-4", "ISO8859-4"], RegEnc::SingleByte),
-    (&["ISO-8859-5", "ISO8859-5"], RegEnc::SingleByte),
-    (&["ISO-8859-6", "ISO8859-6"], RegEnc::SingleByte),
-    (&["ISO-8859-7", "ISO8859-7"], RegEnc::SingleByte),
-    (&["ISO-8859-8", "ISO8859-8"], RegEnc::SingleByte),
-    (&["ISO-8859-9", "ISO8859-9"], RegEnc::SingleByte),
-    (&["ISO-8859-10", "ISO8859-10"], RegEnc::SingleByte),
-    (&["ISO-8859-11", "ISO8859-11"], RegEnc::SingleByte),
-    (&["ISO-8859-13", "ISO8859-13"], RegEnc::SingleByte),
-    (&["ISO-8859-14", "ISO8859-14"], RegEnc::SingleByte),
-    (&["ISO-8859-15", "ISO8859-15"], RegEnc::SingleByte),
-    (&["ISO-8859-16", "ISO8859-16"], RegEnc::SingleByte),
-    (&["ASCII", "US-ASCII", "US_ASCII", "ISO646"], RegEnc::Ascii),
+    (&["EUC-TW", "EUCTW", "EUC_TW"], EncKind::EucTw),
+    (&["EUC-KR", "EUCKR", "EUC_KR"], EncKind::EucKr),
+    /* KOI8: PHP_ONIG_BAD_KOI8_ENTRY (libonig does not ship OnigEncodingKOI8) */
+    (&["KOI8R", "KOI8-R", "KOI-8R"], EncKind::Koi8R),
+    (&["ISO-8859-1", "ISO8859-1"], EncKind::Iso8859(1)),
+    (&["ISO-8859-2", "ISO8859-2"], EncKind::Iso8859(2)),
+    (&["ISO-8859-3", "ISO8859-3"], EncKind::Iso8859(3)),
+    (&["ISO-8859-4", "ISO8859-4"], EncKind::Iso8859(4)),
+    (&["ISO-8859-5", "ISO8859-5"], EncKind::Iso8859(5)),
+    (&["ISO-8859-6", "ISO8859-6"], EncKind::Iso8859(6)),
+    (&["ISO-8859-7", "ISO8859-7"], EncKind::Iso8859(7)),
+    (&["ISO-8859-8", "ISO8859-8"], EncKind::Iso8859(8)),
+    (&["ISO-8859-9", "ISO8859-9"], EncKind::Iso8859(9)),
+    (&["ISO-8859-10", "ISO8859-10"], EncKind::Iso8859(10)),
+    (&["ISO-8859-11", "ISO8859-11"], EncKind::Iso8859(11)),
+    (&["ISO-8859-13", "ISO8859-13"], EncKind::Iso8859(13)),
+    (&["ISO-8859-14", "ISO8859-14"], EncKind::Iso8859(14)),
+    (&["ISO-8859-15", "ISO8859-15"], EncKind::Iso8859(15)),
+    (&["ISO-8859-16", "ISO8859-16"], EncKind::Iso8859(16)),
+    (&["ASCII", "US-ASCII", "US_ASCII", "ISO646"], EncKind::Ascii),
 ];
 
-/// Index into ENC_NAME_MAP (single-byte ISO encodings share RegEnc values)
+/// Index into ENC_NAME_MAP
 fn name2mbctype(name: &[u8]) -> Option<usize> {
     if name.is_empty() {
         return None;
@@ -102,7 +104,7 @@ struct MbRex {
     default_mbctype: usize,
     current_mbctype: usize,
     current_mbfl: Option<&'static Encoding>,
-    cache: HashMap<Vec<u8>, (Rc<Regex>, u32, Syntax, usize)>,
+    cache: HashMap<Vec<u8>, Rc<Regex>>,
     search_str: Option<Vec<u8>>,
     search_pos: usize,
     search_re: Option<Rc<Regex>>,
@@ -122,7 +124,7 @@ impl MbRex {
             search_pos: 0,
             search_re: None,
             search_regs: None,
-            default_options: onig::OPT_MULTILINE | onig::OPT_SINGLELINE,
+            default_options: onig::ONIG_OPTION_MULTILINE | onig::ONIG_OPTION_SINGLELINE,
             default_syntax: Syntax::Ruby,
         }
     }
@@ -154,7 +156,7 @@ fn mbctype_name(i: usize) -> &'static str {
     ENC_NAME_MAP[i].0[0]
 }
 
-fn regex_encoding() -> (RegEnc, usize, Option<&'static Encoding>) {
+fn regex_encoding() -> (EncKind, usize, Option<&'static Encoding>) {
     with(|m| {
         (
             ENC_NAME_MAP[m.current_mbctype].1,
@@ -164,28 +166,42 @@ fn regex_encoding() -> (RegEnc, usize, Option<&'static Encoding>) {
     })
 }
 
-fn limits(vm: &Vm) -> Limits {
-    let get = |k: &[u8], d: i64| -> i64 {
-        match vm.constants.get(k) {
-            Some(Value::String(s)) if s.is_empty() => d,
-            Some(v) => v.to_long(),
-            None => d,
-        }
-    };
-    let stack = get(b"mbstring.regex_stack_limit", 100000);
-    let retry = get(b"mbstring.regex_retry_limit", 1000000);
-    Limits {
-        stack_limit: if stack > 0 && stack < u32::MAX as i64 {
-            stack as usize
-        } else {
-            0
-        },
-        retry_limit: if retry > 0 && retry < u32::MAX as i64 {
-            retry as usize
-        } else {
-            0
-        },
+fn ini_long(vm: &Vm, k: &[u8], d: i64) -> i64 {
+    match vm.constants.get(k) {
+        Some(Value::String(s)) if s.is_empty() => d,
+        Some(v) => v.to_long(),
+        None => d,
     }
+}
+
+/// The match parameters `_php_mb_onig_search()` sets up
+/// (ZEND_LONG_UINT_OVFL: values outside 0..=UINT_MAX keep the defaults)
+fn search_param(vm: &Vm) -> MatchParam {
+    let mut mp = MatchParam::default();
+    let stack = ini_long(vm, b"mbstring.regex_stack_limit", 100000);
+    let retry = ini_long(vm, b"mbstring.regex_retry_limit", 1000000);
+    if (0..=u32::MAX as i64).contains(&stack) {
+        mp.match_stack_limit = stack as u32;
+    }
+    if (0..=u32::MAX as i64).contains(&retry) {
+        mp.retry_limit_in_match = retry as u64;
+    }
+    mp
+}
+
+/// The match parameters mb_ereg_match() sets up (only values in
+/// 1..UINT_MAX are applied)
+fn match_param(vm: &Vm) -> MatchParam {
+    let mut mp = MatchParam::default();
+    let stack = ini_long(vm, b"mbstring.regex_stack_limit", 100000);
+    let retry = ini_long(vm, b"mbstring.regex_retry_limit", 1000000);
+    if stack > 0 && stack < u32::MAX as i64 {
+        mp.match_stack_limit = stack as u32;
+    }
+    if retry > 0 && retry < u32::MAX as i64 {
+        mp.retry_limit_in_match = retry as u64;
+    }
+    mp
 }
 
 fn check_mbctype_encoding(s: &[u8]) -> bool {
@@ -214,32 +230,34 @@ fn compile_pattern(
         return None;
     }
     let cached = with(|m| m.cache.get(pattern).cloned());
-    if let Some((r, o, sy, i)) = &cached {
-        if *o == options && *sy == syntax && *i == idx {
+    if let Some(r) = &cached {
+        if r.options() == options && r.kind == enc && r.syntax == syntax {
             return Some(r.clone());
         }
     }
-    match onig::compile(pattern, options, enc, syntax) {
+    match Regex::new(pattern, options, enc, syntax) {
         Ok(re) => {
             let re = Rc::new(re);
             with(|m| {
-                if let Some((old, ..)) = &cached {
-                    if m.search_re
-                        .as_ref()
-                        .map(|s| Rc::ptr_eq(s, old))
-                        .unwrap_or(false)
-                    {
-                        // see bug #72399
-                        m.search_re = None;
-                    }
+                let rc_is_search_re = match (&cached, &m.search_re) {
+                    (Some(old), Some(s)) => Rc::ptr_eq(s, old),
+                    (None, None) => true,
+                    _ => false,
+                };
+                if rc_is_search_re {
+                    /* reuse the new rc? see bug #72399 */
+                    m.search_re = None;
                 }
-                m.cache
-                    .insert(pattern.to_vec(), (re.clone(), options, syntax, idx));
+                m.cache.insert(pattern.to_vec(), re.clone());
             });
             Some(re)
         }
         Err(e) => {
-            vm.emit_warning(&format!("{}(): mbregex compile err: {}", func, e));
+            vm.emit_warning(&format!(
+                "{}(): mbregex compile err: {}",
+                func,
+                String::from_utf8_lossy(&e)
+            ));
             None
         }
     }
@@ -251,13 +269,13 @@ fn init_options(vm: &mut Vm, opts: &[u8]) -> Result<(u32, Syntax), VmError> {
     let mut syntax = Syntax::Ruby;
     for &c in opts {
         match c {
-            b'i' => o |= onig::OPT_IGNORECASE,
-            b'x' => o |= onig::OPT_EXTEND,
-            b'm' => o |= onig::OPT_MULTILINE,
-            b's' => o |= onig::OPT_SINGLELINE,
-            b'p' => o |= onig::OPT_MULTILINE | onig::OPT_SINGLELINE,
-            b'l' => o |= onig::OPT_FIND_LONGEST,
-            b'n' => o |= onig::OPT_FIND_NOT_EMPTY,
+            b'i' => o |= onig::ONIG_OPTION_IGNORECASE,
+            b'x' => o |= onig::ONIG_OPTION_EXTEND,
+            b'm' => o |= onig::ONIG_OPTION_MULTILINE,
+            b's' => o |= onig::ONIG_OPTION_SINGLELINE,
+            b'p' => o |= onig::ONIG_OPTION_MULTILINE | onig::ONIG_OPTION_SINGLELINE,
+            b'l' => o |= onig::ONIG_OPTION_FIND_LONGEST,
+            b'n' => o |= onig::ONIG_OPTION_FIND_NOT_EMPTY,
             b'j' => syntax = Syntax::Java,
             b'u' => syntax = Syntax::GnuRegex,
             b'g' => syntax = Syntax::Grep,
@@ -280,30 +298,31 @@ fn init_options(vm: &mut Vm, opts: &[u8]) -> Result<(u32, Syntax), VmError> {
     Ok((o, syntax))
 }
 
+/// C: `_php_mb_regex_get_option_string`
 fn option_string(o: u32, syntax: Syntax) -> String {
     let mut s = String::new();
-    if o & onig::OPT_IGNORECASE != 0 {
+    if o & onig::ONIG_OPTION_IGNORECASE != 0 {
         s.push('i');
     }
-    if o & onig::OPT_EXTEND != 0 {
+    if o & onig::ONIG_OPTION_EXTEND != 0 {
         s.push('x');
     }
-    if o & (onig::OPT_MULTILINE | onig::OPT_SINGLELINE)
-        == (onig::OPT_MULTILINE | onig::OPT_SINGLELINE)
+    if o & (onig::ONIG_OPTION_MULTILINE | onig::ONIG_OPTION_SINGLELINE)
+        == (onig::ONIG_OPTION_MULTILINE | onig::ONIG_OPTION_SINGLELINE)
     {
         s.push('p');
     } else {
-        if o & onig::OPT_MULTILINE != 0 {
+        if o & onig::ONIG_OPTION_MULTILINE != 0 {
             s.push('m');
         }
-        if o & onig::OPT_SINGLELINE != 0 {
+        if o & onig::ONIG_OPTION_SINGLELINE != 0 {
             s.push('s');
         }
     }
-    if o & onig::OPT_FIND_LONGEST != 0 {
+    if o & onig::ONIG_OPTION_FIND_LONGEST != 0 {
         s.push('l');
     }
-    if o & onig::OPT_FIND_NOT_EMPTY != 0 {
+    if o & onig::ONIG_OPTION_FIND_NOT_EMPTY != 0 {
         s.push('n');
     }
     s.push(match syntax {
@@ -325,16 +344,15 @@ fn new_array(a: PhpArray) -> Value {
 
 /// Add named groups (C: mb_regex_groups_iter)
 fn add_named_groups(arr: &mut PhpArray, re: &Regex, s: &[u8], region: &Region) {
-    for idx in re.names_foreach_order() {
-        let name = &re.names[idx].0;
+    for (name, _) in re.names_foreach() {
         let gn = re.name_to_backref_number(name, Some(region)).unwrap_or(0);
-        let key = ArrayKey::String(PhpString::from_vec(name.clone()));
-        match (
-            region.beg.get(gn).copied().flatten(),
-            region.end.get(gn).copied().flatten(),
-        ) {
-            (Some(b), Some(e)) if b < e && e <= s.len() => arr.set(key, pstr(&s[b..e])),
-            _ => arr.set(key, Value::False),
+        let key = ArrayKey::String(PhpString::from_vec(name.to_vec()));
+        let beg = region.beg.get(gn).copied().unwrap_or(ONIG_REGION_NOTPOS);
+        let end = region.end.get(gn).copied().unwrap_or(ONIG_REGION_NOTPOS);
+        if beg >= 0 && beg < end && (end as usize) <= s.len() {
+            arr.set(key, pstr(&s[beg as usize..end as usize]));
+        } else {
+            arr.set(key, Value::False);
         }
     }
 }
@@ -389,29 +407,32 @@ fn ereg_exec(vm: &mut Vm, args: &[Value], icase: bool) -> Result<Value, VmError>
     }
     let mut options = with(|m| m.default_options);
     if icase {
-        options |= onig::OPT_IGNORECASE;
+        options |= onig::ONIG_OPTION_IGNORECASE;
     }
     let syntax = with(|m| m.default_syntax);
     let re = match compile_pattern(vm, f, &pattern, options, syntax) {
         Some(r) => r,
         None => return Ok(Value::False),
     };
-    let lim = limits(vm);
-    let region = match re.search(&string, 0, &lim) {
-        Ok(Some(r)) => r,
-        _ => return Ok(Value::False),
-    };
+    let mp = search_param(vm);
+    let mut region = Region::default();
+    if re.search(&string, 0, string.len(), Some(&mut region), &mp) < 0 {
+        return Ok(Value::False);
+    }
     if let Some(r) = out_ref {
         let mut arr = PhpArray::new();
-        for i in 0..region.beg.len() {
-            match (region.beg[i], region.end[i]) {
-                (Some(b), Some(e)) if b < e && e <= string.len() => {
-                    arr.set(ArrayKey::Int(i as i64), pstr(&string[b..e]))
-                }
-                _ => arr.set(ArrayKey::Int(i as i64), Value::False),
+        for i in 0..region.num_regs() {
+            let (b, e) = (region.beg[i], region.end[i]);
+            if b >= 0 && b < e && (e as usize) <= string.len() {
+                arr.set(
+                    ArrayKey::Int(i as i64),
+                    pstr(&string[b as usize..e as usize]),
+                )
+            } else {
+                arr.set(ArrayKey::Int(i as i64), Value::False)
             }
         }
-        if !re.names.is_empty() {
+        if re.number_of_names() > 0 {
             add_named_groups(&mut arr, &re, &string, &region);
         }
         *r.borrow_mut() = new_array(arr);
@@ -457,7 +478,7 @@ fn substitute(
 ) {
     let eos = replace.len();
     let mut p = 0usize;
-    let num_regs = regs.beg.len();
+    let num_regs = regs.num_regs();
     while p < eos {
         let clen = mbchar_bytes(replace, p, enc);
         if clen != 1 || replace[p] != b'\\' {
@@ -480,7 +501,7 @@ fn substitute(
                 p += 1;
             }
             b'1'..=b'9' => {
-                if !re.noname_capture_active {
+                if !re.noname_group_capture_is_active() {
                     p += 1;
                     out.extend_from_slice(&replace[sp..p]);
                     continue;
@@ -521,20 +542,20 @@ fn substitute(
                     continue;
                 }
                 if maybe_num {
-                    if !re.noname_capture_active {
+                    if !re.noname_group_capture_is_active() {
                         out.extend_from_slice(&replace[sp..p]);
                         continue;
                     }
                     if name_end - name == 1 {
                         no = (replace[name] - b'0') as i64;
                     } else if replace[name] == b'0' {
-                        // "01" is not a valid number: keep the escape sequence
-                        out.extend_from_slice(&replace[sp..p]);
-                        continue;
+                        /* 01 is not a valid number */
+                        no = -1;
                     } else {
                         no = std::str::from_utf8(&replace[name..name_end])
                             .ok()
-                            .and_then(|t| t.parse::<i64>().ok())
+                            .and_then(|t| t.parse::<u64>().ok())
+                            .map(|v| v as u32 as i32 as i64)
                             .unwrap_or(-1);
                     }
                 } else {
@@ -550,14 +571,13 @@ fn substitute(
             }
         }
         if no < 0 || no as usize >= num_regs {
-            out.extend_from_slice(&replace[sp..p]);
+            out.extend_from_slice(&replace[sp..p.min(eos)]);
             continue;
         }
         let no = no as usize;
-        if let (Some(b), Some(e)) = (regs.beg[no], regs.end[no]) {
-            if b < e && e <= subject.len() {
-                out.extend_from_slice(&subject[b..e]);
-            }
+        let (b, e) = (regs.beg[no], regs.end[no]);
+        if b >= 0 && b < e && (e as usize) <= subject.len() {
+            out.extend_from_slice(&subject[b as usize..e as usize]);
         }
     }
 }
@@ -570,7 +590,7 @@ fn replace_exec(
 ) -> Result<Value, VmError> {
     let f = if callable {
         "mb_ereg_replace_callback"
-    } else if base_options & onig::OPT_IGNORECASE != 0 {
+    } else if base_options & onig::ONIG_OPTION_IGNORECASE != 0 {
         "mb_eregi_replace"
     } else {
         "mb_ereg_replace"
@@ -620,45 +640,46 @@ fn replace_exec(
         Some(r) => r,
         None => return Ok(Value::False),
     };
-    let lim = limits(vm);
-    let subj = re.prepare(&string);
+    let mp = search_param(vm);
+    let string_lim = string.len();
     let mut out: Vec<u8> = Vec::with_capacity(string.len());
     let mut pos = 0usize;
+    let mut regs = Region::default();
     loop {
-        let res = re.search_prepared(&subj, pos, &lim);
-        let regs = match res {
-            Err(e) => {
-                vm.emit_warning(&format!(
-                    "{}(): mbregex search failure in php_mbereg_replace_exec(): {}",
-                    f,
-                    e.message()
-                ));
-                return Ok(Value::False);
+        let err = re.search(&string, pos, string_lim, Some(&mut regs), &mp);
+        if err <= -2 {
+            vm.emit_warning(&format!(
+                "{}(): mbregex search failure in php_mbereg_replace_exec(): {}",
+                f,
+                String::from_utf8_lossy(&onig::error_code_to_str(err))
+            ));
+            return Ok(Value::False);
+        }
+        if err < 0 {
+            /* nomatch: stick that last bit of string on our output */
+            if string_lim > pos {
+                out.extend_from_slice(&string[pos..]);
             }
-            Ok(None) => {
-                if pos < string.len() {
-                    out.extend_from_slice(&string[pos..]);
-                }
-                break;
-            }
-            Ok(Some(r)) => r,
-        };
-        let mbeg = regs.beg[0].unwrap_or(pos);
-        let mend = regs.end[0].unwrap_or(pos);
-        if mbeg >= pos {
+            break;
+        }
+        /* copy the part of the string before the match */
+        let mbeg = regs.beg[0] as usize;
+        if mbeg > pos {
             out.extend_from_slice(&string[pos..mbeg]);
         }
         if !callable {
             substitute(&mut out, &string, &replace, &re, &regs, enc);
         } else {
             let mut subpats = PhpArray::new();
-            for i in 0..regs.beg.len() {
-                match (regs.beg[i], regs.end[i]) {
-                    (Some(b), Some(e)) if b <= e => subpats.push(pstr(&string[b..e])),
-                    _ => subpats.push(pstr(b"")),
+            for i in 0..regs.num_regs() {
+                let (b, e) = (regs.beg[i], regs.end[i]);
+                if b >= 0 && e >= b {
+                    subpats.push(pstr(&string[b as usize..e as usize]));
+                } else {
+                    subpats.push(pstr(b""));
                 }
             }
-            if !re.names.is_empty() {
+            if re.number_of_names() > 0 {
                 add_named_groups(&mut subpats, &re, &string, &regs);
             }
             let r = vm.call_callback(&callback, &[new_array(subpats)])?;
@@ -677,17 +698,14 @@ fn replace_exec(
                 out.extend_from_slice(s.as_bytes());
             }
         }
-        if pos < mend {
-            pos = mend;
+        let n = regs.end[0] as usize;
+        if pos < n {
+            pos = n;
         } else {
-            if pos < string.len() {
-                // copy one byte (as C does)
+            if pos < string_lim {
                 out.push(string[pos]);
             }
             pos += 1;
-        }
-        if pos > string.len() {
-            break;
         }
     }
     Ok(pstring(out))
@@ -697,7 +715,7 @@ fn mb_ereg_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     replace_exec(vm, args, 0, false)
 }
 fn mb_eregi_replace(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    replace_exec(vm, args, onig::OPT_IGNORECASE, false)
+    replace_exec(vm, args, onig::ONIG_OPTION_IGNORECASE, false)
 }
 fn mb_ereg_replace_callback(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     replace_exec(vm, args, 0, true)
@@ -722,36 +740,25 @@ fn mb_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(r) => r,
         None => return Ok(Value::False),
     };
-    let lim = limits(vm);
-    let subj = re.prepare(&string);
+    let mp = search_param(vm);
     let mut arr = PhpArray::new();
     let mut chunk_pos = 0usize;
     let mut pos = 0usize;
-    let mut failed: Option<String> = None;
+    let mut err = 0;
+    let mut regs = Region::default();
     while count != 0 && pos < string.len() {
-        let regs = match re.search_prepared(&subj, pos, &lim) {
-            Ok(Some(r)) => r,
-            Ok(None) => break,
-            Err(e) => {
-                failed = Some(e.message().to_string());
-                break;
-            }
-        };
-        let beg = regs.beg[0].unwrap_or(0);
-        let end = regs.end[0].unwrap_or(0);
-        // onig_search() started inside a character (after `pos++`) matches
-        // an empty pattern right there; this engine starts at the next one.
-        if beg == end && beg > pos && !subj.is_char_head(pos) {
-            pos += 1;
-            continue;
+        err = re.search(&string, pos, string.len(), Some(&mut regs), &mp);
+        if err < 0 {
+            break;
         }
+        let beg = regs.beg[0] as usize;
+        let end = regs.end[0] as usize;
         if pos < end {
             if beg < string.len() && beg >= chunk_pos {
                 arr.push(pstr(&string[chunk_pos..beg]));
                 count = count.wrapping_sub(1);
             } else {
-                // err = -2: ONIGERR_NO_SUPPORT_CONFIG's message
-                failed = Some("no support in this configuration".to_string());
+                err = -2;
                 break;
             }
             chunk_pos = end;
@@ -760,10 +767,10 @@ fn mb_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             pos += 1;
         }
     }
-    if let Some(e) = failed {
+    if err <= -2 {
         vm.emit_warning(&format!(
             "mb_split(): mbregex search failure in mbsplit(): {}",
-            e
+            String::from_utf8_lossy(&onig::error_code_to_str(err))
         ));
         return Ok(Value::False);
     }
@@ -792,11 +799,8 @@ fn mb_ereg_match(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(r) => r,
         None => return Ok(Value::False),
     };
-    let lim = limits(vm);
-    match re.match_at(&string, 0, &lim) {
-        Ok(Some(_)) => Ok(Value::True),
-        _ => Ok(Value::False),
-    }
+    let mp = match_param(vm);
+    Ok(vbool(re.match_at(&string, 0, None, &mp) >= 0))
 }
 
 fn search_exec(vm: &mut Vm, args: &[Value], mode: u8) -> Result<Value, VmError> {
@@ -816,7 +820,10 @@ fn search_exec(vm: &mut Vm, args: &[Value], mode: u8) -> Result<Value, VmError> 
     if let Some(p) = pattern {
         match compile_pattern(vm, f, &p, option, syntax) {
             Some(r) => with(|m| m.search_re = Some(r)),
-            None => return Ok(Value::False),
+            None => {
+                with(|m| m.search_re = None);
+                return Ok(Value::False);
+            }
         }
     }
     let (pos, re, s) = with(|m| (m.search_pos, m.search_re.clone(), m.search_str.clone()));
@@ -828,54 +835,59 @@ fn search_exec(vm: &mut Vm, args: &[Value], mode: u8) -> Result<Value, VmError> 
         Some(s) => s,
         None => return Err(throw(vm, b"Error", "No string was provided".to_string())),
     };
-    let lim = limits(vm);
-    match re.search(&s, pos.min(s.len() + 1), &lim) {
-        Ok(None) => {
-            with(|m| m.search_pos = s.len());
-            Ok(Value::False)
-        }
-        Err(e) => {
-            vm.emit_warning(&format!(
-                "{}(): mbregex search failure in mbregex_search(): {}",
-                f,
-                e.message()
-            ));
-            Ok(Value::False)
-        }
-        Ok(Some(regs)) => {
-            let ret = match mode {
-                1 => {
-                    let b = regs.beg[0].unwrap_or(0);
-                    let e = regs.end[0].unwrap_or(0);
-                    let mut arr = PhpArray::new();
-                    arr.push(Value::Long(b as i64));
-                    arr.push(Value::Long(e as i64 - b as i64));
-                    new_array(arr)
-                }
-                2 => regs_array(&re, &s, &regs),
-                _ => Value::True,
-            };
-            let end = regs.end[0].unwrap_or(0);
-            with(|m| {
-                m.search_pos = if pos <= end { end } else { pos + 1 };
-                m.search_regs = Some(regs);
-            });
-            Ok(ret)
-        }
+    let mp = search_param(vm);
+    let mut regs = Region::default();
+    let err = re.search(&s, pos, s.len(), Some(&mut regs), &mp);
+    if err == ONIG_MISMATCH {
+        with(|m| {
+            m.search_pos = s.len();
+            m.search_regs = Some(regs);
+        });
+        return Ok(Value::False);
+    } else if err <= -2 {
+        vm.emit_warning(&format!(
+            "{}(): mbregex search failure in mbregex_search(): {}",
+            f,
+            String::from_utf8_lossy(&onig::error_code_to_str(err))
+        ));
+        with(|m| m.search_regs = Some(regs));
+        return Ok(Value::False);
     }
+    let ret = match mode {
+        1 => {
+            let b = regs.beg[0];
+            let e = regs.end[0];
+            let mut arr = PhpArray::new();
+            arr.push(Value::Long(b as i64));
+            arr.push(Value::Long(e as i64 - b as i64));
+            new_array(arr)
+        }
+        2 => regs_array(&re, &s, &regs),
+        _ => Value::True,
+    };
+    let end = regs.end[0];
+    with(|m| {
+        m.search_pos = if pos as i64 <= end as i64 {
+            end as usize
+        } else {
+            pos + 1
+        };
+        m.search_regs = Some(regs);
+    });
+    Ok(ret)
 }
 
 fn regs_array(re: &Regex, s: &[u8], regs: &Region) -> Value {
     let mut arr = PhpArray::new();
-    for i in 0..regs.beg.len() {
-        match (regs.beg[i], regs.end[i]) {
-            (Some(b), Some(e)) if b <= e && e <= s.len() => {
-                arr.set(ArrayKey::Int(i as i64), pstr(&s[b..e]))
-            }
-            _ => arr.set(ArrayKey::Int(i as i64), Value::False),
+    for i in 0..regs.num_regs() {
+        let (b, e) = (regs.beg[i], regs.end[i]);
+        if b >= 0 && b <= e && (e as usize) <= s.len() {
+            arr.set(ArrayKey::Int(i as i64), pstr(&s[b as usize..e as usize]))
+        } else {
+            arr.set(ArrayKey::Int(i as i64), Value::False)
         }
     }
-    if !re.names.is_empty() {
+    if re.number_of_names() > 0 {
         add_named_groups(&mut arr, re, s, regs);
     }
     new_array(arr)
@@ -909,7 +921,10 @@ fn mb_ereg_search_init(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(p) = pattern {
         match compile_pattern(vm, f, &p, option, syntax) {
             Some(r) => with(|m| m.search_re = Some(r)),
-            None => return Ok(Value::False),
+            None => {
+                with(|m| m.search_re = None);
+                return Ok(Value::False);
+            }
         }
     }
     let valid = check_mbctype_encoding(&s);
@@ -930,8 +945,24 @@ fn mb_ereg_search_getregs(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
             m.search_regs.clone(),
         )
     });
-    match (re, s, regs) {
-        (Some(re), Some(s), Some(regs)) => Ok(regs_array(&re, &s, &regs)),
+    match (s, regs) {
+        (Some(s), Some(regs)) => {
+            let mut arr = PhpArray::new();
+            for i in 0..regs.num_regs() {
+                let (b, e) = (regs.beg[i], regs.end[i]);
+                if b >= 0 && b <= e && (e as usize) <= s.len() {
+                    arr.set(ArrayKey::Int(i as i64), pstr(&s[b as usize..e as usize]))
+                } else {
+                    arr.set(ArrayKey::Int(i as i64), Value::False)
+                }
+            }
+            if let Some(re) = re {
+                if re.number_of_names() > 0 {
+                    add_named_groups(&mut arr, &re, &s, &regs);
+                }
+            }
+            Ok(new_array(arr))
+        }
         _ => Ok(Value::False),
     }
 }
