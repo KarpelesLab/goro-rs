@@ -258,11 +258,44 @@ impl Vm {
                     let Value::Object(o) = &cur else { break };
                     let msg = o.borrow().get_property(b"message");
                     if matches!(msg.deref(), Value::Object(_)) {
-                        if let Ok(s) = self.value_to_string_checked(&msg.deref()) {
-                            msg_strings.push((
+                        match self.value_to_string_checked(&msg.deref()) {
+                            Ok(s) => msg_strings.push((
                                 Rc::as_ptr(o) as usize,
                                 crate::errdisplay::raw_error_string(s.as_bytes()),
-                            ));
+                            )),
+                            // Exception::__toString() threw: that error is
+                            // the one reported, raised from no active file.
+                            Err(_) => {
+                                let inner = self.current_exception.take();
+                                let text = match &inner {
+                                    Some(Value::Object(e)) => e
+                                        .borrow()
+                                        .get_property(b"message")
+                                        .to_php_string()
+                                        .to_string_lossy(),
+                                    _ => String::new(),
+                                };
+                                let cl = o.borrow().class_name.to_ascii_lowercase();
+                                let base = if self.class_extends_any(&cl, &[b"error"])
+                                    || cl == b"error"
+                                {
+                                    "Error"
+                                } else {
+                                    "Exception"
+                                };
+                                let fatal = format!(
+                                    "Uncaught Error: {} in [no active file]:0\nStack trace:\n#0 [internal function]: {}->__toString()\n#1 {{main}}\n  thrown",
+                                    text, base
+                                );
+                                self.fatal_error_cb(
+                                    crate::errdisplay::E_ERROR,
+                                    &fatal,
+                                    "[no active file]",
+                                    0,
+                                );
+                                self.fatal_emitted = true;
+                                return;
+                            }
                         }
                         self.current_exception = None;
                     }
