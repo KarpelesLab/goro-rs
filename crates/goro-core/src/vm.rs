@@ -38924,7 +38924,18 @@ impl Vm {
                                 op.line,
                             );
                         }
-                        if let Some(exc_val) = self.current_exception.take() {
+                        if let Some(mut exc_val) = self.current_exception.take() {
+                            // zend_binary_assign_op_obj_dim(): no value read
+                            // (offsetGet() threw) is zend_use_object_as_array().
+                            if matches!(op.opcode, OpCode::ArrayGetRW) {
+                                let msg = format!(
+                                    "Cannot use object of type {} as array",
+                                    class_name_orig
+                                );
+                                let err = self.create_exception(b"Error", &msg, op.line);
+                                Self::exception_set_previous(&err, exc_val);
+                                exc_val = err;
+                            }
                             if let Some((catch_target, _, _, _, eh_pc_depth)) =
                                 exception_handlers.last()
                             {
