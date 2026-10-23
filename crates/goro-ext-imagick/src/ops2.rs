@@ -1047,20 +1047,7 @@ fn levelize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 }
 
 fn ordered_dither_of(i: &mut Image, map: &str) -> MResult<()> {
-    let m = map.split(',').next().unwrap_or("o8x8").to_ascii_lowercase();
-    let levels: u32 = map
-        .split(',')
-        .nth(1)
-        .and_then(|l| l.trim().parse().ok())
-        .unwrap_or(2)
-        .max(2);
-    let matrix = match m.as_str() {
-        "o2x2" | "2x2" => of::BayerMatrix::M2,
-        "o3x3" | "o4x4" | "4x4" | "3x3" => of::BayerMatrix::M4,
-        "h16x16o" | "o16x16" => of::BayerMatrix::M16,
-        _ => of::BayerMatrix::M8,
-    };
-    apply_oxideav(i, &of::Dither::ordered(matrix).with_levels(levels))
+    goro_imagick::dither::ordered_dither(i, map)
 }
 
 fn ordered_dither_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
