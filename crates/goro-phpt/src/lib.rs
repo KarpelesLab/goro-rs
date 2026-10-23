@@ -739,8 +739,6 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
 /// 2. phpdbg tests — we don't have phpdbg.
 /// 4. Real MySQL tests (bind_param/bind_result on a live server).
 /// 5. External `php` binary spawn (proc_open/shell_exec/popen of $PHP_BINARY).
-/// 6. Real network tests (live DNS/sockets to non-localhost endpoints).
-/// 7. Live HTTP server required for curl_exec.
 ///
 /// Be conservative: better to skip too few than too many. Never skip a test
 /// that could actually pass.
@@ -802,24 +800,8 @@ pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
     //    coincidental success without losing pass-rate. See git history
     //    if you want to revisit this.
 
-    // 6. Live network — fsockopen / stream_socket_client to a clearly
-    //    non-loopback remote endpoint (i.e. a literal http(s)://example.com
-    //    style URL or a fsockopen("tcp://hostname.tld:80")). Tests using
-    //    plain invalid strings (e.g. 'abc') or 127.0.0.1 are NOT skipped.
-    if has_remote_network_call(file_section) {
-        return Some("Live network not supported".into());
-    }
-
-    // 7. Curl live — only skip if the test actually calls curl_exec() and
-    //    points CURLOPT_URL at a non-loopback URL (tests using
-    //    curl_cli_server_start() talk to a local `php -S`).
-    if filename.contains("/ext/curl/tests/")
-        && !file_section.contains("curl_cli_server_start(")
-        && file_section.contains("curl_exec(")
-        && has_remote_curl_url(file_section)
-    {
-        return Some("Live HTTP server required for curl".into());
-    }
+    // 6./7. Live network: run-tests.php runs those tests; the ones that
+    //    need the network check SKIP_ONLINE_TESTS in their SKIPIF.
 
     // 8. ext/ldap tests needing infrastructure the in-process fixture lacks:
     //    a server on the privileged ldaps port 636, Cyrus SASL (DIGEST-MD5),
@@ -838,161 +820,6 @@ pub fn goro_should_skip(filename: &str, test: &PhptTest) -> Option<String> {
 
     let _ = test_name; // kept for future use
     None
-}
-
-/// Check whether a FILE section makes a network call to something that isn't
-/// clearly the loopback address. We treat 127.0.0.1, ::1, and "localhost" as
-/// safe (loopback). We treat anything else, plus bare http(s):// URLs to
-/// public-looking hosts, as a live network call.
-fn has_remote_network_call(file: &str) -> bool {
-    // fsockopen / pfsockopen / stream_socket_client to a non-loopback host.
-    for fn_name in ["fsockopen(", "pfsockopen(", "stream_socket_client("] {
-        let mut search = file;
-        while let Some(pos) = search.find(fn_name) {
-            let after = &search[pos + fn_name.len()..];
-            // Grab the first argument: roughly the text up to the first comma
-            // or closing paren, on a single line.
-            let end = after.find([',', ')', '\n']).unwrap_or(after.len());
-            let first_arg = &after[..end];
-            if !is_loopback_arg(first_arg) {
-                return true;
-            }
-            search = &after[end..];
-        }
-    }
-
-    // file_get_contents / fopen on an http(s) URL whose host isn't loopback.
-    for fn_name in ["file_get_contents(", "fopen(", "get_headers(", "readfile("] {
-        let mut search = file;
-        while let Some(pos) = search.find(fn_name) {
-            let after = &search[pos + fn_name.len()..];
-            let end = after.find([',', ')', '\n']).unwrap_or(after.len());
-            let first_arg = &after[..end];
-            if url_is_remote(first_arg) {
-                return true;
-            }
-            search = &after[end..];
-        }
-    }
-
-    false
-}
-
-/// Return true if the substring is plausibly a loopback (or unclassifiable)
-/// endpoint and therefore should NOT trigger a live-network skip.
-///
-/// We default to "loopback" (safe) for anything we can't confidently classify
-/// — better to skip too few than too many.
-fn is_loopback_arg(arg: &str) -> bool {
-    let lower = arg.to_lowercase();
-    if lower.contains("127.0.0.1")
-        || lower.contains("::1")
-        || lower.contains("localhost")
-        || lower.contains("[::1]")
-        || lower.contains("0.0.0.0")
-        || lower.contains("unix://") // unix-domain sockets aren't network
-        || lower.contains("udg://")
-        // unix-datagram sockets aren't network
-        || lower.contains("{{ addr }}")
-        || lower.contains("php_cli_server_address")
-    // the test's own local server (ServerClientTestCase / php -S)
-    {
-        return true;
-    }
-    // If the argument is a variable or expression we can't classify, default
-    // to safe (loopback) — don't skip what we don't understand.
-    if !arg.contains('"') && !arg.contains('\'') {
-        return true;
-    }
-    // The arg has a quoted string. Look at its contents:
-    //   - If it does NOT look like a real network address (no dot-separated
-    //     host or "://" scheme), treat as safe (e.g. fsockopen('abc')).
-    //   - If it does look like a real remote host (contains '.tld' or
-    //     hostname.example.com style), treat as remote.
-    // Heuristic: a remote host literal contains a dot AND no PHP variable
-    // expansion markers.
-    let has_dot = arg.contains('.');
-    let has_scheme = arg.contains("://");
-    let has_var = arg.contains('$') || arg.contains("{");
-    if !has_dot && !has_scheme {
-        // No dot, no scheme → not a real-looking network address. Safe.
-        return true;
-    }
-    if has_var {
-        // Dynamic — can't classify confidently. Safe.
-        return true;
-    }
-    // A dotted-numeric host that is no IPv4 address (e.g.
-    // "9999.9999.9999.9999") fails to resolve without any network.
-    let lit = arg.trim().trim_matches(['"', '\'']);
-    let rest = lit.split_once("://").map(|(_, r)| r).unwrap_or(lit);
-    let host = rest.split(':').next().unwrap_or("");
-    if !host.is_empty()
-        && host.bytes().all(|c| c.is_ascii_digit() || c == b'.')
-        && host.parse::<std::net::Ipv4Addr>().is_err()
-    {
-        return true;
-    }
-    false
-}
-
-/// Return true if the first arg of file_get_contents/fopen/etc. is clearly an
-/// http(s):// URL on a non-loopback host.
-fn url_is_remote(arg: &str) -> bool {
-    let lower = arg.to_lowercase();
-    if !lower.contains("http://") && !lower.contains("https://") {
-        return false;
-    }
-    // If the URL string interpolates a variable (e.g. "http://" . $host) or
-    // uses PHP_CLI_SERVER_ADDRESS, we can't be certain — but we already catch
-    // the cli-server case earlier, and dynamic-host tests are usually local.
-    // Only skip when the host is plainly a non-loopback literal.
-    if lower.contains("127.0.0.1")
-        || lower.contains("::1")
-        || lower.contains("localhost")
-        || lower.contains("[::1]")
-        || lower.contains("php_cli_server_address")
-        || lower.contains("{{ addr }}")
-    {
-        return false;
-    }
-    // The URL has a literal external-looking host (e.g. "http://example.com/").
-    // Look for "http://" or "https://" followed by a letter/digit (host char)
-    // and not a variable interpolation marker.
-    for proto in ["http://", "https://"] {
-        if let Some(pos) = lower.find(proto) {
-            let after = &lower[pos + proto.len()..];
-            // Next char should start a host literal.
-            if let Some(c) = after.chars().next() {
-                if c.is_ascii_alphanumeric() {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Return true if a curl_setopt(.., CURLOPT_URL, X) call has X clearly
-/// pointing at a non-loopback URL.
-fn has_remote_curl_url(file: &str) -> bool {
-    let mut search = file;
-    while let Some(pos) = search.find("CURLOPT_URL") {
-        let after = &search[pos + "CURLOPT_URL".len()..];
-        // Skip past the comma.
-        let val_start = match after.find(',') {
-            Some(i) => i + 1,
-            None => return false,
-        };
-        let value = &after[val_start..];
-        let end = value.find([')', ';', '\n']).unwrap_or(value.len());
-        let url_expr = &value[..end];
-        if url_is_remote(url_expr) {
-            return true;
-        }
-        search = &after[val_start + end..];
-    }
-    false
 }
 
 /// Parse --INI-- section into key-value pairs
@@ -2719,13 +2546,14 @@ pub struct TestCounts {
     pub error: usize,
     /// Expected failures (--XFAIL--); not failures.
     pub xfail: usize,
-    /// --XFAIL-- tests that passed.
+    /// --XFAIL-- tests that passed (counted in `pass` too, as
+    /// run-tests.php does).
     pub xpass: usize,
 }
 
 impl TestCounts {
     pub fn total(&self) -> usize {
-        self.pass + self.fail + self.skip + self.error + self.xfail + self.xpass
+        self.pass + self.fail + self.skip + self.error + self.xfail
     }
 }
 
@@ -3043,9 +2871,11 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
                         println!("XFAIL: {} [{}] ({})", test_name, _dbg_name, reason);
                     }
                     Ok(TestResult::XPass) => {
+                        // run-tests.php reports it as a PASS, with a warning.
+                        pass += 1;
                         xpass += 1;
                         println!(
-                            "XPASS: {} [{}] (warn: XFAIL section but test passes)",
+                            "PASS: {} [{}] (warn: XFAIL section but test passes)",
                             test_name, _dbg_name
                         );
                     }
