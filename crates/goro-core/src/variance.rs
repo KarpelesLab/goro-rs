@@ -1906,8 +1906,8 @@ impl Vm {
         }
         let line = self.current_line;
         let file = self.current_file.clone();
-        let same_place = class.start_line == line
-            && class.filename.as_deref() == Some(file.as_str());
+        let same_place =
+            class.start_line == line && class.filename.as_deref() == Some(file.as_str());
         if !same_place {
             self.call_stack.push((
                 "[constant expression]".to_string(),

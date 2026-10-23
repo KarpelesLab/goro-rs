@@ -772,7 +772,11 @@ impl Vm {
         let Some(ce) = self.classes.get(&cl) else {
             return t;
         };
-        if !ce.properties.iter().any(|p| p.has_get_hook || p.has_set_hook) {
+        if !ce
+            .properties
+            .iter()
+            .any(|p| p.has_get_hook || p.has_set_hook)
+        {
             return t;
         }
         let pos = |e: &PropEntry| -> usize {
