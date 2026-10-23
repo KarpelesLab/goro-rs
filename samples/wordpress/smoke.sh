@@ -226,6 +226,7 @@ printf 'uploaded by the goro smoke test\n' > "$WORK/goro-upload.txt"
 req POST "$HTTP/wp-json/wp/v2/media" -H "X-WP-Nonce: $REST_NONCE" \
     -F "file=@$WORK/goro-upload.txt;type=text/plain"
 expect_status 201 "media upload"
+MEDIA_IDS=$(grep -o '"id":[0-9]*' "$BODY" | head -1 | cut -d: -f2)
 URL=$(grep -o '"source_url":"[^"]*"' "$BODY" | head -1 | sed 's/.*:"\(.*\)"/\1/; s/\\\//\//g')
 [ -n "$URL" ] || fail "media upload: no source_url"
 req GET "$URL"
@@ -236,6 +237,7 @@ ok "multipart upload ($URL)"
 req POST "$HTTP/wp-json/wp/v2/media" -H "X-WP-Nonce: $REST_NONCE" \
     -F "file=@$HERE/test-image.jpg;type=image/jpeg"
 expect_status 201 "image upload"
+MEDIA_IDS="$MEDIA_IDS $(grep -o '"id":[0-9]*' "$BODY" | head -1 | cut -d: -f2)"
 grep -q '"thumbnail":{"file":"test-image[-0-9]*-150x150.jpg"' "$BODY" || fail "image upload: no 150x150 thumbnail"
 THUMB=$(grep -o '"thumbnail":{[^}]*"source_url":"[^"]*"' "$BODY" | sed 's/.*"source_url":"\(.*\)"/\1/; s/\\\//\//g')
 req GET "$THUMB"
@@ -274,6 +276,21 @@ if [ -n "$HTTPS" ]; then
         ok "HTTP/2 not negotiated (curl without HTTP/2?)"
     fi
 fi
+
+# --- clean up: delete the post (and its comment) and the uploads ----------
+# Without this, the "Hello from goro" posts pile up across runs and push
+# "Hello world!" off the front page.
+BASE=${HTTPS:-$HTTP}
+req GET "$BASE/wp-admin/admin-ajax.php?action=rest-nonce"
+expect_status 200 "REST nonce (cleanup)"
+REST_NONCE=$(cat "$BODY")
+req DELETE "$BASE/wp-json/wp/v2/posts/$POST_ID?force=true" -H "X-WP-Nonce: $REST_NONCE"
+expect_status 200 "delete post"
+for id in $MEDIA_IDS; do
+    req DELETE "$BASE/wp-json/wp/v2/media/$id?force=true" -H "X-WP-Nonce: $REST_NONCE"
+    expect_status 200 "delete upload $id"
+done
+ok "test post and uploads deleted through the REST API"
 
 # --- WP_DEBUG_LOG ----------------------------------------------------------
 if [ -f "$DEBUG_LOG" ] && [ -s "$DEBUG_LOG" ]; then

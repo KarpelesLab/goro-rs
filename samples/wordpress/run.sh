@@ -22,7 +22,11 @@ if [ ! -f "$SITE/wp-config.php" ]; then
     "$HERE/setup.sh"
 fi
 
-BIN=${GORO_BIN:-${CARGO_TARGET_DIR:-$ROOT/target}/release}
+# Ask cargo for the target directory: it can also come from a cargo config
+# file (build.target-dir), not only from $CARGO_TARGET_DIR.
+TARGET_DIR=$(cd "$ROOT" && cargo metadata --format-version 1 --no-deps 2>/dev/null |
+    sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
+BIN=${GORO_BIN:-${TARGET_DIR:-${CARGO_TARGET_DIR:-$ROOT/target}}/release}
 if [ ! -x "$BIN/goro-httpd" ] || [ ! -x "$BIN/goro" ]; then
     echo "Building goro and goro-httpd (release)..."
     (cd "$ROOT" && cargo build --release --bin goro --bin goro-httpd)
