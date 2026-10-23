@@ -12473,6 +12473,20 @@ impl Compiler {
         }
     }
 
+    /// The last FETCH_OBJ_IS check of an isset chain becomes the
+    /// has_property() check of the property itself (empty()).
+    #[inline(never)]
+    fn final_isset_fetch_to_isset(ops: &mut [Op]) {
+        if let Some(op) = ops
+            .iter_mut()
+            .rev()
+            .take(4)
+            .find(|o| o.opcode == OpCode::PropertyIssetFetch)
+        {
+            op.opcode = OpCode::PropertyIsset;
+        }
+    }
+
     /// `$a[...] = $a`: the value is copied into a temporary first
     /// (zend_compile_assign()'s QM_ASSIGN for zend_is_assign_to_self()).
     #[inline(never)]
@@ -16739,6 +16753,9 @@ impl Compiler {
                     let line = expr.span.line;
                     let mut patches: Vec<u32> = Vec::new();
                     let val = self.compile_isset_prop_chain(inner, line, &mut patches)?;
+                    // (the property itself is ISSET_ISEMPTY_PROP_OBJ: without
+                    // __isset() it is not set, __get() is not called)
+                    Self::final_isset_fetch_to_isset(&mut self.op_array.ops);
                     self.op_array.emit(Op {
                         opcode: OpCode::ErrorRestore,
                         op1: OperandType::Unused,
