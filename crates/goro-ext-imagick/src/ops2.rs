@@ -255,14 +255,25 @@ fn optimize_image_transparency(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[V
 fn deskew_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "d", args)?;
     let t = a[0].double_or(0.0);
-    image_op(vm, &d_(o), "Unable to deskew image", |i| {
-        // the skew angle (oxideav), then a rotation (always: the canvas
-        // grows as with rotateImage())
+    replace_op(vm, &d_(o), "Unable to deskew image", |i| {
+        // the skew angle (oxideav), then an affine rotation about the
+        // origin onto the best-fit canvas, the uncovered area in the
+        // background colour (as DeskewImage() does)
         let thr = (t / 65535.0 * 255.0).clamp(0.0, 255.0) as u8;
-        let angle = goro_imagick::filters::deskew_angle(i, thr);
-        let bg = i.background_color.clone();
-        *i = transform::rotate_free(i, -angle, &bg);
-        Ok(())
+        let angle = -goro_imagick::filters::deskew_angle(i, thr);
+        let (s, c) = angle.to_radians().sin_cos();
+        let mut src = i.clone();
+        src.virtual_pixel = VirtualPixelMethod::Background;
+        let mut out = goro_imagick::distort::distort(
+            &src,
+            goro_imagick::distort::AFFINE_PROJECTION,
+            &[c, s, -s, c, 0.0, 0.0],
+            true,
+        )?;
+        out.virtual_pixel = i.virtual_pixel;
+        out.alpha = i.alpha || i.background_color.to_rgba16()[3] < 65535;
+        out.artifacts.set("deskew:angle", &format!("{}", angle));
+        Ok(out)
     })
 }
 

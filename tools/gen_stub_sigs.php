@@ -148,7 +148,10 @@ foreach ($pecl as $dir => $ext) {
 
 function parse_file(string $path, string $ext): void {
     global $classes, $functions, $constants;
-    $toks = token_get_all(file_get_contents($path));
+    $src = file_get_contents($path);
+    // pecl imagick's quantum type macro: int in a Q16 non-HDRI build
+    if ($ext === 'imagick') $src = str_replace('IMAGICK_QUANTUM_TYPE', 'int', $src);
+    $toks = token_get_all($src);
     // Drop whitespace but keep comments (doc comments carry tags).
     // Preprocessor conditions are kept, except the blocks a mysqlnd build
     // (PDO_USE_MYSQLND) leaves out and the ICU version checks, evaluated

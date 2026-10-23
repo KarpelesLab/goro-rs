@@ -82191,7 +82191,7 @@ pub static CLASSES: &[StubClass] = &[
                     default: None,
                     flags: 0,
                 }],
-                ret: "IMAGICK_QUANTUM_TYPE",
+                ret: "int",
                 ext: "",
             },
             StubFunc {
@@ -82324,7 +82324,7 @@ pub static CLASSES: &[StubClass] = &[
                     },
                     StubArg {
                         name: "value",
-                        ty: "IMAGICK_QUANTUM_TYPE",
+                        ty: "int",
                         default: None,
                         flags: 0,
                     },
@@ -82363,7 +82363,7 @@ pub static CLASSES: &[StubClass] = &[
                 flags: 0x1,
                 args: &[StubArg {
                     name: "index",
-                    ty: "IMAGICK_QUANTUM_TYPE",
+                    ty: "int",
                     default: None,
                     flags: 0,
                 }],

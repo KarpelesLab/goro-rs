@@ -663,10 +663,11 @@ pub fn distort(img: &Image, method: i64, args: &[f64], bestfit: bool) -> MResult
                 }
             }
             if x0 < x1 && y0 < y1 && (x1 - x0) < 100_000.0 && (y1 - y0) < 100_000.0 {
-                let (xa, ya) = (x0.floor(), y0.floor());
+                // the bounds grow by half a pixel each way
+                let (xa, ya) = ((x0 - 0.5).floor(), (y0 - 0.5).floor());
                 out_rect = Rect::new(
-                    (x1.ceil() - xa).max(1.0) as usize,
-                    (y1.ceil() - ya).max(1.0) as usize,
+                    ((x1 + 0.5).ceil() - xa).max(1.0) as usize,
+                    ((y1 + 0.5).ceil() - ya).max(1.0) as usize,
                     xa as i64,
                     ya as i64,
                 );
