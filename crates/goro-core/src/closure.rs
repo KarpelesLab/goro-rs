@@ -1134,10 +1134,17 @@ impl Vm {
         if has_obj {
             op.get_or_create_cv(b"__fcc_captured");
         }
-        let args_cv = op.get_or_create_cv(b"args");
+        // (zend_get_call_trampoline_func(): `mixed ...$arguments`)
+        let args_cv = op.get_or_create_cv(b"arguments");
         op.param_count = 1;
         op.required_param_count = 0;
         op.variadic_param = Some(args_cv);
+        op.param_types = vec![None; args_cv as usize];
+        op.param_types.push(Some(crate::opcode::ParamTypeInfo {
+            param_name: b"arguments".to_vec(),
+            param_type: crate::opcode::ParamType::Simple(b"mixed".to_vec()),
+            implicitly_nullable: false,
+        }));
         let zero = op.add_literal(Value::Long(0));
         if has_obj {
             let m = op.add_literal(str_val(method));

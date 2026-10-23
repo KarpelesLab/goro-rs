@@ -63,6 +63,18 @@ pub fn without_internal_attributes<R>(f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// The `mixed ...$arguments` parameter of a first-class callable's closure
+/// (what reflection shows of a call trampoline).
+fn fcc_variadic_mixed(op: &mut OpArray) {
+    let cv = op.cv_names.len().saturating_sub(1);
+    op.param_types = vec![None; cv];
+    op.param_types.push(Some(ParamTypeInfo {
+        param_name: b"arguments".to_vec(),
+        param_type: ParamType::Simple(b"mixed".to_vec()),
+        implicitly_nullable: false,
+    }));
+}
+
 /// The config of internal attribute `name` (resolved, any case).
 pub(crate) fn internal_attribute(name: &[u8]) -> Option<InternalAttribute> {
     let n = name
@@ -7038,7 +7050,8 @@ impl Compiler {
                                                 .collect(),
                                         );
                                         cc.source_file = self.source_file.clone();
-                                        let args_cv = cc.op_array.get_or_create_cv(b"args");
+                                        let args_cv = cc.op_array.get_or_create_cv(b"arguments");
+        fcc_variadic_mixed(&mut cc.op_array);
                                         cc.op_array.param_count = 1;
                                         cc.op_array.required_param_count = 0;
                                         cc.op_array.variadic_param = Some(args_cv);
@@ -9690,7 +9703,8 @@ impl Compiler {
                                         );
                                         cc.source_file = self.source_file.clone();
                                         // Set up variadic ...$args parameter
-                                        let args_cv = cc.op_array.get_or_create_cv(b"args");
+                                        let args_cv = cc.op_array.get_or_create_cv(b"arguments");
+        fcc_variadic_mixed(&mut cc.op_array);
                                         cc.op_array.param_count = 1;
                                         cc.op_array.required_param_count = 0;
                                         cc.op_array.variadic_param = Some(args_cv);
@@ -18680,7 +18694,8 @@ impl Compiler {
         }
 
         // Set up variadic ...$args parameter
-        let args_cv = cc.op_array.get_or_create_cv(b"args");
+        let args_cv = cc.op_array.get_or_create_cv(b"arguments");
+        fcc_variadic_mixed(&mut cc.op_array);
         cc.op_array.param_count = 1;
         cc.op_array.required_param_count = 0;
         cc.op_array.variadic_param = Some(args_cv);
