@@ -888,7 +888,11 @@ impl Compiler {
         // Nested closure: parent already has a display_name like `{closure:...}`.
         if !self.op_array.display_name.is_empty() {
             name.extend_from_slice(&self.op_array.display_name);
-        } else if let Some(owner) = self.attr_owner_fn.as_ref().filter(|_| self.op_array.name.is_empty()) {
+        } else if let Some(owner) = self
+            .attr_owner_fn
+            .as_ref()
+            .filter(|_| self.op_array.name.is_empty())
+        {
             name.extend_from_slice(owner);
             name.extend_from_slice(b"()");
         } else if let Some(class) = self

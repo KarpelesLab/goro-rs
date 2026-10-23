@@ -19604,7 +19604,10 @@ impl Vm {
         let Some(parent) = class.parent.as_ref() else {
             return false;
         };
-        let pl = parent.strip_prefix(b"\\").unwrap_or(parent).to_ascii_lowercase();
+        let pl = parent
+            .strip_prefix(b"\\")
+            .unwrap_or(parent)
+            .to_ascii_lowercase();
         let Some(pce) = self.classes.get(&pl) else {
             return false;
         };
@@ -19726,14 +19729,12 @@ impl Vm {
         name: &[u8],
         ns_fallback: bool,
     ) -> CallTarget {
-        let global_name = if ns_fallback
-            && name.contains(&b'\\')
-            && !name.windows(2).any(|w| w == b"::")
-        {
-            self.ns_call_global_name(op_array, ip as u32, name)
-        } else {
-            None
-        };
+        let global_name =
+            if ns_fallback && name.contains(&b'\\') && !name.windows(2).any(|w| w == b"::") {
+                self.ns_call_global_name(op_array, ip as u32, name)
+            } else {
+                None
+            };
         let resolved: &[u8] = match &global_name {
             Some(g) => g.as_bytes(),
             None => name,
@@ -57732,7 +57733,11 @@ impl Vm {
             return Some(match r {
                 // (by-value after all: what the general path would do)
                 Some(v) => {
-                    let new = if inc { php_increment(&v) } else { php_decrement(&v) };
+                    let new = if inc {
+                        php_increment(&v)
+                    } else {
+                        php_decrement(&v)
+                    };
                     (v, new)
                 }
                 None => (Value::Null, Value::Null),
@@ -57748,7 +57753,11 @@ impl Vm {
         if self.current_exception.is_some() {
             return Some((old, Value::Null));
         }
-        let new = if inc { php_increment(&old) } else { php_decrement(&old) };
+        let new = if inc {
+            php_increment(&old)
+        } else {
+            php_decrement(&old)
+        };
         *r.borrow_mut() = new;
         if typed_ref::any() {
             self.typed_ref_after_op(&r, old.clone(), Some(inc), strict, line);

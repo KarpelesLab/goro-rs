@@ -7264,7 +7264,10 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                 } else {
                     Value::String(PhpString::from_vec(func_lower.clone()))
                 };
-                let f = vm.functions.get(b"call_user_func_array".as_slice()).copied()?;
+                let f = vm
+                    .functions
+                    .get(b"call_user_func_array".as_slice())
+                    .copied()?;
                 let r = f(vm, &[callable, Value::Array(Rc::new(RefCell::new(arr)))]);
                 return Some(r.unwrap_or(Value::Null));
             }
@@ -9369,7 +9372,8 @@ pub fn reflection_parameter_method(
                 vm.current_line,
             );
             // Only a single class-name type (optionally nullable) qualifies.
-            let class_name_opt = resolved_op_array.as_ref()
+            let class_name_opt = resolved_op_array
+                .as_ref()
                 .and_then(|op| op.param_types.get(type_idx).cloned().flatten())
                 .and_then(|pti| {
                     // ZEND_TYPE_HAS_NAME(): one class name, plus any builtin
@@ -9393,7 +9397,9 @@ pub fn reflection_parameter_method(
                             ParamType::Union(items) => {
                                 let named: Vec<&ParamType> =
                                     items.iter().filter(|t| !is_builtin(t)).collect();
-                                if named.len() == 1 && !matches!(named[0], ParamType::Intersection(_)) {
+                                if named.len() == 1
+                                    && !matches!(named[0], ParamType::Intersection(_))
+                                {
                                     single_name(named[0])
                                 } else {
                                     None

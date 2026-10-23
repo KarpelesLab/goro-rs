@@ -577,13 +577,11 @@ impl Vm {
         // call (ReflectionFunction::invoke(mixed ...$args), ...).
         if matches!(
             (class_lower, method_lower),
-            (
-                b"reflectionfunction" | b"reflectionmethod",
-                b"invoke"
-            ) | (
-                b"reflectionclass" | b"reflectionobject" | b"reflectionenum",
-                b"newinstance"
-            )
+            (b"reflectionfunction" | b"reflectionmethod", b"invoke")
+                | (
+                    b"reflectionclass" | b"reflectionobject" | b"reflectionenum",
+                    b"newinstance"
+                )
         ) {
             self.pending_named_args = named.to_vec();
             return true;
