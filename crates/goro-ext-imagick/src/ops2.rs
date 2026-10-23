@@ -693,7 +693,19 @@ fn no_delegate(lib: &str, at: &str) -> MagickError {
 }
 
 fn liquid_rescale_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
-    let e = no_delegate("LQR", "error/resize.c/LiquidRescaleImage/2079");
+    // ImageMagick names the image's file in this one
+    let name = d_(o)
+        .wand
+        .borrow()
+        .image()
+        .map(|i| i.filename.clone())
+        .unwrap_or_default();
+    let e = MagickError::new(
+        goro_imagick::error::severity::MISSING_DELEGATE_ERROR,
+        format!(
+            "delegate library support not built-in '{name}' (LQR) @ error/resize.c/LiquidRescaleImage/2079"
+        ),
+    );
     unsupported(vm, f, o, args, "lldd", e, "Unable to liquid rescale image")
 }
 
