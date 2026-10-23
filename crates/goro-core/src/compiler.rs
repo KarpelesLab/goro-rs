@@ -10718,6 +10718,31 @@ impl Compiler {
     /// Compile the object part of `isset($a->b->c)`: each intermediate
     /// non-nullsafe property fetch is guarded by PropertyIsset (so magic
     /// __isset runs before __get); failed checks jump to `patches`.
+    /// The container of `$base[...] ?? $d`, fetched for isset (BP_VAR_IS):
+    /// a property chain goes through FETCH_OBJ_IS (no visibility error, no
+    /// undefined-property warning), a static property quietly too. The
+    /// jumps taken when it is unset go to `$d`.
+    #[inline(never)]
+    fn compile_coalesce_dim_base(
+        &mut self,
+        base_expr: &Expr,
+        line: u32,
+        jmp_to_right: &mut Vec<usize>,
+    ) -> CompileResult<OperandType> {
+        if Self::is_static_prop_expr(base_expr) {
+            let (t, j) = self.compile_static_prop_quiet(base_expr)?;
+            jmp_to_right.push(j as usize);
+            return Ok(OperandType::Tmp(t));
+        }
+        if matches!(base_expr.kind, ExprKind::PropertyAccess { .. }) {
+            let mut patches: Vec<u32> = Vec::new();
+            let op = self.compile_isset_prop_chain(base_expr, line, &mut patches)?;
+            jmp_to_right.extend(patches.into_iter().map(|p| p as usize));
+            return Ok(op);
+        }
+        self.compile_expr(base_expr)
+    }
+
     fn compile_isset_prop_chain(
         &mut self,
         expr: &Expr,
@@ -14636,13 +14661,11 @@ impl Compiler {
                     chain.reverse();
 
                     let mut jmp_to_right: Vec<usize> = Vec::new();
-                    let base_op = if Self::is_static_prop_expr(base_expr) {
-                        let (t, j) = self.compile_static_prop_quiet(base_expr)?;
-                        jmp_to_right.push(j as usize);
-                        OperandType::Tmp(t)
-                    } else {
-                        self.compile_expr(base_expr)?
-                    };
+                    let base_op = self.compile_coalesce_dim_base(
+                        base_expr,
+                        expr.span.line,
+                        &mut jmp_to_right,
+                    )?;
                     let base_op = self.snapshot_cv(base_op, expr.span.line);
                     let mut current = base_op;
 

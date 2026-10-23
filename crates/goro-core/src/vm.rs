@@ -54604,6 +54604,11 @@ impl Vm {
                                     }
                                 }
                                 result
+                            } else if is_fetch_is && !has_get {
+                                // FETCH_OBJ_IS: an inaccessible property
+                                // reads as null, silently (inside the
+                                // class's __get, zend_wrong_offset throws)
+                                Value::Null
                             } else {
                                 // No __get - throw the error (with file/line populated)
                                 let exc = self.create_exception(b"Error", &err_msg, op.line);
