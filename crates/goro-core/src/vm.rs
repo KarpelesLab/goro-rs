@@ -1673,6 +1673,8 @@ pub struct Vm {
     pub request_shutdown_hooks: Vec<fn(&mut Vm)>,
     /// php_rfc1867_callback (file upload progress), if any.
     pub rfc1867_callback: Option<crate::rfc1867::Callback>,
+    /// The multibyte callbacks of multipart/form-data parsing (mbstring).
+    pub rfc1867_multibyte: Option<crate::rfc1867::Multibyte>,
     /// SG(headers_sent): set once output reaches the SAPI.
     pub headers_sent: bool,
     /// SG(callback_func): header_register_callback(), run when the headers
@@ -2932,6 +2934,7 @@ impl Vm {
             headers_sent: false,
             header_callback: None,
             rfc1867_callback: None,
+            rfc1867_multibyte: None,
             internal_deprecated_constants: Default::default(),
             uncloneable_classes: Vec::new(),
             internal_function_decls: Default::default(),

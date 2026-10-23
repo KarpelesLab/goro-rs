@@ -17,6 +17,69 @@ use crate::zpp::*;
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"mb_parse_str", mb_parse_str);
     vm.treat_data_hook = Some(treat_data);
+    vm.rfc1867_multibyte = Some(goro_core::rfc1867::Multibyte {
+        start: rfc1867_start,
+        detect: rfc1867_detect,
+        convert: rfc1867_convert,
+        internal: rfc1867_internal,
+        mbchar_bytes: rfc1867_mbchar_bytes,
+    });
+}
+
+fn enc_id(e: &'static Encoding) -> goro_core::rfc1867::EncodingId {
+    e as *const Encoding as usize
+}
+
+fn enc_of(id: goro_core::rfc1867::EncodingId) -> &'static Encoding {
+    // SAFETY: ids are only made by `enc_id()` from `&'static Encoding`s.
+    unsafe { &*(id as *const Encoding) }
+}
+
+/// php_mb_encoding_translation()
+fn rfc1867_start(vm: &mut Vm) -> bool {
+    state::sync(vm);
+    state::with(|s| s.encoding_translation)
+}
+
+/// php_mb_zend_encoding_detector() over MBSTRG(http_input_list)
+/// (php_mb_gpc_get_detect_order()).
+fn rfc1867_detect(_vm: &mut Vm, line: &[u8]) -> Option<goro_core::rfc1867::EncodingId> {
+    let list = state::with(|s| s.http_input_list.clone());
+    if list.len() == 1 && list[0].no == EncNo::Pass {
+        return None;
+    }
+    guess_encoding(&[line], &list, false, false).map(enc_id)
+}
+
+/// php_mb_zend_encoding_converter() to MBSTRG(internal_encoding).
+fn rfc1867_convert(_vm: &mut Vm, data: &[u8], from: goro_core::rfc1867::EncodingId) -> Vec<u8> {
+    let (to, subst, mode) = state::with(|s| {
+        (
+            s.internal_encoding,
+            s.current_filter_illegal_substchar,
+            s.current_filter_illegal_mode,
+        )
+    });
+    mbfl::fast_convert(data, enc_of(from), to, subst, mode).0
+}
+
+/// php_mb_zend_internal_encoding_getter()
+fn rfc1867_internal(_vm: &mut Vm) -> goro_core::rfc1867::EncodingId {
+    enc_id(state::with(|s| s.internal_encoding))
+}
+
+/// php_mb_mbchar_bytes()
+fn rfc1867_mbchar_bytes(e: goro_core::rfc1867::EncodingId, b: u8) -> usize {
+    let e = enc_of(e);
+    if let Some(t) = e.mblen_table {
+        t[b as usize] as usize
+    } else if e.flag & mbfl::MBFL_ENCTYPE_WCS2 != 0 {
+        2
+    } else if e.flag & mbfl::MBFL_ENCTYPE_WCS4 != 0 {
+        4
+    } else {
+        1
+    }
 }
 
 /// C: `mbstr_treat_data` (and `php_mb_post_handler` for PARSE_POST): with

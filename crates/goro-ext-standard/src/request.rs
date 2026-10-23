@@ -770,7 +770,13 @@ impl<'a> MultipartBuffer<'a> {
         false
     }
 
-    fn headers(&mut self, headers: &mut Vec<(Vec<u8>, Vec<u8>)>) -> bool {
+    /// The part's headers; `each_line` sees every header line (the
+    /// encoding detection of encoding translation).
+    fn headers(
+        &mut self,
+        headers: &mut Vec<(Vec<u8>, Vec<u8>)>,
+        each_line: &mut dyn FnMut(&[u8]),
+    ) -> bool {
         if !self.find_boundary() {
             return false;
         }
@@ -780,6 +786,7 @@ impl<'a> MultipartBuffer<'a> {
             if line.is_empty() {
                 break;
             }
+            each_line(&line);
             let colon = if !line.is_empty() && !(line[0] as char).is_ascii_whitespace() {
                 line.iter().position(|&c| c == b':')
             } else {
@@ -876,8 +883,9 @@ fn get_hdr<'b>(headers: &'b [(Vec<u8>, Vec<u8>)], key: &[u8]) -> Option<&'b [u8]
         .map(|(_, v)| v.as_slice())
 }
 
-/// php_ap_getword
-fn getword(line: &[u8], pos: &mut usize, stop: u8) -> Vec<u8> {
+/// php_ap_getword, or php_mb_rfc1867_getword when `mb` gives the length of
+/// the (multibyte) character a byte starts.
+fn getword(line: &[u8], pos: &mut usize, stop: u8, mb: Mblen) -> Vec<u8> {
     let start = *pos;
     let mut p = start;
     while p < line.len() && line[p] != 0 && line[p] != stop {
@@ -895,7 +903,7 @@ fn getword(line: &[u8], pos: &mut usize, stop: u8) -> Vec<u8> {
                 p += 1;
             }
         } else {
-            p += 1;
+            p += mb.len(q);
         }
     }
     if p >= line.len() {
@@ -904,13 +912,29 @@ fn getword(line: &[u8], pos: &mut usize, stop: u8) -> Vec<u8> {
     }
     let res = line[start..p].to_vec();
     while p < line.len() && line[p] == stop {
-        p += 1;
+        p += mb.len(line[p]);
     }
-    *pos = p;
+    *pos = p.min(line.len());
     res
 }
 
-fn substring_conf(s: &[u8], len: usize, quote: u8) -> Vec<u8> {
+/// The length of the character a byte starts, in the multibyte encoding
+/// multipart headers are parsed in (1: none).
+#[derive(Clone, Copy)]
+struct Mblen(Option<(fn(goro_core::rfc1867::EncodingId, u8) -> usize, usize)>);
+
+impl Mblen {
+    #[inline]
+    fn len(self, b: u8) -> usize {
+        match self.0 {
+            Some((f, e)) => f(e, b).max(1),
+            None => 1,
+        }
+    }
+}
+
+/// php_ap_ / php_mb_rfc1867_substring_conf
+fn substring_conf(s: &[u8], len: usize, quote: u8, mb: Mblen) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < len && i < s.len() && s[i] != quote {
@@ -920,16 +944,21 @@ fn substring_conf(s: &[u8], len: usize, quote: u8) -> Vec<u8> {
         {
             i += 1;
             out.push(s[i]);
+            i += 1;
         } else {
-            out.push(s[i]);
+            let mut j = mb.len(s[i]);
+            while j > 0 && i < len && i < s.len() {
+                out.push(s[i]);
+                i += 1;
+                j -= 1;
+            }
         }
-        i += 1;
     }
     out
 }
 
-/// php_ap_getword_conf
-fn getword_conf(s: &[u8]) -> Vec<u8> {
+/// php_ap_getword_conf / php_mb_rfc1867_getword_conf
+fn getword_conf(s: &[u8], mb: Mblen) -> Vec<u8> {
     let mut i = 0;
     while i < s.len() && (s[i] as char).is_ascii_whitespace() {
         i += 1;
@@ -940,19 +969,29 @@ fn getword_conf(s: &[u8]) -> Vec<u8> {
     }
     if s[0] == b'"' || s[0] == b'\'' {
         let q = s[0];
-        substring_conf(&s[1..], s.len() - 1, q)
+        substring_conf(&s[1..], s.len() - 1, q, mb)
     } else {
         let end = s
             .iter()
             .position(|c| (*c as char).is_ascii_whitespace())
             .unwrap_or(s.len());
-        substring_conf(s, end, 0)
+        substring_conf(s, end, 0, mb)
     }
 }
 
-fn ap_basename(path: &[u8]) -> &[u8] {
-    let s = path.iter().rposition(|&c| c == b'\\');
-    let s2 = path.iter().rposition(|&c| c == b'/');
+/// php_ap_basename / php_mb_rfc1867_basename (php_mb_safe_strrchr(): only
+/// separators that are whole characters count).
+fn ap_basename(path: &[u8], mb: Mblen) -> &[u8] {
+    let (mut s, mut s2) = (None, None);
+    let mut i = 0;
+    while i < path.len() {
+        match path[i] {
+            b'\\' => s = Some(i),
+            b'/' => s2 = Some(i),
+            _ => {}
+        }
+        i += mb.len(path[i]);
+    }
     match (s, s2) {
         (Some(a), Some(b)) => &path[a.max(b) + 1..],
         (Some(a), None) => &path[a + 1..],
@@ -1092,11 +1131,29 @@ fn rfc1867_handler(
         }
     }
 
+    // php_rfc1867_encoding_translation() with an internal encoding: names,
+    // filenames and values are converted from the encoding detected from
+    // the part's header lines (mbuff->input_encoding).
+    let mbx = ctx.vm.rfc1867_multibyte.filter(|m| (m.start)(ctx.vm));
+    let mut input_encoding: Option<goro_core::rfc1867::EncodingId> = None;
     while !skip_all && !mb.eof() {
         let mut headers = Vec::new();
-        if !mb.headers(&mut headers) {
+        let vm = &mut *ctx.vm;
+        let found = mb.headers(&mut headers, &mut |line| {
+            if let Some(m) = mbx {
+                input_encoding = (m.detect)(vm, line);
+            }
+        });
+        if !found {
             break;
         }
+        let wmb = Mblen(mbx.and_then(|m| input_encoding.map(|e| (m.mbchar_bytes, e))));
+        let to_internal = |vm: &mut Vm, b: Vec<u8>| -> Vec<u8> {
+            match (mbx, input_encoding) {
+                (Some(m), Some(e)) => (m.convert)(vm, cstr(&b), e),
+                _ => b,
+            }
+        };
         let cd = match get_hdr(&headers, b"Content-Disposition") {
             Some(c) => c.to_vec(),
             None => continue,
@@ -1119,25 +1176,28 @@ fn rfc1867_handler(
             pos += 1;
         }
         while pos < cd.len() && cd[pos] != 0 {
-            let pair = getword(&cd, &mut pos, b';');
+            let pair = getword(&cd, &mut pos, b';', wmb);
             while pos < cd.len() && (cd[pos] as char).is_ascii_whitespace() {
                 pos += 1;
             }
             if pair.contains(&b'=') {
                 let mut pp = 0;
-                let key = getword(&pair, &mut pp, b'=');
+                let key = getword(&pair, &mut pp, b'=', wmb);
                 let rest = &pair[pp..];
                 if key.eq_ignore_ascii_case(b"name") {
-                    param = Some(getword_conf(rest));
+                    param = Some(to_internal(ctx.vm, getword_conf(rest, wmb)));
                 } else if key.eq_ignore_ascii_case(b"filename") {
-                    filename = Some(getword_conf(rest));
+                    filename = Some(to_internal(ctx.vm, getword_conf(rest, wmb)));
                 }
             }
         }
         // Normal form variable
         if filename.is_none() {
             if let Some(param) = param {
-                let value = mb.read_body().unwrap_or_default();
+                let mut value = mb.read_body().unwrap_or_default();
+                if let (Some(m), Some(e)) = (mbx, input_encoding) {
+                    value = (m.convert)(ctx.vm, &value, e);
+                }
                 count += 1;
                 if count <= cfg.max_input_vars {
                     if let Some(f) = cb {
@@ -1374,11 +1434,12 @@ fn rfc1867_handler(
             }
         };
         let fname_c = cstr(&filename).to_vec();
+        let bmb = Mblen(mbx.map(|m| (m.mbchar_bytes, (m.internal)(ctx.vm))));
         reg(
             ctx,
             &protected,
             name_for("name"),
-            sval(ap_basename(&fname_c)),
+            sval(ap_basename(&fname_c, bmb)),
             false,
         );
         reg(
