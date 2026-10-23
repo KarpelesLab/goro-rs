@@ -610,3 +610,99 @@ pub fn map_to_palette(img: &mut Image, palette: &[[u16; 3]], dither: Dither) {
     cube.reduce(usize::MAX);
     cube.assign(img, dither);
 }
+
+/// KmeansImage(): Lloyd iterations from `colors` centres: the `seeds`
+/// first, the rest from the colour map of an undithered quantization
+/// (ImageMagick picks random image colours for unseeded centres). Each iteration assigns
+/// every pixel its closest centre (RGB) and moves the centres to the
+/// means; it stops after `iterations` or once the total squared
+/// distance (QuantumScale units) changes by no more than `tolerance`.
+/// Pixels take their centre's rounded colour.
+pub fn kmeans(
+    img: &mut Image,
+    colors: usize,
+    iterations: usize,
+    tolerance: f64,
+    seeds: Option<Vec<[u16; 3]>>,
+) {
+    if iterations == 0 || img.pixels.is_empty() {
+        return;
+    }
+    let colors = colors.max(1);
+    let mut centres: Vec<[f64; 3]> = seeds
+        .unwrap_or_default()
+        .iter()
+        .take(colors)
+        .map(|c| c.map(|v| v as f64))
+        .collect();
+    if centres.len() < colors {
+        let mut q = img.clone();
+        q.alpha = false;
+        quantize(&mut q, colors, 0, Dither::None);
+        let mut seen = std::collections::HashSet::new();
+        let mut pal: Vec<[u16; 3]> = q
+            .pixels
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2]])
+            .filter(|c| seen.insert(*c))
+            .collect();
+        pal.sort_unstable();
+        let missing = colors - centres.len();
+        centres.extend(pal.iter().take(missing).map(|c| c.map(|v| v as f64)));
+    }
+    // the pixels as a histogram, in first-seen order
+    let mut index = std::collections::HashMap::new();
+    let mut uniq: Vec<([f64; 3], f64)> = vec![];
+    let mut of_pixel = Vec::with_capacity(img.pixels.len() / 4);
+    for p in img.pixels.chunks_exact(4) {
+        let k = [p[0], p[1], p[2]];
+        let i = *index.entry(k).or_insert_with(|| {
+            uniq.push((k.map(|v| v as f64), 0.0));
+            uniq.len() - 1
+        });
+        uniq[i].1 += 1.0;
+        of_pixel.push(i as u32);
+    }
+    let mut label = vec![0usize; uniq.len()];
+    let mut previous: Option<f64> = None;
+    for _ in 0..iterations {
+        let mut total = 0.0;
+        let mut sums = vec![[0f64; 3]; centres.len()];
+        let mut counts = vec![0f64; centres.len()];
+        for (u, (c, n)) in uniq.iter().enumerate() {
+            let (mut best, mut bd) = (0usize, f64::MAX);
+            for (j, m) in centres.iter().enumerate() {
+                let d = (c[0] - m[0]).powi(2) + (c[1] - m[1]).powi(2) + (c[2] - m[2]).powi(2);
+                if d < bd {
+                    bd = d;
+                    best = j;
+                }
+            }
+            label[u] = best;
+            total += n * bd / (Q * Q);
+            counts[best] += n;
+            for k in 0..3 {
+                sums[best][k] += n * c[k];
+            }
+        }
+        for (j, m) in centres.iter_mut().enumerate() {
+            if counts[j] > 0.0 {
+                for k in 0..3 {
+                    m[k] = sums[j][k] / counts[j];
+                }
+            }
+        }
+        if previous.is_some_and(|p| (total - p).abs() <= tolerance) {
+            break;
+        }
+        previous = Some(total);
+    }
+    let out: Vec<[u16; 3]> = centres
+        .iter()
+        .map(|m| m.map(|v| (v + 0.5).floor().clamp(0.0, Q) as u16))
+        .collect();
+    for (p, &u) in img.pixels.chunks_exact_mut(4).zip(&of_pixel) {
+        p[..3].copy_from_slice(&out[label[u as usize]]);
+    }
+    img.colors = None;
+}

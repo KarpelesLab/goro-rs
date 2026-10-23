@@ -918,11 +918,34 @@ fn mean_shift_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R
     })
 }
 
+/// KmeansImage(): seeds from the "kmeans:seed-colors" artifact (a
+/// ';'-separated colour list), the rest from colour quantization.
 fn kmeans_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "lld", args)?;
-    let n = a[0].long_or(8).max(2) as u32;
-    image_op(vm, &d_(o), "Unable to kmeansImage", |i| {
-        apply_oxideav(i, &of::Quantize::new(n))
+    let n = a[0].long_or(8).max(1) as usize;
+    let iterations = a[1].long_or(300).max(0) as usize;
+    let tolerance = a[2].double_or(0.0001);
+    let d = d_(o);
+    image_op(vm, &d, "Unable to kmeansImage", |i| {
+        if iterations == 0 {
+            return Err(MagickError::new(
+                goro_imagick::error::severity::OPTION_ERROR,
+                String::new(),
+            ));
+        }
+        // an image artifact (a wand option does not reach it)
+        let spec = i.artifacts.get("kmeans:seed-colors").map(str::to_string);
+        let seeds = spec.map(|s| {
+            s.split(';')
+                .filter_map(|c| PixelInfo::parse(c.trim()))
+                .map(|c| {
+                    let p = c.to_rgba16();
+                    [p[0], p[1], p[2]]
+                })
+                .collect::<Vec<_>>()
+        });
+        goro_imagick::quantize::kmeans(i, n, iterations, tolerance, seeds);
+        Ok(())
     })
 }
 
