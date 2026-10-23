@@ -17964,6 +17964,10 @@ fn phpversion_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 | "tidy" | "ldap" => {
                     return Ok(Value::String(PhpString::from_bytes(b"8.5.4")));
                 }
+                // PECL extensions report their own version.
+                "uuid" if _vm.loaded_extensions.contains(b"uuid".as_slice()) => {
+                    return Ok(Value::String(PhpString::from_bytes(b"1.3.0")));
+                }
                 _ => return Ok(Value::False),
             }
         }

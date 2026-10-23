@@ -55,6 +55,7 @@ members = [
     "crates/goro-ext-sqlite3",
     "crates/goro-ldap",
     "crates/goro-ext-ldap",
+    "crates/goro-ext-uuid",
 ]
 resolver = "2"
 
@@ -124,6 +125,7 @@ goro-ext-intl = { path = "crates/goro-ext-intl" }
 goro-ext-sqlite3 = { path = "crates/goro-ext-sqlite3" }
 goro-ldap = { path = "crates/goro-ldap" }
 goro-ext-ldap = { path = "crates/goro-ext-ldap" }
+goro-ext-uuid = { path = "crates/goro-ext-uuid" }
 goro-ext-xsl = { path = "crates/goro-ext-xsl" }
 goro-ext-dba = { path = "crates/goro-ext-dba" }
 goro-ext-readline = { path = "crates/goro-ext-readline" }

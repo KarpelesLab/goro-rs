@@ -10357,7 +10357,13 @@ pub fn reflection_extension_method(
 
     match method {
         b"getname" => Some(Value::String(PhpString::from_string(name))),
-        b"getversion" => Some(Value::String(PhpString::from_bytes(b"8.5.4"))),
+        b"getversion" => Some(Value::String(PhpString::from_bytes(
+            match ext_lower.as_str() {
+                // PECL extensions have their own version
+                "uuid" => b"1.3.0".as_slice(),
+                _ => b"8.5.4",
+            },
+        ))),
         b"getfunctions" => {
             // Enumerate all registered internal and user functions that belong
             // to this extension (matched via get_function_extension()). Return

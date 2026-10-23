@@ -50,6 +50,7 @@ pub fn register_extensions(vm: &mut Vm) {
     goro_ext_intl::register(vm);
     goro_ext_sqlite3::register(vm);
     goro_ext_ldap::register(vm);
+    goro_ext_uuid::register(vm);
     goro_ext_xsl::register(vm);
     goro_ext_gd::register(vm);
     goro_ext_dba::register(vm);

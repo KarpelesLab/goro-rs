@@ -107,6 +107,27 @@ jobs:
           path: /tmp/test_results.txt
           retention-days: 30
 
+  pecl:
+    # The test suites of the PECL extensions goro implements (uuid), from
+    # tests/pecl.
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binary
+        uses: actions/download-artifact@v4
+        with:
+          name: goro-binary
+          path: bin
+
+      - name: Run PECL extension tests
+        run: |
+          chmod +x bin/goro
+          ./bin/goro --test tests/pecl/
+
   summary:
     needs: test
     if: always()
