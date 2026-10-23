@@ -861,6 +861,9 @@ pub(crate) struct CachedCallTarget {
     /// (of a method: see MethodCallInfo)
     method_info: Option<Rc<MethodCallInfo>>,
     fn_gen: usize,
+    /// An unqualified namespaced name that resolved to the global function
+    /// (see SiteCaches::ns_fallbacks): the name the call is made by.
+    global_name: Option<PhpString>,
 }
 
 // A pending call is moved on every call (pushed, popped): larger than this,
@@ -19274,7 +19277,7 @@ impl Vm {
             .ops
             .get(ip)
             .is_some_and(|op| !matches!(op.result, OperandType::Unused));
-        self.push_resolved_call(op_array, ip, name);
+        self.push_resolved_call(op_array, ip, name, !no_ns_fallback);
         if let Some(call) = self.pending_calls.last_mut() {
             call.target.no_ns_fallback = no_ns_fallback;
         }
@@ -19283,7 +19286,13 @@ impl Vm {
     /// The pending call of the INIT_FCALL at `ip` of `op_array` by `name`,
     /// with its target as plain_call_target() resolves it.
     #[inline]
-    fn push_resolved_call(&mut self, op_array: &OpArray, ip: usize, name: PhpString) {
+    fn push_resolved_call(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        name: PhpString,
+        ns_fallback: bool,
+    ) {
         let fn_gen = self.user_functions.len() + 1;
         // The call is built in place (extend() makes room before the value
         // is made) and its arguments' buffer and target filled there: one
@@ -19304,11 +19313,25 @@ impl Vm {
         if let Some(buf) = self.value_pool.pop() {
             call.args = buf;
         }
-        if !Self::cached_call_target(op_array, ip, call.name.as_bytes(), fn_gen, &mut call.target) {
+        let mut global = None;
+        if !Self::cached_call_target(
+            op_array,
+            ip,
+            call.name.as_bytes(),
+            fn_gen,
+            &mut call.target,
+            &mut global,
+        ) {
             let name = call.name.clone();
-            let target = self.plain_call_target(op_array, ip, name.as_bytes());
+            let (target, g) = self.plain_call_target_ns(op_array, ip, name.as_bytes(), ns_fallback);
+            global = g;
             if let Some(call) = self.pending_calls.last_mut() {
                 call.target = target;
+            }
+        }
+        if let Some(g) = global {
+            if let Some(call) = self.pending_calls.last_mut() {
+                call.name = g;
             }
         }
     }
@@ -19327,7 +19350,7 @@ impl Vm {
         name: &PhpString,
         frame_this: bool,
     ) -> bool {
-        self.push_resolved_call(op_array, ip, name.clone());
+        self.push_resolved_call(op_array, ip, name.clone(), false);
         match self.pending_calls.last().and_then(|c| c.target.method) {
             Some((_, is_static)) if is_static || !frame_this => true,
             _ => {
@@ -19515,6 +19538,7 @@ impl Vm {
         name: &[u8],
         fn_gen: usize,
         t: &mut CallTarget,
+        global: &mut Option<PhpString>,
     ) -> bool {
         let sites = op_array.sites.borrow();
         let Some(c) = sites
@@ -19539,7 +19563,64 @@ impl Vm {
         t.method = c.method;
         t.method_info = c.method_info.clone();
         t.fn_gen = fn_gen;
+        if c.global_name.is_some() {
+            global.clone_from(&c.global_name);
+        }
         true
+    }
+
+    /// Whether the call / callable site `site` of `op_array` resolved the
+    /// namespaced name `lower` to the global function (see
+    /// SiteCaches::ns_fallbacks).
+    #[inline(never)]
+    pub(crate) fn ns_fallback_cached(&self, op_array: &OpArray, site: u32, lower: &[u8]) -> bool {
+        op_array
+            .sites
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.ns_fallbacks.get(&site))
+            .is_some_and(|n| n.as_slice() == lower)
+    }
+
+    #[inline(never)]
+    pub(crate) fn ns_fallback_remember(op_array: &OpArray, site: u32, lower: &[u8]) {
+        op_array
+            .sites
+            .borrow_mut()
+            .get_or_insert_with(Default::default)
+            .ns_fallbacks
+            .insert(site, lower.to_vec());
+    }
+
+    /// The target descriptor a `f(...)` callable of an unqualified name in
+    /// a namespace resolves (`f:ns\name`): once the site fell back to the
+    /// global function it keeps it (zend_ast_fcc's cached fptr).
+    #[inline(never)]
+    fn fcc_ns_fallback_desc(&self, op_array: &OpArray, site: u32, desc: PhpString) -> PhpString {
+        let Some(name) = desc.as_bytes().strip_prefix(b"f:") else {
+            return desc;
+        };
+        let name = name.strip_prefix(b"\\").unwrap_or(name);
+        let Some(p) = name.iter().rposition(|&b| b == b'\\') else {
+            return desc;
+        };
+        let lower = name.to_ascii_lowercase();
+        let global = || {
+            let mut d = b"F:".to_vec();
+            d.extend_from_slice(&name[p + 1..]);
+            PhpString::from_vec(d)
+        };
+        if self.ns_fallback_cached(op_array, site, &lower) {
+            return global();
+        }
+        if !self.user_functions.contains_key(&lower) && !self.functions.contains_key(&lower) {
+            let gl = lower[p + 1..].to_vec();
+            if self.user_functions.contains_key(&gl) || self.functions.contains_key(&gl) {
+                Self::ns_fallback_remember(op_array, site, &lower);
+                return global();
+            }
+        }
+        desc
     }
 
     /// resolve_call_target() for the INIT_FCALL at `ip` of `op_array`,
@@ -19553,10 +19634,38 @@ impl Vm {
     ) -> CallTarget {
         let fn_gen = self.user_functions.len() + 1;
         let mut t = CallTarget::NONE;
-        if Self::cached_call_target(op_array, ip, name, fn_gen, &mut t) {
+        let mut global = None;
+        if Self::cached_call_target(op_array, ip, name, fn_gen, &mut t, &mut global) {
             return t;
         }
-        let mut t = self.resolve_call_target(name);
+        self.plain_call_target_ns(op_array, ip, name, false).0
+    }
+
+    /// plain_call_target() past the site's cache. `ns_fallback`: an
+    /// unqualified name in a namespace (INIT_NS_FCALL_BY_NAME) that falls
+    /// back to the global function when the namespaced one does not exist;
+    /// the name to call then comes back too (the site keeps it).
+    #[inline(never)]
+    pub(crate) fn plain_call_target_ns(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        name: &[u8],
+        ns_fallback: bool,
+    ) -> (CallTarget, Option<PhpString>) {
+        let global_name = if ns_fallback
+            && name.contains(&b'\\')
+            && !name.windows(2).any(|w| w == b"::")
+        {
+            self.ns_call_global_name(op_array, ip as u32, name)
+        } else {
+            None
+        };
+        let resolved: &[u8] = match &global_name {
+            Some(g) => g.as_bytes(),
+            None => name,
+        };
+        let mut t = self.resolve_call_target(resolved);
         // A static method call's frame name and scope (see MethodCallInfo).
         if let (Some((sep, _)), Some(f)) = (t.method, &t.user) {
             let name = PhpString::from_bytes_untracked(name);
@@ -19577,9 +19686,33 @@ impl Vm {
                     method: t.method,
                     method_info: t.method_info.clone(),
                     fn_gen: t.fn_gen,
+                    global_name: global_name.clone(),
                 },
             );
-        t
+        (t, global_name)
+    }
+
+    /// The global function name an unqualified namespaced call `name` at
+    /// `site` makes: once the namespaced function was found missing there
+    /// (and the global one exists), for good (INIT_NS_FCALL_BY_NAME's
+    /// runtime cache).
+    #[inline(never)]
+    fn ns_call_global_name(&self, op_array: &OpArray, site: u32, name: &[u8]) -> Option<PhpString> {
+        let p = name.iter().rposition(|&b| b == b'\\')?;
+        let lower = name.to_ascii_lowercase();
+        let global = || Some(PhpString::from_vec(name[p + 1..].to_vec()));
+        if self.ns_fallback_cached(op_array, site, &lower) {
+            return global();
+        }
+        if self.user_functions.contains_key(&lower) || self.functions.contains_key(&lower) {
+            return None;
+        }
+        let gl = &lower[p + 1..];
+        if self.user_functions.contains_key(gl) || self.functions.contains_key(gl) {
+            Self::ns_fallback_remember(op_array, site, &lower);
+            return global();
+        }
+        None
     }
 
     /// The user function a pending call names (as user_fn_lookup() finds
@@ -39573,6 +39706,7 @@ impl Vm {
                     let desc = self
                         .read_operand(&op.op2, &cvs, &tmps, &op_array.literals)
                         .to_php_string();
+                    let desc = self.fcc_ns_fallback_desc(op_array, (ip - 1) as u32, desc);
                     let this = if op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this") {
                         cvs.first()
                             .map(|v| v.deref())

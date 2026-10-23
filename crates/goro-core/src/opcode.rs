@@ -591,6 +591,11 @@ pub(crate) struct SiteCaches {
     /// The template the NEWs of a user class last used (see
     /// Vm::new_object_fast).
     pub(crate) new_sites: crate::fxhash::FxHashMap<u32, std::rc::Rc<crate::object::NewTemplate>>,
+    /// The unqualified namespaced function calls / `f(...)` callables that
+    /// fell back to the global function: the namespaced (lowercase) name.
+    /// Like the runtime cache of INIT_NS_FCALL_BY_NAME, a function of that
+    /// name declared later is not seen by the site.
+    pub(crate) ns_fallbacks: crate::fxhash::FxHashMap<u32, Vec<u8>>,
 }
 
 impl OpArray {
