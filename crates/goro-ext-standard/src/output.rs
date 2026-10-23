@@ -2534,8 +2534,7 @@ pub fn materialize_print_r(
                 let cl = b.class_name.to_ascii_lowercase();
                 let keep = b.closure.is_some()
                     || b.has_property(b"__enum_case")
-                    || b.has_property(b"__lazy_state")
-                    || matches!(cl.as_slice(), b"splfixedarray");
+                    || b.has_property(b"__lazy_state");
                 (cl, b.class_name.clone(), keep)
             };
             if keep {
