@@ -55606,6 +55606,7 @@ impl Vm {
                                 | Value::Double(_)
                                 | Value::String(_)
                                 | Value::Resource(_)
+                                | Value::Array(_)
                         )
                     {
                         let type_name = Self::value_type_name(&obj_val_raw);
@@ -58429,6 +58430,7 @@ impl Vm {
                             | Value::Double(_)
                             | Value::String(_)
                             | Value::Resource(_)
+                            | Value::Array(_)
                     ) {
                         // Attempt to assign property on a non-object scalar.
                         // PHP 8 throws Error for all scalar types (including
