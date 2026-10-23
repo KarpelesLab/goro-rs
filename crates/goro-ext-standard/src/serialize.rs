@@ -495,9 +495,11 @@ pub(crate) fn format_serialize_double(f: f64) -> String {
 
 /// Take an element out of a container: a reference with refcount 1 is
 /// treated as a plain value (`Z_ISREF_P(data) && Z_REFCOUNT_P(data) == 1`).
-fn element_value(v: &Value) -> Value {
+/// `v` is the container's slot or a copy of it (`copies`: the number of
+/// copies of the slot's value the caller holds besides the container's).
+fn element_value(v: &Value, copies: usize) -> Value {
     if let Value::Reference(r) = v {
-        if Rc::strong_count(r) == 1 {
+        if Rc::strong_count(r) == 1 + copies {
             return r.borrow().clone();
         }
     }
@@ -617,7 +619,7 @@ impl Serializer {
                 let items: Vec<(ArrayKey, Value)> = {
                     let a = arr.borrow();
                     a.iter()
-                        .map(|(k, v)| (k.clone(), element_value(v)))
+                        .map(|(k, v)| (k.clone(), element_value(v, 0)))
                         .collect()
                 };
                 self.depth += 1;
@@ -727,7 +729,7 @@ impl Serializer {
             let items: Vec<(ArrayKey, Value)> = {
                 let a = arr.borrow();
                 a.iter()
-                    .map(|(k, v)| (k.clone(), element_value(v)))
+                    .map(|(k, v)| (k.clone(), element_value(v, 0)))
                     .collect()
             };
             self.buf
@@ -837,7 +839,8 @@ impl Serializer {
                                 saved_line,
                             );
                         } else {
-                            chosen.push((cand.clone(), e.value.clone()));
+                            // (`props` holds a copy of the value)
+                            chosen.push((cand.clone(), element_value(&e.value, 1)));
                         }
                         break;
                     }
@@ -851,10 +854,10 @@ impl Serializer {
             push_class_name(&mut self.buf, &display);
             self.buf
                 .extend_from_slice(format!("{}:{{", chosen.len()).as_bytes());
-            for (k, v) in &chosen {
+            drop(props);
+            for (k, item) in &chosen {
                 push_str(&mut self.buf, k);
-                let item = element_value(v);
-                self.serialize(vm, &item, false);
+                self.serialize(vm, item, false);
             }
             self.buf.push(b'}');
             return;
@@ -881,7 +884,11 @@ impl Serializer {
                 }
                 true
             })
-            .map(|e| (e.php_key, element_value(&e.value)))
+            // (the entry holds a copy of the value)
+            .map(|e| {
+                let v = element_value(&e.value, 1);
+                (e.php_key, v)
+            })
             .collect();
         push_class_name(&mut self.buf, &out_name);
         self.buf
