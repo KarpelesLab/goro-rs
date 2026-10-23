@@ -216,6 +216,15 @@ impl Vm {
         }
     }
 
+    /// zend_array_dup() of the table: an object's whole property table
+    /// (mangled names of protected/private properties included).
+    fn table_dup(&self, t: &Table) -> PhpArray {
+        match t {
+            Table::Arr(a) => a.borrow().clone(),
+            Table::Obj(o) => self.object_props_mangled(o).borrow().clone(),
+        }
+    }
+
     fn table_copy(&self, t: &Table) -> PhpArray {
         match t {
             Table::Arr(a) => a.borrow().clone(),
@@ -1022,7 +1031,7 @@ impl Vm {
             return self.spl_std_props(obj);
         }
         let t = self.ao_table(obj);
-        let copy = self.table_copy(&t);
+        let copy = self.table_dup(&t);
         // proptable -> symtable for object tables
         let mut out = PhpArray::new();
         for (k, v) in copy.iter() {
@@ -1043,7 +1052,7 @@ impl Vm {
         }
         if is_array_object {
             let t = self.ao_table(obj);
-            (val_arr(self.table_copy(&t)), flags)
+            (val_arr(self.table_dup(&t)), flags)
         } else {
             (Value::Object(obj.clone()), flags | USE_OTHER)
         }
@@ -1275,7 +1284,7 @@ impl Vm {
             }
             b"getarraycopy" => {
                 let t = self.ao_table(obj);
-                val_arr(self.table_copy(&t))
+                val_arr(self.table_dup(&t))
             }
             b"count" => {
                 let t = self.ao_table(obj);
@@ -1342,7 +1351,7 @@ impl Vm {
                     return Some(Value::Null);
                 }
                 let t = self.ao_table(obj);
-                let old = val_arr(self.table_copy(&t));
+                let old = val_arr(self.table_dup(&t));
                 self.ao_set_array(obj, &array, 0, true, "ArrayObject::exchangeArray");
                 old
             }

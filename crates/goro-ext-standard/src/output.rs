@@ -2257,21 +2257,20 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
             } else if is_array_object
                 && obj.borrow().get_property(b"__spl_flags").to_long() & 1 == 0
             {
-                // ArrayObject without STD_PROP_LIST exports its storage.
-                match obj.borrow().get_property(b"__spl_array") {
-                    Value::Array(a) => a
-                        .borrow()
-                        .iter()
-                        .map(|(k, v)| {
-                            let kb = match k {
-                                goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
-                                goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
-                            };
-                            (kb, v.clone())
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                }
+                // ArrayObject without STD_PROP_LIST exports its storage
+                // (get_properties_for(VAR_EXPORT): a wrapped object's or
+                // ArrayObject's table too).
+                vm.object_to_array(&obj)
+                    .borrow()
+                    .iter()
+                    .map(|(k, v)| {
+                        let kb = match k {
+                            goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+                            goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                        };
+                        (kb, v.clone())
+                    })
+                    .collect()
             } else {
                 crate::serialize::mangled_props(vm, obj)
                     .into_iter()
