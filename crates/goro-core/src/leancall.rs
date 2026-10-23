@@ -462,7 +462,10 @@ impl Vm {
             }
             stop
         };
-        let unused = matches!(op.result, OperandType::Unused);
+        // (a result the DO_FCALL is the last user of is released right after
+        // it, see OpArray::free_mask(): as an unused one)
+        let unused = matches!(op.result, OperandType::Unused)
+            || op_array.free_mask().get(ip).is_some_and(|m| m & 4 != 0);
         let result = match vm_frame {
             Some(_) => self.lean_return(&f, stop, &slots, &mut ctmps, unused),
             None => None,
