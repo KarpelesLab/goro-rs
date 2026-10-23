@@ -990,6 +990,24 @@ impl Vm {
             if m & T_MIXED != 0 || (p.by_ref != 0 && m == 0) {
                 continue;
             }
+            // The common case, without a copy of the argument: a plain value
+            // (not a reference) of a type a scalar/array-typed by-value
+            // parameter accepts as is.
+            if p.by_ref == 0 && m != 0 && m & (T_CLASS | T_OBJECT | T_CALLABLE) == 0 {
+                let vt = match &args[i] {
+                    Value::Null => T_NULL,
+                    Value::False => T_FALSE,
+                    Value::True => T_TRUE,
+                    Value::Long(_) => T_INT,
+                    Value::Double(_) => T_FLOAT,
+                    Value::String(_) => T_STRING,
+                    Value::Array(_) => T_ARRAY,
+                    _ => 0,
+                };
+                if m & vt != 0 {
+                    continue;
+                }
+            }
             // A typed by-reference parameter (Z_PARAM_ARRAY_EX(.., 0, 1),
             // `array &$array`): the referenced value is checked, never
             // coerced; a scalar-typed one is left to the function.

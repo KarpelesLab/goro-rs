@@ -712,6 +712,17 @@ impl Vm {
     }
 
     pub(crate) fn register_cv_frame(&mut self, op_array: &crate::opcode::OpArray) -> bool {
+        self.register_cv_frame_hinted(op_array, false)
+    }
+
+    /// register_cv_frame(); `hinted`: the top call_stack frame is known to
+    /// be the call of `op_array` (DO_FCALL's fast path pushed it).
+    #[inline]
+    pub(crate) fn register_cv_frame_hinted(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        hinted: bool,
+    ) -> bool {
         // debug_backtrace() shows the frame's `$this` as its "object"
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
         let variadic = op_array.variadic_param.map_or(0, |v| v + 1);
@@ -728,16 +739,17 @@ impl Vm {
                 .cv_frames
                 .last()
                 .is_some_and(|f| f.name == frame.0.as_ptr())
-            || !frame_is_for(&frame.0, op_array)
+            || (!hinted && !frame_is_for(&frame.0, op_array))
         {
             return false;
         }
         // A builtin's frame (the function called us without a frame of our own)
-        if self
-            .builtin_frames
-            .iter()
-            .rev()
-            .any(|b| b.materialized && b.depth == depth)
+        if !hinted
+            && self
+                .builtin_frames
+                .iter()
+                .rev()
+                .any(|b| b.materialized && b.depth == depth)
         {
             return false;
         }

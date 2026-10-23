@@ -1315,6 +1315,10 @@ pub struct Vm {
     /// The fast call is a forwarding one (self::, static::, parent::; see
     /// fast_forward_target).
     fast_fcall_forward: bool,
+    /// The function DO_FCALL's fast path pushed the top call_stack frame
+    /// for, about to be run (see register_cv_frame()); taken by the next
+    /// execute_op_array_frame().
+    pub(crate) cv_frame_hint: *const OpArray,
     /// Emptied buffers of finished calls (locals, temporaries, backtrace
     /// frames), reused by the next ones.
     value_pool: Vec<Vec<Value>>,
@@ -1873,6 +1877,7 @@ impl Vm {
             fast_fcall_sep: None,
             fast_fcall_captures: None,
             fast_fcall_forward: false,
+            cv_frame_hint: std::ptr::null(),
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),
             bytes_pool: Vec::new(),
@@ -15788,6 +15793,12 @@ pub(crate) fn forward_fcall_name<'a>(
 /// Append `b` to `dst` as String::from_utf8_lossy() renders it.
 #[inline]
 fn push_lossy(dst: &mut String, b: &[u8]) {
+    // (a function name is ASCII: no UTF-8 validation call)
+    if b.is_ascii() {
+        // SAFETY: ASCII bytes are valid UTF-8.
+        dst.push_str(unsafe { std::str::from_utf8_unchecked(b) });
+        return;
+    }
     match std::str::from_utf8(b) {
         Ok(s) => dst.push_str(s),
         Err(_) => dst.push_str(&String::from_utf8_lossy(b)),
@@ -20453,7 +20464,11 @@ impl Vm {
         self.call_depth += 1;
         let outer_exec = std::mem::replace(&mut self.exec_frame_len, self.call_stack.len());
         // Backtraces show the current values of the parameters.
-        let cv_frame = self.register_cv_frame(op_array);
+        let hinted = std::ptr::eq(
+            std::mem::replace(&mut self.cv_frame_hint, std::ptr::null()),
+            op_array,
+        );
+        let cv_frame = self.register_cv_frame_hinted(op_array, hinted);
         let prev_global = self.is_global_scope;
         self.is_global_scope = std::mem::take(&mut self.bind_next_frame);
         // The caller fetches the result of this by-ref function for writing.
@@ -27555,6 +27570,8 @@ impl Vm {
                         }
                         // (a fiber suspended in the call owns its arguments)
                         self.gc_call_args = &call.args;
+                        // (the top call_stack frame is this call's)
+                        self.cv_frame_hint = Rc::as_ptr(&user_fn);
                         let call_result = self.execute_op_array_vm(&user_fn, func_cvs);
                         self.gc_call_args = std::ptr::null();
                         self.keep_ref_depth = None;
