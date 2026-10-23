@@ -1574,8 +1574,9 @@ fn modulate_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
             );
             let mut hh = hh + (h - 100.0) / 200.0;
             hh -= hh.floor();
-            let ss = (ss * s / 100.0).clamp(0.0, 1.0);
-            let ll = (ll * b / 100.0).clamp(0.0, 1.0);
+            // neither is clamped before converting back
+            let ss = ss * s / 100.0;
+            let ll = ll * b / 100.0;
             let (r, g, bb) = goro_imagick::color::hsl_to_rgb(hh, ss, ll);
             p[0] = to_q16(r * 65535.0);
             p[1] = to_q16(g * 65535.0);
@@ -2329,8 +2330,43 @@ fn adaptive_threshold_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Valu
     let a = zpp::parse(vm, f, "lll", args)?;
     let (w, h, off) = (a[0].long_or(3), a[1].long_or(3), a[2].long_or(0));
     image_op(vm, &d_(o), "Unable to adaptive threshold image", |i| {
-        let r = (w.max(h).max(1) / 2).max(1) as u32;
-        apply_oxideav(i, &of::AdaptiveThreshold::new(r, -(off / 257) as i32))
+        // AdaptiveThresholdImage(): per channel, white where the sample
+        // exceeds the mean of its w×h neighbourhood (edge virtual pixels)
+        // plus the offset
+        let (w, h) = (w.max(1) as usize, h.max(1) as usize);
+        let src = i.clone();
+        let (cols, rows) = (i.columns, i.rows);
+        let mut sums = vec![0f64; cols * rows * 3];
+        for y in 0..rows {
+            for x in 0..cols {
+                let mut acc = [0f64; 3];
+                for j in 0..h {
+                    for k in 0..w {
+                        let p = src.virtual_px(
+                            x as i64 + k as i64 - (w / 2) as i64,
+                            y as i64 + j as i64 - (h / 2) as i64,
+                        );
+                        for c in 0..3 {
+                            acc[c] += p[c] as f64;
+                        }
+                    }
+                }
+                for c in 0..3 {
+                    sums[(y * cols + x) * 3 + c] = acc[c] / (w * h) as f64;
+                }
+            }
+        }
+        for (n, p) in i.pixels.chunks_exact_mut(4).enumerate() {
+            for c in 0..3 {
+                p[c] = if p[c] as f64 > sums[n * 3 + c] + off as f64 {
+                    65535
+                } else {
+                    0
+                };
+            }
+        }
+        i.colors = None;
+        Ok(())
     })
 }
 
