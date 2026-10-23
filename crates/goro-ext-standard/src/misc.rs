@@ -434,6 +434,7 @@ final class StreamBucket {
     goro_core::value::set_default_context_hook(default_context);
     vm.register_function(b"fclose", fclose_fn);
     goro_core::value::register_resource_type_dtor(b"stream", stream_resource_dtor);
+    goro_core::value::register_resource_type_dtor(b"stream-context", stream_context_dtor);
     vm.register_function(b"fread", fread_fn);
     vm.register_function(b"fwrite", fwrite_fn);
     vm.register_function(b"fgets", fgets_fn);
@@ -9971,9 +9972,10 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
             }
-            // A reference nothing else holds is copied as its value.
+            // A reference nothing else holds (but the slot `value` was
+            // copied from) is copied as its value.
             let unref = match &value {
-                Value::Reference(r) if Rc::strong_count(r) == 1 => Some(r.borrow().clone()),
+                Value::Reference(r) if Rc::strong_count(r) <= 2 => Some(r.borrow().clone()),
                 _ => None,
             };
             if let Some(v) = unref {
@@ -12297,6 +12299,7 @@ pub(crate) fn set_current_dir(id: Option<i64>) {
 /// a stream handed to PHP code is closed when its last reference goes away,
 /// through the registered fclose()/closedir() (so wrappers see it).
 fn stream_resource_dtor(vm: &mut Vm, id: i64) {
+    goro_core::value::set_resource_no_fclose(id, false);
     if !goro_core::value::is_open_resource(id) || userstream::free_user_stream(vm, id) {
         return;
     }
@@ -12314,8 +12317,11 @@ pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         &called_as(vm, "fclose"),
     )?;
     let fid = args.first().unwrap_or(&Value::Null).to_long();
-    // PHP_STREAM_FLAG_NO_FCLOSE: a filter callback is running on it.
-    if crate::stream_filters::in_filter_callback(fid) {
+    // PHP_STREAM_FLAG_NO_FCLOSE: a filter callback is running on it, or
+    // an object owns it.
+    if crate::stream_filters::in_filter_callback(fid)
+        || goro_core::value::is_resource_no_fclose(fid)
+    {
         vm.emit_warning(
             "fclose(): cannot close the provided stream, as it must not be manually closed",
         );
@@ -16050,8 +16056,10 @@ fn restore_include_path_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmErro
     ini_restore(vm, &[Value::String(PhpString::from_bytes(b"include_path"))])
 }
 
-fn get_resource_type_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn get_resource_type_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    resource_param(vm, val, "get_resource_type")?;
+    let val = &val.deref();
     // For closed resources, return "Unknown" (matches PHP behavior).
     if let Value::Resource(id) = val {
         if goro_core::value::is_registered_resource(id.id())
@@ -19315,8 +19323,28 @@ fn get_mangled_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     }
 }
 
-fn get_resource_id_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// A `resource $resource` parameter (zend_parse_arg Z_PARAM_RESOURCE).
+fn resource_param(vm: &mut Vm, val: &Value, func: &str) -> Result<(), VmError> {
+    let v = val.deref();
+    if matches!(v, Value::Resource(_)) {
+        return Ok(());
+    }
+    let msg = format!(
+        "{}(): Argument #1 ($resource) must be of type resource, {} given",
+        func,
+        Vm::value_type_name(&v)
+    );
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
+}
+
+fn get_resource_id_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
+    resource_param(vm, val, "get_resource_id")?;
     let id = val.resource_id();
     if id >= 0 {
         Ok(Value::Long(id))
@@ -20720,6 +20748,19 @@ thread_local! {
     static DEFAULT_STREAM_CTX: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
 }
 
+/// The stream-context list destructor (php_stream_context_free()): a
+/// context created by PHP code is freed with its last reference (not the
+/// default context, which FG(default_context) holds).
+fn stream_context_dtor(_vm: &mut Vm, id: i64) {
+    if DEFAULT_STREAM_CTX.with(|d| d.get()) == Some(id) {
+        return;
+    }
+    STREAM_CONTEXTS.with(|c| {
+        c.borrow_mut().remove(&id);
+    });
+    goro_core::value::remove_resource(id);
+}
+
 /// FG(default_context), allocated on first use (php_stream_context_from_zval).
 pub(crate) fn default_context() -> i64 {
     DEFAULT_STREAM_CTX.with(|d| {
@@ -21596,8 +21637,39 @@ fn diskfreespace_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn disk_total_space_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     disk_space_impl(vm, args, "disk_total_space", true, "disk_total_space")
 }
-fn get_resources_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
+fn get_resources_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let ty = match args.first().map(|v| v.deref()) {
+        None | Some(Value::Null) | Some(Value::Undef) => None,
+        Some(Value::String(s)) => Some(s.as_bytes().to_vec()),
+        Some(v @ (Value::Long(_) | Value::Double(_) | Value::True | Value::False)) => {
+            Some(v.to_php_string().as_bytes().to_vec())
+        }
+        Some(v) => {
+            let msg = format!(
+                "get_resources(): Argument #1 ($type) must be of type ?string, {} given",
+                Vm::value_type_name(&v)
+            );
+            let exc = vm.throw_type_error(msg.clone());
+            vm.current_exception = Some(exc);
+            return Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            });
+        }
+    };
+    let mut arr = PhpArray::new();
+    for (id, t) in goro_core::value::live_resources() {
+        let keep = match (&ty, &t) {
+            (None, _) => true,
+            // "Unknown": the closed ones (type <= 0)
+            (Some(want), None) => want.as_slice() == b"Unknown",
+            (Some(want), Some(t)) => want == t,
+        };
+        if keep {
+            arr.set(ArrayKey::Int(id), Value::resource(id));
+        }
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 thread_local! {
     /// BG(syslog_device): openlog() keeps the ident pointer.

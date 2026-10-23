@@ -236,7 +236,7 @@ impl Vm {
                                 String::from_utf8_lossy(&key)
                             ));
                         }
-                        let r = Rc::new(RefCell::new(other));
+                        let r = Rc::new(RefCell::new(crate::object::separated(other)));
                         {
                             let mut ob = obj.borrow_mut();
                             if let Some(slot) = ob.properties.get_mut(i - 1) {
@@ -389,7 +389,7 @@ impl Vm {
                                 String::from_utf8_lossy(&d.name)
                             ));
                         }
-                        let r = Rc::new(RefCell::new(other));
+                        let r = Rc::new(RefCell::new(crate::object::separated(other)));
                         obj.borrow_mut().properties[si].1 = Value::Reference(r.clone());
                         self.typed_ref_register_slot(obj, &storage, &r);
                         Value::Reference(r)
@@ -475,7 +475,7 @@ impl Vm {
             let value = match value {
                 Value::Reference(r) if by_ref => Value::Reference(r),
                 other if by_ref => {
-                    let r = Rc::new(RefCell::new(other));
+                    let r = Rc::new(RefCell::new(crate::object::separated(other)));
                     if let Some(slot) = obj.borrow_mut().properties.get_mut(j - 1) {
                         slot.1 = Value::Reference(r.clone());
                     }
@@ -507,7 +507,7 @@ impl Vm {
             match &slot.1 {
                 Value::Reference(r) => r.clone(),
                 v => {
-                    let r = Rc::new(RefCell::new(v.clone()));
+                    let r = Rc::new(RefCell::new(crate::object::separated(v.clone())));
                     slot.1 = Value::Reference(r.clone());
                     r
                 }

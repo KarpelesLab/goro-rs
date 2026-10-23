@@ -210,8 +210,14 @@ impl Vm {
             .get(name_lower)
             .filter(|_| self.consts_updated.contains(name_lower))
         {
-            if let Some(slots) = self.plain_declared_slots(name_lower) {
-                let has_array = slots.iter().any(|(_, v)| matches!(v, Value::Array(_)));
+            if let Some(mut slots) = self.plain_declared_slots(name_lower) {
+                let mut arrays = Vec::new();
+                for (i, (_, v)) in slots.iter_mut().enumerate() {
+                    if let Value::Array(a) = v {
+                        arrays.push((i, Rc::downgrade(a)));
+                        *v = Value::Null;
+                    }
+                }
                 let t = Rc::new(NewTemplate {
                     props_ptr: ce.properties.as_ptr(),
                     props_len: ce.properties.len(),
@@ -219,7 +225,7 @@ impl Vm {
                     class_name: ce.name.clone(),
                     lower: name_lower.to_vec(),
                     slots,
-                    has_array,
+                    arrays,
                     has_destruct,
                 });
                 Self::note_new_site(op_array, ip, &t);
@@ -253,14 +259,14 @@ impl Vm {
         // (as init_declared_props() sets them, one by one)
         obj.properties.reserve(t.slots.len());
         for (name, v) in &t.slots {
-            let v = match v {
-                Value::Array(a) if t.has_array => {
-                    Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
-                }
-                v => v.clone(),
-            };
-            obj.properties.push((name.clone(), v));
+            obj.properties.push((name.clone(), v.clone()));
             obj.account();
+        }
+        // (an array default is shared copy-on-write; fits() saw it alive)
+        for (i, a) in &t.arrays {
+            if let (Some(a), Some(slot)) = (a.upgrade(), obj.properties.get_mut(*i)) {
+                slot.1 = Value::Array(a);
+            }
         }
         obj.mark_declared();
         let rc = Rc::new(RefCell::new(obj));

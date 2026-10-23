@@ -20,8 +20,8 @@ type Obj = Rc<RefCell<PhpObject>>;
 enum Sink {
     /// openMemory/toMemory: PHP's smart_str output buffer.
     Memory(Vec<u8>),
-    /// openUri on a local file.
-    File(std::fs::File),
+    /// openUri on a local file (with the stream resource it stands for).
+    File(std::fs::File, #[allow(dead_code)] Value),
     /// openUri through a stream wrapper (owned: closed with the writer) or
     /// toStream (borrowed).
     Stream { res: Value, owned: bool },
@@ -174,6 +174,7 @@ fn close_writer(vm: &mut Vm, mut w: Box<PhpWriter>) {
     if let Sink::Stream { res, owned: true } = &w.sink {
         let res = res.clone();
         if let Value::Resource(id) = &res {
+            goro_core::value::set_resource_no_fclose(id.id(), false);
             if goro_core::value::is_open_resource(id.id()) {
                 call_builtin(vm, b"fclose", &[res]);
             }
@@ -216,7 +217,7 @@ fn sink_write(vm: Option<&mut Vm>, sink: &mut Sink, data: &[u8]) -> i64 {
             v.extend_from_slice(data);
             data.len() as i64
         }
-        Sink::File(f) => {
+        Sink::File(f, _) => {
             use std::io::Write;
             match f.write_all(data) {
                 Ok(()) => data.len() as i64,
@@ -914,16 +915,20 @@ fn resolve_uri(source: &[u8]) -> Option<(Vec<u8>, bool)> {
 fn open_uri_sink(vm: &mut Vm, ctx: &Ctx, path: &[u8], local: bool) -> Option<Sink> {
     if !local {
         return match call_builtin(vm, b"fopen", &[s(path), s(b"wb")]) {
-            Some(v @ Value::Resource(_)) => Some(Sink::Stream {
-                res: v,
-                owned: true,
-            }),
+            Some(v @ Value::Resource(_)) => {
+                // The writer owns it: not fclose()-able from PHP code.
+                goro_core::value::set_resource_no_fclose(v.resource_id(), true);
+                Some(Sink::Stream {
+                    res: v,
+                    owned: true,
+                })
+            }
             _ => None,
         };
     }
     let p = String::from_utf8_lossy(path).into_owned();
     match std::fs::File::create(&p) {
-        Ok(f) => Some(Sink::File(f)),
+        Ok(f) => Some(Sink::File(f, goro_core::spl_dir::owned_stream_resource())),
         Err(e) => {
             let mut msg = e.to_string();
             if let Some(i) = msg.find(" (os error") {

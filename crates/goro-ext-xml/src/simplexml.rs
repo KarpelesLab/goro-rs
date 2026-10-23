@@ -199,6 +199,10 @@ pub fn docref_warning(vm: &mut Vm, msg: &str) {
 
 fn throw_error(vm: &mut Vm, class: &[u8], msg: &str) {
     let e = vm.create_exception(class, msg, vm.current_line);
+    // (zend_throw_exception(): one already thrown becomes its previous)
+    if let Some(prev) = vm.current_exception.take() {
+        Vm::exception_set_previous(&e, prev);
+    }
     vm.current_exception = Some(e);
 }
 
@@ -922,7 +926,13 @@ fn prop_dim_write(
             Some(mm)
         }
     };
-    let node0 = get_node(vm, &s)?;
+    let Some(node0) = get_node(vm, &s) else {
+        // GET_NODE() only throws: the value is still checked.
+        if let Some(v) = value {
+            let _ = value_str(vm, v, access);
+        }
+        return None;
+    };
     let it = s.itype.get();
     let mut attr: Option<NodeId> = None;
     let mut test = false;

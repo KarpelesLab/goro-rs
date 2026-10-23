@@ -403,6 +403,9 @@ pub(crate) fn with_dim_fetch_type<R>(ty: u8, f: impl FnOnce() -> R) -> R {
     r
 }
 
+/// A free_obj handler calling back into PHP code.
+pub type NativeFreeHook = fn(&mut Vm, &Rc<RefCell<PhpObject>>);
+
 /// Handlers of an object carrying native data, if any.
 #[inline]
 pub fn native_handlers(obj: &Rc<RefCell<PhpObject>>) -> Option<&'static NativeObjectHandlers> {
@@ -1051,6 +1054,9 @@ pub struct Vm {
     pub ob_running: Option<u64>,
     pub ob_next_id: u64,
     pub ob_deactivated: bool,
+    /// php_output_end_all() at request shutdown, without an executing
+    /// frame: an exception an output handler throws is fatal.
+    pub(crate) ob_final_flush: bool,
     pub ob_pending_fatal: Option<VmError>,
     pub ob_fname: Option<String>,
     /// Bumped whenever an entry of the global symbol table is added,
@@ -1135,6 +1141,9 @@ pub struct Vm {
     pub magic_prop_guards: std::collections::HashSet<(u64, Vec<u8>, u8)>,
     /// Objects with __destruct methods, tracked for shutdown-time destruction
     pub(crate) destructible_objects: Vec<Value>,
+    /// free_obj handlers that call back into PHP code, by the address of
+    /// the native handlers table (see register_native_free_hook).
+    native_free_hooks: Vec<(usize, NativeFreeHook)>,
     /// Generators whose body has a `finally`: destroying one while it is
     /// suspended runs its finally blocks (zend_generator_dtor_storage).
     pub(crate) finally_generators: Vec<Rc<RefCell<crate::generator::PhpGenerator>>>,
@@ -1651,6 +1660,7 @@ impl Vm {
             ob_running: None,
             ob_next_id: 0,
             ob_deactivated: false,
+            ob_final_flush: false,
             ob_pending_fatal: None,
             ob_fname: None,
             globals_gen: Rc::new(std::cell::Cell::new(0)),
@@ -1690,6 +1700,7 @@ impl Vm {
             magic_depth: 0,
             magic_prop_guards: std::collections::HashSet::new(),
             destructible_objects: Vec::new(),
+            native_free_hooks: Vec::new(),
             finally_generators: Vec::new(),
             forced_close_generators: Vec::new(),
             running_generators: Vec::new(),
@@ -8392,9 +8403,51 @@ impl Vm {
         self.gc_maybe_auto();
     }
 
+    /// Objects with native data of `handlers` run `hook` once destroyed
+    /// (their free_obj handler, which may call PHP code); they must be
+    /// tracked with track_destructible().
+    pub fn register_native_free_hook(
+        &mut self,
+        handlers: &'static NativeObjectHandlers,
+        hook: NativeFreeHook,
+    ) {
+        let key = handlers as *const NativeObjectHandlers as usize;
+        self.native_free_hooks.retain(|(k, _)| *k != key);
+        self.native_free_hooks.push((key, hook));
+    }
+
+    /// The registered free_obj hook of a destroyed object, run once.
+    fn run_native_free_hook(&mut self, obj_val: &Value) {
+        if self.native_free_hooks.is_empty() {
+            return;
+        }
+        let Value::Object(o) = obj_val else { return };
+        let Some(h) = native_handlers(o) else { return };
+        let key = h as *const NativeObjectHandlers as usize;
+        let Some(hook) = self
+            .native_free_hooks
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, f)| *f)
+        else {
+            return;
+        };
+        if o.borrow().get_property(b"__native_freed").is_truthy() {
+            return;
+        }
+        o.borrow_mut()
+            .set_property_slice(b"__native_freed", Value::True);
+        hook(self, o);
+    }
+
     /// Run the destructor of an object nothing references any more.
     fn destruct_released(&mut self, obj_val: Value) {
-        if let Value::Object(ref obj_rc) = obj_val {
+        self.destruct_released_user(&obj_val);
+        self.run_native_free_hook(&obj_val);
+    }
+
+    fn destruct_released_user(&mut self, obj_val: &Value) {
+        if let Value::Object(obj_rc) = obj_val {
             obj_rc.borrow().dtor_listed.set(false);
             obj_rc
                 .borrow_mut()
@@ -10773,7 +10826,9 @@ impl Vm {
     /// Take the output buffer
     pub fn take_output(&mut self) -> Vec<u8> {
         // Flush all output buffers through their handlers (php_output_end_all)
+        let prev = std::mem::replace(&mut self.ob_final_flush, self.exception_handler.is_none());
         self.ob_end_all();
+        self.ob_final_flush = prev;
         std::mem::take(&mut self.output)
     }
 
@@ -17458,7 +17513,9 @@ impl Vm {
         if !self.ob_stack.is_empty() && self.exception_handler.is_some() {
             self.shutdown_flush_with_handler();
         } else if !hooks.is_empty() {
+            self.ob_final_flush = true;
             self.ob_end_all();
+            self.ob_final_flush = false;
         }
         for hook in hooks {
             hook(self);
@@ -17755,8 +17812,24 @@ impl Vm {
         }
     }
 
-    /// Call the destructor of one object during shutdown.
+    /// Call the destructor of one object during shutdown (its dtor_obj
+    /// handler: SplFileObject's then closes its stream).
     fn shutdown_destruct_one(&mut self, obj_val: &Value) {
+        self.shutdown_destruct_user(obj_val);
+        self.run_native_free_hook(obj_val);
+        if let Value::Object(obj_rc) = obj_val {
+            let owns_stream = obj_rc
+                .try_borrow()
+                .is_ok_and(|o| matches!(o.get_property(b"__spl_stream"), Value::Resource(_)));
+            if owns_stream {
+                obj_rc
+                    .borrow_mut()
+                    .set_property_slice(b"__spl_stream", Value::Null);
+            }
+        }
+    }
+
+    fn shutdown_destruct_user(&mut self, obj_val: &Value) {
         if let Value::Object(obj_rc) = obj_val {
             if matches!(obj_rc.borrow().get_property(b"__ctor_pending"), Value::True) {
                 return;
@@ -19065,6 +19138,20 @@ impl Vm {
         }
     }
 
+    /// Give `class` its own copy of the array defaults it shares with the
+    /// compiled declaration (objects then share them copy-on-write).
+    #[inline(never)]
+    fn own_array_defaults(class: &mut ClassEntry) {
+        for p in class.properties.iter_mut() {
+            if let Value::Array(a) = &p.default {
+                if Rc::strong_count(a) > 1 {
+                    let copy = a.borrow().clone();
+                    p.default = Value::Array(Rc::new(RefCell::new(copy)));
+                }
+            }
+        }
+    }
+
     /// A new object of class `name_lower` gets its declared instance
     /// properties, with their defaults (NEW: object_properties_init()).
     pub(crate) fn init_declared_props(&mut self, name_lower: &[u8], obj: &mut PhpObject) {
@@ -19082,13 +19169,9 @@ impl Vm {
                 // stay Undef until explicitly assigned
                 obj.set_property(name, Value::Undef);
             } else {
+                // An array default is shared with the class entry, copy on
+                // write (like the default_properties_table zval).
                 let resolved = self.resolve_deferred_value(&default);
-                // Each instance gets its own copy of an array
-                // default (the class entry's Rc must not be shared).
-                let resolved = match resolved {
-                    Value::Array(a) => Value::Array(Rc::new(RefCell::new(a.borrow().clone()))),
-                    other => other,
-                };
                 obj.set_property(name, resolved);
             }
         }
@@ -42412,7 +42495,10 @@ impl Vm {
                 },
 
                 OpCode::Extract => match outlined(|| -> Result<Flow, VmError> {
-                    let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // (a property is passed as its reference)
+                    let arr_val = self
+                        .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
+                        .deref();
                     let meta_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
                     let (flags, prefix): (i64, Option<Vec<u8>>) = match &meta_val {
                         Value::Array(a) => {
@@ -42583,7 +42669,16 @@ impl Vm {
                                     let r = match &entry {
                                         Value::Reference(r) => r.clone(),
                                         other => {
-                                            let r = Rc::new(RefCell::new(other.clone()));
+                                            // An element array shared with a copy
+                                            // is separated: it is written through
+                                            // the reference (held by the slot,
+                                            // `entry` and `v` here).
+                                            let mut v = other.clone();
+                                            if matches!(&v, Value::Array(a) if Rc::strong_count(a) > 3)
+                                            {
+                                                crate::array::separate_shared(&mut v);
+                                            }
+                                            let r = Rc::new(RefCell::new(v));
                                             arr.borrow_mut()
                                                 .set(key.clone(), Value::Reference(r.clone()));
                                             r
@@ -47406,6 +47501,9 @@ impl Vm {
                         }
                     }
                     if let Some(mut class) = class_opt {
+                        // The class entry owns its array defaults (the
+                        // compiled declaration's copy is not a holder).
+                        Self::own_array_defaults(&mut class);
                         // Check for using "_" as a class/interface/trait/enum name (deprecated since 8.4)
                         {
                             let short_name =

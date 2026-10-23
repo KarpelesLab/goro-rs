@@ -1067,8 +1067,25 @@ fn create_object(
             return Err(throw(vm, b"TypeError", &msg));
         }
     }
-    obj.set_property(b"context".to_vec(), ctx_val);
-    let val = Value::Object(Rc::new(RefCell::new(obj)));
+    let rc = Rc::new(RefCell::new(obj));
+    // object_init_ex(): the class's create_object handler runs; an
+    // extension object's write_property handler gets the property.
+    vm.run_object_create_hook(&rc);
+    if vm.current_exception.is_some() {
+        return Err(exc_err(vm));
+    }
+    match goro_core::vm::native_handlers(&rc).and_then(|h| h.write_property) {
+        Some(f) => {
+            if !f(vm, &rc, b"context", &ctx_val) && vm.current_exception.is_none() {
+                rc.borrow_mut().set_property(b"context".to_vec(), ctx_val);
+            }
+            if vm.current_exception.is_some() {
+                return Err(exc_err(vm));
+            }
+        }
+        None => rc.borrow_mut().set_property(b"context".to_vec(), ctx_val),
+    }
+    let val = Value::Object(rc);
     if ctor {
         match invoke_method(vm, &val, b"__construct", vec![]) {
             Ok(_) => {}
@@ -3175,7 +3192,7 @@ fn h_fclose(vm: &mut Vm, args: &[Value]) -> Result<Option<Value>, VmError> {
             return Ok(None);
         }
     };
-    if us.borrow().flags & FLAG_NO_FCLOSE != 0 {
+    if us.borrow().flags & FLAG_NO_FCLOSE != 0 || goro_core::value::is_resource_no_fclose(fid) {
         warn(
             vm,
             "cannot close the provided stream, as it must not be manually closed",

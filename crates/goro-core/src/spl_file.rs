@@ -715,6 +715,14 @@ impl Vm {
         } else {
             None
         };
+        // The object owns its stream: freed with it, not fclose()-able.
+        let rid = res.resource_id();
+        crate::value::adopt_new_resource(rid);
+        crate::value::set_resource_no_fclose(rid, true);
+        // (its dtor_obj closes the stream in the shutdown destructor pass)
+        if !obj.borrow().dtor_listed.get() {
+            self.list_destructible(Value::Object(obj.clone()));
+        }
         let mut ob = obj.borrow_mut();
         ob.set_property_slice(b"__spl_stream", res);
         ob.set_property_slice(

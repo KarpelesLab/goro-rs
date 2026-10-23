@@ -1366,7 +1366,10 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
                     continue;
                 }
                 vm.write_output(&line);
+                // (debug_zval_dump(): `table` holds the value once more)
+                ZVAL_BIAS.with(|b| b.set(1));
                 var_dump_value(vm, &value, indent + 2, seen);
+                ZVAL_BIAS.with(|b| b.set(0));
                 goro_core::stack::leave_native(VAR_DUMP_FRAME_COST);
             }
             vm.write_output(format!("{}}}\n", prefix).as_bytes());

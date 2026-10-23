@@ -711,6 +711,59 @@ pub fn is_registered_resource(id: i64) -> bool {
     RESOURCE_REGISTRY.with(|r| r.borrow().contains_key(&id))
 }
 
+/// EG(regular_list) for get_resources(): the registered resources still
+/// referenced from PHP values, plus the open ones the engine keeps by id;
+/// as (id, type name or None when closed), by id.
+pub fn live_resources() -> Vec<(i64, Option<Vec<u8>>)> {
+    let referenced: std::collections::HashSet<i64> = LIVE_RESOURCES
+        .try_with(|m| {
+            m.borrow()
+                .iter()
+                .filter(|(_, w)| w.strong_count() > 0)
+                .map(|(id, _)| *id)
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut v: Vec<(i64, Option<Vec<u8>>)> = RESOURCE_REGISTRY.with(|r| {
+        r.borrow()
+            .iter()
+            .filter(|(id, e)| !e.closed || referenced.contains(id))
+            .map(|(id, e)| (*id, (!e.closed).then(|| e.resource_type.clone())))
+            .collect()
+    });
+    v.sort_by_key(|(id, _)| *id);
+    v
+}
+
+thread_local! {
+    /// Streams PHP code may not fclose() (PHP_STREAM_FLAG_NO_FCLOSE): the
+    /// ones an object owns (SplFileObject, XMLWriter, ...).
+    static NO_FCLOSE: RefCell<std::collections::HashSet<i64>> =
+        RefCell::new(std::collections::HashSet::new());
+}
+
+/// Mark (or unmark) stream `id` as owned by an object: fclose() refuses it.
+pub fn set_resource_no_fclose(id: i64, on: bool) {
+    let _ = NO_FCLOSE.try_with(|s| {
+        let mut s = s.borrow_mut();
+        if on {
+            s.insert(id);
+        } else {
+            s.remove(&id);
+        }
+    });
+}
+
+/// Whether fclose() must refuse stream `id` (see set_resource_no_fclose).
+pub fn is_resource_no_fclose(id: i64) -> bool {
+    NO_FCLOSE
+        .try_with(|s| {
+            let s = s.borrow();
+            !s.is_empty() && s.contains(&id)
+        })
+        .unwrap_or(false)
+}
+
 /// True iff id is registered as a resource AND has not been closed.
 pub fn is_open_resource(id: i64) -> bool {
     RESOURCE_REGISTRY.with(|r| r.borrow().get(&id).map(|e| !e.closed).unwrap_or(false))

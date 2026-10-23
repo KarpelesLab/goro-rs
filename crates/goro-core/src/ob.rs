@@ -295,7 +295,23 @@ impl Vm {
                 // The diagnostics after the call are raised at the line that
                 // ran the handler.
                 let call_line = self.current_line;
+                let no_frame = self.ob_final_flush;
                 let r = self.call_callback(&cb, &args);
+                // An exception thrown without an executing frame (the final
+                // flush) is fatal (zend_throw_exception_internal): its
+                // report, raised inside the handler, is lost and the flush
+                // bails out, dropping the buffer.
+                if no_frame && self.current_exception.is_some() {
+                    self.current_exception = None;
+                    if let Some(i) = self.ob_index_of(id) {
+                        self.ob_handlers[i].flags |= OBH_DISABLED;
+                        self.ob_stack[i].clear();
+                    }
+                    ctx.reset();
+                    self.ob_running = None;
+                    ctx.op = original_op;
+                    return ObStatus::NoData;
+                }
                 match r {
                     Ok(retval) if self.current_exception.is_none() => {
                         if let Some(i) = self.ob_index_of(id) {

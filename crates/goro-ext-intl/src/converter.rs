@@ -29,6 +29,7 @@ const SBCS_BLOB: &[u8] = include_bytes!("converter_sbcs.bin");
 pub const REASON_UNASSIGNED: i64 = 0;
 pub const REASON_ILLEGAL: i64 = 1;
 pub const REASON_RESET: i64 = 3;
+pub const REASON_CLOSE: i64 = 4;
 
 const U_INVALID_CHAR_FOUND: i32 = 10;
 const U_TRUNCATED_CHAR_FOUND: i32 = 11;
@@ -636,8 +637,48 @@ pub static HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
     ..NativeObjectHandlers::EMPTY
 };
 
-fn create(_vm: &mut Vm, o: &Obj) {
+fn create(vm: &mut Vm, o: &Obj) {
     obj::attach(o, Conv::default(), &HANDLERS);
+    // A subclass's callbacks see the converters closed (free_obj).
+    if !o.borrow().class_name.eq_ignore_ascii_case(b"UConverter") {
+        vm.register_native_free_hook(&HANDLERS, free_obj);
+        vm.track_destructible(Value::Object(o.clone()));
+    }
+}
+
+/// php_converter_free_object(): ucnv_close() of the source then the
+/// destination converter, each calling its toU then fromU callback with
+/// UCNV_CLOSE.
+fn free_obj(vm: &mut Vm, o: &Obj) {
+    let Some(st) = obj::state::<Conv>(o) else {
+        return;
+    };
+    let (src, dest) = {
+        let b = st.borrow();
+        (b.src.is_some(), b.dest.is_some())
+    };
+    let cb = Callbacks {
+        obj: Value::Object(o.clone()),
+    };
+    for open in [src, dest] {
+        if !open || vm.current_exception.is_some() {
+            continue;
+        }
+        if cb
+            .call(vm, b"toUCallback", [Value::Long(REASON_CLOSE), s(""), s("")], 0)
+            .is_none()
+        {
+            return;
+        }
+        let args = [
+            Value::Long(REASON_CLOSE),
+            crate::arr(PhpArray::new()),
+            Value::Long(0),
+        ];
+        if cb.call(vm, b"fromUCallback", args, 0).is_none() {
+            return;
+        }
+    }
 }
 
 fn clone_obj(_vm: &mut Vm, src: &Obj, dst: &Obj) {

@@ -363,8 +363,9 @@ impl Drop for Engine {
 enum Source {
     /// Everything is in the buffer already.
     Memory,
-    /// A file read in full; handed out progressively.
-    Data(Vec<u8>, usize),
+    /// A file read in full; handed out progressively (with the stream
+    /// resource it stands for while open).
+    Data(Vec<u8>, usize, #[allow(dead_code)] Value),
     /// A PHP stream (fromStream), read with fread().
     Stream(Value),
     /// The read callback reported end of input or an error (endOfInput).
@@ -483,7 +484,7 @@ impl Core {
     fn read_source(vm: &mut Vm, src: &mut Source, len: usize) -> Result<Vec<u8>, ()> {
         let r = match src {
             Source::Memory | Source::Done => return Ok(Vec::new()),
-            Source::Data(d, pos) => {
+            Source::Data(d, pos, _) => {
                 let n = len.min(d.len() - *pos);
                 let v = d[*pos..*pos + n].to_vec();
                 *pos += n;
@@ -2542,7 +2543,7 @@ fn m_open(
     };
     let enc = encoding.map(|e| String::from_utf8_lossy(&e).into_owned());
     let core = Box::new(Core::new(
-        Source::Data(data, 0),
+        Source::Data(data, 0, goro_core::spl_dir::owned_stream_resource()),
         Vec::new(),
         valid,
         enc.as_deref(),

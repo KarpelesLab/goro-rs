@@ -108,10 +108,15 @@ pub struct NewTemplate {
     /// The class's declared name, and the name it is looked up by.
     pub(crate) class_name: Vec<u8>,
     pub(crate) lower: Vec<u8>,
-    /// The declared property slots and their defaults (arrays are copied
-    /// for each object).
+    /// The declared property slots and their defaults (an array default
+    /// is a placeholder here, see `arrays`).
     pub(crate) slots: Vec<(Vec<u8>, Value)>,
-    pub(crate) has_array: bool,
+    /// The slots whose default is an array, shared copy-on-write with the
+    /// class entry's default (not held here: the template adds no count).
+    pub(crate) arrays: Vec<(
+        usize,
+        std::rc::Weak<std::cell::RefCell<crate::array::PhpArray>>,
+    )>,
     /// The class has a destructor.
     pub(crate) has_destruct: bool,
 }
@@ -124,6 +129,7 @@ impl NewTemplate {
             && self.props_len == ce.properties.len()
             && self.methods_len == ce.methods.len()
             && self.class_name == ce.name
+            && self.arrays.iter().all(|(_, a)| a.strong_count() > 0)
     }
 }
 
@@ -595,4 +601,16 @@ impl PhpObject {
             }
         });
     }
+}
+
+/// A copy of a property slot's value (the slot still holds it) about to be
+/// bound to a reference in its place: an array shared copy-on-write with
+/// something else (the class's default, a copy) is separated first, as
+/// writes through the reference change it in place.
+#[inline]
+pub fn separated(mut v: Value) -> Value {
+    if matches!(&v, Value::Array(a) if std::rc::Rc::strong_count(a) > 2) {
+        crate::array::separate_shared(&mut v);
+    }
+    v
 }

@@ -2382,7 +2382,12 @@ impl Compiler {
                 let val = if is_byref {
                     if let ExprKind::ArrayAccess { array, index } = &arg.value.kind {
                         if let Some(idx_expr) = index {
-                            let arr_op = self.compile_expr(array)?;
+                            // (the container is fetched for writing)
+                            let arr_op = if Self::is_property_rooted(array) {
+                                self.compile_dim_write_base(array)?
+                            } else {
+                                self.compile_expr(array)?
+                            };
                             let idx_op = self.compile_expr(idx_expr)?;
                             let ref_tmp = self.op_array.alloc_temp();
                             self.op_array.emit(Op {
@@ -14286,7 +14291,7 @@ impl Compiler {
                     if func_lower == b"extract" && !args.is_empty() {
                         // extract($array [, $flags [, $prefix]])
                         // Compile the array argument
-                        let arr_operand = self.compile_expr(&args[0].value)?;
+                        let arr_operand = self.compile_extract_source(&args[0].value)?;
                         // Build a [flags, prefix] array in a tmp so the opcode
                         // can access both without growing the Op struct.
                         let meta_tmp = self.op_array.alloc_temp();
@@ -19649,6 +19654,45 @@ impl Compiler {
             }
         }
         Err((tn, vn))
+    }
+
+    /// `$o->p` or `$o->p[k]...` (not nullsafe): a write through it may
+    /// reach an array still shared with the class default.
+    fn is_property_rooted(e: &Expr) -> bool {
+        let mut e = e;
+        while let ExprKind::ArrayAccess {
+            array,
+            index: Some(_),
+        } = &e.kind
+        {
+            e = array;
+        }
+        matches!(
+            &e.kind,
+            ExprKind::PropertyAccess {
+                nullsafe: false,
+                ..
+            }
+        ) && !expr_is_in_nullsafe_chain(e)
+    }
+
+    /// extract()'s array (prefer-ref): a property is fetched for writing,
+    /// as EXTR_REFS binds its elements (its array may still be shared with
+    /// the class default).
+    #[inline(never)]
+    fn compile_extract_source(&mut self, e: &Expr) -> CompileResult<OperandType> {
+        if let ExprKind::PropertyAccess {
+            object,
+            property,
+            nullsafe: false,
+        } = &e.kind
+        {
+            if !expr_is_in_nullsafe_chain(e) {
+                let t = self.compile_property_ref(object, property, e.span.line)?;
+                return Ok(OperandType::Tmp(t));
+            }
+        }
+        self.compile_expr(e)
     }
 
     /// Builtins whose first parameter is `array &$array` (goro passes the

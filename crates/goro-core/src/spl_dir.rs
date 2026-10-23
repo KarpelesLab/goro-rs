@@ -425,6 +425,11 @@ impl Vm {
             }
         }
         set_prop(obj, b"__spl_dir_open", bool_v(opened));
+        if opened {
+            // intern->u.dir.dirp: the directory stream resource the object
+            // owns (listed by get_resources(), not fclose()-able).
+            set_prop(obj, b"__spl_dir_res", owned_stream_resource());
+        }
         set_prop(obj, b"__spl_dir_cursor", Value::Long(0));
         let stored = if path.len() > 1 && path[path.len() - 1] == b'/' {
             &path[..path.len() - 1]
@@ -1406,4 +1411,18 @@ pub fn spl_dir_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Resu
         };
         Err(msg)
     }
+}
+
+/// A (directory) stream resource owned by an object: registered as a
+/// "stream", refused by fclose(), gone when its last reference is.
+pub fn owned_stream_resource() -> Value {
+    fn free(_vm: &mut Vm, id: i64) {
+        crate::value::set_resource_no_fclose(id, false);
+        crate::value::remove_resource(id);
+    }
+    let id = crate::value::alloc_resource_id();
+    crate::value::register_resource(id, b"stream");
+    crate::value::set_resource_no_fclose(id, true);
+    crate::value::set_resource_dtor(id, free);
+    Value::resource(id)
 }
