@@ -6348,7 +6348,10 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ),
         _ => false,
     };
-    Ok(if has_builtin_method {
+    // An IteratorIterator forwards unknown methods to its inner iterator.
+    let forwarded = !has_builtin_method
+        && matches!(class_or_obj, Value::Object(o) if vm.spl_forwarded_method_exists(o, &method_lower));
+    Ok(if has_builtin_method || forwarded {
         Value::True
     } else {
         Value::False

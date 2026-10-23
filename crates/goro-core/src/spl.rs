@@ -522,6 +522,47 @@ impl Vm {
         self.spl_map_named_args(class_lower, method_lower, args, &named)
     }
 
+    /// Whether an IteratorIterator-family object has method `mlower`
+    /// through its inner iterator (spl_dual_it_get_method()).
+    pub fn spl_forwarded_method_exists(&self, obj: &Rc<RefCell<PhpObject>>, mlower: &[u8]) -> bool {
+        let mut cur = obj.clone();
+        for _ in 0..32 {
+            let class_lower = obj_class_lower(&cur);
+            let Some(base) = self.spl_find_base(
+                &class_lower,
+                &[b"recursiveiteratoriterator", b"iteratoriterator"],
+            ) else {
+                return false;
+            };
+            let target = if base == b"recursiveiteratoriterator" {
+                let stack = cur.borrow().get_property(b"__spl_rii_its");
+                let top = match &stack {
+                    Value::Array(s) => s.borrow().values().last().cloned(),
+                    _ => None,
+                };
+                top.unwrap_or_else(|| cur.borrow().get_property(b"__spl_inner"))
+            } else {
+                cur.borrow().get_property(b"__spl_inner")
+            };
+            let Value::Object(t) = target else {
+                return false;
+            };
+            let tcl = obj_class_lower(&t);
+            let user_has = self
+                .classes
+                .get(&tcl)
+                .is_some_and(|c| c.get_method(mlower).is_some());
+            let builtin_has = self
+                .spl_builtin_base(&tcl)
+                .is_some_and(|b| self.spl_stub_lookup(b, mlower).is_some());
+            if user_has || builtin_has {
+                return true;
+            }
+            cur = t;
+        }
+        false
+    }
+
     /// Place named arguments of an SPL method call at their positions
     /// (`args[0]` is $this). Skipped optional parameters become Undef.
     /// Returns false with an Error set on unknown/duplicate names.
