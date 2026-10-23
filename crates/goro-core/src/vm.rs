@@ -53635,6 +53635,11 @@ impl Vm {
                                     }
                                 }
 
+                                // A class declaring __toString() implements
+                                // Stringable (zend_add_magic_method()).
+                                if !found_parent && method_name.eq_ignore_ascii_case(b"__tostring") {
+                                    found_parent = true;
+                                }
                                 if !found_parent {
                                     let class_display_name =
                                         crate::value::display_class_name(&class.name);
