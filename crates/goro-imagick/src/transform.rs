@@ -258,19 +258,10 @@ pub fn border(img: &Image, bw: usize, bh: usize, color: &PixelInfo, compose: Com
     out
 }
 
-fn shade(c: &PixelInfo, f: f64) -> [u16; 4] {
-    let (r, g, b) = c.rgb_q();
-    let q = |v: f64| {
-        if f >= 0.0 {
-            clamp_to_quantum(v + (65535.0 - v) * f) as u16
-        } else {
-            clamp_to_quantum(v * (1.0 + f)) as u16
-        }
-    };
-    [q(r), q(g), q(b), crate::color::to_q16(c.alpha)]
-}
-
-/// FrameImage(): a bevelled frame of the matte colour.
+/// FrameImage(): a bevelled frame of the matte colour. The outer bevel
+/// is lit from the top-left (top toward white by 80/255, left by 125/255,
+/// right toward black by 120/255, bottom by 145/255), the inner bevel
+/// around the image the reverse; bands meet on the corner diagonals.
 pub fn frame(
     img: &Image,
     fw: usize,
@@ -283,63 +274,70 @@ pub fn frame(
     let (w, h) = (img.columns + 2 * fw, img.rows + 2 * fh);
     let mut out = img.clone_attributes(w, h);
     let flat = matte.to_rgba16();
-    let highlight = shade(matte, 0.5);
-    let shadow = shade(matte, -0.5);
-    let accent = shade(matte, 0.25);
+    let tone = |k: f64| -> [u16; 4] {
+        let (r, g, b) = matte.rgb_q();
+        let q = |v: f64| {
+            clamp_to_quantum(if k >= 0.0 {
+                (v * (255.0 - k) + 65535.0 * k) / 255.0
+            } else {
+                v * (255.0 + k) / 255.0
+            }) as u16
+        };
+        [q(r), q(g), q(b), crate::color::to_q16(matte.alpha)]
+    };
+    // top, left, right, bottom of the outer bevel
+    let lit = [tone(80.0), tone(125.0), tone(-120.0), tone(-145.0)];
     for y in 0..h {
         for x in 0..w {
             out.set_px(x, y, flat);
         }
     }
-    let wi = w as i64;
-    let hi = h as i64;
-    // outer bevel: highlight top/left, shadow bottom/right
-    for y in 0..hi {
-        for x in 0..wi {
-            let d_left = x;
-            let d_top = y;
-            let d_right = wi - 1 - x;
-            let d_bottom = hi - 1 - y;
-            let o = outer as i64;
-            let mut c = None;
-            if d_top < o || d_left < o {
-                c = Some(
-                    if d_top < o && d_right < d_top || d_left < o && d_bottom < d_left {
-                        shadow
+    // a bevel ring of `n` pixels inside the rectangle [x0, x1) x [y0, y1)
+    let mut ring = |x0: i64, y0: i64, x1: i64, y1: i64, n: i64, c: [[u16; 4]; 4]| {
+        for y in y0.max(0)..y1.min(h as i64) {
+            for x in x0.max(0)..x1.min(w as i64) {
+                let (dl, dr) = (x - x0, x1 - 1 - x);
+                let (dt, db) = (y - y0, y1 - 1 - y);
+                let k = if dt < n {
+                    if dl < dt {
+                        1
+                    } else if dr < dt {
+                        2
                     } else {
-                        highlight
-                    },
-                );
-            }
-            if d_bottom < o || d_right < o {
-                c = Some(
-                    if d_bottom < o && d_left < d_bottom || d_right < o && d_top < d_right {
-                        highlight
+                        0
+                    }
+                } else if db < n {
+                    if dl < db {
+                        1
+                    } else if dr < db {
+                        2
                     } else {
-                        shadow
-                    },
-                );
-            }
-            // inner bevel: around the image, reversed
-            let ix0 = fw as i64 - inner as i64;
-            let iy0 = fh as i64 - inner as i64;
-            let ix1 = fw as i64 + img.columns as i64 + inner as i64;
-            let iy1 = fh as i64 + img.rows as i64 + inner as i64;
-            if inner > 0 && x >= ix0 && x < ix1 && y >= iy0 && y < iy1 {
-                let in_img = x >= fw as i64
-                    && x < fw as i64 + img.columns as i64
-                    && y >= fh as i64
-                    && y < fh as i64 + img.rows as i64;
-                if !in_img {
-                    let top = y < fh as i64;
-                    let left = x < fw as i64;
-                    c = Some(if top || left { shadow } else { accent });
-                }
-            }
-            if let Some(c) = c {
-                out.set_px(x as usize, y as usize, c);
+                        3
+                    }
+                } else if dl < n {
+                    1
+                } else if dr < n {
+                    2
+                } else {
+                    continue;
+                };
+                out.set_px(x as usize, y as usize, c[k]);
             }
         }
+    };
+    let (o, i) = (outer as i64, inner as i64);
+    ring(0, 0, w as i64, h as i64, o, lit);
+    if i > 0 {
+        let (ix, iy) = (fw as i64 - i, fh as i64 - i);
+        let reversed = [lit[3], lit[2], lit[1], lit[0]];
+        ring(
+            ix,
+            iy,
+            ix + img.columns as i64 + 2 * i,
+            iy + img.rows as i64 + 2 * i,
+            i,
+            reversed,
+        );
     }
     let mut inner_img = Image::new(img.columns, img.rows, matte);
     composite_image(&mut inner_img, img, compose, 0, 0, &ComposeArgs::default());
