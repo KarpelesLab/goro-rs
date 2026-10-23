@@ -1895,71 +1895,71 @@ fn oil_paint_image_with_sigma(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Va
     })
 }
 
+fn interp_arg(v: i64) -> PixelInterpolateMethod {
+    PixelInterpolateMethod(v as i32)
+}
+
 fn swirl_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "d", args)?;
     let deg = a[0].double_or(0.0);
-    image_op(vm, &d_(o), "Unable to swirl image", |i| {
-        apply_oxideav(i, &of::Swirl::new(deg as f32))
+    replace_op(vm, &d_(o), "Unable to swirl image", |i| {
+        Ok(goro_imagick::warp::swirl(
+            i,
+            deg,
+            PixelInterpolateMethod::Undefined,
+        ))
     })
 }
 
 fn swirl_image_with_method(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dl", args)?;
     let deg = a[0].double_or(0.0);
-    image_op(vm, &d_(o), "Unable to swirl image", |i| {
-        apply_oxideav(i, &of::Swirl::new(deg as f32))
+    let m = interp_arg(a[1].long_or(0));
+    replace_op(vm, &d_(o), "Unable to swirl image", |i| {
+        Ok(goro_imagick::warp::swirl(i, deg, m))
     })
-}
-
-/// WaveImage(): the image grows by twice the amplitude in height.
-fn wave_of(i: &Image, amp: f64, len: f64) -> MResult<Image> {
-    let extra = (2.0 * amp.abs()).ceil() as usize;
-    let mut out = i.clone_attributes(i.columns, i.rows + extra);
-    let bg = i.background_color.to_rgba16();
-    let len = if len.abs() < 1e-9 { 1.0 } else { len };
-    for x in 0..out.columns {
-        let off = amp * (2.0 * std::f64::consts::PI * x as f64 / len).sin();
-        for y in 0..out.rows {
-            let sy = y as f64 - amp.abs() - off;
-            let p = if sy < -0.5 || sy > i.rows as f64 - 0.5 {
-                bg
-            } else {
-                let v = i.sample_bilinear(x as f64 + 0.5, sy + 0.5);
-                [to_q16(v[0]), to_q16(v[1]), to_q16(v[2]), to_q16(v[3])]
-            };
-            out.set_px(x, y, p);
-        }
-    }
-    out.page = Rect::new(out.columns, out.rows, 0, 0);
-    out.colors = None;
-    Ok(out)
 }
 
 fn wave_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dd", args)?;
     let (amp, len) = (a[0].double_or(0.0), a[1].double_or(1.0));
-    replace_op(vm, &d_(o), "Unable to wave image", |i| wave_of(i, amp, len))
+    replace_op(vm, &d_(o), "Unable to wave image", |i| {
+        Ok(goro_imagick::warp::wave(
+            i,
+            amp,
+            len,
+            PixelInterpolateMethod::Undefined,
+        ))
+    })
 }
 
 fn wave_image_with_method(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "ddl", args)?;
     let (amp, len) = (a[0].double_or(0.0), a[1].double_or(1.0));
-    replace_op(vm, &d_(o), "Unable to wave image", |i| wave_of(i, amp, len))
+    let m = interp_arg(a[2].long_or(0));
+    replace_op(vm, &d_(o), "Unable to wave image", |i| {
+        Ok(goro_imagick::warp::wave(i, amp, len, m))
+    })
 }
 
 fn implode_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "d", args)?;
     let r = a[0].double_or(0.0);
-    image_op(vm, &d_(o), "Unable to implode image", |i| {
-        apply_oxideav(i, &of::Implode::new(r as f32))
+    replace_op(vm, &d_(o), "Unable to implode image", |i| {
+        Ok(goro_imagick::warp::implode(
+            i,
+            r,
+            PixelInterpolateMethod::Undefined,
+        ))
     })
 }
 
 fn implode_image_with_method(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dl", args)?;
     let r = a[0].double_or(0.0);
-    image_op(vm, &d_(o), "Unable to implode image", |i| {
-        apply_oxideav(i, &of::Implode::new(r as f32))
+    let m = interp_arg(a[1].long_or(0));
+    replace_op(vm, &d_(o), "Unable to implode image", |i| {
+        Ok(goro_imagick::warp::implode(i, r, m))
     })
 }
 

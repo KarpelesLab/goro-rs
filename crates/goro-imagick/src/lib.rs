@@ -36,6 +36,7 @@ pub mod fourier;
 pub mod fx;
 pub mod geometry;
 pub mod image;
+pub mod interp;
 pub mod pixels;
 pub mod properties;
 pub mod pseudo;
@@ -46,6 +47,7 @@ pub mod text;
 pub mod transform;
 pub mod types;
 pub mod wand;
+pub mod warp;
 
 pub use color::PixelInfo;
 pub use error::{MResult, MagickError};

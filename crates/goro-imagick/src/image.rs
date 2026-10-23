@@ -388,6 +388,11 @@ impl Image {
 
     /// The pixel at (x, y), with the virtual pixel method outside the image.
     pub fn virtual_px(&self, x: i64, y: i64) -> [u16; 4] {
+        self.virtual_px_with(x, y, self.virtual_pixel)
+    }
+
+    /// The pixel at (x, y), with the virtual pixel method `vp` outside.
+    pub fn virtual_px_with(&self, x: i64, y: i64, vp: VirtualPixelMethod) -> [u16; 4] {
         let (w, h) = (self.columns as i64, self.rows as i64);
         if x >= 0 && y >= 0 && x < w && y < h {
             return self.px(x as usize, y as usize);
@@ -401,7 +406,6 @@ impl Image {
             let p = v.rem_euclid(2 * n);
             if p < n { p } else { 2 * n - 1 - p }
         };
-        let vp = self.virtual_pixel;
         match vp {
             VirtualPixelMethod::Edge | VirtualPixelMethod::Undefined => {
                 self.px(edge(x, w) as usize, edge(y, h) as usize)
