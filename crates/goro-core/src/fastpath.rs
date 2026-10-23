@@ -1088,6 +1088,27 @@ pub(crate) const SPECIAL_CALLS: &[(&[u8], SpecialArgs, usize)] = &[
     (b"array_key_exists", SpecialArgs::KeyArray, 2),
 ];
 
+/// Whether the INIT_FCALL `op` may call a builtin of SPECIAL_CALLS (is_*,
+/// count, sizeof, strlen, array_key_exists), from its name's first byte and
+/// length: other calls do not look for one (see fast_special_call).
+#[inline(always)]
+fn maybe_special_call(op: &Op, literals: &[Value]) -> bool {
+    let OperandType::Const(i) = op.op1 else {
+        return false;
+    };
+    let Some(Value::String(name)) = literals.get(i as usize) else {
+        return false;
+    };
+    let nb = name.as_bytes();
+    match nb.first().map(u8::to_ascii_lowercase) {
+        Some(b'i') => nb.len() >= 6 && nb[..3].eq_ignore_ascii_case(b"is_"),
+        Some(b'c') => nb.len() == 5,
+        Some(b's') => nb.len() == 6,
+        Some(b'a') => nb.len() == 16,
+        _ => false,
+    }
+}
+
 /// The SPECIAL_CALLS index + 1 of the builtin `lower` (0: not one).
 pub(crate) fn special_call_index(lower: &[u8]) -> u8 {
     SPECIAL_CALLS
@@ -1210,7 +1231,14 @@ impl crate::vm::Vm {
                 // INIT_FCALL arm of the dispatch loop).
                 OpCode::InitFCall => {
                     // (a builtin php-src compiles into an opcode of its own)
-                    match self.fast_special_call(op_array, ip, cvs, tmps, no_release) {
+                    // (only when no destructor is due: the call's release of
+                    // its arguments is then a no-op)
+                    let special = if no_release && maybe_special_call(op, literals) {
+                        self.fast_special_call(op_array, ip, cvs, tmps)
+                    } else {
+                        None
+                    };
+                    match special {
                         Some(next) => Fast::Jump(next),
                         None if self.init_fcall_fast(op_array, ip, cvs) => Fast::Done,
                         None => break 'run ip,
@@ -1447,8 +1475,9 @@ impl crate::vm::Vm {
     /// argument check or coercion happens): the builtin the call site
     /// resolved to runs at once, with what DO_FCALL does around it for such
     /// a call. Returns the index of the opcode after the DO_FCALL, or None
-    /// (nothing done). Only when no destructor is due (the call's release of
-    /// its arguments is then a no-op).
+    /// (nothing done). Called only when no destructor is due (the call's
+    /// release of its arguments is then a no-op) and the name may be one
+    /// (maybe_special_call).
     #[inline(never)]
     fn fast_special_call(
         &mut self,
@@ -1456,28 +1485,11 @@ impl crate::vm::Vm {
         ip: usize,
         cvs: &[Value],
         tmps: &mut [Value],
-        no_release: bool,
     ) -> Option<usize> {
-        if !no_release {
-            return None;
-        }
         let ops = &op_array.ops;
         let literals = &op_array.literals;
         let op = &ops[ip];
         let name = crate::vm::plain_fcall_name(op, literals)?;
-        // (a name of SPECIAL_CALLS at all: is_*, count, sizeof, strlen,
-        // array_key_exists; other calls are not looked up again)
-        let nb = name.as_bytes();
-        let maybe = match nb.first().map(u8::to_ascii_lowercase) {
-            Some(b'i') => nb.len() >= 6 && nb[..3].eq_ignore_ascii_case(b"is_"),
-            Some(b'c') => nb.len() == 5,
-            Some(b's') => nb.len() == 6,
-            Some(b'a') => nb.len() == 16,
-            _ => false,
-        };
-        if !maybe {
-            return None;
-        }
         let fn_gen = self.user_functions.len() + 1;
         let (func, special) = Self::cached_special_call(op_array, ip, name.as_bytes(), fn_gen)?;
         let &(lower, kind, nargs) = SPECIAL_CALLS.get(special as usize - 1)?;
