@@ -4273,7 +4273,14 @@ impl Vm {
         };
         let mut i = 0;
         while let Some(callback) = self.autoload_functions.get(i).cloned() {
+            let fatal_before = self.fatal_emitted;
             let r = self.spl_call_autoloader(&callback, &class_str);
+            // A fatal error raised in the autoloader (a compile error of
+            // code it evaluated, ...) ends the script (zend_bailout()): the
+            // lookup that called it does not go on.
+            if !fatal_before && self.fatal_emitted && self.current_exception.is_none() {
+                self.fatal_bailout = true;
+            }
             i = match self
                 .autoload_functions
                 .iter()
@@ -17299,6 +17306,11 @@ impl Vm {
         // generator"), convert it into a Fatal-error result so the engine surfaces
         // it after main returned cleanly.
         let mut result = result;
+        if result.is_err() && self.fatal_bailout {
+            // (what the bailed-out code threw after the fatal error was
+            // displayed is abandoned)
+            self.current_exception = None;
+        }
         if result.is_ok() && self.current_exception.is_some() {
             let exc_msg = if let Some(Value::Object(obj)) = &self.current_exception {
                 let ob = obj.borrow();
