@@ -15,6 +15,7 @@ use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
+use crate::fpm::fastcgi::{self, FCGI_STDERR, FCGI_STDOUT, FcgiRequest};
 use crate::getopt::{CGI_OPTIONS, GETOPT_INVALID_ARG, GetOpt};
 
 const SAPI_NAME: &str = "cgi-fcgi";
@@ -28,6 +29,11 @@ enum Behavior {
 }
 
 thread_local! {
+    /// The FastCGI request (FastCGI mode: `-b` or a listening socket on
+    /// standard input).
+    static FCGI: std::cell::RefCell<Option<FcgiRequest>> = const { std::cell::RefCell::new(None) };
+    /// fastcgi.logging
+    static FCGI_LOGGING: Cell<bool> = const { Cell::new(true) };
     /// SG(request_info).no_headers
     static NO_HEADERS: Cell<bool> = const { Cell::new(false) };
     /// cgi.nph / cgi.rfc2616_headers
@@ -35,12 +41,37 @@ thread_local! {
     static RFC2616: Cell<bool> = const { Cell::new(false) };
 }
 
+/// sapi_cgibin_getenv() / sapi_fcgi_getenv(): the request parameters
+/// first in FastCGI mode, then the environment.
 fn getenv(k: &str) -> Option<Vec<u8>> {
-    std::env::var_os(k).map(|v| v.into_vec())
+    let fcgi = FCGI.with(|f| {
+        f.borrow()
+            .as_ref()
+            .filter(|r| r.has_env)
+            .map(|r| r.getenv(k.as_bytes()))
+    });
+    match fcgi {
+        Some(Some(v)) => Some(v),
+        _ => std::env::var_os(k).map(|v| v.into_vec()),
+    }
 }
 
-/// CGI_PUTENV(): set (or, for None, remove) an environment variable.
+/// CGI_PUTENV(): set (or, for None, remove) an environment variable (a
+/// request parameter in FastCGI mode).
 fn putenv(k: &str, v: Option<&[u8]>) -> Option<Vec<u8>> {
+    let done = FCGI.with(|f| {
+        let mut f = f.borrow_mut();
+        match f.as_mut().filter(|r| r.has_env) {
+            Some(r) => {
+                r.putenv(k.as_bytes(), v);
+                true
+            }
+            None => false,
+        }
+    });
+    if done {
+        return v.map(|v| v.to_vec());
+    }
     // SAFETY: the CGI SAPI is single-threaded.
     unsafe {
         match v {
@@ -123,7 +154,18 @@ fn usage(argv0: &[u8]) -> String {
     )
 }
 
+/// sapi_cgi_ub_write() / sapi_fcgi_ub_write()
 fn stdout_write(b: &[u8]) {
+    let in_fcgi = FCGI.with(|f| match f.borrow_mut().as_mut() {
+        Some(r) => {
+            r.write(FCGI_STDOUT, b);
+            true
+        }
+        None => false,
+    });
+    if in_fcgi {
+        return;
+    }
     let mut so = std::io::stdout().lock();
     let _ = so.write_all(b);
     let _ = so.flush();
@@ -428,8 +470,20 @@ fn atoi(b: &[u8]) -> i64 {
 /// environment variables (and CONTENT_TYPE / CONTENT_LENGTH).
 fn cgi_request_headers(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut arr = PhpArray::new();
-    for (k, v) in std::env::vars_os() {
-        let k = k.into_vec();
+    let vars: Vec<(Vec<u8>, Vec<u8>)> = match FCGI.with(|f| {
+        f.borrow().as_ref().map(|r| {
+            r.env
+                .iter()
+                .map(|(k, v)| (k.to_vec(), v.to_vec()))
+                .collect::<Vec<_>>()
+        })
+    }) {
+        Some(v) => v,
+        None => std::env::vars_os()
+            .map(|(k, v)| (k.into_vec(), v.into_vec()))
+            .collect(),
+    };
+    for (k, v) in vars {
         let name: Vec<u8> = if k.len() > 5 && k.starts_with(b"HTTP_") {
             let p = &k[5..];
             let mut q = vec![p[0]];
@@ -458,10 +512,46 @@ fn cgi_request_headers(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> 
         };
         arr.set(
             ArrayKey::String(PhpString::from_vec(name)),
-            Value::String(PhpString::from_vec(v.into_vec())),
+            Value::String(PhpString::from_vec(v)),
         );
     }
     Ok(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))))
+}
+
+/// sapi_fcgi_flush()
+fn fcgi_flush(vm: &mut Vm) {
+    if !vm.headers_sent {
+        vm.mark_output_started();
+    }
+    FCGI.with(|f| {
+        if let Some(r) = f.borrow_mut().as_mut() {
+            r.flush(false);
+        }
+    });
+}
+
+/// sapi_cgi_log_message() in FastCGI mode: the message goes to the
+/// request's error stream (fastcgi.logging).
+fn fcgi_log_message(msg: &str) {
+    let sent = FCGI_LOGGING.with(|l| l.get())
+        && FCGI.with(|f| match f.borrow_mut().as_mut() {
+            Some(r) => {
+                let mut b = msg.as_bytes().to_vec();
+                b.push(b'\n');
+                r.write(FCGI_STDERR, &b);
+                true
+            }
+            None => false,
+        });
+    if !sent {
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr(), "{}", msg);
+    }
+}
+
+fn fcgi_logger(_level: i32, msg: &str) {
+    use std::io::Write;
+    let _ = std::io::stderr().write_all(msg.as_bytes());
 }
 
 /// What one request runs.
@@ -493,6 +583,12 @@ fn run_request(ini: &IniSettings, req: &CgiRequest, job: &Job) -> Result<i32, ()
     vm.register_function(b"getallheaders", cgi_request_headers);
     vm.cli_direct_output = true;
     vm.sapi_send_headers = Some(send_headers);
+    if FCGI.with(|f| f.borrow().is_some()) {
+        vm.sapi_ub_write = Some(stdout_write);
+        vm.sapi_flush = Some(fcgi_flush);
+        vm.sapi_log_message = Some(fcgi_log_message);
+        vm.cli_write_through = true;
+    }
     let _ = goro_ext_standard::misc::take_sent_headers();
     let _ = goro_ext_standard::misc::take_status_line();
     goro_core::sapi_headers::reset();
@@ -509,16 +605,40 @@ fn run_request(ini: &IniSettings, req: &CgiRequest, job: &Job) -> Result<i32, ()
     // sapi_cgi_read_post(): the body comes from stdin.
     if req.content_length > 0 {
         let mut body = Vec::new();
-        let _ = std::io::stdin()
-            .lock()
-            .take(req.content_length as u64)
-            .read_to_end(&mut body);
+        let fcgi = FCGI.with(|f| {
+            f.borrow_mut().as_mut().map(|r| {
+                // sapi_fcgi_read_post()
+                let mut buf = vec![0u8; 16384];
+                while body.len() < req.content_length as usize {
+                    let n = (req.content_length as usize - body.len()).min(buf.len());
+                    let got = r.read(&mut buf[..n]);
+                    if got <= 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&buf[..got as usize]);
+                }
+            })
+        });
+        if fcgi.is_none() {
+            let _ = std::io::stdin()
+                .lock()
+                .take(req.content_length as u64)
+                .read_to_end(&mut body);
+        }
         info.body = body;
     }
     info.argv = job.args.to_vec();
     info.env = std::env::vars_os()
         .map(|(k, v)| (k.into_vec(), v.into_vec()))
         .collect();
+    // cgi_php_import_environment_variables(): and the request parameters
+    FCGI.with(|f| {
+        if let Some(r) = f.borrow().as_ref() {
+            for (k, v) in r.env.iter() {
+                info.env.push((k.to_vec(), v.to_vec()));
+            }
+        }
+    });
     info.script_filename = path_translated.clone().unwrap_or_default();
     goro_ext_standard::misc::set_translated_path(
         path_translated
@@ -678,6 +798,8 @@ pub fn cgi_main(argv: Vec<Vec<u8>>) -> i32 {
     let mut ini_ignore = false;
     let mut defines: Vec<u8> = Vec::new();
     let mut behavior = Behavior::Standard;
+    let fastcgi = fastcgi::is_fastcgi();
+    let mut bindpath: Option<String> = None;
     if !skip_getopt {
         let mut g = GetOpt::with_options(&argv, false, CGI_OPTIONS);
         let mut optarg = None;
@@ -696,6 +818,12 @@ pub fn cgi_main(argv: Vec<Vec<u8>>) -> i32 {
                     }
                 }
                 c if c == 's' as i32 => behavior = Behavior::Highlight,
+                // we are being started as an 'external' fastcgi server
+                c if c == 'b' as i32 => {
+                    if !fastcgi {
+                        bindpath = arg.map(|a| String::from_utf8_lossy(&a).into_owned());
+                    }
+                }
                 _ => {}
             }
         }
@@ -747,6 +875,10 @@ consult the installation file that came with this distribution, or visit \n\
                 return if c == GETOPT_INVALID_ARG { 1 } else { 0 };
             }
         }
+    }
+
+    if fastcgi || bindpath.is_some() {
+        return fastcgi_main(&ini, bindpath);
     }
 
     let req = init_request_info(&ini);
@@ -866,6 +998,186 @@ consult the installation file that came with this distribution, or visit \n\
         }
         return exit_status;
     }
+}
+
+/// The process group of the PHP_FCGI_CHILDREN workers and the parent.
+static PGROUP: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static PARENT_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static EXIT_SIGNAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// fastcgi_cleanup(): the parent kills its process group upon exit.
+extern "C" fn fastcgi_cleanup(_signo: libc::c_int) {
+    use std::sync::atomic::Ordering;
+    unsafe {
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = libc::SIG_DFL;
+        libc::sigaction(libc::SIGTERM, &act, std::ptr::null_mut());
+        libc::kill(-PGROUP.load(Ordering::Relaxed), libc::SIGTERM);
+        if PARENT_WAITING.load(Ordering::Relaxed) {
+            EXIT_SIGNAL.store(true, Ordering::Relaxed);
+        } else {
+            libc::_exit(0);
+        }
+    }
+}
+
+/// fcgi_signal_handler(): SIGUSR1 / SIGTERM end the request loop.
+extern "C" fn fcgi_signal_handler(signo: libc::c_int) {
+    if signo == libc::SIGUSR1 || signo == libc::SIGTERM {
+        fastcgi::TERMINATE.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn set_handler(sig: i32, h: libc::sighandler_t) {
+    unsafe {
+        let mut act: libc::sigaction = std::mem::zeroed();
+        act.sa_sigaction = h;
+        libc::sigemptyset(&mut act.sa_mask);
+        libc::sigaction(sig, &act, std::ptr::null_mut());
+    }
+}
+
+/// main()'s FastCGI mode: serve the FastCGI requests of a web server, on
+/// standard input (a listening socket) or the `-b` address.
+fn fastcgi_main(ini: &IniSettings, bindpath: Option<String>) -> i32 {
+    use std::sync::atomic::Ordering;
+    fastcgi::set_logger(fcgi_logger);
+    FCGI_LOGGING.with(|l| l.set(ini_bool(ini, "fastcgi.logging", true)));
+    // fcgi_setup_signals()
+    let h = fcgi_signal_handler as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    set_handler(libc::SIGUSR1, h);
+    set_handler(libc::SIGTERM, h);
+    let mut fcgi_fd = 0;
+    if let Some(bp) = &bindpath {
+        let somaxconn = libc::SOMAXCONN;
+        let mut backlog = somaxconn.min(128);
+        if let Ok(b) = std::env::var("PHP_FCGI_BACKLOG") {
+            backlog = crate::fpm::conf::atoi(&b) as i32;
+        }
+        if backlog < -1 || backlog > somaxconn {
+            eprintln!(
+                "Invalid backlog {}, needs to be between -1 and {}",
+                backlog, somaxconn
+            );
+            return 255;
+        }
+        fcgi_fd = fastcgi::listen(bp, backlog);
+        if fcgi_fd < 0 {
+            eprintln!("Couldn't create FastCGI listen socket on port {}", bp);
+            return 255;
+        }
+    }
+    // How many times to run PHP scripts before dying
+    let mut max_requests = 500;
+    if let Ok(m) = std::env::var("PHP_FCGI_MAX_REQUESTS") {
+        max_requests = crate::fpm::conf::atoi(&m);
+        if max_requests < 0 {
+            eprintln!("PHP_FCGI_MAX_REQUESTS is not valid");
+            return 255;
+        }
+    }
+    let mut children = 0;
+    if let Ok(c) = std::env::var("PHP_FCGI_CHILDREN") {
+        children = crate::fpm::conf::atoi(&c);
+        if children < 0 {
+            eprintln!("PHP_FCGI_CHILDREN is not valid");
+            return 255;
+        }
+        fastcgi::set_mgmt_var(b"FCGI_MAX_CONNS", c.as_bytes());
+        // the number of concurrent requests, equals FCGI_MAX_CONNS
+        fastcgi::set_mgmt_var(b"FCGI_MAX_REQS", c.as_bytes());
+    } else {
+        fastcgi::set_mgmt_var(b"FCGI_MAX_CONNS", b"1");
+        fastcgi::set_mgmt_var(b"FCGI_MAX_REQS", b"1");
+    }
+    if children > 0 {
+        // a process group for us & children
+        unsafe { libc::setsid() };
+        PGROUP.store(unsafe { libc::getpgrp() }, Ordering::Relaxed);
+        let cleanup = fastcgi_cleanup as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        for s in [libc::SIGTERM, libc::SIGINT, libc::SIGQUIT] {
+            set_handler(s, cleanup);
+        }
+        let mut running = 0;
+        loop {
+            let mut is_child = false;
+            while running < children {
+                match unsafe { libc::fork() } {
+                    0 => {
+                        is_child = true;
+                        set_handler(libc::SIGTERM, h);
+                        set_handler(libc::SIGQUIT, libc::SIG_DFL);
+                        set_handler(libc::SIGINT, libc::SIG_DFL);
+                        break;
+                    }
+                    -1 => {
+                        eprintln!("php (pre-forking): {}", std::io::Error::last_os_error());
+                        std::process::exit(1);
+                    }
+                    _ => running += 1,
+                }
+            }
+            if is_child {
+                break;
+            }
+            PARENT_WAITING.store(true, Ordering::Relaxed);
+            loop {
+                let mut status = 0;
+                if unsafe { libc::wait(&mut status) } >= 0 {
+                    running -= 1;
+                    break;
+                } else if EXIT_SIGNAL.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            if EXIT_SIGNAL.load(Ordering::Relaxed) {
+                return 0;
+            }
+        }
+    }
+    FCGI.with(|f| *f.borrow_mut() = Some(FcgiRequest::new(fcgi_fd, None, None, None)));
+    let mut requests = 0;
+    let mut exit_status = 0;
+    loop {
+        let fd = FCGI.with(|f| f.borrow_mut().as_mut().map_or(-1, |r| r.accept_request()));
+        if fd < 0 {
+            break;
+        }
+        let req = init_request_info(ini);
+        let job = Job {
+            behavior: Behavior::Standard,
+            cgi: true,
+            no_headers: false,
+            no_chdir: false,
+            script_file: None,
+            args: &[],
+            query_string: req.query_string.clone(),
+        };
+        if let Ok(status) = run_request(ini, &req, &job) {
+            if exit_status == 0 {
+                exit_status = status;
+            }
+        }
+        // sapi_cgi_deactivate()
+        FCGI.with(|f| {
+            if let Some(r) = f.borrow_mut().as_mut() {
+                r.finish_request(false);
+            }
+        });
+        requests += 1;
+        if max_requests != 0 && requests == max_requests {
+            FCGI.with(|f| {
+                if let Some(r) = f.borrow_mut().as_mut() {
+                    r.finish_request(true);
+                }
+            });
+            if max_requests != 1 {
+                exit_status = 0;
+            }
+            break;
+        }
+    }
+    exit_status
 }
 
 /// Whether `argv0` names the CGI SAPI.

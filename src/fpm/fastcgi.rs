@@ -806,3 +806,160 @@ pub fn get_last_client_ip() -> Option<String> {
         },
     })
 }
+
+/// fcgi_set_mgmt_var()
+pub fn set_mgmt_var(name: &[u8], value: &[u8]) {
+    MGMT_VARS.with(|m| {
+        let mut m = m.borrow_mut();
+        if !m.iter().any(|(k, _)| k == name) {
+            m.push((name.to_vec(), value.to_vec()));
+        }
+    });
+}
+
+/// fcgi_is_fastcgi(): standard input is a listening socket (php-cgi
+/// started by a web server's FastCGI process manager).
+pub fn is_fastcgi() -> bool {
+    let mut sa: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+    set_errno(0);
+    let r = unsafe { libc::getpeername(0, &mut sa as *mut _ as *mut libc::sockaddr, &mut len) };
+    r != 0 && errno() == libc::ENOTCONN
+}
+
+/// fcgi_listen(): a listening socket on "host:port", "port" or a unix
+/// socket path, or -1.
+pub fn listen(path: &str, backlog: i32) -> i32 {
+    let mut tcp = false;
+    let mut host = String::new();
+    let mut port: u16 = 0;
+    if let Some(p) = path.find(':') {
+        port = super::conf::atoi(&path[p + 1..]) as i16 as u16;
+        if port != 0 {
+            host = path[..p].to_string();
+            tcp = true;
+        }
+    } else if path.bytes().all(|c| c.is_ascii_digit()) {
+        port = super::conf::atoi(path) as i16 as u16;
+        if port != 0 {
+            tcp = true;
+        }
+    }
+    let sock;
+    let reuse: libc::c_int = 1;
+    if tcp {
+        let ip: std::net::Ipv4Addr = if host.is_empty() || host.starts_with('*') {
+            std::net::Ipv4Addr::UNSPECIFIED
+        } else if let Ok(a) = host.parse::<std::net::Ipv4Addr>() {
+            a
+        } else {
+            use std::net::ToSocketAddrs;
+            let addrs: Vec<std::net::Ipv4Addr> = match (host.as_str(), 0).to_socket_addrs() {
+                Ok(it) => it
+                    .filter_map(|a| match a.ip() {
+                        std::net::IpAddr::V4(v) => Some(v),
+                        _ => None,
+                    })
+                    .collect(),
+                Err(_) => Vec::new(),
+            };
+            match addrs.len() {
+                0 => {
+                    fcgi_log(4, &format!("Cannot resolve host name '{}'!\n", host));
+                    return -1;
+                }
+                1 => addrs[0],
+                _ => {
+                    fcgi_log(
+                        4,
+                        &format!(
+                            "Host '{}' has multiple addresses. You must choose one explicitly!\n",
+                            host
+                        ),
+                    );
+                    return -1;
+                }
+            }
+        };
+        let mut sa: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        sa.sin_family = libc::AF_INET as libc::sa_family_t;
+        sa.sin_port = port.to_be();
+        sa.sin_addr.s_addr = u32::from(ip).to_be();
+        sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+        let ok = sock >= 0
+            && unsafe {
+                libc::setsockopt(
+                    sock,
+                    libc::SOL_SOCKET,
+                    libc::SO_REUSEADDR,
+                    &reuse as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            } >= 0
+            && unsafe {
+                libc::bind(
+                    sock,
+                    &sa as *const _ as *const libc::sockaddr,
+                    std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+                )
+            } >= 0
+            && unsafe { libc::listen(sock, backlog) } >= 0;
+        if !ok {
+            let e = errno();
+            unsafe { libc::close(sock) };
+            fcgi_log(
+                4,
+                &format!(
+                    "Cannot bind/listen socket - [{}] {}.\n",
+                    e,
+                    super::zlog::strerror(e)
+                ),
+            );
+            return -1;
+        }
+        if let Ok(ip) = std::env::var("FCGI_WEB_SERVER_ADDRS") {
+            set_allowed_clients(Some(&ip));
+        }
+    } else {
+        let mut sa: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+        if path.len() >= sa.sun_path.len() {
+            fcgi_log(4, "Listening socket's path name is too long.\n");
+            return -1;
+        }
+        sa.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (i, &c) in path.as_bytes().iter().enumerate() {
+            sa.sun_path[i] = c as libc::c_char;
+        }
+        let cp = std::ffi::CString::new(path).unwrap_or_default();
+        unsafe { libc::unlink(cp.as_ptr()) };
+        let len = (std::mem::size_of::<libc::sa_family_t>() + path.len()) as libc::socklen_t;
+        sock = unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0) };
+        let ok = sock >= 0
+            && unsafe {
+                libc::setsockopt(
+                    sock,
+                    libc::SOL_SOCKET,
+                    libc::SO_REUSEADDR,
+                    &reuse as *const _ as *const libc::c_void,
+                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                )
+            } >= 0
+            && unsafe { libc::bind(sock, &sa as *const _ as *const libc::sockaddr, len) } >= 0
+            && unsafe { libc::listen(sock, backlog) } >= 0;
+        if !ok {
+            let e = errno();
+            unsafe { libc::close(sock) };
+            fcgi_log(
+                4,
+                &format!(
+                    "Cannot bind/listen socket - [{}] {}.\n",
+                    e,
+                    super::zlog::strerror(e)
+                ),
+            );
+            return -1;
+        }
+        unsafe { libc::chmod(cp.as_ptr(), 0o777) };
+    }
+    sock
+}
