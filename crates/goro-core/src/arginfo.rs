@@ -902,10 +902,7 @@ impl Vm {
                 }
                 return Err(ZppError::Throw(
                     b"Error",
-                    format!(
-                        "Unknown named parameter ${}",
-                        String::from_utf8_lossy(&name)
-                    ),
+                    format!("Unknown named parameter ${}", crate::string::msg_str(&name)),
                 ));
             };
             if idx < set.len() && set[idx] {
@@ -913,7 +910,7 @@ impl Vm {
                     b"Error",
                     format!(
                         "Named parameter ${} overwrites previous argument",
-                        String::from_utf8_lossy(&name)
+                        crate::string::msg_str(&name)
                     ),
                 ));
             }
@@ -1353,7 +1350,7 @@ impl Vm {
                     if d.fract() != 0.0 {
                         let msg = format!(
                             "Implicit conversion from float-string \"{}\" to int loses precision",
-                            s.to_string_lossy()
+                            s.to_msg_string()
                         );
                         self.emit_deprecated_at(&msg, line);
                         if self.current_exception.is_some() {

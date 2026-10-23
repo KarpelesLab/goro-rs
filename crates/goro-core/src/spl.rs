@@ -512,7 +512,7 @@ impl Vm {
         if self.native_class_handlers.contains_key(class_lower) {
             if let Err(n) = self.merge_native_named_args(class_lower, method_lower, args, 1, &named)
             {
-                let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(&n));
+                let msg = format!("Unknown named parameter ${}", crate::string::msg_str(&n));
                 let exc = self.create_exception(b"Error", &msg, line);
                 self.current_exception = Some(exc);
                 return false;
@@ -604,14 +604,14 @@ impl Vm {
                 .position(|p| p.as_bytes() == name.as_slice());
             match idx {
                 None => {
-                    let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(name));
+                    let msg = format!("Unknown named parameter ${}", crate::string::msg_str(name));
                     self.spl_throw(b"Error", &msg);
                     return false;
                 }
                 Some(i) if i < positional => {
                     let msg = format!(
                         "Named parameter ${} overwrites previous argument",
-                        String::from_utf8_lossy(name)
+                        crate::string::msg_str(name)
                     );
                     self.spl_throw(b"Error", &msg);
                     return false;
@@ -1152,7 +1152,7 @@ impl Vm {
                 let msg = format!(
                     "Creation of dynamic property {}::${} is deprecated",
                     crate::value::display_class_name(&obj.borrow().class_name),
-                    String::from_utf8_lossy(&name)
+                    crate::string::msg_str(&name)
                 );
                 let had_exc = self.current_exception.is_some();
                 self.emit_deprecated(&msg);

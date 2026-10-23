@@ -341,7 +341,7 @@ impl Vm {
                 if !self.callable_class_exists(&cl) {
                     *error = Some(format!(
                         "class \"{}\" not found",
-                        String::from_utf8_lossy(name)
+                        crate::string::msg_str(name)
                     ));
                     return None;
                 }
@@ -462,7 +462,7 @@ impl Vm {
         } else {
             *error = Some(format!(
                 "function \"{}\" not found or invalid function name",
-                String::from_utf8_lossy(callable)
+                crate::string::msg_str(callable)
             ));
             return false;
         }
@@ -557,12 +557,12 @@ impl Vm {
             *error = Some(format!(
                 "class {} does not have a method \"{}\"",
                 self.callable_class_name(&cs),
-                String::from_utf8_lossy(&mname)
+                crate::string::msg_str(&mname)
             ));
         } else {
             *error = Some(format!(
                 "function {}() does not exist",
-                String::from_utf8_lossy(&mname)
+                crate::string::msg_str(&mname)
             ));
         }
         if fcc.object.is_some() && handler.as_ref().is_some_and(|m| m.is_static) {

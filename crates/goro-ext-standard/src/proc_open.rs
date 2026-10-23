@@ -297,7 +297,7 @@ fn desc_from_array(
                 let e = errno();
                 vm.emit_warning(&format!(
                     "proc_open({}): Failed to open stream: {}",
-                    String::from_utf8_lossy(&file),
+                    goro_core::string::msg_str(&file),
                     xp_socket::strerror(e)
                 ));
                 return Err(None);
@@ -374,7 +374,7 @@ fn desc_from_array(
         _ => {
             vm.emit_warning(&format!(
                 "proc_open(): {} is not a valid descriptor spec/mode",
-                String::from_utf8_lossy(&ty)
+                goro_core::string::msg_str(&ty)
             ));
             return Err(None);
         }

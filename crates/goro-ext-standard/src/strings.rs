@@ -1206,7 +1206,7 @@ fn validate_sprintf_format_arg(
                     .map(|c| c.get_method(b"__tostring").is_some())
                     .unwrap_or(false);
                 if !has_tostring {
-                    let class_display = String::from_utf8_lossy(&class_name).to_string();
+                    let class_display = goro_core::string::msg_str(&class_name).to_string();
                     let msg = format!(
                         "{}(): Argument #1 ($format) must be of type string, {} given",
                         func_name, class_display
@@ -1878,7 +1878,10 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
             _ => {
                 return Err(raise(
                     &mut vm,
-                    format!("Unknown format specifier \"{}\"", spec as char),
+                    format!(
+                        "Unknown format specifier \"{}\"",
+                        goro_core::string::msg_char(spec)
+                    ),
                 ));
             }
         }
@@ -4778,7 +4781,10 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if arg < 0 {
                     let line = vm.current_line;
                     vm.emit_warning_at(
-                        &format!("pack(): Type {}: '*' ignored", code as char),
+                        &format!(
+                            "pack(): Type {}: '*' ignored",
+                            goro_core::string::msg_char(code)
+                        ),
                         line,
                     );
                     arg = 1;
@@ -4788,7 +4794,10 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if currentarg >= num_args {
                     return Err(pack_value_error(
                         vm,
-                        format!("Type {}: not enough arguments", code as char),
+                        format!(
+                            "Type {}: not enough arguments",
+                            goro_core::string::msg_char(code)
+                        ),
                     ));
                 }
                 let idx = currentarg as usize;
@@ -4810,7 +4819,10 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if currentarg > i32::MAX as i64 - arg || currentarg + arg > num_args {
                     return Err(pack_value_error(
                         vm,
-                        format!("Type {}: too few arguments", code as char),
+                        format!(
+                            "Type {}: too few arguments",
+                            goro_core::string::msg_char(code)
+                        ),
                     ));
                 }
                 currentarg += arg;
@@ -4818,7 +4830,10 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             _ => {
                 return Err(pack_value_error(
                     vm,
-                    format!("Type {}: unknown format code", code as char),
+                    format!(
+                        "Type {}: unknown format code",
+                        goro_core::string::msg_char(code)
+                    ),
                 ));
             }
         }
@@ -4852,7 +4867,10 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if outputpos < 0 {
                     let line = vm.current_line;
                     vm.emit_warning_at(
-                        &format!("pack(): Type {}: outside of string", code as char),
+                        &format!(
+                            "pack(): Type {}: outside of string",
+                            goro_core::string::msg_char(code)
+                        ),
                         line,
                     );
                     outputpos = 0;
@@ -4869,7 +4887,10 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if cnt < 0 || (i32::MAX as i64 - outputpos) / unit < cnt {
                 return Err(pack_value_error(
                     vm,
-                    format!("Type {}: integer overflow in format string", code as char),
+                    format!(
+                        "Type {}: integer overflow in format string",
+                        goro_core::string::msg_char(code)
+                    ),
                 ));
             }
             outputpos += cnt * unit;
@@ -4904,7 +4925,7 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     vm.emit_warning_at(
                         &format!(
                             "pack(): Type {}: not enough characters in string",
-                            code as char
+                            goro_core::string::msg_char(code)
                         ),
                         line,
                     );
@@ -4922,7 +4943,8 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             vm.emit_warning_at(
                                 &format!(
                                     "pack(): Type {}: illegal hex digit {}",
-                                    code as char, c as char
+                                    goro_core::string::msg_char(code),
+                                    goro_core::string::msg_char(c)
                                 ),
                                 line,
                             );
@@ -5051,7 +5073,10 @@ fn unpack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if overflow {
                     let line = vm.current_line;
                     vm.emit_warning_at(
-                        &format!("unpack(): Type {}: integer overflow", typ as char),
+                        &format!(
+                            "unpack(): Type {}: integer overflow",
+                            goro_core::string::msg_char(typ)
+                        ),
                         line,
                     );
                     return Ok(Value::False);
@@ -5074,7 +5099,10 @@ fn unpack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if repetitions < 0 {
                     let line = vm.current_line;
                     vm.emit_warning_at(
-                        &format!("unpack(): Type {}: '*' ignored", typ as char),
+                        &format!(
+                            "unpack(): Type {}: '*' ignored",
+                            goro_core::string::msg_char(typ)
+                        ),
                         line,
                     );
                     repetitions = 1;
@@ -5104,7 +5132,7 @@ fn unpack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             _ => {
                 return Err(pack_value_error(
                     vm,
-                    format!("Invalid format type {}", typ as char),
+                    format!("Invalid format type {}", goro_core::string::msg_char(typ)),
                 ));
             }
         };
@@ -5114,7 +5142,10 @@ fn unpack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if size != 0 && size != -1 && i32::MAX as i64 - size + 1 < inputpos {
                 let line = vm.current_line;
                 vm.emit_warning_at(
-                    &format!("unpack(): Type {}: integer overflow", typ as char),
+                    &format!(
+                        "unpack(): Type {}: integer overflow",
+                        goro_core::string::msg_char(typ)
+                    ),
                     line,
                 );
                 return Ok(Value::False);
@@ -5249,7 +5280,10 @@ fn unpack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             if repetitions >= 0 {
                                 let line = vm.current_line;
                                 vm.emit_warning_at(
-                                    &format!("unpack(): Type {}: outside of string", typ as char),
+                                    &format!(
+                                        "unpack(): Type {}: outside of string",
+                                        goro_core::string::msg_char(typ)
+                                    ),
                                     line,
                                 );
                             }
@@ -5262,7 +5296,10 @@ fn unpack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         } else {
                             let line = vm.current_line;
                             vm.emit_warning_at(
-                                &format!("unpack(): Type {}: outside of string", typ as char),
+                                &format!(
+                                    "unpack(): Type {}: outside of string",
+                                    goro_core::string::msg_char(typ)
+                                ),
                                 line,
                             );
                         }
@@ -5279,7 +5316,10 @@ fn unpack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if size != -1 {
                         let line = vm.current_line;
                         vm.emit_warning_at(
-                            &format!("unpack(): Type {}: outside of string", typ as char),
+                            &format!(
+                                "unpack(): Type {}: outside of string",
+                                goro_core::string::msg_char(typ)
+                            ),
                             line,
                         );
                     }
@@ -5293,7 +5333,7 @@ fn unpack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 vm.emit_warning_at(
                     &format!(
                         "unpack(): Type {}: not enough input values, need {} values but only {} {} provided",
-                        typ as char,
+                        goro_core::string::msg_char(typ),
                         size,
                         avail,
                         if avail == 1 { "was" } else { "were" }

@@ -199,7 +199,7 @@ fn zpp_long(
                     if (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) {
                         vm.emit_deprecated(&format!(
                             "Implicit conversion from float-string \"{}\" to int loses precision",
-                            s.to_string_lossy()
+                            s.to_msg_string()
                         ));
                         return Ok(Some(d as i64));
                     }
@@ -235,7 +235,7 @@ fn double_to_long(
     if d.fract() != 0.0 {
         vm.emit_deprecated(&format!(
             "Implicit conversion from float {} to int loses precision",
-            Value::Double(d).to_php_string().to_string_lossy()
+            Value::Double(d).to_php_string().to_msg_string()
         ));
         if vm.current_exception.is_some() {
             return Err(VmError {
@@ -481,7 +481,7 @@ fn getaddresses(
             .into_owned();
         let msg = format!(
             "php_network_getaddresses: getaddrinfo for {} failed: {}",
-            String::from_utf8_lossy(host),
+            goro_core::string::msg_str(host),
             gai
         );
         vm.emit_warning(&format!("{}(): {}", func, msg));
@@ -569,7 +569,7 @@ fn parse_ip_address(s: &[u8]) -> Result<(Vec<u8>, i32), String> {
         }
         return Err(format!(
             "Failed to parse IPv6 address \"{}\"",
-            String::from_utf8_lossy(s)
+            goro_core::string::msg_str(s)
         ));
     }
     let colon = if s.is_empty() {
@@ -581,7 +581,7 @@ fn parse_ip_address(s: &[u8]) -> Result<(Vec<u8>, i32), String> {
         Some(c) => Ok((s[..c].to_vec(), atoi(&s[c + 1..]))),
         None => Err(format!(
             "Failed to parse address \"{}\"",
-            String::from_utf8_lossy(s)
+            goro_core::string::msg_str(s)
         )),
     }
 }
@@ -1040,12 +1040,12 @@ fn connect_ip(
                 None => vm.emit_warning(&format!(
                     "{}(): Invalid IP Address: {}",
                     func,
-                    String::from_utf8_lossy(b)
+                    goro_core::string::msg_str(b)
                 )),
                 Some(Err(e)) => vm.emit_warning(&format!(
                     "{}(): Failed to bind to '{}:{}', system said: {}",
                     func,
-                    String::from_utf8_lossy(b),
+                    goro_core::string::msg_str(b),
                     bport,
                     strerror(e)
                 )),
@@ -1556,7 +1556,7 @@ pub(crate) fn stream_socket_client(vm: &mut Vm, args: &[Value]) -> Result<Value,
             vm.emit_warning(&format!(
                 "{}(): Unable to connect to {} ({})",
                 F,
-                String::from_utf8_lossy(&quoted),
+                goro_core::string::msg_str(&quoted),
                 e.text.as_deref().unwrap_or("Unknown error")
             ));
             finish_open_error(vm, args.get(1), args.get(2), &e);
@@ -1607,7 +1607,7 @@ pub(crate) fn stream_socket_server(vm: &mut Vm, args: &[Value]) -> Result<Value,
             vm.emit_warning(&format!(
                 "{}(): Unable to connect to {} ({})",
                 F,
-                String::from_utf8_lossy(&shown),
+                goro_core::string::msg_str(&shown),
                 e.text.as_deref().unwrap_or("Unknown error")
             ));
             finish_open_error(vm, args.get(1), args.get(2), &e);
@@ -1831,7 +1831,7 @@ pub(crate) fn stream_socket_sendto(vm: &mut Vm, args: &[Value]) -> Result<Value,
                 vm.emit_warning(&format!(
                     "{}(): Failed to parse `{}' into a valid network address",
                     F,
-                    String::from_utf8_lossy(&target)
+                    goro_core::string::msg_str(&target)
                 ));
                 return Ok(Value::False);
             }
@@ -2040,7 +2040,7 @@ pub(crate) fn fsockopen(vm: &mut Vm, args: &[Value], persistent: bool) -> Result
             vm.emit_warning(&format!(
                 "{}(): Unable to connect to {}:{} ({})",
                 f,
-                String::from_utf8_lossy(&shown),
+                goro_core::string::msg_str(&shown),
                 port,
                 e.text.as_deref().unwrap_or("Unknown error")
             ));

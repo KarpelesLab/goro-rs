@@ -74,7 +74,7 @@ impl Vm {
                     format!(
                         "Access to undeclared static property {}::${}",
                         self.builtin_canonical_name(&lower),
-                        String::from_utf8_lossy(prop)
+                        crate::string::msg_str(prop)
                     ),
                 ));
             }
@@ -117,7 +117,7 @@ impl Vm {
                         b"Error",
                         format!(
                             "Cannot access \"{}\" when no class scope is active",
-                            String::from_utf8_lossy(name).to_ascii_lowercase()
+                            crate::string::msg_str(name).to_ascii_lowercase()
                         ),
                     ));
                 }
@@ -157,13 +157,13 @@ impl Vm {
                 format!(
                     "Access to undeclared static property {}::${}",
                     self.builtin_canonical_name(&lower),
-                    String::from_utf8_lossy(prop)
+                    crate::string::msg_str(prop)
                 ),
             ));
         }
         Err(SpErr::Throw(
             b"Error",
-            format!("Class \"{}\" not found", String::from_utf8_lossy(&resolved)),
+            format!("Class \"{}\" not found", crate::string::msg_str(&resolved)),
         ))
     }
 
@@ -185,7 +185,7 @@ impl Vm {
                 format!(
                     "Access to undeclared static property {}::${}",
                     crate::value::display_class_name(&ce.name),
-                    String::from_utf8_lossy(name)
+                    crate::string::msg_str(name)
                 ),
             )
         };
@@ -225,7 +225,7 @@ impl Vm {
                                     "protected"
                                 },
                                 crate::value::display_class_name(&ce.name),
-                                String::from_utf8_lossy(name)
+                                crate::string::msg_str(name)
                             ),
                         ));
                     }
@@ -463,7 +463,7 @@ impl Vm {
                             "protected"
                         },
                         cname,
-                        String::from_utf8_lossy(name)
+                        crate::string::msg_str(name)
                     ),
                 ));
             }
@@ -471,7 +471,7 @@ impl Vm {
         let msg = format!(
             "Accessing static property {}::${} as non static",
             cname,
-            String::from_utf8_lossy(name)
+            crate::string::msg_str(name)
         );
         self.emit_notice_at(&msg, line);
         Ok(())
@@ -524,7 +524,7 @@ impl Vm {
                 if indirect { "indirectly " } else { "" },
                 vis,
                 self.sp_decl_display(slot),
-                String::from_utf8_lossy(name),
+                crate::string::msg_str(name),
                 scope_str
             ),
         ))
@@ -536,8 +536,8 @@ impl Vm {
             if c.is_trait {
                 let msg = format!(
                     "Accessing static trait property {}::${} is deprecated, it should only be accessed on a class using the trait",
-                    String::from_utf8_lossy(&c.name),
-                    String::from_utf8_lossy(name)
+                    crate::string::msg_str(&c.name),
+                    crate::string::msg_str(name)
                 );
                 self.emit_deprecated_at(&msg, line);
             }
@@ -550,7 +550,7 @@ impl Vm {
             format!(
                 "Typed static property {}::${} must not be accessed before initialization",
                 self.sp_decl_display(slot),
-                String::from_utf8_lossy(name)
+                crate::string::msg_str(name)
             ),
         )
     }
@@ -595,7 +595,7 @@ impl Vm {
                 {
                     return Err(SpErr::Throw(
                         b"Error",
-                        format!("Undefined constant \"{}\"", String::from_utf8_lossy(c)),
+                        format!("Undefined constant \"{}\"", crate::string::msg_str(c)),
                     ));
                 }
             }
@@ -661,7 +661,7 @@ impl Vm {
                                     format!(
                                         "Cannot auto-initialize an array inside property {}::${} of type {}",
                                         self.sp_decl_display(&slot),
-                                        String::from_utf8_lossy(name),
+                                        crate::string::msg_str(name),
                                         td
                                     ),
                                 ));
@@ -709,7 +709,7 @@ impl Vm {
                                 format!(
                                     "Cannot access uninitialized non-nullable property {}::${} by reference",
                                     self.sp_decl_display(&slot),
-                                    String::from_utf8_lossy(name)
+                                    crate::string::msg_str(name)
                                 ),
                             ));
                         }
@@ -894,7 +894,7 @@ impl Vm {
                 format!(
                     "Attempt to unset static property {}::${}",
                     crate::value::display_class_name(&self.classes[key].name),
-                    String::from_utf8_lossy(name)
+                    crate::string::msg_str(name)
                 ),
             ),
             Err(e) => e,
@@ -1132,7 +1132,7 @@ impl Vm {
             "Cannot assign {} to property {}::${} of type {}",
             Self::value_type_name(v),
             crate::value::display_class_name(&decl_disp),
-            String::from_utf8_lossy(&name),
+            crate::string::msg_str(&name),
             self.param_type_name(&pt)
         );
         let exc = self.create_exception(b"TypeError", &msg, self.current_line);
@@ -1264,7 +1264,7 @@ impl Vm {
                 if crate::stubs::find_constant(&short).is_some() {
                     continue;
                 }
-                let msg = format!("Undefined constant \"{}\"", String::from_utf8_lossy(&name));
+                let msg = format!("Undefined constant \"{}\"", crate::string::msg_str(&name));
                 let exc = self.create_exception(b"Error", &msg, self.current_line);
                 self.current_exception = Some(exc);
                 return Err(());
@@ -1418,14 +1418,14 @@ impl Vm {
                         "Cannot make non static method {}::{}() static in class {}",
                         pdecl,
                         mname,
-                        String::from_utf8_lossy(&class.name)
+                        crate::string::msg_str(&class.name)
                     )
                 } else {
                     format!(
                         "Cannot make static method {}::{}() non static in class {}",
                         pdecl,
                         mname,
-                        String::from_utf8_lossy(&class.name)
+                        crate::string::msg_str(&class.name)
                     )
                 };
                 return Err((msg, line, false));
@@ -1586,7 +1586,7 @@ impl Vm {
                     "Cannot assign {} to class constant {}::{} of type {}",
                     Self::value_type_name(&v2),
                     self.sp_class_name_of(&decl),
-                    String::from_utf8_lossy(name),
+                    crate::string::msg_str(name),
                     tstr
                 );
                 let line = self.current_line;

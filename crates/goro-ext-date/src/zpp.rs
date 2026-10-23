@@ -189,7 +189,7 @@ fn float_to_long(
         match from_string {
             Some(s) => vm.emit_deprecated(&format!(
                 "Implicit conversion from float-string \"{}\" to int loses precision",
-                String::from_utf8_lossy(s)
+                goro_core::string::msg_str(s)
             )),
             None => vm.emit_deprecated(&format!(
                 "Implicit conversion from float {} to int loses precision",

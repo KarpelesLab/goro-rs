@@ -230,7 +230,7 @@ fn ob_callable_name(vm: &mut Vm, cb: &Value) -> Result<Vec<u8>, String> {
             } else {
                 Err(format!(
                     "function \"{}\" not found or invalid function name",
-                    String::from_utf8_lossy(name)
+                    goro_core::string::msg_str(name)
                 ))
             }
         }
@@ -309,7 +309,7 @@ fn check_method(
         None => {
             return Err(format!(
                 "class \"{}\" not found",
-                String::from_utf8_lossy(cls)
+                goro_core::string::msg_str(cls)
             ));
         }
     };
@@ -320,8 +320,8 @@ fn check_method(
             if has_obj.is_none() && !m.is_static {
                 return Err(format!(
                     "non-static method {}::{}() cannot be called statically",
-                    String::from_utf8_lossy(&cls_disp),
-                    String::from_utf8_lossy(&m.name)
+                    goro_core::string::msg_str(&cls_disp),
+                    goro_core::string::msg_str(&m.name)
                 ));
             }
             Ok(full.to_vec())
@@ -334,8 +334,8 @@ fn check_method(
             }
             Err(format!(
                 "class {} does not have a method \"{}\"",
-                String::from_utf8_lossy(&cls_disp),
-                String::from_utf8_lossy(meth)
+                goro_core::string::msg_str(&cls_disp),
+                goro_core::string::msg_str(meth)
             ))
         }
     }

@@ -236,7 +236,7 @@ impl Vm {
                         )
                     };
                     let msg = match self.value_to_string_checked(&msg) {
-                        Ok(s) => s.to_string_lossy(),
+                        Ok(s) => s.to_msg_string(),
                         Err(_) => String::new(),
                     };
                     self.current_exception = None;

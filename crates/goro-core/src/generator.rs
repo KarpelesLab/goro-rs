@@ -2539,8 +2539,8 @@ impl Vm {
             // The scope may be stored lowercased: show the declared name
             // (anonymous classes keep their full internal name).
             let class_display = match self.classes.get(&scope.to_ascii_lowercase()) {
-                Some(ce) => String::from_utf8_lossy(&ce.name).to_string(),
-                None => String::from_utf8_lossy(scope).to_string(),
+                Some(ce) => crate::string::msg_str(&ce.name).to_string(),
+                None => crate::string::msg_str(scope).to_string(),
             };
             format!("{}::{}", class_display, raw_name)
         } else {
@@ -2646,7 +2646,7 @@ impl Vm {
             _ => {
                 let msg = format!(
                     "Call to undefined method Generator::{}()",
-                    String::from_utf8_lossy(method)
+                    crate::string::msg_str(method)
                 );
                 let exc = self.create_exception(b"Error", &msg, line);
                 self.current_exception = Some(exc);

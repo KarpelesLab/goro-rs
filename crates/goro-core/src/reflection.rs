@@ -1099,7 +1099,7 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
             String::from_utf8_lossy(&ob.class_name).to_string()
         }
         Value::String(s) => {
-            let name = s.to_string_lossy();
+            let name = s.to_msg_string();
             // Closure strings should map to "Closure" class
             if name.starts_with("__closure_")
                 || name.starts_with("__arrow_")
@@ -1111,7 +1111,7 @@ fn reflection_class_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> bo
                 name
             }
         }
-        _ => arg.to_php_string().to_string_lossy(),
+        _ => arg.to_php_string().to_msg_string(),
     };
 
     // Strip leading backslash
@@ -1772,7 +1772,7 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
 
     let func_name = match &arg {
         Value::String(s) => {
-            let name = s.to_string_lossy();
+            let name = s.to_msg_string();
             // Check for closures
             if name.starts_with("__closure_")
                 || name.starts_with("__arrow_")
@@ -1791,7 +1791,7 @@ fn reflection_function_construct_impl(vm: &mut Vm, args: &[Value], line: u32) ->
             }
             name
         }
-        _ => arg.to_php_string().to_string_lossy(),
+        _ => arg.to_php_string().to_msg_string(),
     };
 
     // Strip leading backslash
@@ -2074,7 +2074,7 @@ fn reflection_parameter_construct_impl(vm: &mut Vm, args: &[Value], _line: u32) 
                 && !vm.user_functions.contains_key(&lower)
                 && !vm.functions.contains_key(&lower)
             {
-                let err_msg = format!("Function {}() does not exist", String::from_utf8_lossy(raw));
+                let err_msg = format!("Function {}() does not exist", crate::string::msg_str(raw));
                 let exc = vm.create_exception(b"ReflectionException", &err_msg, _line);
                 vm.current_exception = Some(exc);
                 return false;
@@ -4707,7 +4707,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     let err_msg = format!(
                         "Typed property {}::${} must not be accessed before initialization",
                         cname,
-                        prop_name.to_string_lossy()
+                        prop_name.to_msg_string()
                     );
                     let exc = vm.create_exception(b"Error", &err_msg, vm.current_line);
                     vm.current_exception = Some(exc);
@@ -4721,7 +4721,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 let err_msg = format!(
                     "Property {}::${} does not exist",
                     target,
-                    prop_name.to_string_lossy()
+                    prop_name.to_msg_string()
                 );
                 let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
                 vm.current_exception = Some(exc);
@@ -5561,7 +5561,7 @@ pub fn reflection_method_method(
             } else {
                 // No prototype found - throw
                 let ob2 = obj.borrow();
-                let method_display = ob2.get_property(b"name").to_php_string().to_string_lossy();
+                let method_display = ob2.get_property(b"name").to_php_string().to_msg_string();
                 drop(ob2);
                 let err_msg = format!(
                     "Method {}::{} does not have a prototype",
@@ -5866,7 +5866,7 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                             let msg = format!(
                                 "Too few arguments to function {}::{}(), {} passed and {} {} expected",
                                 canonical,
-                                String::from_utf8_lossy(&m.name),
+                                crate::string::msg_str(&m.name),
                                 invoke_args.len(),
                                 descriptor,
                                 req
@@ -5958,7 +5958,7 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                     let msg = format!(
                         "Trying to invoke abstract method {}::{}()",
                         canonical,
-                        String::from_utf8_lossy(&m.name)
+                        crate::string::msg_str(&m.name)
                     );
                     let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
                     vm.current_exception = Some(exc);
@@ -9486,10 +9486,8 @@ pub fn reflection_parameter_method(
                         vm.try_autoload_class(&name);
                     }
                     if rcls(vm, &lower).is_none() {
-                        let msg = format!(
-                            "Class \"{}\" does not exist",
-                            String::from_utf8_lossy(&name)
-                        );
+                        let msg =
+                            format!("Class \"{}\" does not exist", crate::string::msg_str(&name));
                         let exc =
                             vm.create_exception(b"ReflectionException", &msg, vm.current_line);
                         vm.current_exception = Some(exc);
@@ -9817,7 +9815,7 @@ pub fn reflection_constant_method(
             };
             let shown = match &value {
                 Value::Array(_) => "Array".to_string(),
-                v => v.to_php_string().to_string_lossy(),
+                v => v.to_php_string().to_msg_string(),
             };
             Some(Value::String(PhpString::from_string(format!(
                 "Constant [ {}{} {} ] {{ {} }}\n",
@@ -10115,7 +10113,7 @@ pub fn reflection_generator_method(
                 let closure_display = if gb.op_array.display_name.is_empty() {
                     None
                 } else {
-                    Some(String::from_utf8_lossy(&gb.op_array.display_name).to_string())
+                    Some(crate::string::msg_str(&gb.op_array.display_name).to_string())
                 };
                 // Methods yield a ReflectionMethod.
                 let method_of = if gb.op_array.display_name.is_empty() {
@@ -11696,7 +11694,7 @@ pub(crate) fn reflection_prop_write_allowed(
     let msg = format!(
         "Cannot set read-only property {}::${}",
         crate::value::display_class_name(&display),
-        String::from_utf8_lossy(name)
+        crate::string::msg_str(name)
     );
     let exc = vm.create_exception(b"ReflectionException", &msg, vm.current_line);
     vm.current_exception = Some(exc);
@@ -12241,8 +12239,8 @@ fn reflection_property_hook_method(
     let decl_display = vm
         .classes
         .get(&decl)
-        .map(|c| String::from_utf8_lossy(&c.name).to_string())
-        .unwrap_or_else(|| String::from_utf8_lossy(&decl).to_string());
+        .map(|c| crate::string::msg_str(&c.name).to_string())
+        .unwrap_or_else(|| crate::string::msg_str(&decl).to_string());
     let method_name = String::from_utf8_lossy(&m).to_string();
     let rm = create_reflection_method(vm, &decl_display, &method_name);
     if let Value::Object(o) = &rm {
@@ -13433,7 +13431,7 @@ pub fn reflection_attribute_method(
                 .borrow()
                 .get_property(b"__reflection_attr_validation_error")
             {
-                let exc = vm.create_exception(b"Error", &e.to_string_lossy(), call_site_line);
+                let exc = vm.create_exception(b"Error", &e.to_msg_string(), call_site_line);
                 vm.current_exception = Some(exc);
                 return Some(Value::Null);
             }
@@ -13474,7 +13472,7 @@ pub fn reflection_attribute_method(
                                 None => {
                                     let msg = format!(
                                         "Unknown named parameter ${}",
-                                        String::from_utf8_lossy(&n)
+                                        crate::string::msg_str(&n)
                                     );
                                     let exc = vm.create_exception(b"Error", &msg, call_site_line);
                                     vm.current_exception = Some(exc);

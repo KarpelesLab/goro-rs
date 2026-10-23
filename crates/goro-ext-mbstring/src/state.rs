@@ -399,7 +399,7 @@ pub fn parse_encoding_list_ini(
                 vm,
                 &format!(
                     "INI setting contains invalid encoding \"{}\"",
-                    String::from_utf8_lossy(&bad)
+                    goro_core::string::msg_str(&bad)
                 ),
             );
             None
@@ -468,7 +468,7 @@ fn set_internal_encoding_ini(vm: &mut Vm, st: &mut MbState, name: &[u8]) {
                 vm,
                 &format!(
                     "Unknown encoding \"{}\" in ini setting",
-                    String::from_utf8_lossy(name)
+                    goro_core::string::msg_str(name)
                 ),
             );
             &mbfl::basic::ENC_UTF8

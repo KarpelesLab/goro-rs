@@ -443,7 +443,7 @@ impl Vm {
             let msg = format!(
                 "{}({}): Failed to open directory: {}",
                 func,
-                String::from_utf8_lossy(path),
+                crate::string::msg_str(path),
                 error.unwrap_or_default()
             );
             self.spl_throw(b"UnexpectedValueException", &msg);
@@ -569,7 +569,7 @@ impl Vm {
                     func,
                     self.builtin_canonical_name(b),
                     if nullable { " or null" } else { "" },
-                    String::from_utf8_lossy(&s)
+                    crate::string::msg_str(&s)
                 );
                 self.spl_throw(b"TypeError", &msg);
                 return Err(());
@@ -580,7 +580,7 @@ impl Vm {
                 "{}(): Argument #1 ($class) must be a valid class name{}, {} given",
                 func,
                 if nullable { " or null" } else { "" },
-                String::from_utf8_lossy(&s)
+                crate::string::msg_str(&s)
             );
             self.spl_throw(b"TypeError", &msg);
             return Err(());
@@ -1113,7 +1113,7 @@ impl Vm {
                         {
                             let msg = format!(
                                 "SplFileInfo::getPathInfo(): Argument #1 ($class) must be a class name derived from SplFileInfo or null, {} given",
-                                String::from_utf8_lossy(&c)
+                                crate::string::msg_str(&c)
                             );
                             return self.spl_throw(b"TypeError", &msg);
                         }
@@ -1406,7 +1406,7 @@ pub fn spl_dir_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Resu
                 .borrow()
                 .get_property(b"message")
                 .to_php_string()
-                .to_string_lossy(),
+                .to_msg_string(),
             _ => String::new(),
         };
         Err(msg)

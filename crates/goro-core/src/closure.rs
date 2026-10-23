@@ -976,7 +976,7 @@ impl Vm {
                 }
                 return Err((
                     b"Error",
-                    format!("Class \"{}\" not found", String::from_utf8_lossy(&cls)),
+                    format!("Class \"{}\" not found", crate::string::msg_str(&cls)),
                 ));
             }
         };
@@ -1044,8 +1044,8 @@ impl Vm {
                     self.emit_deprecated_at(
                         &format!(
                             "Calling static trait method {}::{} is deprecated, it should only be called on a class using the trait",
-                            String::from_utf8_lossy(&canon),
-                            String::from_utf8_lossy(&mname)
+                            crate::string::msg_str(&canon),
+                            crate::string::msg_str(&mname)
                         ),
                         line,
                     );
@@ -1293,7 +1293,7 @@ impl Vm {
                 }
                 Err(format!(
                     "function \"{}\" not found or invalid function name",
-                    String::from_utf8_lossy(&b)
+                    crate::string::msg_str(&b)
                 ))
             }
             Value::Array(arr) => {
@@ -1388,7 +1388,7 @@ impl Vm {
                 }
                 return Err(format!(
                     "class \"{}\" not found",
-                    String::from_utf8_lossy(cls)
+                    crate::string::msg_str(cls)
                 ));
             }
         };
@@ -1442,15 +1442,15 @@ impl Vm {
                     return Err(format!(
                         "cannot access {} method {}::{}()",
                         vis_s,
-                        String::from_utf8_lossy(&canon),
-                        String::from_utf8_lossy(&mname)
+                        crate::string::msg_str(&canon),
+                        crate::string::msg_str(&mname)
                     ));
                 }
                 if is_abstract {
                     return Err(format!(
                         "cannot call abstract method {}::{}()",
-                        String::from_utf8_lossy(&canon),
-                        String::from_utf8_lossy(&mname)
+                        crate::string::msg_str(&canon),
+                        crate::string::msg_str(&mname)
                     ));
                 }
                 let mut n = canon.clone();
@@ -1464,8 +1464,8 @@ impl Vm {
                     None => {
                         return Err(format!(
                             "non-static method {}::{}() cannot be called statically",
-                            String::from_utf8_lossy(&canon),
-                            String::from_utf8_lossy(&mname)
+                            crate::string::msg_str(&canon),
+                            crate::string::msg_str(&mname)
                         ));
                     }
                 };
@@ -1508,8 +1508,8 @@ impl Vm {
                 }
                 Err(format!(
                     "class {} does not have a method \"{}\"",
-                    String::from_utf8_lossy(&canon),
-                    String::from_utf8_lossy(m)
+                    crate::string::msg_str(&canon),
+                    crate::string::msg_str(m)
                 ))
             }
         }
@@ -1582,7 +1582,7 @@ impl Vm {
                     if !self.classes.contains_key(&l) && !self.is_known_builtin_class(&l) {
                         self.emit_warning(&format!(
                             "Class \"{}\" not found",
-                            String::from_utf8_lossy(&n)
+                            crate::string::msg_str(&n)
                         ));
                         return Some(Value::Null);
                     }
@@ -1621,7 +1621,7 @@ impl Vm {
                     let msg = format!(
                         "Cannot bind method {}::{}() to object of class {}, this will be an error in PHP 9",
                         scope_display(self, fs),
-                        String::from_utf8_lossy(&mname),
+                        crate::string::msg_str(&mname),
                         oname
                     );
                     self.emit_warning(&msg);

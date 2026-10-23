@@ -113,34 +113,13 @@ fn ini_bool(vm: &Vm, key: &[u8]) -> bool {
 /// as the plane-16 private-use characters U+10FF00 + byte and written back
 /// as the raw bytes (php_error_cb() outputs messages as they are).
 pub fn raw_error_string(b: &[u8]) -> String {
-    let mut out = String::with_capacity(b.len());
-    let mut rest = b;
-    loop {
-        match std::str::from_utf8(rest) {
-            Ok(s) => {
-                out.push_str(s);
-                return out;
-            }
-            Err(e) => {
-                let (ok, bad) = rest.split_at(e.valid_up_to());
-                // (valid UTF-8 by construction)
-                out.push_str(std::str::from_utf8(ok).unwrap_or_default());
-                let n = e.error_len().unwrap_or(bad.len()).max(1);
-                for &c in &bad[..n] {
-                    out.push(char::from_u32(0x10FF00 + c as u32).unwrap_or('?'));
-                }
-                rest = &bad[n..];
-            }
-        }
-    }
+    crate::string::msg_str(b).into_owned()
 }
 
 /// The bytes of a message made by `raw_error_string`.
 pub fn raw_error_bytes(s: &str) -> std::borrow::Cow<'_, [u8]> {
-    if !s
-        .chars()
-        .any(|c| (0x10FF00..=0x10FFFF).contains(&(c as u32)))
-    {
+    // (U+10FF00..U+10FFFF are encoded F4 8F BC..BF xx)
+    if !s.as_bytes().contains(&0xF4) {
         return std::borrow::Cow::Borrowed(s.as_bytes());
     }
     let mut out = Vec::with_capacity(s.len());

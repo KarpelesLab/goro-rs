@@ -690,13 +690,13 @@ fn handler_conflict(vm: &mut Vm, new: &[u8], set: &[u8]) -> bool {
         let msg = if new != set {
             format!(
                 "Output handler '{}' conflicts with '{}'",
-                String::from_utf8_lossy(new),
-                String::from_utf8_lossy(set)
+                goro_core::string::msg_str(new),
+                goro_core::string::msg_str(set)
             )
         } else {
             format!(
                 "Output handler '{}' cannot be used twice",
-                String::from_utf8_lossy(new)
+                goro_core::string::msg_str(new)
             )
         };
         docref(vm, Level::Warning, &msg);

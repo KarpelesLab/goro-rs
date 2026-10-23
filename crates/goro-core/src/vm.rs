@@ -216,7 +216,7 @@ macro_rules! native_exc_check {
                     .borrow()
                     .get_property(b"message")
                     .to_php_string()
-                    .to_string_lossy(),
+                    .to_msg_string(),
                 _ => "Uncaught exception".to_string(),
             };
             return Err(VmError {
@@ -951,7 +951,7 @@ impl PendingCall {
                     if resolved[idx].is_some() {
                         return Err(format!(
                             "Named parameter ${} overwrites previous argument",
-                            String::from_utf8_lossy(&name)
+                            crate::string::msg_str(&name)
                         ));
                     }
                     resolved[idx] = Some(val.clone());
@@ -967,7 +967,7 @@ impl PendingCall {
                     // Unknown named parameter - error
                     return Err(format!(
                         "Unknown named parameter ${}",
-                        String::from_utf8_lossy(&name)
+                        crate::string::msg_str(&name)
                     ));
                 }
             }
@@ -1016,7 +1016,7 @@ impl PendingCall {
                     if idx < positional_count {
                         return Err(format!(
                             "Named parameter ${} overwrites previous argument",
-                            String::from_utf8_lossy(&name)
+                            crate::string::msg_str(&name)
                         ));
                     }
                     // Extend args if needed, using Null for skipped positions
@@ -1032,7 +1032,7 @@ impl PendingCall {
             if !found {
                 return Err(format!(
                     "Unknown named parameter ${}",
-                    String::from_utf8_lossy(&name)
+                    crate::string::msg_str(&name)
                 ));
             }
         }
@@ -3077,7 +3077,7 @@ impl Vm {
             } else {
                 format!(
                     "Cannot use \"{}\" in the global scope",
-                    String::from_utf8_lossy(kw)
+                    crate::string::msg_str(kw)
                 )
             };
             let exc = self.create_exception(b"Error", &msg, line);
@@ -3352,7 +3352,7 @@ impl Vm {
         is_property: bool,
         caller: Option<&[u8]>,
     ) -> String {
-        let target_display = String::from_utf8_lossy(target_class_display).to_string();
+        let target_display = crate::string::msg_str(target_class_display).to_string();
         if is_property {
             format!(
                 "Cannot access {} property {}::${}",
@@ -4017,7 +4017,7 @@ impl Vm {
                     self.pop_builtin_frame();
                     self.current_exception = Some(exc);
                     return Err(VmError {
-                        message: format!("Uncaught {}: {}", String::from_utf8_lossy(cls), msg),
+                        message: format!("Uncaught {}: {}", crate::string::msg_str(cls), msg),
                         line: self.current_line,
                     });
                 }
@@ -5547,7 +5547,7 @@ impl Vm {
         self.emit_deprecated(&format!(
             "Creation of dynamic property {}::${} is deprecated",
             class_display,
-            name.to_string_lossy()
+            name.to_msg_string()
         ));
         if Rc::strong_count(obj) < before && Rc::strong_count(obj) <= 1 {
             return Some(Some(format!(
@@ -5805,7 +5805,7 @@ impl Vm {
                     if !d.is_finite() || (l as f64) != d {
                         let msg = format!(
                             "Implicit conversion from float-string \"{}\" to int loses precision",
-                            s.to_string_lossy()
+                            s.to_msg_string()
                         );
                         self.emit_deprecated(&msg);
                     }
@@ -6080,7 +6080,7 @@ impl Vm {
                             "Implicit conversion from float {} to int loses precision",
                             crate::value::Value::Double(*f)
                                 .to_php_string()
-                                .to_string_lossy()
+                                .to_msg_string()
                         ),
                         line,
                     );
@@ -6152,10 +6152,11 @@ impl Vm {
                 }
             }
         }
-        let message = message.as_str();
         err_obj.set_property(
             b"message".to_vec(),
-            Value::String(PhpString::from_string(message.to_string())),
+            Value::String(PhpString::from_vec(
+                crate::errdisplay::raw_error_bytes(&message).into_owned(),
+            )),
         );
         err_obj.set_property(b"code".to_vec(), Value::Long(0));
         err_obj.set_property(
@@ -7746,7 +7747,7 @@ impl Vm {
                     self.emit_deprecated_at(
                         &format!(
                             "Implicit conversion from float-string \"{}\" to int loses precision",
-                            s.to_string_lossy()
+                            s.to_msg_string()
                         ),
                         line,
                     );
@@ -8039,7 +8040,7 @@ impl Vm {
                         self.emit_warning_at(
                             &format!(
                                 "compact(): Undefined variable ${}",
-                                String::from_utf8_lossy(n)
+                                crate::string::msg_str(n)
                             ),
                             line,
                         );
@@ -9538,7 +9539,7 @@ impl Vm {
     /// a user function).
     pub fn function_redeclaration_error(&self, name: &[u8]) -> Option<String> {
         let lower = name.to_ascii_lowercase();
-        let shown = String::from_utf8_lossy(name);
+        let shown = crate::string::msg_str(name);
         if let Some(old) = self.user_functions.get(&lower) {
             if !old.filename.is_empty() {
                 return Some(format!(
@@ -9609,7 +9610,7 @@ impl Vm {
             _ => {
                 return Err(format!(
                     "Call to undefined method Closure::{}()",
-                    String::from_utf8_lossy(method_name)
+                    crate::string::msg_str(method_name)
                 ));
             }
         };
@@ -9708,7 +9709,7 @@ impl Vm {
                     } else {
                         let msg = format!(
                             "Failed to create closure from callable: function \"{}\" not found",
-                            s.to_string_lossy()
+                            s.to_msg_string()
                         );
                         let exc = self.create_exception(b"TypeError", &msg, line);
                         self.current_exception = Some(exc);
@@ -9980,7 +9981,7 @@ impl Vm {
                     if !self.classes.contains_key(&l) && !self.is_known_builtin_class(&l) {
                         self.emit_warning(&format!(
                             "Class \"{}\" not found",
-                            String::from_utf8_lossy(&name)
+                            crate::string::msg_str(&name)
                         ));
                         return Value::Null;
                     }
@@ -12415,7 +12416,7 @@ impl Vm {
                         .borrow()
                         .get_property(b"message")
                         .to_php_string()
-                        .to_string_lossy();
+                        .to_msg_string();
                     if msg == "Iterator not initialized or already consumed" {
                         self.current_exception = None;
                         return Some(Value::Null);
@@ -12433,7 +12434,7 @@ impl Vm {
                         .borrow()
                         .get_property(b"message")
                         .to_php_string()
-                        .to_string_lossy();
+                        .to_msg_string();
                     if msg == "Iterator not initialized or already consumed" {
                         self.current_exception = None;
                         return Some(Value::Null);
@@ -17398,7 +17399,7 @@ impl Vm {
                 let msg = ob
                     .get_property(b"message")
                     .to_php_string()
-                    .to_string_lossy()
+                    .to_msg_string()
                     .to_string();
                 if msg.is_empty() {
                     format!("Uncaught {}", class)
@@ -21349,7 +21350,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -21433,7 +21434,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -21517,7 +21518,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -21601,7 +21602,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -21718,7 +21719,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -21836,7 +21837,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -22009,7 +22010,7 @@ impl Vm {
                                     return Err(VmError {
                                         message: format!(
                                             "Uncaught {}: {}",
-                                            String::from_utf8_lossy(class_bytes),
+                                            crate::string::msg_str(class_bytes),
                                             clean_msg
                                         ),
                                         line: op.line,
@@ -22084,7 +22085,7 @@ impl Vm {
                                     return Err(VmError {
                                         message: format!(
                                             "Uncaught {}: {}",
-                                            String::from_utf8_lossy(class_bytes),
+                                            crate::string::msg_str(class_bytes),
                                             clean_msg
                                         ),
                                         line: op.line,
@@ -22185,7 +22186,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -22286,7 +22287,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -22393,7 +22394,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -22595,7 +22596,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -22706,7 +22707,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -22828,7 +22829,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -22884,7 +22885,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -22938,7 +22939,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -22994,7 +22995,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23155,7 +23156,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23211,7 +23212,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23266,7 +23267,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23322,7 +23323,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23377,7 +23378,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23433,7 +23434,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23489,7 +23490,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23545,7 +23546,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23601,7 +23602,7 @@ impl Vm {
                                 .borrow()
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy(),
+                                .to_msg_string(),
                             _ => "Uncaught exception".to_string(),
                         };
                         return Err(VmError {
@@ -23712,7 +23713,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -23820,7 +23821,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -23905,7 +23906,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -23990,7 +23991,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -24092,7 +24093,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -24196,7 +24197,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -24351,7 +24352,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -24443,7 +24444,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -24541,7 +24542,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -24634,7 +24635,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -24737,7 +24738,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(class_bytes),
+                                                    crate::string::msg_str(class_bytes),
                                                     clean_msg
                                                 ),
                                                 line: op.line,
@@ -25173,7 +25174,7 @@ impl Vm {
                             if let Some(name) = op_array.cv_names.get(*idx as usize) {
                                 let msg = format!(
                                     "Undefined variable ${}",
-                                    String::from_utf8_lossy(name)
+                                    crate::string::msg_str(name)
                                 );
                                 self.emit_warning_at(&msg, op.line);
                             }
@@ -25370,7 +25371,7 @@ impl Vm {
                                                 b"Error",
                                                 format!(
                                                     "Class \"{}\" not found",
-                                                    String::from_utf8_lossy(cn.as_bytes())
+                                                    crate::string::msg_str(cn.as_bytes())
                                                 ),
                                             ))
                                         } else if let Some(c) = self.classes.get(&cl) {
@@ -25650,7 +25651,7 @@ impl Vm {
                                     .unwrap_or_default();
                                 self.emit_deprecated_at(&format!(
                                     "Calling static trait method {}::{} is deprecated, it should only be called on a class using the trait",
-                                    String::from_utf8_lossy(&tn), String::from_utf8_lossy(&name.as_bytes()[pos + 2..])), op.line);
+                                    crate::string::msg_str(&tn), crate::string::msg_str(&name.as_bytes()[pos + 2..])), op.line);
                             }
                         }
                         if from_closure {
@@ -25770,7 +25771,7 @@ impl Vm {
                             {
                                 let err_msg = format!(
                                     "Class \"{}\" not found",
-                                    String::from_utf8_lossy(
+                                    crate::string::msg_str(
                                         class_name.strip_prefix(b"\\").unwrap_or(&class_name)
                                     )
                                 );
@@ -26034,7 +26035,7 @@ impl Vm {
                                     self.emit_warning_at(
                                         &format!(
                                             "Undefined variable ${}",
-                                            String::from_utf8_lossy(name)
+                                            crate::string::msg_str(name)
                                         ),
                                         op.line,
                                     );
@@ -26530,7 +26531,7 @@ impl Vm {
                                     let msg = ob
                                         .get_property(b"message")
                                         .to_php_string()
-                                        .to_string_lossy()
+                                        .to_msg_string()
                                         .to_string();
                                     format!("Uncaught {}: {}", class, msg)
                                 } else {
@@ -26587,7 +26588,7 @@ impl Vm {
                                         if call.named_args.iter().any(|(n, _)| *n == name_bytes) {
                                             result = Err(format!(
                                                 "Named parameter ${} overwrites previous argument",
-                                                String::from_utf8_lossy(&name_bytes)
+                                                crate::string::msg_str(&name_bytes)
                                             ));
                                             break;
                                         }
@@ -26695,7 +26696,7 @@ impl Vm {
                             return Err(VmError {
                                 message: format!(
                                     "Uncaught {}: {}",
-                                    String::from_utf8_lossy(exc_class),
+                                    crate::string::msg_str(exc_class),
                                     err_msg
                                 ),
                                 line: op.line,
@@ -27237,7 +27238,7 @@ impl Vm {
                                             let message = exc
                                                 .get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy();
+                                                .to_msg_string();
                                             format!("Uncaught {}: {}", class, message)
                                         } else {
                                             "Uncaught exception".to_string()
@@ -27368,7 +27369,7 @@ impl Vm {
                                         crate::value::display_class_name(&ob.class_name),
                                         ob.get_property(b"message")
                                             .to_php_string()
-                                            .to_string_lossy()
+                                            .to_msg_string()
                                     )
                                 } else {
                                     "Unknown exception".to_string()
@@ -27696,7 +27697,7 @@ impl Vm {
                                         Err(n) => {
                                             let msg = format!(
                                                 "Unknown named parameter ${}",
-                                                String::from_utf8_lossy(&n)
+                                                crate::string::msg_str(&n)
                                             );
                                             let exc =
                                                 self.create_exception(b"Error", &msg, op.line);
@@ -27721,7 +27722,7 @@ impl Vm {
                                                 o.borrow()
                                                     .get_property(b"message")
                                                     .to_php_string()
-                                                    .to_string_lossy()
+                                                    .to_msg_string()
                                             } else {
                                                 "Unknown exception".to_string()
                                             };
@@ -28847,7 +28848,7 @@ impl Vm {
                                         crate::value::display_class_name(&ob.class_name),
                                         ob.get_property(b"message")
                                             .to_php_string()
-                                            .to_string_lossy()
+                                            .to_msg_string()
                                     )
                                 } else {
                                     "Unknown exception".to_string()
@@ -28910,7 +28911,7 @@ impl Vm {
                                             self.builtin_canonical_name(spl_class)
                                         });
                                 let method_display =
-                                    String::from_utf8_lossy(orig_method).to_string();
+                                    crate::string::msg_str(orig_method).to_string();
                                 let frame_name =
                                     format!("{}->{}", class_display, method_display);
                                 let extra_args: Vec<Value> =
@@ -28965,7 +28966,7 @@ impl Vm {
                                 let result = if let Some(n) = named_err {
                                     let msg = format!(
                                         "Unknown named parameter ${}",
-                                        String::from_utf8_lossy(&n)
+                                        crate::string::msg_str(&n)
                                     );
                                     let exc = self.create_exception(b"Error", &msg, op.line);
                                     self.current_exception = Some(exc);
@@ -29003,7 +29004,7 @@ impl Vm {
                                             let ob = o.borrow();
                                             ob.get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                         } else {
                                             "Unknown exception".to_string()
                                         };
@@ -29059,7 +29060,7 @@ impl Vm {
                                     let ob = o.borrow();
                                     ob.get_property(b"message")
                                         .to_php_string()
-                                        .to_string_lossy()
+                                        .to_msg_string()
                                 } else {
                                     "Unknown exception".to_string()
                                 };
@@ -29282,7 +29283,7 @@ impl Vm {
                                         return Err(VmError {
                                             message: format!(
                                                 "Uncaught {}: {}",
-                                                String::from_utf8_lossy(exc_class),
+                                                crate::string::msg_str(exc_class),
                                                 final_msg
                                             ),
                                             line: op.line,
@@ -29630,7 +29631,7 @@ impl Vm {
                                             let message = exc
                                                 .get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy();
+                                                .to_msg_string();
                                             format!("Uncaught {}: {}", class, message)
                                         } else {
                                             "Uncaught exception".to_string()
@@ -29728,7 +29729,7 @@ impl Vm {
                                                 .iter()
                                                 .find(|(k, _)| k == b"message")
                                                 .map(|(_, v)| {
-                                                    v.to_php_string().to_string_lossy()
+                                                    v.to_php_string().to_msg_string()
                                                 })
                                         } else {
                                             None
@@ -29742,9 +29743,9 @@ impl Vm {
                             }
                             if let Some(custom_msg) = dep_msg {
                                 let mut fn_display = if !user_fn.display_name.is_empty() {
-                                    String::from_utf8_lossy(&user_fn.display_name).into_owned()
+                                    crate::string::msg_str(&user_fn.display_name).into_owned()
                                 } else {
-                                    call.name.to_string_lossy()
+                                    call.name.to_msg_string()
                                 };
                                 // For magic __call/__callStatic dispatch, the deprecation banner
                                 // should name the originally-invoked method, not __call itself.
@@ -29806,7 +29807,7 @@ impl Vm {
                                             if let Value::Object(o) = e {
                                                 let obj = o.borrow();
                                                 let cls =
-                                                    String::from_utf8_lossy(&obj.class_name)
+                                                    crate::string::msg_str(&obj.class_name)
                                                         .to_string();
                                                 obj.properties
                                                     .iter()
@@ -29815,7 +29816,7 @@ impl Vm {
                                                         format!(
                                                             "Uncaught {}: {}",
                                                             cls,
-                                                            v.to_php_string().to_string_lossy()
+                                                            v.to_php_string().to_msg_string()
                                                         )
                                                     })
                                             } else {
@@ -29836,9 +29837,9 @@ impl Vm {
                                     .any(|a| a.name.eq_ignore_ascii_case(b"nodiscard"))
                             {
                                 let mut fn_display = if !user_fn.display_name.is_empty() {
-                                    String::from_utf8_lossy(&user_fn.display_name).into_owned()
+                                    crate::string::msg_str(&user_fn.display_name).into_owned()
                                 } else {
-                                    call.name.to_string_lossy()
+                                    call.name.to_msg_string()
                                 };
                                 // __call/__callStatic name the method that was called.
                                 let magic_name = if func_name_lower.ends_with(b"::__call") {
@@ -29905,12 +29906,12 @@ impl Vm {
                                             // Check for abstract method call
                                             if method.is_abstract {
                                                 let orig_bytes = call.name.as_bytes();
-                                                let class_display = String::from_utf8_lossy(
+                                                let class_display = crate::string::msg_str(
                                                     &orig_bytes[..sep_pos],
                                                 )
                                                 .to_string();
                                                 let method_display =
-                                                    String::from_utf8_lossy(&method.name)
+                                                    crate::string::msg_str(&method.name)
                                                         .to_string();
                                                 let err_msg = format!(
                                                     "Cannot call abstract method {}::{}()",
@@ -29949,7 +29950,7 @@ impl Vm {
                                                 let method_declaring =
                                                     method.declaring_class.clone();
                                                 let method_display_name =
-                                                    String::from_utf8_lossy(&method.name)
+                                                    crate::string::msg_str(&method.name)
                                                         .to_string();
                                                 // Use the original case class name from call.name
                                                 let orig_bytes = call.name.as_bytes();
@@ -30321,7 +30322,7 @@ impl Vm {
                                     let class_display = self
                                         .classes
                                         .get(scope)
-                                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                        .map(|c| crate::string::msg_str(&c.name).to_string())
                                         .unwrap_or_else(|| self.builtin_canonical_name(scope));
                                     format!("{}::{}", class_display, name)
                                 }
@@ -30347,8 +30348,8 @@ impl Vm {
                             let class_display = self
                                 .classes
                                 .get(scope)
-                                .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                                .unwrap_or_else(|| String::from_utf8_lossy(scope).to_string());
+                                .map(|c| crate::string::msg_str(&c.name).to_string())
+                                .unwrap_or_else(|| crate::string::msg_str(scope).to_string());
                             format!("{}::{}", class_display, method_name)
                         } else {
                             raw_display
@@ -30425,7 +30426,7 @@ impl Vm {
                                         .unwrap_or_else(|| display_name.clone())
                                 } else {
                                     let mut fname =
-                                        String::from_utf8_lossy(user_fn.effective_name())
+                                        crate::string::msg_str(user_fn.effective_name())
                                             .to_string();
                                     if user_fn.display_name.is_empty() && !fname.contains("::")
                                     {
@@ -30434,10 +30435,10 @@ impl Vm {
                                                 .classes
                                                 .get(&sc.to_ascii_lowercase())
                                                 .map(|c| {
-                                                    String::from_utf8_lossy(&c.name).to_string()
+                                                    crate::string::msg_str(&c.name).to_string()
                                                 })
                                                 .unwrap_or_else(|| {
-                                                    String::from_utf8_lossy(sc).to_string()
+                                                    crate::string::msg_str(sc).to_string()
                                                 });
                                             fname = format!("{}::{}", cname, fname);
                                         }
@@ -30546,7 +30547,7 @@ impl Vm {
                                     return Err(VmError {
                                         message: format!(
                                             "Uncaught {}: {}",
-                                            String::from_utf8_lossy(exc_class),
+                                            crate::string::msg_str(exc_class),
                                             err_msg
                                         ),
                                         line: exc_line,
@@ -31013,10 +31014,10 @@ impl Vm {
                                                 .position(|w| w == b"::")
                                                 .unwrap_or(0)],
                                         )
-                                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                        .map(|c| crate::string::msg_str(&c.name).to_string())
                                         .unwrap_or(cls);
                                     let meth_display =
-                                        String::from_utf8_lossy(&user_fn.name).to_string();
+                                        crate::string::msg_str(&user_fn.name).to_string();
                                     let meth_display = if meth_display.is_empty() {
                                         meth
                                     } else {
@@ -31835,7 +31836,7 @@ impl Vm {
                                                     let msg = format!(
                                                         "{}::__construct(): Argument #3 ($iteratorClass) must be a class name derived from ArrayIterator, {} given",
                                                         class_canonical,
-                                                        String::from_utf8_lossy(
+                                                        crate::string::msg_str(
                                                             iter_class_bytes
                                                         )
                                                     );
@@ -34795,7 +34796,7 @@ impl Vm {
                                             let err_msg = format!(
                                                 "Cannot call abstract method {}::{}()",
                                                 cname,
-                                                String::from_utf8_lossy(method_part)
+                                                crate::string::msg_str(method_part)
                                             );
                                             let exc = self
                                                 .create_exception(b"Error", &err_msg, op.line);
@@ -34958,7 +34959,7 @@ impl Vm {
                             }
                             // Handle Reflection static methods
                             if !handled {
-                                let func_display = call.name.to_string_lossy();
+                                let func_display = call.name.to_msg_string();
                                 if let Some(sep_pos) = func_display.find("::") {
                                     let class_part = &func_display[..sep_pos];
                                     let method_part = &func_display[sep_pos + 2..];
@@ -35003,7 +35004,7 @@ impl Vm {
                                                     let msg = ob
                                                         .get_property(b"message")
                                                         .to_php_string()
-                                                        .to_string_lossy()
+                                                        .to_msg_string()
                                                         .to_string();
                                                     format!("Uncaught {}: {}", cls, msg)
                                                 } else {
@@ -35193,7 +35194,7 @@ impl Vm {
                                                         ),
                                                         ob.get_property(b"message")
                                                             .to_php_string()
-                                                            .to_string_lossy()
+                                                            .to_msg_string()
                                                     )
                                                 } else {
                                                     "Uncaught exception".to_string()
@@ -35223,7 +35224,7 @@ impl Vm {
                                                     let msg = ob
                                                         .get_property(b"message")
                                                         .to_php_string()
-                                                        .to_string_lossy()
+                                                        .to_msg_string()
                                                         .to_string();
                                                     format!("Uncaught {}: {}", cls, msg)
                                                 } else {
@@ -35385,7 +35386,7 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Uncaught {}: {}",
-                                                    String::from_utf8_lossy(cls),
+                                                    crate::string::msg_str(cls),
                                                     msg
                                                 ),
                                                 line: op.line,
@@ -35452,7 +35453,7 @@ impl Vm {
                                                     ),
                                                     ob.get_property(b"message")
                                                         .to_php_string()
-                                                        .to_string_lossy()
+                                                        .to_msg_string()
                                                 )
                                             }
                                             _ => "Uncaught exception".to_string(),
@@ -35473,7 +35474,7 @@ impl Vm {
                                 }
                             }
                             if !handled {
-                                let func_display = call.name.to_string_lossy();
+                                let func_display = call.name.to_msg_string();
                                 let err_msg = if let Some(pos) = func_display.find("::") {
                                     let cls = &func_display[..pos];
                                     let cl = cls.trim_start_matches('\\').to_ascii_lowercase();
@@ -36114,7 +36115,7 @@ impl Vm {
                                 let ob = o.borrow();
                                 ob.get_property(b"message")
                                     .to_php_string()
-                                    .to_string_lossy()
+                                    .to_msg_string()
                             } else {
                                 "Unknown exception".to_string()
                             };
@@ -36718,7 +36719,7 @@ impl Vm {
                                     let ob = o.borrow();
                                     ob.get_property(b"message")
                                         .to_php_string()
-                                        .to_string_lossy()
+                                        .to_msg_string()
                                 } else {
                                     "Unknown exception".to_string()
                                 };
@@ -36812,10 +36813,10 @@ impl Vm {
                                             let ob = o.borrow();
                                             format!(
                                                 "Uncaught {}: {}",
-                                                String::from_utf8_lossy(&ob.class_name),
+                                                crate::string::msg_str(&ob.class_name),
                                                 ob.get_property(b"message")
                                                     .to_php_string()
-                                                    .to_string_lossy()
+                                                    .to_msg_string()
                                             )
                                         }
                                         _ => "Uncaught exception".to_string(),
@@ -37375,7 +37376,7 @@ impl Vm {
                                             self.emit_warning_at(
                                                 &format!(
                                                     "Undefined array key \"{}\"",
-                                                    s.to_string_lossy()
+                                                    s.to_msg_string()
                                                 ),
                                                 op.line,
                                             );
@@ -37439,7 +37440,7 @@ impl Vm {
                                         self.emit_warning_at(
                                             &format!(
                                                 "Illegal string offset \"{}\"",
-                                                key_str.to_string_lossy()
+                                                key_str.to_msg_string()
                                             ),
                                             op.line,
                                         );
@@ -37716,7 +37717,7 @@ impl Vm {
                                 let ob = o.borrow();
                                 ob.get_property(b"message")
                                     .to_php_string()
-                                    .to_string_lossy()
+                                    .to_msg_string()
                             } else {
                                 "Unknown exception".to_string()
                             };
@@ -37784,7 +37785,7 @@ impl Vm {
                                         self.emit_warning_at(
                                             &format!(
                                                 "Undefined array key \"{}\"",
-                                                s.to_string_lossy()
+                                                s.to_msg_string()
                                             ),
                                             op.line,
                                         );
@@ -37917,7 +37918,7 @@ impl Vm {
                                 let ob = o.borrow();
                                 ob.get_property(b"message")
                                     .to_php_string()
-                                    .to_string_lossy()
+                                    .to_msg_string()
                             } else {
                                 "Unknown exception".to_string()
                             };
@@ -38031,7 +38032,7 @@ impl Vm {
                                             let msg = ob
                                                 .get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                                 .to_string();
                                             if msg.is_empty() {
                                                 format!("Uncaught {}", class)
@@ -38096,7 +38097,7 @@ impl Vm {
                                         crate::value::display_class_name(&ob.class_name),
                                         ob.get_property(b"message")
                                             .to_php_string()
-                                            .to_string_lossy()
+                                            .to_msg_string()
                                     )
                                 }
                                 _ => "Uncaught exception".to_string(),
@@ -38396,7 +38397,7 @@ impl Vm {
                                         let ob = o.borrow();
                                         ob.get_property(b"message")
                                             .to_php_string()
-                                            .to_string_lossy()
+                                            .to_msg_string()
                                     }
                                     _ => "Uncaught exception".to_string(),
                                 };
@@ -38569,7 +38570,7 @@ impl Vm {
                                             let msg = ob
                                                 .get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                                 .to_string();
                                             if msg.is_empty() {
                                                 format!("Uncaught {}", class)
@@ -38608,7 +38609,7 @@ impl Vm {
                                     let msg = ob
                                         .get_property(b"message")
                                         .to_php_string()
-                                        .to_string_lossy()
+                                        .to_msg_string()
                                         .to_string();
                                     if msg.is_empty() {
                                         format!("Uncaught {}", class)
@@ -38669,7 +38670,7 @@ impl Vm {
                                     let msg = ob
                                         .get_property(b"message")
                                         .to_php_string()
-                                        .to_string_lossy();
+                                        .to_msg_string();
                                     if msg.is_empty() {
                                         format!("Uncaught {}", class)
                                     } else {
@@ -38703,7 +38704,7 @@ impl Vm {
                                 let msg = ob
                                     .get_property(b"message")
                                     .to_php_string()
-                                    .to_string_lossy();
+                                    .to_msg_string();
                                 if msg.is_empty() {
                                     format!("Uncaught {}", class)
                                 } else {
@@ -38745,7 +38746,7 @@ impl Vm {
                                     let msg = ob
                                         .get_property(b"message")
                                         .to_php_string()
-                                        .to_string_lossy();
+                                        .to_msg_string();
                                     if msg.is_empty() {
                                         format!("Uncaught {}", class)
                                     } else {
@@ -38955,7 +38956,7 @@ impl Vm {
                                             crate::value::display_class_name(&ob.class_name),
                                             ob.get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                         )
                                     }
                                     _ => "Uncaught exception".to_string(),
@@ -39074,7 +39075,7 @@ impl Vm {
                                 o.borrow()
                                     .get_property(b"message")
                                     .to_php_string()
-                                    .to_string_lossy()
+                                    .to_msg_string()
                             ),
                             _ => "Uncaught exception".to_string(),
                         };
@@ -39221,7 +39222,7 @@ impl Vm {
                                                 let ob = o.borrow();
                                                 ob.get_property(b"message")
                                                     .to_php_string()
-                                                    .to_string_lossy()
+                                                    .to_msg_string()
                                             }
                                             _ => "Uncaught exception".to_string(),
                                         };
@@ -39251,7 +39252,7 @@ impl Vm {
                                                         ),
                                                         ob.get_property(b"message")
                                                             .to_php_string()
-                                                            .to_string_lossy()
+                                                            .to_msg_string()
                                                     )
                                                 }
                                                 _ => "Uncaught exception".to_string(),
@@ -39986,9 +39987,9 @@ impl Vm {
                                 attr.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             if attr_lower == b"returntypewillchange" && !delayed {
                                 let func_display = if !func_op_array.display_name.is_empty() {
-                                    String::from_utf8_lossy(&func_op_array.display_name).to_string()
+                                    crate::string::msg_str(&func_op_array.display_name).to_string()
                                 } else {
-                                    String::from_utf8_lossy(&func_op_array.name).to_string()
+                                    crate::string::msg_str(&func_op_array.name).to_string()
                                 };
                                 return Err(VmError {
                                     message: {
@@ -40009,9 +40010,9 @@ impl Vm {
                         // Emit deprecation for implicitly nullable parameters.
                         // For closures, prefer the canonical PHP display name (e.g. {closure:file:line}).
                         let func_display = if !func_op_array.display_name.is_empty() {
-                            String::from_utf8_lossy(&func_op_array.display_name).to_string()
+                            crate::string::msg_str(&func_op_array.display_name).to_string()
                         } else {
-                            String::from_utf8_lossy(&func_op_array.name).to_string()
+                            crate::string::msg_str(&func_op_array.name).to_string()
                         };
                         for pt_info in func_op_array.param_types.iter().flatten() {
                             if pt_info.implicitly_nullable {
@@ -40084,7 +40085,7 @@ impl Vm {
                     {
                         let msg = format!(
                             "Cannot access \"{}\" when no class scope is active",
-                            String::from_utf8_lossy(&class_lower)
+                            crate::string::msg_str(&class_lower)
                         );
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
@@ -40527,12 +40528,12 @@ impl Vm {
                             format!(
                                 "Uncaught {}: {}",
                                 class,
-                                message.to_php_string().to_string_lossy()
+                                message.to_php_string().to_msg_string()
                             )
                         } else {
                             format!(
                                 "Uncaught exception: {}",
-                                exc_val.to_php_string().to_string_lossy()
+                                exc_val.to_php_string().to_msg_string()
                             )
                         };
                         self.current_exception = Some(exc_val);
@@ -40724,7 +40725,7 @@ impl Vm {
                                     || prop_name.as_bytes() == b"class")
                             {
                                 let class_display = crate::value::display_class_name(&class.name);
-                                let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
+                                let prop_display = crate::string::msg_str(prop_name.as_bytes());
                                 let msg = format!(
                                     "Cannot access trait constant {}::{} directly",
                                     class_display, prop_display
@@ -40779,7 +40780,7 @@ impl Vm {
                                                 "Cannot access {} constant {}::{}",
                                                 vis_s,
                                                 crate::value::display_class_name(&class.name),
-                                                String::from_utf8_lossy(prop_name.as_bytes())
+                                                crate::string::msg_str(prop_name.as_bytes())
                                             );
                                             let exc =
                                                 self.create_exception(b"Error", &msg, op.line);
@@ -40885,11 +40886,11 @@ impl Vm {
                                             raw.to_ascii_lowercase().as_slice(),
                                             b"self" | b"parent" | b"static"
                                         ) {
-                                            String::from_utf8_lossy(raw).to_string()
+                                            crate::string::msg_str(raw).to_string()
                                         } else {
-                                            String::from_utf8_lossy(&resolved_class).to_string()
+                                            crate::string::msg_str(&resolved_class).to_string()
                                         };
-                                        let prop_display = prop_name.to_string_lossy();
+                                        let prop_display = prop_name.to_msg_string();
                                         let err_msg = format!(
                                             "Undefined constant {}::{}",
                                             class_display, prop_display
@@ -41009,7 +41010,7 @@ impl Vm {
                                     if !resolved {
                                         // Constant not found - throw Undefined constant error (PHP 8+)
                                         let const_display =
-                                            String::from_utf8_lossy(&const_name).to_string();
+                                            crate::string::msg_str(&const_name).to_string();
                                         let err_msg =
                                             format!("Undefined constant \"{}\"", const_display);
                                         let exc =
@@ -41159,7 +41160,7 @@ impl Vm {
                                             let rest = &s.as_bytes()[b"__deferred_spread__::".len()..];
                                             if let Some(sep_pos) = rest.windows(2).position(|w| w == b"::") {
                                                 let ref_const = &rest[sep_pos + 2..];
-                                                let const_display = String::from_utf8_lossy(ref_const).to_string();
+                                                let const_display = crate::string::msg_str(ref_const).to_string();
                                                 return Some(format!("Cannot declare self-referencing constant self::{}", const_display));
                                             }
                                         }
@@ -41318,8 +41319,8 @@ impl Vm {
                                 builtin_val
                             } else if self.is_known_builtin_class(&class_lower) {
                                 // Builtin class exists but constant doesn't
-                                let class_display = String::from_utf8_lossy(&resolved_class);
-                                let prop_display = prop_name.to_string_lossy();
+                                let class_display = crate::string::msg_str(&resolved_class);
+                                let prop_display = prop_name.to_msg_string();
                                 let err_msg = format!(
                                     "Undefined constant {}::{}",
                                     class_display, prop_display
@@ -41339,7 +41340,7 @@ impl Vm {
                                 });
                             } else {
                                 // Class not found - throw Error
-                                let class_display = String::from_utf8_lossy(&resolved_class);
+                                let class_display = crate::string::msg_str(&resolved_class);
                                 let err_msg = format!("Class \"{}\" not found", class_display);
                                 let exc = self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc);
@@ -41384,8 +41385,8 @@ impl Vm {
                                     let err_msg = format!(
                                         "Cannot assign {} to class constant {}::{} of type {}",
                                         Self::value_type_name(&v2),
-                                        String::from_utf8_lossy(&decl_name),
-                                        prop_name.to_string_lossy(),
+                                        crate::string::msg_str(&decl_name),
+                                        prop_name.to_msg_string(),
                                         tstr
                                     );
                                     let exc =
@@ -41486,9 +41487,9 @@ impl Vm {
                                     self.deprecation_in_progress.remove(&guard_key);
                                     if let Some(custom_msg) = dep_result {
                                         let class_display =
-                                            String::from_utf8_lossy(&canonical_class).to_string();
+                                            crate::string::msg_str(&canonical_class).to_string();
                                         let const_display =
-                                            String::from_utf8_lossy(ref_const_name).to_string();
+                                            crate::string::msg_str(ref_const_name).to_string();
                                         let is_enum_case = self
                                             .classes
                                             .get(ref_class_lower)
@@ -41600,8 +41601,8 @@ impl Vm {
                                     self.deprecation_in_progress.remove(&guard_key);
                                     if let Some(custom_msg) = dep_result {
                                         let class_display =
-                                            String::from_utf8_lossy(&resolved_class).to_string();
-                                        let const_display = prop_name.to_string_lossy();
+                                            crate::string::msg_str(&resolved_class).to_string();
+                                        let const_display = prop_name.to_msg_string();
                                         // Enum cases use "Enum case" instead of "Constant" in PHP's banner.
                                         let is_enum_case = self
                                             .classes
@@ -42075,7 +42076,7 @@ impl Vm {
                                                     .iter()
                                                     .find(|(k, _)| k == b"message")
                                                     .map(|(_, v)| {
-                                                        v.to_php_string().to_string_lossy()
+                                                        v.to_php_string().to_msg_string()
                                                     })
                                             } else {
                                                 None
@@ -42116,7 +42117,7 @@ impl Vm {
                                 | b"SUNFUNCS_RET_DOUBLE"
                         ) {
                             self.emit_deprecated_at(
-                                &format!("Constant {} is deprecated since 8.4, as date_sunrise() and date_sunset() were deprecated in 8.1", String::from_utf8_lossy(name_bytes)),
+                                &format!("Constant {} is deprecated since 8.4, as date_sunrise() and date_sunset() were deprecated in 8.1", crate::string::msg_str(name_bytes)),
                                 op.line,
                             );
                         }
@@ -42141,7 +42142,7 @@ impl Vm {
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     } else {
                         // PHP 8: undefined constants are fatal errors
-                        let name_str = name.to_string_lossy();
+                        let name_str = name.to_msg_string();
                         let msg = format!("Undefined constant \"{}\"", name_str);
                         let exc = self.create_exception(b"Error", &msg, op.line);
                         self.current_exception = Some(exc);
@@ -42844,7 +42845,7 @@ impl Vm {
                                 return Err(VmError {
                                     message: format!(
                                         "Uncaught {}: {}",
-                                        String::from_utf8_lossy(exc_class),
+                                        crate::string::msg_str(exc_class),
                                         msg
                                     ),
                                     line: op.line,
@@ -43083,7 +43084,7 @@ impl Vm {
                         return Err(VmError {
                             message: format!(
                                 "Uncaught {}: {}",
-                                String::from_utf8_lossy(class),
+                                crate::string::msg_str(class),
                                 msg
                             ),
                             line: op.line,
@@ -43381,7 +43382,7 @@ impl Vm {
                         if is_virtual_write_only {
                             let class_display =
                                 crate::value::display_class_name(&class_name_orig_wo);
-                            let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
+                            let prop_display = crate::string::msg_str(prop_name.as_bytes());
                             let msg = format!(
                                 "Property {}::${} is write-only",
                                 class_display, prop_display
@@ -43633,7 +43634,7 @@ impl Vm {
                                             let msg = ob
                                                 .get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                                 .to_string();
                                             if msg.is_empty() {
                                                 format!("Uncaught {}", class)
@@ -43754,7 +43755,7 @@ impl Vm {
                                     self.emit_warning_at(
                                         &format!(
                                             "Undefined variable ${}",
-                                            String::from_utf8_lossy(n)
+                                            crate::string::msg_str(n)
                                         ),
                                         op.line,
                                     );
@@ -43795,7 +43796,7 @@ impl Vm {
                             return Ok(Flow::Continue);
                         }
                         return Err(VmError {
-                            message: format!("Uncaught {}: {}", String::from_utf8_lossy(cls), msg),
+                            message: format!("Uncaught {}: {}", crate::string::msg_str(cls), msg),
                             line: op.line,
                         });
                     }
@@ -43854,7 +43855,7 @@ impl Vm {
                             }
                             let msg = if let Value::Object(o) = &exc_val {
                                 let ob = o.borrow();
-                                ob.get_property(b"message").to_php_string().to_string_lossy()
+                                ob.get_property(b"message").to_php_string().to_msg_string()
                             } else { "Unknown exception".to_string() };
                             self.current_exception = Some(exc_val);
                             return Err(VmError { message: msg, line: op.line });
@@ -43924,7 +43925,7 @@ impl Vm {
                                     .borrow()
                                     .get_property(b"message")
                                     .to_php_string()
-                                    .to_string_lossy(),
+                                    .to_msg_string(),
                                 _ => "Uncaught exception".to_string(),
                             };
                             return Err(VmError {
@@ -44526,7 +44527,7 @@ impl Vm {
                                             let msg = ob
                                                 .get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                                 .to_string();
                                             format!("Uncaught {}: {}", class, msg)
                                         } else {
@@ -44609,7 +44610,7 @@ impl Vm {
                                 self.emit_warning_at(
                                     &format!(
                                         "Undefined variable ${}",
-                                        String::from_utf8_lossy(&name)
+                                        crate::string::msg_str(&name)
                                     ),
                                     op.line,
                                 );
@@ -44739,7 +44740,7 @@ impl Vm {
                     } else {
                         if mode == 1 && !fs.tab.exists(&name) {
                             self.emit_warning_at(
-                                &format!("Undefined variable ${}", String::from_utf8_lossy(&name)),
+                                &format!("Undefined variable ${}", crate::string::msg_str(&name)),
                                 op.line,
                             );
                         }
@@ -45149,7 +45150,7 @@ impl Vm {
                             format!(
                                 "Uncaught {}: {}",
                                 class,
-                                message.to_php_string().to_string_lossy()
+                                message.to_php_string().to_msg_string()
                             )
                         } else {
                             "Uncaught exception".to_string()
@@ -45433,7 +45434,7 @@ impl Vm {
                     let msg = self
                         .read_operand(&op.op1, &cvs, &tmps, &op_array.literals)
                         .to_php_string()
-                        .to_string_lossy();
+                        .to_msg_string();
                     let exc_val = self.create_exception(b"Error", &msg, op.line);
                     self.current_exception = Some(exc_val);
                     if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
@@ -45456,7 +45457,7 @@ impl Vm {
                         );
                     if !(conditional && self.last_call_by_ref) {
                         let msg_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                        let msg = msg_val.to_php_string().to_string_lossy();
+                        let msg = msg_val.to_php_string().to_msg_string();
                         self.emit_notice_at(&msg, op.line);
                     }
                 }
@@ -45970,10 +45971,10 @@ impl Vm {
                                         let ob = o.borrow();
                                         format!(
                                             "Uncaught {}: {}",
-                                            String::from_utf8_lossy(&ob.class_name),
+                                            crate::string::msg_str(&ob.class_name),
                                             ob.get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                         )
                                     }
                                     _ => "Uncaught exception".to_string(),
@@ -46241,7 +46242,7 @@ impl Vm {
                             if !matches!(v, Value::Object(_) | Value::Reference(_)) {
                                 let class_display =
                                     crate::value::display_class_name(&class_name_orig);
-                                self.emit_notice_at(&format!("Indirect modification of overloaded property {}::${} has no effect", class_display, prop_name.to_string_lossy()), op.line);
+                                self.emit_notice_at(&format!("Indirect modification of overloaded property {}::${} has no effect", class_display, prop_name.to_msg_string()), op.line);
                             }
                             v
                         } else if let Some(msg) = inaccessible {
@@ -46472,7 +46473,7 @@ impl Vm {
                                                 .unwrap_or_else(|| {
                                                     crate::value::display_class_name(&decl)
                                                 }),
-                                            prop_name.to_string_lossy()
+                                            prop_name.to_msg_string()
                                         )
                                     })
                                 });
@@ -46597,7 +46598,7 @@ impl Vm {
                         let type_name = Self::value_type_name(&obj_val);
                         let msg = format!(
                             "Attempt to modify property \"{}\" on {}",
-                            prop_name.to_string_lossy(),
+                            prop_name.to_msg_string(),
                             type_name
                         );
                         let exc = self.create_exception(b"Error", &msg, op.line);
@@ -47083,7 +47084,7 @@ impl Vm {
                                                 crate::value::display_class_name(&ob.class_name),
                                                 ob.get_property(b"message")
                                                     .to_php_string()
-                                                    .to_string_lossy()
+                                                    .to_msg_string()
                                             )
                                         }
                                         _ => "Uncaught exception".to_string(),
@@ -47176,7 +47177,7 @@ impl Vm {
                                     self.emit_warning_at(
                                         &format!(
                                             "Illegal string offset \"{}\"",
-                                            ks.to_string_lossy()
+                                            ks.to_msg_string()
                                         ),
                                         op.line,
                                     );
@@ -47620,7 +47621,7 @@ impl Vm {
                                     let msg = ob
                                         .get_property(b"message")
                                         .to_php_string()
-                                        .to_string_lossy()
+                                        .to_msg_string()
                                         .to_string();
                                     format!("Uncaught {}: {}", class, msg)
                                 } else {
@@ -47762,7 +47763,7 @@ impl Vm {
                             format!(
                                 "Uncaught {}: {}",
                                 class,
-                                message.to_php_string().to_string_lossy()
+                                message.to_php_string().to_msg_string()
                             )
                         } else {
                             "Uncaught UnhandledMatchError".to_string()
@@ -47924,9 +47925,9 @@ impl Vm {
                                 || parent_lower == b"weakmap"
                             {
                                 let child_display =
-                                    String::from_utf8_lossy(&class.name).to_string();
+                                    crate::string::msg_str(&class.name).to_string();
                                 let parent_display =
-                                    String::from_utf8_lossy(parent_name).to_string();
+                                    crate::string::msg_str(parent_name).to_string();
                                 return Err(VmError {
                                     message: format!(
                                         "Class {} cannot extend final class {}",
@@ -48020,7 +48021,7 @@ impl Vm {
                                                     ),
                                                     ob.get_property(b"message")
                                                         .to_php_string()
-                                                        .to_string_lossy()
+                                                        .to_msg_string()
                                                 )
                                             } else {
                                                 "Uncaught exception".to_string()
@@ -48084,8 +48085,8 @@ impl Vm {
                                 return Err(VmError {
                                     message: format!(
                                         "{} cannot implement {} - it is not an interface",
-                                        String::from_utf8_lossy(&class.name),
-                                        String::from_utf8_lossy(parent_name)
+                                        crate::string::msg_str(&class.name),
+                                        crate::string::msg_str(parent_name)
                                     ),
                                     line: op.line,
                                 });
@@ -48099,9 +48100,9 @@ impl Vm {
                                 // Check: interface can only extend another interface
                                 if class.is_interface && !parent.is_interface {
                                     let child_display =
-                                        String::from_utf8_lossy(&class.name).to_string();
+                                        crate::string::msg_str(&class.name).to_string();
                                     let parent_display =
-                                        String::from_utf8_lossy(parent_name).to_string();
+                                        crate::string::msg_str(parent_name).to_string();
                                     return Err(VmError {
                                         message: format!(
                                             "{} cannot implement {} - it is not an interface",
@@ -48115,8 +48116,8 @@ impl Vm {
                                     return Err(VmError {
                                         message: format!(
                                             "Class {} cannot extend trait {}",
-                                            String::from_utf8_lossy(&class.name),
-                                            String::from_utf8_lossy(&parent.name)
+                                            crate::string::msg_str(&class.name),
+                                            crate::string::msg_str(&parent.name)
                                         ),
                                         line: op.line,
                                     });
@@ -48124,9 +48125,9 @@ impl Vm {
                                 // Check: class cannot extend an interface
                                 if !class.is_interface && parent.is_interface {
                                     let child_display =
-                                        String::from_utf8_lossy(&class.name).to_string();
+                                        crate::string::msg_str(&class.name).to_string();
                                     let parent_display =
-                                        String::from_utf8_lossy(parent_name).to_string();
+                                        crate::string::msg_str(parent_name).to_string();
                                     return Err(VmError {
                                         message: format!(
                                             "Class {} cannot extend interface {}",
@@ -48139,12 +48140,12 @@ impl Vm {
                                 if parent.is_final {
                                     let _parent_display =
                                         String::from_utf8_lossy(parent_name).to_string();
-                                    let child_display = String::from_utf8_lossy(
+                                    let child_display = crate::string::msg_str(
                                         name_val.to_php_string().as_bytes(),
                                     )
                                     .to_string();
                                     let parent_display =
-                                        String::from_utf8_lossy(&parent.name).to_string();
+                                        crate::string::msg_str(&parent.name).to_string();
                                     return Err(VmError {
                                         message: format!(
                                             "Class {} cannot extend final class {}",
@@ -48156,8 +48157,8 @@ impl Vm {
                                 // Check if parent is an enum (enums cannot be extended)
                                 if parent.is_enum {
                                     let parent_display =
-                                        String::from_utf8_lossy(parent_name).to_string();
-                                    let child_display = String::from_utf8_lossy(
+                                        crate::string::msg_str(parent_name).to_string();
+                                    let child_display = crate::string::msg_str(
                                         name_val.to_php_string().as_bytes(),
                                     )
                                     .to_string();
@@ -48172,9 +48173,9 @@ impl Vm {
                                 // Check readonly inheritance rules
                                 if !class.is_readonly && parent.is_readonly {
                                     let child_display =
-                                        String::from_utf8_lossy(&class.name).to_string();
+                                        crate::string::msg_str(&class.name).to_string();
                                     let parent_display =
-                                        String::from_utf8_lossy(parent_name).to_string();
+                                        crate::string::msg_str(parent_name).to_string();
                                     return Err(VmError {
                                         message: format!(
                                             "Non-readonly class {} cannot extend readonly class {}",
@@ -48185,9 +48186,9 @@ impl Vm {
                                 }
                                 if class.is_readonly && !parent.is_readonly {
                                     let child_display =
-                                        String::from_utf8_lossy(&class.name).to_string();
+                                        crate::string::msg_str(&class.name).to_string();
                                     let parent_display =
-                                        String::from_utf8_lossy(parent_name).to_string();
+                                        crate::string::msg_str(parent_name).to_string();
                                     return Err(VmError {
                                         message: format!(
                                             "Readonly class {} cannot extend non-readonly class {}",
@@ -48220,7 +48221,7 @@ impl Vm {
                                                 || method_name.as_slice() == b"__construct")
                                         {
                                             let parent_display =
-                                                String::from_utf8_lossy(parent_name).to_string();
+                                                crate::string::msg_str(parent_name).to_string();
                                             // Property hooks have special name/error format
                                             let is_hook = method_name
                                                 .starts_with(b"__property_get_")
@@ -48242,12 +48243,12 @@ impl Vm {
                                                 format!(
                                                     "Cannot override final property hook {}::${}::{}()",
                                                     parent_display,
-                                                    String::from_utf8_lossy(prop_name),
+                                                    crate::string::msg_str(prop_name),
                                                     hook_kind
                                                 )
                                             } else {
                                                 let method_display =
-                                                    String::from_utf8_lossy(&method.name)
+                                                    crate::string::msg_str(&method.name)
                                                         .to_string();
                                                 format!(
                                                     "Cannot override final method {}::{}()",
@@ -48282,11 +48283,11 @@ impl Vm {
                                                                 .to_ascii_lowercase(),
                                                         )
                                                         .map(|c| {
-                                                            String::from_utf8_lossy(&c.name)
+                                                            crate::string::msg_str(&c.name)
                                                                 .to_string()
                                                         })
                                                         .unwrap_or_else(|| {
-                                                            String::from_utf8_lossy(parent_name)
+                                                            crate::string::msg_str(parent_name)
                                                                 .to_string()
                                                         });
                                                     let mdisp = String::from_utf8_lossy(&cm.name)
@@ -48345,13 +48346,13 @@ impl Vm {
                                             };
                                             if child_vis_level > parent_vis_level {
                                                 let child_display =
-                                                    String::from_utf8_lossy(&class.name)
+                                                    crate::string::msg_str(&class.name)
                                                         .to_string();
                                                 let parent_display =
-                                                    String::from_utf8_lossy(&proto_class)
+                                                    crate::string::msg_str(&proto_class)
                                                         .to_string();
                                                 let method_display =
-                                                    String::from_utf8_lossy(&method.name)
+                                                    crate::string::msg_str(&method.name)
                                                         .to_string();
                                                 let vis_str = match proto_vis {
                                                     Visibility::Public => "public",
@@ -48575,9 +48576,9 @@ impl Vm {
                                             child_has.map(|p| !p.is_abstract).unwrap_or(false);
                                         let child_is_readonly =
                                             child_has.map(|p| p.is_readonly).unwrap_or(false);
-                                        let parent_display = String::from_utf8_lossy(parent_name);
+                                        let parent_display = crate::string::msg_str(parent_name);
                                         let prop_display =
-                                            String::from_utf8_lossy(&parent_prop.name);
+                                            crate::string::msg_str(&parent_prop.name);
                                         let mut get_key: Vec<u8> = b"__property_get_".to_vec();
                                         get_key.extend_from_slice(&parent_prop.name);
                                         let mut set_key: Vec<u8> = b"__property_set_".to_vec();
@@ -48645,7 +48646,7 @@ impl Vm {
                                         return Err(VmError {
                                             message: format!(
                                                 "Class {} contains {} abstract {} and must therefore be declared abstract or implement the {} ({})",
-                                                String::from_utf8_lossy(&class.name),
+                                                crate::string::msg_str(&class.name),
                                                 n,
                                                 word,
                                                 remain,
@@ -48667,9 +48668,9 @@ impl Vm {
                                             .any(|p| p.name == parent_prop.name)
                                         {
                                             let parent_display =
-                                                String::from_utf8_lossy(parent_name).to_string();
+                                                crate::string::msg_str(parent_name).to_string();
                                             let prop_display =
-                                                String::from_utf8_lossy(&parent_prop.name)
+                                                crate::string::msg_str(&parent_prop.name)
                                                     .to_string();
                                             return Err(VmError {
                                                 message: format!(
@@ -48691,13 +48692,13 @@ impl Vm {
                                         {
                                             if parent_prop.is_static != child_prop.is_static {
                                                 let child_display =
-                                                    String::from_utf8_lossy(&class.name)
+                                                    crate::string::msg_str(&class.name)
                                                         .to_string();
                                                 let parent_display =
-                                                    String::from_utf8_lossy(parent_name)
+                                                    crate::string::msg_str(parent_name)
                                                         .to_string();
                                                 let prop_display =
-                                                    String::from_utf8_lossy(&parent_prop.name)
+                                                    crate::string::msg_str(&parent_prop.name)
                                                         .to_string();
                                                 if parent_prop.is_static {
                                                     return Err(VmError {
@@ -48746,13 +48747,13 @@ impl Vm {
                                             };
                                             if child_vis_level > parent_vis_level {
                                                 let child_display =
-                                                    String::from_utf8_lossy(&class.name)
+                                                    crate::string::msg_str(&class.name)
                                                         .to_string();
                                                 let parent_display =
-                                                    String::from_utf8_lossy(parent_name)
+                                                    crate::string::msg_str(parent_name)
                                                         .to_string();
                                                 let prop_display =
-                                                    String::from_utf8_lossy(&parent_prop.name)
+                                                    crate::string::msg_str(&parent_prop.name)
                                                         .to_string();
                                                 let vis_str = match parent_prop.visibility {
                                                     Visibility::Public => "public",
@@ -48827,11 +48828,11 @@ impl Vm {
                                         if parent_read_only {
                                             // Otherwise emit a hook-style declaration mismatch error.
                                             let child_display =
-                                                String::from_utf8_lossy(&class.name).to_string();
+                                                crate::string::msg_str(&class.name).to_string();
                                             let parent_display =
-                                                String::from_utf8_lossy(parent_name).to_string();
+                                                crate::string::msg_str(parent_name).to_string();
                                             let prop_display =
-                                                String::from_utf8_lossy(&parent_prop.name)
+                                                crate::string::msg_str(&parent_prop.name)
                                                     .to_string();
                                             let child_type = child_prop
                                                 .property_type
@@ -48858,11 +48859,11 @@ impl Vm {
                                         }
                                         if parent_write_only {
                                             let child_display =
-                                                String::from_utf8_lossy(&class.name).to_string();
+                                                crate::string::msg_str(&class.name).to_string();
                                             let parent_display =
-                                                String::from_utf8_lossy(parent_name).to_string();
+                                                crate::string::msg_str(parent_name).to_string();
                                             let prop_display =
-                                                String::from_utf8_lossy(&parent_prop.name)
+                                                crate::string::msg_str(&parent_prop.name)
                                                     .to_string();
                                             let child_type = child_prop
                                                 .property_type
@@ -48888,11 +48889,11 @@ impl Vm {
                                             });
                                         }
                                         let child_display =
-                                            String::from_utf8_lossy(&class.name).to_string();
+                                            crate::string::msg_str(&class.name).to_string();
                                         let parent_display =
-                                            String::from_utf8_lossy(parent_name).to_string();
+                                            crate::string::msg_str(parent_name).to_string();
                                         let prop_display =
-                                            String::from_utf8_lossy(&parent_prop.name).to_string();
+                                            crate::string::msg_str(&parent_prop.name).to_string();
                                         let expected_type = parent_type_str;
                                         if parent_prop.property_type.is_none() {
                                             return Err(VmError {
@@ -48904,7 +48905,7 @@ impl Vm {
                                             });
                                         } else {
                                             let parent_display =
-                                                String::from_utf8_lossy(&parent_decl_name)
+                                                crate::string::msg_str(&parent_decl_name)
                                                     .to_string();
                                             return Err(VmError {
                                                 message: format!(
@@ -48934,11 +48935,11 @@ impl Vm {
                                     {
                                         if parent_prop.is_readonly && !child_prop.is_readonly {
                                             let parent_display =
-                                                String::from_utf8_lossy(parent_name).to_string();
+                                                crate::string::msg_str(parent_name).to_string();
                                             let child_display =
-                                                String::from_utf8_lossy(&class.name).to_string();
+                                                crate::string::msg_str(&class.name).to_string();
                                             let prop_display =
-                                                String::from_utf8_lossy(&parent_prop.name)
+                                                crate::string::msg_str(&parent_prop.name)
                                                     .to_string();
                                             return Err(VmError {
                                                 message: format!(
@@ -48953,11 +48954,11 @@ impl Vm {
                                         }
                                         if !parent_prop.is_readonly && child_prop.is_readonly {
                                             let parent_display =
-                                                String::from_utf8_lossy(parent_name).to_string();
+                                                crate::string::msg_str(parent_name).to_string();
                                             let child_display =
-                                                String::from_utf8_lossy(&class.name).to_string();
+                                                crate::string::msg_str(&class.name).to_string();
                                             let prop_display =
-                                                String::from_utf8_lossy(&parent_prop.name)
+                                                crate::string::msg_str(&parent_prop.name)
                                                     .to_string();
                                             return Err(VmError {
                                                 message: format!(
@@ -48984,10 +48985,10 @@ impl Vm {
                                         if let Some(sv) = parent_prop.set_visibility {
                                             if sv == Visibility::Private {
                                                 let parent_display =
-                                                    String::from_utf8_lossy(parent_name)
+                                                    crate::string::msg_str(parent_name)
                                                         .to_string();
                                                 let prop_display =
-                                                    String::from_utf8_lossy(&parent_prop.name)
+                                                    crate::string::msg_str(&parent_prop.name)
                                                         .to_string();
                                                 return Err(VmError {
                                                     message: format!(
@@ -49009,11 +49010,11 @@ impl Vm {
                                             && !parent_has_no_set_prototype
                                         {
                                             let child_display =
-                                                String::from_utf8_lossy(&class.name).to_string();
+                                                crate::string::msg_str(&class.name).to_string();
                                             let parent_display =
-                                                String::from_utf8_lossy(parent_name).to_string();
+                                                crate::string::msg_str(parent_name).to_string();
                                             let prop_display =
-                                                String::from_utf8_lossy(&parent_prop.name)
+                                                crate::string::msg_str(&parent_prop.name)
                                                     .to_string();
                                             // Parent has no set-vis (symmetric) but child adds one
                                             if parent_set_vis.is_none() && child_set_vis.is_some() {
@@ -49150,7 +49151,7 @@ impl Vm {
                                                         crate::value::display_class_name(
                                                             &class.name
                                                         ),
-                                                        String::from_utf8_lossy(const_name),
+                                                        crate::string::msg_str(const_name),
                                                         vis_s,
                                                         kind,
                                                         crate::value::display_class_name(
@@ -49166,13 +49167,13 @@ impl Vm {
                                         if let Some(meta) = parent_meta {
                                             if meta.is_final {
                                                 let child_display =
-                                                    String::from_utf8_lossy(&class.name)
+                                                    crate::string::msg_str(&class.name)
                                                         .to_string();
                                                 let parent_display =
-                                                    String::from_utf8_lossy(parent_name)
+                                                    crate::string::msg_str(parent_name)
                                                         .to_string();
                                                 let const_display =
-                                                    String::from_utf8_lossy(const_name).to_string();
+                                                    crate::string::msg_str(const_name).to_string();
                                                 return Err(VmError {
                                                     message: format!(
                                                         "{}::{} cannot override final constant {}::{}",
@@ -49292,9 +49293,9 @@ impl Vm {
                                 // Check that we're implementing an interface, not a class
                                 if !iface.is_interface {
                                     let iface_display =
-                                        String::from_utf8_lossy(iface_name).to_string();
+                                        crate::string::msg_str(iface_name).to_string();
                                     let class_display =
-                                        String::from_utf8_lossy(&class.name).to_string();
+                                        crate::string::msg_str(&class.name).to_string();
                                     return Err(VmError {
                                         message: format!(
                                             "{} cannot implement {} - it is not an interface",
@@ -49336,9 +49337,9 @@ impl Vm {
                                             > 1;
                                     if already_inherited {
                                         let iface_display =
-                                            String::from_utf8_lossy(&iface.name).to_string();
+                                            crate::string::msg_str(&iface.name).to_string();
                                         let class_display =
-                                            String::from_utf8_lossy(&class.name).to_string();
+                                            crate::string::msg_str(&class.name).to_string();
                                         return Err(VmError {
                                             message: format!(
                                                 "Interface {} cannot implement previously implemented interface {}",
@@ -49465,9 +49466,9 @@ impl Vm {
                                                 message: format!(
                                                     "{}::{} cannot override final constant {}::{}",
                                                     decl_display(self, &child_decl),
-                                                    String::from_utf8_lossy(const_name),
+                                                    crate::string::msg_str(const_name),
                                                     decl_display(self, &iface_decl),
-                                                    String::from_utf8_lossy(const_name)
+                                                    crate::string::msg_str(const_name)
                                                 ),
                                                 line: op.line,
                                             });
@@ -49484,11 +49485,11 @@ impl Vm {
                                                 message: format!(
                                                     "{} {} inherits both {}::{} and {}::{}, which is ambiguous",
                                                     kind,
-                                                    String::from_utf8_lossy(&class.name),
+                                                    crate::string::msg_str(&class.name),
                                                     decl_display(self, &child_decl),
-                                                    String::from_utf8_lossy(const_name),
+                                                    crate::string::msg_str(const_name),
                                                     decl_display(self, &iface_decl),
-                                                    String::from_utf8_lossy(const_name)
+                                                    crate::string::msg_str(const_name)
                                                 ),
                                                 line: op.line,
                                             });
@@ -49521,12 +49522,12 @@ impl Vm {
                                             }
                                             if meta.is_final {
                                                 let child_display =
-                                                    String::from_utf8_lossy(&class.name)
+                                                    crate::string::msg_str(&class.name)
                                                         .to_string();
                                                 let iface_display =
-                                                    String::from_utf8_lossy(iface_name).to_string();
+                                                    crate::string::msg_str(iface_name).to_string();
                                                 let const_display =
-                                                    String::from_utf8_lossy(const_name).to_string();
+                                                    crate::string::msg_str(const_name).to_string();
                                                 return Err(VmError {
                                                     message: format!(
                                                         "{}::{} cannot override final constant {}::{}",
@@ -49546,13 +49547,13 @@ impl Vm {
                                                 {
                                                     if child_meta.visibility != Visibility::Public {
                                                         let child_display =
-                                                            String::from_utf8_lossy(&class.name)
+                                                            crate::string::msg_str(&class.name)
                                                                 .to_string();
                                                         let iface_display =
-                                                            String::from_utf8_lossy(iface_name)
+                                                            crate::string::msg_str(iface_name)
                                                                 .to_string();
                                                         let const_display =
-                                                            String::from_utf8_lossy(const_name)
+                                                            crate::string::msg_str(const_name)
                                                                 .to_string();
                                                         return Err(VmError {
                                                             message: format!(
@@ -49699,7 +49700,7 @@ impl Vm {
                                 let iface_lower: Vec<u8> =
                                     iface_name.iter().map(|b| b.to_ascii_lowercase()).collect();
                                 let class_display =
-                                    String::from_utf8_lossy(&class.name).to_string();
+                                    crate::string::msg_str(&class.name).to_string();
                                 // zend_implement_serializable() warns before the
                                 // enum's interface check rejects it, also through
                                 // an interface extending Serializable.
@@ -49922,7 +49923,7 @@ impl Vm {
                                 };
                                 if !has_iterator_or_aggregate && !parent_has_it {
                                     let class_display =
-                                        String::from_utf8_lossy(&class.name).to_string();
+                                        crate::string::msg_str(&class.name).to_string();
                                     let kind = if class.is_enum { "Enum" } else { "Class" };
                                     // zend_implement_traversable(): E_CORE_ERROR, in Unknown on line 0.
                                     let msg = format!(
@@ -49956,7 +49957,7 @@ impl Vm {
                                 all_ifaces.iter().any(|n| n == b"iteratoraggregate");
                             if has_iterator && has_iterator_aggregate {
                                 let class_display =
-                                    String::from_utf8_lossy(&class.name).to_string();
+                                    crate::string::msg_str(&class.name).to_string();
                                 return Err(VmError {
                                     message: format!(
                                         "Class {} cannot implement both Iterator and IteratorAggregate at the same time",
@@ -49998,9 +49999,9 @@ impl Vm {
                             if let Some(trait_def) = self.classes.get(&trait_lower) {
                                 if !trait_def.is_trait {
                                     let trait_display =
-                                        String::from_utf8_lossy(&trait_def.name).to_string();
+                                        crate::string::msg_str(&trait_def.name).to_string();
                                     let class_display =
-                                        String::from_utf8_lossy(&class.name).to_string();
+                                        crate::string::msg_str(&class.name).to_string();
                                     // zend_do_link_class throws (catchable) Error
                                     let err_msg = format!(
                                         "{} cannot use {} - it is not a trait",
@@ -50024,9 +50025,9 @@ impl Vm {
                                 // message/since suffix when present (handled via format_deprecated_message).
                                 let trait_attrs = trait_def.attributes.clone();
                                 let trait_display =
-                                    String::from_utf8_lossy(&trait_def.name).to_string();
+                                    crate::string::msg_str(&trait_def.name).to_string();
                                 let class_display =
-                                    String::from_utf8_lossy(&class.name).to_string();
+                                    crate::string::msg_str(&class.name).to_string();
                                 if let Some(custom_msg) = self.get_deprecated_message(&trait_attrs)
                                 {
                                     let prefix = format!(
@@ -50039,7 +50040,7 @@ impl Vm {
                             } else {
                                 // PHP 8 raises an Error (catchable) with the format:
                                 // Uncaught Error: Trait "name" not found
-                                let trait_display = String::from_utf8_lossy(trait_name).to_string();
+                                let trait_display = crate::string::msg_str(trait_name).to_string();
                                 let err_msg = format!("Trait \"{}\" not found", trait_display);
                                 let exc = self.create_exception(b"Error", &err_msg, op.line);
                                 self.current_exception = Some(exc);
@@ -50073,21 +50074,21 @@ impl Vm {
                                         None => {
                                             return Err(format!(
                                                 "Could not find trait {}",
-                                                String::from_utf8_lossy(name)
+                                                crate::string::msg_str(name)
                                             ));
                                         }
                                     };
                                     if !t.is_trait {
                                         return Err(format!(
                                             "Class {} is not a trait, Only traits may be used in 'as' and 'insteadof' statements",
-                                            String::from_utf8_lossy(&t.name)
+                                            crate::string::msg_str(&t.name)
                                         ));
                                     }
                                     if !used_traits.contains(&lower) {
                                         return Err(format!(
                                             "Required Trait {} wasn't added to {}",
-                                            String::from_utf8_lossy(&t.name),
-                                            String::from_utf8_lossy(&class.name)
+                                            crate::string::msg_str(&t.name),
+                                            crate::string::msg_str(&class.name)
                                         ));
                                     }
                                     Ok(lower)
@@ -50445,14 +50446,14 @@ impl Vm {
                                                     return Err(VmError {
                                                         message: format!(
                                                             "Trait method {}::{} has not been applied as {}::{}, because of collision with {}::{}",
-                                                            String::from_utf8_lossy(
+                                                            crate::string::msg_str(
                                                                 &trait_def.name
                                                             ),
-                                                            String::from_utf8_lossy(&m.name),
-                                                            String::from_utf8_lossy(&class.name),
-                                                            String::from_utf8_lossy(&display),
-                                                            String::from_utf8_lossy(prev_trait),
-                                                            String::from_utf8_lossy(&existing.name)
+                                                            crate::string::msg_str(&m.name),
+                                                            crate::string::msg_str(&class.name),
+                                                            crate::string::msg_str(&display),
+                                                            crate::string::msg_str(prev_trait),
+                                                            crate::string::msg_str(&existing.name)
                                                         ),
                                                         line: op.line,
                                                     });
@@ -50504,8 +50505,8 @@ impl Vm {
                                                         return Err(VmError {
                                                             message: format!(
                                                                 "Cannot override final method {}::{}()",
-                                                                String::from_utf8_lossy(&pdecl),
-                                                                String::from_utf8_lossy(&pm.name)
+                                                                crate::string::msg_str(&pdecl),
+                                                                crate::string::msg_str(&pm.name)
                                                             ),
                                                             line: op.line,
                                                         });
@@ -50527,10 +50528,10 @@ impl Vm {
                                                             message: format!(
                                                                 "Cannot make {} method {}::{}() {} in class {}",
                                                                 a,
-                                                                String::from_utf8_lossy(&pdecl),
-                                                                String::from_utf8_lossy(&m.name),
+                                                                crate::string::msg_str(&pdecl),
+                                                                crate::string::msg_str(&m.name),
                                                                 b,
-                                                                String::from_utf8_lossy(
+                                                                crate::string::msg_str(
                                                                     &class.name
                                                                 )
                                                             ),
@@ -50595,13 +50596,13 @@ impl Vm {
                                             .clone()
                                             .unwrap_or_else(|| class.name.clone());
                                         let class_display =
-                                            String::from_utf8_lossy(&class.name).to_string();
+                                            crate::string::msg_str(&class.name).to_string();
                                         let first_display =
-                                            String::from_utf8_lossy(&first_def).to_string();
+                                            crate::string::msg_str(&first_def).to_string();
                                         let trait_display =
-                                            String::from_utf8_lossy(&trait_def.name).to_string();
+                                            crate::string::msg_str(&trait_def.name).to_string();
                                         let prop_display =
-                                            String::from_utf8_lossy(&prop.name).to_string();
+                                            crate::string::msg_str(&prop.name).to_string();
                                         if let Some(class_prop) =
                                             class.properties.iter().find(|p| {
                                                 p.name == prop.name
@@ -50683,9 +50684,9 @@ impl Vm {
                                         return Err(VmError {
                                             message: format!(
                                                 "Readonly class {} cannot use trait with a non-readonly property {}::${}",
-                                                String::from_utf8_lossy(&class.name),
-                                                String::from_utf8_lossy(&trait_def.name),
-                                                String::from_utf8_lossy(&prop.name)
+                                                crate::string::msg_str(&class.name),
+                                                crate::string::msg_str(&trait_def.name),
+                                                crate::string::msg_str(&prop.name)
                                             ),
                                             line: op.line,
                                         });
@@ -50693,7 +50694,7 @@ impl Vm {
                                     // Check if enum - enums cannot include properties from traits
                                     if class.is_enum {
                                         let class_display =
-                                            String::from_utf8_lossy(&class.name).to_string();
+                                            crate::string::msg_str(&class.name).to_string();
                                         return Err(VmError {
                                             message: format!(
                                                 "Enum {} cannot include properties",
@@ -50871,10 +50872,10 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "{} and {} define the same constant ({}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
-                                                    String::from_utf8_lossy(&first_def),
-                                                    String::from_utf8_lossy(&trait_def.name),
-                                                    String::from_utf8_lossy(const_name),
-                                                    String::from_utf8_lossy(&class.name)
+                                                    crate::string::msg_str(&first_def),
+                                                    crate::string::msg_str(&trait_def.name),
+                                                    crate::string::msg_str(const_name),
+                                                    crate::string::msg_str(&class.name)
                                                 ),
                                                 line: op.line,
                                             });
@@ -50892,10 +50893,10 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "{}::{} cannot override final constant {}::{}",
-                                                    String::from_utf8_lossy(&class.name),
-                                                    String::from_utf8_lossy(const_name),
-                                                    String::from_utf8_lossy(&pdecl),
-                                                    String::from_utf8_lossy(const_name)
+                                                    crate::string::msg_str(&class.name),
+                                                    crate::string::msg_str(const_name),
+                                                    crate::string::msg_str(&pdecl),
+                                                    crate::string::msg_str(const_name)
                                                 ),
                                                 line: op.line,
                                             });
@@ -50939,9 +50940,9 @@ impl Vm {
                                     for (method_name, _) in &trait_def.methods {
                                         if forbidden_magic.contains(&method_name.as_slice()) {
                                             let class_display =
-                                                String::from_utf8_lossy(&class.name).to_string();
+                                                crate::string::msg_str(&class.name).to_string();
                                             let method_display =
-                                                String::from_utf8_lossy(method_name).to_string();
+                                                crate::string::msg_str(method_name).to_string();
                                             return Err(VmError {
                                                 message: format!(
                                                     "Enum {} cannot include magic method {}",
@@ -51264,13 +51265,13 @@ impl Vm {
                                         // Check staticness compatibility
                                         if trait_method.is_static && !class_method.is_static {
                                             let trait_display =
-                                                String::from_utf8_lossy(trait_orig_name)
+                                                crate::string::msg_str(trait_orig_name)
                                                     .to_string();
                                             let method_display =
-                                                String::from_utf8_lossy(&trait_method.name)
+                                                crate::string::msg_str(&trait_method.name)
                                                     .to_string();
                                             let class_display =
-                                                String::from_utf8_lossy(&class.name).to_string();
+                                                crate::string::msg_str(&class.name).to_string();
                                             return Err(VmError {
                                                 message: format!(
                                                     "Cannot make static method {}::{}() non static in class {}",
@@ -51281,13 +51282,13 @@ impl Vm {
                                         }
                                         if !trait_method.is_static && class_method.is_static {
                                             let trait_display =
-                                                String::from_utf8_lossy(trait_orig_name)
+                                                crate::string::msg_str(trait_orig_name)
                                                     .to_string();
                                             let method_display =
-                                                String::from_utf8_lossy(&trait_method.name)
+                                                crate::string::msg_str(&trait_method.name)
                                                     .to_string();
                                             let class_display =
-                                                String::from_utf8_lossy(&class.name).to_string();
+                                                crate::string::msg_str(&class.name).to_string();
                                             return Err(VmError {
                                                 message: format!(
                                                     "Cannot make non static method {}::{}() static in class {}",
@@ -51345,9 +51346,9 @@ impl Vm {
                                     });
                                     if came_from_trait {
                                         let class_display =
-                                            String::from_utf8_lossy(&class.name).to_string();
+                                            crate::string::msg_str(&class.name).to_string();
                                         let method_display =
-                                            String::from_utf8_lossy(&method.name).to_string();
+                                            crate::string::msg_str(&method.name).to_string();
                                         return Err(VmError {
                                             message: format!(
                                                 "Class {} must implement 1 abstract method ({}::{})",
@@ -51416,7 +51417,7 @@ impl Vm {
                                     continue;
                                 }
                                 let iface_display =
-                                    String::from_utf8_lossy(&iface.name).to_string();
+                                    crate::string::msg_str(&iface.name).to_string();
                                 let iface_props: Vec<crate::object::PropertyDef> = iface
                                     .properties
                                     .iter()
@@ -51457,8 +51458,8 @@ impl Vm {
                                             return Err(VmError {
                                                 message: format!(
                                                     "Set access level of {}::${} must be {} (as in class {}){}",
-                                                    String::from_utf8_lossy(&class.name),
-                                                    String::from_utf8_lossy(&cp.name),
+                                                    crate::string::msg_str(&class.name),
+                                                    crate::string::msg_str(&cp.name),
                                                     shown,
                                                     iface_display,
                                                     if ip.set_visibility.is_some() {
@@ -51498,8 +51499,8 @@ impl Vm {
                                                     return Err(VmError {
                                                         message: format!(
                                                             "Set type of {}::${} must be supertype of {} (as in interface {})",
-                                                            String::from_utf8_lossy(&class.name),
-                                                            String::from_utf8_lossy(&cp.name),
+                                                            crate::string::msg_str(&class.name),
+                                                            crate::string::msg_str(&cp.name),
                                                             ts,
                                                             iface_display
                                                         ),
@@ -51839,10 +51840,10 @@ impl Vm {
                                                 // Circular reference: A = self::B, B = self::A
                                                 // PHP reports the name of the referenced constant
                                                 let _class_display =
-                                                    String::from_utf8_lossy(&class.name)
+                                                    crate::string::msg_str(&class.name)
                                                         .to_string();
                                                 let const_display =
-                                                    String::from_utf8_lossy(ref_const).to_string();
+                                                    crate::string::msg_str(ref_const).to_string();
                                                 format!(
                                                     "Cannot declare self-referencing constant self::{}",
                                                     const_display
@@ -51850,7 +51851,7 @@ impl Vm {
                                             } else if !ref_exists {
                                                 // Completely undefined constant
                                                 let ref_str =
-                                                    String::from_utf8_lossy(rest).to_string();
+                                                    crate::string::msg_str(rest).to_string();
                                                 format!("Undefined constant {}", ref_str)
                                             } else {
                                                 // Reference to external class constant that is still deferred - skip for now
@@ -52627,7 +52628,7 @@ impl Vm {
                                             message: format!(
                                                 "{}::${}::{}() has #[\\Override] attribute, but no matching parent method exists",
                                                 crate::value::display_class_name(&class.name),
-                                                String::from_utf8_lossy(prop),
+                                                crate::string::msg_str(prop),
                                                 if is_set { "set" } else { "get" }
                                             ),
                                             line: op.line,
@@ -52686,7 +52687,7 @@ impl Vm {
                                     let class_display_name =
                                         crate::value::display_class_name(&class.name);
                                     let method_display =
-                                        String::from_utf8_lossy(&method.name).to_string();
+                                        crate::string::msg_str(&method.name).to_string();
                                     return Err(VmError {
                                         message: format!(
                                             "{}::{}() has #[\\Override] attribute, but no matching parent method exists",
@@ -52757,7 +52758,7 @@ impl Vm {
                                     let class_display_name =
                                         crate::value::display_class_name(&class.name);
                                     let prop_display =
-                                        String::from_utf8_lossy(&prop.name).to_string();
+                                        crate::string::msg_str(&prop.name).to_string();
                                     return Err(VmError {
                                         message: format!(
                                             "{}::${} has #[\\Override] attribute, but no matching parent property exists",
@@ -52789,7 +52790,7 @@ impl Vm {
                                 let from_trait = method_from_trait.contains_key(method_key);
                                 for pt_info in method.op_array.param_types.iter().flatten() {
                                     if pt_info.implicitly_nullable && !from_trait {
-                                        let method_display = String::from_utf8_lossy(&method.name);
+                                        let method_display = crate::string::msg_str(&method.name);
                                         let param_name =
                                             String::from_utf8_lossy(&pt_info.param_name);
                                         self.emit_deprecated_at(
@@ -52801,7 +52802,7 @@ impl Vm {
                                 let method_display_name = format!(
                                     "{}::{}",
                                     class_display,
-                                    String::from_utf8_lossy(&method.name)
+                                    crate::string::msg_str(&method.name)
                                 );
                                 self.emit_optional_before_required_deprecation(
                                     &method.op_array,
@@ -52829,8 +52830,8 @@ impl Vm {
                                     && !matches!(prop.default, Value::Undef | Value::Null)
                                 {
                                     let cls_display =
-                                        String::from_utf8_lossy(&class.name).to_string();
-                                    let prop_display = String::from_utf8_lossy(&prop.name);
+                                        crate::string::msg_str(&class.name).to_string();
+                                    let prop_display = crate::string::msg_str(&prop.name);
                                     return Err(VmError {
                                         message: format!(
                                             "Cannot specify default value for virtual hooked property {}::${}",
@@ -52851,8 +52852,8 @@ impl Vm {
                                             } else {
                                                 "Write-only"
                                             },
-                                            String::from_utf8_lossy(&class.name),
-                                            String::from_utf8_lossy(&prop.name)
+                                            crate::string::msg_str(&class.name),
+                                            crate::string::msg_str(&prop.name)
                                         ),
                                         line: op.line,
                                     });
@@ -52870,8 +52871,8 @@ impl Vm {
                                         return Err(VmError {
                                             message: format!(
                                                 "Get hook of backed property {}::{} with set hook may not return by reference",
-                                                String::from_utf8_lossy(&class.name),
-                                                String::from_utf8_lossy(&prop.name)
+                                                crate::string::msg_str(&class.name),
+                                                crate::string::msg_str(&prop.name)
                                             ),
                                             line: op.line,
                                         });
@@ -52915,9 +52916,9 @@ impl Vm {
                                                     &class, prop_type, param_type,
                                                 ) {
                                                     let cls_display =
-                                                        String::from_utf8_lossy(&class.name);
+                                                        crate::string::msg_str(&class.name);
                                                     let prop_display =
-                                                        String::from_utf8_lossy(&prop.name);
+                                                        crate::string::msg_str(&prop.name);
                                                     let param_name = String::from_utf8_lossy(
                                                         &param_info.param_name,
                                                     );
@@ -53126,7 +53127,7 @@ impl Vm {
                     if !self.classes.contains_key(&name_lower)
                         && !self.is_known_builtin_class(&name_lower)
                     {
-                        let class_display = crate::value::display_class_name(class_name.as_bytes());
+                        let class_display = crate::string::msg_str(class_name.as_bytes());
                         let err_msg = format!("Class \"{}\" not found", class_display);
                         // An exception thrown by an autoloader wins.
                         if self.current_exception.is_none() {
@@ -53159,7 +53160,7 @@ impl Vm {
                         } else {
                             format!(
                                 "The \"{}\" class is reserved for internal use and cannot be manually instantiated",
-                                class_name.to_string_lossy()
+                                class_name.to_msg_string()
                             )
                         };
                         let exc = self.create_exception(b"Error", &err_msg, op.line);
@@ -53730,7 +53731,7 @@ impl Vm {
                                         let class_display = crate::value::display_class_name(
                                             &obj.borrow().class_name,
                                         );
-                                        self.emit_notice_at(&format!("Indirect modification of overloaded property {}::${} has no effect", class_display, prop_name.to_string_lossy()), op.line);
+                                        self.emit_notice_at(&format!("Indirect modification of overloaded property {}::${} has no effect", class_display, prop_name.to_msg_string()), op.line);
                                     }
                                     other
                                 }
@@ -53805,7 +53806,7 @@ impl Vm {
                                     self.emit_warning(&format!(
                                         "Undefined property: {}::${}",
                                         class_display,
-                                        prop_name.to_string_lossy()
+                                        prop_name.to_msg_string()
                                     ));
                                     Value::Null
                                 }
@@ -54043,7 +54044,7 @@ impl Vm {
                                             let ob = o.borrow();
                                             ob.get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                         }
                                         _ => "Uncaught exception".to_string(),
                                     };
@@ -54246,7 +54247,7 @@ impl Vm {
                             if is_virtual_write_only {
                                 let class_display =
                                     crate::value::display_class_name(&class_name_orig);
-                                let prop_display = String::from_utf8_lossy(prop_name_bytes);
+                                let prop_display = crate::string::msg_str(prop_name_bytes);
                                 let msg = format!(
                                     "Property {}::${} is write-only",
                                     class_display, prop_display
@@ -54520,7 +54521,7 @@ impl Vm {
                                             let msg = ob
                                                 .get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                                 .to_string();
                                             if msg.is_empty() {
                                                 format!("Uncaught {}", class)
@@ -54621,7 +54622,7 @@ impl Vm {
                                         &format!(
                                             "Undefined property: {}::${}",
                                             class_display,
-                                            prop_name.to_string_lossy()
+                                            prop_name.to_msg_string()
                                         ),
                                         op.line,
                                     );
@@ -54756,7 +54757,7 @@ impl Vm {
                                         if !allows {
                                             let class_display =
                                                 crate::value::display_class_name(&class_name_orig);
-                                            self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, prop_name.to_string_lossy()));
+                                            self.emit_deprecated(&format!("Creation of dynamic property {}::${} is deprecated", class_display, prop_name.to_msg_string()));
                                         }
                                     }
                                     let arr = if unset_fetch {
@@ -54832,7 +54833,7 @@ impl Vm {
                                     .unwrap_or_else(|| {
                                         crate::value::display_class_name(&class_name_orig)
                                     });
-                                let prop_display = String::from_utf8_lossy(prop_name.as_bytes());
+                                let prop_display = crate::string::msg_str(prop_name.as_bytes());
                                 let msg = format!(
                                     "Typed property {}::${} must not be accessed before initialization",
                                     class_display, prop_display
@@ -54959,7 +54960,7 @@ impl Vm {
                                                 let msg = ob
                                                     .get_property(b"message")
                                                     .to_php_string()
-                                                    .to_string_lossy()
+                                                    .to_msg_string()
                                                     .to_string();
                                                 if msg.is_empty() {
                                                     format!("Uncaught {}", class)
@@ -55008,7 +55009,7 @@ impl Vm {
                                         let class_display =
                                             crate::value::display_class_name(&class_name_orig);
                                         let prop_display =
-                                            String::from_utf8_lossy(prop_name.as_bytes());
+                                            crate::string::msg_str(prop_name.as_bytes());
                                         self.emit_warning(&format!(
                                             "Undefined property: {}::${}",
                                             class_display, prop_display
@@ -55034,7 +55035,7 @@ impl Vm {
                                                 crate::value::display_class_name(&class_name_orig)
                                             });
                                         let prop_display =
-                                            String::from_utf8_lossy(prop_name.as_bytes());
+                                            crate::string::msg_str(prop_name.as_bytes());
                                         let _type_name = self
                                             .param_type_name(tp.property_type.as_ref().unwrap());
                                         let msg = format!(
@@ -55075,7 +55076,7 @@ impl Vm {
                                                 &format!(
                                                     "Creation of dynamic property {}::${} is deprecated",
                                                     class_display,
-                                                    prop_name.to_string_lossy()
+                                                    prop_name.to_msg_string()
                                                 ),
                                                 op.line,
                                             );
@@ -55090,7 +55091,7 @@ impl Vm {
                                     // Exception, ReflectionClass, and empty user classes).
                                     let class_display =
                                         crate::value::display_class_name(&class_name_orig);
-                                    let prop_display = prop_name.to_string_lossy();
+                                    let prop_display = prop_name.to_msg_string();
                                     self.emit_warning_at(
                                         &format!(
                                             "Undefined property: {}::${}",
@@ -55134,7 +55135,7 @@ impl Vm {
                                     self.emit_warning_at(
                                         &format!(
                                             "Undefined variable ${}",
-                                            String::from_utf8_lossy(name)
+                                            crate::string::msg_str(name)
                                         ),
                                         op.line,
                                     );
@@ -55144,7 +55145,7 @@ impl Vm {
                         let type_name = Self::value_type_name(&obj_val);
                         let msg = format!(
                             "Attempt to modify property \"{}\" on {}",
-                            prop_name.to_string_lossy(),
+                            prop_name.to_msg_string(),
                             type_name
                         );
                         let exc = self.create_exception(b"Error", &msg, op.line);
@@ -55386,7 +55387,7 @@ impl Vm {
                                     .borrow()
                                     .get_property(b"message")
                                     .to_php_string()
-                                    .to_string_lossy(),
+                                    .to_msg_string(),
                                 _ => "Uncaught exception".to_string(),
                             };
                             return Err(VmError {
@@ -55674,7 +55675,7 @@ impl Vm {
                             if is_virtual_read_only {
                                 let class_display =
                                     crate::value::display_class_name(&class_name_orig);
-                                let prop_display = String::from_utf8_lossy(prop_name_bytes_set);
+                                let prop_display = crate::string::msg_str(prop_name_bytes_set);
                                 let msg = format!(
                                     "Property {}::${} is read-only",
                                     class_display, prop_display
@@ -56070,7 +56071,7 @@ impl Vm {
                                                 crate::value::display_class_name(&declaring_class)
                                             });
                                         let prop_display =
-                                            String::from_utf8_lossy(prop_name.as_bytes())
+                                            crate::string::msg_str(prop_name.as_bytes())
                                                 .to_string();
                                         // zend_readonly_property_modification_error()
                                         // comes before the set-visibility check.
@@ -56168,7 +56169,7 @@ impl Vm {
                                                 let msg = format!(
                                                     "Object was released while assigning to property {}::${}",
                                                     cd,
-                                                    String::from_utf8_lossy(prop_name.as_bytes())
+                                                    crate::string::msg_str(prop_name.as_bytes())
                                                 );
                                                 let exc =
                                                     self.create_exception(b"Error", &msg, op.line);
@@ -56201,7 +56202,7 @@ impl Vm {
                                                 crate::value::display_class_name(&class_name_orig)
                                             });
                                         let prop_display =
-                                            String::from_utf8_lossy(prop_name.as_bytes())
+                                            crate::string::msg_str(prop_name.as_bytes())
                                                 .to_string();
                                         let expected = self.param_type_name(pt);
                                         let given = Self::value_type_name(&value);
@@ -56349,7 +56350,7 @@ impl Vm {
                                             let msg = ob
                                                 .get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                                 .to_string();
                                             format!("Uncaught {}: {}", class, msg)
                                         } else {
@@ -56450,7 +56451,7 @@ impl Vm {
                                             let msg = ob
                                                 .get_property(b"message")
                                                 .to_php_string()
-                                                .to_string_lossy()
+                                                .to_msg_string()
                                                 .to_string();
                                             format!("Uncaught {}: {}", class, msg)
                                         } else {
@@ -57461,7 +57462,7 @@ impl Vm {
                                     let method_vis = method.visibility;
                                     let method_declaring = method.declaring_class.clone();
                                     let method_display_name =
-                                        String::from_utf8_lossy(&method.name).to_string();
+                                        crate::string::msg_str(&method.name).to_string();
                                     let caller_scope = self.current_class_scope();
                                     self.check_visibility(
                                         method_vis,
@@ -57806,7 +57807,7 @@ impl Vm {
                             let msg = ob
                                 .get_property(b"message")
                                 .to_php_string()
-                                .to_string_lossy()
+                                .to_msg_string()
                                 .to_string();
                             format!("Uncaught {}: {}", class, msg)
                         } else {
@@ -58287,7 +58288,7 @@ impl Vm {
         let message = obj_borrow
             .get_property(b"message")
             .to_php_string()
-            .to_string_lossy();
+            .to_msg_string();
         let file = obj_borrow
             .get_property(b"file")
             .to_php_string()
@@ -58430,10 +58431,7 @@ impl Vm {
                     Value::Object(o) => {
                         let ob = o.borrow();
                         let cn = crate::value::display_class_name(&ob.class_name);
-                        let m = ob
-                            .get_property(b"message")
-                            .to_php_string()
-                            .to_string_lossy();
+                        let m = ob.get_property(b"message").to_php_string().to_msg_string();
                         if m.is_empty() {
                             format!("Uncaught {}", cn)
                         } else {
@@ -59309,7 +59307,7 @@ impl Vm {
             let err_msg = call
                 .args
                 .first()
-                .map(|v| v.to_php_string().to_string_lossy().to_string())
+                .map(|v| v.to_php_string().to_msg_string().to_string())
                 .unwrap_or_else(|| "Error".to_string());
             let err_line = call
                 .args
@@ -59614,18 +59612,12 @@ impl Vm {
                 }
                 // If call_object_method failed, try SPL dispatch directly
                 Err(VmError {
-                    message: format!(
-                        "Call to undefined function {}()",
-                        call.name.to_string_lossy()
-                    ),
+                    message: format!("Call to undefined function {}()", call.name.to_msg_string()),
                     line,
                 })
             } else {
                 Err(VmError {
-                    message: format!(
-                        "Call to undefined function {}()",
-                        call.name.to_string_lossy()
-                    ),
+                    message: format!("Call to undefined function {}()", call.name.to_msg_string()),
                     line,
                 })
             }
@@ -59772,7 +59764,7 @@ impl Vm {
             _ => Err(VmError {
                 message: format!(
                     "Call to undefined method Fiber::{}()",
-                    String::from_utf8_lossy(method)
+                    crate::string::msg_str(method)
                 ),
                 line,
             }),
@@ -60081,7 +60073,7 @@ impl Vm {
                     let m = ob
                         .get_property(b"message")
                         .to_php_string()
-                        .to_string_lossy()
+                        .to_msg_string()
                         .to_string();
                     format!("Uncaught {}: {}", cls, m)
                 } else {
@@ -61111,7 +61103,7 @@ impl Vm {
                     let m = ob
                         .get_property(b"message")
                         .to_php_string()
-                        .to_string_lossy()
+                        .to_msg_string()
                         .to_string();
                     format!("Uncaught {}: {}", cls, m)
                 } else {

@@ -232,6 +232,11 @@ impl PhpString {
         String::from_utf8_lossy(&self.inner.data).into_owned()
     }
 
+    /// The string for a diagnostic message (see [`msg_str`]).
+    pub fn to_msg_string(&self) -> String {
+        msg_str(&self.inner.data).into_owned()
+    }
+
     /// Write the raw bytes to a writer
     pub fn write_to(&self, writer: &mut dyn std::io::Write) -> std::io::Result<()> {
         writer.write_all(&self.inner.data)
@@ -261,6 +266,45 @@ impl std::fmt::Debug for PhpString {
 impl std::fmt::Display for PhpString {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_string_lossy())
+    }
+}
+
+/// Text of `b` for a diagnostic (warning or exception) message. Messages
+/// travel as Rust strings: bytes that are not UTF-8 are kept as the
+/// plane-16 private-use characters U+10FF00 + byte, which the error display,
+/// error handlers and exception messages turn back into the raw bytes
+/// (`errdisplay::raw_error_bytes`), as php's messages carry them unchanged.
+pub fn msg_str(b: &[u8]) -> std::borrow::Cow<'_, str> {
+    let mut rest = match std::str::from_utf8(b) {
+        Ok(s) => return std::borrow::Cow::Borrowed(s),
+        Err(_) => b,
+    };
+    let mut out = String::with_capacity(b.len() + 8);
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(s) => {
+                out.push_str(s);
+                return std::borrow::Cow::Owned(out);
+            }
+            Err(e) => {
+                let (ok, bad) = rest.split_at(e.valid_up_to());
+                out.push_str(std::str::from_utf8(ok).unwrap_or_default());
+                let n = e.error_len().unwrap_or(bad.len()).max(1);
+                for &c in &bad[..n] {
+                    out.push(char::from_u32(0x10FF00 + c as u32).unwrap_or('?'));
+                }
+                rest = &bad[n..];
+            }
+        }
+    }
+}
+
+/// One byte of a diagnostic message, kept raw (see [`msg_str`]).
+pub fn msg_char(b: u8) -> char {
+    if b < 0x80 {
+        b as char
+    } else {
+        char::from_u32(0x10FF00 + b as u32).unwrap_or('?')
     }
 }
 

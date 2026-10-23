@@ -168,7 +168,7 @@ pub fn phptoken_tokenize(vm: &mut Vm, class_lower: &[u8], args: &[Value]) -> Opt
         if ce.is_abstract && !ce.is_interface && !ce.is_trait && !ce.is_enum {
             let msg = format!(
                 "Cannot instantiate abstract class {}",
-                String::from_utf8_lossy(&ce.name)
+                crate::string::msg_str(&ce.name)
             );
             let exc = vm.create_exception(b"Error", &msg, vm.current_line);
             vm.current_exception = Some(exc);
@@ -210,7 +210,7 @@ pub fn phptoken_tokenize(vm: &mut Vm, class_lower: &[u8], args: &[Value]) -> Opt
                         let short = c.rsplit(|&b| b == b'\\').next().unwrap_or(c);
                         if !vm.constants.contains_key(c) && !vm.constants.contains_key(short) {
                             let msg =
-                                format!("Undefined constant \"{}\"", String::from_utf8_lossy(c));
+                                format!("Undefined constant \"{}\"", crate::string::msg_str(c));
                             let exc = vm.create_exception(b"Error", &msg, vm.current_line);
                             vm.current_exception = Some(exc);
                             return None;

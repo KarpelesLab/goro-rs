@@ -574,7 +574,7 @@ fn zval_filter(
                 &format!(
                     "filter validation failed: filter {} not satisfied by '{}'",
                     entry.name,
-                    s.to_string_lossy()
+                    s.to_msg_string()
                 ),
             );
             return;
@@ -1037,7 +1037,7 @@ fn filter_input(vm: &mut Vm, args: &[Value]) -> R {
             throw(
                 vm,
                 FAILED_EXCEPTION,
-                &format!("input value '{}' not found", var.to_string_lossy()),
+                &format!("input value '{}' not found", var.to_msg_string()),
             );
             return Ok(Value::Null);
         }

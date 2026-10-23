@@ -851,7 +851,7 @@ impl Vm {
                 if e.objs.is_empty() {
                     let msg = format!(
                         "Called {}() on an invalid iterator",
-                        String::from_utf8_lossy(method)
+                        crate::string::msg_str(method)
                     );
                     return self.spl_throw(b"RuntimeException", &msg);
                 }
@@ -877,7 +877,7 @@ impl Vm {
                     } else if flags & MIT_NEED_ALL != 0 {
                         let msg = format!(
                             "Called {}() with non valid sub iterator",
-                            String::from_utf8_lossy(method)
+                            crate::string::msg_str(method)
                         );
                         return self.spl_throw(b"RuntimeException", &msg);
                     } else {
@@ -940,7 +940,7 @@ pub fn spl_multiple_construct_native(
                 .borrow()
                 .get_property(b"message")
                 .to_php_string()
-                .to_string_lossy(),
+                .to_msg_string(),
             _ => String::new(),
         };
         Err(msg)

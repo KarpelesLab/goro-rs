@@ -1297,7 +1297,7 @@ impl Vm {
                 match got {
                     Some(v) => v.deref(),
                     None => {
-                        let msg = format!("Undefined array key \"{}\"", k.to_string_lossy());
+                        let msg = format!("Undefined array key \"{}\"", k.to_msg_string());
                         self.emit_warning(&msg);
                         Value::Null
                     }
@@ -2455,7 +2455,7 @@ pub fn spl_iter_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Res
                 .borrow()
                 .get_property(b"message")
                 .to_php_string()
-                .to_string_lossy(),
+                .to_msg_string(),
             _ => String::new(),
         };
         Err(msg)

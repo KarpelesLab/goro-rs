@@ -236,7 +236,7 @@ impl Vm {
                 if mode != DimFetch::W && matches!(cur, Value::Undef) && cell.is_none() {
                     if let Some(name) = undef_cv {
                         self.emit_warning_at(
-                            &format!("Undefined variable ${}", String::from_utf8_lossy(name)),
+                            &format!("Undefined variable ${}", crate::string::msg_str(name)),
                             line,
                         );
                     }
@@ -343,7 +343,7 @@ impl Vm {
                     &format!(
                         "Indirect modification of overloaded property {}::${} has no effect",
                         crate::value::display_class_name(class_name),
-                        String::from_utf8_lossy(prop)
+                        crate::string::msg_str(prop)
                     ),
                     line,
                 );
@@ -368,7 +368,7 @@ impl Vm {
         let msg = format!(
             "Indirect modification of {}::${} is not allowed",
             crate::value::display_class_name(class_name),
-            String::from_utf8_lossy(prop)
+            crate::string::msg_str(prop)
         );
         self.throw_error_msg(b"Error", &msg);
         false
@@ -782,7 +782,7 @@ impl Vm {
                 {
                     if trailing && mode != DimFetch::Unset {
                         self.emit_warning_at(
-                            &format!("Illegal string offset \"{}\"", s.to_string_lossy()),
+                            &format!("Illegal string offset \"{}\"", s.to_msg_string()),
                             line,
                         );
                     }
@@ -1031,7 +1031,7 @@ impl Vm {
         let msg = match k {
             crate::array::ArrayKey::Int(i) => format!("Undefined array key {}", i),
             crate::array::ArrayKey::String(s) => {
-                format!("Undefined array key \"{}\"", s.to_string_lossy())
+                format!("Undefined array key \"{}\"", s.to_msg_string())
             }
         };
         self.emit_warning_at(&msg, line);
@@ -1167,7 +1167,7 @@ impl Vm {
                 let msg = format!(
                     "{}::offsetGet(): Argument #1 (${}) not passed",
                     crate::value::display_class_name(&decl),
-                    String::from_utf8_lossy(&pname)
+                    crate::string::msg_str(&pname)
                 );
                 self.throw_error_msg(b"ArgumentCountError", &msg);
                 indirect_notice(self);

@@ -734,12 +734,12 @@ pub fn prop_write(vm: &mut Vm, o: &Rc<RefCell<PhpObject>>, name: &[u8], kind: u8
         format!(
             "Cannot unset {}::${}",
             class_display(vm, &o.borrow().class_name.clone()),
-            String::from_utf8_lossy(name)
+            goro_core::string::msg_str(name)
         )
     } else {
         format!(
             "Cannot modify readonly property DatePeriod::${}",
-            String::from_utf8_lossy(name)
+            goro_core::string::msg_str(name)
         )
     };
     let exc = vm.create_exception(b"Error", &msg, vm.current_line);

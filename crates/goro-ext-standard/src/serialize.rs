@@ -890,7 +890,7 @@ impl Serializer {
                             vm.emit_warning_at(
                                 &format!(
                                     "serialize(): \"{}\" is returned from __sleep() multiple times",
-                                    String::from_utf8_lossy(&name)
+                                    goro_core::string::msg_str(&name)
                                 ),
                                 saved_line,
                             );
@@ -903,7 +903,7 @@ impl Serializer {
                 if !found {
                     vm.emit_warning_at(&format!(
                         "serialize(): \"{}\" returned as member variable from __sleep() but does not exist",
-                        String::from_utf8_lossy(&name)), saved_line);
+                        goro_core::string::msg_str(&name)), saved_line);
                 }
             }
             push_class_name(&mut self.buf, &display);
@@ -978,9 +978,7 @@ fn exception_err(vm: &Vm) -> VmError {
         format!(
             "Uncaught {}: {}",
             goro_core::value::display_class_name(&ob.class_name),
-            ob.get_property(b"message")
-                .to_php_string()
-                .to_string_lossy()
+            ob.get_property(b"message").to_php_string().to_msg_string()
         )
     } else {
         "Uncaught exception".to_string()
@@ -2477,7 +2475,7 @@ impl<'a> Parser<'a> {
                 &format!(
                     "Cannot create dynamic property {}::${}",
                     display,
-                    String::from_utf8_lossy(&uname)
+                    goro_core::string::msg_str(&uname)
                 ),
             );
             return Err(());
@@ -2487,7 +2485,7 @@ impl<'a> Parser<'a> {
                 &format!(
                     "Creation of dynamic property {}::${} is deprecated",
                     display,
-                    String::from_utf8_lossy(&uname)
+                    goro_core::string::msg_str(&uname)
                 ),
                 self.line,
             );
@@ -2631,7 +2629,7 @@ impl<'a> Parser<'a> {
                         "Cannot assign {} to property {}::${} of type {}",
                         Vm::value_type_name(&inner),
                         display,
-                        String::from_utf8_lossy(&prop_name),
+                        goro_core::string::msg_str(&prop_name),
                         vm.param_type_name(&pt)
                     );
                     obj.borrow_mut().set_property(storage.clone(), Value::Undef);

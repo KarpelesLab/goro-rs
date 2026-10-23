@@ -260,7 +260,7 @@ impl Vm {
                 if d.is_finite() && d.fract() != 0.0 {
                     let msg = format!(
                         "Implicit conversion from float {} to int loses precision",
-                        Value::Double(d).to_php_string().to_string_lossy()
+                        Value::Double(d).to_php_string().to_msg_string()
                     );
                     self.emit_deprecated(&msg);
                 }
@@ -313,7 +313,7 @@ impl Vm {
     fn ao_undefined_key(&mut self, k: &ArrayKey) {
         let msg = match k {
             ArrayKey::Int(n) => format!("Undefined array key {}", n),
-            ArrayKey::String(s) => format!("Undefined array key \"{}\"", s.to_string_lossy()),
+            ArrayKey::String(s) => format!("Undefined array key \"{}\"", s.to_msg_string()),
         };
         self.emit_warning(&msg);
     }
@@ -960,7 +960,7 @@ impl Vm {
                     func,
                     argn,
                     name,
-                    other.to_php_string().to_string_lossy()
+                    other.to_php_string().to_msg_string()
                 );
                 self.spl_throw(b"TypeError", &msg);
                 return None;
@@ -982,7 +982,7 @@ impl Vm {
                 func,
                 argn,
                 name,
-                s.to_string_lossy()
+                s.to_msg_string()
             );
             self.spl_throw(b"TypeError", &msg);
             return None;
@@ -1412,7 +1412,7 @@ impl Vm {
                     if !self.classes.contains_key(&cl) && !self.is_known_builtin_class(&cl) {
                         let msg = format!(
                             "Cannot deserialize ArrayObject with iterator class '{}'; no such class exists",
-                            c.to_string_lossy()
+                            c.to_msg_string()
                         );
                         return self.spl_throw(b"UnexpectedValueException", &msg);
                     }
@@ -1421,7 +1421,7 @@ impl Vm {
                     if !is_iter {
                         let msg = format!(
                             "Cannot deserialize ArrayObject with iterator class '{}'; this class does not implement the Iterator interface",
-                            c.to_string_lossy()
+                            c.to_msg_string()
                         );
                         return self.spl_throw(b"UnexpectedValueException", &msg);
                     }
@@ -1666,7 +1666,7 @@ pub fn spl_array_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Re
                 .borrow()
                 .get_property(b"message")
                 .to_php_string()
-                .to_string_lossy(),
+                .to_msg_string(),
             _ => String::new(),
         };
         Err(msg)

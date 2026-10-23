@@ -358,7 +358,7 @@ fn uri_prop_write(vm: &mut Vm, o: &Obj, name: &[u8], kind: u8) -> bool {
     let msg = format!(
         "Cannot create dynamic property {}::${}",
         class_name_of(o),
-        String::from_utf8_lossy(name)
+        crate::string::msg_str(name)
     );
     throw(vm, b"Error", &msg);
     false

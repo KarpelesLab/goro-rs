@@ -475,7 +475,7 @@ fn no_dynamic_property(
     let msg = format!(
         "Cannot create dynamic property {}::${}",
         class_display(obj),
-        String::from_utf8_lossy(name)
+        crate::string::msg_str(name)
     );
     throw(vm, b"Error", &msg);
     true
@@ -1585,7 +1585,7 @@ pub fn handle_random_docall(
                 let is_engine = matches!(&k, ArrayKey::String(s) if s.as_bytes() == b"engine");
                 let msg = if !is_engine {
                     let name = match &k {
-                        ArrayKey::String(s) => s.to_string_lossy(),
+                        ArrayKey::String(s) => s.to_msg_string(),
                         ArrayKey::Int(n) => n.to_string(),
                     };
                     format!("Cannot create dynamic property {}::${}", cname, name)

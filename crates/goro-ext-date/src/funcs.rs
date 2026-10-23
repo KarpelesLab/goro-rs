@@ -583,7 +583,7 @@ pub fn date_default_timezone_set_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
         false,
     )?
     .unwrap_or_default();
-    let zs = String::from_utf8_lossy(&zone).into_owned();
+    let zs = goro_core::string::msg_str(&zone).into_owned();
     if zone.contains(&0) || !timezone_id_is_valid(&zs) {
         vm.emit_notice_at(
             &format!(

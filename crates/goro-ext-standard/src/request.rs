@@ -227,7 +227,7 @@ pub fn request_parse_body(
     } else {
         return Err(format!(
             "Content-Type \"{}\" is not supported",
-            String::from_utf8_lossy(&ct)
+            goro_core::string::msg_str(&ct)
         ));
     }
     match ctx.exception {

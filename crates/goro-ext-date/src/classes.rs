@@ -132,7 +132,7 @@ fn check_instantiable(vm: &mut Vm, cls: &[u8]) -> R<()> {
             b"Error",
             &format!(
                 "Cannot instantiate abstract class {}",
-                String::from_utf8_lossy(&n)
+                goro_core::string::msg_str(&n)
             ),
         ));
     }
@@ -478,7 +478,7 @@ fn make_tz_value(vm: &mut Vm, t: &Time) -> Value {
 
 /// timezone_initialize: Err(message) on failure
 pub fn timezone_initialize(tz: &[u8]) -> Result<TzObj, String> {
-    let shown = String::from_utf8_lossy(tz).into_owned();
+    let shown = goro_core::string::msg_str(tz).into_owned();
     let mut dummy = Time::new();
     let mut ptr = Ptr::new(tz);
     let mut dst = 0;
@@ -626,7 +626,7 @@ fn restore_custom_props(vm: &mut Vm, o: &Obj, a: &PhpArray, internal: &[&[u8]]) 
             vm.emit_deprecated(&format!(
                 "Creation of dynamic property {}::${} is deprecated",
                 disp,
-                String::from_utf8_lossy(&n)
+                goro_core::string::msg_str(&n)
             ));
         }
     }

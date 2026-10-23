@@ -138,7 +138,7 @@ pub fn get_encoding(
                     pname,
                     &format!(
                         "must be a valid encoding, \"{}\" given",
-                        String::from_utf8_lossy(n)
+                        goro_core::string::msg_str(n)
                     ),
                 )),
                 Some(e) => {
@@ -186,7 +186,7 @@ pub fn parse_encoding_list_arg(
             pname,
             &format!(
                 "contains invalid encoding \"{}\"",
-                String::from_utf8_lossy(&bad)
+                goro_core::string::msg_str(&bad)
             ),
         )),
     }
@@ -236,7 +236,7 @@ pub fn parse_encoding_array(
                         pname,
                         &format!(
                             "contains invalid encoding \"{}\"",
-                            String::from_utf8_lossy(&s)
+                            goro_core::string::msg_str(&s)
                         ),
                     ));
                 }
@@ -311,7 +311,7 @@ fn mb_language(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     "language",
                     &format!(
                         "must be a valid language, \"{}\" given",
-                        String::from_utf8_lossy(&n)
+                        goro_core::string::msg_str(&n)
                     ),
                 ))
             }
@@ -339,7 +339,7 @@ fn mb_internal_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 "encoding",
                 &format!(
                     "must be a valid encoding, \"{}\" given",
-                    String::from_utf8_lossy(&n)
+                    goro_core::string::msg_str(&n)
                 ),
             )),
             Some(e) => {
@@ -413,7 +413,7 @@ fn mb_http_output(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     "encoding",
                     &format!(
                         "must be a valid encoding, \"{}\" given",
-                        String::from_utf8_lossy(&n)
+                        goro_core::string::msg_str(&n)
                     ),
                 )),
                 Some(e) => {
@@ -543,7 +543,7 @@ fn mb_preferred_mime_name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             "encoding",
             &format!(
                 "must be a valid encoding, \"{}\" given",
-                String::from_utf8_lossy(&name)
+                goro_core::string::msg_str(&name)
             ),
         )),
         Some(e) => match mbfl::preferred_mime_name(e) {
@@ -551,7 +551,7 @@ fn mb_preferred_mime_name(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             None => {
                 vm.emit_warning(&format!(
                     "mb_preferred_mime_name(): No MIME preferred name corresponding to \"{}\"",
-                    String::from_utf8_lossy(&name)
+                    goro_core::string::msg_str(&name)
                 ));
                 Ok(Value::False)
             }

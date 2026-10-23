@@ -71,8 +71,8 @@ fn check_access(vm: &Vm, ce_name: &[u8], m: &goro_core::object::MethodDef) -> Re
     Err(format!(
         "cannot access {} method {}::{}()",
         vis,
-        String::from_utf8_lossy(ce_name),
-        String::from_utf8_lossy(&m.name)
+        goro_core::string::msg_str(ce_name),
+        goro_core::string::msg_str(&m.name)
     ))
 }
 
@@ -101,7 +101,7 @@ fn resolve_static(vm: &mut Vm, class: &[u8], method: &[u8]) -> Result<Value, Str
         None => {
             return Err(format!(
                 "class \"{}\" not found",
-                String::from_utf8_lossy(class)
+                goro_core::string::msg_str(class)
             ));
         }
     };
@@ -112,8 +112,8 @@ fn resolve_static(vm: &mut Vm, class: &[u8], method: &[u8]) -> Result<Value, Str
             if !m.is_static {
                 return Err(format!(
                     "non-static method {}::{}() cannot be called statically",
-                    String::from_utf8_lossy(&ce.name),
-                    String::from_utf8_lossy(&m.name)
+                    goro_core::string::msg_str(&ce.name),
+                    goro_core::string::msg_str(&m.name)
                 ));
             }
             let mut a = PhpArray::new();
@@ -130,8 +130,8 @@ fn resolve_static(vm: &mut Vm, class: &[u8], method: &[u8]) -> Result<Value, Str
             }
             Err(format!(
                 "class {} does not have a method \"{}\"",
-                String::from_utf8_lossy(&ce.name),
-                String::from_utf8_lossy(method)
+                goro_core::string::msg_str(&ce.name),
+                goro_core::string::msg_str(method)
             ))
         }
     }
@@ -167,7 +167,7 @@ fn resolve_callable(vm: &mut Vm, cb: &Value) -> Result<Value, String> {
             }
             Err(format!(
                 "function \"{}\" not found or invalid function name",
-                s.to_string_lossy()
+                s.to_msg_string()
             ))
         }
         Value::Array(a) => {
@@ -225,7 +225,7 @@ fn resolve_callable(vm: &mut Vm, cb: &Value) -> Result<Value, String> {
                             Err(format!(
                                 "class {} does not have a method \"{}\"",
                                 class_display(vm, &cl),
-                                String::from_utf8_lossy(&method)
+                                goro_core::string::msg_str(&method)
                             ))
                         }
                     }

@@ -453,7 +453,7 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
 
                 if let Some(target_name) = fcc_target {
                     // FCC closure: display with ["function"] and target's parameters
-                    let target_display = String::from_utf8_lossy(&target_name).to_string();
+                    let target_display = goro_core::string::msg_str(&target_name).to_string();
 
                     // Look up the target function's parameters
                     let target_lower: Vec<u8> =

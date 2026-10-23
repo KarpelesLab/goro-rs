@@ -269,7 +269,10 @@ fn init_options(vm: &mut Vm, opts: &[u8]) -> Result<(u32, Syntax), VmError> {
             _ => {
                 return Err(value_error(
                     vm,
-                    format!("Option \"{}\" is not supported", c as char),
+                    format!(
+                        "Option \"{}\" is not supported",
+                        goro_core::string::msg_char(c)
+                    ),
                 ));
             }
         }
@@ -352,7 +355,7 @@ fn mb_regex_encoding(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 "encoding",
                 &format!(
                     "must be a valid encoding, \"{}\" given",
-                    String::from_utf8_lossy(&n)
+                    goro_core::string::msg_str(&n)
                 ),
             )),
             Some(i) => {

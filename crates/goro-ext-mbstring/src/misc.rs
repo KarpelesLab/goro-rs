@@ -69,7 +69,10 @@ fn mb_convert_kana(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     f,
                     2,
                     "mode",
-                    &format!("contains invalid flag: '{}'", c as char),
+                    &format!(
+                        "contains invalid flag: '{}'",
+                        goro_core::string::msg_char(c)
+                    ),
                 ));
             }
         }

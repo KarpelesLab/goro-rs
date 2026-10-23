@@ -1097,7 +1097,7 @@ fn value_display(v: &Value) -> String {
         Value::Null => "null".into(),
         Value::String(s) => {
             let b = s.as_bytes();
-            let shown = String::from_utf8_lossy(&b[..b.len().min(10)]).to_string();
+            let shown = crate::string::msg_str(&b[..b.len().min(10)]).to_string();
             if b.len() > 10 {
                 format!("'{}...'", shown)
             } else {
@@ -1291,7 +1291,7 @@ impl Vm {
                         pop_linking();
                         let shown = self
                             .call_object_method(&exc, b"__toString", &[])
-                            .map(|v| v.to_php_string().to_string_lossy())
+                            .map(|v| v.to_php_string().to_msg_string())
                             .unwrap_or_default();
                         self.current_exception = None;
                         return Some((
@@ -1346,7 +1346,7 @@ impl Vm {
                 "Could not check compatibility between {} and {}, because class {} is not available",
                 child_decl,
                 parent_decl,
-                String::from_utf8_lossy(&ctx.first_unresolved())
+                crate::string::msg_str(&ctx.first_unresolved())
             )
         } else {
             format!(

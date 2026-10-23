@@ -242,7 +242,7 @@ fn fopen_connect(
                 wrapper_log_error(
                     vm,
                     options,
-                    format!("Invalid login {}", String::from_utf8_lossy(&user)),
+                    format!("Invalid login {}", goro_core::string::msg_str(&user)),
                 );
                 return fail(vm, &ctl);
             }
@@ -259,7 +259,7 @@ fn fopen_connect(
                     wrapper_log_error(
                         vm,
                         options,
-                        format!("Invalid password {}", String::from_utf8_lossy(&pass)),
+                        format!("Invalid password {}", goro_core::string::msg_str(&pass)),
                     );
                     return fail(vm, &ctl);
                 }

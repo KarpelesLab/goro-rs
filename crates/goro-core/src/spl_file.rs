@@ -539,7 +539,7 @@ impl Vm {
                 } else if d.is_finite() && d.abs() < 9.2e18 {
                     let msg = format!(
                         "Implicit conversion from float {} to int loses precision",
-                        Value::Double(d).to_php_string().to_string_lossy()
+                        Value::Double(d).to_php_string().to_msg_string()
                     );
                     self.emit_deprecated(&msg);
                     Some(d as i64)
@@ -1395,7 +1395,7 @@ pub fn spl_file_object_construct_native(
                 .borrow()
                 .get_property(b"message")
                 .to_php_string()
-                .to_string_lossy(),
+                .to_msg_string(),
             _ => String::new(),
         };
         Err(msg)
@@ -1431,7 +1431,7 @@ fn spl_file_info_construct_inner(
                 .borrow()
                 .get_property(b"message")
                 .to_php_string()
-                .to_string_lossy(),
+                .to_msg_string(),
             _ => String::new(),
         };
         Err(msg)

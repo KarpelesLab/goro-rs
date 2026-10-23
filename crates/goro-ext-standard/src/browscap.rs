@@ -152,7 +152,7 @@ fn load(vm: &mut Vm, filename: &[u8]) -> Option<BrowserData> {
                 if value.eq_ignore_ascii_case(&pattern) {
                     vm.emit_warning(&format!(
                         "Invalid browscap ini file: 'Parent' value cannot be same as the section name: {} (in file {})",
-                        String::from_utf8_lossy(&pattern),
+                        goro_core::string::msg_str(&pattern),
                         path
                     ));
                     continue;

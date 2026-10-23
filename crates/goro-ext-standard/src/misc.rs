@@ -979,7 +979,7 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         || name_upper == b"NULL"
         || name_bytes == b"__COMPILER_HALT_OFFSET__"
     {
-        let name_str = name.to_string_lossy();
+        let name_str = name.to_msg_string();
         vm.emit_warning(&format!(
             "Constant {} already defined, this will be an error in PHP 9",
             name_str
@@ -990,7 +990,7 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let normalized = normalize_ns_const_name(&name_bytes);
     // Check if constant is already defined
     if vm.constants.contains_key(&normalized) {
-        let name_str = name.to_string_lossy();
+        let name_str = name.to_msg_string();
         vm.emit_warning(&format!(
             "Constant {} already defined, this will be an error in PHP 9",
             name_str
@@ -1055,7 +1055,7 @@ fn const_array_copy(
 
 fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let name_str = name.to_string_lossy();
+    let name_str = name.to_msg_string();
     // Check for class constants (Class::CONST)
     if let Some(pos) = name_str.find("::") {
         let class_name = &name_str[..pos];
@@ -1098,7 +1098,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if class.is_trait && class.constants.contains_key(const_name.as_bytes()) {
                 let msg = format!(
                     "Cannot access trait constant {}::{} directly",
-                    String::from_utf8_lossy(&class.name),
+                    goro_core::string::msg_str(&class.name),
                     const_name
                 );
                 let line = vm.current_line;
@@ -1131,7 +1131,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         } else {
                             "protected"
                         };
-                        let class_display = String::from_utf8_lossy(&class.name).to_string();
+                        let class_display = goro_core::string::msg_str(&class.name).to_string();
                         let msg = format!(
                             "Cannot access {} constant {}::{}",
                             vis_str, class_display, const_name
@@ -1160,7 +1160,7 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             vm.deprecation_in_progress.remove(&guard_key);
                             if let Some(custom_msg) = dep_result {
                                 let class_display =
-                                    String::from_utf8_lossy(&class.name).to_string();
+                                    goro_core::string::msg_str(&class.name).to_string();
                                 let prefix = format!("Constant {}::{}", class_display, const_name);
                                 let msg = vm.format_deprecated_message(&prefix, &custom_msg);
                                 vm.emit_user_deprecated_at(&msg, vm.current_line);
@@ -1400,7 +1400,7 @@ fn callable_check_class(vm: &mut Vm, name: &[u8], quiet: bool) -> Result<Vec<u8>
     }
     Err(format!(
         "class \"{}\" not found",
-        String::from_utf8_lossy(name)
+        goro_core::string::msg_str(name)
     ))
 }
 
@@ -4157,7 +4157,7 @@ fn array_walk_object_entries(
                                 let val_type = value_type_for_error(&new_val);
                                 let class_display =
                                     goro_core::value::display_class_name(&obj.borrow().class_name);
-                                let prop_display = String::from_utf8_lossy(prop_name);
+                                let prop_display = goro_core::string::msg_str(prop_name);
                                 Some(format!(
                                     "Cannot assign {} to reference held by property {}::${} of type {}",
                                     val_type, class_display, prop_display, type_name
@@ -6018,7 +6018,7 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if !chk.ok && vm.current_exception.is_none() {
             let msg = format!(
                 "Invalid callback {}, {}",
-                String::from_utf8_lossy(&chk.name),
+                goro_core::string::msg_str(&chk.name),
                 chk.error.unwrap_or_default()
             );
             let exc = vm.create_exception(b"Error", &msg, line);
@@ -6064,7 +6064,7 @@ fn php_assert(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if assert_ini_bool(vm, b"assert.exception", true) {
         let msg = desc_str
             .as_ref()
-            .map(|d| d.to_string_lossy())
+            .map(|d| d.to_msg_string())
             .unwrap_or_default();
         // The dispatcher may already have pushed our frame.
         let pushed = vm
@@ -6689,7 +6689,7 @@ fn array_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     .borrow()
                     .get_property(b"message")
                     .to_php_string()
-                    .to_string_lossy(),
+                    .to_msg_string(),
                 _ => String::new(),
             };
             Err(VmError {
@@ -7101,7 +7101,7 @@ fn validate_fmt_arg2(vm: &mut Vm, func_name: &str, format_arg: &Value) -> Result
             if has_tostring {
                 None
             } else {
-                let class_display = String::from_utf8_lossy(&class_name).to_string();
+                let class_display = goro_core::string::msg_str(&class_name).to_string();
                 let msg = format!(
                     "{}(): Argument #2 ($format) must be of type string, {} given",
                     func_name, class_display
@@ -7782,7 +7782,7 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 let name = obj.borrow().class_name.clone();
                 let msg = format!(
                     "http_build_query(): Argument #1 ($data) must not be an enum, {} given",
-                    String::from_utf8_lossy(&name)
+                    goro_core::string::msg_str(&name)
                 );
                 let exc = vm.create_exception(b"TypeError", &msg, 0);
                 vm.current_exception = Some(exc);
@@ -7953,7 +7953,7 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     } else {
                         let msg = format!(
                             "Unbacked enum {} cannot be converted to a string",
-                            String::from_utf8_lossy(&class_name)
+                            goro_core::string::msg_str(&class_name)
                         );
                         let exc = vm.create_exception(b"ValueError", &msg, 0);
                         vm.current_exception = Some(exc);
@@ -10175,7 +10175,7 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let line = vm.current_line;
         let msg = format!(
             "Cannot use \"{}\" as a class alias as it is reserved",
-            String::from_utf8_lossy(&alias_lower)
+            goro_core::string::msg_str(&alias_lower)
         );
         return Err(VmError { message: msg, line });
     }
@@ -10187,10 +10187,7 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.try_autoload_class(original.as_bytes());
     }
     if !vm.classes.contains_key(&original_lower) && !vm.is_known_builtin_class(&original_lower) {
-        vm.emit_warning(&format!(
-            "Class \"{}\" not found",
-            original.to_string_lossy()
-        ));
+        vm.emit_warning(&format!("Class \"{}\" not found", original.to_msg_string()));
         return Ok(Value::False);
     }
     if vm.classes.contains_key(&alias_lower) {
@@ -10214,7 +10211,7 @@ fn class_alias_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let msg = format!(
             "Cannot redeclare {} {}{}",
             kind,
-            alias.to_string_lossy(),
+            alias.to_msg_string(),
             location
         );
         vm.emit_warning(&msg);
@@ -13903,7 +13900,7 @@ fn setcookie_common(
                             format!(
                                 "{}(): option \"{}\" is invalid",
                                 fname,
-                                String::from_utf8_lossy(&key)
+                                goro_core::string::msg_str(&key)
                             ),
                         );
                     }
@@ -16902,7 +16899,7 @@ fn chown_common(
                         "{}(): Unable to find {} for {}",
                         name,
                         if group { "gid" } else { "uid" },
-                        s.to_string_lossy()
+                        s.to_msg_string()
                     ));
                     return Ok(Value::False);
                 }
@@ -18649,7 +18646,7 @@ fn php_exec(
                 &format!(
                     "{}(): Unable to fork [{}]",
                     fname,
-                    String::from_utf8_lossy(cmd)
+                    goro_core::string::msg_str(cmd)
                 ),
                 line,
             );
@@ -18766,7 +18763,7 @@ fn shell_exec_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Err(_) => {
             vm.emit_warning(&format!(
                 "shell_exec(): Unable to execute '{}'",
-                cmd.to_string_lossy()
+                cmd.to_msg_string()
             ));
             return Ok(Value::False);
         }
@@ -19281,7 +19278,7 @@ fn apply_filter_list(
                     vm,
                     &format!(
                         "Unable to create filter ({})",
-                        String::from_utf8_lossy(&name)
+                        goro_core::string::msg_str(&name)
                     ),
                 );
             }
@@ -20222,7 +20219,7 @@ fn stream_wrapper_register_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     if builtin || already_user {
         vm.emit_warning(&format!(
             "stream_wrapper_register(): Protocol {}:// is already defined.",
-            String::from_utf8_lossy(&scheme)
+            goro_core::string::msg_str(&scheme)
         ));
         return Ok(Value::False);
     }
@@ -20267,7 +20264,7 @@ fn stream_wrapper_unregister_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
         if !builtin {
             vm.emit_warning(&format!(
                 "stream_wrapper_unregister(): Unable to unregister protocol {}://",
-                String::from_utf8_lossy(&scheme)
+                goro_core::string::msg_str(&scheme)
             ));
             return Ok(Value::False);
         }
@@ -21217,7 +21214,7 @@ fn request_parse_body_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
                         vm,
                         &format!(
                             "Invalid key \"{}\" in $options argument",
-                            key.to_string_lossy()
+                            key.to_msg_string()
                         ),
                     ));
                 }

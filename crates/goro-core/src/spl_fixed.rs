@@ -124,7 +124,7 @@ impl Vm {
                 if d.is_finite() && d.fract() != 0.0 {
                     let msg = format!(
                         "Implicit conversion from float {} to int loses precision",
-                        Value::Double(d).to_php_string().to_string_lossy()
+                        Value::Double(d).to_php_string().to_msg_string()
                     );
                     self.emit_deprecated(&msg);
                 }
@@ -601,7 +601,7 @@ pub fn spl_fixed_construct_native(vm: &mut Vm, args: &[Value], _line: u32) -> Re
                 .borrow()
                 .get_property(b"message")
                 .to_php_string()
-                .to_string_lossy(),
+                .to_msg_string(),
             _ => String::new(),
         };
         Err(msg)

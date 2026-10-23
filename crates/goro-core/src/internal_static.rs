@@ -438,11 +438,11 @@ impl Vm {
         let method_display: String = match t.kind {
             TargetKind::Enum => match t.method_lower.as_slice() {
                 b"tryfrom" => "tryFrom".into(),
-                m => String::from_utf8_lossy(m).into_owned(),
+                m => crate::string::msg_str(m).into_owned(),
             },
             _ => crate::stubs::find_method(&t.internal, &t.method_lower)
                 .map(|(_, m)| m.name.to_string())
-                .unwrap_or_else(|| String::from_utf8_lossy(&t.method_lower).into_owned()),
+                .unwrap_or_else(|| crate::string::msg_str(&t.method_lower).into_owned()),
         };
         let class_display = match t.kind {
             TargetKind::Native => self.builtin_canonical_name(&t.internal),
@@ -543,7 +543,7 @@ impl Vm {
                     }
                     Err(n) => {
                         let msg =
-                            format!("Unknown named parameter ${}", String::from_utf8_lossy(&n));
+                            format!("Unknown named parameter ${}", crate::string::msg_str(&n));
                         let exc = self.create_exception(b"Error", &msg, line);
                         self.current_exception = Some(exc);
                         Value::Null
@@ -564,7 +564,7 @@ impl Vm {
                     .iter()
                     .find(|(n, _)| !(name.ends_with(b"::parse") && n.as_slice() == b"errors"))
                 {
-                    let msg = format!("Unknown named parameter ${}", String::from_utf8_lossy(n));
+                    let msg = format!("Unknown named parameter ${}", crate::string::msg_str(n));
                     let exc = self.create_exception(b"Error", &msg, line);
                     self.current_exception = Some(exc);
                     Value::Null

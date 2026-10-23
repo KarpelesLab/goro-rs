@@ -336,7 +336,7 @@ fn build_header_elem(
                     vm,
                     format!(
                         "Header name \"{}\" contains invalid characters",
-                        String::from_utf8_lossy(cstr(key))
+                        goro_core::string::msg_str(cstr(key))
                     ),
                 ));
             }
@@ -359,8 +359,8 @@ fn build_header_elem(
                         vm,
                         format!(
                             "Header \"{}\" must only contain numeric keys, \"{}\" found",
-                            String::from_utf8_lossy(cstr(key)),
-                            ks.to_string_lossy()
+                            goro_core::string::msg_str(cstr(key)),
+                            ks.to_msg_string()
                         ),
                     ));
                 }
@@ -370,7 +370,7 @@ fn build_header_elem(
                         vm,
                         format!(
                             "Header \"{}\" must only contain values of type string, {} found",
-                            String::from_utf8_lossy(cstr(key)),
+                            goro_core::string::msg_str(cstr(key)),
                             type_name(&v)
                         ),
                     ));
@@ -383,7 +383,7 @@ fn build_header_elem(
             vm,
             format!(
                 "Header \"{}\" must be of type array|string, {} given",
-                String::from_utf8_lossy(cstr(key)),
+                goro_core::string::msg_str(cstr(key)),
                 type_name(&other)
             ),
         )),
@@ -725,7 +725,7 @@ pub fn php_mail(
             vm.emit_warning(&format!(
                 "{}(): Could not execute mail delivery program '{}'",
                 func,
-                String::from_utf8_lossy(&sendmail_path)
+                goro_core::string::msg_str(&sendmail_path)
             ));
             false
         }
@@ -849,7 +849,7 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             None => {
                                 vm.emit_warning(&format!(
                                     "mb_send_mail(): Unsupported charset \"{}\" - will be regarded as ascii",
-                                    String::from_utf8_lossy(&cs)
+                                    goro_core::string::msg_str(&cs)
                                 ));
                                 &mbfl::singlebyte::ENC_ASCII
                             }
@@ -869,7 +869,7 @@ fn mb_send_mail(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             _ => {
                 vm.emit_warning(&format!(
                     "mb_send_mail(): Unsupported transfer encoding \"{}\" - will be regarded as 8bit",
-                    String::from_utf8_lossy(&cte)
+                    goro_core::string::msg_str(&cte)
                 ));
                 body_enc = &mbfl::basic::ENC_8BIT;
             }

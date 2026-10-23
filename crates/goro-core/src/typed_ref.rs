@@ -597,7 +597,7 @@ impl Vm {
                     tn,
                     class,
                     class,
-                    String::from_utf8_lossy(prop),
+                    crate::string::msg_str(prop),
                     self.param_type_name(&ty)
                 ))
             }

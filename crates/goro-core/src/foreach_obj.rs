@@ -233,7 +233,7 @@ impl Vm {
                             return Err(format!(
                                 "Cannot acquire reference to readonly property {}::${}",
                                 disp,
-                                String::from_utf8_lossy(&key)
+                                crate::string::msg_str(&key)
                             ));
                         }
                         let r = Rc::new(RefCell::new(crate::object::separated(other)));
@@ -333,7 +333,7 @@ impl Vm {
                     return Err(format!(
                         "Cannot create reference to property {}::${}",
                         crate::value::display_class_name(&class_name),
-                        String::from_utf8_lossy(&d.name)
+                        crate::string::msg_str(&d.name)
                     ));
                 }
                 if run_hook && by_ref {
@@ -386,7 +386,7 @@ impl Vm {
                                         .class_name_for_display(&decl_lower)
                                         .unwrap_or_else(|| d.declaring_class.clone())
                                 ),
-                                String::from_utf8_lossy(&d.name)
+                                crate::string::msg_str(&d.name)
                             ));
                         }
                         let r = Rc::new(RefCell::new(crate::object::separated(other)));

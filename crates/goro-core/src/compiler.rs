@@ -989,7 +989,7 @@ impl Compiler {
                 .map(|_| {
                     format!(
                         "Cannot redeclare function {}() (previously declared as local import)",
-                        String::from_utf8_lossy(&qn)
+                        crate::string::msg_str(&qn)
                     )
                 }),
             UseKind::Normal => self
@@ -999,7 +999,7 @@ impl Compiler {
                 .map(|_| {
                     format!(
                         "Cannot redeclare class {} (previously declared as local import)",
-                        String::from_utf8_lossy(&qn)
+                        crate::string::msg_str(&qn)
                     )
                 }),
             UseKind::Constant => self
@@ -1009,7 +1009,7 @@ impl Compiler {
                 .map(|_| {
                     format!(
                         "Cannot declare const {} because the name is already in use",
-                        String::from_utf8_lossy(&qn)
+                        crate::string::msg_str(&qn)
                     )
                 }),
         };
@@ -1315,7 +1315,7 @@ impl Compiler {
     ) -> CompileResult<OperandType> {
         let shown = format!(
             "assert({}: {})",
-            String::from_utf8_lossy(arg.name.as_deref().unwrap_or_default()),
+            crate::string::msg_str(arg.name.as_deref().unwrap_or_default()),
             crate::ast_export::export_expr(&arg.value)
         );
         let desc = goro_parser::ast::Argument {
@@ -1353,7 +1353,7 @@ impl Compiler {
                         format!(
                             "{}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead",
                             name,
-                            String::from_utf8_lossy(&pt.param_name)
+                            crate::string::msg_str(&pt.param_name)
                         ),
                         f.decl_line,
                     );
@@ -3054,8 +3054,8 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Cannot redeclare function {}() (previously declared in {}:{})",
-                                String::from_utf8_lossy(prev_name),
-                                String::from_utf8_lossy(&self.source_file),
+                                crate::string::msg_str(prev_name),
+                                crate::string::msg_str(&self.source_file),
                                 prev_line
                             ),
                             line: stmt.span.line,
@@ -5029,7 +5029,7 @@ impl Compiler {
                                             message: format!(
                                                 "Cannot use {} as default value for parameter ${} of type {}",
                                                 tn,
-                                                String::from_utf8_lossy(&param.name),
+                                                crate::string::msg_str(&param.name),
                                                 crate::vm::variance::type_to_string(
                                                     &crate::vm::variance::TypeView::from_param_type(
                                                         &pti.param_type
@@ -5218,8 +5218,7 @@ impl Compiler {
                     }
                     if !*is_const {
                         // zend_compile_declare(): E_COMPILE_WARNING
-                        let msg =
-                            format!("Unsupported declare '{}'", String::from_utf8_lossy(name));
+                        let msg = format!("Unsupported declare '{}'", crate::string::msg_str(name));
                         push_compile_warning_tuple((msg.clone(), stmt.span.line));
                         push_pending_compile_warning(msg, stmt.span.line);
                         continue;
@@ -5237,7 +5236,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Cannot redeclare constant '{}'",
-                                String::from_utf8_lossy(name)
+                                crate::string::msg_str(name)
                             ),
                             line: stmt.span.line,
                         });
@@ -5445,7 +5444,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Duplicate declaration of static variable ${}",
-                                String::from_utf8_lossy(name)
+                                crate::string::msg_str(name)
                             ),
                             line: stmt.span.line,
                         });
@@ -6169,7 +6168,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Cannot use \"{}\" as {} {} name as it is reserved",
-                                String::from_utf8_lossy(name),
+                                crate::string::msg_str(name),
                                 article,
                                 kind
                             ),
@@ -6215,7 +6214,7 @@ impl Compiler {
                                         message: format!(
                                             "Access type for interface constant {}::{} must be public",
                                             cname,
-                                            String::from_utf8_lossy(cn)
+                                            crate::string::msg_str(cn)
                                         ),
                                         line,
                                     });
@@ -6228,7 +6227,7 @@ impl Compiler {
                                         message: format!(
                                             "Cannot redefine class constant {}::{}",
                                             cname,
-                                            String::from_utf8_lossy(cn)
+                                            crate::string::msg_str(cn)
                                         ),
                                         line,
                                     });
@@ -6270,7 +6269,7 @@ impl Compiler {
                                         message: format!(
                                             "Access type for interface method {}::{}() must be public",
                                             cname,
-                                            String::from_utf8_lossy(mn)
+                                            crate::string::msg_str(mn)
                                         ),
                                         line: *line,
                                     });
@@ -6280,7 +6279,7 @@ impl Compiler {
                                         message: format!(
                                             "Interface function {}::{}() cannot contain body",
                                             cname,
-                                            String::from_utf8_lossy(mn)
+                                            crate::string::msg_str(mn)
                                         ),
                                         line: *line,
                                     });
@@ -6323,7 +6322,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Cannot use \"{}\" as {} name, as it is reserved",
-                                String::from_utf8_lossy(p),
+                                crate::string::msg_str(p),
                                 kind_name
                             ),
                             line: stmt.span.line,
@@ -6342,7 +6341,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Cannot use \"{}\" as interface name, as it is reserved",
-                                String::from_utf8_lossy(iface)
+                                crate::string::msg_str(iface)
                             ),
                             line: stmt.span.line,
                         });
@@ -6363,12 +6362,12 @@ impl Compiler {
                             } else {
                                 "Class"
                             };
-                            let iface_display = String::from_utf8_lossy(iface);
+                            let iface_display = crate::string::msg_str(iface);
                             return Err(CompileError {
                                 message: format!(
                                     "{} {} cannot implement previously implemented interface {}",
                                     kind,
-                                    String::from_utf8_lossy(name),
+                                    crate::string::msg_str(name),
                                     iface_display
                                 ),
                                 line: stmt.span.line,
@@ -6413,7 +6412,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Enum backing type must be int or string, {} given",
-                                String::from_utf8_lossy(bt)
+                                crate::string::msg_str(bt)
                             ),
                             line: stmt.span.line,
                         });
@@ -6455,7 +6454,7 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: format!(
                                         "Enum {} cannot include properties",
-                                        String::from_utf8_lossy(name)
+                                        crate::string::msg_str(name)
                                     ),
                                     line: *prop_line,
                                 });
@@ -6482,8 +6481,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Property {}::${} cannot have type {}",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name),
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(prop_name),
                                             type_hint_display(hint)
                                         ),
                                         line: *prop_line,
@@ -6500,8 +6499,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Property {}::${} cannot have type void",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(prop_name)
                                         ),
                                         line: *prop_line,
                                     });
@@ -6517,8 +6516,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Property {}::${} cannot have type never",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(prop_name)
                                         ),
                                         line: *prop_line,
                                     });
@@ -6532,8 +6531,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Readonly property {}::${} must have type",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(prop_name)
                                         ),
                                         line: *prop_line,
                                     });
@@ -6543,8 +6542,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Static property {}::${} cannot be readonly",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(prop_name)
                                         ),
                                         line: *prop_line,
                                     });
@@ -6554,8 +6553,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Readonly property {}::${} cannot have default value",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(prop_name)
                                         ),
                                         line: *prop_line,
                                     });
@@ -6585,8 +6584,8 @@ impl Compiler {
                                         return Err(CompileError {
                                             message: format!(
                                                 "Cannot use null as default value for property {}::${} of type {}",
-                                                String::from_utf8_lossy(&qualified_name),
-                                                String::from_utf8_lossy(prop_name),
+                                                crate::string::msg_str(&qualified_name),
+                                                crate::string::msg_str(prop_name),
                                                 tstr
                                             ),
                                             line: *prop_line,
@@ -6687,8 +6686,8 @@ impl Compiler {
                                             message: format!(
                                                 "Cannot use {} as default value for property {}::${} of type {}",
                                                 vn,
-                                                String::from_utf8_lossy(&qualified_name),
-                                                String::from_utf8_lossy(prop_name),
+                                                crate::string::msg_str(&qualified_name),
+                                                crate::string::msg_str(prop_name),
                                                 tstr
                                             ),
                                             line: *prop_line,
@@ -7232,8 +7231,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Property with asymmetric visibility {}::${} must have type",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(prop_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(prop_name)
                                         ),
                                         line: stmt.span.line,
                                     });
@@ -7249,8 +7248,8 @@ impl Compiler {
                                         return Err(CompileError {
                                             message: format!(
                                                 "Visibility of property {}::${} must not be weaker than set visibility",
-                                                String::from_utf8_lossy(name),
-                                                String::from_utf8_lossy(prop_name)
+                                                crate::string::msg_str(name),
+                                                crate::string::msg_str(prop_name)
                                             ),
                                             line: stmt.span.line,
                                         });
@@ -7273,8 +7272,8 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: format!(
                                         "Cannot redeclare {}::${}",
-                                        String::from_utf8_lossy(name),
-                                        String::from_utf8_lossy(prop_name)
+                                        crate::string::msg_str(name),
+                                        crate::string::msg_str(prop_name)
                                     ),
                                     line: stmt.span.line,
                                 });
@@ -7389,7 +7388,7 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Class {} contains {} abstract {} and must therefore be declared abstract or implement the {} ({})",
-                                            String::from_utf8_lossy(name),
+                                            crate::string::msg_str(name),
                                             count,
                                             plural,
                                             remaining_word,
@@ -7427,7 +7426,7 @@ impl Compiler {
                                 );
                                 // Display name for __METHOD__: $prop::get
                                 let hook_display_name =
-                                    format!("${}::get", String::from_utf8_lossy(prop_name));
+                                    format!("${}::get", crate::string::msg_str(prop_name));
                                 let mut hook_compiler = Compiler::new();
                                 hook_compiler.current_namespace = self.current_namespace.clone();
                                 hook_compiler.use_map = self.use_map.clone();
@@ -7502,7 +7501,7 @@ impl Compiler {
                                 );
                                 // Display name for __METHOD__: $prop::set
                                 let hook_display_name =
-                                    format!("${}::set", String::from_utf8_lossy(prop_name));
+                                    format!("${}::set", crate::string::msg_str(prop_name));
                                 let mut hook_compiler = Compiler::new();
                                 hook_compiler.current_namespace = self.current_namespace.clone();
                                 hook_compiler.use_map = self.use_map.clone();
@@ -7643,9 +7642,9 @@ impl Compiler {
                                         .iter()
                                         .map(|b| b.to_ascii_lowercase())
                                         .collect();
-                                    let class_display = String::from_utf8_lossy(name).to_string();
+                                    let class_display = crate::string::msg_str(name).to_string();
                                     let method_display =
-                                        String::from_utf8_lossy(method_name).to_string();
+                                        crate::string::msg_str(method_name).to_string();
                                     if mn_lower_v == b"__construct" {
                                         return Err(CompileError {
                                             message: format!(
@@ -7688,8 +7687,8 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: format!(
                                         "Interface method {}::{}() must not be final",
-                                        String::from_utf8_lossy(name),
-                                        String::from_utf8_lossy(method_name)
+                                        crate::string::msg_str(name),
+                                        crate::string::msg_str(method_name)
                                     ),
                                     line: *method_line,
                                 });
@@ -7699,8 +7698,8 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: format!(
                                         "Interface method {}::{}() must not be abstract",
-                                        String::from_utf8_lossy(name),
-                                        String::from_utf8_lossy(method_name)
+                                        crate::string::msg_str(name),
+                                        crate::string::msg_str(method_name)
                                     ),
                                     line: *method_line,
                                 });
@@ -7713,8 +7712,8 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: format!(
                                         "Abstract function {}::{}() cannot be declared private",
-                                        String::from_utf8_lossy(name),
-                                        String::from_utf8_lossy(method_name)
+                                        crate::string::msg_str(name),
+                                        crate::string::msg_str(method_name)
                                     ),
                                     line: *method_line,
                                 });
@@ -7724,8 +7723,8 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: format!(
                                         "Enum method {}::{}() must not be abstract",
-                                        String::from_utf8_lossy(name),
-                                        String::from_utf8_lossy(method_name)
+                                        crate::string::msg_str(name),
+                                        crate::string::msg_str(method_name)
                                     ),
                                     line: *method_line,
                                 });
@@ -7755,8 +7754,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Enum {} cannot include magic method {}",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(method_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(method_name)
                                         ),
                                         line: *method_line,
                                     });
@@ -7771,8 +7770,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Cannot redeclare {}::{}()",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(method_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(method_name)
                                         ),
                                         line: *method_line,
                                     });
@@ -7787,15 +7786,15 @@ impl Compiler {
                                         return Err(CompileError {
                                             message: format!(
                                                 "Method {}::{}() cannot declare a return type",
-                                                String::from_utf8_lossy(name),
-                                                String::from_utf8_lossy(method_name)
+                                                crate::string::msg_str(name),
+                                                crate::string::msg_str(method_name)
                                             ),
                                             line: *method_line,
                                         });
                                     }
                                     // Magic method return type restrictions
                                     if let Some(rt) = method_return_type {
-                                        let class_display = String::from_utf8_lossy(name);
+                                        let class_display = crate::string::msg_str(name);
                                         // Helper: check if a type hint matches a simple type name
                                         let is_simple_type =
                                             |hint: &TypeHint, expected: &[u8]| -> bool {
@@ -7871,9 +7870,7 @@ impl Compiler {
                                                             message: format!(
                                                                 "{}::{}(): Return type must be {} when declared",
                                                                 class_display,
-                                                                String::from_utf8_lossy(
-                                                                    method_name
-                                                                ),
+                                                                crate::string::msg_str(method_name),
                                                                 crate::vm::variance::type_to_string(
                                                                     &exp_tv, None
                                                                 )
@@ -7891,9 +7888,9 @@ impl Compiler {
                             {
                                 let mn_lower: Vec<u8> =
                                     method_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                let class_display = String::from_utf8_lossy(name).to_string();
+                                let class_display = crate::string::msg_str(name).to_string();
                                 let method_display =
-                                    String::from_utf8_lossy(method_name).to_string();
+                                    crate::string::msg_str(method_name).to_string();
 
                                 // 1) Argument count / signature checks first (PHP checks these before static)
                                 if matches!(
@@ -8026,7 +8023,7 @@ impl Compiler {
                                                         "{}::{}(): Parameter #1 (${}) must be of type string when declared",
                                                         class_display,
                                                         method_display,
-                                                        String::from_utf8_lossy(&param.name)
+                                                        crate::string::msg_str(&param.name)
                                                     ),
                                                     line: *method_line,
                                                 });
@@ -8043,7 +8040,7 @@ impl Compiler {
                                                         "{}::{}(): Parameter #2 (${}) must be of type array when declared",
                                                         class_display,
                                                         method_display,
-                                                        String::from_utf8_lossy(&param.name)
+                                                        crate::string::msg_str(&param.name)
                                                     ),
                                                     line: *method_line,
                                                 });
@@ -8059,7 +8056,7 @@ impl Compiler {
                                                     message: format!(
                                                         "{}::__unserialize(): Parameter #1 (${}) must be of type array when declared",
                                                         class_display,
-                                                        String::from_utf8_lossy(&param.name)
+                                                        crate::string::msg_str(&param.name)
                                                     ),
                                                     line: *method_line,
                                                 });
@@ -8075,7 +8072,7 @@ impl Compiler {
                                                     message: format!(
                                                         "{}::__set_state(): Parameter #1 (${}) must be of type array when declared",
                                                         class_display,
-                                                        String::from_utf8_lossy(&param.name)
+                                                        crate::string::msg_str(&param.name)
                                                     ),
                                                     line: *method_line,
                                                 });
@@ -8217,8 +8214,8 @@ impl Compiler {
                                                     return Err(CompileError {
                                                         message: format!(
                                                             "Property with asymmetric visibility {}::${} must have type",
-                                                            String::from_utf8_lossy(name),
-                                                            String::from_utf8_lossy(&param.name)
+                                                            crate::string::msg_str(name),
+                                                            crate::string::msg_str(&param.name)
                                                         ),
                                                         line: *method_line,
                                                     });
@@ -8233,10 +8230,8 @@ impl Compiler {
                                                         return Err(CompileError {
                                                             message: format!(
                                                                 "Visibility of property {}::${} must not be weaker than set visibility",
-                                                                String::from_utf8_lossy(name),
-                                                                String::from_utf8_lossy(
-                                                                    &param.name
-                                                                )
+                                                                crate::string::msg_str(name),
+                                                                crate::string::msg_str(&param.name)
                                                             ),
                                                             line: *method_line,
                                                         });
@@ -8250,8 +8245,8 @@ impl Compiler {
                                                 return Err(CompileError {
                                                     message: format!(
                                                         "Readonly property {}::${} must have type",
-                                                        String::from_utf8_lossy(name),
-                                                        String::from_utf8_lossy(&param.name)
+                                                        crate::string::msg_str(name),
+                                                        crate::string::msg_str(&param.name)
                                                     ),
                                                     line: *method_line,
                                                 });
@@ -8293,8 +8288,8 @@ impl Compiler {
                                                 return Err(CompileError {
                                                     message: format!(
                                                         "Cannot redeclare {}::${}",
-                                                        String::from_utf8_lossy(name),
-                                                        String::from_utf8_lossy(&param.name)
+                                                        crate::string::msg_str(name),
+                                                        crate::string::msg_str(&param.name)
                                                     ),
                                                     line: *method_line,
                                                 });
@@ -8307,8 +8302,8 @@ impl Compiler {
                                                 return Err(CompileError {
                                                     message: format!(
                                                         "Property {}::${} cannot have type {}",
-                                                        String::from_utf8_lossy(name),
-                                                        String::from_utf8_lossy(&param.name),
+                                                        crate::string::msg_str(name),
+                                                        crate::string::msg_str(&param.name),
                                                         type_hint_display(hint)
                                                     ),
                                                     line: param.line,
@@ -8387,7 +8382,7 @@ impl Compiler {
                                                 );
                                                 let hook_display_name = format!(
                                                     "${}::get",
-                                                    String::from_utf8_lossy(&param.name)
+                                                    crate::string::msg_str(&param.name)
                                                 );
                                                 let mut hook_compiler = Compiler::new();
                                                 hook_compiler.current_namespace =
@@ -8471,7 +8466,7 @@ impl Compiler {
                                                 );
                                                 let hook_display_name = format!(
                                                     "${}::set",
-                                                    String::from_utf8_lossy(&param.name)
+                                                    crate::string::msg_str(&param.name)
                                                 );
                                                 let mut hook_compiler = Compiler::new();
                                                 hook_compiler.current_namespace =
@@ -8827,7 +8822,7 @@ impl Compiler {
                                                     return Err(CompileError {
                                                         message: format!(
                                                             "Cannot use null as default value for parameter ${} of type {}",
-                                                            String::from_utf8_lossy(&param.name),
+                                                            crate::string::msg_str(&param.name),
                                                             type_hint_display(hint)
                                                         ),
                                                         line: default_expr.span.line,
@@ -8914,7 +8909,7 @@ impl Compiler {
                                                     Err((tn, _)) => {
                                                         return Err(CompileError {
                                                             message: format!("Cannot use {} as default value for parameter ${} of type {}", tn,
-                                                                String::from_utf8_lossy(&param.name),
+                                                                crate::string::msg_str(&param.name),
                                                                 crate::vm::variance::type_to_string(&crate::vm::variance::TypeView::from_param_type(&pti.param_type), None)),
                                                             line: default_expr.span.line,
                                                         });
@@ -9011,8 +9006,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Cannot redeclare {}::{}()",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(method_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(method_name)
                                         ),
                                         line: *method_line,
                                     });
@@ -9057,8 +9052,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Non-abstract method {}::{}() must contain body",
-                                            String::from_utf8_lossy(name),
-                                            String::from_utf8_lossy(method_name)
+                                            crate::string::msg_str(name),
+                                            crate::string::msg_str(method_name)
                                         ),
                                         line: *method_line,
                                     });
@@ -9895,8 +9890,8 @@ impl Compiler {
                                     return Err(CompileError {
                                         message: format!(
                                             "Class constant {}::{} cannot have type {}",
-                                            String::from_utf8_lossy(&qualified_name),
-                                            String::from_utf8_lossy(const_name),
+                                            crate::string::msg_str(&qualified_name),
+                                            crate::string::msg_str(const_name),
                                             tstr
                                         ),
                                         line: stmt.span.line,
@@ -9908,8 +9903,8 @@ impl Compiler {
                                             message: format!(
                                                 "Cannot use {} as value for class constant {}::{} of type {}",
                                                 tn,
-                                                String::from_utf8_lossy(&qualified_name),
-                                                String::from_utf8_lossy(const_name),
+                                                crate::string::msg_str(&qualified_name),
+                                                crate::string::msg_str(const_name),
                                                 tstr
                                             ),
                                             line: stmt.span.line,
@@ -9974,8 +9969,8 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: format!(
                                         "Private constant {}::{} cannot be final as it is not visible to other classes",
-                                        String::from_utf8_lossy(name),
-                                        String::from_utf8_lossy(const_name)
+                                        crate::string::msg_str(name),
+                                        crate::string::msg_str(const_name)
                                     ),
                                     line: stmt.span.line,
                                 });
@@ -9999,8 +9994,8 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: format!(
                                         "Case {} of backed enum {} must have a value",
-                                        String::from_utf8_lossy(case_name),
-                                        String::from_utf8_lossy(name)
+                                        crate::string::msg_str(case_name),
+                                        crate::string::msg_str(name)
                                     ),
                                     line: stmt.span.line,
                                 });
@@ -10009,8 +10004,8 @@ impl Compiler {
                                 return Err(CompileError {
                                     message: format!(
                                         "Case {} of non-backed enum {} must not have a value",
-                                        String::from_utf8_lossy(case_name),
-                                        String::from_utf8_lossy(name)
+                                        crate::string::msg_str(case_name),
+                                        crate::string::msg_str(name)
                                     ),
                                     line: stmt.span.line,
                                 });
@@ -10275,7 +10270,7 @@ impl Compiler {
                                     message: format!(
                                         "Cannot use traits inside of interfaces. {} is used in {}",
                                         trait_list.first().unwrap_or(&String::new()),
-                                        String::from_utf8_lossy(name)
+                                        crate::string::msg_str(name)
                                     ),
                                     line: stmt.span.line,
                                 });
@@ -10436,9 +10431,9 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Cannot use {} as {} because '{}' is a special class name",
-                                String::from_utf8_lossy(&fqn),
-                                String::from_utf8_lossy(&alias),
-                                String::from_utf8_lossy(&alias)
+                                crate::string::msg_str(&fqn),
+                                crate::string::msg_str(&alias),
+                                crate::string::msg_str(&alias)
                             ),
                             line: stmt.span.line,
                         });
@@ -10451,7 +10446,7 @@ impl Compiler {
                             push_compile_warning_tuple((
                                 format!(
                                     "The use statement with non-compound name '{}' has no effect",
-                                    String::from_utf8_lossy(&alias)
+                                    crate::string::msg_str(&alias)
                                 ),
                                 stmt.span.line,
                             ));
@@ -10503,8 +10498,8 @@ impl Compiler {
                                 message: format!(
                                     "Cannot use{} {} as {} because the name is already in use",
                                     type_str,
-                                    String::from_utf8_lossy(&fqn),
-                                    String::from_utf8_lossy(&alias)
+                                    crate::string::msg_str(&fqn),
+                                    crate::string::msg_str(&alias)
                                 ),
                                 line: stmt.span.line,
                             });
@@ -10528,7 +10523,7 @@ impl Compiler {
             StmtKind::Label(name) => {
                 // Check for duplicate labels
                 if self.label_offsets.contains_key(name) {
-                    let label_display = String::from_utf8_lossy(name);
+                    let label_display = crate::string::msg_str(name);
                     return Err(CompileError {
                         message: format!("Label '{}' already defined", label_display),
                         line: stmt.span.line,
@@ -16640,7 +16635,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Cannot use lexical variable ${} as a parameter name",
-                                String::from_utf8_lossy(&use_var.variable)
+                                crate::string::msg_str(&use_var.variable)
                             ),
                             line: expr.span.line,
                         });
@@ -16652,7 +16647,7 @@ impl Compiler {
                         return Err(CompileError {
                             message: format!(
                                 "Cannot use variable ${} twice",
-                                String::from_utf8_lossy(&use_var.variable)
+                                crate::string::msg_str(&use_var.variable)
                             ),
                             line: expr.span.line,
                         });
@@ -16785,7 +16780,7 @@ impl Compiler {
                                             message: format!(
                                                 "Cannot use {} as default value for parameter ${} of type {}",
                                                 tn,
-                                                String::from_utf8_lossy(&param.name),
+                                                crate::string::msg_str(&param.name),
                                                 crate::vm::variance::type_to_string(
                                                     &crate::vm::variance::TypeView::from_param_type(
                                                         &pti.param_type
@@ -17125,7 +17120,7 @@ impl Compiler {
                                             message: format!(
                                                 "Cannot use {} as default value for parameter ${} of type {}",
                                                 tn,
-                                                String::from_utf8_lossy(&param.name),
+                                                crate::string::msg_str(&param.name),
                                                 crate::vm::variance::type_to_string(
                                                     &crate::vm::variance::TypeView::from_param_type(
                                                         &pti.param_type
@@ -22231,7 +22226,7 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
             return Err(CompileError {
                 message: format!(
                     "Cannot re-assign auto-global variable {}",
-                    String::from_utf8_lossy(&p.name)
+                    crate::string::msg_str(&p.name)
                 ),
                 line,
             });
@@ -22240,7 +22235,7 @@ fn check_duplicate_params(params: &[Param], line: u32) -> CompileResult<()> {
             return Err(CompileError {
                 message: format!(
                     "Redefinition of parameter ${}",
-                    String::from_utf8_lossy(&p.name)
+                    crate::string::msg_str(&p.name)
                 ),
                 line,
             });

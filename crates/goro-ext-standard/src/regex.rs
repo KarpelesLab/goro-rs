@@ -104,7 +104,7 @@ fn throw(vm: &mut Vm, class: &[u8], msg: String) -> VmError {
     let exc = vm.create_exception(class, &msg, line);
     vm.current_exception = Some(exc);
     VmError {
-        message: format!("Uncaught {}: {}", String::from_utf8_lossy(class), msg),
+        message: format!("Uncaught {}: {}", goro_core::string::msg_str(class), msg),
         line,
     }
 }
@@ -297,12 +297,14 @@ pub fn get_compiled_regex(vm: &mut Vm, regex: &[u8], fname: &str) -> Option<Rc<P
         if start_delimiter == end_delimiter {
             vm.emit_warning(&format!(
                 "{}(): No ending delimiter '{}' found",
-                fname, delimiter as char
+                fname,
+                goro_core::string::msg_char(delimiter)
             ));
         } else {
             vm.emit_warning(&format!(
                 "{}(): No ending matching delimiter '{}' found",
-                fname, delimiter as char
+                fname,
+                goro_core::string::msg_char(delimiter)
             ));
         }
         pcre_handle_exec_error(vm, PCRE2_ERROR_INTERNAL);
@@ -332,7 +334,11 @@ pub fn get_compiled_regex(vm: &mut Vm, regex: &[u8], fname: &str) -> Option<Rc<P
             b' ' | b'\n' | b'\r' => {}
             _ => {
                 if c != 0 {
-                    vm.emit_warning(&format!("{}(): Unknown modifier '{}'", fname, c as char));
+                    vm.emit_warning(&format!(
+                        "{}(): Unknown modifier '{}'",
+                        fname,
+                        goro_core::string::msg_char(c)
+                    ));
                 } else {
                     vm.emit_warning(&format!("{}(): NUL byte is not a valid modifier", fname));
                 }

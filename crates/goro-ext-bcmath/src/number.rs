@@ -524,17 +524,14 @@ fn margs(m: &Method, args: &[Value]) -> Result<Vec<Value>, String> {
                     .iter()
                     .position(|p| p.as_bytes() == name.as_bytes())
                 else {
-                    return Err(format!(
-                        "Unknown named parameter ${}",
-                        name.to_string_lossy()
-                    ));
+                    return Err(format!("Unknown named parameter ${}", name.to_msg_string()));
                 };
                 if list.len() <= pos {
                     list.resize(pos + 1, None);
                 } else if list[pos].is_some() {
                     return Err(format!(
                         "Named parameter ${} overwrites previous argument",
-                        name.to_string_lossy()
+                        name.to_msg_string()
                     ));
                 }
                 list[pos] = Some(v.deref());

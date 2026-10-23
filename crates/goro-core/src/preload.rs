@@ -362,7 +362,7 @@ impl Vm {
                         "Can't preload unlinked class {}: {}{}",
                         name,
                         kind,
-                        String::from_utf8_lossy(&dep)
+                        crate::string::msg_str(&dep)
                     ),
                     u.class.start_line,
                 );
