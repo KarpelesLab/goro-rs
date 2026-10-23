@@ -451,7 +451,37 @@ pub fn compose_pixel(op: C, s: [f64; 4], d: [f64; 4], args: &ComposeArgs) -> [f6
             };
             each(&|c| f(sz[c], dz[c]), f(sa, da))
         }
-        C::SoftLight => each(&|c| soft_light(sca(c), dca(c)) + dca(c), ao),
+        // ImageMagick's SoftLight: the W3C soft light of the premultiplied
+        // samples weighted by Da, plus Sca(1-Da) + Dca, over the result alpha
+        C::SoftLight => each(
+            &|c| {
+                sdiv(
+                    soft_light(sca(c), dca(c)) * da + sca(c) * (1.0 - da) + dca(c),
+                    ao,
+                    0.0,
+                )
+            },
+            ao,
+        ),
+        // its PegtopLight is the W3C soft light of the premultiplied
+        // samples, mixed the W3C way
+        C::PegtopLight => each(&|c| sdiv(w(c, soft_light(sca(c), dca(c))), ao, 0.0), ao),
+        // colour burn / dodge of the premultiplied samples, over the
+        // result alpha; a full source gives 1 unless the destination is 0
+        C::SoftBurn | C::SoftDodge => each(
+            &|c| {
+                let (s, d) = (sca(c), dca(c));
+                let b = if s >= 1.0 {
+                    if d > 0.0 { 1.0 } else { 0.0 }
+                } else if op == C::SoftBurn {
+                    if s <= 0.0 { 0.0 } else { 1.0 - (1.0 - d) / s }
+                } else {
+                    d / (1.0 - s)
+                };
+                sdiv(b.clamp(0.0, 1.0), ao, 0.0)
+            },
+            ao,
+        ),
         C::Bumpmap => {
             let i = intensity(s);
             let c = |k: usize| if sa > 0.0 { i * d[k] } else { d[k] };
