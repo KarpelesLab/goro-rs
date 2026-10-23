@@ -324,15 +324,24 @@ enum Container {
 }
 
 enum Frame {
-    /// '[' elements: the array (created with the first element)
-    Array(Option<PhpArray>),
-    /// '{' members: the container (created with the first member) and the
-    /// key of the member whose value is being parsed
-    Object(Option<Container>, Vec<u8>),
+    /// '[' elements: the array (created with the first element), whether
+    /// an element was parsed
+    Array(Option<PhpArray>, bool),
+    /// '{' members: the container (created with the first member), the
+    /// key of the member whose value is being parsed, whether a member
+    /// precedes it
+    Object(Option<Container>, Vec<u8>, bool),
 }
+
+/// YYMAXDEPTH of the bison parser: its state stack holds fewer entries.
+const YYMAXDEPTH: usize = 10000;
 
 pub struct Parser<'a, 'v> {
     scanner: Scanner<'a>,
+    /// Entries on the bison parser's state stack (one per grammar symbol
+    /// of the rules in progress, plus the start state): too deep a nesting
+    /// exhausts it, a syntax error.
+    slots: usize,
     depth: i32,
     max_depth: i32,
     validate: bool,
@@ -348,6 +357,7 @@ impl<'a, 'v> Parser<'a, 'v> {
                 options,
                 errcode: 0,
             },
+            slots: 1,
             depth: 1,
             max_depth,
             validate,
@@ -370,6 +380,23 @@ impl<'a, 'v> Parser<'a, 'v> {
     fn fail_with<T>(&mut self, code: i64) -> Result<T, ()> {
         self.scanner.errcode = code;
         Err(())
+    }
+
+    /// Push `n` states on the parser stack ("memory exhausted" when it is
+    /// full: yyerror()).
+    fn push(&mut self, n: usize) -> Result<(), ()> {
+        for _ in 0..n {
+            self.slots += 1;
+            if self.slots >= YYMAXDEPTH {
+                return self.fail();
+            }
+        }
+        Ok(())
+    }
+
+    /// Reduce a rule of `n` symbols (its result is pushed in their place).
+    fn reduce(&mut self, n: usize) {
+        self.slots -= n - 1;
     }
 
     fn depth_inc(&mut self) -> Result<(), ()> {
@@ -440,8 +467,12 @@ impl<'a, 'v> Parser<'a, 'v> {
         let Tok::Str(k) = t else {
             return self.fail();
         };
+        self.push(1)?;
         match self.scanner.scan() {
-            Tok::Colon => Ok(k),
+            Tok::Colon => {
+                self.push(1)?;
+                Ok(k)
+            }
             _ => self.fail(),
         }
     }
@@ -454,27 +485,39 @@ impl<'a, 'v> Parser<'a, 'v> {
             // Parse a value starting with `tok`.
             let mut value = match tok {
                 Tok::LBrace => {
+                    // '{' $@1
+                    self.push(1)?;
                     self.depth_inc()?;
+                    self.push(1)?;
                     let t = self.scanner.scan();
                     match t {
                         Tok::RBrace => {
+                            // members: %empty, then '}'
+                            self.push(2)?;
+                            self.reduce(4);
                             self.depth -= 1;
                             self.finish_object(None)
                         }
                         Tok::RBracket => return self.fail_with(ERROR_STATE_MISMATCH),
                         t => {
                             let key = self.member_key(t)?;
-                            stack.push(Frame::Object(None, key));
+                            stack.push(Frame::Object(None, key, false));
                             tok = self.scanner.scan();
                             continue;
                         }
                     }
                 }
                 Tok::LBracket => {
+                    // '[' $@2
+                    self.push(1)?;
                     self.depth_inc()?;
+                    self.push(1)?;
                     let t = self.scanner.scan();
                     match t {
                         Tok::RBracket => {
+                            // elements: %empty, then ']'
+                            self.push(2)?;
+                            self.reduce(4);
                             self.depth -= 1;
                             if self.validate {
                                 Value::Null
@@ -484,14 +527,18 @@ impl<'a, 'v> Parser<'a, 'v> {
                         }
                         Tok::RBrace => return self.fail_with(ERROR_STATE_MISMATCH),
                         t => {
-                            stack.push(Frame::Array(None));
+                            stack.push(Frame::Array(None, false));
                             tok = t;
                             continue;
                         }
                     }
                 }
-                Tok::Value(v) => v,
+                Tok::Value(v) => {
+                    self.push(1)?;
+                    v
+                }
                 Tok::Str(s) => {
+                    self.push(1)?;
                     if self.validate {
                         Value::Null
                     } else {
@@ -509,17 +556,26 @@ impl<'a, 'v> Parser<'a, 'v> {
                             _ => self.fail(),
                         };
                     }
-                    Some(Frame::Array(arr)) => {
+                    Some(Frame::Array(arr, more)) => {
+                        // element: value | element ',' value
+                        if *more {
+                            self.reduce(3);
+                        }
+                        *more = true;
                         if !self.validate {
                             arr.get_or_insert_with(PhpArray::new).push(value);
                         }
                         match self.scanner.scan() {
                             Tok::Comma => {
+                                self.push(1)?;
                                 tok = self.scanner.scan();
                                 break;
                             }
                             Tok::RBracket => {
-                                let Some(Frame::Array(arr)) = stack.pop() else {
+                                // elements: element, then ']'
+                                self.push(1)?;
+                                self.reduce(4);
+                                let Some(Frame::Array(arr, _)) = stack.pop() else {
                                     unreachable!()
                                 };
                                 self.depth -= 1;
@@ -534,9 +590,11 @@ impl<'a, 'v> Parser<'a, 'v> {
                         }
                     }
                     Some(Frame::Object(..)) => {
-                        let Some(Frame::Object(c, key)) = stack.pop() else {
+                        let Some(Frame::Object(c, key, more)) = stack.pop() else {
                             unreachable!()
                         };
+                        // member: key ':' value | member ',' key ':' value
+                        self.reduce(if more { 5 } else { 3 });
                         let mut c = match c {
                             Some(c) => Some(c),
                             None if self.validate => None,
@@ -547,13 +605,17 @@ impl<'a, 'v> Parser<'a, 'v> {
                         }
                         match self.scanner.scan() {
                             Tok::Comma => {
+                                self.push(1)?;
                                 let t = self.scanner.scan();
                                 let key = self.member_key(t)?;
-                                stack.push(Frame::Object(c, key));
+                                stack.push(Frame::Object(c, key, true));
                                 tok = self.scanner.scan();
                                 break;
                             }
                             Tok::RBrace => {
+                                // members: member, then '}'
+                                self.push(1)?;
+                                self.reduce(4);
                                 self.depth -= 1;
                                 value = self.finish_object(c);
                             }
