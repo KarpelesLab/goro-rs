@@ -515,8 +515,37 @@ fn iterator_apply_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::Null);
     }
 
-    let iterator = args.first().unwrap_or(&Value::Null).clone();
-    let callback = args.get(1).unwrap_or(&Value::Null).clone();
+    if args.len() < 2 {
+        let msg = format!(
+            "iterator_apply() expects at least 2 arguments, {} given",
+            args.len()
+        );
+        let line = vm.current_line;
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, line);
+        vm.current_exception = Some(exc);
+        return Ok(Value::Null);
+    }
+    let iterator = args[0].deref();
+    let callback = args[1].clone();
+    // Z_PARAM_OBJECT_OF_CLASS(zend_ce_traversable)
+    let traversable = match &iterator {
+        Value::Generator(_) => true,
+        Value::Object(o) => {
+            let cls = o.borrow().class_name.to_ascii_lowercase();
+            vm.class_implements_interface(&cls, b"traversable")
+        }
+        _ => false,
+    };
+    if !traversable {
+        let msg = format!(
+            "iterator_apply(): Argument #1 ($iterator) must be of type Traversable, {} given",
+            Vm::value_type_name(&iterator)
+        );
+        let line = vm.current_line;
+        let exc = vm.create_exception(b"TypeError", &msg, line);
+        vm.current_exception = Some(exc);
+        return Ok(Value::Null);
+    }
     // Validate $args is array|null
     let cb_args = match args.get(2) {
         None | Some(Value::Null) => None,

@@ -2783,6 +2783,13 @@ pub struct Subject {
     offs: Vec<usize>,
 }
 
+impl Subject {
+    /// Whether byte `pos` starts a character (or is the end).
+    pub fn is_char_head(&self, pos: usize) -> bool {
+        self.offs.binary_search(&pos).is_ok() || self.codes.is_empty()
+    }
+}
+
 /// Match region: byte offsets per group (None = did not participate)
 #[derive(Clone, Debug)]
 pub struct Region {

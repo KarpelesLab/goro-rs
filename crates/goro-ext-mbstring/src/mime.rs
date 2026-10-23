@@ -334,7 +334,23 @@ fn mb_encode_mimeheader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     state::sync(vm);
     let mut charset: &'static Encoding = &mbfl::basic::ENC_PASS;
     let mut base64 = true;
-    if present(args, 1) {
+    // Z_PARAM_STR (not _OR_NULL) despite the ?string arginfo: an explicit
+    // null is deprecated and parsed as "".
+    let null_given = |vm: &mut Vm, i: usize, pname: &str| {
+        let given = matches!(args.get(i).map(|v| v.deref()), Some(Value::Null));
+        if given {
+            vm.emit_deprecated(&format!(
+                "{}(): Passing null to parameter #{} (${}) of type ?string is deprecated",
+                f,
+                i + 1,
+                pname
+            ));
+        }
+        given
+    };
+    let charset_null = null_given(vm, 1, "charset");
+    let transenc_null = null_given(vm, 2, "transfer_encoding");
+    if present(args, 1) || charset_null {
         let name = str_arg(vm, f, args, 1, "charset")?;
         charset = get_encoding(vm, f, Some(&name), 2, "charset")?;
         if charset.mime_name.map(|m| m.is_empty()).unwrap_or(true) || charset.no == EncNo::Qprint {
@@ -345,7 +361,7 @@ fn mb_encode_mimeheader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 "charset",
                 &format!(
                     "\"{}\" cannot be used for MIME header encoding",
-                    String::from_utf8_lossy(&name)
+                    goro_core::string::msg_str(&name)
                 ),
             ));
         }
@@ -361,7 +377,7 @@ fn mb_encode_mimeheader(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
     }
-    if present(args, 2) {
+    if present(args, 2) || transenc_null {
         let t = str_arg(vm, f, args, 2, "transfer_encoding")?;
         if !t.is_empty() && (t[0] == b'Q' || t[0] == b'q') {
             base64 = false;

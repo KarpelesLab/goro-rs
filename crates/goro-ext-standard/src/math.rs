@@ -112,7 +112,9 @@ pub fn register(vm: &mut Vm) {
             b"string".to_vec(),
         ))))
     };
-    vm.register_builtin_param_types(b"number_format", vec![num(), i(), ns(), ns()]);
+    // (arginfo says float: the null deprecation names it; Z_PARAM_NUMBER
+    // errors say int|float)
+    vm.register_builtin_param_types(b"number_format", vec![f(), i(), ns(), ns()]);
     vm.register_builtin_param_types(b"fdiv", vec![f(), f()]);
     // These validate their own arguments (check_math_num_arg/check_int_arg) and
     // emit the null / float-to-int deprecations themselves.

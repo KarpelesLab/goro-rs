@@ -717,12 +717,19 @@ fn mb_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         };
         let beg = regs.beg[0].unwrap_or(0);
         let end = regs.end[0].unwrap_or(0);
+        // onig_search() started inside a character (after `pos++`) matches
+        // an empty pattern right there; this engine starts at the next one.
+        if beg == end && beg > pos && !subj.is_char_head(pos) {
+            pos += 1;
+            continue;
+        }
         if pos < end {
             if beg < string.len() && beg >= chunk_pos {
                 arr.push(pstr(&string[chunk_pos..beg]));
                 count = count.wrapping_sub(1);
             } else {
-                failed = Some("mismatch".to_string());
+                // err = -2: ONIGERR_NO_SUPPORT_CONFIG's message
+                failed = Some("no support in this configuration".to_string());
                 break;
             }
             chunk_pos = end;

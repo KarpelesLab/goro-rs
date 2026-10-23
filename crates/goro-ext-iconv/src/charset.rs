@@ -197,7 +197,16 @@ fn table() -> &'static [(&'static str, Kind)] {
 /// The charset named `name` (glibc's normalization: case-insensitive;
 /// ISO_8859-N, ISO8859-N, ISO88591... spellings).
 pub fn lookup(name: &[u8]) -> Option<Kind> {
-    let up: Vec<u8> = name.to_ascii_uppercase();
+    // glibc's strip(): only alphanumerics and "_-.,:" are kept; an empty
+    // name is the locale's charset (UTF-8 for php's C.UTF-8 LC_CTYPE).
+    let up: Vec<u8> = name
+        .iter()
+        .filter(|c| c.is_ascii_alphanumeric() || b"_-.,:".contains(c))
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if up.is_empty() {
+        return Some(Kind::Utf8);
+    }
     for &(n, k) in table() {
         if n.as_bytes() == up.as_slice() {
             return Some(k);

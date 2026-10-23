@@ -857,7 +857,7 @@ fn hc_unserialize(
         if !obj.borrow().has_property(&name) {
             vm.emit_deprecated(&format!(
                 "Creation of dynamic property HashContext::${} is deprecated",
-                String::from_utf8_lossy(&name)
+                goro_core::string::msg_str(&name)
             ));
         }
         obj.borrow_mut().set_property(name, v);
