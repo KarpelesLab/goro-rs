@@ -1360,6 +1360,10 @@ fn preg_do_repl_func(
     mark: Option<&Vec<u8>>,
     flags: i64,
 ) -> Result<Option<PhpString>, VmError> {
+    // zend_call_function() does not run while an exception is pending.
+    if vm.current_exception.is_some() {
+        return Ok(None);
+    }
     let mut arg = PhpArray::new();
     populate_subpat_array(
         &mut arg,
@@ -1614,10 +1618,8 @@ fn php_preg_replace_func_impl(
                         break;
                     }
                 };
-                if first_err.is_some() {
-                    // An exception is pending: PHP no longer calls the callback.
-                    continue;
-                }
+                // (with an exception pending, the remaining subjects are still
+                // matched: the callback is not called, a match fails)
                 match php_replace_in_subject_func(
                     vm,
                     regex,
