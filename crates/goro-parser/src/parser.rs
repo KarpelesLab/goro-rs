@@ -4850,10 +4850,37 @@ impl Parser {
             }
             TokenKind::DollarOpenBrace => {
                 self.advance();
-                let inner = self.parse_expression()?;
+                let mut inner = self.parse_expression()?;
                 self.expect(&TokenKind::CloseBrace)?;
                 // `${'name'}` names a compiled variable, like `$name`
-                // (zend_try_compile_cv).
+                // (zend_try_compile_cv); so does a name zend_compile folds to
+                // a constant string (`${'na' . 'me'}`).
+                fn folded_name(e: &Expr) -> Option<Vec<u8>> {
+                    match &e.kind {
+                        ExprKind::String(s) => Some(s.clone()),
+                        ExprKind::Int(n) => Some(n.to_string().into_bytes()),
+                        ExprKind::BinaryOp {
+                            left,
+                            op: BinaryOp::Concat,
+                            right,
+                        } => {
+                            let mut l = folded_name(left)?;
+                            l.extend(folded_name(right)?);
+                            Some(l)
+                        }
+                        _ => None,
+                    }
+                }
+                let folded = match &inner.kind {
+                    ExprKind::BinaryOp { op: BinaryOp::Concat, .. } => folded_name(&inner),
+                    _ => None,
+                };
+                if let Some(name) = folded {
+                    inner = Expr {
+                        kind: ExprKind::String(name),
+                        span: inner.span,
+                    };
+                }
                 if let ExprKind::String(name) = &inner.kind {
                     let valid = name
                         .first()
