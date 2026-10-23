@@ -965,6 +965,34 @@ impl Vm {
         self.try_assign_ref(&r, value).map(|_| true)
     }
 
+    /// A compound assignment on `C::$name` failed: a typed static property
+    /// takes the coerced UNDEF result (see typed_ref::failed_op_value).
+    pub(crate) fn static_prop_failed_op(&mut self, class_v: &Value, name: &[u8], strict: bool) {
+        let Ok(idx) = self.static_prop_class_idx(class_v, name) else {
+            return;
+        };
+        let Ok(slot) = self.locate_static_prop(idx, name, None) else {
+            return;
+        };
+        if !slot.typed {
+            return;
+        }
+        let Some(v) = self
+            .sp_ptype(&slot)
+            .and_then(|pt| super::typed_ref::failed_op_value(&pt, strict))
+        else {
+            return;
+        };
+        match self.sp_cell(&slot, name) {
+            Some(Value::Reference(r)) => {
+                let r = r.clone();
+                *r.borrow_mut() = v;
+            }
+            Some(c) => *c = v,
+            None => {}
+        }
+    }
+
     /// Build the PHP-level exception for a static property error and make it
     /// current. Returns the "Uncaught ..." message for the no-handler path.
     pub(crate) fn sp_raise(&mut self, err: SpErr, line: u32) -> String {

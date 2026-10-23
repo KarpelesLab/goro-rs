@@ -22554,10 +22554,19 @@ impl Vm {
                     }
                     self.write_operand(&op.result, a.add(&b), &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::Sub => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
@@ -22638,10 +22647,19 @@ impl Vm {
                     }
                     self.write_operand(&op.result, a.sub(&b), &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::Mul => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
@@ -22722,10 +22740,19 @@ impl Vm {
                     }
                     self.write_operand(&op.result, a.mul(&b), &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::Div => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
@@ -22839,10 +22866,19 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::Mod => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
@@ -22957,10 +22993,19 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::Pow => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
@@ -23050,10 +23095,19 @@ impl Vm {
                     }
                     self.write_operand(&op.result, a.pow(&b), &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::Concat => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
@@ -23148,10 +23202,19 @@ impl Vm {
                         &static_cv_keys,
                     );
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::UnaryPlus => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
@@ -23407,10 +23470,19 @@ impl Vm {
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::BitwiseOr => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
@@ -23514,10 +23586,19 @@ impl Vm {
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::BitwiseXor => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
@@ -23615,10 +23696,19 @@ impl Vm {
                     };
                     self.write_operand(&op.result, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::BoolXor => {
                     // (BOOL_XOR: undefined operands warn, each one is
@@ -23837,10 +23927,19 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::ShiftRight => match outlined(|| -> Result<Flow, VmError> {
                     let a = self.read_operand_warn(
@@ -23948,10 +24047,19 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
 
                 OpCode::BooleanNot => {
@@ -24970,10 +25078,19 @@ impl Vm {
                         &static_cv_keys,
                     );
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignSub => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25055,10 +25172,19 @@ impl Vm {
                         &static_cv_keys,
                     );
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignMul => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25140,10 +25266,19 @@ impl Vm {
                         &static_cv_keys,
                     );
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignDiv => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25242,10 +25377,19 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignMod => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25346,10 +25490,19 @@ impl Vm {
                         }
                     }
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignPow => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25439,10 +25592,19 @@ impl Vm {
                         &static_cv_keys,
                     );
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignConcat => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25508,10 +25670,19 @@ impl Vm {
                     );
                     #[allow(unreachable_code)]
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignBitwiseAnd => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25600,10 +25771,19 @@ impl Vm {
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignBitwiseOr => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25698,10 +25878,19 @@ impl Vm {
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignBitwiseXor => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25790,10 +25979,19 @@ impl Vm {
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignShiftLeft => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -25893,10 +26091,19 @@ impl Vm {
                         &static_cv_keys,
                     );
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
                 OpCode::AssignShiftRight => match outlined(|| -> Result<Flow, VmError> {
                     let rhs = self.read_operand_warn(
@@ -26000,10 +26207,19 @@ impl Vm {
                         &static_cv_keys,
                     );
                     Ok(Flow::Next)
-                })? {
-                    Flow::Next => {}
-                    Flow::Continue => continue 'exec,
-                    Flow::Return(v) => return Ok(v),
+                }) {
+                    Ok(Flow::Next) => {}
+                    Ok(Flow::Continue) => {
+                        if self.current_exception.is_some() {
+                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        }
+                        continue 'exec;
+                    }
+                    Ok(Flow::Return(v)) => return Ok(v),
+                    Err(e) => {
+                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        return Err(e);
+                    }
                 },
 
                 // Increment / Decrement

@@ -805,3 +805,194 @@ pub(crate) fn incdec_msg(msg: &str, inc: bool) -> String {
         if inc { "maximal" } else { "minimal" }
     )
 }
+
+/// What the UNDEF result of a failed compound assignment becomes in a slot
+/// of type `ty`: zend_binary_op() leaves an UNDEF copy that
+/// zend_verify_property_type() coerces like a weak scalar (int, float,
+/// string, then bool are tried in turn); None when it is rejected (strict
+/// mode, no scalar type), which leaves the slot as it was.
+pub(crate) fn failed_op_value(ty: &ParamType, strict: bool) -> Option<Value> {
+    if strict {
+        return None;
+    }
+    let mask = TypeView::from_param_type(ty).mask;
+    if mask & T_LONG != 0 {
+        Some(Value::Long(0))
+    } else if mask & T_DOUBLE != 0 {
+        Some(Value::Double(0.0))
+    } else if mask & T_STRING != 0 {
+        Some(Value::String(crate::string::PhpString::empty()))
+    } else if mask & T_BOOL == T_BOOL {
+        Some(Value::False)
+    } else {
+        None
+    }
+}
+
+impl Vm {
+    /// A failed compound assignment through the typed reference `r`
+    /// (zend_binary_assign_op_typed_ref): the coerced UNDEF result is
+    /// stored when every type source accepts it alike.
+    fn typed_ref_failed_op(&self, r: &Rc<RefCell<Value>>, strict: bool) {
+        let mut out: Option<Value> = None;
+        for s in sources(r) {
+            let Some(v) = failed_op_value(&s.ty, strict) else {
+                return;
+            };
+            match &out {
+                Some(prev) if !identical_scalar(prev, &v) => return,
+                _ => out = Some(v),
+            }
+        }
+        if let Some(v) = out {
+            *r.borrow_mut() = v;
+        }
+    }
+
+    /// The binary operation (or CV compound assignment) `op` threw. When it
+    /// is the middle of a compound assignment on a typed slot, the slot
+    /// takes the coerced UNDEF result like php-src's in-place assign-op
+    /// handlers leave it (zend_binary_assign_op_typed_prop / _typed_ref);
+    /// an undefined variable operand is left NULL (BP_VAR_RW fetch).
+    #[inline(never)]
+    pub(crate) fn compound_op_failed(
+        &mut self,
+        op: &crate::opcode::Op,
+        op_array: &crate::opcode::OpArray,
+        cvs: &mut [Value],
+        tmps: &mut [Value],
+        static_cv_keys: &crate::fxhash::FxHashMap<u32, Vec<u8>>,
+    ) {
+        use crate::opcode::OperandType;
+        let strict = op_array.strict_types;
+        let ops = &op_array.ops;
+        let sz = std::mem::size_of::<crate::opcode::Op>().max(1);
+        let idx =
+            (op as *const crate::opcode::Op as usize).wrapping_sub(ops.as_ptr() as usize) / sz;
+        if !ops.get(idx).is_some_and(|o| std::ptr::eq(o, op)) {
+            return;
+        }
+        match op.opcode {
+            OpCode::AssignAdd
+            | OpCode::AssignSub
+            | OpCode::AssignMul
+            | OpCode::AssignDiv
+            | OpCode::AssignMod
+            | OpCode::AssignPow
+            | OpCode::AssignConcat
+            | OpCode::AssignBitwiseAnd
+            | OpCode::AssignBitwiseOr
+            | OpCode::AssignBitwiseXor
+            | OpCode::AssignShiftLeft
+            | OpCode::AssignShiftRight => {
+                let OperandType::Cv(ci) = op.op1 else {
+                    return;
+                };
+                match cvs.get(ci as usize) {
+                    Some(Value::Undef) => {
+                        self.write_operand(&op.op1, Value::Null, cvs, tmps, static_cv_keys)
+                    }
+                    Some(Value::Reference(r)) => {
+                        let r = r.clone();
+                        if matches!(*r.borrow(), Value::Undef) {
+                            *r.borrow_mut() = Value::Null;
+                        } else if is_typed(&r)
+                            && !(op.opcode == OpCode::AssignConcat
+                                && matches!(*r.borrow(), Value::String(_)))
+                        {
+                            // (a string is concatenated in place)
+                            self.typed_ref_failed_op(&r, strict);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            _ => {
+                let (Some(prev), Some(next)) = (
+                    idx.checked_sub(1).and_then(|i| ops.get(i)),
+                    ops.get(idx + 1),
+                ) else {
+                    return;
+                };
+                if !matches!(op.result, OperandType::Tmp(_))
+                    || prev.result != op.op1
+                    || next.op2 != op.result
+                {
+                    return;
+                }
+                // A string is concatenated in place: it keeps its value.
+                if op.opcode == OpCode::Concat
+                    && matches!(
+                        self.read_operand(&op.op1, cvs, tmps, &op_array.literals)
+                            .deref(),
+                        Value::String(_)
+                    )
+                {
+                    return;
+                }
+                let lits = &op_array.literals;
+                match (prev.opcode, next.opcode) {
+                    (OpCode::PropertyGetRW, OpCode::PropertySet) => {
+                        let Value::Object(o) =
+                            self.read_operand(&next.op1, cvs, tmps, lits).deref()
+                        else {
+                            return;
+                        };
+                        let name = self
+                            .read_operand(&next.result, cvs, tmps, lits)
+                            .to_php_string();
+                        let key = self
+                            .prop_access_key(&o, name.as_bytes())
+                            .unwrap_or_else(|| name.as_bytes().to_vec());
+                        let cur = o
+                            .borrow()
+                            .properties
+                            .iter()
+                            .find(|(k, _)| *k == key)
+                            .map(|(_, v)| v.clone());
+                        match cur {
+                            Some(Value::Reference(r)) if is_typed(&r) => {
+                                self.typed_ref_failed_op(&r, strict)
+                            }
+                            Some(_) => {
+                                if let Some(v) = self
+                                    .typed_ref_source_for(&o, &key)
+                                    .and_then(|s| failed_op_value(&s.ty, strict))
+                                {
+                                    o.borrow_mut().set_property_slice(&key, v);
+                                }
+                            }
+                            None => {}
+                        }
+                    }
+                    (OpCode::StaticPropFetchRW, OpCode::StaticPropSet) => {
+                        let class_v = self.read_operand(&next.op1, cvs, tmps, lits);
+                        let name = self
+                            .read_operand(&next.result, cvs, tmps, lits)
+                            .to_php_string();
+                        self.static_prop_failed_op(&class_v, name.as_bytes(), strict);
+                    }
+                    (OpCode::ArrayGetRW, OpCode::ArraySet) => {
+                        let Value::Array(a) = self.read_operand(&next.op1, cvs, tmps, lits).deref()
+                        else {
+                            return;
+                        };
+                        let k = Vm::value_to_array_key(self.read_operand(
+                            &next.result,
+                            cvs,
+                            tmps,
+                            lits,
+                        ));
+                        let el = a.borrow().get(&k).cloned();
+                        if let Some(Value::Reference(r)) = el {
+                            if is_typed(&r) {
+                                self.typed_ref_failed_op(&r, strict);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
