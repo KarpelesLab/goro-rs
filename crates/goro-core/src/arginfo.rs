@@ -343,6 +343,21 @@ pub enum ZppError {
     Pending,
 }
 
+/// The T_* bit of a (dereferenced) value's type.
+fn value_type_bit(v: &Value) -> u16 {
+    match v {
+        Value::Undef | Value::Null => T_NULL,
+        Value::False => T_FALSE,
+        Value::True => T_TRUE,
+        Value::Long(_) => T_INT,
+        Value::Double(_) => T_FLOAT,
+        Value::String(_) => T_STRING,
+        Value::Array(_) => T_ARRAY,
+        Value::Resource(_) => 0,
+        _ => T_OBJECT,
+    }
+}
+
 /// zend_zval_value_name()
 fn value_name(v: &Value) -> String {
     Vm::value_type_name(v)
@@ -996,12 +1011,45 @@ impl Vm {
                 }
                 break;
             }
+            let mut v = args[i].deref();
+            if p.by_ref == 0
+                && m & T_CALLABLE == 0
+                && m & (T_CLASS | T_OBJECT) != 0
+                && !matches!(v, Value::Object(_) | Value::Generator(_))
+            {
+                // An object or class typed parameter given a non-object: only
+                // the scalar/array part of the type can accept it (e.g.
+                // key("abc"), iterator_to_array(true)); the rest is left to
+                // the function.
+                if m & value_type_bit(&v) != 0 {
+                    break;
+                }
+                if m & (T_BOOL | T_INT | T_FLOAT | T_STRING) != 0 {
+                    break;
+                }
+                // Z_PARAM_ARRAY_OR_OBJECT expects "array".
+                let ty = if m == T_ARRAY | T_OBJECT {
+                    "array"
+                } else if m == T_ARRAY | T_OBJECT | T_NULL {
+                    "?array"
+                } else {
+                    arg_type_display(p)
+                };
+                return Err(ZppError::Throw(
+                    b"TypeError",
+                    format!(
+                        "{} must be of type {}, {} given",
+                        info.arg_prefix(i),
+                        ty,
+                        value_name(&v)
+                    ),
+                ));
+            }
             if p.by_ref != 0 || m == 0 || m & (T_CLASS | T_OBJECT | T_CALLABLE) != 0 {
                 // Validated by the function itself; leave the rest to it too
                 // so errors keep zpp's left-to-right order.
                 break;
             }
-            let mut v = args[i].deref();
             let vt = match &v {
                 Value::Undef | Value::Null => T_NULL,
                 Value::False => T_FALSE,
