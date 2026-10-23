@@ -47030,7 +47030,20 @@ impl Vm {
                                     obj.borrow().properties.iter().find(|(k, _)| k == pn),
                                     Some((_, Value::Undef)) | None
                                 );
-                            if uninit
+                            // An extension object whose get_property_ptr_ptr
+                            // returns NULL for a property it serves (its slot
+                            // stays uninitialized) hands out the value
+                            // (read_property mode 3).
+                            let native = if uninit {
+                                native_handlers(obj)
+                                    .and_then(|h| h.read_property)
+                                    .and_then(|f| f(self, obj, prop_name.as_bytes(), 3))
+                            } else {
+                                None
+                            };
+                            if let Some(v) = native {
+                                v
+                            } else if uninit
                                 && src.as_ref().is_some_and(|s| {
                                     variance::TypeView::from_param_type(&s.ty).mask
                                         & variance::T_NULL
