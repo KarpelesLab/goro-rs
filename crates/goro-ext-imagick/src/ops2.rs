@@ -475,51 +475,7 @@ fn shear_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let bg = color_arg(vm, &a[0])?;
     let (xs, ys) = (a[1].double_or(0.0), a[2].double_or(0.0));
     replace_op(vm, &d_(o), "Unable to shear image", |i| {
-        let (tx, ty) = (xs.to_radians().tan(), ys.to_radians().tan());
-        let (w, h) = (i.columns as f64, i.rows as f64);
-        let nw = (w + (h * tx).abs()).ceil() as usize;
-        let nh = (h + (nw as f64 * ty).abs()).ceil() as usize;
-        let mut src = i.clone();
-        src.virtual_pixel = VirtualPixelMethod::Transparent;
-        let mut out = i.clone_attributes(nw, nh);
-        out.enable_alpha();
-        let ox = if tx < 0.0 { -(h * tx) } else { 0.0 };
-        let oy = if ty < 0.0 { -(nw as f64 * ty) } else { 0.0 };
-        let bgq = bg.to_rgba16();
-        for y in 0..nh {
-            for x in 0..nw {
-                // inverse of x' = x + tx*y ; y' = y + ty*x'
-                let xp = x as f64 + 0.5;
-                let yp = y as f64 + 0.5 - oy;
-                let sy = yp - ty * (xp);
-                let sx = xp - ox - tx * sy;
-                let p = if sx < -0.5 || sy < -0.5 || sx > w + 0.5 || sy > h + 0.5 {
-                    bgq
-                } else {
-                    let s = src.sample_bilinear(sx, sy);
-                    let a = s[3] / 65535.0;
-                    let ba = bgq[3] as f64 / 65535.0;
-                    let ao = a + ba * (1.0 - a);
-                    let mut q = [0u16; 4];
-                    for c in 0..3 {
-                        q[c] = to_q16(if ao > 0.0 {
-                            (s[c] * a + bgq[c] as f64 * ba * (1.0 - a)) / ao
-                        } else {
-                            0.0
-                        });
-                    }
-                    q[3] = to_q16(ao * 65535.0);
-                    q
-                };
-                out.set_px(x, y, p);
-            }
-        }
-        if !i.alpha && out.is_opaque() {
-            out.alpha = false;
-        }
-        out.page = Rect::new(nw, nh, 0, 0);
-        out.colors = None;
-        Ok(out)
+        goro_imagick::shear::shear(i, xs, ys, &bg)
     })
 }
 
