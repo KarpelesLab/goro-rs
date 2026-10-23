@@ -247,6 +247,9 @@ final class StreamBucket {
 
     // Constants
     vm.register_function(b"define", define);
+    // ZEND_DECLARE_CONST: what a `const X = ...;` statement runs (not a
+    // call to define(): observers and disable_functions do not see it).
+    vm.register_function(b"__declare_const", define);
     vm.register_function(b"constant", constant);
 
     // Output buffering

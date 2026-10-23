@@ -5333,7 +5333,7 @@ impl Compiler {
                             continue; // Skip the define() call for this const
                         }
                     }
-                    // Emit it as a define() call
+                    // Emit it as a call of define()'s body (ZEND_DECLARE_CONST)
                     // Build the fully-qualified constant name
                     let fqn = self.prefix_with_namespace(name);
                     // Register any attributes for this constant (PHP 8.5+)
@@ -5357,7 +5357,7 @@ impl Compiler {
                         .add_literal(Value::String(PhpString::from_vec(fqn)));
                     let define_idx = self
                         .op_array
-                        .add_literal(Value::String(PhpString::from_bytes(b"define")));
+                        .add_literal(Value::String(PhpString::from_bytes(b"__declare_const")));
                     let arg_count_idx = self.op_array.add_literal(Value::Long(2));
                     self.op_array.emit(Op {
                         opcode: OpCode::InitFCall,
