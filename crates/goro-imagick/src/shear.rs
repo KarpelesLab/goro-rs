@@ -147,3 +147,60 @@ pub fn shear(img: &Image, x_deg: f64, y_deg: f64, background: &PixelInfo) -> MRe
     out.colors = None;
     Ok(out)
 }
+
+/// RotateImage(): quarter turns are exact; any other angle renders as an
+/// SRT distortion (EWA) about the image's centre, with background virtual
+/// pixels, into a window of
+/// W = w' + 2·round((w'|cos θ| + h'|sin θ| − w')/2 + 1) (likewise H), where
+/// w'×h' is the image after the nearest quarter turn and θ what is left;
+/// the page moves by half the growth over the original size.
+pub fn rotate(img: &Image, degrees: f64, background: &PixelInfo) -> Image {
+    let mut deg = degrees % 360.0;
+    if deg < 0.0 {
+        deg += 360.0;
+    }
+    let quarters = (deg / 90.0).round();
+    let theta = deg - 90.0 * quarters;
+    if theta.abs() < 1e-12 {
+        let mut r = crate::transform::rotate90(img, quarters as i32);
+        r.page = Rect::new(r.columns, r.rows, img.page.x, img.page.y);
+        return r;
+    }
+    let (w, h) = if (quarters as i64).rem_euclid(2) == 1 {
+        (img.rows as f64, img.columns as f64)
+    } else {
+        (img.columns as f64, img.rows as f64)
+    };
+    let th = theta.to_radians();
+    let grow = |a: f64, b: f64| -> f64 {
+        let bound = a * th.cos().abs() + b * th.sin().abs();
+        2.0 * ((bound - a) / 2.0 + 1.5).floor().max(0.0)
+    };
+    let nw = (w + grow(w, h)) as i64;
+    let nh = (h + grow(h, w)) as i64;
+    let ox = (nw - img.columns as i64).div_euclid(2);
+    let oy = (nh - img.rows as i64).div_euclid(2);
+    let mut src = img.clone();
+    src.background_color = background.clone();
+    src.virtual_pixel = crate::types::VirtualPixelMethod::Background;
+    src.artifacts.set(
+        "distort:viewport",
+        &format!("{}x{}{:+}{:+}", nw, nh, -ox, -oy),
+    );
+    let mut out = match crate::distort::distort(&src, crate::distort::SRT, &[deg], false) {
+        Ok(o) => o,
+        Err(_) => return img.clone(),
+    };
+    out.virtual_pixel = img.virtual_pixel;
+    out.background_color = img.background_color.clone();
+    out.artifacts = img.artifacts.clone();
+    if !img.alpha && !(background.alpha_trait && background.alpha < 65535.0) {
+        out.alpha = false;
+        for p in out.pixels.chunks_exact_mut(4) {
+            p[3] = 65535;
+        }
+    }
+    out.page = Rect::new(nw as usize, nh as usize, img.page.x - ox, img.page.y - oy);
+    out.colors = None;
+    out
+}

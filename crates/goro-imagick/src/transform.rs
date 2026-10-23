@@ -112,7 +112,7 @@ pub fn transverse(img: &Image) -> Image {
     o
 }
 
-fn rotate90(img: &Image, quarters: i32) -> Image {
+pub(crate) fn rotate90(img: &Image, quarters: i32) -> Image {
     let (w, h) = (img.columns, img.rows);
     let mut o = match quarters.rem_euclid(4) {
         0 => img.clone(),
@@ -135,7 +135,7 @@ pub fn rotate(img: &Image, degrees: f64, background: &PixelInfo) -> Image {
     if (deg % 90.0).abs() < 1e-9 {
         return rotate90(img, (deg / 90.0).round() as i32);
     }
-    rotate_free(img, deg, background)
+    crate::shear::rotate(img, deg, background)
 }
 
 /// A rotation by any angle through the general path (the canvas grows by
