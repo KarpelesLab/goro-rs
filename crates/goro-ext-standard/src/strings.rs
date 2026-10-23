@@ -598,6 +598,20 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
+    // zend_string_safe_alloc(len, times, 0): an overflowing size is fatal.
+    if s.len()
+        .checked_mul(times as usize)
+        .and_then(|n| n.checked_add(32))
+        .is_none()
+    {
+        let msg = format!(
+            "Possible integer overflow in memory allocation ({} * {} + 32)",
+            s.len(),
+            times
+        );
+        let line = vm.current_line;
+        return Err(vm.emit_fatal_at(&msg, line));
+    }
     let total_len = s.len().saturating_mul(times as usize);
     // zend_string_safe_alloc(): bail out like the Zend allocator would.
     let mem_limit = goro_core::value::memory_get_limit();
