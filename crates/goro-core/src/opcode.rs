@@ -712,6 +712,26 @@ impl OpArray {
         out
     }
 
+    /// Drop the spare capacity of the vectors compiling filled (the code of
+    /// a function stays in memory as long as the function is declared).
+    pub fn shrink_to_fit(&mut self) {
+        self.ops.shrink_to_fit();
+        self.literals.shrink_to_fit();
+        self.cv_names.shrink_to_fit();
+        self.child_functions.shrink_to_fit();
+        self.param_types.shrink_to_fit();
+        self.class_const_literals.shrink_to_fit();
+        self.by_ref_params.shrink_to_fit();
+        self.param_has_default.shrink_to_fit();
+        self.param_default_repr.shrink_to_fit();
+    }
+
+    /// shrink_to_fit(), as a value.
+    pub fn shrunk(mut self) -> OpArray {
+        self.shrink_to_fit();
+        self
+    }
+
     /// `cv_names` was edited (see cv_name_info()).
     pub(crate) fn cv_names_changed(&mut self) {
         self.cv_info.take();

@@ -5090,7 +5090,7 @@ impl Compiler {
                 let func_idx = self.op_array.child_functions.len() as u32;
                 self.op_array
                     .child_functions
-                    .push(std::rc::Rc::new(func_compiler.op_array));
+                    .push(std::rc::Rc::new(func_compiler.op_array.shrunk()));
 
                 let name_idx = self
                     .op_array
@@ -9028,7 +9028,7 @@ impl Compiler {
                                     lower_name,
                                     MethodDef {
                                         name: method_name.clone(),
-                                        op_array: std::rc::Rc::new(concrete_op_array),
+                                        op_array: std::rc::Rc::new(concrete_op_array.shrunk()),
                                         param_count,
                                         is_static: *is_static,
                                         is_abstract: *is_abstract,
@@ -16863,7 +16863,7 @@ impl Compiler {
 
                 self.op_array
                     .child_functions
-                    .push(std::rc::Rc::new(closure_compiler.op_array));
+                    .push(std::rc::Rc::new(closure_compiler.op_array.shrunk()));
 
                 // Emit DeclareFunction for the closure
                 let name_idx = self
@@ -17197,7 +17197,7 @@ impl Compiler {
 
                 self.op_array
                     .child_functions
-                    .push(std::rc::Rc::new(closure_compiler.op_array));
+                    .push(std::rc::Rc::new(closure_compiler.op_array.shrunk()));
 
                 let name_idx = self
                     .op_array
@@ -19021,7 +19021,7 @@ impl Compiler {
 
         self.op_array
             .child_functions
-            .push(std::rc::Rc::new(cc.op_array));
+            .push(std::rc::Rc::new(cc.op_array.shrunk()));
 
         // Emit DeclareFunction for the closure
         let name_idx = self

@@ -18319,6 +18319,9 @@ impl Vm {
         if crate::preload::done() {
             self.preload_strip_declares(abs_path, &mut op);
         }
+        if cacheable {
+            op.shrink_to_fit();
+        }
         let compiled = crate::script_cache::Compiled {
             op_array: op,
             classes: Rc::new(classes),
