@@ -13981,7 +13981,11 @@ fn op_array_is_deprecated(op: &OpArray, attrs: &[RuntimeAttribute]) -> bool {
 /// the root-most ancestor declaration it overrides, with interface methods
 /// taking precedence. Constructors only get one from abstract/interface
 /// declarations.
-fn method_prototype(vm: &Vm, m: &crate::object::MethodDef) -> Option<String> {
+fn method_prototype(
+    vm: &Vm,
+    m: &crate::object::MethodDef,
+    scope: Option<&[u8]>,
+) -> Option<String> {
     if m.visibility == Visibility::Private {
         return None;
     }
@@ -14016,15 +14020,32 @@ fn method_prototype(vm: &Vm, m: &crate::object::MethodDef) -> Option<String> {
         }
         cur = pce.parent.clone();
     }
-    // Interfaces of the declaring class and its ancestors.
+    // Interfaces of the class the method is looked up on (an inherited
+    // method gets the prototypes of the interfaces it implements there)
+    // and of its ancestors, implemented in order: the last one wins.
+    let mut iface_chain: Vec<Vec<u8>> = Vec::new();
+    match scope.map(|s| s.to_ascii_lowercase()) {
+        Some(s) if s != decl => {
+            let mut c = Some(s);
+            while let Some(cl) = c {
+                if iface_chain.contains(&cl) {
+                    break;
+                }
+                c = rcls(vm, &cl).and_then(|ce| ce.parent.as_ref().map(|p| p.to_ascii_lowercase()));
+                iface_chain.push(cl);
+            }
+        }
+        _ => iface_chain = chain_classes.clone(),
+    }
     let mut stack: Vec<Vec<u8>> = Vec::new();
-    for c in &chain_classes {
+    for c in iface_chain.iter().rev() {
         if let Some(cc) = rcls(vm, c) {
             for i in &cc.interfaces {
                 stack.push(i.to_ascii_lowercase());
             }
         }
     }
+    stack.reverse();
     let mut seen: Vec<Vec<u8>> = Vec::new();
     let mut iface_proto: Option<String> = None;
     while let Some(i) = stack.pop() {
@@ -14239,7 +14260,7 @@ pub(crate) fn function_string(vm: &Vm, ctx: &FnStrCtx, indent: &str) -> String {
         }
     }
     if let Some(m) = ctx.method {
-        if let Some(p) = method_prototype(vm, m) {
+        if let Some(p) = method_prototype(vm, m, ctx.scope) {
             s.push_str(&format!(", prototype {}", p));
         }
         if m.name.eq_ignore_ascii_case(b"__construct") {
