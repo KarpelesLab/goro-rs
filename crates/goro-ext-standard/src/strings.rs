@@ -2901,10 +2901,7 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if max_phonemes < 0 {
         let msg = "metaphone(): Argument #2 ($max_phonemes) must be greater than or equal to 0"
             .to_string();
-        let exc = vm.throw_type_error(msg.clone());
-        if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
-        }
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
         vm.current_exception = Some(exc);
         return Err(VmError {
             message: msg,
@@ -2966,11 +2963,9 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::empty()));
     }
 
-    let phonize = |result: &mut Vec<u8>, c: u8| {
-        if result.len() < max {
-            result.push(c);
-        }
-    };
+    // Phonize(): max_phonemes is only checked before each letter, so one
+    // letter's code (X -> KS) may exceed it.
+    let phonize = |result: &mut Vec<u8>, c: u8| result.push(c);
 
     // First letter handling
     let first = read_letter_at(w_idx);
