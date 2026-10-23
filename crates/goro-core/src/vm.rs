@@ -53620,23 +53620,37 @@ impl Vm {
 
                         // Check for property get hook (PHP 8.4)
                         let prop_name_bytes = prop_name.as_bytes();
-                        let hook_method_name = format!(
-                            "__property_get_{}",
-                            String::from_utf8_lossy(prop_name_bytes)
-                        );
-                        let hook_method_lower: Vec<u8> = hook_method_name
-                            .bytes()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        let hook_cls = self.hook_owner_class(&class_lower, prop_name_bytes);
-                        let has_get_hook = self
-                            .classes
-                            .get(&hook_cls)
-                            .and_then(|c| c.get_method(&hook_method_lower))
-                            .is_some_and(|md| {
-                                hook_cls == class_lower || md.declaring_class == hook_cls
-                            });
-                        let hook_key = {
+                        // (no class involved declares the property with hooks:
+                        // none of the lookups below)
+                        let may_hook = self.prop_may_have_hooks(&class_lower, prop_name_bytes);
+                        let hook_method_lower: Vec<u8> = if may_hook {
+                            let hook_method_name = format!(
+                                "__property_get_{}",
+                                String::from_utf8_lossy(prop_name_bytes)
+                            );
+                            hook_method_name
+                                .bytes()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let hook_cls = if may_hook {
+                            self.hook_owner_class(&class_lower, prop_name_bytes)
+                        } else {
+                            Vec::new()
+                        };
+                        let has_get_hook = may_hook
+                            && self
+                                .classes
+                                .get(&hook_cls)
+                                .and_then(|c| c.get_method(&hook_method_lower))
+                                .is_some_and(|md| {
+                                    hook_cls == class_lower || md.declaring_class == hook_cls
+                                });
+                        let hook_key = if !has_get_hook {
+                            Vec::new()
+                        } else {
                             let mut k = class_lower.clone();
                             k.push(b':');
                             k.push(b':');
@@ -55034,23 +55048,37 @@ impl Vm {
 
                         // Check for property set hook (PHP 8.4)
                         let prop_name_bytes_set = prop_name.as_bytes();
-                        let set_hook_method_name = format!(
-                            "__property_set_{}",
-                            String::from_utf8_lossy(prop_name_bytes_set)
-                        );
-                        let set_hook_method_lower: Vec<u8> = set_hook_method_name
-                            .bytes()
-                            .map(|b| b.to_ascii_lowercase())
-                            .collect();
-                        let set_hook_cls = self.hook_owner_class(&class_lower, prop_name_bytes_set);
-                        let has_set_hook = self
-                            .classes
-                            .get(&set_hook_cls)
-                            .and_then(|c| c.get_method(&set_hook_method_lower))
-                            .is_some_and(|md| {
-                                set_hook_cls == class_lower || md.declaring_class == set_hook_cls
-                            });
-                        let set_hook_key = {
+                        // (no class involved declares the property with hooks:
+                        // none of the lookups below)
+                        let may_hook = self.prop_may_have_hooks(&class_lower, prop_name_bytes_set);
+                        let set_hook_method_lower: Vec<u8> = if may_hook {
+                            let set_hook_method_name = format!(
+                                "__property_set_{}",
+                                String::from_utf8_lossy(prop_name_bytes_set)
+                            );
+                            set_hook_method_name
+                                .bytes()
+                                .map(|b| b.to_ascii_lowercase())
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
+                        let set_hook_cls = if may_hook {
+                            self.hook_owner_class(&class_lower, prop_name_bytes_set)
+                        } else {
+                            Vec::new()
+                        };
+                        let has_set_hook = may_hook
+                            && self
+                                .classes
+                                .get(&set_hook_cls)
+                                .and_then(|c| c.get_method(&set_hook_method_lower))
+                                .is_some_and(|md| {
+                                    set_hook_cls == class_lower || md.declaring_class == set_hook_cls
+                                });
+                        let set_hook_key = if !has_set_hook {
+                            Vec::new()
+                        } else {
                             let mut k = class_lower.clone();
                             k.push(b':');
                             k.push(b':');
@@ -59750,6 +59778,30 @@ impl Vm {
     /// The class whose hooks apply to `$obj->pn` from the current scope: a
     /// private property declared by the calling class shadows the object
     /// class' property (and its hooks).
+    /// Whether accessing property `pn` of `class_lower` may run a hook: the
+    /// class, or the calling scope (a private property, see
+    /// hook_owner_class()), declares the property with hooks.
+    fn prop_may_have_hooks(&self, class_lower: &[u8], pn: &[u8]) -> bool {
+        let has = |cl: &[u8]| {
+            self.classes.get(cl).is_some_and(|c| {
+                c.properties
+                    .iter()
+                    .any(|p| p.name == pn && (p.has_get_hook || p.has_set_hook))
+            })
+        };
+        if has(class_lower) {
+            return true;
+        }
+        let scope = match self.scope_top() {
+            Some(s) => Some(s.clone()),
+            None => self
+                .called_class_stack
+                .last()
+                .map(|n| n.to_ascii_lowercase()),
+        };
+        scope.is_some_and(|s| s.as_slice() != class_lower && !s.is_empty() && has(&s))
+    }
+
     fn hook_owner_class(&self, class_lower: &[u8], pn: &[u8]) -> Vec<u8> {
         if let Some(scope) = self.current_class_scope() {
             let scope_lower: Vec<u8> = scope.iter().map(|b| b.to_ascii_lowercase()).collect();
