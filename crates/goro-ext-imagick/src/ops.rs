@@ -1461,39 +1461,39 @@ fn quantize_images(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
     })
 }
 
-fn blend_toward(i: &mut Image, c: &PixelInfo, amount: [f64; 3]) {
-    let (r, g, b) = c.rgb_q();
-    let t = [r, g, b];
-    for p in i.pixels.chunks_exact_mut(4) {
-        for ch in 0..3 {
-            p[ch] = to_q16(p[ch] as f64 * (1.0 - amount[ch]) + t[ch] * amount[ch]);
-        }
+/// The opacity argument of colorizeImage()/tintImage(): a colour whose
+/// RGB are the per-channel blend fractions. In legacy mode the value is
+/// only type-checked, and ImageMagick ends up with the blend that
+/// colorize/tint pick for it.
+fn blend_arg(vm: &mut Vm, a: &Arg, legacy: bool) -> Result<Option<[f64; 3]>, ()> {
+    let Arg::Any(v) = a else {
+        return Err(());
+    };
+    if legacy {
+        zval_to_opacity(vm, v, Cls::Imagick)?;
+        return Ok(None);
     }
-    i.colors = None;
+    let c = zval_to_pixel(vm, v, Cls::Imagick)?;
+    Ok(Some([c.red / 65535.0, c.green / 65535.0, c.blue / 65535.0]))
 }
 
 fn colorize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "zz|b", args)?;
     let c = color_arg(vm, &a[0])?;
-    let op = match &a[1] {
-        Arg::Any(v) => zval_to_opacity(vm, v, Cls::Imagick)?,
-        _ => return Err(()),
-    };
+    let legacy = a[2].bool_or(false);
+    let blend = blend_arg(vm, &a[1], legacy)?;
     image_op(vm, &d_(o), "Unable to colorize image", |i| {
-        // the blend is per channel from the "opacity" colour (or its alpha)
-        let amt = if op.alpha_trait || op.red != 0.0 || op.green != 0.0 || op.blue != 0.0 {
-            [op.red / 65535.0, op.green / 65535.0, op.blue / 65535.0]
-        } else {
-            let a = op.alpha / 65535.0;
-            [a, a, a]
-        };
-        let amt = if amt == [0.0, 0.0, 0.0] {
-            let a = op.alpha / 65535.0;
-            [a, a, a]
-        } else {
-            amt
-        };
-        blend_toward(i, &c, amt);
+        // ColorizeImage(): each channel moves toward the colour by its
+        // blend fraction; legacy mode blends by the colour itself
+        let (r, g, b) = c.rgb_q();
+        let t = [r, g, b];
+        let amt = blend.unwrap_or([r / 65535.0, g / 65535.0, b / 65535.0]);
+        for p in i.pixels.chunks_exact_mut(4) {
+            for ch in 0..3 {
+                p[ch] = to_q16(p[ch] as f64 * (1.0 - amt[ch]) + t[ch] * amt[ch]);
+            }
+        }
+        i.colors = None;
         Ok(())
     })
 }
@@ -1501,27 +1501,21 @@ fn colorize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 fn tint_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "zz|b", args)?;
     let c = color_arg(vm, &a[0])?;
-    let op = match &a[1] {
-        Arg::Any(v) => zval_to_opacity(vm, v, Cls::Imagick)?,
-        _ => return Err(()),
-    };
+    let legacy = a[2].bool_or(false);
+    let blend = blend_arg(vm, &a[1], legacy)?;
     image_op(vm, &d_(o), "Unable tint image", |i| {
-        // TintImage(): mid-tones move toward the colour, by the amount
+        // TintImage(): every channel moves by (blend * tint - intensity of
+        // the tint), weighted by 4v(1-v) so black and white stay put;
+        // legacy mode has a zero blend
         let (r, g, b) = c.rgb_q();
-        let amt = [op.red / 65535.0, op.green / 65535.0, op.blue / 65535.0];
-        let amt = if amt == [0.0, 0.0, 0.0] {
-            let a = op.alpha / 65535.0;
-            [a, a, a]
-        } else {
-            amt
-        };
-        let t = [r, g, b];
+        let t = [r / 65535.0, g / 65535.0, b / 65535.0];
+        let amt = blend.unwrap_or([0.0; 3]);
+        let it = 0.212656 * t[0] + 0.715158 * t[1] + 0.072186 * t[2];
+        let shift = [amt[0] * t[0] - it, amt[1] * t[1] - it, amt[2] * t[2] - it];
         for p in i.pixels.chunks_exact_mut(4) {
-            let lum = Image::intensity(p) / 65535.0;
-            let weight = 1.0 - 4.0 * (lum - 0.5) * (lum - 0.5);
             for ch in 0..3 {
-                let delta = (t[ch] - 32767.5) * amt[ch] * weight;
-                p[ch] = to_q16(p[ch] as f64 + delta);
+                let v = p[ch] as f64 / 65535.0;
+                p[ch] = to_q16(65535.0 * (v + shift[ch] * 4.0 * v * (1.0 - v)));
             }
         }
         i.colors = None;
