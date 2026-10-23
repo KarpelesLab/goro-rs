@@ -338,6 +338,81 @@ pub fn run_test_with_dir_and_filename(
     }
 }
 
+/// run-tests.php's $ini_overwrites.
+const RUN_TESTS_INI_OVERWRITES: &[(&str, &str)] = &[
+    ("output_handler", ""),
+    ("open_basedir", ""),
+    ("disable_functions", ""),
+    ("output_buffering", "Off"),
+    ("error_reporting", "32767"),
+    ("fatal_error_backtraces", "Off"),
+    ("display_errors", "1"),
+    ("display_startup_errors", "1"),
+    ("log_errors", "0"),
+    ("html_errors", "0"),
+    ("track_errors", "0"),
+    ("report_zend_debug", "0"),
+    ("docref_root", ""),
+    ("docref_ext", ".html"),
+    ("error_prepend_string", ""),
+    ("error_append_string", ""),
+    ("auto_prepend_file", ""),
+    ("auto_append_file", ""),
+    ("ignore_repeated_errors", "0"),
+    ("precision", "14"),
+    ("serialize_precision", "-1"),
+    ("memory_limit", "128M"),
+    ("opcache.fast_shutdown", "0"),
+    ("opcache.file_update_protection", "0"),
+    ("opcache.revalidate_freq", "0"),
+    ("opcache.jit_hot_loop", "1"),
+    ("opcache.jit_hot_func", "1"),
+    ("opcache.jit_hot_return", "1"),
+    ("opcache.jit_hot_side_exit", "1"),
+    ("opcache.jit_max_root_traces", "100000"),
+    ("opcache.jit_max_side_traces", "100000"),
+    ("opcache.jit_max_exit_counters", "100000"),
+    ("opcache.protect_memory", "1"),
+    ("zend.assertions", "1"),
+    ("zend.exception_ignore_args", "0"),
+    ("zend.exception_string_param_max_len", "15"),
+    ("short_open_tag", "0"),
+];
+
+/// settings2params() of the test's INI settings over $ini_overwrites
+/// (settings2array(): a later setting replaces an earlier one, extensions
+/// accumulate).
+fn extra_args(ini: &[(String, String)]) -> String {
+    let mut list: Vec<(String, String)> = RUN_TESTS_INI_OVERWRITES
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    for (k, v) in ini {
+        let multi = k == "extension" || k == "zend_extension";
+        match list.iter_mut().find(|(lk, _)| lk == k) {
+            Some(e) if !multi => e.1 = v.clone(),
+            _ => list.push((k.clone(), v.clone())),
+        }
+    }
+    let mut out = String::new();
+    for (k, v) in list {
+        // addslashes()
+        let mut val = String::new();
+        for c in v.chars() {
+            match c {
+                '\\' | '\'' | '"' => {
+                    val.push('\\');
+                    val.push(c);
+                }
+                '\0' => val.push_str("\\0"),
+                c => val.push(c),
+            }
+        }
+        out.push_str(&format!(" -d \"{}={}\"", k, val));
+    }
+    format!(" {}", out)
+}
+
 fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> TestResult {
     // Parse INI settings
     let mut ini_settings = parse_ini_settings(test.ini_section());
@@ -374,6 +449,12 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
             let path = rest[..end].to_string();
             *v = format!("{}tee {} >/dev/null{}", &v[..start], path, &rest[end + 1..]);
         }
+    }
+    // run-tests.php: TEST_PHP_EXTRA_ARGS holds the test's INI settings
+    // (over its $ini_overwrites) as -d options, for the php processes a test
+    // starts itself (php_cli_server_start(), ServerClientTestCase, ...).
+    unsafe {
+        std::env::set_var("TEST_PHP_EXTRA_ARGS", extra_args(&ini_settings));
     }
     // --ARGS-- are passed to the script as $argv (inherited by the forked child).
     TEST_ARGS.with(|a| *a.borrow_mut() = test.sections.get("ARGS").map(|s| s.trim().to_string()));
