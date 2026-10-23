@@ -2553,7 +2553,9 @@ pub fn materialize_print_r(
             let shadow = Rc::new(RefCell::new(shadow));
             let shadow_val = Value::Object(shadow.clone());
             memo.insert(key, Some(shadow_val.clone()));
-            let rows: Vec<(Vec<u8>, Value)> = if let Some(arr) = native_props(vm, o, 0) {
+            let rows: Vec<(Vec<u8>, Value)> = if let Some(rows) = internal_debug_rows(vm, o, &cl) {
+                rows
+            } else if let Some(arr) = native_props(vm, o, 0) {
                 arr.iter()
                     .map(|(k, v)| (array_key_bytes(k), v.clone()))
                     .collect()
@@ -2594,6 +2596,101 @@ pub fn materialize_print_r(
             }
             shadow.borrow_mut().properties = props;
             Some(shadow_val)
+        }
+        // zend_generator_get_debug_info(): the generator's function.
+        Value::Generator(g) => {
+            let name = vm.generator_function_name(g);
+            let mut shadow = goro_core::object::PhpObject::new(b"Generator".to_vec(), 0);
+            shadow.native = Some(goro_core::object::NativeData {
+                data: Rc::new(()),
+                handlers: &PRINT_R_SHADOW,
+            });
+            shadow.properties = vec![(
+                b"function".to_vec(),
+                Value::String(PhpString::from_string(name.to_string())),
+            )];
+            Some(Value::Object(Rc::new(RefCell::new(shadow))))
+        }
+        _ => None,
+    }
+}
+
+/// The get_debug_info handlers of internal classes whose objects keep their
+/// state outside the property table (what var_dump() shows of them):
+/// WeakReference's referent, WeakMap's entries, a random engine's states.
+fn internal_debug_rows(
+    vm: &mut Vm,
+    o: &std::rc::Rc<std::cell::RefCell<goro_core::object::PhpObject>>,
+    cl: &[u8],
+) -> Option<Vec<(Vec<u8>, Value)>> {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    let has_user_debug_info = vm
+        .classes
+        .get(cl)
+        .and_then(|c| c.get_method(b"__debuginfo"))
+        .is_some();
+    match cl {
+        b"weakreference" => {
+            let weak_id = o.borrow().get_property(b"__weak_ref_id").to_long() as u64;
+            let referent = vm
+                .weak_refs
+                .get(&weak_id)
+                .and_then(|w| w.upgrade())
+                .map(Value::Object)
+                .unwrap_or(Value::Null);
+            Some(vec![(b"object".to_vec(), referent)])
+        }
+        b"weakmap" => {
+            let oid = o.borrow().object_id;
+            let entries: Vec<(Value, Value)> = vm
+                .weak_map_entries
+                .get(&oid)
+                .map(|es| {
+                    es.iter()
+                        .filter_map(|(_, w, v)| w.upgrade().map(|s| (Value::Object(s), v.clone())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(
+                entries
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, (k, v))| {
+                        let mut e = goro_core::array::PhpArray::new();
+                        e.set(
+                            goro_core::array::ArrayKey::String(PhpString::from_bytes(b"key")),
+                            k,
+                        );
+                        e.set(
+                            goro_core::array::ArrayKey::String(PhpString::from_bytes(b"value")),
+                            v.deref(),
+                        );
+                        (
+                            i.to_string().into_bytes(),
+                            Value::Array(Rc::new(RefCell::new(e))),
+                        )
+                    })
+                    .collect(),
+            )
+        }
+        b"random\\engine\\mt19937"
+        | b"random\\engine\\xoshiro256starstar"
+        | b"random\\engine\\pcgoneseq128xslrr64"
+            if !has_user_debug_info =>
+        {
+            match vm
+                .call_object_method(&Value::Object(o.clone()), b"__debugInfo", &[])
+                .map(|r| r.deref())
+            {
+                Some(Value::Array(a)) => Some(
+                    a.borrow()
+                        .iter()
+                        .map(|(k, v)| (array_key_bytes(k), v.clone()))
+                        .collect(),
+                ),
+                _ => None,
+            }
         }
         _ => None,
     }
