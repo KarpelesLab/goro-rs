@@ -302,6 +302,45 @@ fn inc_dec(old: Num, inc: bool) -> Value {
     }
 }
 
+/// An operand that is not an undefined variable (through a CV's
+/// reference), as a value (sharing a string or array).
+#[inline(always)]
+fn defined_operand(
+    operand: &OperandType,
+    cvs: &[Value],
+    tmps: &[Value],
+    literals: &[Value],
+) -> Option<Value> {
+    let v = match operand {
+        OperandType::Cv(i) => match cvs.get(*i as usize)? {
+            Value::Reference(r) => r.try_borrow().ok()?.clone(),
+            v => v.clone(),
+        },
+        OperandType::Tmp(i) => tmps.get(*i as usize)?.clone(),
+        OperandType::Const(i) => literals.get(*i as usize)?.clone(),
+        _ => return None,
+    };
+    (!matches!(v, Value::Undef | Value::Reference(_))).then_some(v)
+}
+
+/// i_zend_is_true() of a value whose conversion has no side effect (no
+/// object, no NAN, which warns).
+#[inline(always)]
+fn plain_truthy(v: &Value) -> Option<bool> {
+    Some(match v {
+        Value::True => true,
+        Value::False | Value::Null => false,
+        Value::Long(n) => *n != 0,
+        Value::Double(d) if !d.is_nan() => *d != 0.0,
+        Value::String(s) => {
+            let b = s.as_bytes();
+            !(b.is_empty() || b == b"0")
+        }
+        Value::Array(a) => a.try_borrow().ok()?.len() > 0,
+        _ => return None,
+    })
+}
+
 #[inline(always)]
 fn bool_val(b: bool) -> Value {
     if b { Value::True } else { Value::False }
@@ -397,10 +436,31 @@ pub(crate) fn fast_op(
             store!(bool_val(eq == (op.opcode == OpCode::Equal)))
         }
         OpCode::Identical | OpCode::NotIdentical => {
-            let a = num!(op.op1);
-            let b = num!(op.op2);
-            let same = a.value().identical(&b.value());
+            // Scalars and objects (arrays are compared element by element,
+            // with a recursion guard: the general handler's).
+            let Some(a) = defined_operand(&op.op1, cvs, tmps, literals) else {
+                return Fast::No;
+            };
+            let Some(b) = defined_operand(&op.op2, cvs, tmps, literals) else {
+                return Fast::No;
+            };
+            if matches!(a, Value::Array(_)) || matches!(b, Value::Array(_)) {
+                return Fast::No;
+            }
+            let same = match (&a, &b) {
+                (Value::Object(x), Value::Object(y)) => Rc::ptr_eq(x, y),
+                _ => a.identical(&b),
+            };
             store!(bool_val(same == (op.opcode == OpCode::Identical)))
+        }
+        OpCode::BooleanNot | OpCode::CastBool => {
+            let Some(v) = defined_operand(&op.op1, cvs, tmps, literals) else {
+                return Fast::No;
+            };
+            let Some(t) = plain_truthy(&v) else {
+                return Fast::No;
+            };
+            store!(bool_val(t == (op.opcode == OpCode::CastBool)))
         }
         OpCode::AssignAdd | OpCode::AssignSub | OpCode::AssignMul => {
             let OperandType::Cv(ci) = op.op1 else {
@@ -473,7 +533,19 @@ pub(crate) fn fast_op(
                 Some(Value::True) => true,
                 Some(Value::False) | Some(Value::Null) => false,
                 Some(Value::Long(n)) => *n != 0,
-                _ => return Fast::No,
+                Some(Value::Reference(_)) | None => {
+                    match defined_operand(&op.op1, cvs, tmps, literals)
+                        .as_ref()
+                        .and_then(plain_truthy)
+                    {
+                        Some(t) => t,
+                        None => return Fast::No,
+                    }
+                }
+                Some(v) => match plain_truthy(v) {
+                    Some(t) => t,
+                    None => return Fast::No,
+                },
             };
             match op.op2 {
                 OperandType::JmpTarget(t) if truthy == (op.opcode == OpCode::JmpNz) => {
@@ -658,6 +730,11 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::FreeTmps
             | OpCode::InitFCall
             | OpCode::SendVal
+            | OpCode::BooleanNot
+            | OpCode::CastBool
+            | OpCode::ErrorSuppress
+            | OpCode::ErrorRestore
+            | OpCode::Nop
     )
 }
 
@@ -750,15 +827,27 @@ impl crate::vm::Vm {
                     };
                     let end = (b as usize).min(tmps.len());
                     let range = &mut tmps[(a as usize).min(end)..end];
-                    if range.iter().any(|v| {
-                        matches!(
-                            v,
-                            Value::Object(_)
-                                | Value::Array(_)
-                                | Value::Reference(_)
-                                | Value::Resource(_)
-                        )
-                    }) {
+                    // An array or object held elsewhere too only loses a
+                    // holder; one held here alone is freed when it holds a
+                    // few plain values (nothing to destroy). (No object
+                    // with a destructor exists: `no_release`; the cycle
+                    // collector is not due.)
+                    let releasable = |v: &Value| match v {
+                        Value::Array(a) => {
+                            Rc::strong_count(a) > 1
+                                || a.try_borrow()
+                                    .is_ok_and(|a| a.len() <= 16 && a.values().all(is_plain_scalar))
+                        }
+                        Value::Object(o) => Rc::strong_count(o) > 1,
+                        Value::Reference(_) | Value::Resource(_) | Value::Generator(_) => false,
+                        _ => true,
+                    };
+                    if !range.iter().all(releasable)
+                        || (range
+                            .iter()
+                            .any(|v| matches!(v, Value::Array(_) | Value::Object(_)))
+                            && crate::gc::gc_pending())
+                    {
                         break 'run ip;
                     }
                     for slot in range {
@@ -787,9 +876,31 @@ impl crate::vm::Vm {
                 OpCode::PostDecrement => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::JmpZ => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::JmpNz => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
-                OpCode::Assign => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::Assign => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
+                    Fast::No => self.fast_assign_container(op, cvs, tmps, literals, refs_ok),
+                    f => f,
+                },
                 OpCode::QmAssign => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::AssignConcat => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::BooleanNot => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                OpCode::CastBool => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
+                // (the silence of isset() / empty() / `??` / `@`)
+                OpCode::ErrorSuppress => {
+                    self.error_reporting_stack.push(self.error_reporting);
+                    self.error_reporting = crate::errdisplay::begin_silence(
+                        self.error_reporting,
+                        matches!(op.op1, OperandType::Const(_)),
+                    );
+                    Fast::Done
+                }
+                OpCode::ErrorRestore => {
+                    if let Some(saved) = self.error_reporting_stack.pop() {
+                        self.error_reporting =
+                            crate::errdisplay::end_silence(self.error_reporting, saved);
+                    }
+                    Fast::Done
+                }
+                OpCode::Nop => Fast::Done,
                 _ => return ip,
             };
             ip = match fast {
@@ -842,6 +953,83 @@ impl crate::vm::Vm {
         } else {
             false
         }
+    }
+
+    /// `$cv = <array|object>` over a plain value or an undefined variable
+    /// (nothing is released): what write_operand() stores (a variable's or
+    /// a literal's array is copied, a temporary's is moved; objects are
+    /// registered with the cycle collector).
+    fn fast_assign_container(
+        &self,
+        op: &Op,
+        cvs: &mut [Value],
+        tmps: &mut [Value],
+        literals: &[Value],
+        refs_ok: bool,
+    ) -> Fast {
+        let OperandType::Cv(ci) = op.op1 else {
+            return Fast::No;
+        };
+        if !tmp_writable(&op.result, tmps) {
+            return Fast::No;
+        }
+        let target_ok = match cvs.get(ci as usize) {
+            Some(Value::Reference(r)) => {
+                refs_ok && r.try_borrow_mut().is_ok_and(|b| is_plain_scalar(&b))
+            }
+            Some(v) => is_plain_scalar(v),
+            None => false,
+        };
+        if !target_ok {
+            return Fast::No;
+        }
+        let val = match op.op2 {
+            OperandType::Tmp(i) => match tmps.get(i as usize) {
+                Some(Value::Object(_)) | Some(Value::Array(_)) => {
+                    std::mem::replace(&mut tmps[i as usize], Value::Undef)
+                }
+                _ => return Fast::No,
+            },
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                Some(v @ (Value::Object(_) | Value::Array(_))) => v.clone(),
+                _ => return Fast::No,
+            },
+            OperandType::Const(i) => match literals.get(i as usize) {
+                Some(v @ Value::Array(_)) => v.clone(),
+                _ => return Fast::No,
+            },
+            _ => return Fast::No,
+        };
+        let val = match val {
+            Value::Array(a) if Rc::ptr_eq(&a, &self.globals) => {
+                // ($GLOBALS: the general handler's copy)
+                if let OperandType::Tmp(i) = op.op2 {
+                    tmps[i as usize] = Value::Array(a);
+                }
+                return Fast::No;
+            }
+            Value::Array(a) if Rc::strong_count(&a) == 1 => Value::Array(a),
+            v @ Value::Array(_) => self.dup_array_value(v),
+            Value::Object(o) => {
+                crate::gc::track_object(&o);
+                Value::Object(o)
+            }
+            v => v,
+        };
+        let result = matches!(op.result, OperandType::Tmp(_)).then(|| val.clone());
+        match &mut cvs[ci as usize] {
+            Value::Reference(r) => {
+                let Ok(mut b) = r.try_borrow_mut() else {
+                    return Fast::No;
+                };
+                *b = val;
+            }
+            slot => *slot = val,
+        }
+        if let Some(v) = result {
+            store_tmp(&op.result, v, tmps);
+        }
+        Fast::Done
     }
 
     /// `isset($a[k])` of a real array with an int / string key (the general
