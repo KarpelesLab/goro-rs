@@ -796,9 +796,15 @@ mod tests {
                     continue;
                 };
                 let b = to_srgb(cs, f).unwrap();
+                // LCH hues come from Q16-rounded a/b, u/v
+                let tol = if matches!(cs, Colorspace::LCH | Colorspace::LCHab | Colorspace::LCHuv) {
+                    1e-4
+                } else {
+                    1e-6
+                };
                 for k in 0..3 {
                     assert!(
-                        (b[k] - s[k]).abs() < 1e-6,
+                        (b[k] - s[k]).abs() < tol,
                         "{:?} {:?} {:?} {:?}",
                         cs,
                         s,

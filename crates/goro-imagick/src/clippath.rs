@@ -25,7 +25,7 @@ fn resources(p: &[u8]) -> Vec<PathRes> {
         let nlen = p[j] as usize;
         let name = String::from_utf8_lossy(p.get(j + 1..j + 1 + nlen).unwrap_or(&[])).into_owned();
         j += 1 + nlen;
-        if (1 + nlen) % 2 != 0 {
+        if !(1 + nlen).is_multiple_of(2) {
             j += 1;
         }
         if j + 4 > p.len() {

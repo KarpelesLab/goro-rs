@@ -41,7 +41,7 @@ impl ChannelStats {
 /// exactly.
 fn sample_depth(v: u16) -> u32 {
     for d in 1..16u32 {
-        if (v as u64 * ((1u64 << d) - 1)) % 65535 == 0 {
+        if (v as u64 * ((1u64 << d) - 1)).is_multiple_of(65535) {
             return d;
         }
     }

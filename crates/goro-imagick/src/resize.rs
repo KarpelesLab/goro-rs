@@ -145,8 +145,8 @@ impl Filter {
             FilterType::Jinc => f(
                 Kernel::Jinc,
                 Window::Box,
-                3.2383154841662362,
-                3.2383154841662362,
+                3.238_315_484_166_236,
+                3.238_315_484_166_236,
                 1.0,
             ),
             FilterType::Sinc | FilterType::SincFast => sw(Window::Box, 4.0),
@@ -161,7 +161,7 @@ impl Filter {
             FilterType::Lanczos2Sharp => {
                 f(Kernel::Sinc, Window::Sinc, 2.0, 2.0, 0.9549963639785485)
             }
-            FilterType::Robidoux => cubic(0.37821575509399867, 0.31089212245300067),
+            FilterType::Robidoux => cubic(0.378_215_755_093_998_7, 0.310_892_122_453_000_7),
             FilterType::RobidouxSharp => cubic(0.2620145123990142, 0.3689927438004929),
             FilterType::Cosine => sw(Window::Cosine, 3.0),
             FilterType::CubicSpline => f(Kernel::CubicSpline, Window::Box, 2.0, 2.0, 1.0),

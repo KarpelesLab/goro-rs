@@ -1963,7 +1963,7 @@ pub fn photoshop_resource(p: &[u8], want: u16) -> Option<Vec<u8>> {
         let id = u16::from_be_bytes([p[i + 4], p[i + 5]]);
         let nlen = p[i + 6] as usize;
         let mut j = i + 7 + nlen;
-        if (1 + nlen) % 2 != 0 {
+        if !(1 + nlen).is_multiple_of(2) {
             j += 1;
         }
         let size = u32::from_be_bytes(p.get(j..j + 4)?.try_into().ok()?) as usize;

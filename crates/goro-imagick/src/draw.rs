@@ -1250,11 +1250,13 @@ impl DrawingWand {
         for q in tile.pixels.chunks_exact_mut(4) {
             q.copy_from_slice(&[0, 0, 0, 0]);
         }
-        let mut sub = DrawingWand::default();
-        sub.clip_paths = self.clip_paths.clone();
-        sub.patterns = self.patterns.clone();
-        sub.font_resolution = self.font_resolution;
-        sub.primitives = pattern.2.clone();
+        let sub = DrawingWand {
+            clip_paths: self.clip_paths.clone(),
+            patterns: self.patterns.clone(),
+            font_resolution: self.font_resolution,
+            primitives: pattern.2.clone(),
+            ..Default::default()
+        };
         sub.render_onto(&mut tile)?;
         // the coverage of the shape
         let mut mp = p.clone();
