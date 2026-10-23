@@ -4479,66 +4479,73 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         vm.memory_check(alloc_size)?;
     }
 
-    // PHP's wordwrap algorithm (mirrors PHP's C implementation for multi-char breaks):
-    // 1. Detect existing break sequences in text and copy through.
-    // 2. For spaces: if line_len >= width, replace space with break.
-    // 3. For cut_long: if line_len >= width and no valid space, force cut.
-    // 4. For word boundary: if line_len >= width and valid space, break at lastspace.
+    let bytes_len = bytes.len() as i64;
+    let brk_len = brk_bytes.len() as i64;
+    let mut laststart: i64 = 0;
+    let mut lastspace: i64 = 0;
 
+    // A single-character break without cutting: breaks replace spaces in
+    // place (PHP_FUNCTION(wordwrap)'s special case).
+    if brk_len == 1 && !cut_long {
+        let mut out = bytes.to_vec();
+        for current in 0..bytes_len {
+            let ch = bytes[current as usize];
+            if ch == brk_bytes[0] {
+                laststart = current + 1;
+                lastspace = current + 1;
+            } else if ch == b' ' {
+                if current - laststart >= width {
+                    out[current as usize] = brk_bytes[0];
+                    laststart = current + 1;
+                }
+                lastspace = current;
+            } else if current - laststart >= width && laststart != lastspace {
+                out[lastspace as usize] = brk_bytes[0];
+                laststart = lastspace + 1;
+            }
+        }
+        return Ok(Value::String(PhpString::from_vec(out)));
+    }
+
+    // Multiple character line break or forced cut.
     let cap = bytes
         .len()
         .saturating_add(est_breaks.saturating_mul(brk_bytes.len()));
     let mut result = Vec::with_capacity(cap);
-    let mut laststart: i64 = 0;
-    let mut lastspace: i64 = 0;
     let mut current: i64 = 0;
-    let bytes_len = bytes.len() as i64;
-    let brk_len = brk_bytes.len() as i64;
-
     while current < bytes_len {
         let ch = bytes[current as usize];
-
-        // Check for existing break string in text
         if ch == brk_bytes[0]
-            && current + brk_len <= bytes_len
+            && current + brk_len < bytes_len
             && &bytes[current as usize..(current + brk_len) as usize] == brk_bytes
         {
-            // Copy everything from laststart through the break string
+            // An existing break: copy through it.
             result.extend_from_slice(&bytes[laststart as usize..(current + brk_len) as usize]);
-            current += brk_len;
-            laststart = current;
-            lastspace = current;
-            continue;
+            current += brk_len - 1;
+            laststart = current + 1;
+            lastspace = current + 1;
         } else if ch == b' ' {
             if current - laststart >= width {
-                // Line is long enough - break at this space (replace space with break)
                 result.extend_from_slice(&bytes[laststart as usize..current as usize]);
                 result.extend_from_slice(brk_bytes);
                 laststart = current + 1;
             }
             lastspace = current;
         } else if current - laststart >= width && cut_long && laststart >= lastspace {
-            // Force cut at current position (no valid space available)
             result.extend_from_slice(&bytes[laststart as usize..current as usize]);
             result.extend_from_slice(brk_bytes);
             laststart = current;
             lastspace = current;
-            // No `continue;` here — PHP's chk-- compensates for the chk++
-            // at the top of the loop, but we increment `current` at the
-            // bottom only, so leaving the fall-through keeps us advancing.
         } else if current - laststart >= width && laststart < lastspace {
-            // Break at last recorded space
             result.extend_from_slice(&bytes[laststart as usize..lastspace as usize]);
             result.extend_from_slice(brk_bytes);
             laststart = lastspace + 1;
             lastspace = laststart;
         }
-
         current += 1;
     }
-
-    // Append remaining
-    if laststart < bytes_len {
+    // Copy over any stragglers.
+    if laststart != current {
         result.extend_from_slice(&bytes[laststart as usize..]);
     }
 
