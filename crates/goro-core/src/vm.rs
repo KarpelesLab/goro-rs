@@ -17548,6 +17548,32 @@ impl Vm {
         arr
     }
 
+    /// `parent::getMessage()` (or `Exception::getCode()` from a subclass
+    /// method): Exception's / Error's internal method on `$this`, when the
+    /// named class is a Throwable the object is an instance of.
+    #[inline(never)]
+    fn parent_throwable_method(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        named_lower: &[u8],
+        method_lower: &[u8],
+    ) -> Option<Value> {
+        let obj_lower = obj.borrow().class_name.to_ascii_lowercase();
+        if obj_lower != named_lower && !self.class_extends(&obj_lower, named_lower) {
+            return None;
+        }
+        if method_lower == b"__wakeup"
+            && self
+                .throwable_builtin_method(obj, named_lower, b"getcode")
+                .is_some()
+        {
+            // (Exception::__wakeup() of an object whose properties were
+            // already checked by unserialize)
+            return Some(Value::Null);
+        }
+        self.throwable_builtin_method(obj, named_lower, method_lower)
+    }
+
     /// The internal methods of Exception / Error (final getters,
     /// getTraceAsString(), __toString()) called from internal code
     /// (call_user_func(), array_map(), ...).
@@ -36719,6 +36745,22 @@ impl Vm {
                                             )
                                         } else {
                                             None
+                                        };
+                                        // parent::getMessage() & co. (Exception's
+                                        // internal methods)
+                                        let spl_result = match spl_result {
+                                            None if call.named_args.is_empty()
+                                                && (call.args.is_empty()
+                                                    || (args_skip_first
+                                                        && call.args.len() == 1)) =>
+                                            {
+                                                self.parent_throwable_method(
+                                                    obj,
+                                                    &class_lower,
+                                                    &method_lower,
+                                                )
+                                            }
+                                            r => r,
                                         };
                                         if let Some(result) = spl_result {
                                             self.write_operand(
