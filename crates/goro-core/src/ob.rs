@@ -5,6 +5,9 @@
 //! per-level handler metadata lives in `Vm::ob_handlers`, index-aligned with
 //! `ob_stack`.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::string::PhpString;
 use crate::value::Value;
 use crate::vm::{Vm, VmError};
@@ -242,9 +245,50 @@ impl Vm {
     /// php_output_deactivate: drop every handler without running it.
     pub fn ob_deactivate(&mut self) {
         self.ob_stack.clear();
-        self.ob_handlers.clear();
+        let handlers = std::mem::take(&mut self.ob_handlers);
         self.ob_running = None;
         self.ob_deactivated = true;
+        // A handler object that only the output layer held is destroyed
+        // with it, also while it is running (its call does not hold it).
+        let mut dying = Vec::new();
+        for h in &handlers {
+            if let ObKind::User(cb) = &h.kind {
+                if let Some(o) = Self::ob_handler_object(cb) {
+                    let running = self
+                        .ob_handler_calls
+                        .iter()
+                        .find(|(w, _)| w.upgrade().is_some_and(|r| Rc::ptr_eq(&r, &o)));
+                    let listed = o.borrow().dtor_listed.get() as usize;
+                    if let Some(&(_, base)) = running {
+                        // (the handler entry, the destructor list)
+                        if base <= 1 + listed {
+                            dying.push(o);
+                        }
+                    }
+                }
+            }
+        }
+        drop(handlers);
+        for o in dying {
+            if !matches!(o.borrow().get_property(b"__destructed"), Value::True) {
+                self.gc_run_destructor(&o);
+            }
+        }
+    }
+
+    /// The object a user output handler callable holds (`$obj`,
+    /// `[$obj, 'method']`).
+    fn ob_handler_object(cb: &Value) -> Option<Rc<RefCell<crate::object::PhpObject>>> {
+        match cb {
+            Value::Object(o) if !o.borrow().class_name.eq_ignore_ascii_case(b"closure") => {
+                Some(o.clone())
+            }
+            Value::Array(a) => match a.borrow().get(&crate::array::ArrayKey::Int(0)) {
+                Some(Value::Object(o)) => Some(o.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// php_output_handler_append. Returns true if the data was merely stored.
@@ -304,7 +348,27 @@ impl Vm {
                 // ran the handler.
                 let call_line = self.current_line;
                 let no_frame = self.ob_final_flush;
+                // (its holders apart from `cb`, a copy of the handler's, and `o`)
+                let held = Self::ob_handler_object(&cb)
+                    .map(|o| (Rc::downgrade(&o), Rc::strong_count(&o).saturating_sub(2)));
+                let pushed = held.is_some();
+                if let Some(h) = held {
+                    self.ob_handler_calls.push(h);
+                }
+                // (called from the user code whose output it handles; from a
+                // builtin, an [internal function] frame)
+                let saved_ucf = if no_frame || self.in_builtin_frame() {
+                    None
+                } else {
+                    Some(self.ucf_call_line.replace(call_line))
+                };
                 let r = self.call_callback(&cb, &args);
+                if let Some(s) = saved_ucf {
+                    self.ucf_call_line = s;
+                }
+                if pushed {
+                    self.ob_handler_calls.pop();
+                }
                 // An exception thrown without an executing frame (the final
                 // flush) is fatal (zend_throw_exception_internal): its
                 // report, raised inside the handler, is lost and the flush

@@ -1174,6 +1174,9 @@ pub struct Vm {
     /// Output handler metadata, index-aligned with `ob_stack` (see ob.rs)
     pub ob_handlers: Vec<crate::ob::ObHandler>,
     pub ob_running: Option<u64>,
+    /// User output handlers being called: the handler's object and how
+    /// many holders it had as the call started (see ob_deactivate()).
+    pub(crate) ob_handler_calls: Vec<(std::rc::Weak<RefCell<PhpObject>>, usize)>,
     pub ob_next_id: u64,
     pub ob_deactivated: bool,
     /// php_output_end_all() at request shutdown, without an executing
@@ -1831,6 +1834,7 @@ impl Vm {
             ob_stack: Vec::new(),
             ob_handlers: Vec::new(),
             ob_running: None,
+            ob_handler_calls: Vec::new(),
             ob_next_id: 0,
             ob_deactivated: false,
             ob_final_flush: false,
