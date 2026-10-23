@@ -21258,7 +21258,22 @@ impl Vm {
                     );
                     if next != ip {
                         ip = next;
-                        continue 'exec;
+                        // The opcode the run stopped at takes the general
+                        // path at once: a run of fast opcodes sets none of
+                        // the states checked above (exit, bailout, a
+                        // comparison's recursion, an exception), and checks
+                        // memory_limit and interrupts itself (it stops for
+                        // them: they are handled above). A frame tracking
+                        // its opcodes goes round.
+                        if track
+                            || ip >= op_array.ops.len()
+                            || crate::value::memory_exhausted() != 0
+                            || crate::value::VM_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed)
+                            || self.current_exception.is_some()
+                            || self.error_handler_threw
+                        {
+                            continue 'exec;
+                        }
                     }
                     fast_tried = true;
                 }
