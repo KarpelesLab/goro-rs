@@ -32,14 +32,25 @@ pub fn diff_days(one: &Time, two: &Time) -> i64 {
         };
         let earliest_time = hmsf_to_decimal_hour(earliest.h, earliest.i, earliest.s, earliest.us);
         let latest_time = hmsf_to_decimal_hour(latest.h, latest.i, latest.s, latest.us);
-        let mut days = (epoch_days_from_time(one) - epoch_days_from_time(two)).abs();
+        // C stores the llabs() result into an int before adjusting it
+        let mut days = (epoch_days_from_time(one).wrapping_sub(epoch_days_from_time(two)))
+            .wrapping_abs() as i32;
         if latest_time < earliest_time && days > 0 {
             days -= 1;
         }
-        // C stores into an int
-        days as i32 as i64
+        days as i64
     } else {
-        (((one.sse - two.sse) as f64).floor() / 86400.0).abs() as i32 as i64
+        double_to_int(((one.sse.wrapping_sub(two.sse) as f64).floor() / 86400.0).abs()) as i64
+    }
+}
+
+/// C's double -> int conversion as done by x86 cvttsd2si: truncation, with
+/// NaN and out-of-range values producing INT_MIN.
+fn double_to_int(d: f64) -> i32 {
+    if d.is_nan() || d >= 2147483648.0 || d <= -2147483649.0 {
+        i32::MIN
+    } else {
+        d as i32
     }
 }
 
