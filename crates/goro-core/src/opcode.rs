@@ -673,6 +673,15 @@ impl OpArray {
     /// auto-globals, internal code, a closure).
     #[inline]
     pub(crate) fn lean_kind(&self) -> u8 {
+        match self.lean_kind.0.get() {
+            Some(k) => *k,
+            None => self.lean_kind_init(),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn lean_kind_init(&self) -> u8 {
         *self.lean_kind.0.get_or_init(|| {
             let plain = self.return_type.is_none()
                 && !self.returns_by_ref

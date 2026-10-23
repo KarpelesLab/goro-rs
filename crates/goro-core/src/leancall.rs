@@ -89,13 +89,10 @@ fn drops_quietly(v: &Value) -> bool {
     }
 }
 
-/// Release the values of `slots`, as a frame's end does: the temporaries
-/// (from `ncv` on), then the variables, each in order.
+/// Release the values of `slots` in order, as a frame's end does.
 #[inline]
-fn release_slots(slots: &mut Vec<Value>, ncv: usize) {
-    let n = ncv.min(slots.len());
-    let (cvs, tmps) = slots.split_at_mut(n);
-    for v in tmps.iter_mut().chain(cvs.iter_mut()) {
+fn release_slots(slots: &mut Vec<Value>) {
+    for v in slots.iter_mut() {
         if !matches!(
             v,
             Value::Undef
@@ -129,20 +126,6 @@ impl Vm {
             && self.stack_configured
             && self.builtin_frames_synced()
             && crate::stack::has_room()
-    }
-
-    /// Whether lean calls of `f` are tried (see CvNameInfo::lean_score).
-    #[inline]
-    fn lean_tried(f: &OpArray) -> bool {
-        let info = f.cv_name_info();
-        let score = info.lean_score.get();
-        if score < 0 {
-            // (a function whose calls kept being handed over is tried
-            // again after a while)
-            info.lean_score.set(score + 1);
-            return false;
-        }
-        true
     }
 
     /// The user function the top pending call was set up for, when it may
@@ -214,16 +197,31 @@ impl Vm {
     }
 
     /// Whether the top pending call was set up for a user function or an
-    /// instance method: it may be a lean call's (see lean_target()).
-    #[inline(always)]
+    /// instance method that may be a lean call's (lean_target() checks the
+    /// rest), whose calls are tried: one whose calls kept being handed
+    /// over is tried again after a while (see CvNameInfo::lean_score).
+    #[inline]
     pub(crate) fn lean_candidate(&self) -> bool {
-        self.pending_calls.last().is_some_and(|c| {
-            let t = &c.target;
-            t.user.is_some()
-                && !t.closure
-                && t.forward.is_none()
-                && !matches!(t.method, Some((_, true)))
-        })
+        let Some(c) = self.pending_calls.last() else {
+            return false;
+        };
+        let t = &c.target;
+        let Some(f) = t.user.as_ref() else {
+            return false;
+        };
+        if t.closure || t.forward.is_some() || matches!(t.method, Some((_, true))) {
+            return false;
+        }
+        if f.lean_kind() == 0 {
+            return false;
+        }
+        let info = f.cv_name_info();
+        let score = info.lean_score.get();
+        if score < 0 {
+            info.lean_score.set(score + 1);
+            return false;
+        }
+        true
     }
 
     /// The top pending call, taken for a lean call of its function.
@@ -251,9 +249,6 @@ impl Vm {
         let Some((f, sep)) = self.lean_target(false) else {
             return false;
         };
-        if !Self::lean_tried(f) {
-            return false;
-        }
         let f = Rc::clone(f);
         if !self.lean_ready(op, tmps) {
             return false;
@@ -262,7 +257,7 @@ impl Vm {
         let nargs = call.args.len();
         // The parameters move to the callee's variables; `$this` stays
         // (DO_FCALL's fast path, move_args()).
-        let mut slots = self.take_values(f.cv_names.len() + f.temp_count as usize);
+        let mut slots = self.take_values(f.cv_names.len());
         let keep = usize::from(sep.is_some());
         if keep == 1 {
             slots[0] = call.args[0].clone();
@@ -340,15 +335,12 @@ impl Vm {
                 return None;
             }
         }
-        if !Self::lean_tried(f) {
-            return None;
-        }
         let f = Rc::clone(f);
         if !self.lean_ready(fcall, tmps) {
             return None;
         }
         let call = self.pop_lean_call();
-        let mut slots = self.take_values(f.cv_names.len() + f.temp_count as usize);
+        let mut slots = self.take_values(f.cv_names.len());
         if base == 1 {
             slots[0] = call.args[0].clone();
         }
@@ -371,9 +363,9 @@ impl Vm {
     }
 
     /// The lean call of `f` made by the DO_FCALL at `ip` of `op_array`,
-    /// its first `nargs` variables (of `slots`: its variables, then its
-    /// temporaries) set to the arguments. True: the call was made, its
-    /// result stored in `tmps`. False: it was handed over.
+    /// the first `nargs` of its variables `slots` set to the arguments.
+    /// True: the call was made, its result stored in `tmps`. False: it was
+    /// handed over.
     #[allow(clippy::too_many_arguments)]
     fn lean_run(
         &mut self,
@@ -387,7 +379,6 @@ impl Vm {
         tmps: &mut [Value],
     ) -> bool {
         let op = &op_array.ops[ip];
-        let ncv = f.cv_names.len();
         // (what DO_FCALL's fast path does with the call)
         self.last_call_by_ref = false;
         // By-value array parameters get their own copy (nothing of the call
@@ -402,7 +393,7 @@ impl Vm {
             }
         }
         // The frame's room on the VM stack (execute_op_array_frame()).
-        let frame_size = slots.len() * 16 + crate::stack::CALL_FRAME_SIZE;
+        let frame_size = (slots.len() + f.temp_count as usize) * 16 + crate::stack::CALL_FRAME_SIZE;
         let vm_frame = match crate::stack::vm_push(frame_size) {
             Ok(fr) => Some(crate::stack::VmFrameGuard(fr)),
             // (memory_limit: the general handler reports it)
@@ -410,6 +401,7 @@ impl Vm {
         };
         let depth = self.call_depth + self.lean_depth;
         let mut fe = self.foreach_pool.pop().unwrap_or_else(new_foreach_state);
+        let mut ctmps = self.take_values(f.temp_count as usize);
         let stop = if vm_frame.is_none() {
             0
         } else {
@@ -428,7 +420,6 @@ impl Vm {
                 None => self.class_scope_stack.push(Vec::new()),
             }
             self.lean_depth += 1;
-            let (cvs, ctmps) = slots.split_at_mut(ncv);
             let ForeachState {
                 positions,
                 snap,
@@ -442,8 +433,8 @@ impl Vm {
             let stop = self.run_fast_ops(
                 &f,
                 0,
-                cvs,
-                ctmps,
+                &mut slots,
+                &mut ctmps,
                 false,
                 true,
                 no_release,
@@ -473,10 +464,7 @@ impl Vm {
         };
         let unused = matches!(op.result, OperandType::Unused);
         let result = match vm_frame {
-            Some(_) => {
-                let (cvs, ctmps) = slots.split_at_mut(ncv);
-                self.lean_return(&f, stop, cvs, ctmps, unused)
-            }
+            Some(_) => self.lean_return(&f, stop, &slots, &mut ctmps, unused),
             None => None,
         };
         let Some(result) = result else {
@@ -484,13 +472,11 @@ impl Vm {
             drop(vm_frame);
             let info = f.cv_name_info();
             info.lean_score
-                .set(info.lean_score.get().saturating_sub(4).max(-64));
+                .set(info.lean_score.get().saturating_sub(16).max(-256));
             // (the arguments, moved: as many as were sent)
             if call.args.len() < nargs {
                 call.args.resize_with(nargs, || Value::Undef);
             }
-            let mut ctmps = self.take_values(0);
-            ctmps.extend(slots.drain(ncv..));
             self.lean_resume.push(LeanResume {
                 caller: op_array,
                 caller_ip: ip,
@@ -516,8 +502,11 @@ impl Vm {
         if self.foreach_pool.len() < 16 {
             self.foreach_pool.push(fe);
         }
-        crate::gc::release_frame(&slots[..ncv]);
-        release_slots(&mut slots, ncv);
+        crate::gc::release_frame(&slots);
+        // (the temporaries, then the variables)
+        release_slots(&mut ctmps);
+        release_slots(&mut slots);
+        self.recycle_values(ctmps);
         self.recycle_values(slots);
         if !crate::gc::release_quiet() {
             // (frees memory only: no destructor is listed, nothing was
