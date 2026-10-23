@@ -1804,10 +1804,25 @@ fn version_compare_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(if r { Value::True } else { Value::False })
 }
 
-fn floatval_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Double(
-        args.first().unwrap_or(&Value::Null).to_double(),
-    ))
+/// floatval(): zval_get_double(); an object without a numeric cast warns
+/// and counts as 1.0.
+fn floatval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let v = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    if let Value::Object(obj) = &v {
+        if let Some(d) = vm.object_to_double.and_then(|h| h(&v)) {
+            return Ok(Value::Double(d));
+        }
+        if let Some(c) = goro_core::value::native_cast(obj, 2) {
+            return Ok(Value::Double(c.to_double()));
+        }
+        let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+        vm.emit_warning(&format!(
+            "Object of class {} could not be converted to float",
+            class_name
+        ));
+        return Ok(Value::Double(1.0));
+    }
+    Ok(Value::Double(v.to_double()))
 }
 
 fn fpow_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

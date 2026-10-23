@@ -42,8 +42,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"is_array", is_array);
     vm.register_function(b"is_numeric", is_numeric);
     vm.register_function(b"intval", intval);
-    vm.register_function(b"floatval", floatval);
-    vm.register_function(b"doubleval", floatval);
     vm.register_function(b"strval", strval);
     vm.register_function(b"boolval", boolval);
     vm.register_function(b"settype", settype);
@@ -312,12 +310,6 @@ fn parse_int_str(s: &str, radix: u32) -> i64 {
         }
     }
     result
-}
-
-fn floatval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::Double(
-        args.first().unwrap_or(&Value::Null).to_double(),
-    ))
 }
 
 fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
