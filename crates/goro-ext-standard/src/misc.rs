@@ -310,6 +310,9 @@ final class StreamBucket {
     vm.register_function(b"range", range_fn);
     vm.register_function(b"compact", compact);
     vm.register_function(b"current", current);
+    vm.register_function(b"pos", current);
+    vm.register_function(b"getrusage", getrusage_fn);
+    vm.register_function(b"sys_getloadavg", sys_getloadavg_fn);
     vm.register_function(b"next", next_fn);
     vm.register_function(b"prev", prev_fn);
     vm.register_function(b"reset", reset_fn);
@@ -3347,6 +3350,60 @@ fn in_array(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         message: msg,
         line: vm.current_line,
     })
+}
+
+/// PHP_FUNCTION(getrusage) (ext/standard/microtime.c)
+fn getrusage_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let who = if args.first().map(|v| v.to_long()) == Some(1) {
+        libc::RUSAGE_CHILDREN
+    } else {
+        libc::RUSAGE_SELF
+    };
+    // SAFETY: getrusage() fills the zeroed struct it is given.
+    let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrusage(who, &mut u) } == -1 {
+        return Ok(Value::False);
+    }
+    let mut arr = PhpArray::new();
+    for (k, v) in [
+        ("ru_oublock", u.ru_oublock as i64),
+        ("ru_inblock", u.ru_inblock as i64),
+        ("ru_msgsnd", u.ru_msgsnd as i64),
+        ("ru_msgrcv", u.ru_msgrcv as i64),
+        ("ru_maxrss", u.ru_maxrss as i64),
+        ("ru_ixrss", u.ru_ixrss as i64),
+        ("ru_idrss", u.ru_idrss as i64),
+        ("ru_minflt", u.ru_minflt as i64),
+        ("ru_majflt", u.ru_majflt as i64),
+        ("ru_nsignals", u.ru_nsignals as i64),
+        ("ru_nvcsw", u.ru_nvcsw as i64),
+        ("ru_nivcsw", u.ru_nivcsw as i64),
+        ("ru_nswap", u.ru_nswap as i64),
+        ("ru_utime.tv_usec", u.ru_utime.tv_usec as i64),
+        ("ru_utime.tv_sec", u.ru_utime.tv_sec as i64),
+        ("ru_stime.tv_usec", u.ru_stime.tv_usec as i64),
+        ("ru_stime.tv_sec", u.ru_stime.tv_sec as i64),
+    ] {
+        arr.set(
+            ArrayKey::String(PhpString::from_bytes(k.as_bytes())),
+            Value::Long(v),
+        );
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+/// PHP_FUNCTION(sys_getloadavg)
+fn sys_getloadavg_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut load = [0f64; 3];
+    // SAFETY: getloadavg() writes at most 3 doubles.
+    if unsafe { libc::getloadavg(load.as_mut_ptr(), 3) } == -1 {
+        return Ok(Value::False);
+    }
+    let mut arr = PhpArray::new();
+    for l in load {
+        arr.push(Value::Double(l));
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
 /// zend_fcall_info_init() failure of a zpp `f` parameter: TypeError
