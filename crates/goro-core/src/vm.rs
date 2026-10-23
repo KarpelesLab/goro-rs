@@ -6754,8 +6754,10 @@ impl Vm {
     #[inline]
     pub fn maybe_recycle_object_id(&mut self, val: &Value) {
         if let Value::Object(rc) = val {
-            if Rc::strong_count(rc) == 1 {
-                self.free_object_ids.push(rc.borrow().object_id);
+            // (never the sentinel zero id of handle-less internal objects)
+            let id = rc.borrow().object_id;
+            if Rc::strong_count(rc) == 1 && id != 0 {
+                self.free_object_ids.push(id);
             }
         }
     }

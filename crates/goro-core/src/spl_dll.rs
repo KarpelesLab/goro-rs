@@ -666,8 +666,19 @@ impl Vm {
 
     /// Foreach over a DLL whose class does not override the iterator
     /// methods: an independent cursor (spl_dllist_get_iterator).
+    /// (The handle foreach takes for the iterator is allocated by foreach.)
     pub(crate) fn dll_new_iterator(&mut self, obj: &Rc<RefCell<PhpObject>>) -> Value {
-        let it = self.spl_instantiate(b"InternalIterator");
+        self.dll_new_iterator_at(obj, false)
+    }
+
+    /// spl_dllist_get_iterator(); `handle`: the iterator object takes an
+    /// object handle itself.
+    pub fn dll_new_iterator_at(&mut self, obj: &Rc<RefCell<PhpObject>>, handle: bool) -> Value {
+        let id = if handle { self.alloc_object_id() } else { 0 };
+        let it = Rc::new(RefCell::new(PhpObject::new(
+            b"InternalIterator".to_vec(),
+            id,
+        )));
         let c = Self::dll_obj_cursor(obj);
         let flags = dll_flags(self, obj) & IT_MASK;
         {
@@ -727,7 +738,7 @@ impl Vm {
     }
 
     /// Whether foreach should use the internal DLL iterator for this object.
-    pub(crate) fn dll_uses_internal_iterator(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+    pub fn dll_uses_internal_iterator(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         let cl = obj_class_lower(obj);
         if self.spl_find_base(&cl, &[b"spldoublylinkedlist"]).is_none() {
             return false;

@@ -402,6 +402,26 @@ impl Vm {
         prop(obj, b"__spl_inner")
     }
 
+    /// What the inner zend_object_iterator walks: the inner iterator, or
+    /// the independent cursor of an inner SplDoublyLinkedList.
+    fn dit_iter(obj: &Rc<RefCell<PhpObject>>) -> Value {
+        match prop(obj, b"__spl_inner_h") {
+            Value::Object(h) if h.borrow().has_property(b"__spl_dll_target") => Value::Object(h),
+            _ => Self::dit_inner(obj),
+        }
+    }
+
+    /// inner.ce->get_iterator(): the handle of the inner iterator (an
+    /// SplDoublyLinkedList gets its own cursor).
+    fn spl_inner_it_handle(&mut self, inner: &Value) -> Value {
+        if let Value::Object(o) = inner {
+            if self.dll_uses_internal_iterator(o) {
+                return self.dll_new_iterator_at(o, true);
+            }
+        }
+        self.spl_it_handle()
+    }
+
     fn dit_has_cur(obj: &Rc<RefCell<PhpObject>>) -> bool {
         bprop(obj, b"__spl_has_cur")
     }
@@ -422,14 +442,14 @@ impl Vm {
     fn dit_rewind(&mut self, obj: &Rc<RefCell<PhpObject>>) {
         Self::dit_free(obj);
         set_prop(obj, b"__spl_pos", Value::Long(0));
-        let inner = Self::dit_inner(obj);
+        let inner = Self::dit_iter(obj);
         if !matches!(inner, Value::Null | Value::Undef) {
             self.it_rewind(&inner);
         }
     }
 
     fn dit_valid(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
-        let inner = Self::dit_inner(obj);
+        let inner = Self::dit_iter(obj);
         if matches!(inner, Value::Null | Value::Undef) {
             return false;
         }
@@ -442,7 +462,7 @@ impl Vm {
             if self.exc() {
                 return false;
             }
-            let inner = Self::dit_inner(obj);
+            let inner = Self::dit_iter(obj);
             let data = self.it_current(&inner);
             if self.exc() {
                 return false;
@@ -467,7 +487,7 @@ impl Vm {
         if do_free {
             Self::dit_free(obj);
         }
-        let inner = Self::dit_inner(obj);
+        let inner = Self::dit_iter(obj);
         if matches!(inner, Value::Null | Value::Undef) {
             if !do_free {
                 self.spl_throw(
@@ -511,7 +531,7 @@ impl Vm {
             if self.exc() {
                 return;
             }
-            let inner = Self::dit_inner(obj);
+            let inner = Self::dit_iter(obj);
             self.it_next(&inner);
         }
         Self::dit_free(obj);
@@ -706,8 +726,8 @@ impl Vm {
                     return false;
                 }
             }
+            let h = self.spl_inner_it_handle(&it);
             set_prop(obj, b"__spl_inner", it);
-            let h = self.spl_it_handle();
             set_prop(obj, b"__spl_inner_h", h);
             self.dit_rewind(obj);
             true
@@ -1040,7 +1060,7 @@ impl Vm {
             _ => {}
         }
         // inner.iterator = inner.ce->get_iterator()
-        let h = self.spl_it_handle();
+        let h = self.spl_inner_it_handle(&inner);
         set_prop(obj, b"__spl_inner_h", h);
         set_prop(obj, b"__spl_inner", inner);
         set_prop(obj, b"__spl_dit", Value::Long(dit));
@@ -1414,11 +1434,11 @@ impl Vm {
             },
             (b"norewinditerator", b"rewind") => Value::Null,
             (b"norewinditerator", b"valid") => {
-                let inner = Self::dit_inner(obj);
+                let inner = Self::dit_iter(obj);
                 bv(self.it_valid(&inner))
             }
             (b"norewinditerator", b"key") => {
-                let inner = Self::dit_inner(obj);
+                let inner = Self::dit_iter(obj);
                 self.it_key(&inner)
             }
             (b"norewinditerator", b"current") => {
@@ -1427,7 +1447,7 @@ impl Vm {
                 if obj.borrow().has_property(b"__spl_nr_cur") {
                     return Some(prop(obj, b"__spl_nr_cur"));
                 }
-                let inner = Self::dit_inner(obj);
+                let inner = Self::dit_iter(obj);
                 let v = self.it_current(&inner).deref();
                 let user_current = match &inner {
                     Value::Object(io) => self
@@ -1447,7 +1467,7 @@ impl Vm {
                 obj.borrow_mut()
                     .properties
                     .retain(|(k, _)| k != b"__spl_nr_cur");
-                let inner = Self::dit_inner(obj);
+                let inner = Self::dit_iter(obj);
                 self.it_next(&inner);
                 Value::Null
             }

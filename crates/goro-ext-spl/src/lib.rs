@@ -317,7 +317,8 @@ fn iterator_to_array_impl(
                 return r;
             }
             let _handle = take_handle.then(|| vm.internal_iterator_handle());
-            iterator_to_array_iterate(vm, val, use_keys)
+            let it = object_iterator(vm, obj).unwrap_or_else(|| val.clone());
+            iterator_to_array_iterate(vm, &it, use_keys)
         }
         Some(g @ Value::Generator(_)) => {
             let _handle = take_handle.then(|| vm.internal_iterator_handle());
@@ -328,6 +329,13 @@ fn iterator_to_array_impl(
         }
         _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     }
+}
+
+/// The independent zend_object_iterator a class's get_iterator creates
+/// (SplDoublyLinkedList: its own cursor), when it is not the object itself.
+fn object_iterator(vm: &mut Vm, obj: &Rc<RefCell<goro_core::object::PhpObject>>) -> Option<Value> {
+    vm.dll_uses_internal_iterator(obj)
+        .then(|| vm.dll_new_iterator_at(obj, false))
 }
 
 /// spl_iterator_apply() with spl_iterator_to_array_apply(): walk the
@@ -481,6 +489,11 @@ fn iterator_count_iterate(vm: &mut Vm, resolved: Option<&Value>) -> Result<Value
         Some(Value::Array(arr)) => Ok(Value::Long(arr.borrow().len() as i64)),
         Some(it @ (Value::Object(_) | Value::Generator(_))) => {
             // spl_iterator_apply() with spl_iterator_count_apply()
+            let own = match it {
+                Value::Object(o) => object_iterator(vm, o),
+                _ => None,
+            };
+            let it = own.as_ref().unwrap_or(it);
             let mut count: i64 = 0;
             if let Value::Generator(_) = it {
                 if !vm.generator_traverse_start(it) {
