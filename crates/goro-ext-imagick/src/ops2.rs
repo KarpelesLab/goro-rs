@@ -766,47 +766,21 @@ fn clip_path_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
     })
 }
 
-/// RemapImage(): every pixel takes the nearest colour of the reference
-/// image's palette (no dithering yet).
+/// RemapImage(): every pixel takes a colour of the reference image,
+/// dithered as asked (Undefined dithers as Floyd-Steinberg).
 fn remap_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "zl", args)?;
     let d = d_(o);
     not_empty(vm, &d)?;
     let other = other_imagick(vm, f, 1, &a[0])?;
-    let mut palette: Vec<[u16; 3]> = {
-        let w = other.wand.borrow();
-        let r = w.image().unwrap();
-        let mut seen = std::collections::HashSet::new();
-        r.pixels
-            .chunks_exact(4)
-            .map(|p| [p[0], p[1], p[2]])
-            .filter(|p| seen.insert(*p))
-            .take(65536)
-            .collect()
+    let reference = other.wand.borrow().image().unwrap().clone();
+    let method = match a[1].long_or(0) {
+        1 => goro_imagick::quantize::Dither::None,
+        2 => goro_imagick::quantize::Dither::Riemersma,
+        _ => goro_imagick::quantize::Dither::FloydSteinberg,
     };
-    if palette.is_empty() {
-        palette.push([0, 0, 0]);
-    }
     image_op(vm, &d, "Unable to remap image", |i| {
-        let mut cache = std::collections::HashMap::new();
-        for p in i.pixels.chunks_exact_mut(4) {
-            let key = [p[0], p[1], p[2]];
-            let best = *cache.entry(key).or_insert_with(|| {
-                *palette
-                    .iter()
-                    .min_by_key(|q| {
-                        (0..3)
-                            .map(|c| {
-                                let x = q[c] as i64 - key[c] as i64;
-                                (x * x) as u64
-                            })
-                            .sum::<u64>()
-                    })
-                    .unwrap()
-            });
-            p[..3].copy_from_slice(&best);
-        }
-        i.colors = None;
+        goro_imagick::quantize::remap(i, &reference, method);
         Ok(())
     })
 }

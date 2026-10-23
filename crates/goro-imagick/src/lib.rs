@@ -43,6 +43,7 @@ pub mod interp;
 pub mod pixels;
 pub mod properties;
 pub mod pseudo;
+pub mod quantize;
 pub mod resize;
 pub mod segment;
 pub mod shear;
