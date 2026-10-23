@@ -2260,7 +2260,7 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                 // ArrayObject without STD_PROP_LIST exports its storage
                 // (get_properties_for(VAR_EXPORT): a wrapped object's or
                 // ArrayObject's table too).
-                vm.object_to_array(&obj)
+                vm.object_to_array(obj)
                     .borrow()
                     .iter()
                     .map(|(k, v)| {

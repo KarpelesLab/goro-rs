@@ -124,8 +124,7 @@ impl Vm {
                 // zend_dval_to_lval_safe()
                 let line = self.current_line;
                 let l = self.float_to_int_cast(d, line);
-                let fits =
-                    !(d >= 9.223_372_036_854_775_808e18 || d < -9.223_372_036_854_775_808e18);
+                let fits = !(d >= i64::MAX as f64 || d < i64::MIN as f64);
                 if l as f64 != d && fits {
                     let msg = format!(
                         "Implicit conversion from float {} to int loses precision",
