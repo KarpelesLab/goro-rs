@@ -53611,7 +53611,23 @@ impl Vm {
                     // is not fetched for writing).
                     if matches!(op.opcode, OpCode::PropertyGetIncDec) {
                         if let Some(msg) = self.readonly_incdec_error(&obj_val_raw, prop_name.as_bytes()) {
+                            // zend_post_incdec_overloaded_property(): the copy
+                            // read is incremented (a TypeError for an object or
+                            // array), then the write is refused.
+                            let inc = !matches!(
+                                op_array.ops.get(ip).map(|o| o.opcode),
+                                Some(OpCode::PostDecrement)
+                            );
+                            let cur = match &obj_val_raw {
+                                Value::Object(o) => o.borrow().get_property(prop_name.as_bytes()),
+                                _ => Value::Null,
+                            };
+                            let type_err = check_inc_dec_type(&cur, inc)
+                                .map(|m| self.create_exception(b"TypeError", &m, op.line));
                             let exc = self.create_exception(b"Error", &msg, op.line);
+                            if let Some(t) = type_err {
+                                Self::exception_set_previous(&exc, t);
+                            }
                             self.current_exception = Some(exc);
                             if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                                 pending_calls_catch_depth = Some(saved_pc);
