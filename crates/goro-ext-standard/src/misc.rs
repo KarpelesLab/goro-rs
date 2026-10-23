@@ -3752,62 +3752,23 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // the real instance).
         vm.maybe_run_lazy_init(&outer);
         let obj = vm.proxy_redirect(&outer);
-        let entries: Vec<(ArrayKey, Vec<u8>, Value)> = {
-            let obj_borrow = obj.borrow();
-            let class_name_lower: Vec<u8> = obj_borrow
-                .class_name
-                .iter()
-                .map(|b| b.to_ascii_lowercase())
-                .collect();
-            // Map property name -> (visibility, declaring_class_original_case)
-            let prop_info: std::collections::HashMap<
-                Vec<u8>,
-                (goro_core::object::Visibility, Vec<u8>),
-            > = if let Some(class_def) = vm.get_class_def(&class_name_lower) {
-                class_def
-                    .properties
-                    .iter()
-                    .map(|p| {
-                        let decl_lower = &p.declaring_class;
-                        let decl_display = vm
-                            .get_class_def(decl_lower)
-                            .map(|c| c.name.clone())
-                            .unwrap_or_else(|| p.declaring_class.clone());
-                        (p.name.clone(), (p.visibility, decl_display))
-                    })
-                    .collect()
-            } else {
-                std::collections::HashMap::new()
-            };
-            obj_borrow
-                .properties
-                .iter()
-                .filter(|(k, v)| {
-                    !k.starts_with(b"__spl_")
-                        && !k.starts_with(b"__reflection_")
-                        && !k.starts_with(b"__enum_")
-                        && !k.starts_with(b"__ctor_")
-                        && !k.starts_with(b"__clone_")
-                        && !k.starts_with(b"__destructed")
-                        && !k.starts_with(b"__fiber_")
-                        && !k.starts_with(b"__timestamp")
-                        && !k.starts_with(b"__lazy_")
-                        && !matches!(v, Value::Undef)
-                })
-                .map(|(k, v)| {
-                    let (vis, declaring_class) = prop_info
-                        .get(k)
-                        .map(|(v, dc)| (Some(*v), dc.as_slice()))
-                        .unwrap_or((None, &[]));
-                    let mangled_key = mangle_property_name(k, declaring_class, vis);
-                    (
-                        ArrayKey::String(PhpString::from_vec(mangled_key)),
-                        k.clone(),
-                        v.clone(),
-                    )
-                })
-                .collect()
-        };
+        // The property table (zend_std_get_properties): mangled keys, each
+        // with the storage key of its slot.
+        let entries: Vec<(ArrayKey, Vec<u8>, Value)> = vm
+            .object_prop_table(&obj)
+            .into_iter()
+            .map(|e| {
+                let storage = match &e.slot {
+                    Some(sl) => sl
+                        .moved_key
+                        .clone()
+                        .filter(|mk| obj.borrow().has_property(mk))
+                        .unwrap_or_else(|| sl.storage_key.clone()),
+                    None => e.key.clone(),
+                };
+                (ArrayKey::String(PhpString::from_vec(e.key)), storage, e.value)
+            })
+            .collect();
         let extra_data = args.get(2);
         return array_walk_object_entries(vm, callback, &entries, extra_data, &obj);
     }
@@ -19738,36 +19699,6 @@ fn getopt_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         *r.borrow_mut() = Value::Long(optind as i64);
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-/// Mangle a PHP object property name according to visibility.
-/// Private: \0DeclaringClass\0propName
-/// Protected: \0*\0propName
-/// Public: propName (unchanged)
-fn mangle_property_name(
-    name: &[u8],
-    declaring_class: &[u8],
-    visibility: Option<goro_core::object::Visibility>,
-) -> Vec<u8> {
-    match visibility {
-        Some(goro_core::object::Visibility::Private) => {
-            let mut mangled = Vec::with_capacity(1 + declaring_class.len() + 1 + name.len());
-            mangled.push(0);
-            mangled.extend_from_slice(declaring_class);
-            mangled.push(0);
-            mangled.extend_from_slice(name);
-            mangled
-        }
-        Some(goro_core::object::Visibility::Protected) => {
-            let mut mangled = Vec::with_capacity(3 + name.len());
-            mangled.push(0);
-            mangled.push(b'*');
-            mangled.push(0);
-            mangled.extend_from_slice(name);
-            mangled
-        }
-        _ => name.to_vec(),
-    }
 }
 
 // Stream stubs

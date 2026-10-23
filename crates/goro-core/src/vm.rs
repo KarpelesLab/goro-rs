@@ -3438,7 +3438,7 @@ impl Vm {
         let mut current = class_name_lower.to_vec();
         let mut last_private: Option<(crate::object::Visibility, Vec<u8>)> = None;
         for _ in 0..50 {
-            if let Some(class) = self.classes.get(&current) {
+            if let Some(class) = self.prop_view_class(&current) {
                 // Prefer non-private (public/protected) match at this level.
                 for prop in &class.properties {
                     if prop.name == prop_name
