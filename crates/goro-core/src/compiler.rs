@@ -1813,6 +1813,16 @@ impl Compiler {
         }
     }
 
+    /// A closure's body resolves names in the namespace and with the
+    /// imports of the code it is declared in.
+    #[inline(never)]
+    fn inherit_name_context(&self, c: &mut Compiler) {
+        c.current_namespace = self.current_namespace.clone();
+        c.use_map = self.use_map.clone();
+        c.use_function_map = self.use_function_map.clone();
+        c.use_const_map = self.use_const_map.clone();
+    }
+
     /// Resolve a function name. Rules similar to class names, but:
     /// - Uses use_function_map instead of use_map
     /// - Unqualified function calls fall back to global at RUNTIME (not compile time),
@@ -16587,6 +16597,7 @@ impl Compiler {
                 let is_generator = stmts_contain_yield(body);
 
                 let mut closure_compiler = Compiler::new();
+                self.inherit_name_context(&mut closure_compiler);
                 // A closure can be rebound to another scope: self::/parent::
                 // constants resolve at run time.
                 closure_compiler.keep_relative_class_names = true;
@@ -17011,6 +17022,7 @@ impl Compiler {
                 let display_name = self.closure_display_name(expr.span.line);
 
                 let mut closure_compiler = Compiler::new();
+                self.inherit_name_context(&mut closure_compiler);
                 closure_compiler.keep_relative_class_names = true;
                 closure_compiler.op_array.name = closure_name.clone();
                 closure_compiler.op_array.display_name = display_name;
