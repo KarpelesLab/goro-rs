@@ -3255,11 +3255,13 @@ impl Compiler {
         implements: &[Vec<u8>],
         body: &[ClassMember],
     ) -> bool {
-        // Enums, interfaces and traits keep prior (always-hoisted) behavior: goro's VM
-        // pre-registers these so forward references resolve, and deferring them caused
-        // regressions with no observable benefit (PHP's stricter ordering for enums is
-        // not what the deprecation/trait-binding tests exercise).
-        if modifiers.is_enum || modifiers.is_interface || modifiers.is_trait {
+        // Interfaces and traits keep the prior (always-hoisted) behavior.
+        // An enum implements UnitEnum (ZEND_ACC_IMPLEMENT_INTERFACES): it
+        // is never early-bound.
+        if modifiers.is_enum {
+            return false;
+        }
+        if modifiers.is_interface || modifiers.is_trait {
             return true;
         }
         if !implements.is_empty() {
