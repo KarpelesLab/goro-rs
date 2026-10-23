@@ -1245,8 +1245,11 @@ impl Vm {
                 }
             };
             // object_properties_load(): a property the class does not
-            // declare is a dynamic one.
-            if !obj.borrow().has_property(&name) && !self.spl_allows_dynamic_props(obj) {
+            // declare is a dynamic one (even when it already exists).
+            let declared = self
+                .find_instance_prop_def(&obj_class_lower(obj), &name)
+                .is_some();
+            if !declared && !self.spl_allows_dynamic_props(obj) {
                 let msg = format!(
                     "Creation of dynamic property {}::${} is deprecated",
                     crate::value::display_class_name(&obj.borrow().class_name),
