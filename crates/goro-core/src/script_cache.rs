@@ -373,7 +373,11 @@ mod shm {
                 let d = (base + at) as *mut u8;
                 std::ptr::copy_nonoverlapping((p.len() as u32).to_ne_bytes().as_ptr(), d, 4);
                 std::ptr::copy_nonoverlapping(p.as_ptr(), d.add(4), p.len());
-                std::ptr::copy_nonoverlapping(timestamp.to_ne_bytes().as_ptr(), d.add(4 + p.len()), 8);
+                std::ptr::copy_nonoverlapping(
+                    timestamp.to_ne_bytes().as_ptr(),
+                    d.add(4 + p.len()),
+                    8,
+                );
                 std::ptr::copy_nonoverlapping(size.to_ne_bytes().as_ptr(), d.add(12 + p.len()), 8);
             }
             used.store(at + len, Ordering::Relaxed);

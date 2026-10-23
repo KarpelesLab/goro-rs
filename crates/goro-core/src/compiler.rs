@@ -873,16 +873,6 @@ impl Compiler {
         }
     }
 
-    /// Compute the canonical PHP closure display name `{closure:<context>:<line>}`
-    /// from the current compiler scope (the *parent* of the closure being created).
-    ///
-    /// `<context>` is one of:
-    /// - The parent's already-set `op_array.display_name` (for nested closures inside another
-    ///   closure/arrow), with the outer `{closure:...}` braces kept intact, e.g.
-    ///   `{closure:{closure:Foo::bar():12}:13}`.
-    /// - `Class::method()` when compiling inside a class method.
-    /// - `function_name()` when compiling inside a global/namespaced function.
-    /// - The source file path otherwise (top-level script).
     /// The line of the opcodes compiled right after object expression
     /// `object` (CG(zend_lineno)): a closure leaves it at its closing line
     /// (zend_compile_func_decl() sets decl->end_lineno and does not restore
@@ -899,6 +889,16 @@ impl Compiler {
         }
     }
 
+    /// Compute the canonical PHP closure display name `{closure:<context>:<line>}`
+    /// from the current compiler scope (the *parent* of the closure being created).
+    ///
+    /// `<context>` is one of:
+    /// - The parent's already-set `op_array.display_name` (for nested closures inside another
+    ///   closure/arrow), with the outer `{closure:...}` braces kept intact, e.g.
+    ///   `{closure:{closure:Foo::bar():12}:13}`.
+    /// - `Class::method()` when compiling inside a class method.
+    /// - `function_name()` when compiling inside a global/namespaced function.
+    /// - The source file path otherwise (top-level script).
     fn closure_display_name(&self, line: u32) -> Vec<u8> {
         let mut name = b"{closure:".to_vec();
         // Nested closure: parent already has a display_name like `{closure:...}`.

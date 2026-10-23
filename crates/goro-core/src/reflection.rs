@@ -237,7 +237,8 @@ fn linked_method_prototype(vm: &Vm, class_lower: &[u8], m: &[u8], depth: u32) ->
     let pm = pce.and_then(|p| p.get_method(m));
     // The scope of `parent->common.prototype ?: parent`.
     let proto_of = |owner: &[u8], f: &crate::object::MethodDef| {
-        linked_method_prototype(vm, owner, m, depth + 1).unwrap_or_else(|| lower_name(&f.declaring_class))
+        linked_method_prototype(vm, owner, m, depth + 1)
+            .unwrap_or_else(|| lower_name(&f.declaring_class))
     };
     let mut proto = match (parent.as_deref(), pm) {
         // An inherited method is the parent's function, with its prototype.
@@ -5597,11 +5598,12 @@ pub fn reflection_method_method(
                 Value::String(s) => s.as_bytes().to_ascii_lowercase(),
                 _ => class_lower.clone(),
             };
-            let proto_class = linked_method_prototype(vm, &lookup, method_lower_bytes, 0).map(|p| {
-                rcls(vm, &p)
-                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
-                    .unwrap_or_else(|| String::from_utf8_lossy(&p).to_string())
-            });
+            let proto_class =
+                linked_method_prototype(vm, &lookup, method_lower_bytes, 0).map(|p| {
+                    rcls(vm, &p)
+                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                        .unwrap_or_else(|| String::from_utf8_lossy(&p).to_string())
+                });
             if let Some(proto) = proto_class {
                 let method_name = rcls(vm, &class_lower)
                     .and_then(|c| {

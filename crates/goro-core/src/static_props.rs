@@ -1332,8 +1332,7 @@ impl Vm {
                 thunk_marker_name(&p.default).is_some()
                     || matches!(&p.default, Value::String(s) if s.as_bytes().starts_with(GC))
             })
-            || c
-                .static_properties
+            || c.static_properties
                 .values()
                 .any(|v| thunk_marker_name(v).is_some())
     }
