@@ -356,7 +356,7 @@ fn sample_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 /// its size, and a LanczosSharp resize finishes. Colour profiles are kept
 /// and the other profiles removed, 8 bits deep, with the freedesktop.org
 /// thumbnail properties.
-fn thumbnail_of(i: &Image, w: i64, h: i64) -> MResult<Image> {
+pub(crate) fn thumbnail_of(i: &Image, w: i64, h: i64) -> MResult<Image> {
     if w <= 0 || h <= 0 {
         return Err(zero_size());
     }

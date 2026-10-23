@@ -1770,7 +1770,19 @@ fn montage_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
             ),
             None => (n.clamp(1, 4), n.div_ceil(4)),
         };
-        let (tw, th) = match goro_imagick::Geometry::parse(&geom) {
+        // each tile is the image thumbnailed to fit the geometry, centred
+        // in a cell with the geometry's offsets as spacing on every side
+        let pg = goro_imagick::Geometry::parse(&geom);
+        let (bx, by) = pg
+            .as_ref()
+            .map(|g| {
+                (
+                    g.x.unwrap_or(0.0).max(0.0) as usize,
+                    g.y.unwrap_or(0.0).max(0.0) as usize,
+                )
+            })
+            .unwrap_or((0, 0));
+        let (tw, th) = match &pg {
             Some(g) if g.width.is_some() => (
                 g.width.unwrap_or(120.0) as usize,
                 g.height.or(g.width).unwrap_or(120.0) as usize,
@@ -1780,24 +1792,25 @@ fn montage_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
                 w.images.iter().map(|i| i.rows).max().unwrap_or(1),
             ),
         };
+        let (cw, ch) = (tw + 2 * bx, th + 2 * by);
         let rows = n.div_ceil(cols);
-        let mut canvas = Image::new(cols * tw, rows * th, &PixelInfo::white());
+        let mut canvas = Image::new(cols * cw, rows * ch, &PixelInfo::white());
         for (k, img) in w.images.iter().enumerate() {
-            let (cx, cy) = ((k % cols) * tw, (k / cols) * th);
+            let (cx, cy) = ((k % cols) * cw, (k / cols) * ch);
             let g = goro_imagick::Geometry {
                 width: Some(tw as f64),
                 height: Some(th as f64),
                 ..Default::default()
             };
             let (nw, nh) = g.meta_size(img.columns, img.rows);
-            let t = transform::resize(img, nw, nh, FilterType::Undefined)
-                .unwrap_or_else(|_| img.clone());
+            let t =
+                crate::ops::thumbnail_of(img, nw as i64, nh as i64).unwrap_or_else(|_| img.clone());
             composite_image(
                 &mut canvas,
                 &t,
                 CompositeOp::Over,
-                (cx + (tw - nw.min(tw)) / 2) as i64,
-                (cy + (th - nh.min(th)) / 2) as i64,
+                (cx + bx + (tw - t.columns.min(tw)) / 2) as i64,
+                (cy + by + (th - t.rows.min(th)) / 2) as i64,
                 &ComposeArgs::default(),
             );
         }
