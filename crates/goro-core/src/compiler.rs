@@ -18274,7 +18274,12 @@ impl Compiler {
                             | ExprKind::DynamicStaticPropertyAccess { .. } => OperandType::Tmp(
                                 self.emit_static_prop_fetch(OpCode::StaticPropGetRef, value)?,
                             ),
-                            _ => self.compile_expr(value)?,
+                            _ => {
+                                let v = self.compile_expr(value)?;
+                                // (a by-ref function hands out its reference)
+                                self.mark_ref_call(&v);
+                                v
+                            }
                         };
                         let obj = self.compile_obj_write_base(object)?;
                         let name = self.compile_property_name(property)?;
@@ -18536,6 +18541,7 @@ impl Compiler {
                             ),
                             _ => {
                                 let v = self.compile_expr(value)?;
+                                self.mark_ref_call(&v);
                                 self.emit_assign_ref_call_notice(value, expr.span.line);
                                 v
                             }
