@@ -2218,36 +2218,54 @@ fn add_noise_image_with_attenuate(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: 
 
 fn raise_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "llllb", args)?;
-    let (w, h) = (
-        a[0].long_or(0).max(0) as usize,
-        a[1].long_or(0).max(0) as usize,
-    );
+    let (bw, bh) = (a[0].long_or(0).max(0), a[1].long_or(0).max(0));
     let raise = a[4].bool_or(true);
     image_op(vm, &d_(o), "Unable to raise image", |i| {
-        // RaiseImage(): lighten the top/left edges, darken bottom/right
-        let (cw, ch) = (i.columns, i.rows);
-        for y in 0..ch {
-            for x in 0..cw {
-                let top = y < h && x < cw - y.min(cw);
-                let left = x < w && y < ch - x.min(ch);
-                let bottom = y >= ch.saturating_sub(h);
-                let right = x >= cw.saturating_sub(w);
-                let lighten = (top || left) == raise && (top || left);
-                let darken = (bottom || right) && !(top || left);
-                let mut p = i.px(x, y);
+        // RaiseImage(): the top band toward white by 120/255, the left by
+        // 65/255, the right toward black by 65/255, the bottom by 120/255
+        // (swapped when sunken); the bands meet on the corner diagonals
+        let (w, h) = (i.columns as i64, i.rows as i64);
+        let lift = |v: f64, k: f64| (v * (255.0 - k) + 65535.0 * k) / 255.0;
+        let sink = |v: f64, k: f64| v * (255.0 - k) / 255.0;
+        for y in 0..h {
+            for x in 0..w {
+                // 0 top, 1 left, 2 right, 3 bottom
+                let region = if y < bh {
+                    if x < y {
+                        1
+                    } else if x > w - 1 - y {
+                        2
+                    } else {
+                        0
+                    }
+                } else if y >= h - bh {
+                    let r = h - 1 - y;
+                    if x <= r {
+                        1
+                    } else if x >= w - 1 - r {
+                        2
+                    } else {
+                        3
+                    }
+                } else if x < bw {
+                    1
+                } else if x >= w - bw {
+                    2
+                } else {
+                    continue;
+                };
+                let region = if raise { region } else { 3 - region };
+                let mut p = i.px(x as usize, y as usize);
                 for v in p.iter_mut().take(3) {
                     let f = *v as f64;
-                    *v = if lighten {
-                        to_q16(f + (65535.0 - f) * 0.4)
-                    } else if (darken == raise && darken) || ((top || left) && !raise) {
-                        to_q16(f * 0.6)
-                    } else if darken && !raise {
-                        to_q16(f + (65535.0 - f) * 0.4)
-                    } else {
-                        *v
-                    };
+                    *v = to_q16(match region {
+                        0 => lift(f, 120.0),
+                        1 => lift(f, 65.0),
+                        2 => sink(f, 65.0),
+                        _ => sink(f, 120.0),
+                    });
                 }
-                i.set_px(x, y, p);
+                i.set_px(x as usize, y as usize, p);
             }
         }
         i.colors = None;
