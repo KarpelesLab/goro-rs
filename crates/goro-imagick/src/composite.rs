@@ -636,6 +636,29 @@ fn from_f(p: [f64; 4]) -> [u16; 4] {
 
 /// CompositeImage(): compose `src` onto `dst` at (x, y).
 pub fn composite_image(dst: &mut Image, src: &Image, op: C, x: i64, y: i64, args: &ComposeArgs) {
+    composite_image_channel(dst, src, op, x, y, args, crate::types::channel::DEFAULT);
+}
+
+/// CompositeImage() with a channel mask: channels outside the mask keep
+/// the destination, except that Over fills unselected colour channels
+/// from the source and always composes the alpha (as ImageMagick 7.1.2
+/// does).
+pub fn composite_image_channel(
+    dst: &mut Image,
+    src: &Image,
+    op: C,
+    x: i64,
+    y: i64,
+    args: &ComposeArgs,
+    ch: i64,
+) {
+    let all = ch == crate::types::channel::DEFAULT || ch == 0 || ch == 0x7fffffff;
+    let sel = [
+        all || ch & crate::types::channel::RED != 0,
+        all || ch & crate::types::channel::GREEN != 0,
+        all || ch & crate::types::channel::BLUE != 0,
+        all || ch & crate::types::channel::ALPHA != 0,
+    ];
     let mut src_owned;
     let mut src = src;
     if src.colorspace == Colorspace::CMYK && dst.colorspace != Colorspace::CMYK {
@@ -694,6 +717,18 @@ pub fn composite_image(dst: &mut Image, src: &Image, op: C, x: i64, y: i64, args
             } else {
                 compose_pixel(op, s, d, args)
             };
+            if !all && op != C::Copy {
+                let over = matches!(op, C::Over | C::SrcOver);
+                for c in 0..4 {
+                    if !sel[c] {
+                        o[c] = if over {
+                            if c == 3 { o[3] } else { s[c] }
+                        } else {
+                            d[c]
+                        };
+                    }
+                }
+            }
             if !dst.alpha {
                 o[3] = 1.0;
             }

@@ -801,7 +801,8 @@ fn composite_image_m(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> 
         .get("compose:args")
         .map(ComposeArgs::parse)
         .unwrap_or_default();
-    composite_image(img, &src, op, x, y, &args_s);
+    let ch = a[4].long_or(channel::DEFAULT);
+    goro_imagick::composite::composite_image_channel(img, &src, op, x, y, &args_s, ch);
     img.colors = None;
     Ok(Value::True)
 }
