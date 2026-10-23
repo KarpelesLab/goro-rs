@@ -1494,15 +1494,25 @@ fn identify_text(w: &Wand, img: &Image) -> String {
     s
 }
 
-/// The image signature: SHA-256 of the pixels.
+/// The image signature: SHA-256 of the samples as little-endian
+/// float32 in [0, 1], as ImageMagick 7 hashes them.
 pub(crate) fn signature(img: &Image) -> String {
-    let mut data = Vec::with_capacity(img.pixels.len() * 2);
-    for p in img.pixels.chunks_exact(4) {
-        for &v in &p[..3] {
-            data.extend_from_slice(&v.to_be_bytes());
+    let mut data = Vec::with_capacity(img.pixels.len() * 4);
+    let f = |v: u16| ((v as f64 / 65535.0) as f32).to_le_bytes();
+    let channels = if img.colorspace == Colorspace::Gray {
+        1
+    } else {
+        3
+    };
+    for (n, p) in img.pixels.chunks_exact(4).enumerate() {
+        for &v in &p[..channels] {
+            data.extend_from_slice(&f(v));
+        }
+        if let Some(k) = &img.black {
+            data.extend_from_slice(&f(k[n]));
         }
         if img.alpha {
-            data.extend_from_slice(&p[3].to_be_bytes());
+            data.extend_from_slice(&f(p[3]));
         }
     }
     sha256_hex(&data)
