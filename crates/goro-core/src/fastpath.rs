@@ -336,7 +336,7 @@ fn plain_truthy(v: &Value) -> Option<bool> {
             let b = s.as_bytes();
             !(b.is_empty() || b == b"0")
         }
-        Value::Array(a) => a.try_borrow().ok()?.len() > 0,
+        Value::Array(a) => !a.try_borrow().ok()?.is_empty(),
         _ => return None,
     })
 }
@@ -1737,7 +1737,7 @@ impl crate::vm::Vm {
                 Value::Array(a) => {
                     !Rc::ptr_eq(a, &self.globals)
                         && a.try_borrow()
-                            .is_ok_and(|a| a.len() <= 8 && a.values().all(|v| is_plain_scalar(v)))
+                            .is_ok_and(|a| a.len() <= 8 && a.values().all(is_plain_scalar))
                 }
                 Value::Undef => false,
                 v => is_plain_scalar(v),
