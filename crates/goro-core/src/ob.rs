@@ -289,6 +289,11 @@ impl Vm {
         let mut still_have_handler = true;
         let status;
         match kind {
+            // zend_call_function() does not run with an exception pending:
+            // the handler fails (its buffer passes through).
+            ObKind::User(_) if self.current_exception.is_some() => {
+                status = ObStatus::Failure;
+            }
             ObKind::User(cb) => {
                 let data = self.ob_stack[idx].clone();
                 let args = [
