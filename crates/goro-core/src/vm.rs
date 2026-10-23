@@ -4298,6 +4298,23 @@ impl Vm {
         self.check_leading_numeric_warning(a, line);
     }
 
+    /// Release the TMP operands of an instruction that hold objects; true
+    /// when one was released.
+    fn release_tmp_objects(op: &crate::opcode::Op, tmps: &mut [Value]) -> bool {
+        let mut released = false;
+        for o in [&op.op1, &op.op2] {
+            if let OperandType::Tmp(i) = o {
+                if let Some(slot) = tmps.get_mut(*i as usize) {
+                    if matches!(slot, Value::Object(_)) {
+                        *slot = Value::Undef;
+                        released = true;
+                    }
+                }
+            }
+        }
+        released
+    }
+
     /// Release the temporaries an instruction consumed (its TMP operands).
     fn release_tmp_operands(op: &crate::opcode::Op, tmps: &mut [Value]) {
         for o in [&op.op1, &op.op2] {
@@ -20413,6 +20430,12 @@ impl Vm {
                             return Err(e);
                         }
                     }
+                    // The echoed temporary object is freed by ECHO.
+                    if matches!(val, Value::Object(_)) {
+                        drop(val);
+                        Self::release_tmp_operands(op, &mut tmps);
+                        release_point!(outlined);
+                    }
                     Ok(Flow::Next)
                 })? {
                     Flow::Next => {}
@@ -21425,6 +21448,13 @@ impl Vm {
                         r.extend_from_slice(b_str.as_bytes());
                         PhpString::from_vec(r)
                     };
+                    // ZEND_CONCAT frees its TMP operands (a temporary
+                    // object's destructor runs before the result is used).
+                    if matches!(a, Value::Object(_)) || matches!(b, Value::Object(_)) {
+                        drop((a, b));
+                        Self::release_tmp_operands(op, &mut tmps);
+                        release_point!(outlined);
+                    }
                     self.write_operand(
                         &op.result,
                         Value::String(result),
@@ -22390,17 +22420,17 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    self.write_operand(
-                        &op.result,
-                        if a.equals_with_object_cast(&b) {
-                            Value::True
-                        } else {
-                            Value::False
-                        },
-                        &mut cvs,
-                        &mut tmps,
-                        &static_cv_keys,
-                    );
+                    let r = if a.equals_with_object_cast(&b) {
+                        Value::True
+                    } else {
+                        Value::False
+                    };
+                    drop((a, b, a_raw, b_raw));
+                    // A temporary object operand is freed by the comparison.
+                    if Self::release_tmp_objects(op, &mut tmps) {
+                        release_point!(outlined);
+                    }
+                    self.write_operand(&op.result, r, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
                 })? {
                     Flow::Next => {}
@@ -22500,17 +22530,17 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    self.write_operand(
-                        &op.result,
-                        if a.equals_with_object_cast(&b) {
-                            Value::False
-                        } else {
-                            Value::True
-                        },
-                        &mut cvs,
-                        &mut tmps,
-                        &static_cv_keys,
-                    );
+                    let r = if a.equals_with_object_cast(&b) {
+                        Value::False
+                    } else {
+                        Value::True
+                    };
+                    drop((a, b, a_raw, b_raw));
+                    // A temporary object operand is freed by the comparison.
+                    if Self::release_tmp_objects(op, &mut tmps) {
+                        release_point!(outlined);
+                    }
+                    self.write_operand(&op.result, r, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
                 })? {
                     Flow::Next => {}

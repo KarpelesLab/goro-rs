@@ -3503,6 +3503,7 @@ impl Compiler {
 
             StmtKind::Echo(exprs) => {
                 for expr in exprs {
+                    let tmp_start = self.op_array.temp_count;
                     let operand = self.compile_expr(expr)?;
                     self.op_array.emit(Op {
                         opcode: OpCode::Echo,
@@ -3511,6 +3512,9 @@ impl Compiler {
                         result: OperandType::Unused,
                         line: stmt.span.line,
                     });
+                    // Temporaries of the echoed expression are freed by now.
+                    let tmp_end = self.op_array.temp_count;
+                    self.emit_free_tmps((tmp_start, tmp_end), stmt.span.line);
                 }
                 Ok(())
             }
