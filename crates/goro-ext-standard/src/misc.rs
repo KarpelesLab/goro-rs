@@ -1042,12 +1042,57 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
         return Ok(Value::False);
     }
+    // copy_constant_array(): references are dropped; a recursive array
+    // is rejected (validate_constant_array_argument()).
+    let value = match value.deref() {
+        Value::Array(a) => {
+            let mut stack = Vec::new();
+            match const_array_copy(&a, &mut stack) {
+                Some(v) => v,
+                None => {
+                    let msg = "define(): Argument #2 ($value) cannot be a recursive array";
+                    let exc = vm.create_exception(b"ValueError", msg, 0);
+                    vm.current_exception = Some(exc);
+                    return Err(VmError {
+                        message: msg.to_string(),
+                        line: vm.current_line,
+                    });
+                }
+            }
+        }
+        _ => value,
+    };
     let file = vm.current_file.to_string();
     vm.constant_files.insert(normalized.clone(), file);
     vm.user_constant_names
         .push((normalized.clone(), name_bytes.to_vec()));
     vm.constants.insert(normalized, value);
     Ok(Value::True)
+}
+
+/// A constant's copy of array `a`: references replaced by their values;
+/// None when the array contains itself.
+fn const_array_copy(a: &Rc<RefCell<PhpArray>>, stack: &mut Vec<*const RefCell<PhpArray>>) -> Option<Value> {
+    let p = Rc::as_ptr(a);
+    if stack.contains(&p) {
+        return None;
+    }
+    stack.push(p);
+    let mut out = PhpArray::new();
+    let entries: Vec<(ArrayKey, Value)> = a
+        .borrow()
+        .iter()
+        .map(|(k, v)| (k.clone(), v.deref()))
+        .collect();
+    for (k, v) in entries {
+        let v = match v {
+            Value::Array(inner) => const_array_copy(&inner, stack)?,
+            v => v,
+        };
+        out.set(k, v);
+    }
+    stack.pop();
+    Some(Value::Array(Rc::new(RefCell::new(out))))
 }
 
 fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

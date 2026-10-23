@@ -11896,6 +11896,7 @@ impl Compiler {
             // write separates it from the array it came from); a returned
             // reference is written through.
             let v = self.compile_expr(array)?;
+            self.mark_ref_call(&v);
             let marker = self.op_array.add_literal(Value::Long(2));
             let t = self.op_array.alloc_temp();
             self.op_array.emit(Op {
@@ -19461,6 +19462,23 @@ impl Compiler {
         value: &Expr,
     ) -> CompileResult<OperandType> {
         let line = expr.span.line;
+        // The target is fetched for isset() first (BP_VAR_IS).
+        {
+            let mut e = target;
+            loop {
+                match &e.kind {
+                    ExprKind::ArrayAccess { index: None, .. } => {
+                        return Err(CompileError {
+                            message: "Cannot use [] for reading".into(),
+                            line,
+                        });
+                    }
+                    ExprKind::ArrayAccess { array, .. } => e = array,
+                    ExprKind::PropertyAccess { object, .. } => e = object,
+                    _ => break,
+                }
+            }
+        }
         let saved_mode = self.memoize_mode;
         let saved_exprs = std::mem::take(&mut self.memoized_exprs);
         let saved_root = self.memoize_root;

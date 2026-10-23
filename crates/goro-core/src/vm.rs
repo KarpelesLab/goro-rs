@@ -20549,6 +20549,14 @@ impl Vm {
                                     let copy = a.borrow().clone();
                                     Value::Array(Rc::new(RefCell::new(copy)))
                                 }
+                                // A returned reference to an array or object:
+                                // the container itself (written in place); to
+                                // null: kept, for the write to vivify it.
+                                Value::Reference(r)
+                                    if matches!(&*r.borrow(), Value::Array(_) | Value::Object(_)) =>
+                                {
+                                    r.borrow().clone()
+                                }
                                 other => other,
                             };
                             self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
@@ -35777,6 +35785,24 @@ impl Vm {
                 }
                 OpCode::ArrayAppend => match outlined(|| -> Result<Flow, VmError> {
                     let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // `f()[] = v` with f() returning a reference to null:
+                    // the referenced variable becomes an array.
+                    let arr_val = match (&op.op1, arr_val) {
+                        (OperandType::Tmp(_), Value::Reference(r)) => {
+                            let inner = r.borrow().clone();
+                            match inner {
+                                Value::Null | Value::Undef => {
+                                    let fresh =
+                                        Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                                    *r.borrow_mut() = fresh.clone();
+                                    fresh
+                                }
+                                Value::Array(_) | Value::Object(_) => inner,
+                                _ => Value::Reference(r),
+                            }
+                        }
+                        (_, v) => v,
+                    };
                     let val = self.read_operand_warn(
                         &op.op2,
                         &cvs,
@@ -35974,6 +36000,24 @@ impl Vm {
                             return Ok(Flow::Next);
                         }
                         let arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                        // `f()[k] = v` with f() returning a reference: the
+                        // write goes to what it references.
+                        let arr_val = match (&op.op1, arr_val) {
+                            (OperandType::Tmp(_), Value::Reference(r)) => {
+                                let inner = r.borrow().clone();
+                                match inner {
+                                    Value::Null | Value::Undef => {
+                                        let fresh =
+                                            Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                                        *r.borrow_mut() = fresh.clone();
+                                        fresh
+                                    }
+                                    Value::Array(_) | Value::Object(_) => inner,
+                                    _ => Value::Reference(r),
+                                }
+                            }
+                            (_, v) => v,
+                        };
                         // The write-back of `$obj[k]++`: FETCH_DIM_RW never calls
                         // offsetSet().
                         if matches!(op.opcode, OpCode::ArraySetIncDec)
@@ -36718,6 +36762,14 @@ impl Vm {
                     let is_rw = matches!(op.opcode, OpCode::ArrayGetRW | OpCode::ArrayGetIncDec);
                     let obj_w = matches!(op.opcode, OpCode::ArrayGetObjW);
                     let mut arr_val = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
+                    // A reference returned by `f()` (in `f()[k] op= v`): the
+                    // element of what it references.
+                    if let (OperandType::Tmp(_), Value::Reference(r)) = (&op.op1, &arr_val) {
+                        let inner = r.borrow().clone();
+                        if matches!(inner, Value::Array(_) | Value::Object(_)) {
+                            arr_val = inner;
+                        }
+                    }
                     // If the source is an uninitialized superglobal CV, fall back to the global.
                     if matches!(arr_val, Value::Null | Value::Undef) {
                         if let OperandType::Cv(idx) = &op.op1 {
