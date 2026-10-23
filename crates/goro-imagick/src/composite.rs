@@ -437,7 +437,9 @@ pub fn compose_pixel(op: C, s: [f64; 4], d: [f64; 4], args: &ComposeArgs) -> [f6
                     0.0
                 }
             };
-            each(&|c| f(dca(c), sca(c)), f(da, sa))
+            // the colour (over the result alpha) is 0 where Dca is 0
+            let fc = |x: f64, y: f64| if x > 0.0 { f(x, y) } else { 0.0 };
+            each(&|c| sdiv(fc(dca(c), sca(c)), ao, 0.0), f(da, sa))
         }
         C::Reflect => {
             let f = |x: f64, y: f64| {
@@ -449,7 +451,11 @@ pub fn compose_pixel(op: C, s: [f64; 4], d: [f64; 4], args: &ComposeArgs) -> [f6
                     0.0
                 }
             };
-            each(&|c| f(sz[c], dz[c]), f(sa, da))
+            // a full destination channel reflects to 1; the colour is
+            // scaled by the result alpha
+            let fc = |x: f64, y: f64| if y < 1.0 { x * x / (1.0 - y) } else { 1.0 };
+            let k = ao;
+            each(&|c| fc(sz[c], dz[c]) * k, f(sa, da))
         }
         // ImageMagick's SoftLight: the W3C soft light of the premultiplied
         // samples weighted by Da, plus Sca(1-Da) + Dca, over the result alpha
