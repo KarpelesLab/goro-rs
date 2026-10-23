@@ -5583,6 +5583,21 @@ impl Vm {
         ))
     }
 
+    /// zendi_try_get_long() of an integer operator's operand: a
+    /// leading-numeric string warns ("A non-numeric value encountered")
+    /// before its conversion's own diagnostics, operand by operand.
+    fn int_operand(&mut self, v: &Value, line: u32) -> i64 {
+        if let Value::String(s) = v.deref() {
+            if matches!(
+                crate::value::parse_numeric_str(s.as_bytes(), true),
+                Some((_, true))
+            ) {
+                self.emit_warning_at("A non-numeric value encountered", line);
+            }
+        }
+        self.op_to_long(v)
+    }
+
     /// zendi_try_get_long() for an already type-checked operand: floats are
     /// converted modularly with the "not representable" warning or the
     /// "loses precision" deprecation, float strings are capped.
@@ -21235,18 +21250,8 @@ impl Vm {
                             });
                         }
                     }
-                    // Emit warning for leading-numeric strings
-                    for val in [&a, &b] {
-                        if let Value::String(s) = val.deref() {
-                            if crate::value::parse_numeric_string(s.as_bytes()).is_none()
-                                && !s.as_bytes().is_empty()
-                            {
-                                self.emit_warning_at("A non-numeric value encountered", op.line);
-                            }
-                        }
-                    }
-                    let mod_a = Value::Long(self.op_to_long(&a));
-                    let mod_b = Value::Long(self.op_to_long(&b));
+                    let mod_a = Value::Long(self.int_operand(&a, op.line));
+                    let mod_b = Value::Long(self.int_operand(&b, op.line));
                     match mod_a.modulo(&mod_b) {
                         Ok(result) => self.write_operand(
                             &op.result,
@@ -21712,12 +21717,6 @@ impl Vm {
                             });
                         }
                     }
-                    // (an int operation: leading-numeric strings warn)
-                    if !(matches!(a.deref(), Value::String(_))
-                        && matches!(b.deref(), Value::String(_)))
-                    {
-                        self.arith_operand_warnings(&a, &b, op.line);
-                    }
                     let result = if matches!(a.deref(), Value::String(_))
                         && matches!(b.deref(), Value::String(_))
                     {
@@ -21730,8 +21729,8 @@ impl Vm {
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
                         {
-                            let al = self.op_to_long(&a);
-                            let bl = self.op_to_long(&b);
+                            let al = self.int_operand(&a, op.line);
+                            let bl = self.int_operand(&b, op.line);
                             Value::Long(al & bl)
                         }
                     };
@@ -21819,12 +21818,6 @@ impl Vm {
                             });
                         }
                     }
-                    // (an int operation: leading-numeric strings warn)
-                    if !(matches!(a.deref(), Value::String(_))
-                        && matches!(b.deref(), Value::String(_)))
-                    {
-                        self.arith_operand_warnings(&a, &b, op.line);
-                    }
                     let result = if matches!(a.deref(), Value::String(_))
                         && matches!(b.deref(), Value::String(_))
                     {
@@ -21843,8 +21836,8 @@ impl Vm {
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
                         {
-                            let al = self.op_to_long(&a);
-                            let bl = self.op_to_long(&b);
+                            let al = self.int_operand(&a, op.line);
+                            let bl = self.int_operand(&b, op.line);
                             Value::Long(al | bl)
                         }
                     };
@@ -21932,12 +21925,6 @@ impl Vm {
                             });
                         }
                     }
-                    // (an int operation: leading-numeric strings warn)
-                    if !(matches!(a.deref(), Value::String(_))
-                        && matches!(b.deref(), Value::String(_)))
-                    {
-                        self.arith_operand_warnings(&a, &b, op.line);
-                    }
                     let result = if matches!(a.deref(), Value::String(_))
                         && matches!(b.deref(), Value::String(_))
                     {
@@ -21950,8 +21937,8 @@ impl Vm {
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
                         {
-                            let al = self.op_to_long(&a);
-                            let bl = self.op_to_long(&b);
+                            let al = self.int_operand(&a, op.line);
+                            let bl = self.int_operand(&b, op.line);
                             Value::Long(al ^ bl)
                         }
                     };
@@ -22142,18 +22129,8 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    for v in [&a, &b] {
-                        if let Value::String(sv) = v.deref() {
-                            if matches!(
-                                crate::value::parse_numeric_str(sv.as_bytes(), true),
-                                Some((_, true))
-                            ) {
-                                self.emit_warning_at("A non-numeric value encountered", op.line);
-                            }
-                        }
-                    }
-                    let al = self.op_to_long(&a);
-                    let bl = self.op_to_long(&b);
+                    let al = self.int_operand(&a, op.line);
+                    let bl = self.int_operand(&b, op.line);
                     match Self::php_shift(al, bl, true) {
                         Ok(r) => self.write_operand(
                             &op.result,
@@ -22263,18 +22240,8 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    for v in [&a, &b] {
-                        if let Value::String(sv) = v.deref() {
-                            if matches!(
-                                crate::value::parse_numeric_str(sv.as_bytes(), true),
-                                Some((_, true))
-                            ) {
-                                self.emit_warning_at("A non-numeric value encountered", op.line);
-                            }
-                        }
-                    }
-                    let al = self.op_to_long(&a);
-                    let bl = self.op_to_long(&b);
+                    let al = self.int_operand(&a, op.line);
+                    let bl = self.int_operand(&b, op.line);
                     match Self::php_shift(al, bl, false) {
                         Ok(r) => self.write_operand(
                             &op.result,
@@ -23657,18 +23624,8 @@ impl Vm {
                             });
                         }
                     }
-                    // Emit warning for leading-numeric strings
-                    for val in [&cv_val, &rhs] {
-                        if let Value::String(s) = val.deref() {
-                            if crate::value::parse_numeric_string(s.as_bytes()).is_none()
-                                && !s.as_bytes().is_empty()
-                            {
-                                self.emit_warning_at("A non-numeric value encountered", op.line);
-                            }
-                        }
-                    }
-                    let mod_a = Value::Long(self.op_to_long(&cv_val));
-                    let mod_b = Value::Long(self.op_to_long(&rhs));
+                    let mod_a = Value::Long(self.int_operand(&cv_val, op.line));
+                    let mod_b = Value::Long(self.int_operand(&rhs, op.line));
                     match mod_a.modulo(&mod_b) {
                         Ok(result) => self.write_operand(
                             &op.op1,
@@ -23926,23 +23883,6 @@ impl Vm {
                             });
                         }
                     }
-                    // Emit warning for leading-numeric strings used in mixed-type bitwise ops
-                    if !(matches!(cv_val.deref(), Value::String(_))
-                        && matches!(rhs.deref(), Value::String(_)))
-                    {
-                        for val in [&cv_val, &rhs] {
-                            if let Value::String(s) = val.deref() {
-                                if crate::value::parse_numeric_string(s.as_bytes()).is_none()
-                                    && !s.as_bytes().is_empty()
-                                {
-                                    self.emit_warning_at(
-                                        "A non-numeric value encountered",
-                                        op.line,
-                                    );
-                                }
-                            }
-                        }
-                    }
                     let result = if matches!(cv_val.deref(), Value::String(_))
                         && matches!(rhs.deref(), Value::String(_))
                     {
@@ -23954,7 +23894,7 @@ impl Vm {
                         let res: Vec<u8> = (0..len).map(|i| ab[i] & bb[i]).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(self.op_to_long(&cv_val) & self.op_to_long(&rhs))
+                        Value::Long(self.int_operand(&cv_val, op.line) & self.int_operand(&rhs, op.line))
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
@@ -24035,23 +23975,6 @@ impl Vm {
                             });
                         }
                     }
-                    // Emit warning for leading-numeric strings used in mixed-type bitwise ops
-                    if !(matches!(cv_val.deref(), Value::String(_))
-                        && matches!(rhs.deref(), Value::String(_)))
-                    {
-                        for val in [&cv_val, &rhs] {
-                            if let Value::String(s) = val.deref() {
-                                if crate::value::parse_numeric_string(s.as_bytes()).is_none()
-                                    && !s.as_bytes().is_empty()
-                                {
-                                    self.emit_warning_at(
-                                        "A non-numeric value encountered",
-                                        op.line,
-                                    );
-                                }
-                            }
-                        }
-                    }
                     let result = if matches!(cv_val.deref(), Value::String(_))
                         && matches!(rhs.deref(), Value::String(_))
                     {
@@ -24069,7 +23992,7 @@ impl Vm {
                             .collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(self.op_to_long(&cv_val) | self.op_to_long(&rhs))
+                        Value::Long(self.int_operand(&cv_val, op.line) | self.int_operand(&rhs, op.line))
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
@@ -24150,23 +24073,6 @@ impl Vm {
                             });
                         }
                     }
-                    // Emit warning for leading-numeric strings used in mixed-type bitwise ops
-                    if !(matches!(cv_val.deref(), Value::String(_))
-                        && matches!(rhs.deref(), Value::String(_)))
-                    {
-                        for val in [&cv_val, &rhs] {
-                            if let Value::String(s) = val.deref() {
-                                if crate::value::parse_numeric_string(s.as_bytes()).is_none()
-                                    && !s.as_bytes().is_empty()
-                                {
-                                    self.emit_warning_at(
-                                        "A non-numeric value encountered",
-                                        op.line,
-                                    );
-                                }
-                            }
-                        }
-                    }
                     let result = if matches!(cv_val.deref(), Value::String(_))
                         && matches!(rhs.deref(), Value::String(_))
                     {
@@ -24178,7 +24084,7 @@ impl Vm {
                         let res: Vec<u8> = (0..len).map(|i| ab[i] ^ bb[i]).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else {
-                        Value::Long(self.op_to_long(&cv_val) ^ self.op_to_long(&rhs))
+                        Value::Long(self.int_operand(&cv_val, op.line) ^ self.int_operand(&rhs, op.line))
                     };
                     self.write_operand(&op.op1, result, &mut cvs, &mut tmps, &static_cv_keys);
                     Ok(Flow::Next)
@@ -24260,17 +24166,8 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    for val in [&cv_val, &rhs] {
-                        if let Value::String(s) = val.deref() {
-                            if crate::value::parse_numeric_string(s.as_bytes()).is_none()
-                                && !s.as_bytes().is_empty()
-                            {
-                                self.emit_warning_at("A non-numeric value encountered", op.line);
-                            }
-                        }
-                    }
-                    let a = self.op_to_long(&cv_val);
-                    let n = self.op_to_long(&rhs);
+                    let a = self.int_operand(&cv_val, op.line);
+                    let n = self.int_operand(&rhs, op.line);
                     if n < 0 {
                         let msg = "Bit shift by negative number";
                         let exc = self.create_exception(b"ArithmeticError", msg, op.line);
@@ -24372,17 +24269,8 @@ impl Vm {
                             line: op.line,
                         });
                     }
-                    for val in [&cv_val, &rhs] {
-                        if let Value::String(s) = val.deref() {
-                            if crate::value::parse_numeric_string(s.as_bytes()).is_none()
-                                && !s.as_bytes().is_empty()
-                            {
-                                self.emit_warning_at("A non-numeric value encountered", op.line);
-                            }
-                        }
-                    }
-                    let a = self.op_to_long(&cv_val);
-                    let n = self.op_to_long(&rhs);
+                    let a = self.int_operand(&cv_val, op.line);
+                    let n = self.int_operand(&rhs, op.line);
                     if n < 0 {
                         let msg = "Bit shift by negative number";
                         let exc = self.create_exception(b"ArithmeticError", msg, op.line);
