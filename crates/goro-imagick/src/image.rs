@@ -178,6 +178,16 @@ impl Image {
         if color.alpha_trait {
             img.alpha = true;
         }
+        if color.colorspace == Colorspace::Gray {
+            // a gray(...) or grayNN colour makes a gray canvas, though its
+            // type stays the canvas's true colour
+            img.colorspace = Colorspace::Gray;
+            img.image_type = if img.alpha {
+                ImageType::TrueColorAlpha
+            } else {
+                ImageType::TrueColor
+            };
+        }
         if color.colorspace == Colorspace::CMYK {
             img.colorspace = Colorspace::CMYK;
             let k = crate::color::to_q16(color.black);

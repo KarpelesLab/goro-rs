@@ -3125,8 +3125,7 @@ const STORAGE_SHORT: i64 = 7;
 
 /// php_imagick_validate_map()
 fn validate_map(map: &str) -> bool {
-    map.bytes()
-        .all(|c| b"RGBAOCYMKIP".contains(&c.to_ascii_uppercase()))
+    map.bytes().all(|c| b"RGBAOCYMKIP".contains(&c))
 }
 
 fn export_image_pixels(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
@@ -3168,7 +3167,7 @@ fn export_image_pixels(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -
     }
     let r = {
         let w_ = d.wand.borrow();
-        goro_imagick::pixels::export_q16(w_.image().unwrap(), x, y, w as usize, h as usize, &map)
+        goro_imagick::pixels::export_f64(w_.image().unwrap(), x, y, w as usize, h as usize, &map)
     };
     let samples = match r {
         Ok(s) => s,
@@ -3177,14 +3176,15 @@ fn export_image_pixels(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -
         }
     };
     let mut arr = PhpArray::new();
-    for q in samples {
+    for v in samples {
+        let q = v.round().clamp(0.0, 65535.0) as u16;
         arr.push(match storage {
-            STORAGE_CHAR => Value::Long(goro_imagick::image::q_to_u8(q) as i64),
+            STORAGE_CHAR => Value::Long((v / 257.0).round().clamp(0.0, 255.0) as i64),
             STORAGE_SHORT | STORAGE_QUANTUM => Value::Long(q as i64),
             STORAGE_LONG => Value::Long(q as i64 * 65537),
             STORAGE_LONGLONG => Value::Long((q as u64).wrapping_mul(281479271743489) as i64),
-            STORAGE_FLOAT => Value::Double((q as f64 / 65535.0) as f32 as f64),
-            _ => Value::Double(q as f64 / 65535.0),
+            STORAGE_FLOAT => Value::Double((v / 65535.0) as f32 as f64),
+            _ => Value::Double(v / 65535.0),
         });
     }
     Ok(arr_val(arr))
@@ -3233,57 +3233,48 @@ fn import_image_pixels(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -
     if !validate_map(&map) {
         return throw_cls(vm, Cls::Imagick, "The map contains disallowed characters");
     }
+    // the values convert as zval_get_long() / zval_get_double() do
     let mut samples = Vec::with_capacity(vals.len());
     match storage {
         STORAGE_FLOAT | STORAGE_DOUBLE => {
             for v in &vals {
-                let d = match v {
-                    Value::Long(n) => *n as f64,
-                    Value::Double(d) => *d,
-                    _ => {
-                        return throw_cls(
-                            vm,
-                            Cls::Imagick,
-                            "The map must contain only numeric values",
-                        );
-                    }
-                };
+                let mut d = v.to_double();
+                if storage == STORAGE_FLOAT {
+                    d = d as f32 as f64;
+                }
                 samples.push(goro_imagick::color::to_q16(d * 65535.0));
             }
         }
         STORAGE_SHORT | STORAGE_LONG => {
-            for v in &vals {
-                let n = match v {
-                    Value::Long(n) => *n,
-                    Value::Double(d) => *d as i64,
-                    _ => {
-                        return throw_cls(
-                            vm,
-                            Cls::Imagick,
-                            "The map must contain only numeric values",
-                        );
-                    }
-                };
-                // imported as LongPixel (32-bit)
-                samples.push(((n.clamp(0, u32::MAX as i64) as u64 + 32768) / 65537) as u16);
+            // pecl hands ImageMagick its array of 64-bit longs as 32-bit
+            // LongPixel samples: each value is two samples, low word first
+            let longs: Vec<i64> = vals.iter().map(|v| v.to_long()).collect();
+            for j in 0..vals.len() {
+                let v = longs[j / 2] as u64;
+                let word = if j % 2 == 0 { v & 0xffff_ffff } else { v >> 32 };
+                samples.push((word / 65537) as u16);
             }
         }
         STORAGE_CHAR => {
             for v in &vals {
-                let n = match v {
-                    Value::Long(n) => *n,
-                    _ => {
-                        return throw_cls(
-                            vm,
-                            Cls::Imagick,
-                            "The character array contains incorrect values",
-                        );
-                    }
-                };
-                samples.push((n.clamp(0, 255) as u16) * 257);
+                samples.push((v.to_long() as u8) as u16 * 257);
             }
         }
         _ => return throw_cls(vm, Cls::Imagick, "Unknown storage format"),
+    }
+    if map.is_empty() {
+        let msg = if storage == STORAGE_CHAR {
+            "The character array contains incorrect values"
+        } else {
+            "The map must contain only numeric values"
+        };
+        return throw_cls(vm, Cls::Imagick, msg);
+    }
+    let inside = with_image(vm, &d, |i| {
+        (x + w) as usize <= i.columns && (y + h) as usize <= i.rows
+    })?;
+    if !inside {
+        return convert_exception(vm, None, Cls::Imagick, "Unable to import image pixels");
     }
     let r = {
         let mut w_ = d.wand.borrow_mut();
