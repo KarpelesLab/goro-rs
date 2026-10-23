@@ -1281,7 +1281,23 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
         _ => has_alpha || (img.alpha && opts.get("png:color-type") == Some("6")),
     };
     let n = img.columns * img.rows;
-    let (format, stride, data) = if depth16 {
+    // ImageMagick writes a gray image with alpha as 8-bit gray+alpha
+    // whatever its depth, each sample truncated to 8 bits
+    let gray_alpha8 = img.is_gray()
+        && want_alpha
+        && !matches!(m, "PNG48" | "PNG64")
+        && opts.get("png:bit-depth").is_none()
+        && opts.get("png:color-type").is_none();
+    let (format, stride, data) = if gray_alpha8 {
+        (
+            P::Ya8,
+            w as usize * 2,
+            img.pixels
+                .chunks_exact(4)
+                .flat_map(|p| [(p[0] / 257) as u8, (p[3] / 257) as u8])
+                .collect(),
+        )
+    } else if depth16 {
         if gray && !want_alpha {
             (
                 P::Gray16Le,
