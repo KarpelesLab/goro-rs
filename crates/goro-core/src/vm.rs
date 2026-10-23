@@ -1295,6 +1295,10 @@ pub struct Vm {
     /// returned by value: the matching ArraySetIncDec must not call
     /// offsetSet() (the increment only affected a temporary).
     incdec_skip_set: bool,
+    /// The extra named arguments of the internal function call whose
+    /// argument check is failing (call_stack index, name, value): its frame
+    /// shows them (see call_builtin_at).
+    pub(crate) builtin_frame_named: Vec<(usize, PhpString, Value)>,
     /// The converted key of `$a[$k] op= v` / `$a[$k]++` read by the RW
     /// fetch at (call depth, op index): the write-back two ops later uses
     /// it instead of reading (and warning about) `$k` again.
@@ -1762,6 +1766,7 @@ impl Vm {
             isset_get_cache: None,
             recorded_errors: None,
             incdec_skip_set: false,
+            builtin_frame_named: Vec::new(),
             dim_rw_key: None,
             dim_rw_abort: None,
             current_line: 0,
@@ -6653,6 +6658,8 @@ impl Vm {
         // zend.exception_ignore_args: frames carry no "args"
         let ignore_args = self.exception_ignore_args();
         let mut frame_list: Vec<CallFrame> = self.call_stack.iter().rev().cloned().collect();
+        // The call_stack index of each entry.
+        let mut stack_at: Vec<usize> = (0..frame_list.len()).rev().collect();
         // zend_fetch_debug_backtrace(): while a constant expression is
         // evaluated (EG(filename_override)), its "[constant expression]"
         // entry is the first one, at the executing position, even for code
@@ -6666,6 +6673,8 @@ impl Vm {
             f.1 = self.current_file.clone();
             f.2 = self.current_line;
             frame_list.insert(0, f);
+            let a = stack_at.remove(k);
+            stack_at.insert(0, a);
         }
         let named_args = if ignore_args {
             Vec::new()
@@ -6739,7 +6748,7 @@ impl Vm {
             }
             // Add args array (an eval() frame has none)
             if !ignore_args && func_name != "eval" {
-                let at = frame_list.len() - 1 - idx;
+                let at = stack_at[idx];
                 let args_arr = if named_args.iter().any(|n| n.0 == at) {
                     let named: Vec<(PhpString, Value)> = named_args
                         .iter()
@@ -29133,6 +29142,9 @@ impl Vm {
                         let mut named_skipped_args: Vec<usize> = Vec::new();
                         let zpp = self.zpp_info(&func_name_lower);
                         let mut zpp_err: Option<crate::arginfo::ZppError> = None;
+                        // (a variadic's extra named arguments: the call is
+                        // made, its argument checks fail in its frame)
+                        let mut named_extra: Vec<(PhpString, Value)> = Vec::new();
                         // Compiled to an opcode by php-src: no frame of its own
                         // (A call through a closure, e.g. strlen(...)($s), is a
                         // real call.)
@@ -29157,9 +29169,13 @@ impl Vm {
                             {
                                 // Stub arginfo: map names to positions, fill skipped defaults
                                 let named = std::mem::take(&mut call.named_args);
+                                let extra = crate::internal_frames::extra_named_args(info, &named);
                                 match self.zpp_resolve_named(info, &mut call.args, named) {
                                     Ok(d) => named_skipped_args = d,
-                                    Err(e) => zpp_err = Some(e),
+                                    Err(e) => {
+                                        zpp_err = Some(e);
+                                        named_extra = extra;
+                                    }
                                 }
                             } else if let Some(param_names) =
                                 self.builtin_param_names.get(&func_name_lower).cloned()
@@ -29235,7 +29251,7 @@ impl Vm {
                             matches!(zpp, Some((_, f)) if f & crate::arginfo::CHECK_TYPES != 0);
                         // Arguments as passed, when zpp coerced some (for the frame).
                         let mut zpp_orig: Option<Vec<Value>> = None;
-                        let mut zpp_err_in_call = false;
+                        let mut zpp_err_in_call = !named_extra.is_empty();
                         if zpp_err.is_none() {
                             if let Some((info, flags)) = zpp {
                                 if let Err(e) = self.zpp_check(
@@ -29260,8 +29276,12 @@ impl Vm {
                                         zpp_orig.as_deref().unwrap_or(&call.args),
                                         op.line,
                                     );
+                                    self.note_builtin_frame_named(std::mem::take(
+                                        &mut named_extra,
+                                    ));
                                 }
                                 let exc_val = self.create_exception(cls, &msg, op.line);
+                                self.builtin_frame_named.clear();
                                 if zpp_err_in_call && !special {
                                     self.pop_builtin_frame();
                                 }

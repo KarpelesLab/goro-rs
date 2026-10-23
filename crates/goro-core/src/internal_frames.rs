@@ -398,10 +398,23 @@ impl Vm {
             return f(self, args);
         };
         let mut owned = args.to_vec();
+        let extra = extra_named_args(info, &named);
         if let Err(e) = self.zpp_resolve_named(info, &mut owned, named) {
             let line = self.current_line;
             if let crate::arginfo::ZppError::Throw(cls, msg) = e {
+                // (collected by the variadic: the call is made, its own
+                // argument checks fail in its frame)
+                let in_call = !extra.is_empty();
+                if in_call {
+                    let at = self.ucf_call_line.take().unwrap_or(0);
+                    self.push_builtin_frame(lname, args, at);
+                    self.note_builtin_frame_named(extra);
+                }
                 let exc = self.create_exception(cls, &msg, line);
+                self.builtin_frame_named.clear();
+                if in_call {
+                    self.pop_builtin_frame();
+                }
                 self.current_exception = Some(exc);
             }
             return Err(crate::vm::VmError {
@@ -484,12 +497,17 @@ impl Vm {
         let is_ucf = lname == b"call_user_func" || lname == b"call_user_func_array";
         let special = named.is_empty() && compiled_special(lname, &args);
         let mut err = None;
+        // A variadic function's extra named arguments
+        // (ZEND_CALL_HAS_EXTRA_NAMED_PARAMS): the call is made, its own
+        // argument checks fail inside it.
+        let mut extra_named: Vec<(PhpString, Value)> = Vec::new();
         if !named.is_empty() {
             if is_ucf || lname == b"forward_static_call" || lname == b"forward_static_call_array" {
                 self.pending_named_args = named;
             } else if let Some(info) = crate::arginfo::lookup(lname) {
+                extra_named = extra_named_args(info, &named);
                 if let Err(e) = self.zpp_resolve_named(info, &mut args, named) {
-                    err = Some((e, false));
+                    err = Some((e, !extra_named.is_empty()));
                 }
             }
         }
@@ -507,8 +525,10 @@ impl Vm {
                 let in_call = in_call && !special;
                 if in_call {
                     self.push_builtin_frame(lname, &shown, line);
+                    self.note_builtin_frame_named(std::mem::take(&mut extra_named));
                 }
                 let exc = self.create_exception(cls, &msg, line);
+                self.builtin_frame_named.clear();
                 if in_call {
                     self.pop_builtin_frame();
                 }
@@ -773,10 +793,21 @@ impl Vm {
         }
     }
 
+    /// The innermost (just pushed) builtin frame has these extra named
+    /// arguments (see Vm::builtin_frame_named).
+    pub(crate) fn note_builtin_frame_named(&mut self, extra: Vec<(PhpString, Value)>) {
+        if extra.is_empty() {
+            return;
+        }
+        self.sync_builtin_frames();
+        let at = self.call_stack.len().saturating_sub(1);
+        self.builtin_frame_named = extra.into_iter().map(|(k, v)| (at, k, v)).collect();
+    }
+
     /// The extra named arguments (ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) of the
     /// running variadic functions' frames: (call_stack index, name, value).
     pub fn frame_named_args(&self) -> Vec<(usize, PhpString, Value)> {
-        let mut out = Vec::new();
+        let mut out = self.builtin_frame_named.clone();
         for f in &self.cv_frames {
             if f.variadic == 0 || f.cvs.is_null() {
                 continue;
@@ -1104,4 +1135,21 @@ fn same_frame_name(a: &str, b: &str) -> bool {
         }
     }
     a.len() == b.len() && norm(a).eq(norm(b))
+}
+
+/// The named arguments of a call to variadic internal function `info` that
+/// name none of its parameters (collected by the variadic one).
+pub(crate) fn extra_named_args(
+    info: &crate::arginfo::FuncInfo,
+    named: &[(Vec<u8>, Value)],
+) -> Vec<(PhpString, Value)> {
+    if !info.is_variadic() {
+        return Vec::new();
+    }
+    let n = info.num_args();
+    named
+        .iter()
+        .filter(|(k, _)| !info.params[..n].iter().any(|p| p.name.as_bytes() == k))
+        .map(|(k, v)| (PhpString::from_vec(k.clone()), v.clone()))
+        .collect()
 }
