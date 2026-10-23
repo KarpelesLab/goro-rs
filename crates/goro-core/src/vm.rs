@@ -20847,7 +20847,8 @@ impl Vm {
             op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin, &mut sym, &mut fe,
         );
         // VERIFY_RETURN_TYPE runs in the function, before its frame is left.
-        let r = if op_array.return_type.is_some() && r.is_ok() {
+        // (exit() unwinds the frame: nothing was returned)
+        let r = if op_array.return_type.is_some() && r.is_ok() && !self.exit_requested {
             self.verify_return_in_frame(op_array, r)
         } else {
             r
@@ -27644,8 +27645,15 @@ impl Vm {
                         }
                         // zend_free_extra_args(): extra arguments still
                         // shared elsewhere become possible roots.
-                        if call.args.len() > bound {
-                            for a in &call.args[bound..] {
+                        // (a variadic parameter's arguments are extra ones
+                        // too, released in order)
+                        let extra_from = match user_fn.variadic_param.filter(|_| captures.is_none())
+                        {
+                            Some(vi) => (vi as usize).min(bound),
+                            None => bound,
+                        };
+                        if call.args.len() > extra_from {
+                            for a in &call.args[extra_from..] {
                                 crate::gc::on_child_released(a);
                             }
                         }
