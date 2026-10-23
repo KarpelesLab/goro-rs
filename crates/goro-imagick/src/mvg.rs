@@ -276,6 +276,11 @@ fn rnd(v: f64) -> i64 {
 }
 
 /// Composite `color` (Q16 RGBA) at coverage `a` over the pixel.
+pub fn composite_pixel(img: &mut Image, x: usize, y: usize, color: &[f64; 4], a: f64) {
+    over(img, x, y, color, a)
+}
+
+/// Composite `color` (Q16 RGBA) at coverage `a` over the pixel.
 fn over(img: &mut Image, x: usize, y: usize, color: &[f64; 4], a: f64) {
     if a <= 0.0 {
         return;

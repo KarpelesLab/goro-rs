@@ -462,16 +462,18 @@ impl DrawingWand {
 
     pub fn skew_x(&mut self, deg: f64) {
         self.print(&format!("skewX {}", num(deg)));
+        // ImageMagick 7.1.2's MVG skewX shears by sin(θ) (black box)
         self.transform(Affine {
-            ry: deg.to_radians().tan(),
+            ry: deg.to_radians().sin(),
             ..Default::default()
         });
     }
 
     pub fn skew_y(&mut self, deg: f64) {
         self.print(&format!("skewY {}", num(deg)));
+        // ... and skewY by -tan(θ/2)
         self.transform(Affine {
-            rx: deg.to_radians().tan(),
+            rx: -(deg.to_radians() / 2.0).tan(),
             ..Default::default()
         });
     }
@@ -1800,6 +1802,75 @@ impl DrawingWand {
         mvg::draw(img, &subs, Some((fill, gc.fill_rule == 2)), Some(st), width);
     }
 
+    fn flush_points(img: &mut Image, points: &mut Vec<(i64, i64, [u16; 4])>) {
+        let (w, h) = (img.columns, img.rows);
+        for (x, y, c) in points.drain(..) {
+            if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
+                if c[3] < 65535 {
+                    let mut one = Image::blank(1, 1);
+                    one.alpha = true;
+                    one.set_px(0, 0, c);
+                    composite_image(img, &one, CompositeOp::Over, x, y, &ComposeArgs::default());
+                } else {
+                    img.set_px(x as usize, y as usize, c);
+                }
+            }
+        }
+    }
+
+    fn render_composite(&self, img: &mut Image, p: &Primitive) -> crate::error::MResult<()> {
+        if let Shape::Composite {
+            op,
+            x,
+            y,
+            w: cw,
+            h: ch,
+            image,
+        } = &p.shape
+        {
+            let mut src = (**image).clone();
+            // the image travels through the MVG as a blob at its depth
+            if src.depth < 16 && src.depth > 0 {
+                let m = ((1u32 << src.depth) - 1) as f64;
+                for v in src.pixels.iter_mut() {
+                    *v = ((((*v as f64) * m / 65535.0 + 0.5).floor()) * 65535.0 / m + 0.5).floor()
+                        as u16;
+                }
+            }
+            let (tw, th) = (
+                if *cw > 0.0 {
+                    cw.round() as usize
+                } else {
+                    src.columns
+                },
+                if *ch > 0.0 {
+                    ch.round() as usize
+                } else {
+                    src.rows
+                },
+            );
+            if (tw, th) != (src.columns, src.rows) && tw > 0 && th > 0 {
+                src = crate::transform::resize(&src, tw, th, FilterType::Undefined)?;
+            }
+            let a = p.gc.affine;
+            let (px, py) = (a.sx * x + a.ry * y + a.tx, a.rx * x + a.sy * y + a.ty);
+            let translate_only = a.sx == 1.0 && a.sy == 1.0 && a.rx == 0.0 && a.ry == 0.0;
+            if *op == CompositeOp::Over && translate_only {
+                Self::affine_over(img, &src, px, py);
+            } else {
+                composite_image(
+                    img,
+                    &src,
+                    *op,
+                    px.round() as i64,
+                    py.round() as i64,
+                    &ComposeArgs::default(),
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn render_onto(&self, img: &mut Image) -> crate::error::MResult<()> {
         let (w, h) = (img.columns, img.rows);
         if w == 0 || h == 0 {
@@ -1807,7 +1878,6 @@ impl DrawingWand {
         }
         let mut nodes = Vec::new();
         let mut points: Vec<(i64, i64, [u16; 4])> = Vec::new();
-        let mut composites = Vec::new();
         for p in &self.primitives {
             match &p.shape {
                 Shape::Point(x, y) => {
@@ -1815,7 +1885,9 @@ impl DrawingWand {
                     let (px, py) = (a.sx * x + a.ry * y + a.tx, a.rx * x + a.sy * y + a.ty);
                     let mut c = p.gc.fill.clone();
                     c.alpha *= p.gc.fill_opacity * p.gc.opacity;
+                    Self::flush_nodes(img, &mut nodes);
                     points.push((px.round() as i64, py.round() as i64, c.to_rgba16()));
+                    Self::flush_points(img, &mut points);
                 }
                 Shape::Text { x, y, text } => {
                     if self.raster_text(img, p, *x, *y, text, &mut nodes) {
@@ -1825,7 +1897,12 @@ impl DrawingWand {
                         nodes.extend(n);
                     }
                 }
-                Shape::Composite { .. } => composites.push(p),
+                Shape::Composite { .. } => {
+                    // in drawing order
+                    Self::flush_nodes(img, &mut nodes);
+                    Self::flush_points(img, &mut points);
+                    self.render_composite(img, p)?;
+                }
                 Shape::Path { path, open, im } => {
                     if self.raster_im(img, p, im, &mut nodes) {
                         continue;
@@ -1853,58 +1930,30 @@ impl DrawingWand {
             }
         }
         Self::flush_nodes(img, &mut nodes);
-        for (x, y, c) in points {
-            if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
-                if c[3] < 65535 {
-                    let mut one = Image::blank(1, 1);
-                    one.alpha = true;
-                    one.set_px(0, 0, c);
-                    composite_image(img, &one, CompositeOp::Over, x, y, &ComposeArgs::default());
-                } else {
-                    img.set_px(x as usize, y as usize, c);
-                }
-            }
-        }
-        for p in composites {
-            if let Shape::Composite {
-                op,
-                x,
-                y,
-                w: cw,
-                h: ch,
-                image,
-            } = &p.shape
-            {
-                let mut src = (**image).clone();
-                let (tw, th) = (
-                    if *cw > 0.0 {
-                        cw.round() as usize
-                    } else {
-                        src.columns
-                    },
-                    if *ch > 0.0 {
-                        ch.round() as usize
-                    } else {
-                        src.rows
-                    },
-                );
-                if (tw, th) != (src.columns, src.rows) && tw > 0 && th > 0 {
-                    src = crate::transform::resize(&src, tw, th, FilterType::Undefined)?;
-                }
-                let a = p.gc.affine;
-                let (px, py) = (a.sx * x + a.ry * y + a.tx, a.rx * x + a.sy * y + a.ty);
-                composite_image(
-                    img,
-                    &src,
-                    *op,
-                    px.round() as i64,
-                    py.round() as i64,
-                    &ComposeArgs::default(),
-                );
-            }
-        }
+        Self::flush_points(img, &mut points);
         img.colors = None;
         Ok(())
+    }
+
+    /// DrawAffineImage() for a translation (black box): the image lands
+    /// at the rounded position, one more column and row taken from its
+    /// edge, and goes over the canvas.
+    fn affine_over(img: &mut Image, src: &Image, tx: f64, ty: f64) {
+        if src.columns == 0 || src.rows == 0 {
+            return;
+        }
+        let (x0, y0) = ((tx + 0.5).floor() as i64, (ty + 0.5).floor() as i64);
+        let (x1, y1) = (x0 + src.columns as i64, y0 + src.rows as i64);
+        for y in y0.max(0)..=y1.min(img.rows as i64 - 1) {
+            for x in x0.max(0)..=x1.min(img.columns as i64 - 1) {
+                let sx = ((x - x0) as usize).min(src.columns - 1);
+                let sy = ((y - y0) as usize).min(src.rows - 1);
+                let q = src.px(sx, sy);
+                let a = if src.alpha { q[3] as f64 } else { 65535.0 };
+                let color = [q[0] as f64, q[1] as f64, q[2] as f64, a];
+                mvg::composite_pixel(img, x as usize, y as usize, &color, 1.0);
+            }
+        }
     }
 
     /// The resolution text is laid out at.
