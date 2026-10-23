@@ -330,6 +330,10 @@ pub struct Globals {
     pub last_phar_name: Vec<u8>,
     pub last_alias: Option<Vec<u8>>,
     pub mung_list: u32,
+    /// The archives of phar.cache_list (cached_phars / cached_alias): they
+    /// outlive the request.
+    pub cached_fnames: Vec<Vec<u8>>,
+    pub cached_aliases: Vec<Vec<u8>>,
 }
 
 thread_local! {
@@ -349,6 +353,8 @@ thread_local! {
         last_phar_name: Vec::new(),
         last_alias: None,
         mung_list: 0,
+        cached_fnames: Vec::new(),
+        cached_aliases: Vec::new(),
     });
 }
 
@@ -1028,6 +1034,32 @@ pub fn parse_pharfile(
         }
     });
     Ok(mydata)
+}
+
+/// PHP_RSHUTDOWN_FUNCTION(phar): the archives the request opened are
+/// released (phar_fname_map / phar_alias_map are per request).
+pub fn request_shutdown() {
+    g(|g| {
+        if !g.request_init {
+            return;
+        }
+        let Globals {
+            fname_map,
+            alias_map,
+            cached_fnames,
+            cached_aliases,
+            ..
+        } = g;
+        fname_map.retain(|k, _| cached_fnames.contains(k));
+        alias_map.retain(|k, _| cached_aliases.contains(k));
+        g.request_init = false;
+        g.last_phar = None;
+        g.last_phar_name.clear();
+        g.last_alias = None;
+        g.mung_list = 0;
+        g.cwd = None;
+        g.cwd_init = false;
+    });
 }
 
 /// phar_request_initialize()

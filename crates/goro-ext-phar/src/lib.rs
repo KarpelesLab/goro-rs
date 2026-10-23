@@ -500,6 +500,8 @@ pub fn register(vm: &mut Vm) {
     vm.include_stream_hook = Some(include_stream);
     intercept::register(vm);
     vm.phpinfo_hooks.push(phpinfo);
+    vm.request_shutdown_hooks
+        .push(|_| archive::request_shutdown());
 }
 
 fn ini_parse_bool(v: &[u8]) -> bool {
@@ -582,6 +584,10 @@ fn on_update_cache_list(vm: &mut Vm, value: &[u8], startup: bool) -> bool {
             break;
         }
     }
+    g(|g| {
+        g.cached_fnames = g.fname_map.keys().cloned().collect();
+        g.cached_aliases = g.alias_map.keys().cloned().collect();
+    });
     true
 }
 
