@@ -1238,7 +1238,7 @@ fn webp_yuv_to_rgba(im: &oxideav_webp::WebpImage) -> Option<Vec<u8>> {
         let (jn, jf) = if y == 0 {
             (0, 0)
         } else {
-            let j = (y + 1) / 2; // the lower chroma row of the pair
+            let j = y.div_ceil(2); // the lower chroma row of the pair
             if y % 2 == 1 {
                 (j - 1, j.min(ch - 1))
             } else {
@@ -1248,7 +1248,7 @@ fn webp_yuv_to_rgba(im: &oxideav_webp::WebpImage) -> Option<Vec<u8>> {
         let (in_, if_) = if x == 0 {
             (0, 0)
         } else {
-            let i = (x + 1) / 2;
+            let i = x.div_ceil(2);
             if x % 2 == 1 {
                 (i - 1, i.min(cw - 1))
             } else {
