@@ -152,11 +152,12 @@ impl Vm {
     /// Whether a method call on an object of `class_lower` should be
     /// dispatched as a deferred SPL call (see spl_deferred_call).
     pub(crate) fn spl_should_defer(&self, class_lower: &[u8], method_lower: &[u8]) -> bool {
-        if method_lower.starts_with(b"__") {
-            return false;
-        }
+        let magic = method_lower.starts_with(b"__");
         match self.spl_builtin_base(class_lower) {
-            Some(base) => self.spl_stub_lookup(base, method_lower).is_some(),
+            // (magic methods only when deprecated: SplFixedArray::__wakeup())
+            Some(base) => self
+                .spl_stub_lookup(base, method_lower)
+                .is_some_and(|m| !magic || m.deprecated.is_some()),
             None => false,
         }
     }
