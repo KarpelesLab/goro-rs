@@ -20,8 +20,63 @@ fn has_alpha8(rgba: &[u8]) -> bool {
     rgba.chunks_exact(4).any(|p| p[3] != 255)
 }
 
+/// 8-bit, 3- or 4-plane PCX (RGB / RGBA), which oxideav-pcx refuses:
+/// RLE scanlines of planes × bytes-per-line bytes.
+fn decode_pcx_planes(data: &[u8]) -> Option<Image> {
+    if data.len() < 128 || data[0] != 0x0a || data[3] != 8 {
+        return None;
+    }
+    let le16 = |o: usize| u16::from_le_bytes([data[o], data[o + 1]]) as usize;
+    let (x0, y0, x1, y1) = (le16(4), le16(6), le16(8), le16(10));
+    let (w, h) = (x1.checked_sub(x0)? + 1, y1.checked_sub(y0)? + 1);
+    let np = data[65] as usize;
+    let bpl = le16(66);
+    if !(3..=4).contains(&np) || bpl < w {
+        return None;
+    }
+    let rle = data[2] == 1;
+    let mut img = Image::blank(w, h);
+    let mut o = 128;
+    let mut line = vec![0u8; np * bpl];
+    for y in 0..h {
+        let mut k = 0;
+        while k < line.len() && o < data.len() {
+            let b = data[o];
+            o += 1;
+            if rle && b >= 0xc0 {
+                let n = (b & 0x3f) as usize;
+                let v = *data.get(o)?;
+                o += 1;
+                for _ in 0..n {
+                    if k < line.len() {
+                        line[k] = v;
+                    }
+                    k += 1;
+                }
+            } else {
+                line[k] = b;
+                k += 1;
+            }
+        }
+        for x in 0..w {
+            let c = |p: usize| line[p * bpl + x] as u16 * 257;
+            img.set_px(x, y, [c(0), c(1), c(2), if np == 4 { c(3) } else { 65535 }]);
+        }
+    }
+    img.alpha = np == 4;
+    img.depth = 8;
+    Some(img)
+}
+
 pub fn decode_pcx(data: &[u8]) -> MResult<Vec<Image>> {
-    let im = oxideav_pcx::decode_rgba8(data).map_err(|e| corrupt("PCX", e))?;
+    let im = match oxideav_pcx::decode_rgba8(data) {
+        Ok(im) => im,
+        Err(e) => {
+            return decode_pcx_planes(data)
+                .map(|i| vec![i])
+                .ok_or_else(|| corrupt("PCX", e));
+        }
+    };
     let alpha = has_alpha8(&im.data);
     Ok(vec![rgba8_image(im.width, im.height, &im.data, alpha)])
 }
@@ -56,7 +111,7 @@ pub fn decode_hdr(data: &[u8]) -> MResult<Vec<Image>> {
             img.set_px(x, y, [q(f(0)), q(f(1)), q(f(2)), 65535]);
         }
     }
-    img.depth = 32;
+    img.depth = 16;
     img.colorspace = Colorspace::RGB;
     Ok(vec![img])
 }
@@ -627,4 +682,584 @@ pub fn encode_miff(images: &[&Image], compression: CompressionType) -> Vec<u8> {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// SGI (Iris RGB), from the SGI image file format specification
+
+pub fn decode_sgi(data: &[u8]) -> MResult<Vec<Image>> {
+    let bad = || corrupt("SGI", "improper image header");
+    if data.len() < 512 || data[0] != 0x01 || data[1] != 0xda {
+        return Err(bad());
+    }
+    let be16 = |o: usize| u16::from_be_bytes([data[o], data[o + 1]]) as usize;
+    let be32 =
+        |o: usize| u32::from_be_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as usize;
+    let rle = data[2] == 1;
+    let bpc = data[3] as usize;
+    let dim = be16(4);
+    let w = be16(6);
+    let h = if dim >= 2 { be16(8) } else { 1 };
+    let z = if dim >= 3 { be16(10) } else { 1 };
+    if !(1..=2).contains(&bpc) || w == 0 || h == 0 || z == 0 {
+        return Err(bad());
+    }
+    let maxv = if bpc == 2 { 65535.0 } else { 255.0 };
+    // channel planes of rows, bottom row first
+    let mut planes = vec![vec![0u16; w * h]; z];
+    let read_val = |o: usize| -> u16 {
+        if bpc == 2 {
+            u16::from_be_bytes([data[o], data[o + 1]])
+        } else {
+            data[o] as u16
+        }
+    };
+    for (c, plane) in planes.iter_mut().enumerate() {
+        for row in 0..h {
+            let dst = &mut plane[(h - 1 - row) * w..(h - row) * w];
+            if !rle {
+                let o = 512 + ((c * h + row) * w) * bpc;
+                if o + w * bpc > data.len() {
+                    return Err(corrupt("SGI", "unexpected end-of-file"));
+                }
+                for (x, d) in dst.iter_mut().enumerate() {
+                    *d = read_val(o + x * bpc);
+                }
+            } else {
+                let t = 512 + (c * h + row) * 4;
+                if t + 4 > data.len() {
+                    return Err(corrupt("SGI", "unexpected end-of-file"));
+                }
+                let mut o = be32(t);
+                let mut x = 0;
+                while x < w && o + bpc <= data.len() {
+                    let cnt = read_val(o) as usize;
+                    o += bpc;
+                    let n = cnt & 0x7f;
+                    if n == 0 {
+                        break;
+                    }
+                    if cnt & 0x80 != 0 {
+                        for _ in 0..n {
+                            if x < w && o + bpc <= data.len() {
+                                dst[x] = read_val(o);
+                            }
+                            x += 1;
+                            o += bpc;
+                        }
+                    } else {
+                        let v = if o + bpc <= data.len() {
+                            read_val(o)
+                        } else {
+                            0
+                        };
+                        o += bpc;
+                        for _ in 0..n {
+                            if x < w {
+                                dst[x] = v;
+                            }
+                            x += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut img = Image::blank(w, h);
+    let q = |v: u16| crate::color::to_q16(v as f64 * 65535.0 / maxv);
+    for k in 0..w * h {
+        let p = match z {
+            1 | 2 => {
+                let g = q(planes[0][k]);
+                [g, g, g, if z == 2 { q(planes[1][k]) } else { 65535 }]
+            }
+            _ => [
+                q(planes[0][k]),
+                q(planes[1][k]),
+                q(planes[2][k]),
+                if z >= 4 { q(planes[3][k]) } else { 65535 },
+            ],
+        };
+        img.pixels[k * 4..k * 4 + 4].copy_from_slice(&p);
+    }
+    img.alpha = z == 2 || z >= 4;
+    if z <= 2 {
+        img.colorspace = Colorspace::Gray;
+    }
+    img.depth = (bpc * 8) as u32;
+    if rle {
+        img.compression = CompressionType::RLE;
+    }
+    Ok(vec![img])
+}
+
+// ---------------------------------------------------------------------------
+// XPM, from the XPM manual: the C strings hold "w h ncolors cpp", the
+// colour table (chars, then key/colour pairs; the "c" key wins) and the rows
+
+pub fn decode_xpm(data: &[u8]) -> MResult<Vec<Image>> {
+    let bad = || corrupt("XPM", "improper image header");
+    // the quoted strings, outside comments
+    let mut strs: Vec<Vec<u8>> = Vec::new();
+    let mut i = 0;
+    let n = data.len();
+    while i < n {
+        if data[i..].starts_with(b"/*") {
+            i += 2;
+            while i + 1 < n && !(data[i] == b'*' && data[i + 1] == b'/') {
+                i += 1;
+            }
+            i += 2;
+        } else if data[i] == b'"' {
+            i += 1;
+            let s = i;
+            while i < n && data[i] != b'"' {
+                i += 1;
+            }
+            strs.push(data[s..i.min(n)].to_vec());
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+    let head = String::from_utf8_lossy(strs.first().ok_or_else(bad)?).to_string();
+    let v: Vec<usize> = head
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    if v.len() < 4 {
+        return Err(bad());
+    }
+    let (w, h, nc, cpp) = (v[0], v[1], v[2], v[3]);
+    if w == 0 || h == 0 || cpp == 0 || strs.len() < 1 + nc + h {
+        return Err(bad());
+    }
+    let mut table: std::collections::HashMap<Vec<u8>, [u16; 4]> = std::collections::HashMap::new();
+    let mut alpha = false;
+    for line in &strs[1..1 + nc] {
+        if line.len() < cpp {
+            return Err(bad());
+        }
+        let key = line[..cpp].to_vec();
+        let rest = String::from_utf8_lossy(&line[cpp..]).to_string();
+        let toks: Vec<&str> = rest.split_whitespace().collect();
+        // key/value pairs; a colour may be several words ("light blue")
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        let mut k = 0;
+        while k < toks.len() {
+            if matches!(toks[k], "c" | "m" | "g" | "g4" | "s") && k + 1 < toks.len() {
+                let key = toks[k].to_string();
+                let mut val = Vec::new();
+                k += 1;
+                while k < toks.len() && !matches!(toks[k], "c" | "m" | "g" | "g4" | "s") {
+                    val.push(toks[k]);
+                    k += 1;
+                }
+                pairs.push((key, val.join(" ")));
+            } else {
+                k += 1;
+            }
+        }
+        let pick = pairs
+            .iter()
+            .find(|(k, _)| k == "c")
+            .or_else(|| pairs.iter().find(|(k, _)| k == "g"))
+            .or_else(|| pairs.iter().find(|(k, _)| k == "g4"))
+            .or_else(|| pairs.iter().find(|(k, _)| k == "m"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        let c = if pick.eq_ignore_ascii_case("none") {
+            alpha = true;
+            [0, 0, 0, 0]
+        } else {
+            match crate::color::PixelInfo::parse(&pick) {
+                Some(p) => p.to_rgba16(),
+                None => [0, 0, 0, 65535],
+            }
+        };
+        table.insert(key, c);
+    }
+    let mut img = Image::blank(w, h);
+    for y in 0..h {
+        let row = &strs[1 + nc + y];
+        for x in 0..w {
+            let k = &row[(x * cpp).min(row.len())..((x + 1) * cpp).min(row.len())];
+            let c = table.get(k).copied().unwrap_or([0, 0, 0, 65535]);
+            img.set_px(x, y, c);
+        }
+    }
+    img.alpha = alpha;
+    img.colors = Some(nc);
+    img.depth = 8;
+    Ok(vec![img])
+}
+
+// ---------------------------------------------------------------------------
+// PSD, from Adobe's Photoshop file format specification: the merged
+// (composite) image of a version-1 file
+
+fn packbits_row(data: &[u8], mut o: usize, out: &mut Vec<u8>, want: usize) -> usize {
+    while out.len() < want && o < data.len() {
+        let n = data[o] as i8;
+        o += 1;
+        if n >= 0 {
+            let cnt = n as usize + 1;
+            let end = (o + cnt).min(data.len());
+            out.extend_from_slice(&data[o..end]);
+            o = end;
+        } else if n != -128 {
+            let cnt = (-(n as i32)) as usize + 1;
+            if o < data.len() {
+                let v = data[o];
+                o += 1;
+                out.extend(std::iter::repeat_n(v, cnt));
+            }
+        }
+    }
+    o
+}
+
+pub fn decode_psd(data: &[u8]) -> MResult<Vec<Image>> {
+    let bad = || corrupt("PSD", "improper image header");
+    if data.len() < 26 || !data.starts_with(b"8BPS") {
+        return Err(bad());
+    }
+    let be16 = |o: usize| u16::from_be_bytes([data[o], data[o + 1]]) as usize;
+    let be32 = |o: usize| {
+        if o + 4 > data.len() {
+            0
+        } else {
+            u32::from_be_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]) as usize
+        }
+    };
+    let version = be16(4);
+    if version != 1 {
+        return Err(bad());
+    }
+    let nch = be16(12);
+    let h = be32(14);
+    let w = be32(18);
+    let depth = be16(22);
+    let mode = be16(24);
+    if w == 0 || h == 0 || !(depth == 8 || depth == 16 || depth == 1) {
+        return Err(bad());
+    }
+    let mut o = 26;
+    let cmlen = be32(o);
+    let cmap = data.get(o + 4..o + 4 + cmlen).unwrap_or(&[]).to_vec();
+    o += 4 + cmlen;
+    let rlen = be32(o);
+    let resources = data.get(o + 4..o + 4 + rlen).map(|r| r.to_vec());
+    o += 4 + rlen;
+    let llen = be32(o);
+    let layers_at = o + 4;
+    o += 4 + llen;
+    if o + 2 > data.len() {
+        return Err(corrupt("PSD", "unexpected end-of-file"));
+    }
+    let comp = be16(o);
+    o += 2;
+    let bps = if depth == 16 { 2 } else { 1 };
+    let row_bytes = if depth == 1 { w.div_ceil(8) } else { w * bps };
+    let mut chans: Vec<Vec<u8>> = Vec::with_capacity(nch);
+    if comp == 1 {
+        let counts: Vec<usize> = (0..nch * h).map(|k| be16(o + k * 2)).collect();
+        o += nch * h * 2;
+        for c in 0..nch {
+            let mut plane = Vec::with_capacity(row_bytes * h);
+            for r in 0..h {
+                let mut row = Vec::with_capacity(row_bytes);
+                packbits_row(data, o, &mut row, row_bytes);
+                row.resize(row_bytes, 0);
+                plane.extend_from_slice(&row);
+                o += counts[c * h + r];
+            }
+            chans.push(plane);
+        }
+    } else {
+        for _ in 0..nch {
+            let end = (o + row_bytes * h).min(data.len());
+            let mut plane = data[o..end].to_vec();
+            plane.resize(row_bytes * h, 0);
+            chans.push(plane);
+            o = end;
+        }
+    }
+    let sample = |c: usize, k: usize| -> u16 {
+        let p = &chans[c];
+        match depth {
+            16 => u16::from_be_bytes([p[k * 2], p[k * 2 + 1]]),
+            1 => {
+                let (y, x) = (k / w, k % w);
+                if p[y * row_bytes + x / 8] & (0x80 >> (x % 8)) != 0 {
+                    0
+                } else {
+                    65535
+                }
+            }
+            _ => p[k] as u16 * 257,
+        }
+    };
+    let mut img = Image::blank(w, h);
+    let color_ch = match mode {
+        0..=2 | 8 => 1,
+        4 => 4,
+        _ => 3,
+    };
+    let alpha = nch > color_ch;
+    let mut black = if mode == 4 {
+        Some(vec![0u16; w * h])
+    } else {
+        None
+    };
+    for k in 0..w * h {
+        let a = if alpha { sample(color_ch, k) } else { 65535 };
+        let p = match mode {
+            2 => {
+                let i = (sample(0, k) / 257) as usize;
+                let g = |c: usize| cmap.get(c * 256 + i).copied().unwrap_or(0) as u16 * 257;
+                [g(0), g(1), g(2), a]
+            }
+            0 | 1 | 8 => {
+                let g = sample(0, k);
+                [g, g, g, a]
+            }
+            4 => {
+                // Photoshop stores CMYK inverted (0 = full ink)
+                if let Some(b) = &mut black {
+                    b[k] = 65535 - sample(3, k);
+                }
+                [
+                    65535 - sample(0, k),
+                    65535 - sample(1, k),
+                    65535 - sample(2, k),
+                    a,
+                ]
+            }
+            _ => [sample(0, k), sample(1, k), sample(2, k), a],
+        };
+        img.pixels[k * 4..k * 4 + 4].copy_from_slice(&p);
+    }
+    img.alpha = alpha;
+    if alpha {
+        // the composite is stored blended over white; ImageMagick unblends
+        // it (psd:alpha-unblend)
+        for p in img.pixels.chunks_exact_mut(4) {
+            let a = p[3] as f64 / 65535.0;
+            if a > 0.0 {
+                for c in p.iter_mut().take(3) {
+                    *c = crate::color::to_q16((*c as f64 - 65535.0 * (1.0 - a)) / a);
+                }
+            }
+        }
+    }
+    img.black = black;
+    img.colorspace = match mode {
+        0 | 1 | 8 => Colorspace::Gray,
+        4 => Colorspace::CMYK,
+        _ => Colorspace::SRGB,
+    };
+    if mode == 2 {
+        img.colors = Some(cmap.len() / 3);
+    }
+    img.depth = depth.max(8) as u32;
+    if depth == 1 {
+        img.depth = 1;
+    }
+    if comp == 1 {
+        img.compression = CompressionType::RLE;
+    }
+    if let Some(r) = resources {
+        if !r.is_empty() {
+            img.set_profile("8bim", r);
+        }
+    }
+    let mut all = vec![img];
+    if matches!(mode, 1 | 3 | 8) && depth != 1 {
+        all.extend(psd_layers(data, layers_at, llen, (w, h), mode, depth));
+    }
+    Ok(all)
+}
+
+/// The layers of a PSD's layer-and-mask section, each its own image on
+/// the document's canvas (ImageMagick lists them after the composite),
+/// labelled with the layer name.
+fn psd_layers(
+    data: &[u8],
+    start: usize,
+    len: usize,
+    canvas: (usize, usize),
+    mode: usize,
+    depth: usize,
+) -> Vec<Image> {
+    let mut out = Vec::new();
+    let end = (start + len).min(data.len());
+    let be16 = |o: usize| {
+        if o + 2 <= end {
+            u16::from_be_bytes([data[o], data[o + 1]])
+        } else {
+            0
+        }
+    };
+    let be32 = |o: usize| {
+        if o + 4 <= end {
+            u32::from_be_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]])
+        } else {
+            0
+        }
+    };
+    if len < 4 {
+        return out;
+    }
+    let info_len = be32(start) as usize;
+    let mut o = start + 4;
+    if info_len < 2 {
+        return out;
+    }
+    let count = (be16(o) as i16).unsigned_abs() as usize;
+    o += 2;
+    struct Rec {
+        top: i64,
+        left: i64,
+        w: usize,
+        h: usize,
+        chans: Vec<(i16, usize)>,
+        opacity: u8,
+        name: String,
+    }
+    let mut recs = Vec::new();
+    for _ in 0..count {
+        let top = be32(o) as i32 as i64;
+        let left = be32(o + 4) as i32 as i64;
+        let bottom = be32(o + 8) as i32 as i64;
+        let right = be32(o + 12) as i32 as i64;
+        let nch = be16(o + 16) as usize;
+        o += 18;
+        let mut chans = Vec::new();
+        for _ in 0..nch {
+            chans.push((be16(o) as i16, be32(o + 2) as usize));
+            o += 6;
+        }
+        // "8BIM", the blend key, opacity, clipping, flags, filler
+        let opacity = data.get(o + 8).copied().unwrap_or(255);
+        o += 12;
+        let extra = be32(o) as usize;
+        o += 4;
+        let xend = o + extra;
+        let mlen = be32(o) as usize;
+        let mut p = o + 4 + mlen;
+        let blen = be32(p) as usize;
+        p += 4 + blen;
+        let nlen = data.get(p).copied().unwrap_or(0) as usize;
+        let name =
+            String::from_utf8_lossy(data.get(p + 1..p + 1 + nlen).unwrap_or(&[])).to_string();
+        o = xend;
+        recs.push(Rec {
+            top,
+            left,
+            w: (right - left).max(0) as usize,
+            h: (bottom - top).max(0) as usize,
+            chans,
+            opacity,
+            name,
+        });
+    }
+    let bps = if depth == 16 { 2 } else { 1 };
+    for r in recs {
+        let mut planes: Vec<(i16, Vec<u8>)> = Vec::new();
+        for &(id, dlen) in &r.chans {
+            let cstart = o;
+            let comp = be16(o);
+            let row_bytes = r.w * bps;
+            let mut plane = Vec::with_capacity(row_bytes * r.h);
+            let mut q = o + 2;
+            if comp == 1 {
+                let counts: Vec<usize> = (0..r.h).map(|k| be16(q + k * 2) as usize).collect();
+                q += r.h * 2;
+                for c in counts {
+                    let mut row = Vec::with_capacity(row_bytes);
+                    packbits_row(&data[..end], q, &mut row, row_bytes);
+                    row.resize(row_bytes, 0);
+                    plane.extend_from_slice(&row);
+                    q += c;
+                }
+            } else if comp == 2 || comp == 3 {
+                // ZIP, without (2) or with (3) per-row delta prediction
+                let e = (cstart + dlen).min(end);
+                plane = zlib_inflate(&data[q.min(e)..e]).unwrap_or_default();
+                plane.resize(row_bytes * r.h, 0);
+                if comp == 3 {
+                    psd_unpredict(&mut plane, r.w, r.h, bps);
+                }
+            } else {
+                let e = (q + row_bytes * r.h).min(end);
+                plane.extend_from_slice(&data[q.min(e)..e]);
+                plane.resize(row_bytes * r.h, 0);
+            }
+            planes.push((id, plane));
+            o = cstart + dlen;
+        }
+        if r.w == 0 || r.h == 0 {
+            continue;
+        }
+        let get = |id: i16, k: usize| -> Option<u16> {
+            planes.iter().find(|(i, _)| *i == id).map(|(_, p)| {
+                if bps == 2 {
+                    u16::from_be_bytes([p[k * 2], p[k * 2 + 1]])
+                } else {
+                    p[k] as u16 * 257
+                }
+            })
+        };
+        let mut img = Image::blank(r.w, r.h);
+        let has_alpha = r.chans.iter().any(|c| c.0 == -1);
+        for k in 0..r.w * r.h {
+            let a = get(-1, k).map_or(65535.0, |v| v as f64) * r.opacity as f64 / 255.0;
+            let px = if matches!(mode, 1 | 8) {
+                let g = get(0, k).unwrap_or(0);
+                [g, g, g, crate::color::to_q16(a)]
+            } else {
+                [
+                    get(0, k).unwrap_or(0),
+                    get(1, k).unwrap_or(0),
+                    get(2, k).unwrap_or(0),
+                    crate::color::to_q16(a),
+                ]
+            };
+            img.pixels[k * 4..k * 4 + 4].copy_from_slice(&px);
+        }
+        img.alpha = has_alpha || r.opacity != 255;
+        if matches!(mode, 1 | 8) {
+            img.colorspace = Colorspace::Gray;
+        }
+        img.depth = (bps * 8) as u32;
+        img.page = crate::geometry::Rect::new(canvas.0, canvas.1, r.left, r.top);
+        if !r.name.is_empty() {
+            img.properties.set("label", &r.name);
+        }
+        out.push(img);
+    }
+    out
+}
+
+/// Undo PSD's ZIP prediction: each sample is stored as the difference
+/// from the one before it in its row (16-bit samples big-endian).
+fn psd_unpredict(plane: &mut [u8], w: usize, h: usize, bps: usize) {
+    for y in 0..h {
+        if bps == 2 {
+            let row = &mut plane[y * w * 2..(y + 1) * w * 2];
+            for x in 1..w {
+                let prev = u16::from_be_bytes([row[x * 2 - 2], row[x * 2 - 1]]);
+                let cur = u16::from_be_bytes([row[x * 2], row[x * 2 + 1]]);
+                let v = prev.wrapping_add(cur).to_be_bytes();
+                row[x * 2] = v[0];
+                row[x * 2 + 1] = v[1];
+            }
+        } else {
+            let row = &mut plane[y * w..(y + 1) * w];
+            for x in 1..w {
+                row[x] = row[x].wrapping_add(row[x - 1]);
+            }
+        }
+    }
 }
