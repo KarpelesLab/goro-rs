@@ -4327,21 +4327,90 @@ impl Parser {
         }
     }
 
-    fn parse_logical_or(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_logical_and()?;
-        while matches!(self.peek(), TokenKind::BooleanOr) {
+    /// The binary operators from `||` down to `*` `/` `%`, by precedence
+    /// climbing (one loop instead of a function per level): their level
+    /// (1 = loosest) and what they build. All are left-associative; the
+    /// comparisons and equalities are non-associative in php-src's grammar,
+    /// which reports a chain of them as a syntax error first.
+    fn binary_op_level(kind: &TokenKind) -> Option<(u8, BinLevelOp)> {
+        use BinLevelOp::*;
+        Some(match kind {
+            TokenKind::BooleanOr => (1, Bin(BinaryOp::BooleanOr)),
+            TokenKind::BooleanAnd => (2, Bin(BinaryOp::BooleanAnd)),
+            TokenKind::Pipe => (3, Bin(BinaryOp::BitwiseOr)),
+            TokenKind::Caret => (4, Bin(BinaryOp::BitwiseXor)),
+            TokenKind::Ampersand => (5, Bin(BinaryOp::BitwiseAnd)),
+            TokenKind::Equal => (6, Bin(BinaryOp::Equal)),
+            TokenKind::Identical => (6, Bin(BinaryOp::Identical)),
+            TokenKind::NotEqual => (6, Bin(BinaryOp::NotEqual)),
+            TokenKind::NotIdentical => (6, Bin(BinaryOp::NotIdentical)),
+            TokenKind::Less => (7, Bin(BinaryOp::Less)),
+            TokenKind::Greater => (7, Bin(BinaryOp::Greater)),
+            TokenKind::LessEqual => (7, Bin(BinaryOp::LessEqual)),
+            TokenKind::GreaterEqual => (7, Bin(BinaryOp::GreaterEqual)),
+            TokenKind::Spaceship => (7, Bin(BinaryOp::Spaceship)),
+            TokenKind::Instanceof => (7, Instanceof),
+            // `|>` binds tighter than the comparisons and looser than `.`
+            TokenKind::PipeGreater => (8, Pipe),
+            // `.` binds looser than the shifts and `+`/`-` (PHP 8)
+            TokenKind::Dot => (9, Bin(BinaryOp::Concat)),
+            TokenKind::ShiftLeft => (10, Bin(BinaryOp::ShiftLeft)),
+            TokenKind::ShiftRight => (10, Bin(BinaryOp::ShiftRight)),
+            TokenKind::Plus => (11, Bin(BinaryOp::Add)),
+            TokenKind::Minus => (11, Bin(BinaryOp::Sub)),
+            TokenKind::Star => (12, Bin(BinaryOp::Mul)),
+            TokenKind::Slash => (12, Bin(BinaryOp::Div)),
+            TokenKind::Percent => (12, Bin(BinaryOp::Mod)),
+            _ => return None,
+        })
+    }
+
+    /// A binary expression whose operators are all of level `min` or
+    /// tighter (see binary_op_level); its operands are `**` / unary
+    /// expressions.
+    fn parse_binary(&mut self, min: u8) -> ParseResult<Expr> {
+        let mut left = self.parse_pow()?;
+        while let Some((level, op)) = Self::binary_op_level(self.peek()) {
+            if level < min {
+                break;
+            }
             self.advance();
-            let right = self.parse_short_circuit_rhs(&left, true, Self::parse_logical_and)?;
+            let right = match op {
+                // `&&` / `||`: an operand a constant left side decides is
+                // never compiled.
+                BinLevelOp::Bin(BinaryOp::BooleanOr) => {
+                    self.parse_short_circuit_rhs(&left, true, |p| p.parse_binary(level + 1))?
+                }
+                BinLevelOp::Bin(BinaryOp::BooleanAnd) => {
+                    self.parse_short_circuit_rhs(&left, false, |p| p.parse_binary(level + 1))?
+                }
+                _ => self.parse_binary(level + 1)?,
+            };
+            let span = left.span.merge(right.span);
             left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op: BinaryOp::BooleanOr,
-                    left: Box::new(left),
-                    right: Box::new(right),
+                span,
+                kind: match op {
+                    BinLevelOp::Bin(op) => ExprKind::BinaryOp {
+                        op,
+                        left: Box::new(left),
+                        right: Box::new(right),
+                    },
+                    BinLevelOp::Instanceof => ExprKind::Instanceof {
+                        expr: Box::new(left),
+                        class: Box::new(right),
+                    },
+                    BinLevelOp::Pipe => ExprKind::Pipe {
+                        value: Box::new(left),
+                        callable: Box::new(right),
+                    },
                 },
             };
         }
         Ok(left)
+    }
+
+    fn parse_logical_or(&mut self) -> ParseResult<Expr> {
+        self.parse_binary(1)
     }
 
     /// Whether `e` compiles to a constant that decides `&&` (`want` =
@@ -4377,7 +4446,7 @@ impl Parser {
         &mut self,
         left: &Expr,
         is_or: bool,
-        parse: fn(&mut Self) -> ParseResult<Expr>,
+        parse: impl FnOnce(&mut Self) -> ParseResult<Expr>,
     ) -> ParseResult<Expr> {
         let start_tok = self.pos;
         let anon_before = self.anon_class_stmts.len();
@@ -4391,238 +4460,6 @@ impl Parser {
             }
         }
         Ok(right)
-    }
-
-    fn parse_logical_and(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_bitwise_or()?;
-        while matches!(self.peek(), TokenKind::BooleanAnd) {
-            self.advance();
-            let right = self.parse_short_circuit_rhs(&left, false, Self::parse_bitwise_or)?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op: BinaryOp::BooleanAnd,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_bitwise_or(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_bitwise_xor()?;
-        while matches!(self.peek(), TokenKind::Pipe) {
-            self.advance();
-            let right = self.parse_bitwise_xor()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op: BinaryOp::BitwiseOr,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_bitwise_xor(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_bitwise_and()?;
-        while matches!(self.peek(), TokenKind::Caret) {
-            self.advance();
-            let right = self.parse_bitwise_and()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op: BinaryOp::BitwiseXor,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_bitwise_and(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_equality()?;
-        while matches!(self.peek(), TokenKind::Ampersand) {
-            self.advance();
-            let right = self.parse_equality()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op: BinaryOp::BitwiseAnd,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    /// Parse pipe operator (|>), left-associative: it binds tighter than
-    /// the comparisons and looser than `.` (zend_language_parser.y).
-    fn parse_pipe(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_concat()?;
-        while matches!(self.peek(), TokenKind::PipeGreater) {
-            self.advance();
-            let right = self.parse_concat()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::Pipe {
-                    value: Box::new(left),
-                    callable: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_equality(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_comparison()?;
-        loop {
-            let op = match self.peek() {
-                TokenKind::Equal => BinaryOp::Equal,
-                TokenKind::Identical => BinaryOp::Identical,
-                TokenKind::NotEqual => BinaryOp::NotEqual,
-                TokenKind::NotIdentical => BinaryOp::NotIdentical,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_comparison()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_comparison(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_pipe()?;
-        loop {
-            let op = match self.peek() {
-                TokenKind::Less => BinaryOp::Less,
-                TokenKind::Greater => BinaryOp::Greater,
-                TokenKind::LessEqual => BinaryOp::LessEqual,
-                TokenKind::GreaterEqual => BinaryOp::GreaterEqual,
-                TokenKind::Spaceship => BinaryOp::Spaceship,
-                TokenKind::Instanceof => {
-                    self.advance();
-                    let right = self.parse_pipe()?;
-                    left = Expr {
-                        span: left.span.merge(right.span),
-                        kind: ExprKind::Instanceof {
-                            expr: Box::new(left),
-                            class: Box::new(right),
-                        },
-                    };
-                    continue;
-                }
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_pipe()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    /// `.` binds looser than the shifts and `+`/`-` (PHP 8).
-    fn parse_concat(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_shift()?;
-        while matches!(self.peek(), TokenKind::Dot) {
-            self.advance();
-            let right = self.parse_shift()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op: BinaryOp::Concat,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_shift(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_additive()?;
-        loop {
-            let op = match self.peek() {
-                TokenKind::ShiftLeft => BinaryOp::ShiftLeft,
-                TokenKind::ShiftRight => BinaryOp::ShiftRight,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_additive()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_additive(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_multiplicative()?;
-        loop {
-            let op = match self.peek() {
-                TokenKind::Plus => BinaryOp::Add,
-                TokenKind::Minus => BinaryOp::Sub,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_multiplicative()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
-    }
-
-    fn parse_multiplicative(&mut self) -> ParseResult<Expr> {
-        let mut left = self.parse_pow()?;
-        loop {
-            let op = match self.peek() {
-                TokenKind::Star => BinaryOp::Mul,
-                TokenKind::Slash => BinaryOp::Div,
-                TokenKind::Percent => BinaryOp::Mod,
-                _ => break,
-            };
-            self.advance();
-            let right = self.parse_pow()?;
-            left = Expr {
-                span: left.span.merge(right.span),
-                kind: ExprKind::BinaryOp {
-                    op,
-                    left: Box::new(left),
-                    right: Box::new(right),
-                },
-            };
-        }
-        Ok(left)
     }
 
     fn parse_pow(&mut self) -> ParseResult<Expr> {
@@ -4654,7 +4491,7 @@ impl Parser {
 
     fn parse_unary_inner(&mut self) -> ParseResult<Expr> {
         let span = self.span();
-        match self.peek().clone() {
+        match self.peek() {
             TokenKind::Minus => {
                 self.advance();
                 let operand = self.parse_pow()?;
@@ -7758,4 +7595,12 @@ mod tests {
             other => panic!("expected If, got {:?}", other),
         }
     }
+}
+
+/// What a binary operator of parse_binary() builds.
+#[derive(Clone, Copy)]
+enum BinLevelOp {
+    Bin(BinaryOp),
+    Instanceof,
+    Pipe,
 }
