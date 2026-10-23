@@ -325,3 +325,56 @@ pub fn canny(img: &mut Image, radius: f64, sigma: f64, lower: f64, upper: f64) {
     img.colorspace = Colorspace::Gray;
     img.colors = None;
 }
+
+/// RotationalBlurImage(): n = ⌊4θ√R + 2⌋ point samples over ±θ/2 about
+/// ((w-1)/2, (h-1)/2), R the centre's distance to the corner; a pixel at
+/// distance r uses every ⌊R/r⌋-th of them (at most n - 1 apart).
+pub fn rotational_blur(img: &mut Image, angle: f64, ch: i64) {
+    let (w, h) = (img.columns, img.rows);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let th = angle.to_radians();
+    let (cx, cy) = ((w as f64 - 1.0) / 2.0, (h as f64 - 1.0) / 2.0);
+    let big_r = cx.hypot(cy);
+    let n = ((4.0 * th * big_r.sqrt() + 2.0).abs() as usize).max(2);
+    let trig: Vec<(f64, f64)> = (0..n)
+        .map(|i| {
+            let t = th * (i as f64 / (n - 1) as f64 - 0.5);
+            (t.cos(), t.sin())
+        })
+        .collect();
+    let src = img.clone();
+    let mask = crate::filters::channel_mask(ch, img.alpha);
+    for y in 0..h {
+        let dy = y as f64 - cy;
+        for x in 0..w {
+            let dx = x as f64 - cx;
+            let r = dx.hypot(dy);
+            let step = if r < 1e-9 {
+                n - 1
+            } else {
+                ((big_r / r) as usize).min(n - 1)
+            }
+            .max(1);
+            let mut acc = [0f64; 4];
+            let mut cnt = 0f64;
+            for &(c, s) in trig.iter().step_by(step) {
+                let sx = (cx + dx * c - dy * s + 0.5).floor() as i64;
+                let sy = (cy + dx * s + dy * c + 0.5).floor() as i64;
+                let p = edge_px(&src, sx, sy);
+                for k in 0..4 {
+                    acc[k] += p[k] as f64;
+                }
+                cnt += 1.0;
+            }
+            let idx = (y * w + x) * 4;
+            for k in 0..4 {
+                if mask[k] {
+                    img.pixels[idx + k] = clamp_to_quantum(acc[k] / cnt) as u16;
+                }
+            }
+        }
+    }
+    img.colors = None;
+}

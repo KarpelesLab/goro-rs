@@ -446,8 +446,10 @@ fn round_corners_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -
 fn rotational_blur_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "d|l", args)?;
     let ang = a[0].double_or(0.0);
+    let ch = a[1].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to rotational blur image", |i| {
-        apply_oxideav(i, &of::RadialBlur::new(ang as f32))
+        goro_imagick::effects::rotational_blur(i, ang, ch);
+        Ok(())
     })
 }
 
