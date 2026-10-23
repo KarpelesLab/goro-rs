@@ -65,7 +65,21 @@ fn split_colors(s: &str) -> (String, String) {
 
 /// Read a pseudo image. `size` is the wand's size (newPseudoImage's).
 pub fn read(magick: &str, arg: &str, size: Option<(usize, usize)>) -> MResult<Image> {
+    read_with(magick, arg, size, &crate::image::StrMap::default())
+}
+
+/// The same, with the wand's options (gradient:direction...).
+pub fn read_with(
+    magick: &str,
+    arg: &str,
+    size: Option<(usize, usize)>,
+    options: &crate::image::StrMap,
+) -> MResult<Image> {
     let up = magick.to_ascii_uppercase();
+    let direction = options
+        .get("gradient:direction")
+        .unwrap_or("South")
+        .to_string();
     let (w, h) = size.unwrap_or((1, 1));
     let mut img = match up.as_str() {
         "XC" | "CANVAS" => {
@@ -94,7 +108,7 @@ pub fn read(magick: &str, arg: &str, size: Option<(usize, usize)>) -> MResult<Im
                     complement(&c1)
                 },
             )?;
-            let mut img = linear_gradient(w, h, &c1, &c2);
+            let mut img = linear_gradient_dir(w, h, &c1, &c2, &direction);
             img.format = "GRADIENT".to_string();
             img
         }
@@ -201,32 +215,63 @@ fn mix(a: &PixelInfo, b: &PixelInfo, t: f64) -> [u16; 4] {
 }
 
 fn linear_gradient(w: usize, h: usize, c1: &PixelInfo, c2: &PixelInfo) -> Image {
+    linear_gradient_dir(w, h, c1, c2, "South")
+}
+
+/// A linear gradient from the side (or corner) opposite `direction` to
+/// it: t runs over pixel indices, corner to corner for the diagonals.
+fn linear_gradient_dir(
+    w: usize,
+    h: usize,
+    c1: &PixelInfo,
+    c2: &PixelInfo,
+    direction: &str,
+) -> Image {
     let mut img = Image::blank(w, h);
     img.alpha = c1.alpha_trait || c2.alpha_trait;
+    let (wm, hm) = ((w.max(1) - 1) as f64, (h.max(1) - 1) as f64);
+    let d = direction.to_ascii_lowercase();
+    // (x weight, y weight): +1 toward east/south, -1 toward west/north
+    let (sx, sy): (f64, f64) = match d.as_str() {
+        "north" => (0.0, -1.0),
+        "east" => (1.0, 0.0),
+        "west" => (-1.0, 0.0),
+        "northwest" => (-1.0, -1.0),
+        "northeast" => (1.0, -1.0),
+        "southwest" => (-1.0, 1.0),
+        "southeast" => (1.0, 1.0),
+        _ => (0.0, 1.0),
+    };
+    // the diagonals project onto the corner-to-corner vector
+    let (vx, vy) = (sx.abs() * wm, sy.abs() * hm);
+    let span = vx * vx + vy * vy;
     for y in 0..h {
-        let t = if h > 1 {
-            y as f64 / (h - 1) as f64
-        } else {
-            0.0
-        };
-        let p = mix(c1, c2, t);
         for x in 0..w {
-            img.set_px(x, y, p);
+            let fx = if sx > 0.0 { x as f64 } else { wm - x as f64 };
+            let fy = if sy > 0.0 { y as f64 } else { hm - y as f64 };
+            let t = if span > 0.0 {
+                (vx * fx + vy * fy) / span
+            } else {
+                0.0
+            };
+            img.set_px(x, y, mix(c1, c2, t));
         }
     }
     img
 }
 
+/// A radial gradient: centred on the middle pixel index, reaching the
+/// second colour at the larger half-extent (in pixel indices).
 fn radial_gradient(w: usize, h: usize, c1: &PixelInfo, c2: &PixelInfo) -> Image {
     let mut img = Image::blank(w, h);
     img.alpha = c1.alpha_trait || c2.alpha_trait;
-    let cx = w as f64 / 2.0;
-    let cy = h as f64 / 2.0;
-    let r = (w.max(h) as f64 / 2.0).max(1e-9);
+    let cx = (w.max(1) - 1) as f64 / 2.0;
+    let cy = (h.max(1) - 1) as f64 / 2.0;
+    let r = cx.max(cy).max(1e-9);
     for y in 0..h {
         for x in 0..w {
-            let dx = x as f64 + 0.5 - cx;
-            let dy = y as f64 + 0.5 - cy;
+            let dx = x as f64 - cx;
+            let dy = y as f64 - cy;
             let t = ((dx * dx + dy * dy).sqrt() / r).min(1.0);
             img.set_px(x, y, mix(c1, c2, t));
         }
