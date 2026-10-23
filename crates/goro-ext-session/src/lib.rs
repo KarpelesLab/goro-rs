@@ -1221,9 +1221,13 @@ fn serializer_decode(vm: &mut Vm, data: &[u8]) -> bool {
 fn session_decode_data(vm: &mut Vm, data: &[u8]) -> R<bool> {
     let ok = serializer_decode(vm, data);
     if var::BAILOUT.with(|b| b.replace(false)) {
-        // zend_catch: cancel the decode, then continue the bailout.
+        // zend_catch: cancel the decode, then continue the bailout. The
+        // bailout is caught while the session is destroyed, so the destroy
+        // and close handlers run normally.
+        let bailout = std::mem::replace(&mut vm.fatal_bailout, false);
         let _ = session_destroy_internal(vm);
         track_init(vm);
+        vm.fatal_bailout |= bailout;
         if vm.error_reporting & E_WARNING != 0 {
             vm.display_error(
                 "Warning",
