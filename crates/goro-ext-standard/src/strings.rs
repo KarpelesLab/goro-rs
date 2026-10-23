@@ -5666,32 +5666,38 @@ fn quoted_printable_encode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
     ))))
 }
 
+/// PHP_FUNCTION(quoted_printable_decode): walks the string as a C string
+/// (up to its first NUL); "=XX" decodes, "=" + spaces/tabs + CR|LF|CRLF or
+/// end of string is a soft line break, any other "=" is kept.
 fn quoted_printable_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
-    let mut result = Vec::new();
+    let at = |i: usize| bytes.get(i).copied().unwrap_or(0);
+    let mut result = Vec::with_capacity(bytes.len());
     let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'=' && i + 2 < bytes.len() {
-            if bytes[i + 1] == b'\r' && i + 2 < bytes.len() && bytes[i + 2] == b'\n' {
-                i += 3; // soft line break
-            } else if bytes[i + 1] == b'\n' {
-                i += 2; // soft line break
-            } else {
-                let hi = hex_nibble(bytes[i + 1]);
-                let lo = hex_nibble(bytes[i + 2]);
-                if let (Some(h), Some(l)) = (hi, lo) {
-                    result.push((h << 4) | l);
-                } else {
-                    result.push(b'=');
-                    result.push(bytes[i + 1]);
-                    result.push(bytes[i + 2]);
-                }
-                i += 3;
-            }
-        } else {
-            result.push(bytes[i]);
+    while at(i) != 0 {
+        if at(i) != b'=' {
+            result.push(at(i));
             i += 1;
+            continue;
+        }
+        if let (Some(h), Some(l)) = (hex_nibble(at(i + 1)), hex_nibble(at(i + 2))) {
+            result.push((h << 4) | l);
+            i += 3;
+            continue;
+        }
+        let mut k = 1;
+        while matches!(at(i + k), b' ' | b'\t') {
+            k += 1;
+        }
+        match (at(i + k), at(i + k + 1)) {
+            (0, _) => i += k,
+            (b'\r', b'\n') => i += k + 2,
+            (b'\r' | b'\n', _) => i += k + 1,
+            _ => {
+                result.push(b'=');
+                i += 1;
+            }
         }
     }
     Ok(Value::String(PhpString::from_vec(result)))
