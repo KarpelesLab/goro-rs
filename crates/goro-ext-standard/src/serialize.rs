@@ -2986,8 +2986,13 @@ fn incomplete_class_msg(what: &str, class: &str) -> String {
 fn incomplete_prop_read(
     vm: &mut Vm,
     obj: &Rc<RefCell<PhpObject>>,
-    _name: &[u8],
+    name: &[u8],
 ) -> Option<Option<Value>> {
+    // incomplete_class_get_property_ptr_ptr(): a read-modify-write is an Error.
+    if vm.dim_fetch_type(0) == goro_core::vm::BP_VAR_RW {
+        incomplete_prop_write(vm, obj, name, 0);
+        return Some(Some(Value::Null));
+    }
     let func = match vm.call_stack.last() {
         Some((f, ..)) => f.replace("->", "::"),
         None => "main".to_string(),

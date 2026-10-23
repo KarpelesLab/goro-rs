@@ -53376,7 +53376,27 @@ impl Vm {
                                 return Ok(Flow::Continue);
                             }
                         }
-                        if let Some(r) = self.native_prop_read(obj, prop_name.as_bytes()) {
+                        // The read side of `$o->p op= v` / `++$o->p` is a
+                        // get_property_ptr_ptr() (BP_VAR_RW) fetch.
+                        let rw = matches!(
+                            op.opcode,
+                            OpCode::PropertyGetRW | OpCode::PropertyGetIncDec
+                        );
+                        let r = if rw {
+                            with_dim_fetch_type(BP_VAR_RW, || {
+                                self.native_prop_read(obj, prop_name.as_bytes())
+                            })
+                        } else {
+                            self.native_prop_read(obj, prop_name.as_bytes())
+                        };
+                        if let Some(r) = r {
+                            native_exc_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
                             let v = match r {
                                 Some(v) => v,
                                 None => {
