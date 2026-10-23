@@ -6,7 +6,7 @@ use goro_core::compiler::Compiler;
 use goro_core::opcode::OpArray;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::vm::Vm;
+use goro_core::vm::{Vm, VmError};
 use goro_parser::Parser;
 
 /// INI settings in the order they apply (later entries override earlier ones).
@@ -345,6 +345,48 @@ pub fn load(vm: &mut Vm, compiled: &mut Compiled) {
     }
     for class in std::mem::take(&mut compiled.classes) {
         vm.register_class(class);
+    }
+}
+
+/// Compile and run `src`, the main script of a request of a long-running
+/// SAPI (goro-httpd, php-fpm), through the opcache script cache: an
+/// earlier request's compilation of `name` (its resolved path) is reused
+/// while the file is unchanged, as for included files. A compile error is
+/// reported (E_COMPILE_ERROR / E_PARSE, the request's last error).
+pub fn run_main_script(vm: &mut Vm, src: &[u8], name: &str) -> Result<Value, VmError> {
+    if let Some(c) = goro_core::script_cache::lookup(name) {
+        vm.replay_cached_diags(&c.diags);
+        for class in c.classes.iter().cloned() {
+            vm.register_class(class);
+        }
+        return vm.execute_chunk(&c.op_array);
+    }
+    match compile(src, name, true) {
+        Ok(mut c) => {
+            if goro_core::script_cache::enabled()
+                && goro_core::script_cache::store_compiled(
+                    name,
+                    std::rc::Rc::new(goro_core::script_cache::Compiled {
+                        op_array: c.op_array.clone(),
+                        classes: c.classes.clone().into(),
+                        diags: Vec::new(),
+                    }),
+                )
+            {
+                vm.run_optimizer_passes();
+            }
+            load(vm, &mut c);
+            vm.execute_chunk(&c.op_array)
+        }
+        Err(e) => {
+            report_compile_error(vm, &e, name);
+            vm.fatal_emitted = true;
+            vm.last_error = Some((4, e.message.clone(), name.to_string(), e.line));
+            Err(VmError {
+                message: e.message,
+                line: e.line,
+            })
+        }
     }
 }
 

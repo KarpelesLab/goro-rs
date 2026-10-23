@@ -1650,21 +1650,9 @@ fn handle_request() {
                 if let Some(dir) = std::path::Path::new(&filename).parent() {
                     let _ = std::env::set_current_dir(dir);
                 }
-                result = match engine::compile(&src, &filename, true) {
-                    Ok(mut c) => {
-                        engine::load(&mut vm, &mut c);
-                        vm.execute_chunk(&c.op_array)
-                    }
-                    Err(e) => {
-                        engine::report_compile_error(&mut vm, &e, &filename);
-                        vm.fatal_emitted = true;
-                        vm.last_error = Some((4, e.message.clone(), filename.clone(), e.line));
-                        Err(VmError {
-                            message: e.message,
-                            line: e.line,
-                        })
-                    }
-                };
+                // (opcache: the script's compilation from an earlier
+                // request of this worker)
+                result = engine::run_main_script(&mut vm, &src, &filename);
             }
         }
     }

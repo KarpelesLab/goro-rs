@@ -115,41 +115,8 @@ impl PhpRun {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| String::from_utf8_lossy(path).into_owned());
         self.vm.current_file = name.as_str().into();
-        // opcache: the script's compilation from an earlier request.
-        if let Some(c) = goro_core::script_cache::lookup(&name) {
-            self.vm.replay_cached_diags(&c.diags);
-            for class in c.classes.iter().cloned() {
-                self.vm.register_class(class);
-            }
-            return self.vm.execute_chunk(&c.op_array);
-        }
-        match engine::compile(&src, &name, true) {
-            Ok(mut c) => {
-                if goro_core::script_cache::enabled()
-                    && goro_core::script_cache::store_compiled(
-                        &name,
-                        std::rc::Rc::new(goro_core::script_cache::Compiled {
-                            op_array: c.op_array.clone(),
-                            classes: c.classes.clone().into(),
-                            diags: Vec::new(),
-                        }),
-                    )
-                {
-                    self.vm.run_optimizer_passes();
-                }
-                engine::load(&mut self.vm, &mut c);
-                self.vm.execute_chunk(&c.op_array)
-            }
-            Err(e) => {
-                engine::report_compile_error(&mut self.vm, &e, &name);
-                self.vm.fatal_emitted = true;
-                self.vm.last_error = Some((4, e.message.clone(), name, e.line));
-                Err(VmError {
-                    message: e.message,
-                    line: e.line,
-                })
-            }
-        }
+        // (opcache: the script's compilation from an earlier request)
+        engine::run_main_script(&mut self.vm, &src, &name)
     }
 
     /// Run the script `path` the way php_execute_script() does: from the
