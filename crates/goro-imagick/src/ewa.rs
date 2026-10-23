@@ -20,8 +20,8 @@ const SUPPORT: f64 = 2.0;
 const LUT_SIZE: usize = 1024;
 
 fn robidoux(x: f64) -> f64 {
-    const B: f64 = 0.378_215_755_093_998_67;
-    const C: f64 = 0.310_892_122_453_000_67;
+    const B: f64 = 0.378_215_755_093_998_7;
+    const C: f64 = 0.310_892_122_453_000_7;
     let x = x.abs();
     if x < 1.0 {
         ((12.0 - 9.0 * B - 6.0 * C) * x * x * x
