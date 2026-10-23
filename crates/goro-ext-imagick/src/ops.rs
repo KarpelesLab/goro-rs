@@ -1559,6 +1559,67 @@ fn modulate_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     })
 }
 
+/// ContrastStretchImage(): the black point is the first histogram bin
+/// whose cumulative count (from the bottom) exceeds `black`, the white
+/// point the last bin whose count from the top exceeds `n - white`. With
+/// the default channels the histogram is of the pixel intensity
+/// (Rec. 709 luma, rounded to a bin) and one stretch applies to R, G and
+/// B; otherwise every selected channel is stretched on its own
+/// histogram. A degenerate range leaves the channel alone.
+fn histogram_stretch(i: &mut Image, ch: i64, black: f64, white: f64) {
+    let n = (i.columns * i.rows) as f64;
+    let range = |hist: &[u32]| -> Option<(f64, f64)> {
+        let mut acc = 0f64;
+        let mut lo = 65535usize;
+        for (v, &h) in hist.iter().enumerate() {
+            acc += h as f64;
+            if acc > black {
+                lo = v;
+                break;
+            }
+        }
+        let mut acc = 0f64;
+        let mut hi = 0usize;
+        for v in (0..65536).rev() {
+            acc += hist[v] as f64;
+            if acc > n - white {
+                hi = v;
+                break;
+            }
+        }
+        (hi > lo).then_some((lo as f64, hi as f64))
+    };
+    let all = ch == channel::DEFAULT || ch == 0 || ch == 0x7fffffff;
+    let mut ranges = [None; 3];
+    if all {
+        let mut hist = vec![0u32; 65536];
+        for p in i.pixels.chunks_exact(4) {
+            hist[clamp_to_quantum(Image::intensity(p)) as usize] += 1;
+        }
+        let r = range(&hist);
+        ranges = [r, r, r];
+    } else {
+        let mask = channel_mask(ch, i.alpha);
+        for c in 0..3 {
+            if mask[c] {
+                let mut hist = vec![0u32; 65536];
+                for p in i.pixels.chunks_exact(4) {
+                    hist[p[c] as usize] += 1;
+                }
+                ranges[c] = range(&hist);
+            }
+        }
+    }
+    for p in i.pixels.chunks_exact_mut(4) {
+        for c in 0..3 {
+            if let Some((lo, hi)) = ranges[c] {
+                p[c] = to_q16((p[c] as f64 - lo) * 65535.0 / (hi - lo));
+            }
+        }
+    }
+    i.colors = None;
+}
+
 /// The histogram-based stretch of normalize/auto-level/contrast-stretch.
 fn stretch(i: &mut Image, ch: i64, black_frac: f64, white_frac: f64, per_channel: bool) {
     let mask = channel_mask(ch, i.alpha);
@@ -1597,7 +1658,8 @@ fn normalize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
     let ch = a[0].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to normalize image", |i| {
         // NormalizeImage(): a 2% / 1% contrast stretch
-        stretch(i, ch, 0.02, 0.01, false);
+        let n = (i.columns * i.rows) as f64;
+        histogram_stretch(i, ch, 0.02 * n, 0.99 * n);
         Ok(())
     })
 }
@@ -1605,20 +1667,29 @@ fn normalize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
 fn equalize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
     image_op(vm, &d_(o), "Unable to equalize image", |i| {
-        let n = (i.columns * i.rows) as f64;
-        for c in 0..3 {
-            let mut hist = vec![0u32; 65536];
-            for p in i.pixels.chunks_exact(4) {
-                hist[p[c] as usize] += 1;
-            }
-            let mut map = vec![0u16; 65536];
-            let mut acc = 0f64;
-            for (v, &h) in hist.iter().enumerate() {
-                acc += h as f64;
-                map[v] = to_q16(acc / n * 65535.0);
-            }
-            for p in i.pixels.chunks_exact_mut(4) {
-                p[c] = map[p[c] as usize];
+        // EqualizeImage(): one map for R, G and B, from the cumulative
+        // histogram of the intensity, with the black bin's count taken off
+        let mut hist = vec![0u32; 65536];
+        for p in i.pixels.chunks_exact(4) {
+            hist[clamp_to_quantum(Image::intensity(p)) as usize] += 1;
+        }
+        let mut cdf = vec![0f64; 65536];
+        let mut acc = 0f64;
+        for (v, &h) in hist.iter().enumerate() {
+            acc += h as f64;
+            cdf[v] = acc;
+        }
+        let (lo, hi) = (cdf[0], cdf[65535]);
+        if hi <= lo {
+            return Ok(());
+        }
+        let map: Vec<u16> = cdf
+            .iter()
+            .map(|&c| to_q16((c - lo) * 65535.0 / (hi - lo)))
+            .collect();
+        for p in i.pixels.chunks_exact_mut(4) {
+            for c in p.iter_mut().take(3) {
+                *c = map[*c as usize];
             }
         }
         i.colors = None;
@@ -1661,8 +1732,7 @@ fn contrast_stretch_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]
     let (b, w) = (a[0].double_or(0.0), a[1].double_or(0.0));
     let ch = a[2].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to contrast strech image", |i| {
-        let n = (i.columns * i.rows) as f64;
-        stretch(i, ch, b / n, w / n, false);
+        histogram_stretch(i, ch, b, w);
         Ok(())
     })
 }
@@ -1671,8 +1741,9 @@ fn linear_stretch_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) 
     let a = zpp::parse(vm, f, "dd", args)?;
     let (b, w) = (a[0].double_or(0.0), a[1].double_or(0.0));
     image_op(vm, &d_(o), "Unable to linear strech image", |i| {
+        // LinearStretchImage() counts the white point from the top
         let n = (i.columns * i.rows) as f64;
-        stretch(i, channel::DEFAULT, b / n, w / n, false);
+        histogram_stretch(i, channel::DEFAULT, b, n - w);
         Ok(())
     })
 }
@@ -1714,52 +1785,68 @@ fn brightness_contrast_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Val
     })
 }
 
+/// ContrastImage(): the HSB brightness is pushed away from (or toward)
+/// mid-gray along a sine curve, hue and saturation kept, so the RGB
+/// samples scale together.
+fn contrast_hsb(i: &mut Image, sharpen: bool) {
+    let sign = if sharpen { 0.5 } else { -0.5 };
+    for p in i.pixels.chunks_exact_mut(4) {
+        let v = p[0].max(p[1]).max(p[2]) as f64 / 65535.0;
+        if v <= 0.0 {
+            continue;
+        }
+        let s = 0.5 * ((std::f64::consts::PI * (v - 0.5)).sin() + 1.0);
+        let nv = (v + sign * (s - v)).clamp(0.0, 1.0);
+        let k = nv / v;
+        for c in p.iter_mut().take(3) {
+            *c = to_q16(*c as f64 * k);
+        }
+    }
+    i.colors = None;
+}
+
 fn contrast_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "b", args)?;
     let sharpen = a[0].bool_or(true);
     image_op(vm, &d_(o), "Unable to contrast image", |i| {
-        // ContrastImage(): a sigmoid push away from (or toward) mid-gray
-        for p in i.pixels.chunks_exact_mut(4) {
-            for c in 0..3 {
-                let x = p[c] as f64 / 65535.0;
-                let s = 0.5 * (1.0 + ((std::f64::consts::PI * (x - 0.5)).sin()));
-                let y = if sharpen {
-                    x + 0.5 * (s - x)
-                } else {
-                    x - 0.5 * (s - x)
-                };
-                p[c] = to_q16(y * 65535.0);
-            }
-        }
-        i.colors = None;
+        contrast_hsb(i, sharpen);
         Ok(())
     })
 }
 
 fn sepia_tone_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "d", args)?;
-    let t = a[0].double_or(80.0);
+    // the threshold is a percentage of the quantum range
+    let thr = a[0].double_or(80.0) * 65535.0 / 100.0;
     image_op(vm, &d_(o), "Unable to sepia tone image", |i| {
-        // SepiaToneImage(): a threshold in quantum scale
-        let thr = (t / 65535.0).clamp(0.0, 1.0);
+        // SepiaToneImage(): red, green and blue ramps offset from the
+        // intensity (green and blue floored at threshold/7), then
+        // NormalizeImage() and ContrastImage()
         for p in i.pixels.chunks_exact_mut(4) {
-            let int = Image::intensity(p) / 65535.0;
-            let r = if int > thr { 1.0 } else { int + (1.0 - thr) };
-            let g = if int > 7.0 * thr / 6.0 {
-                1.0
+            let int = Image::intensity(p);
+            let r = if int > thr {
+                65535.0
             } else {
-                int + (1.0 - 7.0 * thr / 6.0)
+                int + 65535.0 - thr
+            };
+            let g = if int > 7.0 * thr / 6.0 {
+                65535.0
+            } else {
+                int + 65535.0 - 7.0 * thr / 6.0
             };
             let b = if int < thr / 6.0 {
                 0.0
             } else {
                 int - thr / 6.0
             };
-            p[0] = to_q16(r.min(1.0) * 65535.0);
-            p[1] = to_q16(g.clamp(0.0, 1.0) * 65535.0);
-            p[2] = to_q16(b.clamp(0.0, 1.0) * 65535.0);
+            let floor = thr / 7.0;
+            p[0] = to_q16(r);
+            p[1] = to_q16(g.max(floor));
+            p[2] = to_q16(b.max(floor));
         }
-        i.colors = None;
+        let n = (i.columns * i.rows) as f64;
+        histogram_stretch(i, channel::DEFAULT, 0.02 * n, 0.99 * n);
+        contrast_hsb(i, true);
         Ok(())
     })
 }
