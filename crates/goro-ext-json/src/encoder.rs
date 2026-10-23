@@ -438,7 +438,8 @@ pub fn encode_array(
     match val {
         Value::Array(a) => {
             is_object = false;
-            recursion_id = Rc::as_ptr(a) as usize;
+            // (the zend_array it stands for: unmodified copies share it)
+            recursion_id = (a.borrow().identity() | (1u64 << 63)) as usize;
             arr_rc = Some(a.clone());
             entries = None;
             let b = a.borrow();
