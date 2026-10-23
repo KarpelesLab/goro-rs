@@ -1145,6 +1145,10 @@ impl crate::vm::Vm {
             is_plain_scalar(cur) && !matches!(cur, Value::Undef)
         } else if w_fetch {
             matches!(cur, Value::Array(_))
+        } else if op.opcode == OpCode::PropertyGetIncDec && matches!(cur, Value::Object(_)) {
+            // (++/-- of a readonly property is refused before the object
+            // is incremented: the general handler checks)
+            false
         } else {
             match cur {
                 Value::Undef => false,
