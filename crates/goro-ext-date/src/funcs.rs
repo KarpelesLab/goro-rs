@@ -585,8 +585,13 @@ pub fn date_default_timezone_set_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
         false,
     )?
     .unwrap_or_default();
+    // The zone is used as a C string: everything after a NUL byte is ignored.
+    let zone = match zone.iter().position(|&b| b == 0) {
+        Some(n) => zone[..n].to_vec(),
+        None => zone.to_vec(),
+    };
     let zs = goro_core::string::msg_str(&zone).into_owned();
-    if zone.contains(&0) || !timezone_id_is_valid(&zs) {
+    if !timezone_id_is_valid(&zs) {
         vm.emit_notice_at(
             &format!(
                 "date_default_timezone_set(): Timezone ID '{}' is invalid",
