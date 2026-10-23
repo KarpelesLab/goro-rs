@@ -19,8 +19,8 @@ class SL { function __sleep() { return [new stdClass]; } }
 t(12, fn() => serialize(new SL));
 t(13, function () { $o = new class { public $a = 1; }; return str_contains(var_export($o, true), "\0") ? 'nul' : var_export($o, true); });
 --EXPECTF--
-1: string(120) "{closure:%s:3}"
-2: string(132) "{closure:{closure:%s:5}:5}"
+1: string(%d) "{closure:%s:3}"
+2: string(%d) "{closure:{closure:%s:5}:5}"
 3: EXC ReflectionException: The parameter specified by its offset could not be found
 4: bool(true)
 
