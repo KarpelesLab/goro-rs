@@ -49613,9 +49613,14 @@ impl Vm {
                                         });
                                     }
                                 }
+                                // do_inherit_property(): each parent property in turn,
+                                // checked for final, static, readonly, set visibility,
+                                // visibility, then type.
+                                for cur_prop in &parent.properties {
+                                let cur_props = std::slice::from_ref(cur_prop);
                                 // Check final-property overrides: if parent has a final property,
                                 // the child cannot redeclare it.
-                                for parent_prop in &parent.properties {
+                                for parent_prop in cur_props {
                                     if parent_prop.is_final
                                         && parent_prop.visibility != Visibility::Private
                                     {
@@ -49640,7 +49645,7 @@ impl Vm {
                                     }
                                 }
                                 // Check property static/non-static mismatch (must come before visibility check)
-                                for parent_prop in &parent.properties {
+                                for parent_prop in cur_props {
                                     if parent_prop.visibility != Visibility::Private {
                                         if let Some(child_prop) = class
                                             .properties
@@ -49684,8 +49689,149 @@ impl Vm {
                                         }
                                     }
                                 }
+                                // Check readonly property mismatch — skip for abstract or
+                                // hook-only properties in the parent (those have no real backing).
+                                for parent_prop in cur_props {
+                                    if parent_prop.visibility == Visibility::Private {
+                                        continue;
+                                    }
+                                    // Abstract or virtual parent properties don't impose readonly invariance.
+                                    if parent_prop.is_abstract || parent_prop.is_virtual {
+                                        continue;
+                                    }
+                                    if let Some(child_prop) =
+                                        class.properties.iter().find(|p| p.name == parent_prop.name)
+                                    {
+                                        if parent_prop.is_readonly && !child_prop.is_readonly {
+                                            let parent_display =
+                                                crate::string::msg_str(parent_name).to_string();
+                                            let child_display =
+                                                crate::string::msg_str(&class.name).to_string();
+                                            let prop_display =
+                                                crate::string::msg_str(&parent_prop.name)
+                                                    .to_string();
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Cannot redeclare readonly property {}::${} as non-readonly {}::${}",
+                                                    parent_display,
+                                                    prop_display,
+                                                    child_display,
+                                                    prop_display
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                        if !parent_prop.is_readonly && child_prop.is_readonly {
+                                            let parent_display =
+                                                crate::string::msg_str(parent_name).to_string();
+                                            let child_display =
+                                                crate::string::msg_str(&class.name).to_string();
+                                            let prop_display =
+                                                crate::string::msg_str(&parent_prop.name)
+                                                    .to_string();
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Cannot redeclare non-readonly property {}::${} as readonly {}::${}",
+                                                    parent_display,
+                                                    prop_display,
+                                                    child_display,
+                                                    prop_display
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                }
+                                // Check private(set) properties are implicitly final + set visibility compatibility
+                                for parent_prop in cur_props {
+                                    if parent_prop.visibility == Visibility::Private {
+                                        continue;
+                                    }
+                                    if let Some(child_prop) =
+                                        class.properties.iter().find(|p| p.name == parent_prop.name)
+                                    {
+                                        // private(set) property is implicitly final
+                                        if let Some(sv) = parent_prop.set_visibility {
+                                            if sv == Visibility::Private {
+                                                let parent_display =
+                                                    crate::string::msg_str(parent_name)
+                                                        .to_string();
+                                                let prop_display =
+                                                    crate::string::msg_str(&parent_prop.name)
+                                                        .to_string();
+                                                return Err(VmError {
+                                                    message: format!(
+                                                        "Cannot override final property {}::${}",
+                                                        parent_display, prop_display
+                                                    ),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
+                                        // Check set-visibility compatibility
+                                        let parent_set_vis = parent_prop.set_visibility;
+                                        let child_set_vis = child_prop.set_visibility;
+                                        // If the parent has no set hook (e.g. get-only abstract),
+                                        // the child is free to add asymmetric set visibility.
+                                        let parent_has_no_set_prototype =
+                                            !parent_prop.has_set_hook && parent_prop.is_virtual; // pure virtual: no backing setter either
+                                        if parent_set_vis != child_set_vis
+                                            && !parent_has_no_set_prototype
+                                        {
+                                            let child_display =
+                                                crate::string::msg_str(&class.name).to_string();
+                                            let parent_display =
+                                                crate::string::msg_str(parent_name).to_string();
+                                            let prop_display =
+                                                crate::string::msg_str(&parent_prop.name)
+                                                    .to_string();
+                                            // Parent has no set-vis (symmetric) but child adds one
+                                            if parent_set_vis.is_none() && child_set_vis.is_some() {
+                                                return Err(VmError {
+                                                    message: format!(
+                                                        "Set access level of {}::${} must be omitted (as in class {})",
+                                                        child_display, prop_display, parent_display
+                                                    ),
+                                                    line: op.line,
+                                                });
+                                            }
+                                            // Parent has set-vis but child restricts it more
+                                            if let (Some(p_sv), Some(c_sv)) =
+                                                (parent_set_vis, child_set_vis)
+                                            {
+                                                let p_level = match p_sv {
+                                                    Visibility::Public => 0,
+                                                    Visibility::Protected => 1,
+                                                    Visibility::Private => 2,
+                                                };
+                                                let c_level = match c_sv {
+                                                    Visibility::Public => 0,
+                                                    Visibility::Protected => 1,
+                                                    Visibility::Private => 2,
+                                                };
+                                                if c_level > p_level {
+                                                    let vis_str = match p_sv {
+                                                        Visibility::Public => "public(set)",
+                                                        Visibility::Protected => "protected(set)",
+                                                        Visibility::Private => "private(set)",
+                                                    };
+                                                    return Err(VmError {
+                                                        message: format!(
+                                                            "Set access level of {}::${} must be {} (as in class {}) or weaker",
+                                                            child_display,
+                                                            prop_display,
+                                                            vis_str,
+                                                            parent_display
+                                                        ),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                                 // Check property visibility compatibility
-                                for parent_prop in &parent.properties {
+                                for parent_prop in cur_props {
                                     if parent_prop.visibility != Visibility::Private {
                                         if let Some(child_prop) = class
                                             .properties
@@ -49742,7 +49888,7 @@ impl Vm {
                                 // Check property type invariance.
                                 // Read-only properties (only get hook) → covariant child type allowed.
                                 // Write-only properties (only set hook) → contravariant child type allowed.
-                                for parent_prop in &parent.properties {
+                                for parent_prop in cur_props {
                                     if parent_prop.visibility == Visibility::Private {
                                         continue; // Private properties are not subject to invariance
                                     }
@@ -49877,146 +50023,6 @@ impl Vm {
                                         }
                                     }
                                 }
-                                // Check readonly property mismatch — skip for abstract or
-                                // hook-only properties in the parent (those have no real backing).
-                                for parent_prop in &parent.properties {
-                                    if parent_prop.visibility == Visibility::Private {
-                                        continue;
-                                    }
-                                    // Abstract or virtual parent properties don't impose readonly invariance.
-                                    if parent_prop.is_abstract || parent_prop.is_virtual {
-                                        continue;
-                                    }
-                                    if let Some(child_prop) =
-                                        class.properties.iter().find(|p| p.name == parent_prop.name)
-                                    {
-                                        if parent_prop.is_readonly && !child_prop.is_readonly {
-                                            let parent_display =
-                                                crate::string::msg_str(parent_name).to_string();
-                                            let child_display =
-                                                crate::string::msg_str(&class.name).to_string();
-                                            let prop_display =
-                                                crate::string::msg_str(&parent_prop.name)
-                                                    .to_string();
-                                            return Err(VmError {
-                                                message: format!(
-                                                    "Cannot redeclare readonly property {}::${} as non-readonly {}::${}",
-                                                    parent_display,
-                                                    prop_display,
-                                                    child_display,
-                                                    prop_display
-                                                ),
-                                                line: op.line,
-                                            });
-                                        }
-                                        if !parent_prop.is_readonly && child_prop.is_readonly {
-                                            let parent_display =
-                                                crate::string::msg_str(parent_name).to_string();
-                                            let child_display =
-                                                crate::string::msg_str(&class.name).to_string();
-                                            let prop_display =
-                                                crate::string::msg_str(&parent_prop.name)
-                                                    .to_string();
-                                            return Err(VmError {
-                                                message: format!(
-                                                    "Cannot redeclare non-readonly property {}::${} as readonly {}::${}",
-                                                    parent_display,
-                                                    prop_display,
-                                                    child_display,
-                                                    prop_display
-                                                ),
-                                                line: op.line,
-                                            });
-                                        }
-                                    }
-                                }
-                                // Check private(set) properties are implicitly final + set visibility compatibility
-                                for parent_prop in &parent.properties {
-                                    if parent_prop.visibility == Visibility::Private {
-                                        continue;
-                                    }
-                                    if let Some(child_prop) =
-                                        class.properties.iter().find(|p| p.name == parent_prop.name)
-                                    {
-                                        // private(set) property is implicitly final
-                                        if let Some(sv) = parent_prop.set_visibility {
-                                            if sv == Visibility::Private {
-                                                let parent_display =
-                                                    crate::string::msg_str(parent_name)
-                                                        .to_string();
-                                                let prop_display =
-                                                    crate::string::msg_str(&parent_prop.name)
-                                                        .to_string();
-                                                return Err(VmError {
-                                                    message: format!(
-                                                        "Cannot override final property {}::${}",
-                                                        parent_display, prop_display
-                                                    ),
-                                                    line: op.line,
-                                                });
-                                            }
-                                        }
-                                        // Check set-visibility compatibility
-                                        let parent_set_vis = parent_prop.set_visibility;
-                                        let child_set_vis = child_prop.set_visibility;
-                                        // If the parent has no set hook (e.g. get-only abstract),
-                                        // the child is free to add asymmetric set visibility.
-                                        let parent_has_no_set_prototype =
-                                            !parent_prop.has_set_hook && parent_prop.is_virtual; // pure virtual: no backing setter either
-                                        if parent_set_vis != child_set_vis
-                                            && !parent_has_no_set_prototype
-                                        {
-                                            let child_display =
-                                                crate::string::msg_str(&class.name).to_string();
-                                            let parent_display =
-                                                crate::string::msg_str(parent_name).to_string();
-                                            let prop_display =
-                                                crate::string::msg_str(&parent_prop.name)
-                                                    .to_string();
-                                            // Parent has no set-vis (symmetric) but child adds one
-                                            if parent_set_vis.is_none() && child_set_vis.is_some() {
-                                                return Err(VmError {
-                                                    message: format!(
-                                                        "Set access level of {}::${} must be omitted (as in class {})",
-                                                        child_display, prop_display, parent_display
-                                                    ),
-                                                    line: op.line,
-                                                });
-                                            }
-                                            // Parent has set-vis but child restricts it more
-                                            if let (Some(p_sv), Some(c_sv)) =
-                                                (parent_set_vis, child_set_vis)
-                                            {
-                                                let p_level = match p_sv {
-                                                    Visibility::Public => 0,
-                                                    Visibility::Protected => 1,
-                                                    Visibility::Private => 2,
-                                                };
-                                                let c_level = match c_sv {
-                                                    Visibility::Public => 0,
-                                                    Visibility::Protected => 1,
-                                                    Visibility::Private => 2,
-                                                };
-                                                if c_level > p_level {
-                                                    let vis_str = match p_sv {
-                                                        Visibility::Public => "public(set)",
-                                                        Visibility::Protected => "protected(set)",
-                                                        Visibility::Private => "private(set)",
-                                                    };
-                                                    return Err(VmError {
-                                                        message: format!(
-                                                            "Set access level of {}::${} must be {} (as in class {}) or weaker",
-                                                            child_display,
-                                                            prop_display,
-                                                            vis_str,
-                                                            parent_display
-                                                        ),
-                                                        line: op.line,
-                                                    });
-                                                }
-                                            }
-                                        }
-                                    }
                                 }
                                 // If the child overrides a parent's plain (non-hooked) property
                                 // with hooks, the child property is NOT virtual — it inherits
