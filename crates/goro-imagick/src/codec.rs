@@ -201,6 +201,14 @@ pub static FORMATS: &[FormatInfo] = &[
         false,
     ),
     f(
+        "MSVG",
+        "ImageMagick's own SVG internal renderer",
+        "image/svg+xml",
+        true,
+        false,
+        false,
+    ),
+    f(
         "NULL",
         "Constant image of uniform color",
         "image/x-null",
@@ -369,6 +377,22 @@ pub static FORMATS: &[FormatInfo] = &[
         false,
     ),
     f(
+        "SVG",
+        "Scalable Vector Graphics",
+        "image/svg+xml",
+        true,
+        false,
+        false,
+    ),
+    f(
+        "SVGZ",
+        "Compressed Scalable Vector Graphics",
+        "image/svg+xml",
+        true,
+        false,
+        false,
+    ),
+    f(
         "TGA",
         "Truevision Targa image",
         "image/x-tga",
@@ -473,6 +497,9 @@ pub fn sniff(data: &[u8]) -> Option<&'static str> {
     {
         return Some(if data[2] == 2 { "CUR" } else { "ICO" });
     }
+    if !data.starts_with(&[0x1f, 0x8b]) && oxideav_svg::probe(data) {
+        return Some("SVG");
+    }
     None
 }
 
@@ -510,6 +537,10 @@ pub struct ReadOptions {
     /// `-depth` for raw formats.
     pub depth: Option<u32>,
     pub ping: bool,
+    /// `-density` (vector formats render at density / 96).
+    pub density: Option<(f64, f64)>,
+    /// `-background` (vector formats are composited over it).
+    pub background: PixelInfo,
 }
 
 /// Decode a blob in a given (or sniffed) format.
@@ -527,6 +558,9 @@ pub fn decode(data: &[u8], magick: &str, opts: &ReadOptions) -> MResult<Vec<Imag
         "QOI" => decode_qoi(data)?,
         "PNM" | "PPM" | "PGM" | "PBM" | "PAM" => decode_pnm(data)?,
         "FARBFELD" => decode_farbfeld(data)?,
+        "SVG" | "SVGZ" | "MSVG" | "RSVG" => {
+            crate::svg::decode(data, opts.density, &opts.background)?
+        }
         "RGB" | "RGBA" | "RGBO" | "BGR" | "BGRA" | "GRAY" | "GRAYA" | "CMYK" | "CMYKA" => {
             decode_raw(data, &m, opts)?
         }
@@ -535,6 +569,7 @@ pub fn decode(data: &[u8], magick: &str, opts: &ReadOptions) -> MResult<Vec<Imag
     let fmt = match m.as_str() {
         "JPG" => "JPEG".to_string(),
         "TIF" => "TIFF".to_string(),
+        "SVGZ" | "MSVG" | "RSVG" => "SVG".to_string(),
         "PNG8" | "PNG24" | "PNG32" | "PNG48" | "PNG64" | "PNG00" => "PNG".to_string(),
         _ => m.clone(),
     };

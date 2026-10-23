@@ -366,6 +366,8 @@ impl Wand {
                 None
             },
             ping: false,
+            density: self.settings.density,
+            background: self.settings.background_color.clone(),
         }
     }
 
