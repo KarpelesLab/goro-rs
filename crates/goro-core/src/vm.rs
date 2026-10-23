@@ -1438,6 +1438,13 @@ pub struct Vm {
     pub current_line: u32,
     /// Cached enum case singleton objects: key = "classname_lower::CaseName"
     pub enum_case_cache: crate::fxhash::FxHashMap<Vec<u8>, Value>,
+    /// Enum cases whose referencing value is being resolved (nested fetches
+    /// are marked like IS_CONSTANT_VISITED): "class_lower::CaseName".
+    pub(crate) enum_cases_resolving: Vec<Vec<u8>>,
+    /// Backed enums whose backing table is being built (lowercase names).
+    pub(crate) enum_tables_building: Vec<Vec<u8>>,
+    /// A self-referencing enum case value was reported (see enum_cases_resolving).
+    pub(crate) enum_case_cycle: bool,
     /// Whether a fiber is currently suspended (set by Fiber::suspend())
     pub fiber_suspended: bool,
     /// The value passed to Fiber::suspend()
@@ -1925,6 +1932,9 @@ impl Vm {
             dim_rw_abort: None,
             current_line: 0,
             enum_case_cache: Default::default(),
+            enum_cases_resolving: Vec::new(),
+            enum_tables_building: Vec::new(),
+            enum_case_cycle: false,
             fiber_suspended: false,
             fiber_suspend_value: Value::Null,
             fiber_resume_value: Value::Null,
@@ -17466,7 +17476,7 @@ impl Vm {
         let backing_value = case_entry.1.clone();
 
         // Resolve any deferred constants in the backing value
-        let backing_value = self.resolve_deferred_value(&backing_value);
+        let backing_value = self.resolve_enum_case_backing(&cache_key, case_name, backing_value)?;
 
         // Create the enum case object
         let obj_id = self.alloc_object_id();
@@ -17489,6 +17499,87 @@ impl Vm {
         let val = Value::Object(Rc::new(RefCell::new(obj)));
         self.enum_case_cache.insert(cache_key, val.clone());
         Some(val)
+    }
+
+    /// The backing value of an enum case referencing another constant,
+    /// resolved with the case marked as being evaluated: a cycle (`case A =
+    /// self::B; case B = self::A;`) throws "Cannot declare self-referencing
+    /// constant" (None, the exception pending).
+    #[inline(never)]
+    fn resolve_enum_case_backing(
+        &mut self,
+        cache_key: &[u8],
+        case_name: &[u8],
+        backing_value: Value,
+    ) -> Option<Value> {
+        if !matches!(&backing_value, Value::String(s) if s.as_bytes().starts_with(b"__deferred") || s.as_bytes().starts_with(b"__enum_case__::"))
+        {
+            return Some(backing_value);
+        }
+        if self.enum_cases_resolving.iter().any(|k| k == cache_key) {
+            let msg = format!(
+                "Cannot declare self-referencing constant self::{}",
+                crate::string::msg_str(case_name)
+            );
+            // At the value expression of the case being evaluated.
+            let line = self
+                .enum_cases_resolving
+                .last()
+                .and_then(|k| {
+                    let sep = k.windows(2).position(|w| w == b"::")?;
+                    let c = self.classes.get(&k[..sep])?;
+                    c.constants_meta.get(&k[sep + 2..]).map(|m| m.line)
+                })
+                .filter(|l| *l > 0)
+                .unwrap_or(self.current_line);
+            let exc = self.create_exception(b"Error", &msg, line);
+            self.current_exception = Some(exc);
+            self.enum_case_cycle = true;
+            return None;
+        }
+        self.enum_cases_resolving.push(cache_key.to_vec());
+        // (another case of this enum, folded at compile time)
+        let other_case = match &backing_value {
+            Value::String(s) => s.as_bytes().strip_prefix(b"__enum_case__::").map(|c| c.to_vec()),
+            _ => None,
+        };
+        let v = match other_case {
+            Some(c) => {
+                let class_lower = &cache_key[..cache_key.len() - case_name.len() - 2];
+                self.get_enum_case(class_lower, &c).unwrap_or(Value::Null)
+            }
+            None => self.resolve_deferred_value(&backing_value),
+        };
+        self.enum_cases_resolving.pop();
+        // A case on a reference cycle is not created (each later fetch
+        // throws again); other errors leave it created, the error pending.
+        let cycle = self.enum_case_cycle && self.current_exception.is_some();
+        if self.enum_cases_resolving.is_empty() {
+            self.enum_case_cycle = false;
+        }
+        if cycle {
+            return None;
+        }
+        Some(v)
+    }
+
+    /// The backing value of a case for its type check at a fetch: one
+    /// referencing other constants is resolved through the case (marked as
+    /// being evaluated, for the self-reference check).
+    #[inline(never)]
+    fn enum_case_backing_for_check(
+        &mut self,
+        class_lower: &[u8],
+        case_name: &[u8],
+        case_val: &Value,
+    ) -> Value {
+        if !matches!(case_val, Value::String(s) if s.as_bytes().starts_with(b"__deferred_thunk__::")) {
+            return self.resolve_deferred_value(case_val);
+        }
+        match self.get_enum_case(class_lower, case_name) {
+            Some(Value::Object(o)) => o.borrow().get_property(b"value"),
+            _ => Value::Null,
+        }
     }
 
     /// Check if a Value is an enum case object
@@ -42153,7 +42244,11 @@ impl Vm {
                                     }
                                     let type_error = if let Some((bt, case_val)) = type_check_info {
                                         // Resolve deferred constants before type checking
-                                        let resolved_val = self.resolve_deferred_value(&case_val);
+                                        let resolved_val = self.enum_case_backing_for_check(
+                                            &class_lower,
+                                            &case_name_bytes,
+                                            &case_val,
+                                        );
                                         // The value expression threw (an undefined
                                         // constant, ...): that error propagates.
                                         let ok = if self.current_exception.is_some() {

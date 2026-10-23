@@ -10081,6 +10081,7 @@ impl Compiler {
                                         .as_ref()
                                         .map(|d| String::from_utf8_lossy(d).into_owned()),
                                     referenced_constants: refs,
+                                    line: 0,
                                 },
                             );
                             // Private constants cannot be final
@@ -10373,6 +10374,7 @@ impl Compiler {
                                         .as_ref()
                                         .map(|d| String::from_utf8_lossy(d).into_owned()),
                                     referenced_constants: Vec::new(),
+                                    line: value.as_ref().map_or(0, |v| v.span.line),
                                 },
                             );
                         }

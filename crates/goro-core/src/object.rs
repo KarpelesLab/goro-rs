@@ -49,6 +49,8 @@ pub struct ConstantMeta {
     /// #[\Deprecated] banners for those referenced constants when this
     /// constant is accessed (e.g. CONST = self::PREFIX . self::SUFFIX).
     pub referenced_constants: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Line of the value expression (enum cases; 0 otherwise).
+    pub line: u32,
 }
 
 /// A PHP class entry (class definition)

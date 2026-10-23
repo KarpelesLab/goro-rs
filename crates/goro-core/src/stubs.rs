@@ -788,6 +788,7 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
                     declared_type: parse_type(k.ty),
                     doc_comment: None,
                     referenced_constants: Vec::new(),
+                    line: 0,
                 },
             );
         }
@@ -809,6 +810,7 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
                         declared_type: None,
                         doc_comment: None,
                         referenced_constants: Vec::new(),
+                    line: 0,
                     },
                 );
             }

@@ -1894,7 +1894,54 @@ impl Vm {
     /// zend_enum_build_backed_enum_table: validates the (lazily evaluated)
     /// backing values of a backed enum. Returns (exception class, message);
     /// an empty class when evaluating a value threw (left pending).
+    /// A case value of the backing table: one referencing a constant is
+    /// evaluated like a constant expression (its own frame, the declaration's
+    /// line).
+    #[inline(never)]
+    fn resolve_enum_table_value(&mut self, class: &ClassEntry, raw: &Value) -> Value {
+        let is_ref =
+            matches!(raw, Value::String(s) if s.as_bytes().starts_with(b"__deferred_const__::"));
+        if !is_ref || !self.const_thunks_active.is_empty() {
+            return self.resolve_deferred_value(raw);
+        }
+        let line = self.current_line;
+        let file = self.current_file.clone();
+        let same_place = class.start_line == line
+            && class.filename.as_deref() == Some(file.as_str());
+        if !same_place {
+            self.call_stack.push((
+                "[constant expression]".to_string(),
+                file,
+                line,
+                Vec::new(),
+                false,
+            ));
+            self.current_line = class.start_line;
+        }
+        let v = self.resolve_deferred_value(raw);
+        if !same_place {
+            self.call_stack.pop();
+            self.current_line = line;
+        }
+        v
+    }
+
     pub(crate) fn enum_backed_table_error(
+        &mut self,
+        class_lower: &[u8],
+    ) -> Option<(&'static [u8], String)> {
+        // A case fetched while the table is being built (`case B =
+        // self::A->value + 1`) is just that case.
+        if self.enum_tables_building.iter().any(|c| c == class_lower) {
+            return None;
+        }
+        self.enum_tables_building.push(class_lower.to_vec());
+        let r = self.enum_backed_table_error_inner(class_lower);
+        self.enum_tables_building.pop();
+        r
+    }
+
+    fn enum_backed_table_error_inner(
         &mut self,
         class_lower: &[u8],
     ) -> Option<(&'static [u8], String)> {
@@ -1902,7 +1949,7 @@ impl Vm {
         let bt = class.enum_backing_type.clone()?;
         let mut seen: Vec<(Vec<u8>, Value)> = Vec::new();
         for (case_name, raw) in &class.enum_cases {
-            let v = self.resolve_deferred_value(raw);
+            let v = self.resolve_enum_table_value(&class, raw);
             if self.current_exception.is_some() {
                 return Some((b"", String::from("Uncaught exception")));
             }
