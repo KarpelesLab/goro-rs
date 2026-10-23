@@ -2887,11 +2887,17 @@ pub fn unserialize_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Err(exception_err(vm));
         }
     }
+    // (the frame's args: $data coerced to a string, $options if passed)
+    let mut frame_args = vec![match &data_val {
+        Value::String(_) => data_val.clone(),
+        _ => Value::String(PhpString::from_bytes(&data)),
+    }];
+    frame_args.extend(options.clone());
     vm.call_stack.push((
         "unserialize".to_string(),
         vm.current_file.clone(),
         vm.current_line,
-        vec![Value::String(PhpString::from_bytes(&data))],
+        frame_args,
         false,
     ));
     let r = php_unserialize_with_options(vm, &data, options.as_ref(), "unserialize");
