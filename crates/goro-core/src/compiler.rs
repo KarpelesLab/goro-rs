@@ -6540,6 +6540,14 @@ impl Compiler {
                             }
                             // Validate type hint for redundancy and standalone constraints
                             if let Some(hint) = type_hint {
+                                if class.parent.is_none() && !modifiers.is_trait {
+                                    if let Some(err) = check_parent_type_without_parent(hint) {
+                                        return Err(CompileError {
+                                            message: err,
+                                            line: *prop_line,
+                                        });
+                                    }
+                                }
                                 if let Some(err) = validate_type_hint_full(
                                     hint,
                                     Some(&qualified_name),
@@ -7346,6 +7354,23 @@ impl Compiler {
                                     &self.use_map,
                                 )
                             });
+                            // zend_compile_typename(): with the class known,
+                            // self and parent name the classes.
+                            let prop_type = if modifiers.is_trait
+                                || name.starts_with(b"__anonymous_class_")
+                            {
+                                // (an anonymous class's name is not known when
+                                // it is compiled: GH-19304)
+                                prop_type
+                            } else {
+                                prop_type.map(|t| {
+                                    Self::resolve_relative_type(
+                                        t,
+                                        &qualified_name,
+                                        class.parent.as_deref(),
+                                    )
+                                })
+                            };
                             // Check for duplicate property names
                             if class.properties.iter().any(|p| p.name == *prop_name) {
                                 return Err(CompileError {
@@ -12541,6 +12566,35 @@ impl Compiler {
                 ..
             } => scalar(operand).is_some(),
             _ => false,
+        }
+    }
+
+    /// `self` / `parent` in a property type declared by a class (not a
+    /// trait) name the classes.
+    #[inline(never)]
+    fn resolve_relative_type(t: ParamType, self_name: &[u8], parent: Option<&[u8]>) -> ParamType {
+        match t {
+            ParamType::Simple(n) if n.eq_ignore_ascii_case(b"self") => {
+                ParamType::Simple(self_name.to_vec())
+            }
+            ParamType::Simple(n) if n.eq_ignore_ascii_case(b"parent") => match parent {
+                Some(p) => ParamType::Simple(p.to_vec()),
+                None => ParamType::Simple(n),
+            },
+            ParamType::Nullable(inner) => ParamType::Nullable(Box::new(Self::resolve_relative_type(
+                *inner, self_name, parent,
+            ))),
+            ParamType::Union(ts) => ParamType::Union(
+                ts.into_iter()
+                    .map(|t| Self::resolve_relative_type(t, self_name, parent))
+                    .collect(),
+            ),
+            ParamType::Intersection(ts) => ParamType::Intersection(
+                ts.into_iter()
+                    .map(|t| Self::resolve_relative_type(t, self_name, parent))
+                    .collect(),
+            ),
+            other => other,
         }
     }
 
