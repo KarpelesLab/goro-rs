@@ -235,95 +235,37 @@ fn is_numeric_string(s: &[u8]) -> bool {
     i == s.len()
 }
 
-/// Expand PHP charlist ranges with optional warning emission
-fn expand_charlist_warn(charlist: &[u8], vm: &mut Vm, func_name: &str) -> Vec<u8> {
-    let vm_ptr = vm as *mut Vm;
-    expand_charlist_inner(charlist, Some(vm_ptr), func_name)
-}
-
-fn expand_charlist_inner(charlist: &[u8], vm_ptr: Option<*mut Vm>, func_name: &str) -> Vec<u8> {
-    let mut result = Vec::new();
+/// php_charmask(): the bytes a trim() character list names ("a..z"
+/// ranges), with its warnings for malformed ranges.
+fn expand_charlist_warn(input: &[u8], vm: &mut Vm, func_name: &str) -> Vec<u8> {
+    let mut mask = [false; 256];
+    let end = input.len();
     let mut i = 0;
-    while i < charlist.len() {
-        if i + 1 < charlist.len()
-            && charlist[i] == b'.'
-            && i + 2 < charlist.len()
-            && charlist[i + 1] == b'.'
-        {
-            // ".." at start - no character to the left
-            if i == 0 {
-                if let Some(vm_ptr) = vm_ptr {
-                    let vm = unsafe { &mut *vm_ptr };
-                    vm.emit_warning(&format!(
-                        "{}(): Invalid '..'-range, no character to the left of '..'",
-                        func_name
-                    ));
-                }
-                // Skip the ".." and the character after
-                if i + 2 < charlist.len() {
-                    i += 3;
-                } else {
-                    i += 2;
-                }
-                continue;
-            }
-        }
-        if i + 2 < charlist.len() && charlist[i + 1] == b'.' && charlist[i + 2] == b'.' {
-            if i + 3 >= charlist.len() {
-                // ".." at end - no character to the right
-                if let Some(vm_ptr) = vm_ptr {
-                    let vm = unsafe { &mut *vm_ptr };
-                    vm.emit_warning(&format!(
-                        "{}(): Invalid '..'-range, no character to the right of '..'",
-                        func_name
-                    ));
-                }
-                result.push(charlist[i]);
-                i += 3;
-                continue;
-            }
-            // Range: X..Y
-            let from = charlist[i];
-            let to = charlist[i + 3];
-            if from <= to {
-                for c in from..=to {
-                    result.push(c);
-                }
-            } else {
-                // Invalid range - from > to
-                if let Some(vm_ptr) = vm_ptr {
-                    let vm = unsafe { &mut *vm_ptr };
-                    vm.emit_warning(&format!(
-                        "{}(): Invalid '..'-range, '..'-range needs to be incrementing",
-                        func_name
-                    ));
-                }
-                result.push(from);
+    while i < end {
+        let c = input[i];
+        if i + 3 < end && input[i + 1] == b'.' && input[i + 2] == b'.' && input[i + 3] >= c {
+            for m in &mut mask[c as usize..=input[i + 3] as usize] {
+                *m = true;
             }
             i += 4;
-            // Check if this is followed by another ".." immediately (like "a..b..c")
-            if i < charlist.len()
-                && i + 1 < charlist.len()
-                && charlist[i] == b'.'
-                && i + 1 < charlist.len()
-                && charlist[i + 1] == b'.'
-            {
-                if let Some(vm_ptr) = vm_ptr {
-                    let vm = unsafe { &mut *vm_ptr };
-                    vm.emit_warning(&format!("{}(): Invalid '..'-range", func_name));
-                }
-                // Skip the extra ".." and any trailing char
-                i += 2;
-                if i < charlist.len() {
-                    i += 1;
-                }
-            }
+            continue;
+        } else if i + 1 < end && input[i] == b'.' && input[i + 1] == b'.' {
+            let msg = if i == 0 {
+                "Invalid '..'-range, no character to the left of '..'"
+            } else if i + 2 >= end {
+                "Invalid '..'-range, no character to the right of '..'"
+            } else if input[i - 1] > input[i + 2] {
+                "Invalid '..'-range, '..'-range needs to be incrementing"
+            } else {
+                "Invalid '..'-range"
+            };
+            vm.emit_warning(&format!("{}(): {}", func_name, msg));
         } else {
-            result.push(charlist[i]);
-            i += 1;
+            mask[c as usize] = true;
         }
+        i += 1;
     }
-    result
+    (0..=255u8).filter(|&b| mask[b as usize]).collect()
 }
 
 fn trim(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -5779,19 +5721,8 @@ fn str_word_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if !matches!(cl.deref(), Value::Null) {
             has_char_list = true;
             let cl_str = cl.to_php_string();
-            let cb = cl_str.as_bytes();
-            let mut i = 0;
-            while i < cb.len() {
-                if i + 3 < cb.len() && cb[i + 1] == b'.' && cb[i + 2] == b'.' && cb[i + 3] >= cb[i]
-                {
-                    for c in cb[i]..=cb[i + 3] {
-                        mask[c as usize] = true;
-                    }
-                    i += 4;
-                } else {
-                    mask[cb[i] as usize] = true;
-                    i += 1;
-                }
+            for c in expand_charlist_warn(cl_str.as_bytes(), vm, "str_word_count") {
+                mask[c as usize] = true;
             }
         }
     }

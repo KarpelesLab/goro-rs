@@ -1290,6 +1290,13 @@ impl Vm {
         if m & T_STRING != 0 {
             match arg {
                 Value::Long(_) | Value::Double(_) | Value::True | Value::False => {
+                    // zend_double_to_str()
+                    if matches!(arg, Value::Double(d) if d.is_nan()) {
+                        self.emit_warning_at("unexpected NAN value was coerced to string", line);
+                        if self.current_exception.is_some() {
+                            return Err(ZppError::Pending);
+                        }
+                    }
                     *arg = Value::String(arg.to_php_string());
                     return Ok(true);
                 }

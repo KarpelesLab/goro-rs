@@ -184,6 +184,10 @@ fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         return Ok(Value::String(vm.value_to_string_checked(&derefed)?));
     }
+    if matches!(derefed, Value::Double(d) if d.is_nan()) {
+        // zend_double_to_str()
+        vm.emit_warning("unexpected NAN value was coerced to string");
+    }
     Ok(Value::String(val.to_php_string()))
 }
 

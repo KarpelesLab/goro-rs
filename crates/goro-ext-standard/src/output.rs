@@ -1503,16 +1503,24 @@ fn print_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Some(v) => std::slice::from_ref(v),
         None => args,
     };
+    PRINT_R_NANS.with(|n| n.set(0));
+    let mut buf = Vec::new();
+    print_r_value(&args[0], &mut buf, 0, &classes, &closure_info_table);
+    // zend_double_to_str() of each NAN printed
+    for _ in 0..PRINT_R_NANS.with(|n| n.replace(0)) {
+        vm.emit_warning("unexpected NAN value was coerced to string");
+    }
     if return_output {
-        let mut buf = Vec::new();
-        print_r_value(&args[0], &mut buf, 0, &classes, &closure_info_table);
         Ok(Value::String(PhpString::from_vec(buf)))
     } else {
-        let mut buf = Vec::new();
-        print_r_value(&args[0], &mut buf, 0, &classes, &closure_info_table);
         vm.write_output(&buf);
         Ok(Value::True)
     }
+}
+
+thread_local! {
+    /// NAN values print_r() converted (it builds its output without the VM).
+    static PRINT_R_NANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 thread_local! {
@@ -1696,7 +1704,12 @@ fn print_r_value_body(
         Value::Resource(id) => {
             buf.extend_from_slice(format!("Resource id #{}", id).as_bytes());
         }
-        Value::Double(f) => buf.extend_from_slice(Value::Double(*f).to_php_string().as_bytes()),
+        Value::Double(f) => {
+            if f.is_nan() {
+                PRINT_R_NANS.with(|n| n.set(n.get() + 1));
+            }
+            buf.extend_from_slice(Value::Double(*f).to_php_string().as_bytes())
+        }
         Value::String(s) => {
             let b = s.as_bytes();
             if b.starts_with(b"__closure_")

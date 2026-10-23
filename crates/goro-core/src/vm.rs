@@ -7740,6 +7740,18 @@ impl Vm {
     /// a finite float with a non-integer fractional part and the target type would
     /// coerce it to int. Used for typed property assignments, function parameter
     /// coercion (non-strict mode), and return-type coercion.
+    /// zend_double_to_str() of a NAN given for a builtin's string parameter.
+    #[cold]
+    fn warn_nan_string_param(&mut self, value: &Value, param_type: &ParamType, line: u32) {
+        if matches!(value.deref(), Value::Double(f) if f.is_nan()) {
+            let mask = variance::TypeView::from_param_type(param_type).mask;
+            if mask & variance::T_STRING != 0 && mask & (variance::T_DOUBLE | variance::T_LONG) == 0
+            {
+                self.emit_warning_at("unexpected NAN value was coerced to string", line);
+            }
+        }
+    }
+
     fn emit_implicit_float_to_int_if_needed(
         &mut self,
         value: &Value,
@@ -29436,6 +29448,9 @@ impl Vm {
                                             self.emit_implicit_float_to_int_if_needed(
                                                 arg, pt, op.line,
                                             );
+                                            if matches!(arg, Value::Double(_)) {
+                                                self.warn_nan_string_param(arg, pt, op.line);
+                                            }
                                         }
                                         let val = arg.deref();
                                         // Null to non-nullable scalar param: emit deprecation (PHP 8.1+).
@@ -58077,6 +58092,14 @@ impl Vm {
             let inner = r.borrow().clone();
             return self.value_to_string(&inner);
         }
+        // zend_double_to_str()
+        if let Value::Double(d) = val {
+            if d.is_nan() {
+                let l = self.current_line;
+                self.warn_nan_coercion(val, "string", l);
+            }
+            return val.to_php_string();
+        }
         if let Value::Object(o) = val {
             // a user-defined __toString() wins over the extension cast
             let cl = o.borrow().class_name.to_ascii_lowercase();
@@ -58408,10 +58431,7 @@ impl Vm {
     }
 
     pub fn value_to_string_checked(&mut self, val: &Value) -> Result<PhpString, VmError> {
-        if matches!(val, Value::Double(d) if d.is_nan()) {
-            let l = self.current_line;
-            self.warn_nan_coercion(val, "string", l);
-        }
+        // (a NAN warns in value_to_string())
         // Check for closures stored as strings/arrays
         if Self::is_closure_value(val) {
             let msg = "Object of class Closure could not be converted to string";
