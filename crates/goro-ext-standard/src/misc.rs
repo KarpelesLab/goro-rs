@@ -2774,6 +2774,12 @@ fn php_array_merge_wrapper(
         if recursive {
             let mut stack = Vec::new();
             if !php_array_merge_recursive(vm, &dest, src, &mut stack) {
+                if vm.current_exception.is_some() {
+                    return Err(VmError {
+                        message: vm.uncaught_exception_message(),
+                        line: vm.current_line,
+                    });
+                }
                 return Ok(Value::Null);
             }
         } else {
@@ -2868,8 +2874,10 @@ fn php_array_merge_recursive(
                             darr = Rc::try_unwrap(drc)
                                 .map(|c| c.into_inner())
                                 .unwrap_or_else(|rc| rc.borrow().clone());
-                        } else {
-                            darr.push(src_val.clone());
+                        } else if let Err(msg) = darr.try_push(src_val.clone()) {
+                            let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                            vm.current_exception = Some(exc);
+                            return false;
                         }
                         // SEPARATE_ZVAL(dest_entry): a reference in the
                         // destination is replaced, not written through.
@@ -2884,7 +2892,12 @@ fn php_array_merge_recursive(
             }
             ArrayKey::Int(_) => {
                 let v = merge_copy_entry(&src_entry);
-                dest.borrow_mut().push(v);
+                let pushed = dest.borrow_mut().try_push(v);
+                if let Err(msg) = pushed {
+                    let exc = vm.create_exception(b"Error", msg, vm.current_line);
+                    vm.current_exception = Some(exc);
+                    return false;
+                }
             }
         }
     }

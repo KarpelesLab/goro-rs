@@ -46685,9 +46685,16 @@ impl Vm {
                     let collected: Result<Vec<(ArrayKey, Value)>, String> = match &source {
                         Value::Array(source_arr) => {
                             let source_borrow = source_arr.borrow();
+                            // (a reference held by the array alone is
+                            // unpacked as its value)
                             Ok(source_borrow
                                 .iter()
-                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .map(|(k, v)| match v {
+                                    Value::Reference(r) if Rc::strong_count(r) == 1 => {
+                                        (k.clone(), r.borrow().clone())
+                                    }
+                                    v => (k.clone(), v.clone()),
+                                })
                                 .collect())
                         }
                         Value::Generator(gen_rc) => {
