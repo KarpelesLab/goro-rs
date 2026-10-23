@@ -127,23 +127,8 @@ impl Vm {
     ) -> NewFast {
         let op = &op_array.ops[ip];
         let literals = &op_array.literals;
-        // The template the site used last, while the class still has it
-        // (its name lowercased then).
-        let site = op_array
-            .sites()
-            .borrow()
-            .as_ref()
-            .and_then(|s| s.new_sites.get(&(ip as u32)).cloned());
-        if let Some(t) = site {
-            let same = self.classes.get(t.lower.as_slice()).is_some_and(|ce| {
-                ce.new_template
-                    .borrow()
-                    .as_ref()
-                    .is_some_and(|ct| Rc::ptr_eq(ct, &t) && t.fits(ce))
-            });
-            if same {
-                return NewFast::Obj(self.new_from_template(&t, op, tmps), t.no_ctor);
-            }
+        if let Some(t) = self.new_site_template(op_array, ip) {
+            return NewFast::Obj(self.new_from_template(&t, op, tmps), t.no_ctor);
         }
         let OperandType::Const(ci) = op.op1 else {
             return NewFast::No;
@@ -256,6 +241,29 @@ impl Vm {
         NewFast::Obj(obj_value, false)
     }
 
+    /// The NewTemplate the NEW at `ip` used last, while its class still has
+    /// it (new_from_template() then makes the object).
+    #[inline]
+    pub(crate) fn new_site_template(
+        &self,
+        op_array: &OpArray,
+        ip: usize,
+    ) -> Option<Rc<NewTemplate>> {
+        // (its class's name lowercased then)
+        let t = op_array
+            .sites()
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.new_sites.get(&(ip as u32)).cloned())?;
+        let same = self.classes.get(t.lower.as_slice()).is_some_and(|ce| {
+            ce.new_template
+                .borrow()
+                .as_ref()
+                .is_some_and(|ct| Rc::ptr_eq(ct, &t) && t.fits(ce))
+        });
+        same.then_some(t)
+    }
+
     /// Whether the NEW before `ip` (that made `obj`, of a class without a
     /// constructor) is followed by its constructor call without arguments:
     /// INIT_METHOD_CALL `__construct` on the new object, then DO_FCALL.
@@ -315,7 +323,7 @@ impl Vm {
 
     /// new_object_fast() of a class whose NewTemplate is known: what it
     /// does then.
-    fn new_from_template(&mut self, t: &NewTemplate, op: &Op, tmps: &[Value]) -> Value {
+    pub(crate) fn new_from_template(&mut self, t: &NewTemplate, op: &Op, tmps: &[Value]) -> Value {
         // Recycle the old object ID from the result slot before allocating
         // a new one.
         if let OperandType::Tmp(idx) = &op.result {

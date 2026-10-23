@@ -938,6 +938,9 @@ pub(crate) struct CachedCallTarget {
     fn_gen: usize,
     /// (see CallTarget::ns_global)
     ns_global: bool,
+    /// The builtin is one php-src compiles into an opcode of its own (an
+    /// index + 1 into fastpath::SPECIAL_CALLS; 0: not one).
+    special: u8,
 }
 
 // A pending call is moved on every call (pushed, popped): larger than this,
@@ -19128,7 +19131,7 @@ impl Vm {
     /// !USED_RET() of the call DO_FCALL `op` makes to `lower` (see
     /// call_result_unused), as the general handler records it.
     #[inline]
-    fn note_call_result(&mut self, op: &crate::opcode::Op, lower: &[u8]) {
+    pub(crate) fn note_call_result(&mut self, op: &crate::opcode::Op, lower: &[u8]) {
         if matches!(op.op1, OperandType::Const(_)) {
             match &mut self.call_result_unused {
                 Some(v) => {
@@ -20155,7 +20158,7 @@ impl Vm {
     /// `name` to (see plain_call_target), set in `t` (a CallTarget::NONE)
     /// field by field. False, leaving `t` alone: nothing usable is cached.
     #[inline]
-    fn cached_call_target(
+    pub(crate) fn cached_call_target(
         op_array: &OpArray,
         ip: usize,
         name: &[u8],
@@ -20187,6 +20190,24 @@ impl Vm {
         t.fn_gen = fn_gen;
         t.ns_global = c.ns_global;
         true
+    }
+
+    /// The builtin the INIT_FCALL at `ip` of `op_array` (calling `name`)
+    /// resolved to, when it is one php-src compiles into an opcode of its
+    /// own: the function and its fastpath::SPECIAL_CALLS index + 1.
+    #[inline]
+    pub(crate) fn cached_special_call(
+        op_array: &OpArray,
+        ip: usize,
+        name: &[u8],
+        fn_gen: usize,
+    ) -> Option<(BuiltinFn, u8)> {
+        let sites = op_array.sites().borrow();
+        let c = sites.as_ref()?.call_targets.get(&(ip as u32))?;
+        if c.special == 0 || c.fn_gen != fn_gen || c.name != name {
+            return None;
+        }
+        Some((c.builtin?.0, c.special))
     }
 
     /// Whether the parent of `class` (a delayed early-binding candidate)
@@ -20354,6 +20375,11 @@ impl Vm {
                     method_info: t.method_info.clone(),
                     fn_gen: t.fn_gen,
                     ns_global: t.ns_global,
+                    special: if t.user.is_none() && t.builtin.is_some() && !t.ns_global {
+                        crate::fastpath::special_call_index(&resolved.to_ascii_lowercase())
+                    } else {
+                        0
+                    },
                 },
             );
         t
