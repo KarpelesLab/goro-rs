@@ -388,6 +388,10 @@ pub struct Compiler {
     in_hook_attrs: bool,
     /// The attributes being compiled are those of a closure.
     attrs_scope_unknown: bool,
+    /// The function (`name` / `Class::name`) whose attributes are being
+    /// compiled: it is the active function then, closures in them are
+    /// named after it (`{closure:foo():3}`).
+    attr_owner_fn: Option<Vec<u8>>,
     /// Ids of the finally blocks enclosing the code being compiled.
     finally_path: Vec<u32>,
     finally_id_counter: u32,
@@ -681,6 +685,7 @@ impl Compiler {
             deferred_fatal_errors: Vec::new(),
             in_hook_attrs: false,
             attrs_scope_unknown: false,
+            attr_owner_fn: None,
             finally_path: Vec::new(),
             finally_id_counter: 0,
             label_finally_paths: HashMap::new(),
@@ -877,6 +882,9 @@ impl Compiler {
         // Nested closure: parent already has a display_name like `{closure:...}`.
         if !self.op_array.display_name.is_empty() {
             name.extend_from_slice(&self.op_array.display_name);
+        } else if let Some(owner) = self.attr_owner_fn.as_ref().filter(|_| self.op_array.name.is_empty()) {
+            name.extend_from_slice(owner);
+            name.extend_from_slice(b"()");
         } else if let Some(class) = self
             .current_class
             .as_ref()
@@ -1357,6 +1365,22 @@ impl Compiler {
         r
     }
 
+    /// The attributes of method `class::method` (the active function while
+    /// they are compiled).
+    #[inline(never)]
+    fn compile_method_attributes(
+        &mut self,
+        attrs: &[goro_parser::ast::Attribute],
+        class: &[u8],
+        method: &[u8],
+    ) -> Vec<crate::object::RuntimeAttribute> {
+        let owner = [class, b"::", method].concat();
+        let saved = self.attr_owner_fn.replace(owner);
+        let r = self.compile_attributes_target(attrs, "method");
+        self.attr_owner_fn = saved;
+        r
+    }
+
     /// The attributes of a property hook (a method target).
     fn compile_hook_attributes(
         &mut self,
@@ -1530,6 +1554,7 @@ impl Compiler {
                 // constructor from there.
                 ac.op_array.decl_line = attr.line;
                 ac.op_array.filename = self.source_file.clone();
+                ac.attr_owner_fn = self.attr_owner_fn.clone();
                 if let Some(cls) = &self.current_class {
                     ac.current_class = Some(cls.clone());
                     ac.op_array.scope_class =
@@ -4734,8 +4759,10 @@ impl Compiler {
                 };
                 func_compiler.op_array.doc_comment = func_doc_comment.clone();
                 func_compiler.op_array.strict_types = self.op_array.strict_types;
+                self.attr_owner_fn = Some(qualified_name.clone());
                 func_compiler.op_array.attributes =
                     self.compile_attributes_target(func_attributes, "function");
+                self.attr_owner_fn = None;
                 // Carry the source filename so ReflectionFunction::getFileName()
                 // can report where the function was declared, not where it was
                 // first looked up.
@@ -8955,8 +8982,11 @@ impl Compiler {
                                         doc_comment: method_doc_comment
                                             .as_ref()
                                             .map(|d| String::from_utf8_lossy(d).into_owned()),
-                                        attributes: self
-                                            .compile_attributes_target(method_attributes, "method"),
+                                        attributes: self.compile_method_attributes(
+                                            method_attributes,
+                                            &qualified_name,
+                                            method_name,
+                                        ),
                                     },
                                 );
                             } else {
@@ -9139,8 +9169,11 @@ impl Compiler {
                                         doc_comment: method_doc_comment
                                             .as_ref()
                                             .map(|d| String::from_utf8_lossy(d).into_owned()),
-                                        attributes: self
-                                            .compile_attributes_target(method_attributes, "method"),
+                                        attributes: self.compile_method_attributes(
+                                            method_attributes,
+                                            &qualified_name,
+                                            method_name,
+                                        ),
                                     },
                                 );
                             }
@@ -22534,6 +22567,37 @@ impl Compiler {
                     });
                 }
                 format!("new {}({})", cls, parts.join(", "))
+            }
+            // ZEND_AST_OP_ARRAY: the closure's function name.
+            ExprKind::Closure { .. } => format!(
+                "Closure({})",
+                String::from_utf8_lossy(&self.closure_display_name(expr.span.line))
+            ),
+            // zend_ast_export_ns_name(): an unqualified function name is
+            // the namespaced one (not fully qualified), others resolve to a
+            // fully qualified name.
+            ExprKind::FirstClassCallable(CallableTarget::Function(name)) => {
+                let ExprKind::Identifier(n) = &name.kind else {
+                    return None;
+                };
+                let resolved = String::from_utf8_lossy(&self.resolve_function_name(n)).to_string();
+                let unqualified = !n.contains(&b'\\')
+                    && !self.use_function_map.contains_key(&n.to_ascii_lowercase());
+                if unqualified {
+                    format!("{}(...)", resolved)
+                } else {
+                    format!("\\{}(...)", resolved)
+                }
+            }
+            ExprKind::FirstClassCallable(CallableTarget::StaticMethod { class, method }) => {
+                let ExprKind::Identifier(n) = &class.kind else {
+                    return None;
+                };
+                format!(
+                    "{}::{}(...)",
+                    self.export_class_name(n),
+                    String::from_utf8_lossy(method)
+                )
             }
             _ => return None,
         })
