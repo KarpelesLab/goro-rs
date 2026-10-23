@@ -35925,8 +35925,18 @@ impl Vm {
                                                 }
                                                 obj_mut = obj.borrow_mut();
                                             }
+                                            // (a subclass without a constructor of its own
+                                            // runs ErrorException's)
                                             if is_exc
-                                                && class_lower.as_slice() == b"errorexception"
+                                                && (class_lower.as_slice() == b"errorexception"
+                                                    || is_builtin_subclass(
+                                                        &class_lower,
+                                                        b"errorexception",
+                                                    )
+                                                    || self.class_extends(
+                                                        &class_lower,
+                                                        b"errorexception",
+                                                    ))
                                             {
                                                 // ErrorException($message, $code, $severity, $filename, $line, $previous)
                                                 if call.args.len() > 1 {
