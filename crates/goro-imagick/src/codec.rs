@@ -722,9 +722,171 @@ fn decode_png(data: &[u8]) -> MResult<Vec<Image>> {
             }
         }
     }
+    png_chunk_properties(&mut img, data);
     img.compression = CompressionType::Zip;
     img.quality = 0;
     Ok(vec![img])
+}
+
+/// What ImageMagick's PNG reader records of the chunks it met (png:*
+/// properties), the depth of the file, its orNT orientation and its
+/// primaries (none for a gray file without cHRM).
+fn png_chunk_properties(img: &mut Image, data: &[u8]) {
+    let mut chunks: Vec<(&[u8], &[u8])> = Vec::new();
+    let mut i = 8;
+    while i + 8 <= data.len() {
+        let n = u32::from_be_bytes([data[i], data[i + 1], data[i + 2], data[i + 3]]) as usize;
+        let t = &data[i + 4..i + 8];
+        let end = (i + 8 + n).min(data.len());
+        chunks.push((t, &data[i + 8..end]));
+        if t == b"IEND" {
+            break;
+        }
+        i += 12 + n;
+    }
+    let find = |t: &[u8]| chunks.iter().find(|(c, _)| *c == t).map(|(_, d)| *d);
+    let Some(ihdr) = find(b"IHDR").filter(|d| d.len() >= 13) else {
+        return;
+    };
+    let be32 = |d: &[u8], o: usize| u32::from_be_bytes([d[o], d[o + 1], d[o + 2], d[o + 3]]);
+    let (bit_depth, colour_type, interlace) = (ihdr[8], ihdr[9], ihdr[12]);
+    img.depth = bit_depth as u32;
+    let mut props: Vec<(&str, String)> = Vec::new();
+    let found = "chunk was found";
+    if find(b"bKGD").is_some() {
+        props.push((
+            "png:bKGD",
+            "chunk was found (see Background color, above)".into(),
+        ));
+    }
+    if find(b"cHRM").is_some() {
+        props.push((
+            "png:cHRM",
+            "chunk was found (see Chromaticity, above)".into(),
+        ));
+    } else if matches!(colour_type, 0 | 4) {
+        img.chromaticity = Default::default();
+    }
+    if let Some(g) = find(b"gAMA").filter(|d| d.len() >= 4) {
+        props.push((
+            "png:gAMA",
+            format!(
+                "gamma={} (See Gamma, above)",
+                crate::color::fmt_g(be32(g, 0) as f64 / 100_000.0)
+            ),
+        ));
+    }
+    if find(b"iCCP").is_some() {
+        props.push(("png:iCCP", found.into()));
+    }
+    props.push(("png:IHDR.bit-depth-orig", bit_depth.to_string()));
+    props.push(("png:IHDR.bit_depth", bit_depth.to_string()));
+    props.push(("png:IHDR.color-type-orig", colour_type.to_string()));
+    let ct_name = match colour_type {
+        0 => "Grayscale",
+        2 => "Truecolor",
+        3 => "Indexed",
+        4 => "GrayAlpha",
+        6 => "RGBA",
+        _ => "Unknown",
+    };
+    props.push(("png:IHDR.color_type", format!("{colour_type} ({ct_name})")));
+    props.push((
+        "png:IHDR.interlace_method",
+        if interlace == 0 {
+            "0 (Not interlaced)".into()
+        } else {
+            format!("{interlace} (Adam7 method)")
+        },
+    ));
+    props.push((
+        "png:IHDR.width,height",
+        format!("{}, {}", be32(ihdr, 0), be32(ihdr, 4)),
+    ));
+    if let Some(d) = find(b"pHYs").filter(|d| d.len() >= 9) {
+        props.push((
+            "png:pHYs",
+            format!("x_res={}, y_res={}, units={}", be32(d, 0), be32(d, 4), d[8]),
+        ));
+    }
+    if let Some(d) = find(b"PLTE") {
+        props.push(("png:PLTE.number_colors", (d.len() / 3).to_string()));
+    }
+    if let Some(d) = find(b"sRGB").filter(|d| !d.is_empty()) {
+        let name = match d[0] {
+            0 => "Perceptual Intent",
+            1 => "Relative Intent",
+            2 => "Saturation Intent",
+            _ => "Absolute Intent",
+        };
+        props.push(("png:sRGB", format!("intent={} ({name})", d[0])));
+    }
+    let texts = chunks
+        .iter()
+        .filter(|(c, _)| matches!(*c, b"tEXt" | b"zTXt" | b"iTXt"))
+        .count();
+    if texts > 0 {
+        props.push((
+            "png:text",
+            format!("{texts} tEXt/zTXt/iTXt chunks were found"),
+        ));
+    }
+    if let Some(d) = find(b"tIME").filter(|d| d.len() >= 7) {
+        props.push((
+            "png:tIME",
+            format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                u16::from_be_bytes([d[0], d[1]]),
+                d[2],
+                d[3],
+                d[4],
+                d[5],
+                d[6]
+            ),
+        ));
+    }
+    if find(b"tRNS").is_some() {
+        props.push(("png:tRNS", found.into()));
+    }
+    for (k, v) in props {
+        img.properties.set(k, &v);
+    }
+    if let Some(d) = find(b"orNT").filter(|d| !d.is_empty()) {
+        img.orientation = OrientationType(d[0] as i32);
+    }
+    // the background colour; a palette entry's samples are scaled as if
+    // they had the file's bit depth (ImageMagick does so, wrapping at 16
+    // bits)
+    if let Some(b) = find(b"bKGD") {
+        let max = ((1u32 << bit_depth.min(16)) - 1).max(1);
+        let scale = |v: u32| (v.wrapping_mul(65535 / max) & 0xffff) as f64;
+        let rgb = match (colour_type, b.len()) {
+            (3, 1..) => find(b"PLTE")
+                .filter(|p| p.len() >= 3 * (b[0] as usize + 1))
+                .map(|p| {
+                    let e = &p[3 * b[0] as usize..];
+                    [scale(e[0] as u32), scale(e[1] as u32), scale(e[2] as u32)]
+                }),
+            (0 | 4, 2..) => {
+                let v = scale(u16::from_be_bytes([b[0], b[1]]) as u32);
+                Some([v, v, v])
+            }
+            (2 | 6, 6..) => {
+                let c = |o: usize| scale(u16::from_be_bytes([b[o], b[o + 1]]) as u32);
+                Some([c(0), c(2), c(4)])
+            }
+            _ => None,
+        };
+        if let Some([r, g, bl]) = rgb {
+            img.background_color = PixelInfo {
+                red: r,
+                green: g,
+                blue: bl,
+                alpha: 65535.0,
+                ..PixelInfo::white()
+            };
+        }
+    }
 }
 
 fn decode_jpeg(data: &[u8]) -> MResult<Vec<Image>> {
@@ -1266,11 +1428,280 @@ fn is_gray_image(img: &Image) -> bool {
         )
 }
 
+/// A sample at 8 bits as ImageMagick's PNG writer stores it (truncated).
+fn png8(v: u16) -> u8 {
+    (v / 257) as u8
+}
+
+/// The smallest PNG sample depth (1, 2, 4 or 8) holding these 8-bit
+/// gray levels exactly.
+fn png_gray_depth(levels: impl Iterator<Item = u8> + Clone) -> u8 {
+    for d in [1u8, 2, 4] {
+        let step = 255 / ((1u32 << d) - 1);
+        if levels.clone().all(|v| (v as u32).is_multiple_of(step)) {
+            return d;
+        }
+    }
+    8
+}
+
+/// The colour type, depth and samples ImageMagick 7 picks for a PNG
+/// when nothing forces them (black-box): gray when every pixel is,
+/// at the least depth holding its levels (a tRNS key for a lone fully
+/// transparent gray, else gray+alpha); a palette for at most 256
+/// colours (in first-appearance order, the background appended when
+/// there is room), at the least index depth; else RGB, or RGBA when
+/// the image has an alpha channel; 16 bits only for a 16-bit image
+/// whose samples need them.
+struct PngLayout {
+    format: oxideav_png::PixelFormat,
+    stride: usize,
+    data: Vec<u8>,
+    bit_depth: Option<u8>,
+    palette: Option<Vec<[u8; 4]>>,
+    bkgd: Option<oxideav_png::Bkgd>,
+    trns: Option<oxideav_png::Trns>,
+}
+
+fn png_auto_layout(img: &Image) -> PngLayout {
+    use oxideav_png::{Bkgd, PixelFormat as P, Trns};
+    let w = img.columns;
+    let px = || img.pixels.chunks_exact(4);
+    let opaque = !img.alpha || px().all(|p| p[3] == 65535);
+    let needs16 = img.depth > 8
+        && px().any(|p| p[..3].iter().any(|v| v % 257 != 0) || (img.alpha && p[3] % 257 != 0));
+    let bg = img.background_color.to_rgba16();
+    if needs16 {
+        let gray = px().all(|p| p[0] == p[1] && p[1] == p[2]);
+        let (format, stride, data) = if gray && opaque {
+            (P::Gray16Le, w * 2, le16(px().map(|p| p[0])))
+        } else if img.alpha {
+            // (oxideav-png has no 16-bit gray+alpha)
+            (P::Rgba64Le, w * 8, le16(img.pixels.iter().copied()))
+        } else {
+            (
+                P::Rgb48Le,
+                w * 6,
+                le16(px().flat_map(|p| [p[0], p[1], p[2]])),
+            )
+        };
+        let bkgd = if gray && opaque {
+            Bkgd::Grayscale(bg[0])
+        } else {
+            Bkgd::Rgb(bg[0], bg[1], bg[2])
+        };
+        return PngLayout {
+            format,
+            stride,
+            data,
+            bit_depth: None,
+            palette: None,
+            bkgd: Some(bkgd),
+            trns: None,
+        };
+    }
+    let p8: Vec<[u8; 4]> = px()
+        .map(|p| {
+            [
+                png8(p[0]),
+                png8(p[1]),
+                png8(p[2]),
+                if img.alpha { png8(p[3]) } else { 255 },
+            ]
+        })
+        .collect();
+    let bg8 = [png8(bg[0]), png8(bg[1]), png8(bg[2])];
+    let gray = p8.iter().all(|p| p[0] == p[1] && p[1] == p[2]);
+    if gray {
+        let binary = p8.iter().all(|p| p[3] == 0 || p[3] == 255);
+        let mut key = None;
+        if !opaque && binary {
+            // one gray for every transparent pixel, unused by opaque ones
+            let t: Vec<u8> = p8.iter().filter(|p| p[3] == 0).map(|p| p[0]).collect();
+            if t.iter().all(|&v| v == t[0]) && !p8.iter().any(|p| p[3] == 255 && p[0] == t[0]) {
+                key = Some(t[0]);
+            }
+        }
+        if opaque || key.is_some() {
+            let d = png_gray_depth(p8.iter().map(|p| p[0]).chain([bg8[0]]));
+            let scale = 255 / ((1u32 << d) - 1) as u8;
+            let data: Vec<u8> = p8.iter().map(|p| p[0] / scale).collect();
+            return PngLayout {
+                format: P::Gray8,
+                stride: w,
+                data,
+                bit_depth: (d < 8).then_some(d),
+                palette: None,
+                bkgd: Some(Bkgd::Grayscale((bg8[0] / scale) as u16)),
+                trns: key.map(|k| Trns::Grayscale((k / scale) as u16)),
+            };
+        }
+        return PngLayout {
+            format: P::Ya8,
+            stride: w * 2,
+            data: p8.iter().flat_map(|p| [p[0], p[3]]).collect(),
+            bit_depth: None,
+            palette: None,
+            bkgd: Some(Bkgd::Grayscale(bg8[0] as u16)),
+            trns: None,
+        };
+    }
+    // a palette, colours in the order they first appear
+    let mut index = std::collections::HashMap::new();
+    let mut entries: Vec<[u8; 4]> = Vec::new();
+    let mut fits = true;
+    for p in &p8 {
+        if !index.contains_key(p) {
+            if entries.len() == 256 {
+                fits = false;
+                break;
+            }
+            index.insert(*p, entries.len());
+            entries.push(*p);
+        }
+    }
+    if fits {
+        // the entries with transparency lead (a shorter tRNS)
+        let mut order: Vec<usize> = (0..entries.len())
+            .filter(|&i| entries[i][3] != 255)
+            .collect();
+        order.extend((0..entries.len()).filter(|&i| entries[i][3] == 255));
+        let mut remap = vec![0usize; entries.len()];
+        for (new, &old) in order.iter().enumerate() {
+            remap[old] = new;
+        }
+        entries = order.iter().map(|&i| entries[i]).collect();
+        for v in index.values_mut() {
+            *v = remap[*v];
+        }
+        let bgp = [bg8[0], bg8[1], bg8[2], 255];
+        let bkgd = match index.get(&bgp) {
+            Some(&i) => Some(i),
+            None if entries.len() < 256 => {
+                entries.push(bgp);
+                Some(entries.len() - 1)
+            }
+            None => None,
+        };
+        let d = match entries.len() {
+            0..=2 => 1,
+            3..=4 => 2,
+            5..=16 => 4,
+            _ => 8,
+        };
+        let data: Vec<u8> = p8.iter().map(|p| index[p] as u8).collect();
+        return PngLayout {
+            format: P::Pal8,
+            stride: w,
+            data,
+            bit_depth: (d < 8).then_some(d),
+            palette: Some(entries),
+            bkgd: bkgd.map(|i| Bkgd::Palette(i as u8)),
+            trns: None,
+        };
+    }
+    let bkgd = Some(Bkgd::Rgb(bg8[0] as u16, bg8[1] as u16, bg8[2] as u16));
+    if img.alpha {
+        PngLayout {
+            format: P::Rgba,
+            stride: w * 4,
+            data: p8.iter().flatten().copied().collect(),
+            bit_depth: None,
+            palette: None,
+            bkgd,
+            trns: None,
+        }
+    } else {
+        PngLayout {
+            format: P::Rgb24,
+            stride: w * 3,
+            data: p8.iter().flat_map(|p| [p[0], p[1], p[2]]).collect(),
+            bit_depth: None,
+            palette: None,
+            bkgd,
+            trns: None,
+        }
+    }
+}
+
+/// PNG8 for an opaque image of at most 256 colours: an 8-bit palette of
+/// the image's colours (more colours, or alpha, are a quantize matter).
+fn png8_layout(img: &Image) -> Option<PngLayout> {
+    use oxideav_png::{Bkgd, PixelFormat as P};
+    if img.alpha && !img.is_opaque() {
+        return None;
+    }
+    let mut index = std::collections::HashMap::new();
+    let mut entries: Vec<[u8; 4]> = Vec::new();
+    let mut data = Vec::with_capacity(img.columns * img.rows);
+    for p in img.pixels.chunks_exact(4) {
+        let e = [png8(p[0]), png8(p[1]), png8(p[2]), 255];
+        let i = match index.get(&e) {
+            Some(&i) => i,
+            None => {
+                if entries.len() == 256 {
+                    return None;
+                }
+                index.insert(e, entries.len());
+                entries.push(e);
+                entries.len() - 1
+            }
+        };
+        data.push(i as u8);
+    }
+    let bg = img.background_color.to_rgba16();
+    let bgp = [png8(bg[0]), png8(bg[1]), png8(bg[2]), 255];
+    Some(PngLayout {
+        format: P::Pal8,
+        stride: img.columns,
+        data,
+        bit_depth: None,
+        palette: Some(entries),
+        bkgd: index.get(&bgp).map(|&i| Bkgd::Palette(i as u8)),
+        trns: None,
+    })
+}
+
 fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
     use oxideav_png::{PixelFormat as P, Plane, PngImage};
     let mut img = img.clone();
+    // cHRM goes with primaries (gray and linear images have none)
+    let chrm = img.chromaticity.white.0 > 0.0;
     img.cmyk_to_rgb();
     let (w, h) = (img.columns as u32, img.rows as u32);
+    let bit_depth_opt = opts.get("png:bit-depth");
+    let ct_opt = opts.get("png:color-type");
+    let forced = matches!(m, "PNG24" | "PNG32" | "PNG48" | "PNG64")
+        || bit_depth_opt.is_some_and(|d| d == "16")
+        || ct_opt.is_some_and(|c| c != "0" || is_gray_image(&img));
+    let layout = if forced {
+        None
+    } else if m == "PNG8" {
+        png8_layout(&img)
+    } else {
+        let mut l = png_auto_layout(&img);
+        if bit_depth_opt == Some("8") {
+            // png:bit-depth=8: the same choices at 8 bits a sample
+            if let (Some(d), P::Gray8) = (l.bit_depth, l.format) {
+                let scale = 255 / ((1u32 << d) - 1) as u8;
+                l.data.iter_mut().for_each(|v| *v *= scale);
+                l.bkgd = l.bkgd.map(|b| match b {
+                    oxideav_png::Bkgd::Grayscale(v) => {
+                        oxideav_png::Bkgd::Grayscale(v * scale as u16)
+                    }
+                    o => o,
+                });
+                l.trns = l.trns.map(|t| match t {
+                    oxideav_png::Trns::Grayscale(v) => {
+                        oxideav_png::Trns::Grayscale(v * scale as u16)
+                    }
+                    o => o,
+                });
+            }
+            l.bit_depth = None;
+        }
+        Some(l)
+    };
     let has_alpha = img.alpha && !img.is_opaque();
     let depth16 = match m {
         "PNG48" | "PNG64" => true,
@@ -1289,7 +1720,7 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
     let want_alpha = match m {
         "PNG32" | "PNG64" => true,
         "PNG24" | "PNG48" => false,
-        _ => has_alpha || (img.alpha && opts.get("png:color-type") == Some("6")),
+        _ => has_alpha || matches!(ct_opt, Some("4") | Some("6")),
     };
     let n = img.columns * img.rows;
     // ImageMagick writes a gray image with alpha as 8-bit gray+alpha
@@ -1329,22 +1760,67 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
             )
         }
     } else if gray && !want_alpha {
-        (P::Gray8, w as usize, gray8(&img))
+        (
+            P::Gray8,
+            w as usize,
+            img.pixels.chunks_exact(4).map(|p| q_to_u8(p[0])).collect(),
+        )
     } else if gray && want_alpha {
-        let rgba = img.to_rgba8();
+        let rgba: Vec<u8> = img.pixels.iter().map(|&v| q_to_u8(v)).collect();
         (
             P::Ya8,
             w as usize * 2,
             rgba.chunks_exact(4).flat_map(|p| [p[0], p[3]]).collect(),
         )
     } else if want_alpha {
-        (P::Rgba, w as usize * 4, img.to_rgba8())
+        (
+            P::Rgba,
+            w as usize * 4,
+            img.pixels.iter().map(|&v| q_to_u8(v)).collect(),
+        )
     } else {
-        (P::Rgb24, w as usize * 3, rgb8(&img))
+        (
+            P::Rgb24,
+            w as usize * 3,
+            img.pixels
+                .chunks_exact(4)
+                .flat_map(|p| [q_to_u8(p[0]), q_to_u8(p[1]), q_to_u8(p[2])])
+                .collect(),
+        )
     };
     let _ = n;
+    let (format, stride, data, bit_depth, palette, bkgd, trns) = match layout {
+        Some(l) => (
+            l.format,
+            l.stride,
+            l.data,
+            l.bit_depth,
+            l.palette,
+            l.bkgd,
+            l.trns,
+        ),
+        None => {
+            let bg = img.background_color.to_rgba16();
+            let bkgd = match format {
+                P::Gray16Le => oxideav_png::Bkgd::Grayscale(bg[0]),
+                P::Gray8 | P::Ya8 => oxideav_png::Bkgd::Grayscale(q_to_u8(bg[0]) as u16),
+                P::Rgb48Le | P::Rgba64Le => oxideav_png::Bkgd::Rgb(bg[0], bg[1], bg[2]),
+                _ => oxideav_png::Bkgd::Rgb(
+                    q_to_u8(bg[0]) as u16,
+                    q_to_u8(bg[1]) as u16,
+                    q_to_u8(bg[2]) as u16,
+                ),
+            };
+            let key = (matches!(m, "PNG24" | "PNG48") && has_alpha)
+                .then_some(oxideav_png::Trns::Rgb(0, 0, 0));
+            (format, stride, data, None, None, Some(bkgd), key)
+        }
+    };
     let mut png = PngImage::new(w, h, format, vec![Plane::new(stride, data)])
         .map_err(|e| coder_err("PNG", e))?;
+    if let Some(entries) = palette {
+        png = png.with_palette(oxideav_png::Palette::new(entries));
+    }
     let mut md = oxideav_png::Metadata::default();
     if let Some(icc) = img.profile("icc") {
         md = md.with_icc(icc.to_vec());
@@ -1361,6 +1837,7 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
         }
     }
     png = png.with_metadata(md);
+    let mut md_exif_drop = false;
     let mut eo = oxideav_png::EncodeOptions::default();
     let level = if img.quality > 0 {
         ((img.quality / 10).clamp(1, 9)) as u8
@@ -1368,7 +1845,22 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
         7
     };
     eo = eo.with_level(level);
+    if let Some(d) = bit_depth {
+        eo = eo.with_bit_depth(d);
+    }
     let mut pm = oxideav_png::PngMetadata::default();
+    pm.bkgd = bkgd;
+    pm.trns = trns;
+    if chrm {
+        let c = &img.chromaticity;
+        let q = |v: f64| (v * 100_000.0 + 0.5) as u32;
+        pm.chrm = Some(oxideav_png::Chrm::new(
+            (q(c.white.0), q(c.white.1)),
+            (q(c.red.0), q(c.red.1)),
+            (q(c.green.0), q(c.green.1)),
+            (q(c.blue.0), q(c.blue.1)),
+        ));
+    }
     if img.x_resolution > 0.0 && img.y_resolution > 0.0 {
         let (xr, yr) = match img.units {
             ResolutionType::PixelsPerInch => (img.x_resolution / 0.0254, img.y_resolution / 0.0254),
@@ -1382,20 +1874,43 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
         } else {
             oxideav_png::PhysUnit::Metre
         };
+        // (truncated, as ImageMagick writes it)
         pm.phys = Some(oxideav_png::Phys::new(
-            (xr + 0.5) as u32,
-            (yr + 0.5) as u32,
+            (xr + 1e-6) as u32,
+            (yr + 1e-6) as u32,
             unit,
         ));
     }
-    for (k, v) in &img.properties.0 {
-        let kl = k.to_ascii_lowercase();
-        if kl.starts_with("png:") || kl.starts_with("exif:") || kl.starts_with("date:") {
-            continue;
-        }
-        if v.is_ascii() && !v.contains('\0') && !k.contains(':') && k.len() < 80 {
+    // every property but the png:* ones, as ImageMagick lists them
+    let mut props: Vec<&(String, String)> = img
+        .properties
+        .0
+        .iter()
+        .filter(|(k, _)| !k.to_ascii_lowercase().starts_with("png:"))
+        .collect();
+    props.sort_by_key(|(k, _)| k.to_ascii_lowercase());
+    if props.iter().any(|(k, _)| k.starts_with("date:")) {
+        let (y, mo, d, hh, mm, ss) = crate::properties::civil_utc(crate::properties::now_secs());
+        pm.time = Some(oxideav_png::Time::new(y as u16, mo, d, hh, mm, ss));
+    }
+    for (k, v) in props {
+        let valid_key = !k.is_empty()
+            && k.len() < 80
+            && k.bytes().all(|b| (0x20..0x7f).contains(&b))
+            && !k.starts_with(' ')
+            && !k.ends_with(' ')
+            && !k.contains("  ");
+        if valid_key && v.is_ascii() && !v.contains('\0') {
             pm.texts.push(oxideav_png::Text::new(k.clone(), v.clone()));
         }
+    }
+    // ImageMagick's private orNT chunk: the orientation
+    if img.orientation != OrientationType::Undefined {
+        pm.unknowns.push(oxideav_png::UnknownChunk::new(
+            *b"orNT",
+            vec![img.orientation.0 as u8],
+            false,
+        ));
     }
     // ImageMagick's private caNv chunk carries a page other than the
     // image's own size at the origin: width, height (u32), x, y (i32)
@@ -1410,6 +1925,43 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
         d.extend_from_slice(&(pg.y as i32).to_be_bytes());
         pm.unknowns
             .push(oxideav_png::UnknownChunk::new(*b"caNv", d, false));
+    }
+    // -define png:exclude-chunk (StripImage() sets it)
+    if let Some(ex) = img
+        .artifacts
+        .get("png:exclude-chunk")
+        .or_else(|| opts.get("png:exclude-chunk"))
+    {
+        let ex: Vec<String> = ex
+            .split(',')
+            .map(|c| c.trim().to_ascii_lowercase())
+            .collect();
+        let has = |c: &str| ex.iter().any(|e| e == c || e == "all");
+        if has("bkgd") {
+            pm.bkgd = None;
+        }
+        if has("chrm") {
+            pm.chrm = None;
+        }
+        if has("phys") {
+            pm.phys = None;
+        }
+        if has("time") {
+            pm.time = None;
+        }
+        if has("text") {
+            pm.texts
+                .retain(|t| t.keyword.starts_with("date:") && !has("date"));
+        }
+        if has("date") {
+            pm.texts.retain(|t| !t.keyword.starts_with("date:"));
+        }
+        if has("exif") {
+            md_exif_drop = true;
+        }
+    }
+    if md_exif_drop {
+        png = png.with_metadata(oxideav_png::Metadata::default());
     }
     eo = eo.with_metadata(pm);
     oxideav_png::encode(&png, &eo).map_err(|e| coder_err("PNG", e))
