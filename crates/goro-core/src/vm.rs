@@ -38159,6 +38159,18 @@ impl Vm {
                                 return Ok(Flow::Continue);
                             }
                         }
+                        // FETCH_DIM_RW adds the missing element (as null)
+                        // before the operation runs: it stays when the
+                        // operation throws (`$a['k'] %= 0`).
+                        // (not when the warning's handler threw:
+                        // zend_undefined_offset_write())
+                        if is_rw
+                            && matches!(v, Value::Null)
+                            && self.current_exception.is_none()
+                            && !Rc::ptr_eq(arr, &self.globals)
+                        {
+                            Self::rw_add_missing_dim(arr, &key);
+                        }
                         v
                     } else if let Value::String(s) = &arr_val {
                         // String offset access (supports negative indices).
@@ -59509,6 +59521,15 @@ impl Vm {
     /// by-ref parameter or capture): the referenced array outlives the
     /// frame, so the caller gets its own copy (PHP shares it refcounted and
     /// separates on the next write).
+    #[inline(never)]
+    fn rw_add_missing_dim(arr: &Rc<RefCell<PhpArray>>, key: &crate::array::ArrayKey) {
+        if let Ok(mut a) = arr.try_borrow_mut() {
+            if a.get(key).is_none() {
+                a.set(key.clone(), Value::Null);
+            }
+        }
+    }
+
     #[inline]
     pub(crate) fn dup_returned_ref_array(
         &self,
