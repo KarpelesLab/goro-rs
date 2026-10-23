@@ -1,0 +1,5 @@
+/site/
+/.cache/
+/certs/
+/site.tmp/
+!/test-image.jpg
