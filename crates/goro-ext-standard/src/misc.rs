@@ -13308,9 +13308,18 @@ fn fseek_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             fh.eof = false;
             // The read buffer is discarded; SEEK_CUR is relative to the
             // logical position (before the buffered bytes).
+            // (_php_stream_seek(): SEEK_CUR is relative to stream->position)
+            let position = fh.append_pos.and_then(|_| fh.append_position());
             let buffered = std::mem::take(&mut fh.filter_read_ready).len() as i64;
             let seek = match whence {
-                0 => SeekFrom::Start(offset as u64),       // SEEK_SET
+                0 => SeekFrom::Start(offset as u64), // SEEK_SET
+                1 if position.is_some() => {
+                    let to = position.unwrap_or(0) as i64 + offset;
+                    if to < 0 {
+                        return Ok(-1);
+                    }
+                    SeekFrom::Start(to as u64)
+                }
                 1 => SeekFrom::Current(offset - buffered), // SEEK_CUR
                 2 => SeekFrom::End(offset),                // SEEK_END
                 _ => SeekFrom::Start(offset as u64),
@@ -16824,11 +16833,15 @@ fn ftruncate_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Some(fh) = handles.get_mut(&fid) {
             match fh.file.set_len(size) {
                 Ok(_) => {
-                    // A memory stream's position is clamped to the new size.
+                    // A memory stream's own offset is clamped to the new
+                    // size, while stream->position (ftell()) stays: it then
+                    // advances from there by what is read and written.
                     if matches!(fh.special, SpecialStream::Memory | SpecialStream::Temp) {
+                        let logical = fh.append_position().or_else(|| fh.logical_os_pos());
                         if let Ok(pos) = fh.file.stream_position() {
                             if pos > size {
                                 let _ = fh.file.seek(std::io::SeekFrom::Start(size));
+                                fh.append_pos = logical.map(|l| (l, size));
                             }
                         }
                     }
