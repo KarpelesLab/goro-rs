@@ -1402,7 +1402,7 @@ fn posterize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
             // dithered onto the colour map of every level combination
             let l = levels as usize;
             let lv: Vec<u16> = (0..l)
-                .map(|k| (k as f64 * 65535.0 / (levels - 1.0)).round() as u16)
+                .map(|k| (k as f64 * 65535.0 / (levels - 1.0)).floor() as u16)
                 .collect();
             let mut pal = Vec::with_capacity(l * l * l);
             for &r in &lv {
@@ -1428,15 +1428,10 @@ const QUANTIZE_DITHER: Dither = Dither::FloydSteinberg;
 
 /// QuantizeImage(): ImageMagick's colour cube, in gray when the
 /// colourspace asks for it.
-fn quantize_of(i: &mut Image, n: i64, cs: i64, depth: i64, dither: bool) -> MResult<()> {
+fn quantize_of(i: &mut Image, n: i64, cs: i64, depth: i64, method: Dither) -> MResult<()> {
     if cs == Colorspace::Gray.0 as i64 {
         transform_colorspace(i, Colorspace::Gray);
     }
-    let method = if dither {
-        Dither::None
-    } else {
-        QUANTIZE_DITHER
-    };
     goro_imagick::quantize::quantize(
         i,
         n.clamp(1, 1 << 24) as usize,
@@ -1455,7 +1450,12 @@ fn quantize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
         a[3].bool_or(false),
     );
     image_op(vm, &d_(o), "Unable to quantize image", |i| {
-        quantize_of(i, n, cs, depth, dither)
+        let method = if dither {
+            Dither::None
+        } else {
+            QUANTIZE_DITHER
+        };
+        quantize_of(i, n, cs, depth, method)
     })
 }
 
@@ -1471,8 +1471,10 @@ fn quantize_images(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
     not_empty(vm, &d)?;
     {
         let mut w = d.wand.borrow_mut();
+        // QuantizeImages() runs from the current image to the end
+        let cur = w.current.min(w.images.len() - 1);
         if cs == Colorspace::Gray.0 as i64 {
-            for i in w.images.iter_mut() {
+            for i in w.images[cur..].iter_mut() {
                 transform_colorspace(i, Colorspace::Gray);
             }
         }
@@ -1481,7 +1483,7 @@ fn quantize_images(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
         } else {
             QUANTIZE_DITHER
         };
-        let mut imgs: Vec<&mut Image> = w.images.iter_mut().collect();
+        let mut imgs: Vec<&mut Image> = w.images[cur..].iter_mut().collect();
         goro_imagick::quantize::quantize_images(
             &mut imgs,
             n.clamp(1, 1 << 24) as usize,
@@ -2864,12 +2866,14 @@ pub(crate) fn set_type_of(i: &mut Image, t: ImageType) {
             i.enable_alpha();
         }
         ImageType::Palette => {
-            let _ = quantize_of(i, 256, 0, 0, false);
+            // SetImageType() quantizes with the default (Riemersma) dither
+            let _ = quantize_of(i, 256, 0, 0, Dither::Riemersma);
             i.disable_alpha();
         }
         ImageType::PaletteAlpha | ImageType::PaletteBilevelAlpha => {
             i.enable_alpha();
-            let _ = quantize_of(i, 256, 0, 0, false);
+            // SetImageType() quantizes with the default (Riemersma) dither
+            let _ = quantize_of(i, 256, 0, 0, Dither::Riemersma);
         }
         ImageType::TrueColor => {
             if i.colorspace != Colorspace::SRGB {
