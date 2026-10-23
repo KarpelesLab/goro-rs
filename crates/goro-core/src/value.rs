@@ -1861,16 +1861,17 @@ impl Value {
                     }
                 } else {
                     // PHP 8: non-numeric string - cast float to string and compare as strings
+                    // (byte-wise: the string need not be UTF-8)
                     let f_str = format_php_float(*f);
-                    let s_str = std::str::from_utf8(s.as_bytes()).unwrap_or("");
+                    let s_str = s.as_bytes();
                     if is_left_double {
-                        match f_str.as_bytes().cmp(s_str.as_bytes()) {
+                        match f_str.as_bytes().cmp(s_str) {
                             std::cmp::Ordering::Less => -1,
                             std::cmp::Ordering::Equal => 0,
                             std::cmp::Ordering::Greater => 1,
                         }
                     } else {
-                        match s_str.as_bytes().cmp(f_str.as_bytes()) {
+                        match s_str.cmp(f_str.as_bytes()) {
                             std::cmp::Ordering::Less => -1,
                             std::cmp::Ordering::Equal => 0,
                             std::cmp::Ordering::Greater => 1,

@@ -599,6 +599,13 @@ pub fn php_math_round(value: f64, places: i32, mode: i64) -> f64 {
     }
 }
 
+/// zend_dval_to_lval_silent((double) n) == n: the int converts to a double
+/// and back unchanged.
+fn long_fits_double(n: i64) -> bool {
+    let d = n as f64;
+    (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) && d as i64 == n
+}
+
 fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         let msg = "max() expects at least 1 argument, 0 given".to_string();
@@ -663,8 +670,9 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let lhs_wins = match (args[0].deref(), args[1].deref()) {
             (Value::Long(a), Value::Long(b)) => a >= b,
             (Value::Double(a), Value::Double(b)) => a >= b,
-            (Value::Long(a), Value::Double(b)) => a as f64 >= b,
-            (Value::Double(a), Value::Long(b)) => a >= b as f64,
+            // (only an int a double holds exactly takes the double path)
+            (Value::Long(a), Value::Double(b)) if long_fits_double(a) => a as f64 >= b,
+            (Value::Double(a), Value::Long(b)) if long_fits_double(b) => a >= b as f64,
             _ => c >= 0,
         };
         return Ok(if lhs_wins {
@@ -748,8 +756,8 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let lhs_wins = match (args[0].deref(), args[1].deref()) {
             (Value::Long(a), Value::Long(b)) => a < b,
             (Value::Double(a), Value::Double(b)) => a < b,
-            (Value::Long(a), Value::Double(b)) => (a as f64) < b,
-            (Value::Double(a), Value::Long(b)) => a < b as f64,
+            (Value::Long(a), Value::Double(b)) if long_fits_double(a) => (a as f64) < b,
+            (Value::Double(a), Value::Long(b)) if long_fits_double(b) => a < b as f64,
             _ => c < 0,
         };
         return Ok(if lhs_wins {
