@@ -75,15 +75,6 @@ fn arg_type_name(val: &Value) -> String {
     }
 }
 
-/// Compare two values as PHP would compare them in array_*_assoc functions:
-/// cast both to string and compare bytes. This matches PHP's
-/// `string_compare_function` semantics used in zend_hash_array_diff/intersect_assoc.
-fn php_value_string_eq(a: &Value, b: &Value) -> bool {
-    let a = a.deref();
-    let b = b.deref();
-    a.to_php_string().as_bytes() == b.to_php_string().as_bytes()
-}
-
 fn require_array_arg_inner(
     vm: &mut Vm,
     val: &Value,
@@ -284,9 +275,7 @@ final class StreamBucket {
     vm.register_function(b"array_slice", array_slice);
     vm.register_function(b"array_splice", array_splice);
     vm.register_function(b"array_search", array_search);
-    vm.register_function(b"array_key_exists", array_key_exists_fn2);
     vm.register_function(b"in_array", in_array);
-    vm.register_function(b"array_map", array_map);
     vm.register_function(b"array_filter", array_filter);
     vm.register_function(b"array_walk", array_walk);
     vm.register_function(b"array_reduce", array_reduce_fn);
@@ -296,8 +285,6 @@ final class StreamBucket {
     vm.register_function(b"array_fill", array_fill);
     vm.register_function(b"array_fill_keys", array_fill_keys);
     vm.register_function(b"array_merge_recursive", array_merge_recursive);
-    vm.register_function(b"array_diff", array_diff);
-    vm.register_function(b"array_intersect", array_intersect);
     vm.register_function(b"sort", sort_fn);
     vm.register_function(b"rsort", rsort_fn);
     vm.register_function(b"asort", asort_fn);
@@ -308,7 +295,6 @@ final class StreamBucket {
     vm.register_function(b"natsort", natsort_fn);
     vm.register_function(b"natcasesort", natcasesort_fn);
     vm.register_function(b"range", range_fn);
-    vm.register_function(b"compact", compact);
     vm.register_function(b"current", current);
     vm.register_function(b"pos", current);
     vm.register_function(b"getrusage", getrusage_fn);
@@ -331,11 +317,9 @@ final class StreamBucket {
     vm.register_function(b"set_time_limit", set_time_limit);
     vm.register_function(b"assert", php_assert);
     vm.register_function(b"class_exists", class_exists);
-    vm.register_function(b"get_class", get_class);
     vm.register_function(b"get_declared_classes", get_declared_classes);
     vm.register_function(b"get_declared_traits", get_declared_traits_fn);
     vm.register_function(b"get_declared_interfaces", get_declared_interfaces_fn);
-    vm.register_function(b"property_exists", property_exists);
     vm.register_function(b"method_exists", method_exists);
     vm.register_function(b"is_object", is_object);
     vm.register_function(b"debug_zval_refcount", debug_zval_refcount);
@@ -392,8 +376,6 @@ final class StreamBucket {
     vm.register_function(b"sleep", sleep_fn);
     vm.register_function(b"usleep", usleep_fn);
     vm.register_function(b"uniqid", uniqid_fn);
-    vm.register_function(b"sys_get_temp_dir", sys_get_temp_dir_fn);
-    vm.register_function(b"tempnam", tempnam_fn);
     vm.register_function(b"getenv", getenv_fn);
     vm.register_function(b"putenv", putenv_fn);
     // SPL autoload functions moved to goro-ext-spl
@@ -420,10 +402,6 @@ final class StreamBucket {
     vm.register_function(b"uasort", uasort_fn);
     vm.register_function(b"uksort", uksort_fn);
     vm.register_function(b"array_change_key_case", array_change_key_case_fn);
-    vm.register_function(b"array_diff_key", array_diff_key_fn);
-    vm.register_function(b"array_diff_assoc", array_diff_assoc_fn);
-    vm.register_function(b"array_intersect_key", array_intersect_key_fn);
-    vm.register_function(b"array_intersect_assoc", array_intersect_assoc_fn);
     vm.register_function(b"array_all", array_all_fn);
     vm.register_function(b"array_any", array_any_fn);
     vm.register_function(b"array_multisort", array_multisort_fn);
@@ -431,8 +409,6 @@ final class StreamBucket {
     vm.register_function(b"system", system_fn);
     vm.register_function(b"shell_exec", shell_exec_fn);
     vm.register_function(b"passthru", passthru_fn);
-    vm.register_function(b"escapeshellarg", escapeshellarg_fn);
-    vm.register_function(b"escapeshellcmd", escapeshellcmd_fn);
     vm.register_function(b"fopen", ctx_fopen_fn_entry);
     goro_core::value::set_default_context_hook(default_context);
     vm.register_function(b"fclose", fclose_fn);
@@ -448,9 +424,6 @@ final class StreamBucket {
     vm.register_function(b"fflush", fflush_fn);
     vm.register_function(b"fsync", fsync_fn);
     vm.register_function(b"fdatasync", fdatasync_fn);
-    vm.register_function(b"unlink", ctx_unlink_fn_entry);
-    vm.register_function(b"rename", ctx_rename_fn_entry);
-    vm.register_function(b"copy", ctx_copy_fn_entry);
     vm.register_function(b"readfile", ctx_readfile_fn_entry);
     vm.register_function(b"file", ctx_file_fn_entry);
     vm.register_function(b"lstat", lstat_fn);
@@ -461,24 +434,17 @@ final class StreamBucket {
     vm.register_function(b"rmdir", ctx_rmdir_fn_entry);
     vm.register_function(b"glob", glob_fn);
     vm.register_function(b"scandir", ctx_scandir_fn_entry);
-    vm.register_function(b"is_writable", is_writable_fn);
     vm.register_function(b"is_writeable", is_writable_fn);
-    vm.register_function(b"is_readable", is_readable_fn);
     vm.register_function(b"filemtime", filemtime_fn);
     vm.register_function(b"fileatime", fileatime_fn);
     vm.register_function(b"filectime", filectime_fn);
     vm.register_function(b"fileinode", fileinode_fn);
-    vm.register_function(b"fileperms", fileperms_fn);
     vm.register_function(b"fileowner", fileowner_fn);
     vm.register_function(b"filegroup", filegroup_fn);
-    vm.register_function(b"filetype", filetype_fn);
-    vm.register_function(b"is_link", is_link_fn);
-    vm.register_function(b"chmod", chmod_fn);
     vm.register_function(b"chown", chown_fn);
     vm.register_function(b"chgrp", chgrp_fn);
     vm.register_function(b"lchown", lchown_fn);
     vm.register_function(b"lchgrp", lchgrp_fn);
-    vm.register_function(b"clearstatcache", clearstatcache_fn);
     vm.register_function(b"fpassthru", fpassthru_fn);
     vm.register_function(b"fgetc", fgetc_fn);
     vm.register_function(b"flock", flock_fn);
@@ -539,16 +505,6 @@ final class StreamBucket {
         Ok(Value::Null)
     });
     vm.register_function(b"array_find_key", array_find_key_fn);
-    vm.register_function(b"array_intersect_ukey", array_intersect_ukey_fn);
-    vm.register_function(b"array_intersect_uassoc", array_intersect_uassoc_fn);
-    vm.register_function(b"array_diff_ukey", array_diff_ukey_fn);
-    vm.register_function(b"array_diff_uassoc", array_diff_uassoc_fn);
-    vm.register_function(b"array_udiff", array_udiff_fn);
-    vm.register_function(b"array_udiff_assoc", array_udiff_assoc_fn);
-    vm.register_function(b"array_udiff_uassoc", array_udiff_uassoc_fn);
-    vm.register_function(b"array_uintersect", array_uintersect_fn);
-    vm.register_function(b"array_uintersect_assoc", array_uintersect_assoc_fn);
-    vm.register_function(b"array_uintersect_uassoc", array_uintersect_uassoc_fn);
     vm.register_function(b"array_product", array_product_fn);
     vm.register_function(b"array_sum", array_sum_fn);
     vm.register_function(b"parse_ini_string", parse_ini_string_fn);
@@ -599,9 +555,6 @@ final class StreamBucket {
     vm.register_function(b"chdir", chdir_fn);
     vm.register_function(b"filesize", filesize_fn);
     vm.register_function(b"touch", touch_fn);
-    vm.register_function(b"file_get_contents", ctx_file_get_contents_fn_entry);
-    vm.register_function(b"file_put_contents", ctx_file_put_contents_fn_entry);
-    vm.register_function(b"realpath", realpath_fn);
     vm.register_function(b"realpath_cache_size", realpath_cache_size_fn);
     vm.register_function(b"realpath_cache_get", realpath_cache_get_fn);
     vm.register_function(b"is_link", is_link_fn);
@@ -766,18 +719,13 @@ final class StreamBucket {
     vm.register_function(b"closelog", closelog_fn);
     vm.register_function(b"openlog", openlog_fn);
     vm.register_function(b"syslog", syslog_fn);
-    vm.register_function(b"mail", mail_fn);
     vm.register_function(b"fsockopen", fsockopen_fn);
     vm.register_function(b"pfsockopen", pfsockopen_fn);
     vm.register_function(b"register_tick_function", register_tick_function_fn);
     vm.register_function(b"unregister_tick_function", unregister_tick_function_fn);
-    vm.register_function(b"output_add_rewrite_var", output_add_rewrite_var_fn);
-    vm.register_function(b"output_reset_rewrite_vars", output_reset_rewrite_vars_fn);
     vm.register_function(b"get_browser", crate::browscap::get_browser);
     vm.register_function(b"stream_socket_accept", xp_socket::stream_socket_accept);
     vm.register_function(b"stream_isatty", stream_isatty_fn);
-    vm.register_function(b"is_uploaded_file", is_uploaded_file_fn);
-    vm.register_function(b"move_uploaded_file", move_uploaded_file_fn);
     vm.register_function(b"get_headers", |vm, args| {
         Ok(http_wrapper::get_headers(vm, args))
     });
@@ -4547,111 +4495,6 @@ fn array_merge_recursive(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
     php_array_merge_wrapper(vm, args, "array_merge_recursive", true)
 }
 
-fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.is_empty() {
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    }
-    // Validate all arguments are arrays
-    for (i, arg) in args.iter().enumerate() {
-        if !matches!(arg, Value::Array(_)) {
-            let type_name = arg_type_name(arg);
-            let msg = if i == 0 {
-                format!(
-                    "array_diff(): Argument #1 ($array) must be of type array, {} given",
-                    type_name
-                )
-            } else {
-                format!(
-                    "array_diff(): Argument #{} must be of type array, {} given",
-                    i + 1,
-                    type_name
-                )
-            };
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    }
-    if args.len() < 2 {
-        // Single array arg: return a copy
-        if let Value::Array(a) = &args[0] {
-            return Ok(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))));
-        }
-    }
-    if let (Some(Value::Array(a)), _) = (args.first(), args.get(1)) {
-        let a = a.borrow();
-        // Collect all values from arrays at index 1+
-        let mut other_vals: Vec<Vec<u8>> = Vec::new();
-        for arg in &args[1..] {
-            if let Value::Array(b) = arg {
-                let b = b.borrow();
-                for v in b.values() {
-                    other_vals.push(v.to_php_string().as_bytes().to_vec());
-                }
-            }
-        }
-        let mut result = PhpArray::new();
-        for (key, val) in a.iter() {
-            let s = val.to_php_string().as_bytes().to_vec();
-            if !other_vals.contains(&s) {
-                result.set(key.clone(), val.clone());
-            }
-        }
-        Ok(Value::Array(Rc::new(RefCell::new(result))))
-    } else {
-        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-    }
-}
-
-fn array_intersect(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.is_empty() {
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    }
-    // Validate all arguments are arrays
-    for (i, arg) in args.iter().enumerate() {
-        if i == 0 {
-            require_array_arg(vm, arg, "array_intersect", "array", 1)?;
-        } else {
-            require_array_arg_variadic(vm, arg, "array_intersect", (i + 1) as u32)?;
-        }
-    }
-    // Single array: return it as-is
-    if args.len() == 1 {
-        return match &args[0] {
-            Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
-            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-        };
-    }
-    let first = match &args[0] {
-        Value::Array(a) => a.borrow().clone(),
-        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    };
-    // Collect string representations of values from all other arrays
-    let other_val_sets: Vec<Vec<Vec<u8>>> = args[1..]
-        .iter()
-        .map(|arg| match arg {
-            Value::Array(arr) => arr
-                .borrow()
-                .values()
-                .map(|v| v.to_php_string().as_bytes().to_vec())
-                .collect(),
-            _ => Vec::new(),
-        })
-        .collect();
-    let mut result = PhpArray::new();
-    for (key, val) in first.iter() {
-        let s = val.to_php_string().as_bytes().to_vec();
-        // Value must exist in ALL other arrays
-        if other_val_sets.iter().all(|vals| vals.contains(&s)) {
-            result.set(key.clone(), val.clone());
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
 // Sort flag constants
 const SORT_REGULAR: i64 = 0;
 const SORT_NUMERIC: i64 = 1;
@@ -6293,51 +6136,6 @@ fn class_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         matches!(k, ClassKind::Class | ClassKind::Enum)
     })
 }
-fn get_class(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    let derefed = val.deref();
-    match &derefed {
-        Value::Object(obj) => {
-            let obj_ref = obj.borrow();
-            Ok(Value::String(PhpString::from_vec(
-                obj_ref.class_name.clone(),
-            )))
-        }
-        Value::Generator(_) => Ok(Value::String(PhpString::from_bytes(b"Generator"))),
-        Value::String(s) => {
-            let b = s.as_bytes();
-            if b.starts_with(b"__closure_")
-                || b.starts_with(b"__arrow_")
-                || b.starts_with(b"__bound_closure_")
-                || b.starts_with(b"__closure_fcc_")
-            {
-                Ok(Value::String(PhpString::from_bytes(b"Closure")))
-            } else {
-                let type_name = Vm::value_type_name(val);
-                let msg = format!(
-                    "get_class(): Argument #1 ($object) must be of type object, {} given",
-                    type_name
-                );
-                let line = vm.current_line;
-                let exc = vm.create_exception(b"TypeError", &msg, line);
-                vm.current_exception = Some(exc);
-                Err(VmError { message: msg, line })
-            }
-        }
-        Value::Null | Value::Undef => Ok(Value::False),
-        _ => {
-            let type_name = Vm::value_type_name(val);
-            let msg = format!(
-                "get_class(): Argument #1 ($object) must be of type object, {} given",
-                type_name
-            );
-            let line = vm.current_line;
-            let exc = vm.create_exception(b"TypeError", &msg, line);
-            vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line })
-        }
-    }
-}
 fn get_declared_classes(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     use goro_core::class_table::ClassKind;
     let mut result = PhpArray::new();
@@ -6363,100 +6161,6 @@ fn get_declared_interfaces_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmE
         result.push(Value::String(PhpString::from_vec(name)));
     }
     Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-fn property_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let class_or_obj = args.first().unwrap_or(&Value::Null);
-    let prop_name = args.get(1).unwrap_or(&Value::Null).to_php_string();
-    // Helper: walk class hierarchy, checking visibility of inherited private.
-    fn class_has_visible_prop(vm: &Vm, class_lower: &[u8], pname: &[u8]) -> bool {
-        if let Some(ce) = vm.classes.get(class_lower) {
-            for prop in &ce.properties {
-                if prop.name != pname {
-                    continue;
-                }
-                // Inherited private props are not visible on subclasses.
-                let decl_lower: Vec<u8> = prop
-                    .declaring_class
-                    .iter()
-                    .map(|b| b.to_ascii_lowercase())
-                    .collect();
-                if prop.visibility == Visibility::Private && decl_lower != class_lower {
-                    continue;
-                }
-                return true;
-            }
-        }
-        false
-    }
-    match class_or_obj {
-        Value::Object(obj) => {
-            let ob = obj.borrow();
-            let class_lower: Vec<u8> = ob
-                .class_name
-                .iter()
-                .map(|c| c.to_ascii_lowercase())
-                .collect();
-            // Declared property check (filters out inherited private).
-            let declared = class_has_visible_prop(vm, &class_lower, prop_name.as_bytes());
-            if declared {
-                return Ok(Value::True);
-            }
-            // Otherwise check whether this is a dynamic instance property
-            // (a key on the object that is not declared anywhere on the class
-            // hierarchy).
-            let on_inst = ob.has_property(prop_name.as_bytes());
-            drop(ob);
-            if !on_inst {
-                return Ok(Value::False);
-            }
-            let mut declared_anywhere = false;
-            let mut current = Some(class_lower);
-            while let Some(cl) = current {
-                if let Some(ce) = vm.classes.get(&cl) {
-                    if ce.properties.iter().any(|p| p.name == prop_name.as_bytes()) {
-                        declared_anywhere = true;
-                        break;
-                    }
-                    current = ce
-                        .parent
-                        .as_ref()
-                        .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
-                } else {
-                    break;
-                }
-            }
-            Ok(if !declared_anywhere {
-                Value::True
-            } else {
-                Value::False
-            })
-        }
-        Value::String(s) => {
-            let class_lower: Vec<u8> = s
-                .as_bytes()
-                .iter()
-                .map(|c| c.to_ascii_lowercase())
-                .collect();
-            Ok(
-                if class_has_visible_prop(vm, &class_lower, prop_name.as_bytes()) {
-                    Value::True
-                } else {
-                    Value::False
-                },
-            )
-        }
-        _ => {
-            let type_name = Vm::value_type_name(class_or_obj);
-            let msg = format!(
-                "property_exists(): Argument #1 ($object_or_class) must be of type object|string, {} given",
-                type_name
-            );
-            let line = vm.current_line;
-            let exc = vm.create_exception(b"TypeError", &msg, line);
-            vm.current_exception = Some(exc);
-            Err(VmError { message: msg, line })
-        }
-    }
 }
 fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_or_obj = args.first().unwrap_or(&Value::Null);
@@ -10375,13 +10079,6 @@ fn uniqid_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Ok(Value::String(PhpString::from_string(base)))
     }
 }
-fn sys_get_temp_dir_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(PhpString::from_bytes(b"/tmp")))
-}
-fn tempnam_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Delegate to the standards-compliant tempnam_fn3.
-    tempnam_fn3(vm, args)
-}
 fn getenv_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     match args.first().map(|v| v.deref()) {
@@ -13654,52 +13351,6 @@ fn fdatasync_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 }
 
-fn unlink_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let filename = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    match std::fs::remove_file(&filename) {
-        Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
-    }
-}
-
-fn rename_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let from = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let to = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    match std::fs::rename(&from, &to) {
-        Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
-    }
-}
-
-fn copy_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let from = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let to = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    match std::fs::copy(&from, &to) {
-        Ok(_) => Ok(Value::True),
-        Err(_) => Ok(Value::False),
-    }
-}
-
 fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path_v = args.first().unwrap_or(&Value::Null).to_php_string();
     // Null byte check (PHP raises ValueError as TypeError message)
@@ -14597,258 +14248,6 @@ fn http_response_code_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         }
     }
     Ok(as_result(RESPONSE_CODE.with(|c| c.get())))
-}
-
-fn array_diff_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Type check all arguments
-    for (i, arg) in args.iter().enumerate() {
-        let a = if let Value::Reference(r) = arg {
-            r.borrow().clone()
-        } else {
-            arg.clone()
-        };
-        if !matches!(a, Value::Array(_)) {
-            let type_name = arg_type_name(&a);
-            let msg = if i == 0 {
-                format!(
-                    "array_diff_key(): Argument #1 ($array) must be of type array, {} given",
-                    type_name
-                )
-            } else {
-                format!(
-                    "array_diff_key(): Argument #{} must be of type array, {} given",
-                    i + 1,
-                    type_name
-                )
-            };
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    }
-    if args.len() < 2 {
-        if let Some(Value::Array(a)) = args.first() {
-            return Ok(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))));
-        }
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    }
-    if let Some(Value::Array(a)) = args.first() {
-        let a = a.borrow();
-        let mut other_keys: Vec<ArrayKey> = Vec::new();
-        for arg in &args[1..] {
-            if let Value::Array(b) = arg {
-                let b = b.borrow();
-                for key in b.keys() {
-                    other_keys.push(key.clone());
-                }
-            }
-        }
-        let mut result = PhpArray::new();
-        for (key, val) in a.iter() {
-            if !other_keys.contains(key) {
-                result.set(key.clone(), val.clone());
-            }
-        }
-        Ok(Value::Array(Rc::new(RefCell::new(result))))
-    } else {
-        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-    }
-}
-
-fn array_diff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    for (i, arg) in args.iter().enumerate() {
-        let a = if let Value::Reference(r) = arg {
-            r.borrow().clone()
-        } else {
-            arg.clone()
-        };
-        if !matches!(a, Value::Array(_)) {
-            let type_name = arg_type_name(&a);
-            let msg = if i == 0 {
-                format!(
-                    "array_diff_assoc(): Argument #1 ($array) must be of type array, {} given",
-                    type_name
-                )
-            } else {
-                format!(
-                    "array_diff_assoc(): Argument #{} must be of type array, {} given",
-                    i + 1,
-                    type_name
-                )
-            };
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    }
-    if args.len() < 2 {
-        if let Some(Value::Array(a)) = args.first() {
-            return Ok(Value::Array(Rc::new(RefCell::new(a.borrow().clone()))));
-        }
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    }
-    if let Some(Value::Array(a)) = args.first() {
-        let a = a.borrow();
-        let mut result = PhpArray::new();
-        for (key, val) in a.iter() {
-            let val_str = val.to_php_string().as_bytes().to_vec();
-            let mut found_in_other = false;
-            for arg in &args[1..] {
-                if let Value::Array(b) = arg {
-                    let b = b.borrow();
-                    if let Some(b_val) = b.get(key) {
-                        if b_val.to_php_string().as_bytes() == val_str.as_slice() {
-                            found_in_other = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if !found_in_other {
-                result.set(key.clone(), val.clone());
-            }
-        }
-        Ok(Value::Array(Rc::new(RefCell::new(result))))
-    } else {
-        Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
-    }
-}
-
-fn array_intersect_key_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    for (i, arg) in args.iter().enumerate() {
-        let a = if let Value::Reference(r) = arg {
-            r.borrow().clone()
-        } else {
-            arg.clone()
-        };
-        if !matches!(a, Value::Array(_)) {
-            let type_name = arg_type_name(&a);
-            let msg = if i == 0 {
-                format!(
-                    "array_intersect_key(): Argument #1 ($array) must be of type array, {} given",
-                    type_name
-                )
-            } else {
-                format!(
-                    "array_intersect_key(): Argument #{} must be of type array, {} given",
-                    i + 1,
-                    type_name
-                )
-            };
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    }
-    if args.len() < 2 {
-        return match args.first() {
-            Some(Value::Array(arr)) => {
-                Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone()))))
-            }
-            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-        };
-    }
-    let first = match &args[0] {
-        Value::Array(a) => a.borrow().clone(),
-        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    };
-    // Collect keys from all other arrays
-    let other_key_sets: Vec<Vec<ArrayKey>> = args[1..]
-        .iter()
-        .map(|arg| match arg {
-            Value::Array(arr) => arr.borrow().keys().cloned().collect(),
-            _ => Vec::new(),
-        })
-        .collect();
-    let mut result = PhpArray::new();
-    for (key, val) in first.iter() {
-        if other_key_sets.iter().all(|keys| keys.contains(key)) {
-            result.set(key.clone(), val.clone());
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-fn array_intersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    for (i, arg) in args.iter().enumerate() {
-        let a = if let Value::Reference(r) = arg {
-            r.borrow().clone()
-        } else {
-            arg.clone()
-        };
-        if !matches!(a, Value::Array(_)) {
-            let type_name = arg_type_name(&a);
-            let msg = if i == 0 {
-                format!(
-                    "array_intersect_assoc(): Argument #1 ($array) must be of type array, {} given",
-                    type_name
-                )
-            } else {
-                format!(
-                    "array_intersect_assoc(): Argument #{} must be of type array, {} given",
-                    i + 1,
-                    type_name
-                )
-            };
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    }
-    if args.len() < 2 {
-        return match args.first() {
-            Some(Value::Array(arr)) => {
-                Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone()))))
-            }
-            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-        };
-    }
-    let first = match &args[0] {
-        Value::Array(a) => a.borrow().clone(),
-        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    };
-    let other_arrays: Vec<_> = args[1..]
-        .iter()
-        .filter_map(|arg| {
-            if let Value::Array(arr) = arg {
-                Some(arr.borrow().clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-    let mut result = PhpArray::new();
-    for (key, val) in first.iter() {
-        let val_str = val.to_php_string().as_bytes().to_vec();
-        let mut found_in_all = true;
-        for other in &other_arrays {
-            if let Some(other_val) = other.get(key) {
-                if other_val.to_php_string().as_bytes().to_vec() != val_str {
-                    found_in_all = false;
-                    break;
-                }
-            } else {
-                found_in_all = false;
-                break;
-            }
-        }
-        if found_in_all {
-            result.set(key.clone(), val.clone());
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn array_all_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -17116,469 +16515,6 @@ fn array_product_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn array_sum_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     php_array_binop(vm, args, "array_sum", "Addition", false)
-}
-fn array_intersect_ukey_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, true, true, false, "array_intersect_ukey", 1)
-}
-fn array_intersect_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, true, true, true, "array_intersect_uassoc", 1)
-}
-fn array_diff_ukey_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, false, true, false, "array_diff_ukey", 1)
-}
-fn array_diff_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, false, true, true, "array_diff_uassoc", 1)
-}
-fn array_udiff_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, false, false, false, "array_udiff", 1)
-}
-fn array_udiff_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_udiff_with_key_check(vm, args, false, "array_udiff_assoc")
-}
-fn array_udiff_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_udiff_uassoc_impl(vm, args, "array_udiff_uassoc")
-}
-fn array_uintersect_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_u_op(vm, args, true, false, false, "array_uintersect", 1)
-}
-fn array_uintersect_assoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_udiff_with_key_check(vm, args, true, "array_uintersect_assoc")
-}
-fn array_uintersect_uassoc_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    array_uintersect_uassoc_impl(vm, args, "array_uintersect_uassoc")
-}
-
-/// Validate a callback argument for array_diff_u*/array_intersect_u*/array_udiff*/array_uintersect* functions.
-/// Returns Ok(()) if valid, or Err with TypeError if not.
-fn validate_array_callback(
-    vm: &mut Vm,
-    callback: &Value,
-    func_name: &str,
-    arg_num: usize,
-) -> Result<(), VmError> {
-    require_callable(
-        vm,
-        callback,
-        func_name,
-        &format!("Argument #{}", arg_num),
-        false,
-    )
-}
-
-/// Generic user-callback array operation
-/// is_intersect: true = keep matches, false = keep non-matches
-/// compare_keys: true = compare keys, false = compare values
-/// also_compare_values: if compare_keys, also check value equality
-fn array_u_op(
-    vm: &mut Vm,
-    args: &[Value],
-    is_intersect: bool,
-    compare_keys: bool,
-    also_compare_values: bool,
-    func_name: &str,
-    num_callbacks: usize,
-) -> Result<Value, VmError> {
-    if args.len() < 1 + num_callbacks {
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    }
-    // Validate callback argument(s) first (PHP validates callbacks before arrays)
-    let array_arg_count = args.len() - num_callbacks;
-    for cb_idx in 0..num_callbacks {
-        let cb_arg_pos = array_arg_count + cb_idx;
-        validate_array_callback(vm, &args[cb_arg_pos], func_name, cb_arg_pos + 1)?;
-    }
-    // Type check all array arguments (everything except the last num_callbacks args)
-    for i in 0..array_arg_count {
-        let val = args[i].deref();
-        if !matches!(val, Value::Array(_)) {
-            let type_name = arg_type_name(&val);
-            let msg = if i == 0 {
-                format!(
-                    "{}(): Argument #1 ($array) must be of type array, {} given",
-                    func_name, type_name
-                )
-            } else {
-                format!(
-                    "{}(): Argument #{} must be of type array, {} given",
-                    func_name,
-                    i + 1,
-                    type_name
-                )
-            };
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    }
-    let callback = args[args.len() - num_callbacks].clone();
-    let first = match args[0].deref() {
-        Value::Array(arr) => arr.borrow().clone(),
-        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    };
-    // If only one array + callback(s), return the first array
-    if array_arg_count <= 1 {
-        return Ok(Value::Array(Rc::new(RefCell::new(first))));
-    }
-    let other_arrays: Vec<PhpArray> = args[1..array_arg_count]
-        .iter()
-        .filter_map(|v| {
-            let v = v.deref();
-            if let Value::Array(arr) = v {
-                Some(arr.borrow().clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut result = PhpArray::new();
-    for (key, value) in first.iter() {
-        let key_val = match key {
-            ArrayKey::Int(n) => Value::Long(*n),
-            ArrayKey::String(s) => Value::String(s.clone()),
-        };
-        let mut found_in_all = true;
-        let mut found_in_any = false;
-        for other in &other_arrays {
-            let mut found_in_this = false;
-            for (okey, ovalue) in other.iter() {
-                let okey_val = match okey {
-                    ArrayKey::Int(n) => Value::Long(*n),
-                    ArrayKey::String(s) => Value::String(s.clone()),
-                };
-                if compare_keys {
-                    let cmp_result =
-                        call_user_func(vm, &[callback.clone(), key_val.clone(), okey_val.clone()])?;
-                    if cmp_result.to_long() == 0 {
-                        if also_compare_values {
-                            // PHP uses string comparison (zend_compare with string semantics)
-                            // for values in array_*_assoc functions, not loose `==`.
-                            if php_value_string_eq(value, ovalue) {
-                                found_in_this = true;
-                                break;
-                            }
-                        } else {
-                            found_in_this = true;
-                            break;
-                        }
-                    }
-                } else {
-                    // Compare values
-                    let cmp_result =
-                        call_user_func(vm, &[callback.clone(), value.clone(), ovalue.clone()])?;
-                    if cmp_result.to_long() == 0 {
-                        found_in_this = true;
-                        break;
-                    }
-                }
-            }
-            if !found_in_this {
-                found_in_all = false;
-            } else {
-                found_in_any = true;
-            }
-        }
-        // intersect: keep if found in ALL others
-        // diff: keep if NOT found in ANY other
-        let keep = if is_intersect {
-            found_in_all
-        } else {
-            !found_in_any
-        };
-        if keep {
-            result.set(key.clone(), value.clone());
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-fn array_udiff_with_key_check(
-    vm: &mut Vm,
-    args: &[Value],
-    is_intersect: bool,
-    func_name: &str,
-) -> Result<Value, VmError> {
-    if args.len() < 2 {
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    }
-    // Validate callback first
-    validate_array_callback(vm, args.last().unwrap(), func_name, args.len())?;
-    // Type check all array arguments (everything except the last callback)
-    let array_arg_count = args.len() - 1;
-    for i in 0..array_arg_count {
-        let val = args[i].deref();
-        if !matches!(val, Value::Array(_)) {
-            let type_name = arg_type_name(&val);
-            let msg = if i == 0 {
-                format!(
-                    "{}(): Argument #1 ($array) must be of type array, {} given",
-                    func_name, type_name
-                )
-            } else {
-                format!(
-                    "{}(): Argument #{} must be of type array, {} given",
-                    func_name,
-                    i + 1,
-                    type_name
-                )
-            };
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    }
-    // Single array + callback: return the first array
-    if array_arg_count <= 1 {
-        return match args[0].deref() {
-            Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
-            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-        };
-    }
-    let callback = args.last().unwrap().clone();
-    let first = match args[0].deref() {
-        Value::Array(arr) => arr.borrow().clone(),
-        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    };
-    let other_arrays: Vec<PhpArray> = args[1..array_arg_count]
-        .iter()
-        .filter_map(|v| {
-            let v = v.deref();
-            if let Value::Array(arr) = v {
-                Some(arr.borrow().clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut result = PhpArray::new();
-    for (key, value) in first.iter() {
-        let mut found_in_all = true;
-        for other in &other_arrays {
-            let mut found = false;
-            if let Some(ovalue) = other.get(key) {
-                let cmp_result =
-                    call_user_func(vm, &[callback.clone(), value.clone(), ovalue.clone()])?;
-                if cmp_result.to_long() == 0 {
-                    found = true;
-                }
-            }
-            if !found {
-                found_in_all = false;
-                break;
-            }
-        }
-        if is_intersect == found_in_all {
-            result.set(key.clone(), value.clone());
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-fn array_udiff_uassoc_impl(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, VmError> {
-    if args.len() < 3 {
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    }
-    // Validate both callbacks first
-    if args.len() >= 2 {
-        validate_array_callback(vm, &args[args.len() - 1], func_name, args.len())?;
-        validate_array_callback(vm, &args[args.len() - 2], func_name, args.len() - 1)?;
-    }
-    // Type check all array arguments (everything except the last 2 callbacks)
-    let array_arg_count = args.len().saturating_sub(2);
-    for i in 0..array_arg_count {
-        let val = args[i].deref();
-        if !matches!(val, Value::Array(_)) {
-            let type_name = arg_type_name(&val);
-            let msg = if i == 0 {
-                format!(
-                    "{}(): Argument #1 ($array) must be of type array, {} given",
-                    func_name, type_name
-                )
-            } else {
-                format!(
-                    "{}(): Argument #{} must be of type array, {} given",
-                    func_name,
-                    i + 1,
-                    type_name
-                )
-            };
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    }
-    // Single array + two callbacks: return the first array
-    if array_arg_count <= 1 {
-        return match args[0].deref() {
-            Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
-            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-        };
-    }
-    let key_callback = args[args.len() - 1].clone();
-    let val_callback = args[args.len() - 2].clone();
-    let first = match args[0].deref() {
-        Value::Array(arr) => arr.borrow().clone(),
-        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    };
-    let other_arrays: Vec<PhpArray> = args[1..array_arg_count]
-        .iter()
-        .filter_map(|v| {
-            let v = v.deref();
-            if let Value::Array(arr) = v {
-                Some(arr.borrow().clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut result = PhpArray::new();
-    for (key, value) in first.iter() {
-        let key_val = match key {
-            ArrayKey::Int(n) => Value::Long(*n),
-            ArrayKey::String(s) => Value::String(s.clone()),
-        };
-        let mut found_in_all = true;
-        for other in &other_arrays {
-            let mut found = false;
-            for (okey, ovalue) in other.iter() {
-                let okey_val = match okey {
-                    ArrayKey::Int(n) => Value::Long(*n),
-                    ArrayKey::String(s) => Value::String(s.clone()),
-                };
-                let key_cmp =
-                    call_user_func(vm, &[key_callback.clone(), key_val.clone(), okey_val])?;
-                if key_cmp.to_long() == 0 {
-                    let val_cmp =
-                        call_user_func(vm, &[val_callback.clone(), value.clone(), ovalue.clone()])?;
-                    if val_cmp.to_long() == 0 {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if !found {
-                found_in_all = false;
-                break;
-            }
-        }
-        if !found_in_all {
-            result.set(key.clone(), value.clone());
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-fn array_uintersect_uassoc_impl(
-    vm: &mut Vm,
-    args: &[Value],
-    func_name: &str,
-) -> Result<Value, VmError> {
-    if args.len() < 3 {
-        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
-    }
-    // Validate both callbacks first
-    if args.len() >= 2 {
-        validate_array_callback(vm, &args[args.len() - 1], func_name, args.len())?;
-        validate_array_callback(vm, &args[args.len() - 2], func_name, args.len() - 1)?;
-    }
-    // Type check all array arguments (everything except the last 2 callbacks)
-    let array_arg_count = args.len().saturating_sub(2);
-    for i in 0..array_arg_count {
-        let val = args[i].deref();
-        if !matches!(val, Value::Array(_)) {
-            let type_name = arg_type_name(&val);
-            let msg = if i == 0 {
-                format!(
-                    "{}(): Argument #1 ($array) must be of type array, {} given",
-                    func_name, type_name
-                )
-            } else {
-                format!(
-                    "{}(): Argument #{} must be of type array, {} given",
-                    func_name,
-                    i + 1,
-                    type_name
-                )
-            };
-            let exc = vm.throw_type_error(msg.clone());
-            vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: vm.current_line,
-            });
-        }
-    }
-    // Single array + two callbacks: return the first array
-    if array_arg_count <= 1 {
-        return match args[0].deref() {
-            Value::Array(arr) => Ok(Value::Array(Rc::new(RefCell::new(arr.borrow().clone())))),
-            _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-        };
-    }
-    let key_callback = args[args.len() - 1].clone();
-    let val_callback = args[args.len() - 2].clone();
-    let first = match args[0].deref() {
-        Value::Array(arr) => arr.borrow().clone(),
-        _ => return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
-    };
-    let other_arrays: Vec<PhpArray> = args[1..array_arg_count]
-        .iter()
-        .filter_map(|v| {
-            let v = v.deref();
-            if let Value::Array(arr) = v {
-                Some(arr.borrow().clone())
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    let mut result = PhpArray::new();
-    for (key, value) in first.iter() {
-        let key_val = match key {
-            ArrayKey::Int(n) => Value::Long(*n),
-            ArrayKey::String(s) => Value::String(s.clone()),
-        };
-        let mut found_in_all = true;
-        for other in &other_arrays {
-            let mut found = false;
-            for (okey, ovalue) in other.iter() {
-                let okey_val = match okey {
-                    ArrayKey::Int(n) => Value::Long(*n),
-                    ArrayKey::String(s) => Value::String(s.clone()),
-                };
-                let key_cmp =
-                    call_user_func(vm, &[key_callback.clone(), key_val.clone(), okey_val])?;
-                if key_cmp.to_long() == 0 {
-                    let val_cmp =
-                        call_user_func(vm, &[val_callback.clone(), value.clone(), ovalue.clone()])?;
-                    if val_cmp.to_long() == 0 {
-                        found = true;
-                        break;
-                    }
-                }
-            }
-            if !found {
-                found_in_all = false;
-                break;
-            }
-        }
-        if found_in_all {
-            result.set(key.clone(), value.clone());
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn parse_ini_string_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -20943,7 +19879,6 @@ macro_rules! default_ctx_entry {
     };
 }
 default_ctx_entry!(ctx_copy_fn2_entry, copy_fn2, 2, None);
-default_ctx_entry!(ctx_copy_fn_entry, copy_fn, 2, None);
 default_ctx_entry!(ctx_dir_fn_entry, dir_fn, 1, None);
 default_ctx_entry!(ctx_file_fn_entry, file_fn, 2, Some(1));
 default_ctx_entry!(
@@ -20963,7 +19898,6 @@ default_ctx_entry!(ctx_mkdir_fn_entry, mkdir_fn, 3, None);
 default_ctx_entry!(ctx_opendir_fn_entry, opendir_fn, 1, None);
 default_ctx_entry!(ctx_readfile_fn_entry, readfile_fn, 2, None);
 default_ctx_entry!(ctx_rename_fn2_entry, rename_fn2, 2, None);
-default_ctx_entry!(ctx_rename_fn_entry, rename_fn, 2, None);
 default_ctx_entry!(ctx_rmdir_fn_entry, rmdir_fn, 1, None);
 default_ctx_entry!(ctx_scandir_fn_entry, scandir_fn, 2, None);
 default_ctx_entry!(
@@ -20979,7 +19913,6 @@ default_ctx_entry!(
     Some(3)
 );
 default_ctx_entry!(ctx_unlink_fn2_entry, unlink_fn2, 1, None);
-default_ctx_entry!(ctx_unlink_fn_entry, unlink_fn, 1, None);
 
 thread_local! {
     static DEFAULT_STREAM_CTX: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
@@ -21988,24 +20921,6 @@ fn syslog_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::True)
 }
 
-fn mail_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Stub: mail() always returns false in test/CLI mode
-    let _to = args.first().unwrap_or(&Value::Null);
-    let _subject = args.get(1).unwrap_or(&Value::Null);
-    let _message = args.get(2).unwrap_or(&Value::Null);
-    if args.is_empty() {
-        let msg = "mail() expects at least 3 arguments, 0 given";
-        let exc = vm.create_exception(b"ArgumentCountError", msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg.to_string(),
-            line: vm.current_line,
-        });
-    }
-    // In CLI/test mode, mail() typically fails
-    Ok(Value::False)
-}
-
 fn fsockopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     xp_socket::fsockopen(vm, args, false)
 }
@@ -22046,25 +20961,9 @@ fn unregister_tick_function_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmE
     }
     Ok(Value::Null)
 }
-fn output_add_rewrite_var_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
-}
-fn output_reset_rewrite_vars_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::True)
-}
 
 fn stream_isatty_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // In CLI mode, always return false (not a TTY)
-    Ok(Value::False)
-}
-
-fn is_uploaded_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // No files are ever uploaded in CLI mode
-    Ok(Value::False)
-}
-
-fn move_uploaded_file_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    // No files are ever uploaded in CLI mode
     Ok(Value::False)
 }
 

@@ -362,3 +362,36 @@ pub fn request_startup(
         hook(vm);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// Every built-in function name is registered once: Vm::register_function()
+    /// debug-asserts on a second registration (which would silently replace
+    /// the first implementation); wrappers go through override_function().
+    #[test]
+    fn no_duplicate_function_registrations() {
+        let ini = vec![("extension".to_string(), "zend_test".to_string())];
+        // The engine's STDIN/STDOUT/STDERR streams close their descriptors
+        // when the thread's state goes away: keep the test harness' output.
+        let saved: Vec<i32> = (0..3).map(|fd| unsafe { libc::dup(fd) }).collect();
+        let res = std::thread::Builder::new()
+            .stack_size(256 << 20)
+            .spawn(move || {
+                let vm = super::new_vm(&ini, "cli");
+                assert!(vm.functions.contains_key(b"strlen".as_slice()));
+                assert!(
+                    vm.functions
+                        .contains_key(b"zend_object_init_with_constructor".as_slice())
+                );
+            })
+            .unwrap()
+            .join();
+        for (fd, &copy) in saved.iter().enumerate() {
+            unsafe {
+                libc::dup2(copy, fd as i32);
+                libc::close(copy);
+            }
+        }
+        res.unwrap();
+    }
+}

@@ -269,10 +269,10 @@ macro_rules! guards {
         )*
         pub fn register(vm: &mut Vm) {
             $(
-                let lower: Vec<u8> = $name.as_bytes().to_vec();
-                if let Some(orig) = vm.functions.get(&lower).copied() {
-                    ORIG.with(|m| m.borrow_mut().insert($name, orig));
-                    vm.register_function($name.as_bytes(), $wrapper);
+                if vm.functions.contains_key($name.as_bytes()) {
+                    if let Some(orig) = vm.override_function($name.as_bytes(), $wrapper) {
+                        ORIG.with(|m| m.borrow_mut().insert($name, orig));
+                    }
                 }
             )*
         }

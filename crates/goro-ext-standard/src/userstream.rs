@@ -5547,11 +5547,9 @@ macro_rules! intercepts {
         )*
         pub(crate) fn register(vm: &mut Vm) {
             $(
-                let lower: Vec<u8> = $name.as_bytes().to_vec();
-                if let Some(orig) = vm.functions.get(&lower).copied() {
+                if let Some(orig) = vm.override_function($name.as_bytes(), $w) {
                     ORIG.with(|m| m.borrow_mut().insert($name, orig));
                 }
-                vm.register_function($name.as_bytes(), $w);
             )*
             vm.include_stream_hook = Some(include_hook);
             vm.include_resolve_hook = Some(include_resolve);

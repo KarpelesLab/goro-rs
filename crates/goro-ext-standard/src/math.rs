@@ -16,13 +16,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"rand", rand_fn);
     vm.register_function(b"mt_rand", mt_rand);
     vm.register_function(b"clamp", clamp_fn);
-    vm.register_function(b"array_sum", array_sum);
-    vm.register_function(b"php_uname", php_uname);
-    vm.register_function(b"phpversion", phpversion);
     vm.register_function(b"version_compare", version_compare_fn);
-    vm.register_function(b"php_sapi_name", php_sapi_name);
-    vm.register_function(b"defined", defined);
-    vm.register_function(b"function_exists", function_exists);
     vm.register_function(b"sin", sin_fn);
     vm.register_function(b"cos", cos_fn);
     vm.register_function(b"tan", tan_fn);
@@ -48,7 +42,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"is_nan", is_nan_fn);
     vm.register_function(b"is_infinite", is_infinite_fn);
     vm.register_function(b"is_finite", is_finite_fn);
-    vm.register_function(b"array_product", array_product);
     vm.register_function(b"random_int", random_int);
     vm.register_function(b"random_bytes", random_bytes_fn);
     vm.register_function(b"sinh", sinh_fn);
@@ -58,7 +51,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"acosh", acosh_fn);
     vm.register_function(b"atanh", atanh_fn);
     vm.register_function(b"fdiv", fdiv_fn);
-    vm.register_function(b"array_sum", array_sum);
     vm.register_function(b"log1p", log1p_fn);
     vm.register_function(b"expm1", expm1_fn);
     vm.register_function(b"getrandmax", getrandmax_fn);
@@ -938,104 +930,6 @@ fn mt_rand(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(goro_core::random::mt_rand_common(vm, min, max)))
 }
 
-fn array_sum(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    if let Value::Array(arr) = val {
-        let arr = arr.borrow();
-        let mut sum = Value::Long(0);
-        for (_, v) in arr.iter() {
-            let val = match v {
-                Value::Reference(r) => r.borrow().clone(),
-                other => other.clone(),
-            };
-            match &val {
-                Value::Long(_) | Value::Double(_) | Value::True | Value::False | Value::Null => {
-                    sum = sum.add(&val);
-                }
-                Value::String(s) => {
-                    // Only numeric strings are summed, others emit warning
-                    if goro_core::value::parse_numeric_string(s.as_bytes()).is_some() {
-                        sum = sum.add(&val);
-                    } else {
-                        vm.emit_warning_at(
-                            "array_sum(): Addition is not supported on type string",
-                            vm.current_line,
-                        );
-                    }
-                }
-                Value::Array(_) => {
-                    vm.emit_warning_at(
-                        "array_sum(): Addition is not supported on type array",
-                        vm.current_line,
-                    );
-                }
-                Value::Object(obj) => {
-                    let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-                    vm.emit_warning_at(
-                        &format!(
-                            "array_sum(): Addition is not supported on type {}",
-                            class_name
-                        ),
-                        vm.current_line,
-                    );
-                }
-                _ => {
-                    let type_name = Vm::value_type_name(&val);
-                    vm.emit_warning_at(
-                        &format!(
-                            "array_sum(): Addition is not supported on type {}",
-                            type_name
-                        ),
-                        vm.current_line,
-                    );
-                }
-            }
-        }
-        Ok(sum)
-    } else {
-        Ok(Value::Long(0))
-    }
-}
-
-fn php_uname(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(goro_core::string::PhpString::from_bytes(
-        b"goro-rs 0.1.0",
-    )))
-}
-
-fn phpversion(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(goro_core::string::PhpString::from_bytes(
-        b"8.5.4",
-    )))
-}
-
-fn php_sapi_name(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    Ok(Value::String(goro_core::string::PhpString::from_bytes(
-        b"cli",
-    )))
-}
-
-fn defined(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    Ok(if vm.constants.contains_key(name.as_bytes()) {
-        Value::True
-    } else {
-        Value::False
-    })
-}
-
-fn function_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let name_lower: Vec<u8> = name
-        .as_bytes()
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
-    let exists = name_lower != goro_core::gc::DESTRUCTOR_FIBER_FN
-        && (vm.functions.contains_key(&name_lower) || vm.user_functions.contains_key(&name_lower));
-    Ok(if exists { Value::True } else { Value::False })
-}
-
 fn sin_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double(
         args.first().unwrap_or(&Value::Null).to_double().sin(),
@@ -1383,63 +1277,6 @@ fn is_finite_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             Value::False
         },
     )
-}
-fn array_product(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if let Some(Value::Array(arr)) = args.first() {
-        let arr = arr.borrow();
-        let mut product = Value::Long(1);
-        for (_, v) in arr.iter() {
-            let val = match v {
-                Value::Reference(r) => r.borrow().clone(),
-                other => other.clone(),
-            };
-            match &val {
-                Value::Long(_) | Value::Double(_) | Value::True | Value::False | Value::Null => {
-                    product = product.mul(&val);
-                }
-                Value::String(s) => {
-                    // Only numeric strings are multiplied, others emit warning
-                    if goro_core::value::parse_numeric_string(s.as_bytes()).is_some() {
-                        product = product.mul(&val);
-                    } else {
-                        vm.emit_warning_at(
-                            "array_product(): Multiplication is not supported on type string",
-                            vm.current_line,
-                        );
-                    }
-                }
-                Value::Array(_) => {
-                    vm.emit_warning_at(
-                        "array_product(): Multiplication is not supported on type array",
-                        vm.current_line,
-                    );
-                }
-                Value::Object(obj) => {
-                    let class_name = String::from_utf8_lossy(&obj.borrow().class_name).to_string();
-                    vm.emit_warning_at(
-                        &format!(
-                            "array_product(): Multiplication is not supported on type {}",
-                            class_name
-                        ),
-                        vm.current_line,
-                    );
-                }
-                _ => {
-                    let type_name = Vm::value_type_name(&val);
-                    vm.emit_warning_at(
-                        &format!(
-                            "array_product(): Multiplication is not supported on type {}",
-                            type_name
-                        ),
-                        vm.current_line,
-                    );
-                }
-            }
-        }
-        Ok(product)
-    } else {
-        Ok(Value::Long(0))
-    }
 }
 fn random_int(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let min = args.first().map(|v| v.to_long()).unwrap_or(0);

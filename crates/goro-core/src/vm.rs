@@ -10209,12 +10209,28 @@ impl Vm {
         }
     }
 
-    /// Register a built-in function
+    /// Register a built-in function. Each name is registered once: a second
+    /// registration would silently replace the first (debug builds assert);
+    /// wrappers around an existing function use `override_function()`.
+    #[track_caller]
     pub fn register_function(&mut self, name: &[u8], func: BuiltinFn) {
-        self.functions.insert(name.to_ascii_lowercase(), func);
+        let lower = name.to_ascii_lowercase();
+        debug_assert!(
+            !self.functions.contains_key(&lower),
+            "function {} registered twice",
+            String::from_utf8_lossy(name)
+        );
+        self.functions.insert(lower, func);
+    }
+
+    /// Replace an already registered built-in function with a wrapper,
+    /// returning the previous implementation (for the wrapper to call).
+    pub fn override_function(&mut self, name: &[u8], func: BuiltinFn) -> Option<BuiltinFn> {
+        self.functions.insert(name.to_ascii_lowercase(), func)
     }
 
     /// Register a built-in function with parameter names (for named argument support)
+    #[track_caller]
     pub fn register_function_with_params(
         &mut self,
         name: &[u8],
@@ -10222,6 +10238,11 @@ impl Vm {
         params: &[&[u8]],
     ) {
         let lower = name.to_ascii_lowercase();
+        debug_assert!(
+            !self.functions.contains_key(&lower),
+            "function {} registered twice",
+            String::from_utf8_lossy(name)
+        );
         self.functions.insert(lower.clone(), func);
         self.builtin_param_names
             .insert(lower, params.iter().map(|p| p.to_vec()).collect());

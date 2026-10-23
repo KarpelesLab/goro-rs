@@ -8,11 +8,9 @@ use std::rc::Rc;
 
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"strlen", strlen);
-    vm.register_function(b"strtolower", strtolower);
     vm.register_function(b"strtoupper", strtoupper);
     vm.register_function(b"trim", trim);
     vm.register_function(b"ltrim", ltrim);
-    vm.register_function(b"rtrim", rtrim);
     vm.register_function(b"substr", substr);
     vm.register_function(b"strpos", strpos);
     vm.register_function(b"str_contains", str_contains);
@@ -26,11 +24,9 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"chr", chr);
     vm.register_function(b"ord", ord);
     vm.register_function(b"sprintf", sprintf);
-    vm.register_function(b"nl2br", nl2br);
     vm.register_function(b"hebrev", hebrev_fn);
     vm.register_function(b"chunk_split", chunk_split);
     vm.register_function(b"str_pad", str_pad);
-    vm.register_function(b"str_word_count", str_word_count);
     vm.register_function(b"strtolower", strtolower);
     vm.register_function(b"ucfirst", ucfirst);
     vm.register_function(b"lcfirst", lcfirst);
@@ -41,11 +37,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"addcslashes", addcslashes);
     vm.register_function(b"stripcslashes", stripcslashes);
     vm.register_function(b"str_rot13", str_rot13);
-    vm.register_function(b"strip_tags", strip_tags);
-    vm.register_function(b"quoted_printable_encode", quoted_printable_encode);
-    vm.register_function(b"quoted_printable_decode", quoted_printable_decode);
-    vm.register_function(b"convert_uuencode", convert_uuencode);
-    vm.register_function(b"convert_uudecode", convert_uudecode);
     vm.register_function(b"rtrim", rtrim); // alias chop
     vm.register_function(b"chop", rtrim);
     vm.register_function(b"strtr", strtr);
@@ -56,7 +47,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"metaphone", metaphone);
     vm.register_function(b"levenshtein", levenshtein);
     vm.register_function(b"count_chars", count_chars);
-    vm.register_function(b"str_split", str_split_fn);
     vm.register_function(b"strrchr", strrchr);
     vm.register_function(b"strstr", strstr_fn);
     vm.register_function(b"strchr", strstr_fn);
@@ -85,14 +75,10 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"unpack", unpack_fn);
     vm.register_function(b"hex2bin", hex2bin);
     vm.register_function(b"bin2hex", bin2hex);
-    vm.register_function(b"crc32", crc32_fn);
-    vm.register_function(b"str_increment", str_increment);
     vm.register_function(b"str_decrement", str_decrement);
     vm.register_function(b"quotemeta", quotemeta_fn);
     vm.register_function(b"utf8_decode", utf8_decode_fn);
     vm.register_function(b"utf8_encode", utf8_encode_fn);
-    vm.register_function(b"get_html_translation_table", get_html_translation_table_fn);
-    vm.register_function(b"html_entity_decode", html_entity_decode_fn);
     vm.register_function(b"strip_tags", strip_tags_fn);
     vm.register_function(b"nl2br", nl2br_fn);
     vm.register_function(b"str_word_count", str_word_count_fn);
@@ -100,7 +86,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"convert_uudecode", convert_uudecode_fn);
     vm.register_function(b"quoted_printable_encode", quoted_printable_encode_fn);
     vm.register_function(b"quoted_printable_decode", quoted_printable_decode_fn);
-    vm.register_function(b"settype", settype_fn);
 
     // Register parameter types for strict_types enforcement on builtins
     let s = || Some(ParamType::Simple(b"string".to_vec()));
@@ -2070,48 +2055,6 @@ fn php_hebrev(str: &[u8], max_chars: i64) -> Vec<u8> {
     broken
 }
 
-fn nl2br(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
-    let is_xhtml = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
-    let br = if is_xhtml {
-        b"<br />" as &[u8]
-    } else {
-        b"<br>"
-    };
-    let bytes = s.as_bytes();
-    let mut result = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\r' {
-            result.extend_from_slice(br);
-            // \r\n is a single newline
-            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                result.push(b'\r');
-                result.push(b'\n');
-                i += 2;
-            } else {
-                result.push(b'\r');
-                i += 1;
-            }
-        } else if bytes[i] == b'\n' {
-            result.extend_from_slice(br);
-            // \n\r is also a single newline (rare but PHP handles it)
-            if i + 1 < bytes.len() && bytes[i + 1] == b'\r' {
-                result.push(b'\n');
-                result.push(b'\r');
-                i += 2;
-            } else {
-                result.push(b'\n');
-                i += 1;
-            }
-        } else {
-            result.push(bytes[i]);
-            i += 1;
-        }
-    }
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-
 fn chunk_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let body = args.first().unwrap_or(&Value::Null).to_php_string();
     // PHP 8: floats with a fractional component or values outside int range
@@ -2237,13 +2180,6 @@ fn str_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
     Ok(Value::String(PhpString::from_vec(result)))
-}
-
-fn str_word_count(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
-    let s_str = s.to_string_lossy();
-    let count = s_str.split_whitespace().count();
-    Ok(Value::Long(count as i64))
 }
 
 fn ucfirst(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -2503,224 +2439,6 @@ fn str_rot13(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_vec(result)))
 }
 
-fn strip_tags(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let allowed = args.get(1);
-
-    // Build set of allowed tag names (lowercase)
-    let mut allowed_tags: Vec<Vec<u8>> = Vec::new();
-    if let Some(allowed_val) = allowed {
-        match allowed_val {
-            Value::String(allowed_str) => {
-                // Parse "<b><p><i>" format
-                let ab = allowed_str.as_bytes();
-                let mut j = 0;
-                while j < ab.len() {
-                    if ab[j] == b'<' {
-                        j += 1;
-                        let start = j;
-                        while j < ab.len() && ab[j] != b'>' && ab[j] != b' ' {
-                            j += 1;
-                        }
-                        if start < j {
-                            allowed_tags.push(ab[start..j].to_ascii_lowercase());
-                        }
-                        while j < ab.len() && ab[j] != b'>' {
-                            j += 1;
-                        }
-                        if j < ab.len() {
-                            j += 1;
-                        }
-                    } else {
-                        j += 1;
-                    }
-                }
-            }
-            Value::Array(arr) => {
-                // Array of tag names ["b", "p", "i"]
-                let arr = arr.borrow();
-                for (_, v) in arr.iter() {
-                    let tag = v.to_php_string().to_string_lossy().to_ascii_lowercase();
-                    allowed_tags.push(tag.into_bytes());
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let bytes = s.as_bytes();
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        // PHP strip_tags strips NUL bytes
-        if bytes[i] == 0 {
-            i += 1;
-            continue;
-        }
-        if bytes[i] == b'<' {
-            // PHP only rejects `<` followed by whitespace (`< ` is kept as a
-            // literal `<`); every other follower starts a tag — including `<<`,
-            // `<>`, `</`, `<?`, `<!`, or any non-whitespace char.
-            if i + 1 < bytes.len() {
-                let next = bytes[i + 1];
-                if matches!(next, b' ' | b'\t' | b'\n' | b'\r') {
-                    result.push(bytes[i]);
-                    i += 1;
-                    continue;
-                }
-            } else {
-                // `<` at end of string — output literally.
-                result.push(bytes[i]);
-                i += 1;
-                continue;
-            }
-
-            // Check for PHP/XML processing instructions and ASP-style tags
-            if i + 1 < bytes.len() && (bytes[i + 1] == b'?' || bytes[i + 1] == b'%') {
-                // Check if this is an XML processing instruction: <?xml (case-insensitive)
-                // <?xml ends at first >, all other <? tags end at ?>
-                let is_xml_pi = i + 4 < bytes.len()
-                    && bytes[i + 2..i + 5].eq_ignore_ascii_case(b"xml")
-                    && (i + 5 >= bytes.len() || !bytes[i + 5].is_ascii_alphanumeric());
-                if is_xml_pi {
-                    // <?xml is treated as XML PI: after the `<?xml` prefix,
-                    // PHP switches to HTML-tag state with is_xml flag and ends
-                    // at first '>' NOT preceded by '-' (so '->' inside content
-                    // doesn't end the tag, but '?>' does).
-                    i += 2;
-                    let mut prev: u8 = 0;
-                    while i < bytes.len() {
-                        if bytes[i] == b'>' && prev != b'-' {
-                            i += 1;
-                            break;
-                        }
-                        prev = bytes[i];
-                        i += 1;
-                    }
-                } else {
-                    // PHP/ASP tag - skip until ?> or %> respectively, tracking
-                    // single/double quotes so nested `<?` inside a quoted string
-                    // doesn't end the outer tag early (bug78346).
-                    let close_char = bytes[i + 1]; // ? or %
-                    i += 2;
-                    let mut in_q: u8 = 0;
-                    while i < bytes.len() {
-                        let c = bytes[i];
-                        if c == b'\'' || c == b'"' {
-                            let prev_is_bs = i > 0 && bytes[i - 1] == b'\\';
-                            if !prev_is_bs {
-                                if in_q == 0 {
-                                    in_q = c;
-                                } else if in_q == c {
-                                    in_q = 0;
-                                }
-                            }
-                        } else if c == b'>' && in_q == 0 && i > 0 && bytes[i - 1] == close_char {
-                            i += 1;
-                            break;
-                        }
-                        i += 1;
-                    }
-                }
-                continue;
-            }
-
-            // Check for HTML comments: <!-- ... -->
-            if i + 3 < bytes.len()
-                && bytes[i + 1] == b'!'
-                && bytes[i + 2] == b'-'
-                && bytes[i + 3] == b'-'
-            {
-                // HTML comment - skip until -->
-                i += 4;
-                while i < bytes.len() {
-                    if bytes[i] == b'-'
-                        && i + 2 < bytes.len()
-                        && bytes[i + 1] == b'-'
-                        && bytes[i + 2] == b'>'
-                    {
-                        i += 3;
-                        break;
-                    }
-                    i += 1;
-                }
-                continue;
-            }
-
-            // Check for SGML/XML declarations: <! ... >
-            if i + 1 < bytes.len() && bytes[i + 1] == b'!' {
-                // Skip until >
-                i += 2;
-                while i < bytes.len() && bytes[i] != b'>' {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
-                continue;
-            }
-
-            // Find the end of the tag
-            let tag_start = i;
-            i += 1;
-            let is_closing = i < bytes.len() && bytes[i] == b'/';
-            if is_closing {
-                i += 1;
-            }
-
-            // Extract tag name following PHP's php_tag_find normalization:
-            // '/' is part of the tag name UNLESS right before '>' (self-closing).
-            let mut tag_name_lower: Vec<u8> = Vec::new();
-            while i < bytes.len()
-                && bytes[i] != b'>'
-                && bytes[i] != b' '
-                && bytes[i] != b'\t'
-                && bytes[i] != b'\n'
-                && bytes[i] != b'\r'
-            {
-                if bytes[i] == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                    // self-closing slash — skip it
-                } else {
-                    tag_name_lower.push(bytes[i].to_ascii_lowercase());
-                }
-                i += 1;
-            }
-
-            // Skip to end of tag, handling quotes
-            let mut in_quote: u8 = 0;
-            while i < bytes.len() {
-                if in_quote != 0 {
-                    if bytes[i] == in_quote {
-                        in_quote = 0;
-                    }
-                } else if bytes[i] == b'"' || bytes[i] == b'\'' {
-                    in_quote = bytes[i];
-                } else if bytes[i] == b'>' {
-                    break;
-                }
-                i += 1;
-            }
-            if i < bytes.len() {
-                i += 1;
-            } // skip >
-
-            // Check if this tag is allowed
-            if !allowed_tags.is_empty()
-                && !tag_name_lower.is_empty()
-                && allowed_tags.iter().any(|t| t == &tag_name_lower)
-            {
-                result.extend_from_slice(&bytes[tag_start..i]);
-            }
-            // Otherwise, the tag is stripped (nothing added to result)
-        } else {
-            result.push(bytes[i]);
-            i += 1;
-        }
-    }
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-
 /// php_quot_print_encode() (ext/standard/quot_print.c)
 pub(crate) fn php_quot_print_encode(src: &[u8]) -> Vec<u8> {
     const MAXL: u64 = 75;
@@ -2768,37 +2486,6 @@ pub(crate) fn php_quot_print_encode(src: &[u8]) -> Vec<u8> {
         }
     }
     d
-}
-
-fn quoted_printable_encode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = zpp_str(vm, args, 0, "quoted_printable_encode", "string")?;
-    Ok(Value::String(PhpString::from_vec(php_quot_print_encode(
-        s.as_bytes(),
-    ))))
-}
-
-fn quoted_printable_decode(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = s.as_bytes();
-    let mut result = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'='
-            && i + 2 < bytes.len()
-            && bytes[i + 1].is_ascii_hexdigit()
-            && bytes[i + 2].is_ascii_hexdigit()
-        {
-            let hex: String = [bytes[i + 1] as char, bytes[i + 2] as char]
-                .iter()
-                .collect();
-            result.push(u8::from_str_radix(&hex, 16).unwrap_or(0));
-            i += 3;
-        } else {
-            result.push(bytes[i]);
-            i += 1;
-        }
-    }
-    Ok(Value::String(PhpString::from_vec(result)))
 }
 
 /// php_uuencode()
@@ -3761,25 +3448,6 @@ pub(crate) fn zpp_str(
         message: msg,
         line: vm.current_line,
     })
-}
-
-fn str_split_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    use goro_core::array::PhpArray;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
-    let len = args.get(1).map(|v| v.to_long()).unwrap_or(1).max(1) as usize;
-    let bytes = s.as_bytes();
-    let mut result = PhpArray::new();
-    if bytes.is_empty() {
-        result.push(Value::String(PhpString::empty()));
-    } else {
-        for chunk in bytes.chunks(len) {
-            result.push(Value::String(PhpString::from_vec(chunk.to_vec())));
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn strstr_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -5055,66 +4723,6 @@ fn bin2hex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(hex)))
 }
 
-fn crc32_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
-    // CRC-32 implementation
-    let mut crc: u32 = 0xFFFFFFFF;
-    for &byte in s.as_bytes() {
-        crc ^= byte as u32;
-        for _ in 0..8 {
-            if crc & 1 != 0 {
-                crc = (crc >> 1) ^ 0xEDB88320;
-            } else {
-                crc >>= 1;
-            }
-        }
-    }
-    let result = crc ^ 0xFFFFFFFF;
-    Ok(Value::Long(result as i64))
-}
-
-fn str_increment(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = s.as_bytes();
-    if bytes.is_empty() || !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
-        return Ok(Value::String(s));
-    }
-    let mut result = bytes.to_vec();
-    let mut carry = true;
-    for i in (0..result.len()).rev() {
-        if !carry {
-            break;
-        }
-        carry = false;
-        match result[i] {
-            b'z' => {
-                result[i] = b'a';
-                carry = true;
-            }
-            b'Z' => {
-                result[i] = b'A';
-                carry = true;
-            }
-            b'9' => {
-                result[i] = b'0';
-                carry = true;
-            }
-            _ => {
-                result[i] += 1;
-            }
-        }
-    }
-    if carry {
-        let prefix = match result[0] {
-            b'a'..=b'z' => b'a',
-            b'A'..=b'Z' => b'A',
-            _ => b'1',
-        };
-        result.insert(0, prefix);
-    }
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-
 /// zval_get_long() of a pack() argument: an out-of-range float warns.
 fn pack_long(vm: &mut Vm, v: Option<&Value>) -> i64 {
     let Some(v) = v else { return 0 };
@@ -5804,308 +5412,6 @@ fn utf8_encode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(PhpString::from_string(result)))
 }
 
-fn get_html_translation_table_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let table_type = args.first().map(|v| v.to_long()).unwrap_or(0); // HTML_SPECIALCHARS=0, HTML_ENTITIES=1
-    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(11); // ENT_QUOTES|ENT_SUBSTITUTE
-
-    // ENT_COMPAT=2 (double quotes), ENT_QUOTES=3 (both), ENT_NOQUOTES=0 (neither)
-    let quote_style = flags & 3;
-
-    let mut result = PhpArray::new();
-
-    if table_type == 0 {
-        // HTML_SPECIALCHARS
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"&")),
-            Value::String(PhpString::from_bytes(b"&amp;")),
-        );
-        if quote_style & 2 != 0 {
-            result.set(
-                ArrayKey::String(PhpString::from_bytes(b"\"")),
-                Value::String(PhpString::from_bytes(b"&quot;")),
-            );
-        }
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"<")),
-            Value::String(PhpString::from_bytes(b"&lt;")),
-        );
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b">")),
-            Value::String(PhpString::from_bytes(b"&gt;")),
-        );
-        if quote_style & 1 != 0 {
-            result.set(
-                ArrayKey::String(PhpString::from_bytes(b"'")),
-                Value::String(PhpString::from_bytes(b"&#039;")),
-            );
-        }
-    } else {
-        // HTML_ENTITIES - include common entities
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"&")),
-            Value::String(PhpString::from_bytes(b"&amp;")),
-        );
-        if quote_style & 2 != 0 {
-            result.set(
-                ArrayKey::String(PhpString::from_bytes(b"\"")),
-                Value::String(PhpString::from_bytes(b"&quot;")),
-            );
-        }
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b"<")),
-            Value::String(PhpString::from_bytes(b"&lt;")),
-        );
-        result.set(
-            ArrayKey::String(PhpString::from_bytes(b">")),
-            Value::String(PhpString::from_bytes(b"&gt;")),
-        );
-        if quote_style & 1 != 0 {
-            result.set(
-                ArrayKey::String(PhpString::from_bytes(b"'")),
-                Value::String(PhpString::from_bytes(b"&#039;")),
-            );
-        }
-        // Add more HTML entities for characters 160-255
-        let entities = [
-            (160, "&nbsp;"),
-            (161, "&iexcl;"),
-            (162, "&cent;"),
-            (163, "&pound;"),
-            (164, "&curren;"),
-            (165, "&yen;"),
-            (166, "&brvbar;"),
-            (167, "&sect;"),
-            (168, "&uml;"),
-            (169, "&copy;"),
-            (170, "&ordf;"),
-            (171, "&laquo;"),
-            (172, "&not;"),
-            (173, "&shy;"),
-            (174, "&reg;"),
-            (175, "&macr;"),
-            (176, "&deg;"),
-            (177, "&plusmn;"),
-            (178, "&sup2;"),
-            (179, "&sup3;"),
-            (180, "&acute;"),
-            (181, "&micro;"),
-            (182, "&para;"),
-            (183, "&middot;"),
-            (184, "&cedil;"),
-            (185, "&sup1;"),
-            (186, "&ordm;"),
-            (187, "&raquo;"),
-            (188, "&frac14;"),
-            (189, "&frac12;"),
-            (190, "&frac34;"),
-            (191, "&iquest;"),
-        ];
-        for (code, entity) in &entities {
-            let ch = [*code as u8];
-            result.set(
-                ArrayKey::String(PhpString::from_bytes(&ch)),
-                Value::String(PhpString::from_string(entity.to_string())),
-            );
-        }
-    }
-    Ok(Value::Array(Rc::new(RefCell::new(result))))
-}
-
-fn html_entity_decode_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let flags = args.get(1).map(|v| v.to_long()).unwrap_or(3); // ENT_QUOTES | ENT_SUBSTITUTE
-    let encoding = args
-        .get(2)
-        .map(|v| v.to_php_string().to_string_lossy().to_ascii_lowercase())
-        .unwrap_or_else(|| "utf-8".to_string());
-    let is_iso88591 = matches!(encoding.as_str(), "iso-8859-1" | "iso8859-1" | "latin1");
-    let bytes = s.as_bytes();
-    let mut result = Vec::new();
-    let mut i = 0;
-
-    while i < bytes.len() {
-        if bytes[i] == b'&' {
-            // Try to find closing ;
-            if let Some(semi_offset) = bytes[i..].iter().position(|&b| b == b';') {
-                let entity = &bytes[i + 1..i + semi_offset];
-                let decoded = decode_html_entity(entity, flags, is_iso88591);
-                if let Some(decoded_bytes) = decoded {
-                    result.extend_from_slice(&decoded_bytes);
-                    i += semi_offset + 1;
-                    continue;
-                }
-            }
-        }
-        result.push(bytes[i]);
-        i += 1;
-    }
-
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-
-fn decode_html_entity(entity: &[u8], flags: i64, is_iso88591: bool) -> Option<Vec<u8>> {
-    // ENT_HTML_QUOTE_SINGLE = 1, ENT_HTML_QUOTE_DOUBLE = 2 (lower bits of flags)
-    let allow_double_quote = (flags & 2) != 0;
-    let allow_single_quote = (flags & 1) != 0;
-    // Numeric entities
-    if entity.first() == Some(&b'#') {
-        let num_str = &entity[1..];
-        let codepoint = if num_str.first() == Some(&b'x') || num_str.first() == Some(&b'X') {
-            // Hex
-            let hex = std::str::from_utf8(&num_str[1..]).ok()?;
-            u32::from_str_radix(hex, 16).ok()?
-        } else {
-            // Decimal
-            let dec = std::str::from_utf8(num_str).ok()?;
-            dec.parse::<u32>().ok()?
-        };
-        // Respect quote-handling flags: skip decoding " (34) / ' (39) when not allowed
-        if codepoint == 34 && !allow_double_quote {
-            return None;
-        }
-        if codepoint == 39 && !allow_single_quote {
-            return None;
-        }
-        if is_iso88591 && codepoint <= 0xFF {
-            return Some(vec![codepoint as u8]);
-        }
-        let ch = char::from_u32(codepoint)?;
-        let mut buf = [0u8; 4];
-        let encoded = ch.encode_utf8(&mut buf);
-        return Some(encoded.as_bytes().to_vec());
-    }
-
-    // Named entities
-    let entity_str = std::str::from_utf8(entity).ok()?;
-    match entity_str {
-        "amp" => Some(b"&".to_vec()),
-        "lt" => Some(b"<".to_vec()),
-        "gt" => Some(b">".to_vec()),
-        "quot" if flags & 3 != 0 => Some(b"\"".to_vec()),
-        "apos" if flags & (16 | 32) != 0 => Some(b"'".to_vec()),
-        "nbsp" => Some("\u{00A0}".as_bytes().to_vec()),
-        "iexcl" => Some("\u{00A1}".as_bytes().to_vec()),
-        "cent" => Some("\u{00A2}".as_bytes().to_vec()),
-        "pound" => Some("\u{00A3}".as_bytes().to_vec()),
-        "curren" => Some("\u{00A4}".as_bytes().to_vec()),
-        "yen" => Some("\u{00A5}".as_bytes().to_vec()),
-        "brvbar" => Some("\u{00A6}".as_bytes().to_vec()),
-        "sect" => Some("\u{00A7}".as_bytes().to_vec()),
-        "uml" => Some("\u{00A8}".as_bytes().to_vec()),
-        "copy" => Some("\u{00A9}".as_bytes().to_vec()),
-        "ordf" => Some("\u{00AA}".as_bytes().to_vec()),
-        "laquo" => Some("\u{00AB}".as_bytes().to_vec()),
-        "not" => Some("\u{00AC}".as_bytes().to_vec()),
-        "shy" => Some("\u{00AD}".as_bytes().to_vec()),
-        "reg" => Some("\u{00AE}".as_bytes().to_vec()),
-        "macr" => Some("\u{00AF}".as_bytes().to_vec()),
-        "deg" => Some("\u{00B0}".as_bytes().to_vec()),
-        "plusmn" => Some("\u{00B1}".as_bytes().to_vec()),
-        "sup2" => Some("\u{00B2}".as_bytes().to_vec()),
-        "sup3" => Some("\u{00B3}".as_bytes().to_vec()),
-        "acute" => Some("\u{00B4}".as_bytes().to_vec()),
-        "micro" => Some("\u{00B5}".as_bytes().to_vec()),
-        "para" => Some("\u{00B6}".as_bytes().to_vec()),
-        "middot" => Some("\u{00B7}".as_bytes().to_vec()),
-        "cedil" => Some("\u{00B8}".as_bytes().to_vec()),
-        "sup1" => Some("\u{00B9}".as_bytes().to_vec()),
-        "ordm" => Some("\u{00BA}".as_bytes().to_vec()),
-        "raquo" => Some("\u{00BB}".as_bytes().to_vec()),
-        "frac14" => Some("\u{00BC}".as_bytes().to_vec()),
-        "frac12" => Some("\u{00BD}".as_bytes().to_vec()),
-        "frac34" => Some("\u{00BE}".as_bytes().to_vec()),
-        "iquest" => Some("\u{00BF}".as_bytes().to_vec()),
-        "times" => Some("\u{00D7}".as_bytes().to_vec()),
-        "divide" => Some("\u{00F7}".as_bytes().to_vec()),
-        "euro" => Some("\u{20AC}".as_bytes().to_vec()),
-        "trade" => Some("\u{2122}".as_bytes().to_vec()),
-        "ndash" => Some("\u{2013}".as_bytes().to_vec()),
-        "mdash" => Some("\u{2014}".as_bytes().to_vec()),
-        "lsquo" => Some("\u{2018}".as_bytes().to_vec()),
-        "rsquo" => Some("\u{2019}".as_bytes().to_vec()),
-        "ldquo" => Some("\u{201C}".as_bytes().to_vec()),
-        "rdquo" => Some("\u{201D}".as_bytes().to_vec()),
-        "bull" => Some("\u{2022}".as_bytes().to_vec()),
-        "hellip" => Some("\u{2026}".as_bytes().to_vec()),
-        "prime" => Some("\u{2032}".as_bytes().to_vec()),
-        "Prime" => Some("\u{2033}".as_bytes().to_vec()),
-        "lsaquo" => Some("\u{2039}".as_bytes().to_vec()),
-        "rsaquo" => Some("\u{203A}".as_bytes().to_vec()),
-        "oline" => Some("\u{203E}".as_bytes().to_vec()),
-        "frasl" => Some("\u{2044}".as_bytes().to_vec()),
-        "ensp" => Some("\u{2002}".as_bytes().to_vec()),
-        "emsp" => Some("\u{2003}".as_bytes().to_vec()),
-        "thinsp" => Some("\u{2009}".as_bytes().to_vec()),
-        "dagger" => Some("\u{2020}".as_bytes().to_vec()),
-        "Dagger" => Some("\u{2021}".as_bytes().to_vec()),
-        "permil" => Some("\u{2030}".as_bytes().to_vec()),
-        // Common accented chars
-        "Agrave" => Some("\u{00C0}".as_bytes().to_vec()),
-        "Aacute" => Some("\u{00C1}".as_bytes().to_vec()),
-        "Acirc" => Some("\u{00C2}".as_bytes().to_vec()),
-        "Atilde" => Some("\u{00C3}".as_bytes().to_vec()),
-        "Auml" => Some("\u{00C4}".as_bytes().to_vec()),
-        "Aring" => Some("\u{00C5}".as_bytes().to_vec()),
-        "AElig" => Some("\u{00C6}".as_bytes().to_vec()),
-        "Ccedil" => Some("\u{00C7}".as_bytes().to_vec()),
-        "Egrave" => Some("\u{00C8}".as_bytes().to_vec()),
-        "Eacute" => Some("\u{00C9}".as_bytes().to_vec()),
-        "Ecirc" => Some("\u{00CA}".as_bytes().to_vec()),
-        "Euml" => Some("\u{00CB}".as_bytes().to_vec()),
-        "Igrave" => Some("\u{00CC}".as_bytes().to_vec()),
-        "Iacute" => Some("\u{00CD}".as_bytes().to_vec()),
-        "Icirc" => Some("\u{00CE}".as_bytes().to_vec()),
-        "Iuml" => Some("\u{00CF}".as_bytes().to_vec()),
-        "ETH" => Some("\u{00D0}".as_bytes().to_vec()),
-        "Ntilde" => Some("\u{00D1}".as_bytes().to_vec()),
-        "Ograve" => Some("\u{00D2}".as_bytes().to_vec()),
-        "Oacute" => Some("\u{00D3}".as_bytes().to_vec()),
-        "Ocirc" => Some("\u{00D4}".as_bytes().to_vec()),
-        "Otilde" => Some("\u{00D5}".as_bytes().to_vec()),
-        "Ouml" => Some("\u{00D6}".as_bytes().to_vec()),
-        "Oslash" => Some("\u{00D8}".as_bytes().to_vec()),
-        "Ugrave" => Some("\u{00D9}".as_bytes().to_vec()),
-        "Uacute" => Some("\u{00DA}".as_bytes().to_vec()),
-        "Ucirc" => Some("\u{00DB}".as_bytes().to_vec()),
-        "Uuml" => Some("\u{00DC}".as_bytes().to_vec()),
-        "Yacute" => Some("\u{00DD}".as_bytes().to_vec()),
-        "THORN" => Some("\u{00DE}".as_bytes().to_vec()),
-        "szlig" => Some("\u{00DF}".as_bytes().to_vec()),
-        "agrave" => Some("\u{00E0}".as_bytes().to_vec()),
-        "aacute" => Some("\u{00E1}".as_bytes().to_vec()),
-        "acirc" => Some("\u{00E2}".as_bytes().to_vec()),
-        "atilde" => Some("\u{00E3}".as_bytes().to_vec()),
-        "auml" => Some("\u{00E4}".as_bytes().to_vec()),
-        "aring" => Some("\u{00E5}".as_bytes().to_vec()),
-        "aelig" => Some("\u{00E6}".as_bytes().to_vec()),
-        "ccedil" => Some("\u{00E7}".as_bytes().to_vec()),
-        "egrave" => Some("\u{00E8}".as_bytes().to_vec()),
-        "eacute" => Some("\u{00E9}".as_bytes().to_vec()),
-        "ecirc" => Some("\u{00EA}".as_bytes().to_vec()),
-        "euml" => Some("\u{00EB}".as_bytes().to_vec()),
-        "igrave" => Some("\u{00EC}".as_bytes().to_vec()),
-        "iacute" => Some("\u{00ED}".as_bytes().to_vec()),
-        "icirc" => Some("\u{00EE}".as_bytes().to_vec()),
-        "iuml" => Some("\u{00EF}".as_bytes().to_vec()),
-        "eth" => Some("\u{00F0}".as_bytes().to_vec()),
-        "ntilde" => Some("\u{00F1}".as_bytes().to_vec()),
-        "ograve" => Some("\u{00F2}".as_bytes().to_vec()),
-        "oacute" => Some("\u{00F3}".as_bytes().to_vec()),
-        "ocirc" => Some("\u{00F4}".as_bytes().to_vec()),
-        "otilde" => Some("\u{00F5}".as_bytes().to_vec()),
-        "ouml" => Some("\u{00F6}".as_bytes().to_vec()),
-        "oslash" => Some("\u{00F8}".as_bytes().to_vec()),
-        "ugrave" => Some("\u{00F9}".as_bytes().to_vec()),
-        "uacute" => Some("\u{00FA}".as_bytes().to_vec()),
-        "ucirc" => Some("\u{00FB}".as_bytes().to_vec()),
-        "uuml" => Some("\u{00FC}".as_bytes().to_vec()),
-        "yacute" => Some("\u{00FD}".as_bytes().to_vec()),
-        "thorn" => Some("\u{00FE}".as_bytes().to_vec()),
-        "yuml" => Some("\u{00FF}".as_bytes().to_vec()),
-        _ => None,
-    }
-}
-
 fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // PHP 8 declares the second arg as `array|string|null` but standard
     // scalar→string coercion still applies in non-strict mode: bool/int/float
@@ -6584,11 +5890,4 @@ fn hex_nibble(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         _ => None,
     }
-}
-
-fn settype_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    if args.len() < 2 {
-        return Ok(Value::False);
-    }
-    Ok(Value::True)
 }

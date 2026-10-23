@@ -482,9 +482,10 @@ pub fn register(vm: &mut Vm) {
     ];
     list.extend_from_slice(STAT_FNS);
     for (name, f) in list {
-        if let Some(o) = vm.functions.get(name.as_bytes()).copied() {
-            ORIG.with(|m| m.borrow_mut().insert(name, o));
-            vm.register_function(name.as_bytes(), f);
+        if vm.functions.contains_key(name.as_bytes()) {
+            if let Some(o) = vm.override_function(name.as_bytes(), f) {
+                ORIG.with(|m| m.borrow_mut().insert(name, o));
+            }
         }
     }
 }
