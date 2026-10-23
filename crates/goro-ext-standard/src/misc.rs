@@ -16071,6 +16071,30 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     let use_include_path = args.get(1).map(|v| v.is_truthy()).unwrap_or(false);
+    // A stream wrapper URL (data:, php://, userspace wrappers, ...) is opened
+    // like fopen() does and passed through (php_stream_open_wrapper_ex()).
+    if path.as_bytes().starts_with(b"data:") || path_str.contains("://") {
+        let mut fargs = vec![
+            Value::String(path.clone()),
+            Value::String(PhpString::from_bytes(b"rb")),
+            if use_include_path {
+                Value::True
+            } else {
+                Value::False
+            },
+        ];
+        if let Some(ctx) = args.get(2) {
+            fargs.push(ctx.clone());
+        }
+        let fp = call_registered(vm, b"fopen", fopen_fn, &fargs)?;
+        let Value::Resource(r) = fp else {
+            return Ok(Value::False);
+        };
+        let fid = r.id();
+        let res = call_registered(vm, b"fpassthru", fpassthru_fn, &[Value::resource(fid)])?;
+        let _ = call_registered(vm, b"fclose", fclose_fn, &[Value::resource(fid)]);
+        return Ok(res);
+    }
     let resolved = resolve_with_include_path(vm, &path_str, use_include_path);
     match read_path_with_wrappers(&resolved) {
         Ok(data) => {
