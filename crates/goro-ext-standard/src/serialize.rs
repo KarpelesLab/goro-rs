@@ -346,6 +346,21 @@ pub(crate) fn mangled_props(vm: &Vm, obj: &Rc<RefCell<PhpObject>>) -> Vec<PropEn
         .collect()
 }
 
+/// The declared slot `key` (a mangled property table key) of `obj`'s
+/// class, if it is one with a type: an uninitialized typed property is
+/// skipped silently by __sleep() (zend_get_typed_property_info_for_slot).
+fn is_typed_slot(vm: &Vm, obj: &Rc<RefCell<PhpObject>>, key: &[u8]) -> bool {
+    let layout = vm.class_layout_of(&obj.borrow().class_name);
+    layout.slots.iter().any(|sl| {
+        sl.mangled() == key
+            && vm.classes.get(&sl.decl).is_some_and(|c| {
+                c.properties
+                    .iter()
+                    .any(|p| !p.is_static && p.name == sl.name && p.property_type.is_some())
+            })
+    })
+}
+
 // ---------------------------------------------------------------------------
 // serialize()
 // ---------------------------------------------------------------------------
@@ -802,6 +817,12 @@ impl Serializer {
                 let candidates = [name.clone(), mangle(&display, &name), mangle(b"*", &name)];
                 let mut found = false;
                 for cand in candidates.iter() {
+                    if !props.iter().any(|e| e.php_key == *cand) && is_typed_slot(vm, &target, cand)
+                    {
+                        // an uninitialized typed property is left out
+                        found = true;
+                        break;
+                    }
                     if let Some(e) = props.iter().find(|e| e.php_key == *cand) {
                         found = true;
                         if matches!(e.value, Value::Undef) {
