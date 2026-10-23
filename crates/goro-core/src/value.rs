@@ -1995,60 +1995,7 @@ pub fn format_php_float_shortest_pub(f: f64) -> String {
 
 /// Format a float using shortest-roundtrip representation (like precision=-1).
 fn format_php_float_shortest(f: f64) -> String {
-    if f.is_nan() {
-        return "NAN".to_string();
-    }
-    if f.is_infinite() {
-        return if f.is_sign_positive() {
-            "INF".to_string()
-        } else {
-            "-INF".to_string()
-        };
-    }
-    if f == 0.0 {
-        return if f.is_sign_negative() {
-            "-0".to_string()
-        } else {
-            "0".to_string()
-        };
-    }
-
-    let abs = f.abs();
-    // PHP's zend_gcvt with mode=0 (precision=-1) uses scientific notation when
-    // decpt > 17 (abs >= 1e17) or decpt < -3 (abs < 1e-4).
-    if abs != 0.0 && (abs >= 1e17 || abs < 1e-4) {
-        // Find shortest roundtrip in scientific notation (start from 1 to ensure decimal point)
-        for prec in 1..20 {
-            let s = format!("{:.prec$e}", f, prec = prec);
-            if let Ok(parsed) = s.parse::<f64>() {
-                if parsed == f {
-                    // Convert to PHP format: uppercase E, explicit +
-                    if let Some(pos) = s.find('e') {
-                        let mantissa = &s[..pos];
-                        let exp: i32 = s[pos + 1..].parse().unwrap_or(0);
-                        let exp_str = if exp >= 0 {
-                            format!("E+{}", exp)
-                        } else {
-                            format!("E{}", exp)
-                        };
-                        return format!("{}{}", mantissa, exp_str);
-                    }
-                }
-            }
-        }
-        return format!("{}", f);
-    }
-
-    // Try increasing precision until roundtrip works
-    for prec in 0..20 {
-        let s = format!("{:.prec$}", f, prec = prec);
-        if let Ok(parsed) = s.parse::<f64>() {
-            if parsed == f {
-                return s;
-            }
-        }
-    }
-    format!("{}", f)
+    zend_gcvt_string(f, -1, b'.', b'E')
 }
 
 /// Public wrapper for format_php_float_with_precision
@@ -2058,135 +2005,80 @@ pub fn format_php_float_with_precision_pub(f: f64, sig_digits: usize) -> String 
 
 /// Format a float with a specific number of significant digits.
 fn format_php_float_with_precision(f: f64, sig_digits: usize) -> String {
-    if f.is_nan() {
-        return "NAN".to_string();
-    }
-    if f.is_infinite() {
-        return if f.is_sign_positive() {
-            "INF".to_string()
+    zend_gcvt_string(f, sig_digits.clamp(1, 800) as i32, b'.', b'E')
+}
+
+fn zend_gcvt_string(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> String {
+    String::from_utf8(zend_gcvt(value, ndigit, dec_point, exp_char))
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
+}
+
+/// zend_gcvt(): `ndigit` significant digits (mode 2), or the shortest
+/// round-trip digits when `ndigit` is negative (mode 0, 17 max).
+pub fn zend_gcvt(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> Vec<u8> {
+    if !value.is_finite() {
+        let s: &[u8] = if value.is_nan() {
+            b"NAN"
+        } else if value < 0.0 {
+            b"-INF"
         } else {
-            "-INF".to_string()
+            b"INF"
         };
+        return s.to_vec();
     }
-    if f == 0.0 {
-        return if f.is_sign_negative() {
-            "-0".to_string()
+    let (ndigit, digits, decpt) = {
+        let neg_zero_free = value.abs();
+        let s = if ndigit < 0 {
+            format!("{:e}", neg_zero_free)
         } else {
-            "0".to_string()
+            format!("{:.*e}", (ndigit.max(1) - 1) as usize, neg_zero_free)
         };
-    }
-
-    // PHP uses G format with `sig_digits` significant digits
-    // This is equivalent to: sprintf("%.{sig_digits}G", f) but with some PHP-specific quirks
-    // A double has at most 767 significant decimal digits.
-    let sig_digits = sig_digits.clamp(1, 800);
-    // Rust's {:.Ne} gives N decimal places after leading digit = N+1 significant digits.
-    // We want sig_digits significant digits total, so use sig_digits - 1.
-    let fmt_width = if sig_digits > 0 { sig_digits - 1 } else { 0 };
-    let s = format!("{:.width$e}", f, width = fmt_width);
-
-    // Parse the scientific notation
-    let parts: Vec<&str> = s.split('e').collect();
-    if parts.len() != 2 {
-        return format!("{}", f);
-    }
-
-    let mantissa = parts[0];
-    let mut exp: i32 = parts[1].parse().unwrap_or(0);
-
-    // Get the significant digits (strip sign and decimal point)
-    let negative = mantissa.starts_with('-');
-    let digits_str = mantissa.trim_start_matches('-').replace('.', "");
-
-    // Trim to sig_digits significant digits
-    let mut digits_vec: Vec<u8> = digits_str.bytes().take(sig_digits).collect();
-
-    // Check if we need to round (next digit)
-    if digits_str.len() > sig_digits {
-        let next_digit = digits_str.as_bytes()[sig_digits] - b'0';
-        if next_digit >= 5 {
-            // Round up
-            let mut carry = true;
-            for d in digits_vec.iter_mut().rev() {
-                if carry {
-                    if *d == b'9' {
-                        *d = b'0';
-                    } else {
-                        *d += 1;
-                        carry = false;
-                    }
-                }
-            }
-            if carry {
-                digits_vec.insert(0, b'1');
-                // Adjust exponent since we added a leading digit
-                exp += 1;
-            }
+        let (mant, exp) = s.split_once('e').unwrap_or((&s, "0"));
+        let exp: i32 = exp.parse().unwrap_or(0);
+        let mut digits: Vec<u8> = mant.bytes().filter(|c| c.is_ascii_digit()).collect();
+        while digits.len() > 1 && digits.last() == Some(&b'0') {
+            digits.pop();
         }
-    }
-
-    // Remove trailing zeros from significant digits
-    while digits_vec.len() > 1 && *digits_vec.last().unwrap() == b'0' {
-        digits_vec.pop();
-    }
-
-    let sig_count = digits_vec.len();
-    let sig_str: String = digits_vec.iter().map(|&b| b as char).collect();
-
-    // Position of decimal point: exp + 1 digits before decimal point
-    let decimal_pos = exp + 1;
-
-    let result = if decimal_pos <= 0 {
-        // 0.00...digits  (e.g., 0.001234)
-        let mut s = String::from("0.");
-        for _ in 0..(-decimal_pos) {
-            s.push('0');
-        }
-        s.push_str(&sig_str);
-        s
-    } else if decimal_pos as usize >= sig_count {
-        // All digits before decimal point, no fractional part
-        let mut s = sig_str.clone();
-        for _ in 0..(decimal_pos as usize - sig_count) {
-            s.push('0');
-        }
-        s
-    } else {
-        // Some digits before, some after decimal point
-        let dp = decimal_pos as usize;
-        let mut s = sig_str[..dp].to_string();
-        s.push('.');
-        s.push_str(&sig_str[dp..]);
-        s
+        let decpt = if value == 0.0 { 1 } else { exp + 1 };
+        (if ndigit < 0 { 17 } else { ndigit }, digits, decpt)
     };
-
-    // Use scientific notation for very large/small numbers (like PHP).
-    // PHP's %G uses scientific when exp >= sig_digits or exp < -4.
-    if exp as i64 >= sig_digits as i64 || exp <= -5 {
-        // PHP uses uppercase E notation, always with at least one decimal digit
-        let mantissa_part = if sig_count > 1 {
-            format!("{}.{}", &sig_str[..1], &sig_str[1..])
-        } else {
-            format!("{}.0", sig_str)
-        };
-        let exp_str = if exp >= 0 {
-            format!("E+{}", exp)
-        } else {
-            format!("E{}", exp)
-        };
-        let formatted = if negative {
-            format!("-{}{}", mantissa_part, exp_str)
-        } else {
-            format!("{}{}", mantissa_part, exp_str)
-        };
-        return formatted;
+    let mut dst = Vec::with_capacity(digits.len() + 8);
+    if value.is_sign_negative() {
+        dst.push(b'-');
     }
-
-    if negative {
-        format!("-{}", result)
+    if (decpt >= 0 && decpt > ndigit) || decpt < -3 {
+        let e = decpt - 1;
+        dst.push(digits[0]);
+        dst.push(dec_point);
+        if digits.len() == 1 {
+            dst.push(b'0');
+        } else {
+            dst.extend_from_slice(&digits[1..]);
+        }
+        dst.push(exp_char);
+        dst.push(if e < 0 { b'-' } else { b'+' });
+        dst.extend_from_slice(e.unsigned_abs().to_string().as_bytes());
+    } else if decpt < 0 {
+        dst.push(b'0');
+        dst.push(dec_point);
+        for _ in decpt..0 {
+            dst.push(b'0');
+        }
+        dst.extend_from_slice(&digits);
     } else {
-        result
+        let decpt = decpt as usize;
+        for i in 0..decpt {
+            dst.push(*digits.get(i).unwrap_or(&b'0'));
+        }
+        if digits.len() > decpt {
+            if decpt == 0 {
+                dst.push(b'0');
+            }
+            dst.push(dec_point);
+            dst.extend_from_slice(&digits[decpt..]);
+        }
     }
+    dst
 }
 
 impl fmt::Debug for Value {
