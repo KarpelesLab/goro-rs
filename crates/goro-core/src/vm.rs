@@ -48105,6 +48105,18 @@ impl Vm {
                                         line: op.line,
                                     });
                                 }
+                                // The classes the method checks will need are loaded
+                                // first, in order (load_delayed_classes()).
+                                if !is_early_attempt {
+                                    if let Err(message) =
+                                        self.variance_load_delayed_for(&class, &parent)
+                                    {
+                                        return Err(VmError {
+                                            message,
+                                            line: op.line,
+                                        });
+                                    }
+                                }
                                 // Inherit methods (child overrides take precedence)
                                 for (method_name, method) in &parent.methods {
                                     // Check if parent method is final and child overrides it
@@ -48369,6 +48381,21 @@ impl Vm {
                                         }
                                     } else {
                                         class.methods.insert(method_name.clone(), method.clone());
+                                    }
+                                }
+                                // A parent still linking (nearly linked): its own
+                                // checks are resolved now (OBLIGATION_DEPENDENCY).
+                                if !is_early_attempt
+                                    && !self.classes.contains_key(&parent_lower)
+                                    && variance::is_linking(&parent_lower)
+                                {
+                                    if let Err((message, l)) =
+                                        self.variance_resolve_dependency(&class, &parent)
+                                    {
+                                        return Err(VmError {
+                                            message,
+                                            line: if l > 0 { l } else { op.line },
+                                        });
                                     }
                                 }
                                 // If the child redeclares a property as plain (no hooks, not abstract),

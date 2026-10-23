@@ -251,6 +251,39 @@ pub(crate) fn take_unlinked_use(name_lower: &[u8]) -> bool {
     })
 }
 
+thread_local! {
+    /// CG(delayed_autoloads): classes a variance check of a linking class
+    /// could not resolve, loaded in order by load_delayed_classes().
+    static DELAYED_AUTOLOADS: RefCell<std::collections::VecDeque<Vec<u8>>> =
+        const { RefCell::new(std::collections::VecDeque::new()) };
+}
+
+fn register_delayed_autoload(name: &[u8]) {
+    let l = lower(name);
+    DELAYED_AUTOLOADS.with(|d| {
+        let mut d = d.borrow_mut();
+        if !d.iter().any(|n| lower(n) == l) {
+            d.push_back(name.to_vec());
+        }
+    });
+}
+
+fn pop_delayed_autoload() -> Option<Vec<u8>> {
+    let n = DELAYED_AUTOLOADS.with(|d| d.borrow_mut().pop_front())?;
+    DELAYED_TRIED.with(|t| t.borrow_mut().push(lower(&n)));
+    Some(n)
+}
+
+thread_local! {
+    /// The delayed autoloads made for the class being linked (and those
+    /// linked meanwhile): a check still missing one does not load it again.
+    static DELAYED_TRIED: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn delayed_tried(name_lower: &[u8]) -> bool {
+    DELAYED_TRIED.with(|t| t.borrow().iter().any(|n| n.as_slice() == name_lower))
+}
+
 pub(crate) fn push_linking(ce: &ClassEntry) {
     push_linking_ex(ce, true);
 }
@@ -1238,48 +1271,19 @@ impl Vm {
         parent_class: &[u8],
         parent: &MethodDef,
     ) -> Option<(String, bool)> {
-        let cur_lc = LinkClass::from_entry(cur);
         let mut attempt = 0;
         loop {
-            let (status, unresolved, msg) = {
-                let ctx = Ctx::new(self, &cur_lc);
-                let parent_decl_lc =
-                    self.variance_scope_for(&ctx, &parent.declaring_class, parent_class);
-                // Trait methods resolve self/parent against the using class.
-                let parent_lc = if parent_decl_lc.is_trait {
-                    cur_lc.clone()
-                } else {
-                    parent_decl_lc.clone()
-                };
-                let child_lc = cur_lc.clone();
-                let status = ctx.implementation_check(child, &child_lc, parent, &parent_lc);
-                if status == Status::Success {
-                    return None;
-                }
-                let child_display = self.variance_method_class_display(&ctx, child, &cur_lc);
-                let parent_display = parent_decl_lc.name.clone();
-                let child_decl = function_declaration(child, &child_display, &child_lc);
-                let parent_decl = function_declaration(parent, &parent_display, &parent_lc);
-                let unresolved: Vec<Vec<u8>> = ctx.unresolved.borrow().clone();
-                let msg = if status == Status::Unresolved {
-                    format!(
-                        "Could not check compatibility between {} and {}, because class {} is not available",
-                        child_decl,
-                        parent_decl,
-                        String::from_utf8_lossy(&ctx.first_unresolved())
-                    )
-                } else {
-                    format!(
-                        "Declaration of {} must be compatible with {}",
-                        child_decl, parent_decl
-                    )
-                };
-                (status, unresolved, msg)
-            };
+            let (status, unresolved, msg) = self.variance_status(cur, child, parent_class, parent);
+            if status == Status::Success {
+                return None;
+            }
             if status == Status::Unresolved && attempt == 0 && !self.autoload_functions.is_empty() {
                 attempt += 1;
                 push_linking(cur);
                 for n in &unresolved {
+                    if delayed_tried(&lower(n)) {
+                        continue;
+                    }
                     self.try_autoload_class(n);
                     // zend_exception_uncaught_error(): an exception thrown
                     // while loading a class the check needs is fatal.
@@ -1306,6 +1310,168 @@ impl Vm {
             }
             return Some((msg, status == Status::Unresolved));
         }
+    }
+
+    /// One compatibility check of `child` (of `cur`) against `parent`,
+    /// without autoloading: the status, the classes it could not resolve
+    /// and the error message.
+    pub(crate) fn variance_status(
+        &self,
+        cur: &ClassEntry,
+        child: &MethodDef,
+        parent_class: &[u8],
+        parent: &MethodDef,
+    ) -> (Status, Vec<Vec<u8>>, String) {
+        let cur_lc = LinkClass::from_entry(cur);
+        let ctx = Ctx::new(self, &cur_lc);
+        let parent_decl_lc = self.variance_scope_for(&ctx, &parent.declaring_class, parent_class);
+        // Trait methods resolve self/parent against the using class.
+        let parent_lc = if parent_decl_lc.is_trait {
+            cur_lc.clone()
+        } else {
+            parent_decl_lc.clone()
+        };
+        let child_lc = cur_lc.clone();
+        let status = ctx.implementation_check(child, &child_lc, parent, &parent_lc);
+        if status == Status::Success {
+            return (status, Vec::new(), String::new());
+        }
+        let child_display = self.variance_method_class_display(&ctx, child, &cur_lc);
+        let parent_display = parent_decl_lc.name.clone();
+        let child_decl = function_declaration(child, &child_display, &child_lc);
+        let parent_decl = function_declaration(parent, &parent_display, &parent_lc);
+        let unresolved: Vec<Vec<u8>> = ctx.unresolved.borrow().clone();
+        let msg = if status == Status::Unresolved {
+            format!(
+                "Could not check compatibility between {} and {}, because class {} is not available",
+                child_decl,
+                parent_decl,
+                String::from_utf8_lossy(&ctx.first_unresolved())
+            )
+        } else {
+            format!(
+                "Declaration of {} must be compatible with {}",
+                child_decl, parent_decl
+            )
+        };
+        (status, unresolved, msg)
+    }
+
+    /// The methods of `class` overriding methods of `parent` that are
+    /// checked for compatibility (do_inheritance_check_on_method).
+    fn variance_overrides<'c>(
+        class: &'c ClassEntry,
+        parent: &'c ClassEntry,
+    ) -> Vec<(&'c MethodDef, &'c MethodDef)> {
+        let mut out = Vec::new();
+        for (name, pm) in &parent.methods {
+            if pm.visibility == crate::object::Visibility::Private
+                || (name.as_slice() == b"__construct" && !pm.is_abstract)
+            {
+                continue;
+            }
+            if let Some(cm) = class.methods.get(name) {
+                if !std::rc::Rc::ptr_eq(&cm.op_array, &pm.op_array) {
+                    out.push((cm, pm));
+                }
+            }
+        }
+        out
+    }
+
+    /// Before `class` checks its methods against `parent`'s: the classes
+    /// those checks cannot resolve yet join the delayed autoloads
+    /// (CG(delayed_autoloads)), which are then loaded in order
+    /// (load_delayed_classes()). Err: the fatal error of an exception
+    /// thrown while loading one.
+    pub(crate) fn variance_load_delayed_for(
+        &mut self,
+        class: &ClassEntry,
+        parent: &ClassEntry,
+    ) -> Result<(), String> {
+        if self.autoload_functions.is_empty() {
+            return Ok(());
+        }
+        if !LINKING.with(|l| !l.borrow().is_empty()) {
+            DELAYED_TRIED.with(|t| t.borrow_mut().clear());
+        }
+        let mut names: Vec<Vec<u8>> = Vec::new();
+        for (cm, pm) in Self::variance_overrides(class, parent) {
+            let (status, unresolved, _) = self.variance_status(class, cm, &parent.name, pm);
+            if status == Status::Unresolved {
+                names.extend(unresolved);
+            }
+        }
+        for n in names {
+            register_delayed_autoload(&n);
+        }
+        self.variance_load_delayed(class)
+    }
+
+    /// load_delayed_classes() while `class` links.
+    pub(crate) fn variance_load_delayed(&mut self, class: &ClassEntry) -> Result<(), String> {
+        while let Some(n) = pop_delayed_autoload() {
+            let l = lower(&n);
+            if self.classes.contains_key(&l) || is_linking(&l) {
+                continue;
+            }
+            push_linking(class);
+            self.try_autoload_class(&n);
+            pop_linking();
+            if let Some(exc) = self.current_exception.take() {
+                let shown = self
+                    .call_object_method(&exc, b"__toString", &[])
+                    .map(|v| v.to_php_string().to_string_lossy())
+                    .unwrap_or_default();
+                self.current_exception = None;
+                return Err(format!(
+                    "During inheritance of {}, while autoloading {}: Uncaught {}",
+                    String::from_utf8_lossy(&class.name),
+                    String::from_utf8_lossy(&n),
+                    shown
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `class` links with a parent that is itself still linking (nearly
+    /// linked, with variance obligations): the delayed autoloads are
+    /// loaded, then the parent's obligations are checked
+    /// (OBLIGATION_DEPENDENCY: resolve_delayed_variance_obligations()).
+    /// Err: the parent's incompatibility (message, line).
+    pub(crate) fn variance_resolve_dependency(
+        &mut self,
+        class: &ClassEntry,
+        parent: &ClassEntry,
+    ) -> Result<(), (String, u32)> {
+        push_linking(class);
+        let r = self.variance_load_delayed(class);
+        let r = match r {
+            Err(m) => Err((m, 0)),
+            Ok(()) => {
+                let gp = parent.parent.as_ref().and_then(|g| {
+                    let gl = lower(g);
+                    self.classes
+                        .get(&gl)
+                        .cloned()
+                        .or_else(|| linking_entry(&gl))
+                });
+                let mut res = Ok(());
+                if let Some(gp) = gp {
+                    for (cm, pm) in Self::variance_overrides(parent, &gp) {
+                        let (status, _, msg) = self.variance_status(parent, cm, &gp.name, pm);
+                        if status == Status::Error {
+                            res = Err((msg, cm.op_array.decl_line));
+                            break;
+                        }
+                    }
+                }
+                res
+            }
+        };
+        pop_linking();
+        r
     }
 
     fn variance_scope_for(&self, ctx: &Ctx, declaring_lower: &[u8], fallback: &[u8]) -> LinkClass {
@@ -1375,6 +1541,9 @@ impl Vm {
                 attempt += 1;
                 push_linking(cur);
                 for n in &unresolved {
+                    if delayed_tried(&lower(n)) {
+                        continue;
+                    }
                     self.try_autoload_class(n);
                 }
                 pop_linking();
