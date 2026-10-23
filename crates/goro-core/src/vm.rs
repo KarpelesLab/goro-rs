@@ -21386,6 +21386,17 @@ impl Vm {
                             self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
                             continue 'exec;
                         }
+                        if matches!(op_array.literals.get(k as usize), Some(Value::Long(3))) {
+                            // `$a[k] = $a`: the value is copied before the
+                            // write fetches the container (QM_ASSIGN of the CV).
+                            self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
+                            let v = match self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals) {
+                                Value::Undef => Value::Null,
+                                v => self.dup_array_value(v.deref()),
+                            };
+                            self.write_operand(&op.result, v, &mut cvs, &mut tmps, &static_cv_keys);
+                            continue 'exec;
+                        }
                         // a key read for isset()/empty()/??
                         self.check_undefined_cv(&op.op1, &cvs, op_array, op.line);
                     }

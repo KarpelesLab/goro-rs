@@ -12447,6 +12447,46 @@ impl Compiler {
         }
     }
 
+    /// `$a[...] = $a`: the value is copied into a temporary first
+    /// (zend_compile_assign()'s QM_ASSIGN for zend_is_assign_to_self()).
+    #[inline(never)]
+    fn copy_assign_to_self(
+        &mut self,
+        target: &Expr,
+        value: &Expr,
+        val: OperandType,
+        line: u32,
+    ) -> OperandType {
+        let ExprKind::Variable(vname) = &value.kind else {
+            return val;
+        };
+        if vname == b"this" || !matches!(val, OperandType::Cv(_)) {
+            return val;
+        }
+        let mut root = target;
+        loop {
+            match &root.kind {
+                ExprKind::ArrayAccess { array, .. } => root = array,
+                ExprKind::PropertyAccess { object, .. } => root = object,
+                ExprKind::StaticPropertyAccess { class, .. } => root = class,
+                _ => break,
+            }
+        }
+        if !matches!(&root.kind, ExprKind::Variable(n) if n == vname) {
+            return val;
+        }
+        let mode = self.op_array.add_literal(Value::Long(3));
+        let t = self.op_array.alloc_temp();
+        self.op_array.emit(Op {
+            opcode: OpCode::QmAssign,
+            op1: val,
+            op2: OperandType::Const(mode),
+            result: OperandType::Tmp(t),
+            line,
+        });
+        OperandType::Tmp(t)
+    }
+
     /// The operand type of a function call's result: the functions
     /// zend_try_compile_special_func() compiles to an opcode, and frameless
     /// internal calls (ZEND_FRAMELESS_ICALL_n), leave a TMP_VAR; other
@@ -13421,6 +13461,11 @@ impl Compiler {
                         None
                     };
                 let mut val = self.compile_assigned_value(target, value)?;
+                // zend_is_assign_to_self(): `$a[k] = $a` reads the value
+                // before the container is fetched for writing.
+                if let ExprKind::ArrayAccess { .. } = &target.kind {
+                    val = self.copy_assign_to_self(target, value, val, expr.span.line);
+                }
                 // The value of `$o->p = $v` is the value assigned, even if a
                 // magic method / lazy initializer run by the store changes $v:
                 // read the variable once.
