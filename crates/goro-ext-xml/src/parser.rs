@@ -1000,19 +1000,19 @@ impl Input {
             self.lc_col = self.base_col;
         }
         let d = &self.data;
-        let mut i = self.lc_pos;
-        let mut line = self.lc_line;
-        let mut col = self.lc_col;
-        while i < pos && i < d.len() {
-            let c = d[i];
-            if c == b'\n' {
-                line += 1;
-                col = 1;
-            } else if c & 0xC0 != 0x80 {
-                col += 1;
+        let start = self.lc_pos.min(d.len());
+        let i = pos.clamp(start, d.len());
+        let seg = &d[start..i];
+        // (counted in bulk, which vectorizes: a byte at a time this is the
+        // hot loop of parsing long text)
+        let chars = |s: &[u8]| s.iter().filter(|&&c| c & 0xC0 != 0x80).count() as u32;
+        let (line, col) = match seg.iter().rposition(|&c| c == b'\n') {
+            Some(nl) => {
+                let lines = seg.iter().filter(|&&c| c == b'\n').count() as u32;
+                (self.lc_line + lines, 1 + chars(&seg[nl + 1..]))
             }
-            i += 1;
-        }
+            None => (self.lc_line, self.lc_col + chars(seg)),
+        };
         self.lc_pos = i;
         self.lc_line = line;
         self.lc_col = col;
