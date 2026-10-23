@@ -6739,14 +6739,14 @@ fn str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
-    let decimals_raw = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let dec = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let dec_point = match args.get(2).map(|v| v.deref()) {
-        Some(Value::Null) | Some(Value::Undef) | None => ".".to_string(),
-        Some(v) => v.to_php_string().to_string_lossy(),
+        Some(Value::Null) | Some(Value::Undef) | None => PhpString::from_bytes(b"."),
+        Some(v) => v.to_php_string(),
     };
     let thousands_sep = match args.get(3).map(|v| v.deref()) {
-        Some(Value::Null) | Some(Value::Undef) | None => ",".to_string(),
-        Some(v) => v.to_php_string().to_string_lossy(),
+        Some(Value::Null) | Some(Value::Undef) | None => PhpString::from_bytes(b","),
+        Some(v) => v.to_php_string(),
     };
 
     // _php_math_number_format_long(): integers (and doubles >= 2^52 that
@@ -6763,128 +6763,63 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     if let Some(n) = as_long {
         return Ok(Value::String(PhpString::from_vec(
-            crate::math::number_format_long(
-                n,
-                decimals_raw,
-                dec_point.as_bytes(),
-                thousands_sep.as_bytes(),
-            ),
+            crate::math::number_format_long(n, dec, dec_point.as_bytes(), thousands_sep.as_bytes()),
         )));
     }
+    let dec = dec.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    Ok(Value::String(PhpString::from_vec(number_format_ex(
+        val.to_double(),
+        dec,
+        dec_point.as_bytes(),
+        thousands_sep.as_bytes(),
+    ))))
+}
 
-    // Handle negative decimal places: round to nearest 10^(-decimals)
-    if decimals_raw < 0 {
-        let num = val.to_double();
-        if num.is_nan() {
-            return Ok(Value::String(PhpString::from_bytes(b"NAN")));
-        }
-        if num.is_infinite() {
-            let prefix = if num < 0.0 { "-" } else { "" };
-            return Ok(Value::String(PhpString::from_string(format!(
-                "{}INF",
-                prefix
-            ))));
-        }
-        let places = decimals_raw.checked_neg().unwrap_or(i64::MAX).min(100) as u32;
-        let factor = 10f64.powi(places as i32);
-        let rounded = (num / factor).round() * factor;
-        // Check if result is effectively zero
-        if rounded.abs() < 0.5 {
-            return Ok(Value::String(PhpString::from_bytes(b"0")));
-        }
-        let neg = rounded < 0.0;
-        // Use format with no decimal places - need to handle large numbers
-        let abs_str = format!("{:.0}", rounded.abs());
-        // Add thousands separator
-        let int_bytes = abs_str.as_bytes();
-        let mut with_sep = String::new();
-        let len = int_bytes.len();
-        for (i, &b) in int_bytes.iter().enumerate() {
-            if i > 0 && (len - i) % 3 == 0 && !thousands_sep.is_empty() {
-                with_sep.push_str(&thousands_sep);
-            }
-            with_sep.push(b as char);
-        }
-        let mut result = String::new();
-        if neg {
-            result.push('-');
-        }
-        result.push_str(&with_sep);
-        return Ok(Value::String(PhpString::from_string(result)));
-    }
-
-    let decimals = decimals_raw.min(100000) as usize;
-
-    // For integer values, format without going through float to preserve precision
-    let (formatted, is_negative) = if let Value::Long(n) = val {
-        let neg = *n < 0;
-        let abs_str = if neg {
-            format!("{}", -(*n as i128))
-        } else {
-            format!("{}", n)
-        };
-        let formatted = if decimals > 0 {
-            format!("{}.{}", abs_str, "0".repeat(decimals))
-        } else {
-            abs_str
-        };
-        (formatted, neg)
+/// _php_math_number_format_ex() (ext/standard/math.c).
+pub(crate) fn number_format_ex(d: f64, dec: i32, dec_point: &[u8], thousand_sep: &[u8]) -> Vec<u8> {
+    let mut is_negative = d < 0.0;
+    let d = crate::math::php_math_round(d.abs(), dec, 1);
+    let dec = dec.max(0) as usize;
+    // strpprintf("%.*F"): php_conv_fp() keeps at most NDIG - 2 decimals.
+    let tmpbuf: Vec<u8> = if d.is_nan() {
+        b"nan".to_vec()
+    } else if d.is_infinite() {
+        b"inf".to_vec()
     } else {
-        let num = val.to_double();
-        if num.is_nan() {
-            return Ok(Value::String(PhpString::from_bytes(b"NAN")));
-        }
-        if num.is_infinite() {
-            let prefix = if num < 0.0 { "-" } else { "" };
-            return Ok(Value::String(PhpString::from_string(format!(
-                "{}INF",
-                prefix
-            ))));
-        }
-        let neg = num < 0.0;
-        // Use PHP's rounding approach: floor(f + 0.5) to handle edge cases
-        // like number_format(0.045, 2) which should give "0.05"
-        let abs_num = {
-            let factor = 10f64.powi(decimals as i32);
-            let f = num.abs() * factor;
-            if f.abs() < 1e15 {
-                let rounded = (f + 0.5).floor();
-                rounded / factor
-            } else {
-                num.abs()
-            }
-        };
-        let formatted = format!("{:.prec$}", abs_num, prec = decimals);
-        // Check if result rounds to zero
-        let is_zero = formatted.chars().all(|c| c == '0' || c == '.');
-        (formatted, neg && !is_zero)
+        format!("{:.*}", dec.min(318), d).into_bytes()
     };
-
-    let parts: Vec<&str> = formatted.split('.').collect();
-    let int_part = parts[0];
-    let dec_part = parts.get(1).unwrap_or(&"");
-
-    // Add thousands separator to integer part
-    let int_bytes = int_part.as_bytes();
-    let mut with_sep = String::new();
-    let len = int_bytes.len();
-    for (i, &b) in int_bytes.iter().enumerate() {
-        if i > 0 && (len - i).is_multiple_of(3) && !thousands_sep.is_empty() {
-            with_sep.push_str(&thousands_sep);
-        }
-        with_sep.push(b as char);
+    if !tmpbuf.first().is_some_and(|c| c.is_ascii_digit()) {
+        return tmpbuf;
     }
-
-    let mut result = String::new();
+    if is_negative && d == 0.0 {
+        is_negative = false;
+    }
+    let dp = if dec > 0 {
+        tmpbuf.iter().position(|&c| c == b'.' || c == b',')
+    } else {
+        None
+    };
+    let int_part = &tmpbuf[..dp.unwrap_or(tmpbuf.len())];
+    let mut out = Vec::with_capacity(tmpbuf.len() + int_part.len() / 3 * thousand_sep.len() + 2);
     if is_negative {
-        result.push('-');
+        out.push(b'-');
     }
-    result.push_str(&with_sep);
-    if decimals > 0 {
-        result.push_str(&dec_point);
-        result.push_str(dec_part);
+    for (i, &c) in int_part.iter().enumerate() {
+        if i > 0 && (int_part.len() - i).is_multiple_of(3) {
+            out.extend_from_slice(thousand_sep);
+        }
+        out.push(c);
     }
-    Ok(Value::String(PhpString::from_string(result)))
+    if dec > 0 {
+        out.extend_from_slice(dec_point);
+        let frac: &[u8] = match dp {
+            Some(p) => &tmpbuf[p + 1..],
+            None => b"",
+        };
+        out.extend_from_slice(frac);
+        out.extend(std::iter::repeat_n(b'0', dec.saturating_sub(frac.len())));
+    }
+    out
 }
 
 fn money_format(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

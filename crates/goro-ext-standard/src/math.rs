@@ -2,28 +2,6 @@ use goro_core::opcode::ParamType;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
-/// PHP-compatible rounding using floor(f + 0.5) approach.
-/// This matches PHP's _php_math_round() which uses floor(f + 0.5) for positive
-/// and ceil(f - 0.5) for negative, which handles edge cases like 0.045*100
-/// differently from Rust's f64::round().
-fn php_round_value(val: f64, places: i32) -> f64 {
-    if val.is_nan() || val.is_infinite() || val == 0.0 {
-        return val;
-    }
-    let factor = 10f64.powi(places);
-    let f = val * factor;
-    // Beyond our precision, rounding is pointless
-    if f.abs() >= 1e15 {
-        return val;
-    }
-    let tmp = if f >= 0.0 {
-        (f + 0.5).floor()
-    } else {
-        (f - 0.5).ceil()
-    };
-    tmp / factor
-}
-
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"abs", abs);
     vm.register_function(b"ceil", ceil);
@@ -85,7 +63,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"expm1", expm1_fn);
     vm.register_function(b"getrandmax", getrandmax_fn);
     vm.register_function(b"mt_getrandmax", mt_getrandmax_fn);
-    vm.register_function(b"number_format", number_format_math);
     vm.register_function(b"intval", intval_fn);
     vm.register_function(b"floatval", floatval_fn);
     vm.register_function(b"doubleval", floatval_fn);
@@ -1544,108 +1521,6 @@ fn getrandmax_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
 
 fn mt_getrandmax_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(2147483647))
-}
-
-fn number_format_math(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    let decimals_raw = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    let dec_point = match args.get(2).map(|v| v.deref()) {
-        Some(Value::Null) | Some(Value::Undef) | None => ".".to_string(),
-        Some(v) => v.to_php_string().to_string_lossy(),
-    };
-    let thousands_sep = match args.get(3).map(|v| v.deref()) {
-        Some(Value::Null) | Some(Value::Undef) | None => ",".to_string(),
-        Some(v) => v.to_php_string().to_string_lossy(),
-    };
-
-    let num = val.to_double();
-
-    // Handle negative decimals: round to nearest 10^(-decimals)
-    let (num_to_format, decimals) = if decimals_raw < 0 {
-        let neg_dec = decimals_raw.checked_neg().unwrap_or(i64::MAX) as u64;
-        if neg_dec >= 20 {
-            (0.0f64, 0usize)
-        } else {
-            let factor = 10f64.powi(neg_dec as i32);
-            let rounded = (num / factor).round() * factor;
-            (rounded, 0usize)
-        }
-    } else {
-        // Round using PHP's rounding (half away from zero) before formatting
-        let rounded = php_round_value(num, decimals_raw.min(100000) as i32);
-        (rounded, decimals_raw.min(100000) as usize)
-    };
-
-    // For integer values with no decimals, format without going through float
-    let formatted = if decimals_raw >= 0
-        && let Value::Long(n) = val
-    {
-        if decimals > 0 {
-            format!("{}.{}", n, "0".repeat(decimals))
-        } else {
-            format!("{}", n)
-        }
-    } else {
-        if num_to_format.is_nan() {
-            if decimals > 0 {
-                format!("NAN{}{}", dec_point, "0".repeat(decimals))
-            } else {
-                "NAN".to_string()
-            }
-        } else if num_to_format.is_infinite() {
-            if num_to_format > 0.0 {
-                if decimals > 0 {
-                    format!("INF{}{}", dec_point, "0".repeat(decimals))
-                } else {
-                    "INF".to_string()
-                }
-            } else {
-                if decimals > 0 {
-                    format!("-INF{}{}", dec_point, "0".repeat(decimals))
-                } else {
-                    "-INF".to_string()
-                }
-            }
-        } else {
-            format!("{:.prec$}", num_to_format, prec = decimals)
-        }
-    };
-
-    let parts: Vec<&str> = formatted.split('.').collect();
-    let int_part = parts[0];
-    let dec_part = parts.get(1).unwrap_or(&"");
-
-    // Add thousands separator
-    let negative = int_part.starts_with('-');
-    let digits: &str = if negative { &int_part[1..] } else { int_part };
-
-    // Don't add thousands sep to non-numeric parts (NAN, INF)
-    let with_sep = if digits.chars().all(|c| c.is_ascii_digit()) {
-        let mut result = String::new();
-        for (i, c) in digits.chars().rev().enumerate() {
-            if i > 0 && i % 3 == 0 && !thousands_sep.is_empty() {
-                result = format!("{}{}{}", c, thousands_sep, result);
-            } else {
-                result.insert(0, c);
-            }
-        }
-        if negative {
-            result.insert(0, '-');
-        }
-        result
-    } else {
-        int_part.to_string()
-    };
-
-    let result = if decimals > 0 {
-        format!("{}{}{}", with_sep, dec_point, dec_part)
-    } else {
-        with_sep
-    };
-
-    Ok(Value::String(goro_core::string::PhpString::from_string(
-        result,
-    )))
 }
 
 /// C strtoll(): whitespace, sign, base prefixes, saturating on overflow.
