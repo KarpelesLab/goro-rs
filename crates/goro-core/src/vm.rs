@@ -4196,6 +4196,168 @@ impl Vm {
         }
     }
 
+    /// ZEND_ADD_ARRAY_UNPACK of an object: its (key, value) pairs.
+    #[inline(never)]
+    fn spread_traversable_object(
+        &mut self,
+        source: &Value,
+    ) -> Result<Vec<(ArrayKey, Value)>, String> {
+        let mut out = Vec::new();
+        self.unpack_traversable(source, &mut |k, v| {
+            let key = match k {
+                Value::Long(n) => ArrayKey::Int(n),
+                Value::String(s) => Self::value_to_array_key(Value::String(s)),
+                _ => return Err("Keys must be of type int|string during array unpacking".into()),
+            };
+            out.push((key, v));
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    /// Iterate a Traversable for `...` unpacking (an array literal's or a
+    /// call's): the class's get_iterator, which takes an iterator object
+    /// handle (after getIterator() for an IteratorAggregate; ArrayIterator
+    /// and SplFixedArray iterate their storage unless a user class
+    /// overrides the methods involved), then rewind and
+    /// valid / current / key / next. `each` gets every key and
+    /// (dereferenced) value; Err(msg) from it ends the loop with that Error.
+    /// Err("") when an exception is pending.
+    #[inline(never)]
+    fn unpack_traversable(
+        &mut self,
+        source: &Value,
+        each: &mut dyn FnMut(Value, Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if !self.obj_instanceof(source, b"traversable") {
+            return Err(format!(
+                "Only arrays and Traversables can be unpacked, {} given",
+                Self::value_type_name(source)
+            ));
+        }
+        if let Some(pairs) = self.unpack_native_storage(source) {
+            let handle = self.foreach_iterator_handle();
+            let mut r = Ok(());
+            for (k, v) in pairs {
+                r = each(k, v.deref());
+                if r.is_err() {
+                    break;
+                }
+            }
+            let r = self.unpack_raise(r);
+            drop(handle);
+            return r;
+        }
+        let it = self.spl_resolve_traversable(source);
+        if self.current_exception.is_some() {
+            return Err(String::new());
+        }
+        let handle = self.foreach_iterator_handle();
+        let r = self.unpack_iterate(&it, each);
+        let r = self.unpack_raise(r);
+        // (the iterator releases what it iterates before its handle)
+        drop(it);
+        drop(handle);
+        r
+    }
+
+    /// The Error an unpacking loop stopped with is thrown while its
+    /// iterator is still alive (the error object takes its handle first).
+    fn unpack_raise(&mut self, r: Result<(), String>) -> Result<(), String> {
+        match r {
+            Err(msg) if !msg.is_empty() => {
+                let line = self.current_line;
+                let exc = self.create_exception(b"Error", &msg, line);
+                self.current_exception = Some(exc);
+                Err(String::new())
+            }
+            r => r,
+        }
+    }
+
+    /// The storage an ArrayIterator / SplFixedArray unpacks
+    /// directly (spl_array_get_iterator / spl_fixedarray_get_iterator).
+    fn unpack_native_storage(&mut self, source: &Value) -> Option<Vec<(Value, Value)>> {
+        let Value::Object(o) = source else {
+            return None;
+        };
+        let class_lower = o.borrow().class_name.to_ascii_lowercase();
+        let user_has = |vm: &Self, m: &[u8]| {
+            vm.classes
+                .get(&class_lower)
+                .is_some_and(|c| c.get_method(m).is_some())
+        };
+        let spl_array = o.borrow().get_property(b"__spl_array");
+        if let Value::Array(a) = spl_array {
+            let ok = if self.obj_instanceof(source, b"arrayiterator") {
+                !["current", "key", "next", "valid", "rewind"]
+                    .iter()
+                    .any(|m| user_has(self, m.as_bytes()))
+            } else {
+                // (ArrayObject goes through getIterator())
+                self.obj_instanceof(source, b"splfixedarray") && !user_has(self, b"getiterator")
+            };
+            if !ok {
+                return None;
+            }
+            let pairs = a
+                .borrow()
+                .iter()
+                .map(|(k, v)| {
+                    let k = match k {
+                        ArrayKey::Int(n) => Value::Long(*n),
+                        ArrayKey::String(s) => Value::String(s.clone()),
+                    };
+                    (k, v.clone())
+                })
+                .collect();
+            return Some(pairs);
+        }
+        None
+    }
+
+    /// The rewind / valid / current / key / next loop of
+    /// unpack_traversable() over an Iterator or a Generator.
+    #[inline(never)]
+    fn unpack_iterate(
+        &mut self,
+        it: &Value,
+        each: &mut dyn FnMut(Value, Value) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if let Value::Generator(_) = it {
+            if !self.generator_traverse_start(it) {
+                return Err(String::new());
+            }
+        } else {
+            self.it_rewind(it);
+            if self.current_exception.is_some() {
+                return Err(String::new());
+            }
+        }
+        loop {
+            let valid = self.it_valid(it);
+            if self.current_exception.is_some() {
+                return Err(String::new());
+            }
+            if !valid {
+                return Ok(());
+            }
+            let val = self.it_current(it).deref();
+            if self.current_exception.is_some() {
+                return Err(String::new());
+            }
+            let key = self.it_key(it);
+            if self.current_exception.is_some() {
+                return Err(String::new());
+            }
+            each(key, val)?;
+            self.it_next(it);
+            if self.current_exception.is_some() {
+                return Err(String::new());
+            }
+        }
+    }
+
     /// FE_RESET_RW on a variable: SEPARATE_ARRAY() of the array it holds
     /// when another holder (a property or element it was assigned from)
     /// shares it, so what the loop writes through its references does not
@@ -27833,167 +27995,22 @@ impl Vm {
                                 None => Ok(pairs),
                             }
                         }
-                        Value::Object(obj_rc) => {
-                            let class_lower: Vec<u8> = obj_rc
-                                .borrow()
-                                .class_name
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            let inner_arr = {
-                                let obj = obj_rc.borrow();
-                                let prop = obj.get_property(b"__spl_array");
-                                if matches!(prop, Value::Array(_)) {
-                                    Some(prop)
-                                } else {
-                                    None
-                                }
-                            };
-                            if let Some(Value::Array(arr)) = inner_arr {
-                                // SPL array-based object (ArrayIterator, etc.)
-                                let arr = arr.borrow();
-                                let mut pairs: Vec<(bool, Vec<u8>, Value)> =
-                                    Vec::with_capacity(arr.len());
-                                for (k, v) in arr.iter() {
-                                    match k {
-                                        ArrayKey::String(s) => {
-                                            pairs.push((true, s.as_bytes().to_vec(), v.clone()));
-                                        }
-                                        ArrayKey::Int(_) => {
-                                            pairs.push((false, Vec::new(), v.clone()));
-                                        }
+                        Value::Object(_) => {
+                            let mut pairs: Vec<(bool, Vec<u8>, Value)> = Vec::new();
+                            let r = self.unpack_traversable(&val, &mut |k, v| {
+                                match k {
+                                    Value::Long(_) => pairs.push((false, Vec::new(), v)),
+                                    Value::String(s) => pairs.push(Self::unpack_string_key(&s, v)),
+                                    _ => {
+                                        return Err("Keys must be of type int|string during argument unpacking".into());
                                     }
                                 }
-                                Ok(pairs)
-                            } else if self
-                                .class_implements_interface(&class_lower, b"iteratoraggregate")
-                            {
-                                // IteratorAggregate: call getIterator() first (may throw)
-                                let iter_val = self.call_object_method(&val, b"getIterator", &[]);
-                                if self.current_exception.is_some() {
-                                    Err("__exception__".to_string())
-                                } else if let Some(iter_obj) = iter_val {
-                                    let mut pairs: Vec<(bool, Vec<u8>, Value)> = Vec::new();
-                                    let mut iter_err: Option<String> = None;
-                                    self.call_object_method(&iter_obj, b"rewind", &[]);
-                                    if self.current_exception.is_some() {
-                                        Err("__exception__".to_string())
-                                    } else {
-                                        loop {
-                                            if self.current_exception.is_some() {
-                                                iter_err = Some("__exception__".to_string());
-                                                break;
-                                            }
-                                            let valid = self
-                                                .call_object_method(&iter_obj, b"valid", &[])
-                                                .unwrap_or(Value::False);
-                                            if self.current_exception.is_some() {
-                                                iter_err = Some("__exception__".to_string());
-                                                break;
-                                            }
-                                            if !valid.is_truthy() {
-                                                break;
-                                            }
-                                            let cur_val = self
-                                                .call_object_method(&iter_obj, b"current", &[])
-                                                .unwrap_or(Value::Null);
-                                            if self.current_exception.is_some() {
-                                                iter_err = Some("__exception__".to_string());
-                                                break;
-                                            }
-                                            let key_val = self
-                                                .call_object_method(&iter_obj, b"key", &[])
-                                                .unwrap_or(Value::Null);
-                                            if self.current_exception.is_some() {
-                                                iter_err = Some("__exception__".to_string());
-                                                break;
-                                            }
-                                            match &key_val {
-                                                Value::Long(_) => {
-                                                    pairs.push((false, Vec::new(), cur_val));
-                                                }
-                                                Value::String(s) => {
-                                                    pairs.push(Self::unpack_string_key(s, cur_val));
-                                                }
-                                                _ => {
-                                                    iter_err = Some("Keys must be of type int|string during argument unpacking".to_string());
-                                                    break;
-                                                }
-                                            }
-                                            self.call_object_method(&iter_obj, b"next", &[]);
-                                        }
-                                        match iter_err {
-                                            Some(e) => Err(e),
-                                            None => Ok(pairs),
-                                        }
-                                    }
-                                } else {
-                                    Ok(Vec::new())
-                                }
-                            } else if self.class_implements_interface(&class_lower, b"traversable")
-                                || self.class_implements_interface(&class_lower, b"iterator")
-                            {
-                                // Generic Iterator: use Iterator protocol
-                                self.call_object_method(&val, b"rewind", &[]);
-                                if self.current_exception.is_some() {
-                                    Err("__exception__".to_string())
-                                } else {
-                                    let mut pairs: Vec<(bool, Vec<u8>, Value)> = Vec::new();
-                                    let mut iter_err: Option<String> = None;
-                                    loop {
-                                        if self.current_exception.is_some() {
-                                            iter_err = Some("__exception__".to_string());
-                                            break;
-                                        }
-                                        let valid = self
-                                            .call_object_method(&val, b"valid", &[])
-                                            .unwrap_or(Value::False);
-                                        if self.current_exception.is_some() {
-                                            iter_err = Some("__exception__".to_string());
-                                            break;
-                                        }
-                                        if !valid.is_truthy() {
-                                            break;
-                                        }
-                                        let cur_val = self
-                                            .call_object_method(&val, b"current", &[])
-                                            .unwrap_or(Value::Null);
-                                        if self.current_exception.is_some() {
-                                            iter_err = Some("__exception__".to_string());
-                                            break;
-                                        }
-                                        let key_val = self
-                                            .call_object_method(&val, b"key", &[])
-                                            .unwrap_or(Value::Null);
-                                        if self.current_exception.is_some() {
-                                            iter_err = Some("__exception__".to_string());
-                                            break;
-                                        }
-                                        match &key_val {
-                                            Value::Long(_) => {
-                                                pairs.push((false, Vec::new(), cur_val));
-                                            }
-                                            Value::String(s) => {
-                                                pairs.push(Self::unpack_string_key(s, cur_val));
-                                            }
-                                            _ => {
-                                                iter_err = Some("Keys must be of type int|string during argument unpacking".to_string());
-                                                break;
-                                            }
-                                        }
-                                        self.call_object_method(&val, b"next", &[]);
-                                    }
-                                    match iter_err {
-                                        Some(e) => Err(e),
-                                        None => Ok(pairs),
-                                    }
-                                }
-                            } else {
-                                let type_name = Self::value_type_name(&val);
-                                Err(format!(
-                                    "Only arrays and Traversables can be unpacked, {} given",
-                                    type_name
-                                ))
+                                Ok(())
+                            });
+                            match r {
+                                Ok(()) => Ok(pairs),
+                                Err(e) if e.is_empty() => Err("__exception__".to_string()),
+                                Err(e) => Err(e),
                             }
                         }
                         _ => {
@@ -49168,6 +49185,7 @@ impl Vm {
                             let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
                             let mut spread_err: Option<String> = None;
                             // zend_generator_get_iterator() + rewind
+                            let _iter_handle = self.foreach_iterator_handle();
                             if !self.generator_traverse_start(&source) {
                                 spread_err = Some(String::new());
                             } else {
@@ -49236,183 +49254,22 @@ impl Vm {
                                     }
                                 }
                             }
+                            // (raised while the generator's iterator is alive)
+                            let spread_err = match spread_err {
+                                Some(e) if !e.is_empty() => {
+                                    let exc = self.create_exception(b"Error", &e, op.line);
+                                    self.current_exception = Some(exc);
+                                    Some(String::new())
+                                }
+                                e => e,
+                            };
                             match spread_err {
                                 Some(e) if !e.is_empty() => Err(e),
                                 Some(_) => Err(String::new()), // exception already set
                                 None => Ok(pairs),
                             }
                         }
-                        Value::Object(obj_rc) => {
-                            let class_lower: Vec<u8> = obj_rc
-                                .borrow()
-                                .class_name
-                                .iter()
-                                .map(|b| b.to_ascii_lowercase())
-                                .collect();
-                            let inner_arr = {
-                                let obj = obj_rc.borrow();
-                                let prop = obj.get_property(b"__spl_array");
-                                if matches!(prop, Value::Array(_)) {
-                                    Some(prop)
-                                } else {
-                                    None
-                                }
-                            };
-                            if let Some(Value::Array(arr)) = inner_arr {
-                                let arr = arr.borrow();
-                                // Validate keys from SPL array
-                                let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
-                                let spread_err: Option<String> = None;
-                                for (k, v) in arr.iter() {
-                                    pairs.push((k.clone(), v.clone()));
-                                }
-                                if let Some(e) = spread_err {
-                                    Err(e)
-                                } else {
-                                    Ok(pairs)
-                                }
-                            } else if self
-                                .class_implements_interface(&class_lower, b"iteratoraggregate")
-                            {
-                                // IteratorAggregate: call getIterator() which may throw
-                                let iter_val =
-                                    self.call_object_method(&source, b"getIterator", &[]);
-                                if self.current_exception.is_some() {
-                                    Err(String::new()) // exception already set
-                                } else if let Some(iter_obj) = iter_val {
-                                    // Use the returned iterator
-                                    self.call_object_method(&iter_obj, b"rewind", &[]);
-                                    if self.current_exception.is_some() {
-                                        Err(String::new()) // exception during rewind
-                                    } else {
-                                        let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
-                                        let mut spread_err: Option<String> = None;
-                                        loop {
-                                            if self.current_exception.is_some() {
-                                                spread_err = Some(String::new());
-                                                break;
-                                            }
-                                            let valid = self
-                                                .call_object_method(&iter_obj, b"valid", &[])
-                                                .unwrap_or(Value::False);
-                                            if self.current_exception.is_some() {
-                                                spread_err = Some(String::new());
-                                                break;
-                                            }
-                                            if !valid.is_truthy() {
-                                                break;
-                                            }
-                                            let cur_val = self
-                                                .call_object_method(&iter_obj, b"current", &[])
-                                                .unwrap_or(Value::Null);
-                                            if self.current_exception.is_some() {
-                                                spread_err = Some(String::new());
-                                                break;
-                                            }
-                                            let key_val = self
-                                                .call_object_method(&iter_obj, b"key", &[])
-                                                .unwrap_or(Value::Null);
-                                            if self.current_exception.is_some() {
-                                                spread_err = Some(String::new());
-                                                break;
-                                            }
-                                            let arr_key = match &key_val {
-                                                Value::Long(n) => ArrayKey::Int(*n),
-                                                Value::String(s) => {
-                                                    let s_str = s.to_string_lossy();
-                                                    if let Ok(n) = s_str.parse::<i64>() {
-                                                        ArrayKey::Int(n)
-                                                    } else {
-                                                        ArrayKey::String(s.clone())
-                                                    }
-                                                }
-                                                _ => {
-                                                    spread_err = Some("Keys must be of type int|string during array unpacking".to_string());
-                                                    break;
-                                                }
-                                            };
-                                            pairs.push((arr_key, cur_val));
-                                            self.call_object_method(&iter_obj, b"next", &[]);
-                                        }
-                                        match spread_err {
-                                            Some(e) if !e.is_empty() => Err(e),
-                                            Some(_) => Err(String::new()),
-                                            None => Ok(pairs),
-                                        }
-                                    }
-                                } else {
-                                    Ok(Vec::new())
-                                }
-                            } else if self.class_implements_interface(&class_lower, b"traversable")
-                                || self.class_implements_interface(&class_lower, b"iterator")
-                            {
-                                self.call_object_method(&source, b"rewind", &[]);
-                                if self.current_exception.is_some() {
-                                    Err(String::new()) // exception during rewind
-                                } else {
-                                    let mut pairs: Vec<(ArrayKey, Value)> = Vec::new();
-                                    let mut spread_err: Option<String> = None;
-                                    loop {
-                                        if self.current_exception.is_some() {
-                                            spread_err = Some(String::new());
-                                            break;
-                                        }
-                                        let valid = self
-                                            .call_object_method(&source, b"valid", &[])
-                                            .unwrap_or(Value::False);
-                                        if self.current_exception.is_some() {
-                                            spread_err = Some(String::new());
-                                            break;
-                                        }
-                                        if !valid.is_truthy() {
-                                            break;
-                                        }
-                                        let cur_val = self
-                                            .call_object_method(&source, b"current", &[])
-                                            .unwrap_or(Value::Null);
-                                        if self.current_exception.is_some() {
-                                            spread_err = Some(String::new());
-                                            break;
-                                        }
-                                        let key_val = self
-                                            .call_object_method(&source, b"key", &[])
-                                            .unwrap_or(Value::Null);
-                                        if self.current_exception.is_some() {
-                                            spread_err = Some(String::new());
-                                            break;
-                                        }
-                                        let arr_key = match &key_val {
-                                            Value::Long(n) => ArrayKey::Int(*n),
-                                            Value::String(s) => {
-                                                let s_str = s.to_string_lossy();
-                                                if let Ok(n) = s_str.parse::<i64>() {
-                                                    ArrayKey::Int(n)
-                                                } else {
-                                                    ArrayKey::String(s.clone())
-                                                }
-                                            }
-                                            _ => {
-                                                spread_err = Some("Keys must be of type int|string during array unpacking".to_string());
-                                                break;
-                                            }
-                                        };
-                                        pairs.push((arr_key, cur_val));
-                                        self.call_object_method(&source, b"next", &[]);
-                                    }
-                                    match spread_err {
-                                        Some(e) if !e.is_empty() => Err(e),
-                                        Some(_) => Err(String::new()),
-                                        None => Ok(pairs),
-                                    }
-                                }
-                            } else {
-                                let type_name = Self::value_type_name(&source);
-                                Err(format!(
-                                    "Only arrays and Traversables can be unpacked, {} given",
-                                    type_name
-                                ))
-                            }
-                        }
+                        Value::Object(_) => self.spread_traversable_object(&source),
                         _ => {
                             let type_name = Self::value_type_name(&source);
                             Err(format!(
@@ -49453,9 +49310,11 @@ impl Vm {
                             }
                         }
                         Err(e) => {
-                            #[allow(clippy::if_same_then_else)] // branches mirror php-src
-                            let exc_class: &[u8] = if e.starts_with("Only arrays") {
-                                b"Error"
+                            // (an object without get_iterator is a zend_type_error())
+                            let exc_class: &[u8] = if e.starts_with("Only arrays")
+                                && matches!(source, Value::Object(_))
+                            {
+                                b"TypeError"
                             } else {
                                 b"Error"
                             };
