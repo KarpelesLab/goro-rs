@@ -2096,7 +2096,7 @@ fn ucwords(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let delimiters = args.get(1).map(|v| v.to_php_string());
     let mut bytes = s.as_bytes().to_vec();
     let delim_bytes: Vec<u8> = if let Some(ref d) = delimiters {
-        d.as_bytes().to_vec()
+        expand_charlist_warn(d.as_bytes(), vm, "ucwords")
     } else {
         b" \t\r\n\x0B\x0C".to_vec()
     };
@@ -2182,32 +2182,10 @@ fn addcslashes(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     let charlist = charlist_val.to_php_string();
-    let chars = charlist.as_bytes();
-    // Expand ranges (e.g., "a..z" means all chars from a to z)
+    // php_charmask()
     let mut char_set = [false; 256];
-    let mut i = 0;
-    while i < chars.len() {
-        if i + 3 < chars.len() && chars[i + 1] == b'.' && chars[i + 2] == b'.' {
-            let start = chars[i];
-            let end = chars[i + 3];
-            if start <= end {
-                for c in start..=end {
-                    char_set[c as usize] = true;
-                }
-            } else {
-                // Invalid range - warn and set each individual character
-                vm.emit_warning(
-                    "addcslashes(): Invalid '..'-range, '..'-range needs to be incrementing",
-                );
-                char_set[start as usize] = true;
-                char_set[b'.' as usize] = true;
-                char_set[end as usize] = true;
-            }
-            i += 4;
-        } else {
-            char_set[chars[i] as usize] = true;
-            i += 1;
-        }
+    for c in expand_charlist_warn(charlist.as_bytes(), vm, "addcslashes") {
+        char_set[c as usize] = true;
     }
     let mut result = Vec::new();
     for &b in s.as_bytes() {
