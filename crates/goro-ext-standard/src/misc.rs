@@ -3740,9 +3740,22 @@ fn php_array_walk_arr(
             None => break,
         };
         // ZVAL_MAKE_REF
+        // (an element array shared with a copy is separated: it is written
+        // through the reference)
         let r = match val {
-            Value::Reference(r) => r,
-            other => {
+            Value::Reference(r) => {
+                if recursive {
+                    if let Ok(mut inner) = r.try_borrow_mut() {
+                        goro_core::array::separate_shared(&mut inner);
+                    }
+                }
+                r
+            }
+            mut other => {
+                // (`other` is one more holder)
+                if matches!(&other, Value::Array(a) if Rc::strong_count(a) > 2) {
+                    goro_core::array::separate_shared(&mut other);
+                }
                 let r = Rc::new(RefCell::new(other));
                 arr.borrow_mut()
                     .set(key.clone(), Value::Reference(r.clone()));

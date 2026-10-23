@@ -35524,6 +35524,7 @@ impl Vm {
                     } else {
                         self.dup_stored_array(&op.op2, val)
                     };
+                    let val = Self::unshare_container(val, &arr_val);
                     if let Value::Array(arr) = &arr_val {
                         if let Err(msg) = arr.borrow_mut().try_push(val) {
                             let exc = self.create_exception(b"Error", msg, op.line);
@@ -35874,6 +35875,7 @@ impl Vm {
                         } else {
                             self.dup_stored_array(&op.op2, val)
                         };
+                        let val = Self::unshare_container(val, &arr_val);
                         // Array/object keys on a real array throw TypeError (matches
                         // zend_illegal_container_offset). value_to_array_key_checked
                         // silently maps both to Int(0), so check explicitly first.
@@ -39127,6 +39129,9 @@ impl Vm {
                                     let r = match slot {
                                         Value::Reference(r) => r.clone(),
                                         other => {
+                                            // (an element array shared with a copy
+                                            // gets its own: it is written through $v)
+                                            crate::array::separate_shared(other);
                                             let r = Rc::new(RefCell::new(std::mem::take(other)));
                                             *other = Value::Reference(r.clone());
                                             r
@@ -44990,10 +44995,19 @@ impl Vm {
                         // Check if the element is already a Reference
                         let existing = arr_mut.get(&key).cloned();
                         let ref_val = if let Some(Value::Reference(r)) = existing {
+                            if let Ok(mut inner) = r.try_borrow_mut() {
+                                crate::array::separate_shared(&mut inner);
+                            }
                             Value::Reference(r)
                         } else {
                             // Create a new Reference wrapping the existing value (or Null)
-                            let inner = existing.unwrap_or(Value::Null);
+                            let mut inner = existing.unwrap_or(Value::Null);
+                            // (the clone above is one more holder)
+                            if let Value::Array(a) = &inner {
+                                if Rc::strong_count(a) > 2 {
+                                    crate::array::separate_shared(&mut inner);
+                                }
+                            }
                             let r = Rc::new(RefCell::new(inner));
                             arr_mut.set(key, Value::Reference(r.clone()));
                             Value::Reference(r)
@@ -57844,6 +57858,56 @@ impl Vm {
         } else {
             value
         }
+    }
+
+    /// `$a[k][j] = $a` / `$a[k][] = $a`: the copy of `$a` being stored
+    /// shares the element array it is stored into (its write was fetched
+    /// before the copy was made). That array is snapshotted in the copy, as
+    /// php-src separates it, so no cycle is created.
+    fn unshare_container(value: Value, container: &Value) -> Value {
+        let (Value::Array(v), Value::Array(c)) = (&value, container) else {
+            return value;
+        };
+        // (holders: the container's own slot, the fetch's temporary and
+        // `container` itself; more means a copy shares it)
+        if Rc::strong_count(c) <= 3 {
+            return value;
+        }
+        fn fix(
+            arr: &Rc<RefCell<PhpArray>>,
+            c: &Rc<RefCell<PhpArray>>,
+            depth: usize,
+        ) -> Option<Vec<(crate::array::ArrayKey, Value)>> {
+            if depth > 64 {
+                return None;
+            }
+            let a = arr.try_borrow().ok()?;
+            let mut repl = Vec::new();
+            for (k, v) in a.iter() {
+                if let Value::Array(n) = v {
+                    if Rc::ptr_eq(n, c) {
+                        let snap = c.try_borrow().ok()?.clone();
+                        repl.push((k.clone(), Value::Array(Rc::new(RefCell::new(snap)))));
+                    } else if Rc::strong_count(n) > 1 {
+                        if let Some(sub) = fix(n, c, depth + 1) {
+                            let mut copy = n.borrow().clone();
+                            for (sk, sv) in sub {
+                                copy.set(sk, sv);
+                            }
+                            repl.push((k.clone(), Value::Array(Rc::new(RefCell::new(copy)))));
+                        }
+                    }
+                }
+            }
+            (!repl.is_empty()).then_some(repl)
+        }
+        if let Some(repl) = fix(v, c, 0) {
+            let mut top = v.borrow_mut();
+            for (k, nv) in repl {
+                top.set(k, nv);
+            }
+        }
+        value
     }
 
     /// `$GLOBALS` passed by value: a copy of the symbol table holding the

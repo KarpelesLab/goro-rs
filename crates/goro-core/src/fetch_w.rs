@@ -213,6 +213,22 @@ impl Vm {
         };
         match cur {
             Value::Array(rc) => {
+                // Copy-on-write: an array the slot shares with another holder
+                // (through a reference cell: the cell holds one count, `cur`
+                // the other) is separated before it is written.
+                // (a plain CV owns its array: arrays are copied when assigned)
+                let rc = if cell.is_some()
+                    && Rc::strong_count(&rc) > 2
+                    && !Rc::ptr_eq(&rc, &self.globals)
+                {
+                    let sep = Rc::new(RefCell::new(rc.borrow().clone()));
+                    if let Some(r) = &cell {
+                        *r.borrow_mut() = Value::Array(sep.clone());
+                    }
+                    sep
+                } else {
+                    rc
+                };
                 restore(slot, Value::Array(rc.clone()));
                 self.fetch_dim_from_array(&rc, key, mode, line)
             }

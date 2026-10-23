@@ -128,25 +128,24 @@ fn hash_key(k: &ArrayKey) -> u64 {
 }
 
 thread_local! {
-    /// Arrays currently being cloned (guards against cycles).
-    static CLONE_STACK: std::cell::RefCell<Vec<*const PhpArray>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Copy a nested array for PhpArray::clone; None means share it instead
-/// (cycle, or the array is currently mutably borrowed).
-fn dup_nested_array(a: &std::rc::Rc<std::cell::RefCell<PhpArray>>) -> Option<Value> {
-    let ptr = a.as_ptr() as *const PhpArray;
-    if CLONE_STACK.with(|st| st.borrow().iter().any(|p| std::ptr::eq(*p, ptr))) {
-        return None;
-    }
-    let inner = a.try_borrow().ok()?;
-    Some(Value::Array(std::rc::Rc::new(std::cell::RefCell::new(
-        inner.clone(),
-    ))))
-}
-
-thread_local! {
     static NEXT_IDENT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// SEPARATE_ARRAY() for a slot about to be bound to a reference: an array
+/// still shared with another holder (properties and elements share an
+/// array assigned from one another until either is written) gets its own
+/// copy, so what is done through the reference (sort(), next(), a
+/// by-reference parameter ...) does not show through the other holder.
+pub fn separate_shared(v: &mut Value) {
+    if let Value::Array(a) = v {
+        if std::rc::Rc::strong_count(a) > 1 {
+            let copy = match a.try_borrow() {
+                Ok(inner) => inner.clone(),
+                Err(_) => return,
+            };
+            *v = Value::Array(std::rc::Rc::new(std::cell::RefCell::new(copy)));
+        }
+    }
 }
 
 impl Clone for PhpArray {
@@ -169,15 +168,10 @@ impl Clone for PhpArray {
         let self_ptr = self as *const PhpArray;
         let is_closure = matches!(self.live().first(), Some((_, Value::String(s)))
             if s.as_bytes().starts_with(b"__closure_") || s.as_bytes().starts_with(b"__arrow_"));
-        // A copy holding nested arrays does not stand for this array: they
-        // are copies too, written in place without separating this one.
-        let mut nested = is_closure;
         let entries = if is_closure {
             self.live().to_vec()
         } else {
-            CLONE_STACK.with(|st| st.borrow_mut().push(self_ptr));
-            let e = self
-                .live()
+            self.live()
                 .iter()
                 .map(|(k, v)| {
                     let v2 = match v {
@@ -189,23 +183,17 @@ impl Clone for PhpArray {
                                 {
                                     v.clone()
                                 }
-                                Value::Array(a) => dup_nested_array(a).unwrap_or_else(|| v.clone()),
                                 other => other.clone(),
                             }
                         }
-                        // Nested arrays are values: give the copy its own storage
-                        // (goro copies eagerly instead of refcounted copy-on-write).
-                        Value::Array(a) => dup_nested_array(a).unwrap_or_else(|| v.clone()),
+                        // Nested arrays are shared with the copy (refcounted
+                        // copy-on-write): a write fetch of an element array
+                        // held elsewhere too separates it (fetch_dim_from_array).
                         _ => v.clone(),
                     };
-                    nested |= matches!(v2, Value::Array(_));
                     (k.clone(), v2)
                 })
-                .collect();
-            CLONE_STACK.with(|st| {
-                st.borrow_mut().pop();
-            });
-            e
+                .collect()
         };
         let mut copy = Self {
             entries,
@@ -219,7 +207,7 @@ impl Clone for PhpArray {
             zcap,
             zpacked,
             untracked: false,
-            ident: std::cell::Cell::new(if nested { 0 } else { self.identity() }),
+            ident: std::cell::Cell::new(if is_closure { 0 } else { self.identity() }),
             iters: None,
         };
         if self.head == 0 {

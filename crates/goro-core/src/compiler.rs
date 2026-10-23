@@ -2198,7 +2198,23 @@ impl Compiler {
                     if is_append {
                         self.compile_throw_error(b"Cannot use [] for reading", line)?;
                     } else {
-                        let v = self.compile_expr(&arg.value)?;
+                        // The array of `sort($o->p)` / `next($a['k'])` is fetched
+                        // for writing (separated from the copies sharing it).
+                        let write_fetch = i == 0
+                            && Self::is_array_ref_builtin(func_name)
+                            && matches!(
+                                &arg.value.kind,
+                                ExprKind::PropertyAccess {
+                                    nullsafe: false,
+                                    ..
+                                } | ExprKind::ArrayAccess { index: Some(_), .. }
+                                    | ExprKind::StaticPropertyAccess { .. }
+                            );
+                        let v = if write_fetch {
+                            self.compile_dim_write_base(&arg.value)?
+                        } else {
+                            self.compile_expr(&arg.value)?
+                        };
                         self.op_array.emit(Op {
                             opcode: OpCode::SendVal,
                             op1: v,
@@ -4102,6 +4118,8 @@ impl Compiler {
                         });
                         OperandType::Tmp(tmp)
                     }
+                    // (a property: fetched for writing too)
+                    _ if *by_ref => self.compile_foreach_ref_source(expr)?,
                     _ => self.compile_expr(expr)?,
                 };
                 // foreach (f() as &$v): iterate f()'s returned reference, or a
@@ -11579,6 +11597,23 @@ impl Compiler {
 
     /// Emit PropertyGetRef for `$obj->prop` in a reference context and return
     /// the tmp holding the Reference.
+    /// The array a by-reference foreach iterates (FE_RESET_RW): a property
+    /// is fetched for writing, separated from the copies sharing it.
+    #[inline(never)]
+    fn compile_foreach_ref_source(&mut self, expr: &Expr) -> CompileResult<OperandType> {
+        match &expr.kind {
+            ExprKind::PropertyAccess {
+                nullsafe: false, ..
+            }
+            | ExprKind::StaticPropertyAccess { .. }
+                if !expr_is_in_nullsafe_chain(expr) =>
+            {
+                self.compile_dim_write_base(expr)
+            }
+            _ => self.compile_expr(expr),
+        }
+    }
+
     fn compile_property_ref(
         &mut self,
         object: &Expr,

@@ -559,14 +559,16 @@ impl PhpObject {
         for (k, v) in &mut self.properties {
             if k.as_slice() == name {
                 if let Value::Reference(r) = v {
+                    if let Ok(mut inner) = r.try_borrow_mut() {
+                        crate::array::separate_shared(&mut inner);
+                    }
                     return r.clone();
                 }
-                let cur = std::mem::replace(v, Value::Null);
-                let cur = if matches!(cur, Value::Undef) {
-                    Value::Null
-                } else {
-                    cur
-                };
+                let mut cur = std::mem::replace(v, Value::Null);
+                if matches!(cur, Value::Undef) {
+                    cur = Value::Null;
+                }
+                crate::array::separate_shared(&mut cur);
                 let r = std::rc::Rc::new(std::cell::RefCell::new(cur));
                 *v = Value::Reference(r.clone());
                 return r;

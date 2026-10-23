@@ -682,6 +682,9 @@ impl Vm {
             SpFetch::Ref => {
                 if let Value::Reference(r) = cell {
                     let r = r.clone();
+                    if let Ok(mut inner) = r.try_borrow_mut() {
+                        crate::array::separate_shared(&mut inner);
+                    }
                     if let Some(pt) = ptype {
                         let decl = self.sp_decl_key(&slot).to_vec();
                         self.typed_ref_register(&r, &decl, name, pt);
@@ -703,10 +706,11 @@ impl Vm {
                     }
                 }
                 let cell = self.sp_cell(&slot, name).expect("slot located above");
-                let inner = match std::mem::replace(cell, Value::Null) {
+                let mut inner = match std::mem::replace(cell, Value::Null) {
                     Value::Undef => Value::Null,
                     v => v,
                 };
+                crate::array::separate_shared(&mut inner);
                 let r = Rc::new(RefCell::new(inner));
                 *cell = Value::Reference(r.clone());
                 if let Some(pt) = ptype {
