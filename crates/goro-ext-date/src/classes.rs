@@ -1605,9 +1605,21 @@ fn datetime_method(
             }
         }
         b"__wakeup" => {
+            wakeup_deprecated(
+                vm,
+                if immutable {
+                    "DateTimeImmutable"
+                } else {
+                    "DateTime"
+                },
+            );
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
+            }
             let mut a = PhpArray::new();
-            for (k, v) in o.borrow().properties.iter() {
-                a.set(ArrayKey::String(PhpString::from_vec(k.clone())), v.clone());
+            // (its real properties: the ones the engine shows are not)
+            for (k, v) in real_props(o, &[b"date", b"timezone_type", b"timezone"]) {
+                a.set(ArrayKey::String(PhpString::from_vec(k)), v);
             }
             match date_from_hash(vm, &a)? {
                 Some(t) => {
@@ -2039,9 +2051,14 @@ fn timezone_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             }
         }
         b"__wakeup" => {
+            wakeup_deprecated(vm, "DateTimeZone");
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
+            }
             let mut a = PhpArray::new();
-            for (k, v) in o.borrow().properties.iter() {
-                a.set(ArrayKey::String(PhpString::from_vec(k.clone())), v.clone());
+            // (its real properties: the ones the engine shows are not)
+            for (k, v) in real_props(o, &[b"timezone_type", b"timezone"]) {
+                a.set(ArrayKey::String(PhpString::from_vec(k)), v);
             }
             match tz_from_hash(&a) {
                 Some(z) => {
@@ -2245,6 +2262,10 @@ fn interval_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             Ok(Value::Null)
         }
         b"__wakeup" => {
+            wakeup_deprecated(vm, "DateInterval");
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
+            }
             let mut a = PhpArray::new();
             for (k, v) in o.borrow().properties.iter() {
                 a.set(ArrayKey::String(PhpString::from_vec(k.clone())), v.clone());
@@ -2416,9 +2437,14 @@ fn period_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Value
             Ok(Value::Null)
         }
         b"__wakeup" => {
+            wakeup_deprecated(vm, "DatePeriod");
+            if vm.current_exception.is_some() {
+                return Ok(Value::Null);
+            }
             let mut a = PhpArray::new();
-            for (k, v) in o.borrow().properties.iter() {
-                a.set(ArrayKey::String(PhpString::from_vec(k.clone())), v.clone());
+            // (its real properties: the ones the engine shows are not)
+            for (k, v) in real_props(o, &crate::state::PERIOD_PROPS) {
+                a.set(ArrayKey::String(PhpString::from_vec(k)), v);
             }
             let mut p = need_period(vm, o);
             if !period_from_hash(vm, &mut p, &a) {
@@ -3050,4 +3076,24 @@ pub fn date_interval_format_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     Ok(Value::String(PhpString::from_vec(interval_format(
         &fmt, &iv.diff,
     ))))
+}
+
+/// The 8.5 deprecation of the date classes' __wakeup().
+fn wakeup_deprecated(vm: &mut Vm, class: &str) {
+    vm.emit_deprecated(&format!(
+        "Method {}::__wakeup() is deprecated since 8.5, this method is obsolete, as serialization hooks are provided by __unserialize() and __serialize()",
+        class
+    ));
+}
+
+/// An object's real properties (zend_std_get_properties()): not the
+/// internal state, nor the fields shown from it (`shown`) while it has one.
+fn real_props(o: &Rc<RefCell<PhpObject>>, shown: &[&[u8]]) -> Vec<(Vec<u8>, Value)> {
+    let ob = o.borrow();
+    let has_state = [P_STATE, P_TZ, P_PERIOD].iter().any(|m| ob.has_property(m));
+    ob.properties
+        .iter()
+        .filter(|(k, _)| !(has_state && shown.contains(&k.as_slice())))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }

@@ -1485,6 +1485,36 @@ impl Value {
                     {
                         // ext/date DateInterval objects are not comparable
                         false
+                    } else if a_b.has_property(b"__timestamp_period")
+                        && b_b.has_property(b"__timestamp_period")
+                        && a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
+                    {
+                        // ext/date DatePeriod: zend_std_compare_objects() of
+                        // the property slots, which its fields are not (they
+                        // are shown by its get_properties handler): only the
+                        // dynamic properties count.
+                        let dynamic = |o: &PhpObject| -> Vec<(Vec<u8>, Value)> {
+                            o.properties
+                                .iter()
+                                .filter(|(k, _)| {
+                                    !k.starts_with(b"__timestamp")
+                                        && !matches!(
+                                            k.as_slice(),
+                                            b"start"
+                                                | b"current"
+                                                | b"end"
+                                                | b"interval"
+                                                | b"recurrences"
+                                                | b"include_start_date"
+                                                | b"include_end_date"
+                                        )
+                                })
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect()
+                        };
+                        let (av, bv) = (dynamic(&a_b), dynamic(&b_b));
+                        av.len() == bv.len()
+                            && av.iter().all(|(k, v)| v.equals(&b_b.get_property(k)))
                     } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
                         && (crate::spl_dll::is_spl_array_object(&a_b)
                             || crate::spl_dll::is_spl_array_object(&b_b))

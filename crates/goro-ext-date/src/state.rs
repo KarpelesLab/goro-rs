@@ -722,7 +722,7 @@ pub fn arr_val(a: PhpArray) -> Value {
     Value::Array(Rc::new(RefCell::new(a)))
 }
 
-const PERIOD_PROPS: [&[u8]; 7] = [
+pub(crate) const PERIOD_PROPS: [&[u8]; 7] = [
     b"start",
     b"current",
     b"end",
@@ -861,6 +861,17 @@ pub fn compare_check(vm: &mut Vm, a: &Value, b: &Value) {
 /// Keep the engine-provided properties after user-added ones, mirroring the
 /// order PHP's get_properties_for handlers produce.
 pub fn prop_added(o: &Rc<RefCell<PhpObject>>) {
+    // date_interval_write_property(): y/m/d/h/i/s/invert are stored as
+    // integers, f as a float; days (and from_string) keep the interval's.
+    let is_interval = o.borrow().has_property(P_IVAL);
+    if is_interval {
+        if let Some(iv) = interval_get(o) {
+            if !iv.from_string {
+                interval_set(o, &iv);
+                return;
+            }
+        }
+    }
     let mut ob = o.borrow_mut();
     let names: &[&[u8]] = if ob.has_property(P_STATE) {
         &[b"date", b"timezone_type", b"timezone"]

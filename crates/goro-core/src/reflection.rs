@@ -5482,15 +5482,10 @@ pub fn reflection_method_method(
             })
         }
         b"isdeprecated" => {
-            // Check for the #[\Deprecated] attribute on the method.
+            // The #[\Deprecated] attribute on the method (an internal one's
+            // ZEND_ACC_DEPRECATED).
             let has_dep = rmethod(vm, &class_lower, method_lower.as_bytes())
-                .map(|m| {
-                    m.attributes.iter().any(|a| {
-                        let n = String::from_utf8_lossy(&a.name);
-                        n.eq_ignore_ascii_case("deprecated")
-                            || n.eq_ignore_ascii_case("\\deprecated")
-                    })
-                })
+                .map(|m| op_array_is_deprecated(&m.op_array, &m.attributes))
                 .unwrap_or(false);
             Some(if has_dep { Value::True } else { Value::False })
         }

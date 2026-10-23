@@ -240,7 +240,8 @@ pub type BuiltinFn = fn(&mut Vm, &[Value]) -> Result<Value, VmError>;
 pub struct NativeClassHandler {
     pub has_method: fn(&[u8], &[u8], bool) -> bool,
     pub call: fn(&mut Vm, &[u8], &[u8], &[u8], Option<&Value>, &[Value]) -> Value,
-    /// Called after a new (dynamic) property was added to an object of the class.
+    /// Called after a property of an object of the class was written (a new
+    /// dynamic one added, or an existing one set).
     pub prop_added: Option<fn(&Rc<RefCell<PhpObject>>)>,
     /// Called before a property write (kind 0) or unset (kind 1). Returning
     /// false aborts the operation; the hook must have set `current_exception`.
@@ -57332,7 +57333,7 @@ impl Vm {
                                     }
                                 }
                                 obj.borrow_mut().set_property(pkey.to_vec(), value);
-                                if was_new && !self.native_class_handlers.is_empty() {
+                                if !self.native_class_handlers.is_empty() {
                                     if let Some((_, h)) =
                                         self.find_native_class_handler(&class_lower)
                                     {
