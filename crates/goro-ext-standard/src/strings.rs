@@ -1254,139 +1254,6 @@ fn validate_sprintf_values_arg(
     })
 }
 
-/// Count the number of format specifiers in a sprintf format string and validate arg count
-fn validate_sprintf_arg_count(
-    vm: &mut Vm,
-    _func_name: &str,
-    args: &[Value],
-) -> Result<(), VmError> {
-    if args.is_empty() {
-        return Ok(());
-    }
-    let format = args[0].to_php_string();
-    let format_bytes = format.as_bytes();
-    let mut max_arg = 0usize;
-    let mut seq_arg = 0usize;
-    let mut i = 0;
-
-    while i < format_bytes.len() {
-        if format_bytes[i] == b'%' {
-            i += 1;
-            if i >= format_bytes.len() {
-                // % at end of string with no specifier
-                let msg = "Missing format specifier at end of string";
-                let exc = vm.create_exception(b"ValueError", msg, 0);
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg.into(),
-                    line: vm.current_line,
-                });
-            }
-            if format_bytes[i] == b'%' {
-                i += 1;
-                continue;
-            }
-            // Check for position specifier N$
-            let save_i = i;
-            let mut num = 0usize;
-            let mut has_num = false;
-            while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                num = num
-                    .saturating_mul(10)
-                    .saturating_add((format_bytes[i] - b'0') as usize);
-                has_num = true;
-                i += 1;
-            }
-            if has_num && i < format_bytes.len() && format_bytes[i] == b'$' {
-                if num == 0 || num >= i32::MAX as usize {
-                    // Invalid argnum: the formatting pass raises the ValueError.
-                    return Ok(());
-                }
-                if num > max_arg {
-                    max_arg = num;
-                }
-                i += 1;
-            } else {
-                i = save_i;
-                seq_arg += 1;
-                if seq_arg > max_arg {
-                    max_arg = seq_arg;
-                }
-            }
-            // Skip flags, width, precision, length modifiers, and type
-            while i < format_bytes.len()
-                && matches!(format_bytes[i], b'-' | b'+' | b' ' | b'0' | b'\'')
-            {
-                if format_bytes[i] == b'\'' {
-                    i += 1; // consume apostrophe
-                    if i >= format_bytes.len() {
-                        // %'  with no padding char -> ValueError "Missing padding character"
-                        let msg = "Missing padding character";
-                        let exc = vm.create_exception(b"ValueError", msg, 0);
-                        vm.current_exception = Some(exc);
-                        return Err(VmError {
-                            message: msg.into(),
-                            line: vm.current_line,
-                        });
-                    }
-                    i += 1; // skip pad char
-                    continue;
-                }
-                i += 1;
-            }
-            // Width
-            while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            // Precision
-            if i < format_bytes.len() && format_bytes[i] == b'.' {
-                i += 1;
-                while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                    i += 1;
-                }
-            }
-            // Length modifiers
-            while i < format_bytes.len()
-                && matches!(
-                    format_bytes[i],
-                    b'l' | b'h' | b'L' | b'q' | b'j' | b'z' | b't'
-                )
-            {
-                i += 1;
-            }
-            // Type specifier - if missing, it's an error
-            if i >= format_bytes.len() {
-                let msg = "Missing format specifier at end of string";
-                let exc = vm.create_exception(b"ValueError", msg, 0);
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg.into(),
-                    line: vm.current_line,
-                });
-            }
-            i += 1;
-        } else {
-            i += 1;
-        }
-    }
-
-    let available = args.len() - 1; // subtract the format arg
-    if max_arg > available {
-        let msg = format!(
-            "{} arguments are required, {} given",
-            max_arg + 1,
-            available + 1
-        );
-        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-    Ok(())
-}
-
 fn sprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         let msg = "sprintf() expects at least 1 argument, 0 given";
@@ -1400,7 +1267,6 @@ fn sprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // TypeError for non-string format argument (array, resource)
     validate_sprintf_format_arg(vm, "sprintf", args.first())?;
     // Check argument count
-    validate_sprintf_arg_count(vm, "sprintf", args)?;
     let result = do_sprintf_vm(vm, args)?;
     Ok(Value::String(PhpString::from_vec(result)))
 }
@@ -1413,19 +1279,6 @@ pub fn do_sprintf(args: &[Value]) -> Vec<u8> {
 
 /// Sprintf implementation with VM reference (for __toString invocation and
 /// for raising errors). Errors set the VM's current_exception.
-/// Replace the '.' of a formatted number by the LC_NUMERIC decimal point.
-fn localize_decimal_point(s: &mut String) {
-    let dp = crate::locale::decimal_point();
-    if dp != b'.' {
-        if let Some(p) = s.find('.') {
-            let mut b = std::mem::take(s).into_bytes();
-            b[p] = dp;
-            *s = String::from_utf8(b)
-                .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
-        }
-    }
-}
-
 pub fn do_sprintf_vm(vm: &mut Vm, args: &[Value]) -> Result<Vec<u8>, VmError> {
     do_sprintf_inner(Some(vm), args)
 }
@@ -1447,6 +1300,78 @@ pub fn do_sprintf_vm_named(
     r
 }
 
+/// The `nb_additional_parameters` of php_formatted_print() for the running
+/// function: -1 for the v*printf() family (ValueError on missing items),
+/// otherwise the number of parameters before the variadic values.
+fn sprintf_additional_params(fname: &str) -> i64 {
+    match fname {
+        "vsprintf" | "vprintf" | "vfprintf" => -1,
+        "fprintf" => 2,
+        _ => 1,
+    }
+}
+
+/// php_conv_fp(): fixed ('F') or exponential ('e'/'E') conversion of a
+/// finite number. Returns (digits without sign, is_negative).
+fn php_conv_fp(format: u8, num: f64, precision: usize, dec_point: u8) -> (Vec<u8>, bool) {
+    // __cvt() reports zero (and -0.0) as positive.
+    let is_negative = num != 0.0 && num.is_sign_negative();
+    let a = num.abs();
+    let mut s = if format == b'F' {
+        format!("{:.*}", precision, a).into_bytes()
+    } else {
+        let t = format!("{:.*e}", precision, a);
+        let (mant, exp) = t.split_once('e').unwrap_or((&t, "0"));
+        let exp: i32 = exp.parse().unwrap_or(0);
+        let mut v = mant.as_bytes().to_vec();
+        v.push(format);
+        v.push(if exp < 0 { b'-' } else { b'+' });
+        v.extend_from_slice(exp.unsigned_abs().to_string().as_bytes());
+        v
+    };
+    if format == b'F' && dec_point != b'.' {
+        if let Some(p) = s.iter().position(|&c| c == b'.') {
+            s[p] = dec_point;
+        }
+    }
+    (s, is_negative)
+}
+
+/// php_sprintf_appendstring().
+#[allow(clippy::too_many_arguments)]
+fn sprintf_append_string(
+    out: &mut Vec<u8>,
+    add: &[u8],
+    min_width: usize,
+    max_width: usize,
+    padding: u8,
+    align_left: bool,
+    neg: bool,
+    expprec: bool,
+    always_sign: bool,
+) {
+    let mut add = add;
+    let mut copy_len = if expprec {
+        max_width.min(add.len())
+    } else {
+        add.len()
+    };
+    let npad = min_width.saturating_sub(copy_len);
+    out.reserve(min_width.max(copy_len));
+    if !align_left {
+        if (neg || always_sign) && padding == b'0' && !add.is_empty() {
+            out.push(if neg { b'-' } else { b'+' });
+            add = &add[1..];
+            copy_len = copy_len.saturating_sub(1);
+        }
+        out.extend(std::iter::repeat_n(padding, npad));
+    }
+    out.extend_from_slice(&add[..copy_len.min(add.len())]);
+    if align_left {
+        out.extend(std::iter::repeat_n(padding, npad));
+    }
+}
+
 fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, VmError> {
     if args.is_empty() {
         return Ok(Vec::new());
@@ -1456,12 +1381,15 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
     } else {
         args[0].to_php_string()
     };
-    let format_bytes = format.as_bytes();
+    let fmt = format.as_bytes();
+    let values = &args[1..];
+    let argc = values.len();
+    let fname = SPRINTF_FNAME.with(|f| f.get());
 
-    // Helper: raise a ValueError (or no-op if no VM).
-    fn raise(vm: &mut Option<&mut Vm>, msg: String) -> VmError {
+    // Helper: raise an exception of `class` (or no-op if no VM).
+    fn raise_class(vm: &mut Option<&mut Vm>, class: &[u8], msg: String) -> VmError {
         if let Some(vm_ref) = vm.as_deref_mut() {
-            let exc = vm_ref.create_exception(b"ValueError", &msg, 0);
+            let exc = vm_ref.create_exception(class, &msg, 0);
             vm_ref.current_exception = Some(exc);
             return VmError {
                 message: msg,
@@ -1473,41 +1401,41 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
             line: 0,
         }
     }
-
-    // Parse an optional argument-position specifier (digits followed by '$').
-    // Returns Some(1-based position) on match. On no match, leaves i unchanged.
-    // Matches PHP: scan past any digits first; only if `$` follows do we treat
-    // this as an argpos spec (and then parse the number, which may be 0/missing
-    // which triggers a ValueError).
-    fn parse_argpos(
-        fmt: &[u8],
-        i: &mut usize,
-        vm: &mut Option<&mut Vm>,
-    ) -> Result<Option<usize>, VmError> {
-        let save_i = *i;
-        let mut lookahead = *i;
-        while lookahead < fmt.len() && fmt[lookahead].is_ascii_digit() {
-            lookahead += 1;
-        }
-        if lookahead >= fmt.len() || fmt[lookahead] != b'$' {
-            // Not an argpos; leave parser position untouched.
-            *i = save_i;
-            return Ok(None);
-        }
-        // Argpos spec confirmed. Parse digits (may be empty → 0 → invalid).
+    fn raise(vm: &mut Option<&mut Vm>, msg: String) -> VmError {
+        raise_class(vm, b"ValueError", msg)
+    }
+    // The format is NUL-terminated in C: reading past the end sees '\0'.
+    let at = |i: usize| fmt.get(i).copied().unwrap_or(0);
+    // php_sprintf_getnumber(): ZEND_STRTOL, -1 when >= INT_MAX.
+    fn getnumber(fmt: &[u8], i: &mut usize) -> i64 {
         let mut num: u64 = 0;
-        let mut overflow = false;
         while *i < fmt.len() && fmt[*i].is_ascii_digit() {
             num = num
                 .saturating_mul(10)
                 .saturating_add((fmt[*i] - b'0') as u64);
-            if num >= i32::MAX as u64 {
-                overflow = true;
-            }
             *i += 1;
         }
-        *i += 1; // skip $
-        if num == 0 || overflow {
+        if num >= i32::MAX as u64 {
+            -1
+        } else {
+            num as i64
+        }
+    }
+    // php_sprintf_get_argnum(): Ok(None) for "next", Ok(Some(0-based)).
+    fn get_argnum(
+        fmt: &[u8],
+        i: &mut usize,
+        vm: &mut Option<&mut Vm>,
+    ) -> Result<Option<usize>, VmError> {
+        let mut t = *i;
+        while t < fmt.len() && fmt[t].is_ascii_digit() {
+            t += 1;
+        }
+        if fmt.get(t) != Some(&b'$') {
+            return Ok(None);
+        }
+        let n = getnumber(fmt, i);
+        if n <= 0 {
             return Err(raise(
                 vm,
                 format!(
@@ -1516,613 +1444,456 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                 ),
             ));
         }
-        Ok(Some(num as usize))
+        *i += 1; // skip '$'
+        Ok(Some(n as usize - 1))
     }
 
     let mut result: Vec<u8> = Vec::new();
-    let mut arg_idx: usize = 1; // 1-based sequential cursor (args[0] is format)
-    let mut i = 0;
+    let mut currarg: usize = 0;
+    let mut max_missing: Option<usize> = None;
+    let mut i = 0usize;
 
-    while i < format_bytes.len() {
-        if format_bytes[i] == b'%' {
+    'outer: while i < fmt.len() {
+        let Some(off) = fmt[i..].iter().position(|&c| c == b'%') else {
+            result.extend_from_slice(&fmt[i..]);
+            break;
+        };
+        result.extend_from_slice(&fmt[i..i + off]);
+        i += off + 1; // skip the '%'
+
+        if at(i) == b'%' {
+            result.push(b'%');
             i += 1;
-            if i >= format_bytes.len() {
-                break;
-            }
-            if format_bytes[i] == b'%' {
-                result.push(b'%');
-                i += 1;
-                continue;
-            }
+            continue;
+        }
+        let mut align_left = false;
+        let mut padding = b' ';
+        let mut always_sign = false;
+        let mut expprec = false;
+        let mut adj_precision = false;
+        let mut width: usize = 0;
+        let mut precision: i64 = 0;
+        let argnum: Option<usize>;
 
-            // Parse format specifier: %[argnum$][flags][width][.precision]type
-            // Value-arg position. None means "use sequential" (set later if no spec).
-            let arg_pos = parse_argpos(format_bytes, &mut i, &mut vm)?;
-
-            // Flags: -, +, space, 0, '
-            let mut pad_char = b' ';
-            let mut left_align = false;
-            let mut show_sign = false;
-            let mut pad_zero = false;
-
-            // Flags
+        if at(i).is_ascii_alphabetic() {
+            argnum = None;
+        } else {
+            argnum = get_argnum(fmt, &mut i, &mut vm)?;
             loop {
-                if i >= format_bytes.len() {
-                    break;
-                }
-                match format_bytes[i] {
-                    b'-' => {
-                        left_align = true;
-                        i += 1;
-                    }
-                    b'+' => {
-                        show_sign = true;
-                        i += 1;
-                    }
-                    b'0' => {
-                        pad_zero = true;
-                        pad_char = b'0';
-                        i += 1;
-                    }
-                    b' ' => {
-                        i += 1;
-                    } // space flag
+                match at(i) {
+                    b' ' | b'0' => padding = at(i),
+                    b'-' => align_left = true,
+                    b'+' => always_sign = true,
                     b'\'' => {
-                        i += 1;
-                        if i >= format_bytes.len() {
+                        if i + 1 < fmt.len() {
+                            i += 1;
+                            padding = fmt[i];
+                        } else {
                             return Err(raise(&mut vm, "Missing padding character".to_string()));
                         }
-                        pad_char = format_bytes[i];
-                        i += 1;
                     }
                     _ => break,
                 }
-            }
-
-            // Width: literal digits, or '*' (next arg / positional arg)
-            let width: usize = if i < format_bytes.len() && format_bytes[i] == b'*' {
                 i += 1;
-                let w_argpos = parse_argpos(format_bytes, &mut i, &mut vm)?;
-                let w_idx = match w_argpos {
+            }
+            if at(i) == b'*' {
+                i += 1;
+                let w = match get_argnum(fmt, &mut i, &mut vm)? {
                     Some(n) => n,
                     None => {
-                        let n = arg_idx;
-                        arg_idx += 1;
-                        n
+                        currarg += 1;
+                        currarg - 1
                     }
                 };
-                let w_arg = args.get(w_idx).unwrap_or(&Value::Null);
-                if !matches!(w_arg, Value::Long(_)) {
+                if w >= argc {
+                    max_missing = Some(max_missing.map_or(w, |m| m.max(w)));
+                    continue 'outer;
+                }
+                let Value::Long(wv) = values[w].deref() else {
                     return Err(raise(&mut vm, "Width must be an integer".to_string()));
-                }
-                let w_val = w_arg.to_long();
-                if w_val < 0 || w_val > i32::MAX as i64 {
+                };
+                if wv < 0 || wv > i32::MAX as i64 {
                     return Err(raise(
                         &mut vm,
                         format!("Width must be between 0 and {}", i32::MAX),
                     ));
                 }
-                w_val as usize
-            } else {
-                let mut w: u64 = 0;
-                let mut overflow = false;
-                while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                    w = w
-                        .saturating_mul(10)
-                        .saturating_add((format_bytes[i] - b'0') as u64);
-                    if w > i32::MAX as u64 {
-                        overflow = true;
-                    }
-                    i += 1;
-                }
-                if overflow {
+                width = wv as usize;
+            } else if at(i).is_ascii_digit() {
+                let w = getnumber(fmt, &mut i);
+                if w < 0 {
                     return Err(raise(
                         &mut vm,
                         format!("Width must be between 0 and {}", i32::MAX),
                     ));
                 }
-                w as usize
-            };
-
-            // Precision: '.' then either '*' or digits. Sentinel: -1 means
-            // "auto/shortest" (only valid for g/G/h/H). Negative literal not
-            // expressible via the digit path; only %.* with -1 is.
-            let mut precision: Option<i64> = None;
-            if i < format_bytes.len() && format_bytes[i] == b'.' {
+                width = w as usize;
+            }
+            if at(i) == b'.' {
                 i += 1;
-                if i < format_bytes.len() && format_bytes[i] == b'*' {
+                adj_precision = true;
+                if at(i) == b'*' {
                     i += 1;
-                    let p_argpos = parse_argpos(format_bytes, &mut i, &mut vm)?;
-                    let p_idx = match p_argpos {
+                    let p = match get_argnum(fmt, &mut i, &mut vm)? {
                         Some(n) => n,
                         None => {
-                            let n = arg_idx;
-                            arg_idx += 1;
-                            n
+                            currarg += 1;
+                            currarg - 1
                         }
                     };
-                    let p_arg = args.get(p_idx).unwrap_or(&Value::Null);
-                    if !matches!(p_arg, Value::Long(_)) {
-                        return Err(raise(&mut vm, "Precision must be an integer".to_string()));
+                    if p >= argc {
+                        max_missing = Some(max_missing.map_or(p, |m| m.max(p)));
+                        continue 'outer;
                     }
-                    let p_val = p_arg.to_long();
-                    if p_val < -1 || p_val > i32::MAX as i64 {
+                    let Value::Long(pv) = values[p].deref() else {
+                        return Err(raise(&mut vm, "Precision must be an integer".to_string()));
+                    };
+                    if pv < -1 || pv > i32::MAX as i64 {
                         return Err(raise(
                             &mut vm,
                             format!("Precision must be between -1 and {}", i32::MAX),
                         ));
                     }
-                    precision = Some(p_val);
-                } else {
-                    let mut p: u64 = 0;
-                    let mut overflow = false;
-                    let mut has_digits = false;
-                    while i < format_bytes.len() && format_bytes[i].is_ascii_digit() {
-                        p = p
-                            .saturating_mul(10)
-                            .saturating_add((format_bytes[i] - b'0') as u64);
-                        if p > i32::MAX as u64 {
-                            overflow = true;
-                        }
-                        has_digits = true;
-                        i += 1;
-                    }
-                    if overflow {
+                    precision = pv;
+                    expprec = true;
+                } else if at(i).is_ascii_digit() {
+                    precision = getnumber(fmt, &mut i);
+                    if precision < 0 {
                         return Err(raise(
                             &mut vm,
                             format!("Precision must be between 0 and {}", i32::MAX),
                         ));
                     }
-                    precision = Some(if has_digits { p as i64 } else { 0 });
+                    expprec = true;
                 }
             }
+        }
 
-            if i >= format_bytes.len() {
-                break;
-            }
-            // Skip length modifiers (l, ll, etc.). PHP only skips 'l' but the
-            // others are harmless to skip too. Notably exclude 'h' and 'H'
-            // because those ARE valid type specifiers (shortest g/G).
-            while i < format_bytes.len() && format_bytes[i] == b'l' {
-                i += 1;
-            }
-            if i >= format_bytes.len() {
-                break;
-            }
-            let spec = format_bytes[i];
+        if at(i) == b'l' {
             i += 1;
-
-            // PHP: precision = -1 only allowed for g/G/h/H.
-            if precision == Some(-1) && !matches!(spec, b'g' | b'G' | b'h' | b'H') {
-                return Err(raise(
-                    &mut vm,
-                    "Precision -1 is only supported for %g, %G, %h and %H".to_string(),
-                ));
+        }
+        let argnum = match argnum {
+            Some(n) => n,
+            None => {
+                currarg += 1;
+                currarg - 1
             }
+        };
+        if argnum >= argc {
+            max_missing = Some(max_missing.map_or(argnum, |m| m.max(argnum)));
+            continue;
+        }
+        let spec = at(i);
+        if expprec && precision == -1 && !matches!(spec, b'g' | b'G' | b'h' | b'H') {
+            return Err(raise(
+                &mut vm,
+                "Precision -1 is only supported for %g, %G, %h and %H".to_string(),
+            ));
+        }
+        let arg = &values[argnum];
 
-            // Determine value arg index now (after parsing all width/precision).
-            let use_arg_idx = match arg_pos {
-                Some(n) => n,
-                None => {
-                    let n = arg_idx;
-                    arg_idx += 1;
-                    n
+        // zval_get_long() of an object: GMP-like objects cast, others warn
+        // ("could not be converted to int") and give 1.
+        fn object_warn(vm: &mut Option<&mut Vm>, arg: &Value, kind: u8, tname: &str) {
+            if let Value::Object(obj) = arg.deref() {
+                if goro_core::value::native_cast(&obj, kind).is_some() {
+                    return;
                 }
-            };
-            let arg = args.get(use_arg_idx).unwrap_or(&Value::Null);
-
-            // Precision usage: precision is Option<i64>, where Some(-1) means
-            // "auto/shortest" (g/G/h/H only). For floating-point specifiers
-            // PHP caps precision at MAX_FLOAT_PRECISION (53) and emits a Notice.
-            const PHP_MAX_FLOAT_PRECISION: i64 = 53;
-            let is_float_spec =
-                matches!(spec, b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'h' | b'H');
-            let precision_usize: Option<usize> = match precision {
-                Some(-1) => None, // sentinel handled per-type below
-                Some(p) if p >= 0 => {
-                    if is_float_spec && p > PHP_MAX_FLOAT_PRECISION {
-                        if let Some(vm_ref) = vm.as_deref_mut() {
-                            let line = vm_ref.current_line;
-                            vm_ref.emit_notice_at(
-                                &format!(
-                                    "{}(): Requested precision of {} digits was truncated to PHP maximum of {} digits",
-                                    SPRINTF_FNAME.with(|f| f.get()),
-                                    p, PHP_MAX_FLOAT_PRECISION
-                                ),
-                                line,
-                            );
+                if let Some(vm_ref) = vm.as_deref_mut() {
+                    let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+                    vm_ref.emit_warning(&format!(
+                        "Object of class {} could not be converted to {}",
+                        class_name, tname
+                    ));
+                }
+            }
+        }
+        /// zval_get_long(): out-of-range floats warn and wrap like
+        /// zend_dval_to_lval().
+        fn int_arg(vm: &mut Option<&mut Vm>, arg: &Value) -> i64 {
+            let v = arg.deref();
+            match &v {
+                Value::Object(_) => {
+                    if let Some(vm_ref) = vm.as_deref_mut() {
+                        if vm_ref
+                            .object_is_operator_type
+                            .map(|f| f(&v))
+                            .unwrap_or(false)
+                        {
+                            if let Some(n) = vm_ref.object_to_long.and_then(|f| f(&v)) {
+                                return n;
+                            }
                         }
-                        Some(PHP_MAX_FLOAT_PRECISION as usize)
-                    } else {
-                        Some((p as usize).min(4096))
                     }
+                    object_warn(vm, arg, 1, "int");
+                    1
                 }
-                _ => None,
-            };
-            let auto_precision = precision == Some(-1);
-
-            // Helper: when the arg is an object without __toString-like
-            // support, PHP either throws (for %s) or emits a Warning
-            // ("could not be converted to int|float") for the numeric specs.
-            fn object_warn_int(vm: &mut Option<&mut Vm>, arg: &Value) {
-                // zval_get_long() on an out-of-range float (zend_dval_to_lval).
-                if let Value::Double(d) = arg.deref() {
-                    if !d.is_finite() || !goro_core::value::php_double_fits_long(d) {
+                Value::Double(f) => {
+                    let f = *f;
+                    if !f.is_finite() || !goro_core::value::php_double_fits_long(f) {
                         if let Some(vm_ref) = vm.as_deref_mut() {
                             vm_ref.emit_warning(&format!(
                                 "The float {} is not representable as an int, cast occurred",
-                                goro_core::value::format_php_float_repr(d)
+                                goro_core::value::format_php_float_repr(f)
                             ));
                         }
-                    }
-                }
-                if let Value::Object(obj) = arg.deref() {
-                    if goro_core::value::native_cast(&obj, 1).is_some() {
-                        return;
-                    }
-                    if let Some(vm_ref) = vm.as_deref_mut() {
-                        let class_name =
-                            goro_core::value::display_class_name(&obj.borrow().class_name);
-                        vm_ref.emit_warning(&format!(
-                            "Object of class {} could not be converted to int",
-                            class_name
-                        ));
-                    }
-                }
-            }
-            /// zval_get_long() for the integer conversions: GMP-like objects
-            /// cast, other objects warn (value 1), out-of-range floats warn
-            /// and wrap like zend_dval_to_lval().
-            fn int_arg(vm: &mut Option<&mut Vm>, arg: &Value) -> i64 {
-                let v = arg.deref();
-                match &v {
-                    Value::Object(_) => {
-                        if let Some(vm_ref) = vm.as_deref_mut() {
-                            if vm_ref
-                                .object_is_operator_type
-                                .map(|f| f(&v))
-                                .unwrap_or(false)
-                            {
-                                if let Some(n) = vm_ref.object_to_long.and_then(|f| f(&v)) {
-                                    return n;
-                                }
-                            }
+                        if !f.is_finite() {
+                            return 0;
                         }
-                        object_warn_int(vm, arg);
-                        1
-                    }
-                    Value::Double(f) => {
-                        let f = *f;
-                        if !f.is_finite()
-                            || !(-9223372036854775808.0..9223372036854775808.0).contains(&f)
-                        {
-                            if let Some(vm_ref) = vm.as_deref_mut() {
-                                let prev = goro_core::value::get_php_precision();
-                                goro_core::value::set_php_precision(-1);
-                                let fs = goro_core::value::format_php_float(f);
-                                goro_core::value::set_php_precision(prev);
-                                vm_ref.emit_warning(&format!(
-                                    "The float {} is not representable as an int, cast occurred",
-                                    fs
-                                ));
+                        let two64 = 18446744073709551616.0f64;
+                        let mut dmod = f % two64;
+                        if dmod < 0.0 {
+                            if dmod == -9223372036854775808.0 {
+                                return i64::MIN;
                             }
-                            if !f.is_finite() {
-                                return 0;
-                            }
-                            let two64 = 18446744073709551616.0f64;
-                            let mut dmod = f % two64;
-                            if dmod < 0.0 {
-                                if dmod == -9223372036854775808.0 {
-                                    return i64::MIN;
-                                }
-                                dmod += two64;
-                            }
-                            if dmod > 9223372036854775807.0 {
-                                dmod -= two64;
-                            }
-                            return dmod as i64;
+                            dmod += two64;
                         }
-                        f as i64
+                        if dmod > 9223372036854775807.0 {
+                            dmod -= two64;
+                        }
+                        return dmod as i64;
                     }
-                    _ => v.to_long(),
+                    f as i64
                 }
+                _ => v.to_long(),
             }
-            fn object_warn_float(vm: &mut Option<&mut Vm>, arg: &Value) {
-                if let Value::Object(obj) = arg.deref() {
-                    if goro_core::value::native_cast(&obj, 2).is_some() {
-                        return;
-                    }
-                    if let Some(vm_ref) = vm.as_deref_mut() {
-                        let class_name =
-                            goro_core::value::display_class_name(&obj.borrow().class_name);
-                        vm_ref.emit_warning(&format!(
-                            "Object of class {} could not be converted to float",
-                            class_name
-                        ));
-                    }
-                }
-            }
+        }
 
-            let formatted: Vec<u8> = match spec {
-                b's' => {
-                    // PHP emits "Array to string conversion" warning when an
-                    // array is fed to %s.
-                    if matches!(arg.deref(), Value::Array(_)) {
-                        if let Some(vm_ref) = vm.as_deref_mut() {
-                            vm_ref.emit_warning("Array to string conversion");
-                        }
-                    }
-                    // For objects lacking __toString-equivalent support, PHP
-                    // throws Error rather than producing output.
-                    let s_bytes: Vec<u8> = if let Some(vm_ref) = vm.as_deref_mut() {
-                        let php_s = vm_ref.value_to_string_checked(arg)?;
-                        php_s.as_bytes().to_vec()
-                    } else {
-                        arg.to_php_string().as_bytes().to_vec()
-                    };
-                    if let Some(prec) = precision_usize {
-                        s_bytes.into_iter().take(prec).collect()
-                    } else {
-                        s_bytes
+        match spec {
+            b's' => {
+                if matches!(arg.deref(), Value::Array(_)) {
+                    if let Some(vm_ref) = vm.as_deref_mut() {
+                        vm_ref.emit_warning("Array to string conversion");
                     }
                 }
-                b'd' => {
-                    let n = int_arg(&mut vm, arg);
-                    if show_sign && n >= 0 {
-                        format!("+{}", n).into_bytes()
-                    } else {
-                        n.to_string().into_bytes()
-                    }
-                }
-                b'f' | b'F' => {
-                    object_warn_float(&mut vm, arg);
-                    let f = arg.to_double();
-                    let prec = precision_usize.unwrap_or(6);
-                    let mut s = format!("{:.prec$}", f);
-                    // %f uses the locale's decimal point, %F does not.
-                    if spec == b'f' {
-                        localize_decimal_point(&mut s);
-                    }
-                    if show_sign && !s.starts_with('-') && !f.is_nan() {
-                        format!("+{}", s).into_bytes()
-                    } else {
-                        s.into_bytes()
-                    }
-                }
-                b'e' => {
-                    object_warn_float(&mut vm, arg);
-                    let f = arg.to_double();
-                    let prec = precision_usize.unwrap_or(6);
-                    let s = format!("{:.prec$e}", f);
-                    // PHP always shows +/- in exponent, Rust doesn't show +
-                    let s = php_fix_exponent(&s);
-                    if show_sign && !s.starts_with('-') && !f.is_nan() {
-                        format!("+{}", s).into_bytes()
-                    } else {
-                        s.into_bytes()
-                    }
-                }
-                b'E' => {
-                    object_warn_float(&mut vm, arg);
-                    let f = arg.to_double();
-                    let prec = precision_usize.unwrap_or(6);
-                    let s = format!("{:.prec$E}", f);
-                    let s = php_fix_exponent(&s);
-                    if show_sign && !s.starts_with('-') && !f.is_nan() {
-                        format!("+{}", s).into_bytes()
-                    } else {
-                        s.into_bytes()
-                    }
-                }
-                b'g' | b'G' | b'h' | b'H' => {
-                    object_warn_float(&mut vm, arg);
-                    let f = arg.to_double();
-                    // precision -1 ('auto') uses shortest round-trip via Rust's
-                    // default float formatting; otherwise use significant digits.
-                    let prec = if auto_precision {
-                        usize::MAX // sentinel: use shortest
-                    } else if precision_usize == Some(0) {
-                        1
-                    } else {
-                        precision_usize.unwrap_or(6)
-                    };
-                    // PHP %g: use shorter of %e and %f, with significant digits
-                    // The precision specifies number of significant digits
-                    let s = if f == 0.0 {
-                        if f.is_sign_negative() {
-                            "-0".to_string()
-                        } else {
-                            "0".to_string()
-                        }
-                    } else if f.is_nan() {
-                        "NAN".to_string()
-                    } else if f.is_infinite() {
-                        if f > 0.0 {
-                            "INF".to_string()
-                        } else {
-                            "-INF".to_string()
-                        }
-                    } else if prec == usize::MAX {
-                        // Shortest round-trip via Rust default Display.
-                        let abs = f.abs();
-                        let exp = abs.log10().floor() as i32;
-                        // Use scientific when exponent is outside [-4, 16].
-                        if (-4..=16).contains(&exp) {
-                            // Try fixed display
-                            format!("{}", f)
-                        } else {
-                            let s = php_fix_exponent(&format!("{:e}", f));
-                            match s.find(['e', 'E']) {
-                                Some(p) if !s[..p].contains('.') => {
-                                    format!("{}.0{}", &s[..p], &s[p..])
-                                }
-                                _ => s,
-                            }
-                        }
-                    } else {
-                        // Use Rust's formatting with significant digits
-                        let abs = f.abs();
-                        let exp = abs.log10().floor() as i32;
-                        if exp >= -1_i32 && exp < prec as i32 {
-                            // Use fixed notation
-                            let decimal_digits = if prec as i32 > exp + 1 {
-                                (prec as i32 - exp - 1) as usize
-                            } else {
-                                0
-                            };
-                            let s = format!("{:.decimal_digits$}", f);
-                            // Remove trailing zeros after decimal point (PHP %g behavior)
-                            if s.contains('.') {
-                                let s = s.trim_end_matches('0');
-                                let s = s.trim_end_matches('.');
-                                s.to_string()
-                            } else {
-                                s
-                            }
-                        } else {
-                            // Use scientific notation
-                            let decimal_digits = prec.saturating_sub(1);
-                            let s = format!("{:.decimal_digits$e}", f);
-                            let s = php_fix_exponent(&s);
-                            // Remove trailing zeros in mantissa
-                            if let Some(e_pos) = s.find(['e', 'E']) {
-                                let mantissa = &s[..e_pos];
-                                let exponent = &s[e_pos..];
-                                // php_gcvt(): the exponential form keeps at
-                                // least one decimal ("1.0e+20").
-                                let mantissa = if mantissa.contains('.') {
-                                    mantissa.trim_end_matches('0').trim_end_matches('.')
-                                } else {
-                                    mantissa
-                                };
-                                if mantissa.contains('.') {
-                                    format!("{}{}", mantissa, exponent)
-                                } else {
-                                    format!("{}.0{}", mantissa, exponent)
-                                }
-                            } else {
-                                s
-                            }
-                        }
-                    };
-                    let upper = matches!(spec, b'G' | b'H');
-                    let mut s = if upper { s.to_uppercase() } else { s };
-                    if matches!(spec, b'g' | b'G') {
-                        localize_decimal_point(&mut s);
-                    }
-                    if show_sign && !s.starts_with('-') && !f.is_nan() {
-                        format!("+{}", s).into_bytes()
-                    } else {
-                        s.into_bytes()
-                    }
-                }
-                b'x' => {
-                    let n = int_arg(&mut vm, arg);
-                    if precision_usize.is_some() {
-                        Vec::new()
-                    } else {
-                        format!("{:x}", n).into_bytes()
-                    }
-                }
-                b'X' => {
-                    let n = int_arg(&mut vm, arg);
-                    if precision_usize.is_some() {
-                        Vec::new()
-                    } else {
-                        format!("{:X}", n).into_bytes()
-                    }
-                }
-                b'o' => {
-                    let n = int_arg(&mut vm, arg);
-                    if precision_usize.is_some() {
-                        Vec::new()
-                    } else {
-                        format!("{:o}", n).into_bytes()
-                    }
-                }
-                b'b' => {
-                    let n = int_arg(&mut vm, arg);
-                    if precision_usize.is_some() {
-                        Vec::new()
-                    } else {
-                        format!("{:b}", n).into_bytes()
-                    }
-                }
-                b'c' => {
-                    vec![int_arg(&mut vm, arg) as u8]
-                }
-                b'u' => format!("{}", int_arg(&mut vm, arg) as u64).into_bytes(),
-                b'%' => {
-                    // `%` as type specifier (after flags/width): output literal `%` and consume arg
-                    vec![b'%']
-                }
-                _ => {
-                    // PHP throws ValueError for any unrecognized type specifier.
-                    return Err(raise(
-                        &mut vm,
-                        format!("Unknown format specifier \"{}\"", spec as char),
-                    ));
-                }
-            };
-
-            // php_sprintf_appendint/appenduint: left-aligned integers never
-            // pad with zeros.
-            let pad_char = if left_align && pad_char == b'0' && matches!(spec, b'd' | b'u') {
-                b' '
-            } else {
-                pad_char
-            };
-            // Apply width and padding (byte-level). php_sprintf_appendchar()
-            // ignores width and padding for %c.
-            if spec != b'c' && width > 0 && formatted.len() < width {
-                let padding = width - formatted.len();
-                if left_align {
-                    result.extend_from_slice(&formatted);
-                    for _ in 0..padding {
-                        result.push(pad_char);
-                    }
+                let s: Vec<u8> = if let Some(vm_ref) = vm.as_deref_mut() {
+                    vm_ref.value_to_string_checked(arg)?.as_bytes().to_vec()
                 } else {
-                    // For zero-padding with sign, put sign before zeros
-                    if pad_zero
-                        && !formatted.is_empty()
-                        && (formatted[0] == b'-' || formatted[0] == b'+')
-                    {
-                        result.push(formatted[0]);
-                        result.extend(std::iter::repeat_n(b'0', padding));
-                        result.extend_from_slice(&formatted[1..]);
-                    } else {
-                        for _ in 0..padding {
-                            result.push(pad_char);
+                    arg.to_php_string().as_bytes().to_vec()
+                };
+                sprintf_append_string(
+                    &mut result,
+                    &s,
+                    width,
+                    precision.max(0) as usize,
+                    padding,
+                    align_left,
+                    false,
+                    expprec,
+                    false,
+                );
+            }
+            b'd' => {
+                let n = int_arg(&mut vm, arg);
+                let mut s = Vec::new();
+                if n >= 0 && always_sign {
+                    s.push(b'+');
+                }
+                s.extend_from_slice(n.to_string().as_bytes());
+                // Can't right-pad 0's on integers.
+                let pad = if align_left && padding == b'0' {
+                    b' '
+                } else {
+                    padding
+                };
+                sprintf_append_string(
+                    &mut result,
+                    &s,
+                    width,
+                    0,
+                    pad,
+                    align_left,
+                    n < 0,
+                    false,
+                    always_sign,
+                );
+            }
+            b'u' => {
+                let n = int_arg(&mut vm, arg) as u64;
+                let pad = if align_left && padding == b'0' {
+                    b' '
+                } else {
+                    padding
+                };
+                sprintf_append_string(
+                    &mut result,
+                    n.to_string().as_bytes(),
+                    width,
+                    0,
+                    pad,
+                    align_left,
+                    false,
+                    false,
+                    false,
+                );
+            }
+            b'e' | b'E' | b'f' | b'F' | b'g' | b'G' | b'h' | b'H' => {
+                object_warn(&mut vm, arg, 2, "float");
+                let number = arg.to_double();
+                // php_sprintf_appenddouble()
+                const MAX_FLOAT_PRECISION: i64 = 53;
+                let mut precision = precision;
+                if !adj_precision {
+                    precision = 6;
+                } else if precision > MAX_FLOAT_PRECISION {
+                    if let Some(vm_ref) = vm.as_deref_mut() {
+                        let line = vm_ref.current_line;
+                        vm_ref.emit_notice_at(
+                            &format!(
+                                "{}(): Requested precision of {} digits was truncated to PHP maximum of {} digits",
+                                fname, precision, MAX_FLOAT_PRECISION
+                            ),
+                            line,
+                        );
+                    }
+                    precision = MAX_FLOAT_PRECISION;
+                }
+                if number.is_nan() {
+                    sprintf_append_string(
+                        &mut result,
+                        b"NaN",
+                        3,
+                        0,
+                        padding,
+                        align_left,
+                        false,
+                        false,
+                        always_sign,
+                    );
+                    i += 1;
+                    continue;
+                }
+                if number.is_infinite() {
+                    let neg = number < 0.0;
+                    let s: &[u8] = if neg { b"-INF" } else { b"INF" };
+                    sprintf_append_string(
+                        &mut result,
+                        s,
+                        0,
+                        0,
+                        padding,
+                        align_left,
+                        neg,
+                        false,
+                        always_sign,
+                    );
+                    i += 1;
+                    continue;
+                }
+                let mut s = Vec::new();
+                let is_negative;
+                match spec {
+                    b'e' | b'E' | b'f' | b'F' => {
+                        let conv = if spec == b'f' { b'F' } else { spec };
+                        let dp = if spec == b'f' {
+                            crate::locale::decimal_point()
+                        } else {
+                            b'.'
+                        };
+                        let (digits, neg) = php_conv_fp(conv, number, precision as usize, dp);
+                        is_negative = neg;
+                        if neg {
+                            s.push(b'-');
+                        } else if always_sign {
+                            s.push(b'+');
                         }
-                        result.extend_from_slice(&formatted);
+                        s.extend_from_slice(&digits);
+                    }
+                    _ => {
+                        if precision == 0 {
+                            precision = 1;
+                        }
+                        let dp = if matches!(spec, b'g' | b'G') {
+                            crate::locale::decimal_point()
+                        } else {
+                            b'.'
+                        };
+                        let exp_char = if matches!(spec, b'G' | b'H') {
+                            b'E'
+                        } else {
+                            b'e'
+                        };
+                        let g = goro_core::value::zend_gcvt(number, precision as i32, dp, exp_char);
+                        is_negative = g.first() == Some(&b'-');
+                        if !is_negative && always_sign {
+                            s.push(b'+');
+                        }
+                        s.extend_from_slice(&g);
                     }
                 }
-            } else {
-                result.extend_from_slice(&formatted);
+                sprintf_append_string(
+                    &mut result,
+                    &s,
+                    width,
+                    0,
+                    padding,
+                    align_left,
+                    is_negative,
+                    false,
+                    always_sign,
+                );
             }
-        } else {
-            result.push(format_bytes[i]);
-            i += 1;
+            b'c' => result.push(int_arg(&mut vm, arg) as u8),
+            b'o' | b'x' | b'X' | b'b' => {
+                let n = int_arg(&mut vm, arg) as u64;
+                let s = match spec {
+                    b'o' => format!("{:o}", n),
+                    b'x' => format!("{:x}", n),
+                    b'X' => format!("{:X}", n),
+                    _ => format!("{:b}", n),
+                };
+                sprintf_append_string(
+                    &mut result,
+                    s.as_bytes(),
+                    width,
+                    0,
+                    padding,
+                    align_left,
+                    false,
+                    expprec,
+                    false,
+                );
+            }
+            b'%' => result.push(b'%'),
+            0 if i >= fmt.len() => {
+                return Err(raise(
+                    &mut vm,
+                    "Missing format specifier at end of string".to_string(),
+                ));
+            }
+            _ => {
+                return Err(raise(
+                    &mut vm,
+                    format!("Unknown format specifier \"{}\"", spec as char),
+                ));
+            }
         }
+        i += 1;
     }
 
+    if let Some(m) = max_missing {
+        let nb = sprintf_additional_params(fname);
+        if nb == -1 {
+            return Err(raise(
+                &mut vm,
+                format!(
+                    "The arguments array must contain {} items, {} given",
+                    m + 1,
+                    argc
+                ),
+            ));
+        }
+        return Err(raise_class(
+            &mut vm,
+            b"ArgumentCountError",
+            format!(
+                "{} arguments are required, {} given",
+                m as i64 + nb + 1,
+                argc as i64 + nb
+            ),
+        ));
+    }
     Ok(result)
-}
-
-/// Fix scientific notation exponent to always show sign (e.g., e2 -> e+2)
-fn php_fix_exponent(s: &str) -> String {
-    // Find 'e' or 'E' and check if the next char is a digit (no sign)
-    if let Some(e_pos) = s.rfind(['e', 'E']) {
-        let after = &s[e_pos + 1..];
-        if !after.is_empty() && after.as_bytes()[0].is_ascii_digit() {
-            // Insert '+' after e/E
-            format!("{}+{}", &s[..e_pos + 1], after)
-        } else {
-            s.to_string()
-        }
-    } else {
-        s.to_string()
-    }
 }
 
 /// hebrev(): convert logical Hebrew text to visual text (string.c).
@@ -4254,7 +4025,6 @@ fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let mut all_args = vec![Value::String(format)];
     all_args.extend(fmt_args);
-    validate_sprintf_arg_count(vm, "vprintf", &all_args)?;
     let result = do_sprintf_vm_named(vm, "vprintf", &all_args)?;
     let len = result.len();
     vm.write_output(&result);
@@ -4272,7 +4042,6 @@ fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     validate_sprintf_format_arg(vm, "printf", args.first())?;
-    validate_sprintf_arg_count(vm, "printf", args)?;
     let result = do_sprintf_vm_named(vm, "printf", args)?;
     let len = result.len();
     vm.write_output(&result);
@@ -4519,7 +4288,6 @@ fn vsprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let mut all_args = vec![Value::String(format)];
     all_args.extend(fmt_args);
-    validate_sprintf_arg_count(vm, "vsprintf", &all_args)?;
     let result = do_sprintf_vm_named(vm, "vsprintf", &all_args)?;
     Ok(Value::String(PhpString::from_vec(result)))
 }
