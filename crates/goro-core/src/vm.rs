@@ -51977,13 +51977,15 @@ impl Vm {
                             let class_display = crate::value::display_class_name(&class.name);
                             let class_lower_for_check: Vec<u8> =
                                 class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            for method in class.methods.values() {
+                            for (method_key, method) in class.methods.iter() {
                                 // Skip inherited methods
                                 if method.declaring_class != class_lower_for_check {
                                     continue;
                                 }
+                                // (a trait's method was reported with the trait)
+                                let from_trait = method_from_trait.contains_key(method_key);
                                 for pt_info in method.op_array.param_types.iter().flatten() {
-                                    if pt_info.implicitly_nullable {
+                                    if pt_info.implicitly_nullable && !from_trait {
                                         let method_display = String::from_utf8_lossy(&method.name);
                                         let param_name =
                                             String::from_utf8_lossy(&pt_info.param_name);

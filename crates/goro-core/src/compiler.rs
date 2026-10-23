@@ -1275,6 +1275,32 @@ impl Compiler {
             .collect()
     }
 
+    /// A compile error ends the file's compilation: the implicitly
+    /// nullable parameters of the functions compiled before it were
+    /// reported at compile time.
+    #[inline(never)]
+    fn push_prior_implicit_nullable(&self) {
+        for f in &self.op_array.child_functions {
+            let name = if !f.display_name.is_empty() {
+                String::from_utf8_lossy(&f.display_name).to_string()
+            } else {
+                String::from_utf8_lossy(&f.name).to_string()
+            };
+            for pt in f.param_types.iter().flatten() {
+                if pt.implicitly_nullable {
+                    push_pending_compile_deprecated(
+                        format!(
+                            "{}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead",
+                            name,
+                            String::from_utf8_lossy(&pt.param_name)
+                        ),
+                        f.decl_line,
+                    );
+                }
+            }
+        }
+    }
+
     /// The attributes of a closure (or of its parameters): its scope is not
     /// known at compile time (zend_is_scope_known()), so self is resolved
     /// when the arguments are evaluated.
@@ -4773,6 +4799,7 @@ impl Compiler {
                             {
                                 match Self::check_literal_default(&pti.param_type, default_expr) {
                                     Err((tn, _)) => {
+                                        self.push_prior_implicit_nullable();
                                         return Err(CompileError {
                                             message: format!(
                                                 "Cannot use {} as default value for parameter ${} of type {}",
@@ -16548,6 +16575,7 @@ impl Compiler {
                             {
                                 match Self::check_literal_default(&pti.param_type, default_expr) {
                                     Err((tn, _)) => {
+                                        self.push_prior_implicit_nullable();
                                         return Err(CompileError {
                                             message: format!(
                                                 "Cannot use {} as default value for parameter ${} of type {}",
@@ -16887,6 +16915,7 @@ impl Compiler {
                             {
                                 match Self::check_literal_default(&pti.param_type, default_expr) {
                                     Err((tn, _)) => {
+                                        self.push_prior_implicit_nullable();
                                         return Err(CompileError {
                                             message: format!(
                                                 "Cannot use {} as default value for parameter ${} of type {}",
