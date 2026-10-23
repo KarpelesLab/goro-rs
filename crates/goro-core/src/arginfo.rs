@@ -1099,7 +1099,9 @@ impl Vm {
                                 true,
                             )
                         });
-                if !ok {
+                // Z_PARAM_OBJ_OF_CLASS_OR_STR: a Stringable object is a string
+                // (in weak mode, zend_parse_arg_str_weak()).
+                if !ok && !(!strict && m & T_STRING != 0 && self.zpp_object_has_tostring(&v)) {
                     return Err(self.zpp_type_error(info, i, p, &v));
                 }
                 break;
