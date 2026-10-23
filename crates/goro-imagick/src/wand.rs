@@ -58,7 +58,7 @@ impl Default for Settings {
             background_color: PixelInfo::white(),
             antialias: true,
             font: String::new(),
-            pointsize: 12.0,
+            pointsize: 0.0,
             gravity: Gravity::Undefined,
             extract: String::new(),
             sampling_factors: Vec::new(),
@@ -376,8 +376,28 @@ impl Wand {
     pub fn read_images(&self, filename: &str, ping: bool) -> MResult<Vec<Image>> {
         let spec = parse_filespec(filename);
         if let Some(m) = &spec.magick {
+            let up = m.to_ascii_uppercase();
+            if up == "LABEL" || up == "CAPTION" {
+                let o = crate::label::LabelOptions {
+                    font: &self.settings.font,
+                    pointsize: self.settings.pointsize,
+                    size: self.settings.size,
+                    gravity: self.settings.gravity,
+                    background: &self.settings.background_color,
+                    fill: self
+                        .settings
+                        .options
+                        .get("fill")
+                        .and_then(PixelInfo::parse)
+                        .unwrap_or_else(PixelInfo::black),
+                };
+                let mut img = crate::label::render(&o, &spec.path, up == "CAPTION")?;
+                self.apply_read_settings(&mut img);
+                return Ok(vec![img]);
+            }
             if pseudo::is_pseudo(m) {
-                let mut img = pseudo::read(m, &spec.path, self.settings.size)?;
+                let mut img =
+                    pseudo::read_with(m, &spec.path, self.settings.size, &self.settings.options)?;
                 self.apply_read_settings(&mut img);
                 return Ok(vec![img]);
             }

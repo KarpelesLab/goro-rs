@@ -40,6 +40,7 @@ pub mod fx;
 pub mod geometry;
 pub mod image;
 pub mod interp;
+pub mod label;
 pub mod pixels;
 pub mod properties;
 pub mod pseudo;
