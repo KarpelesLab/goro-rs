@@ -3341,14 +3341,16 @@ fn get_image_histogram(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -
 
 fn get_image_total_ink_density(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
+    // GetImageTotalInkDensity(): the largest per-pixel sum of C, M, Y and
+    // K; 0 for an image that is not CMYK
     let v = with_image(vm, &this(o), |i| {
-        let mut img = i.clone();
-        img.rgb_to_cmyk();
-        let k = img.black.clone().unwrap_or_default();
+        if i.colorspace != Colorspace::CMYK {
+            return 0.0;
+        }
         let mut max = 0.0f64;
-        for (p, kk) in img.pixels.chunks_exact(4).zip(k.iter()) {
-            let s = p[0] as f64 + p[1] as f64 + p[2] as f64 + *kk as f64;
-            max = max.max(s);
+        for (n, p) in i.pixels.chunks_exact(4).enumerate() {
+            let k = i.black.as_ref().map_or(0.0, |k| k[n] as f64);
+            max = max.max(p[0] as f64 + p[1] as f64 + p[2] as f64 + k);
         }
         max
     })?;
