@@ -36,7 +36,9 @@ Serve a document root over HTTP and HTTPS, running PHP scripts.
       --tls-cert FILE      PEM certificate chain for HTTPS (leaf first)
       --tls-key FILE       PEM private key for HTTPS
       --self-signed        HTTPS with an ephemeral self-signed certificate
-  -w, --workers N          worker threads (default: number of CPUs, max 32)
+  -w, --workers N          worker threads (default: number of CPUs, max 32;
+                           0 serves one connection at a time, in the main
+                           thread, from the first listener: for debugging)
       --front-controller P script requests for missing files go to
                            (default /index.php; \"none\" disables it)
       --server-name NAME   SERVER_NAME (default: the request's Host)
@@ -117,7 +119,6 @@ fn parse_args() -> Result<Options, String> {
                 o.workers = value(&a)?
                     .parse::<usize>()
                     .map_err(|_| "invalid worker count".to_string())?
-                    .max(1)
             }
             "--front-controller" => {
                 let v = value(&a)?;
@@ -318,6 +319,22 @@ fn main() {
         !opts.quiet,
     ));
 
+    if opts.workers == 0 {
+        let (listener, secure) = listeners.swap_remove(0);
+        eprintln!("goro-httpd: serving in the main thread");
+        for stream in listener.incoming().flatten() {
+            if let (Ok(peer), Ok(local)) = (stream.peer_addr(), stream.local_addr()) {
+                let conn = Conn {
+                    stream,
+                    peer,
+                    local,
+                    secure,
+                };
+                serve_connection(conn, &site, tls.as_ref());
+            }
+        }
+        return;
+    }
     let (tx, rx) = mpsc::sync_channel::<Conn>(1024);
     let rx = Arc::new(Mutex::new(rx));
     for i in 0..opts.workers {
