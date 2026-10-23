@@ -629,6 +629,9 @@ fn restore_custom_props(vm: &mut Vm, o: &Obj, a: &PhpArray, internal: &[&[u8]]) 
             }
         }
     }
+    drop(ob);
+    // The engine-provided properties are shown after the restored ones.
+    prop_added(o);
 }
 
 /// add_common_properties: user properties of the object appended to an array
