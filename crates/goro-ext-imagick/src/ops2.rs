@@ -599,6 +599,7 @@ fn sparse_color_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) ->
 
 fn subimage_match(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "z|zzdl", args)?;
+    let metric = a.get(4).map_or(0, |m| m.long_or(0));
     let d = d_(o);
     not_empty(vm, &d)?;
     let other = other_imagick(vm, f, 1, &a[0])?;
@@ -645,9 +646,28 @@ fn subimage_match(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
             }
         }
         let n = (small.columns * small.rows * 3).max(1) as f64;
+        let mut score = (best_err / n).sqrt();
+        // other metrics than (R)MSE: the least distortion over the offsets
+        if !matches!(metric, 0 | 5 | 10) && small.columns <= big.columns && small.rows <= big.rows {
+            let mut least = f64::MAX;
+            for y in 0..=big.rows - small.rows {
+                for x in 0..=big.columns - small.columns {
+                    let r = Rect::new(small.columns, small.rows, x as i64, y as i64);
+                    let crop = transform::crop(big, r).0;
+                    let v = crate::ops::distortion_ch(&crop, &small, metric, channel::DEFAULT);
+                    if v < least {
+                        least = v;
+                        best = (x, y);
+                    }
+                }
+            }
+            score = least;
+        } else if metric == 5 {
+            score *= score;
+        }
         let mut sim = big.clone();
         sim.colors = None;
-        (best, (best_err / n).sqrt(), sim)
+        (best, score, sim)
     };
     if let Some(Arg::Any(r)) = a.get(1) {
         if let Value::Reference(rc) = r {

@@ -2448,7 +2448,7 @@ fn distortion(a: &Image, b: &Image, metric: i64) -> f64 {
 }
 
 /// A metric over the colour channels `ch` selects.
-fn distortion_ch(a: &Image, b: &Image, metric: i64, ch: i64) -> f64 {
+pub(crate) fn distortion_ch(a: &Image, b: &Image, metric: i64, ch: i64) -> f64 {
     let mask = channel_mask(ch, false);
     let nch = (0..3).filter(|&c| mask[c]).count().max(1) as f64;
     let (w, h) = (a.columns.min(b.columns), a.rows.min(b.rows));
@@ -2478,17 +2478,18 @@ fn distortion_ch(a: &Image, b: &Image, metric: i64, ch: i64) -> f64 {
         }
     }
     let mse = sum_sq / (n * nch);
+    // ImageMagick 7.1.2 reports normalised metrics: AE as the fraction
+    // of differing pixels, MEPP as the mean error, PSNR over 120 dB
     match metric {
-        1 => abs_err as f64,
-        3 => sum_abs / (n * nch),
-        4 => sum_abs / nch * 65535.0 / n,
+        1 => abs_err as f64 / n,
+        3 | 4 => sum_abs / (n * nch),
         5 => mse,
         7 => peak,
         8 => {
             if mse == 0.0 {
-                f64::INFINITY
+                1.0
             } else {
-                -10.0 * mse.log10()
+                (-10.0 * mse.log10() / 120.0).min(1.0)
             }
         }
         10 => mse.sqrt(),
