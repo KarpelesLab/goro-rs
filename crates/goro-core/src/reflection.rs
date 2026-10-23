@@ -9100,8 +9100,17 @@ pub fn reflection_parameter_method(
                                 let mut current = Some(cl);
                                 while let Some(cl) = current {
                                     if let Some(ce) = rcls(vm, &cl) {
-                                        if let Some(c) = ce.constants.get(const_name.as_bytes()) {
-                                            return Some(c.clone());
+                                        if ce.constants.contains_key(const_name.as_bytes()) {
+                                            // (enum cases and constant
+                                            // expressions are evaluated)
+                                            return Some(
+                                                resolve_class_constant(
+                                                    vm,
+                                                    &cl,
+                                                    const_name.as_bytes(),
+                                                )
+                                                .unwrap_or(Value::Null),
+                                            );
                                         }
                                         current = ce.parent.as_ref().map(|p| {
                                             p.iter().map(|b| b.to_ascii_lowercase()).collect()

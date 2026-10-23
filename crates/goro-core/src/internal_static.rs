@@ -245,14 +245,35 @@ impl Vm {
             return Value::Null;
         };
         let class_name = String::from_utf8_lossy(&class.name).into_owned();
+        let method = if try_from { "tryFrom" } else { "from" };
         let Some(bt) = class.enum_backing_type.as_ref() else {
-            if try_from {
-                return Value::Null;
-            }
-            let msg = format!("Cannot use ::from on non-backed enum {}", class_name);
+            // A pure enum has no from()/tryFrom() (BackedEnum declares them).
+            let msg = format!("Call to undefined method {}::{}()", class_name, method);
             let exc = self.create_exception(b"Error", &msg, line);
             self.current_exception = Some(exc);
             return Value::Null;
+        };
+        // Z_PARAM_STR_OR_LONG: null is deprecated in weak mode and becomes
+        // the backing type's empty value.
+        let arg = match arg {
+            Value::Null | Value::Undef if !strict => {
+                self.emit_deprecated_at(
+                    &format!(
+                        "{}::{}(): Passing null to parameter #1 ($value) of type string|int is deprecated",
+                        class_name, method
+                    ),
+                    line,
+                );
+                if self.current_exception.is_some() {
+                    return Value::Null;
+                }
+                if bt.eq_ignore_ascii_case(b"int") {
+                    Value::Long(0)
+                } else {
+                    Value::String(crate::string::PhpString::empty())
+                }
+            }
+            a => a,
         };
         // Z_PARAM_LONG / Z_PARAM_STR: weak mode coerces scalars.
         let arg = self.enum_from_weak_int(bt, arg, strict, line);

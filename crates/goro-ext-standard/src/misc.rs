@@ -6256,6 +6256,15 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // An enum's implicit UnitEnum / BackedEnum methods.
+    if let Some(ce) = vm.classes.get(&class_lower).filter(|c| c.is_enum) {
+        let backed = ce.enum_backing_type.is_some();
+        if method_lower == b"cases"
+            || backed && matches!(method_lower.as_slice(), b"from" | b"tryfrom")
+        {
+            return Ok(Value::True);
+        }
+    }
     // An internal class (or the internal ancestor of a user class): its
     // stub's methods, inherited ones included.
     if goro_core::stubs::find_method(&current, &method_lower).is_some() {
