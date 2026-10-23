@@ -1885,6 +1885,13 @@ impl<'a> Parser<'a> {
                     obj.set_property(k.to_vec(), v);
                 }
             }
+            // ErrorException::$severity = E_ERROR
+            if !obj.has_property(b"severity")
+                && (class_lower == b"errorexception"
+                    || vm.class_extends(class_lower, b"errorexception"))
+            {
+                obj.set_property(b"severity".to_vec(), Value::Long(1));
+            }
         }
         if goro_core::spl::spl_class_needs_storage(class_lower)
             && !matches!(obj.get_property(b"__spl_array"), Value::Array(_))
