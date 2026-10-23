@@ -24858,6 +24858,13 @@ impl Vm {
                             });
                         }
                     }
+                    // (pow_function_base(): a zero base with a negative exponent)
+                    if cv_val.to_double() == 0.0 && rhs.to_double() < 0.0 {
+                        self.emit_deprecated_at(
+                            "Power of base 0 and negative exponent is deprecated",
+                            op.line,
+                        );
+                    }
                     self.write_operand(
                         &op.op1,
                         cv_val.pow(&rhs),

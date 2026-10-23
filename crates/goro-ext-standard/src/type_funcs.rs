@@ -191,7 +191,10 @@ fn strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::String(val.to_php_string()))
 }
 
-fn boolval(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn boolval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // (ZEND_BOOL: zend_is_true() warns for NAN)
+    let line = vm.current_line;
+    vm.warn_nan_coercion(args.first().unwrap_or(&Value::Null), "bool", line);
     Ok(if args.first().unwrap_or(&Value::Null).is_truthy() {
         Value::True
     } else {

@@ -1502,6 +1502,12 @@ fn intval_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ));
             return Ok(Value::Long(1));
         }
+        Value::Double(d) => {
+            // zval_get_long(): zend_dval_to_lval() warns for a float out of
+            // range (and wraps it)
+            let line = vm.current_line;
+            return Ok(Value::Long(vm.float_to_int_cast(*d, line)));
+        }
         _ => return Ok(Value::Long(val.to_long())),
     };
     if base == 0 || base == 2 {
