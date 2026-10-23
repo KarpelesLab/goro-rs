@@ -48565,7 +48565,12 @@ impl Vm {
                                 // Internal parent: check overriding methods against
                                 // its stub signatures.
                                 if let Err((msg, line, unresolved)) =
-                                    self.internal_parent_method_checks(&class, stub_parent, op.line)
+                                    self.internal_parent_method_checks(
+                                        &class,
+                                        stub_parent,
+                                        op.line,
+                                        is_early_attempt,
+                                    )
                                 {
                                     if unresolved && is_early_attempt {
                                         variance::defer(&class.name);
@@ -48980,7 +48985,10 @@ impl Vm {
                                     {
                                         if let Err((msg, line, unresolved)) = self
                                             .internal_parent_method_checks(
-                                                &class, stub_iface, op.line,
+                                                &class,
+                                                stub_iface,
+                                                op.line,
+                                                is_early_attempt,
                                             )
                                         {
                                             if unresolved && is_early_attempt {

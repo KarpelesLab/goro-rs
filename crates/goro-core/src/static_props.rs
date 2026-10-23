@@ -1334,6 +1334,7 @@ impl Vm {
         class: &crate::object::ClassEntry,
         parent: &'static crate::object::ClassEntry,
         decl_line: u32,
+        can_retry: bool,
     ) -> Result<(), (String, u32, bool)> {
         let outer = self.recorded_errors.replace(Vec::new());
         let r = self.internal_parent_method_checks_inner(class, parent, decl_line);
@@ -1345,7 +1346,7 @@ impl Vm {
                 }
             }
             // Retried later: the errors will be raised again then.
-            Err((_, _, true)) => {}
+            Err((_, _, true)) if can_retry => {}
             Err(_) => {
                 let file = self.current_file.clone();
                 for (ty, msg, line) in recorded {

@@ -19104,6 +19104,13 @@ impl Compiler {
                 }
             }
             E::DynamicClassConstAccess { class, constant } => {
+                // (a literal class operand folds to a non-string value)
+                if matches!(
+                    class.kind,
+                    E::Array(_) | E::Int(_) | E::Float(_) | E::True | E::False | E::Null
+                ) {
+                    return Some("Class name must be a valid object or a string".into());
+                }
                 if !is_name(class) {
                     return Some(
                         "Dynamic class names are not allowed in compile-time class constant references"
