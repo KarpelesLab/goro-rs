@@ -2765,6 +2765,7 @@ impl Parser {
         match self.peek() {
             TokenKind::Case => {
                 // enum case
+                let case_line = self.span().line;
                 self.advance();
                 let name = match self.peek().clone() {
                     TokenKind::Identifier(name) => {
@@ -2791,6 +2792,7 @@ impl Parser {
                 self.expect(&TokenKind::Semicolon)?;
                 Ok(ClassMember::EnumCase {
                     name,
+                    line: case_line,
                     value,
                     attributes: member_attributes,
                     doc_comment: member_doc_comment,

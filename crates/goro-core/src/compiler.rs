@@ -6295,6 +6295,24 @@ impl Compiler {
                                 }
                                 seen_consts.push(cn.clone());
                             }
+                            // An enum case is a class constant too.
+                            ClassMember::EnumCase {
+                                name: cn,
+                                line: case_line,
+                                ..
+                            } if modifiers.is_enum => {
+                                if seen_consts.iter().any(|c| c == cn) {
+                                    return Err(CompileError {
+                                        message: format!(
+                                            "Cannot redefine class constant {}::{}",
+                                            cname,
+                                            crate::string::msg_str(cn)
+                                        ),
+                                        line: *case_line,
+                                    });
+                                }
+                                seen_consts.push(cn.clone());
+                            }
                             ClassMember::Property {
                                 get_hook,
                                 set_hook,
@@ -7818,7 +7836,8 @@ impl Compiler {
                                             crate::string::msg_str(name),
                                             crate::string::msg_str(method_name)
                                         ),
-                                        line: *method_line,
+                                        // (zend_verify_enum(): at the enum)
+                                        line: stmt.span.line,
                                     });
                                 }
                                 // Backed enums cannot redeclare from/tryFrom, any enum cannot redeclare cases
@@ -10042,6 +10061,7 @@ impl Compiler {
                             value,
                             attributes: case_attributes,
                             doc_comment: case_doc_comment,
+                            ..
                         } => {
                             // 'case' can only be used in enums
                             if !modifiers.is_enum {

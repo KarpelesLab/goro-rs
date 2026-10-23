@@ -498,6 +498,8 @@ pub enum ClassMember {
     },
     EnumCase {
         name: Vec<u8>,
+        /// Line of the `case` keyword
+        line: u32,
         value: Option<Expr>,
         attributes: Vec<Attribute>,
         doc_comment: Option<Vec<u8>>,
