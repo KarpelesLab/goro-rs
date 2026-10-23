@@ -735,11 +735,15 @@ fn decode_jpeg(data: &[u8]) -> MResult<Vec<Image>> {
     if jpg.format == P::Cmyk {
         img = Image::blank(w as usize, h as usize);
         img.colorspace = Colorspace::CMYK;
+        let exact = jpeg_islow_cmyk(data).filter(|v| v.len() == (w * h * 4) as usize);
         let plane = &jpg.planes[0];
         let mut k = vec![0u16; (w * h) as usize];
         for y in 0..h as usize {
             for x in 0..w as usize {
-                let s = &plane.data[y * plane.stride + x * 4..];
+                let s = match &exact {
+                    Some(v) => &v[(y * w as usize + x) * 4..],
+                    None => &plane.data[y * plane.stride + x * 4..],
+                };
                 img.set_px(
                     x,
                     y,
@@ -754,6 +758,13 @@ fn decode_jpeg(data: &[u8]) -> MResult<Vec<Image>> {
             }
         }
         img.black = Some(k);
+    } else if let Some((rgba, gray)) =
+        jpeg_islow_rgba(data).filter(|(r, _)| r.len() == w as usize * h as usize * 4)
+    {
+        img = from_rgba8(w, h, &rgba, false);
+        if gray {
+            img.colorspace = Colorspace::Gray;
+        }
     } else {
         let rgba = jpeg_ycc_to_rgba(&jpg).unwrap_or_else(|| jpg.to_rgba8());
         img = from_rgba8(w, h, &rgba, false);
@@ -1900,14 +1911,69 @@ fn jpeg_ycc_to_rgba(jpg: &oxideav_mjpeg::JpegImage) -> Option<Vec<u8>> {
         P::Yuv420P | P::YuvJ420P => (2, 2),
         _ => return None,
     };
-    let (w, h) = (jpg.width as usize, jpg.height as usize);
     if jpg.planes.len() < 3 {
         return None;
     }
     let (cw, ch) = jpg.format.plane_dimensions(jpg.width, jpg.height, 1);
-    // upsample one chroma plane to w × h
-    let up = |p: &oxideav_mjpeg::Plane| -> Vec<u8> {
-        let at = |x: usize, y: usize| p.data[y * p.stride + x] as i32;
+    let pl = |i: usize, w: usize, h: usize| JpegPlane {
+        data: &jpg.planes[i].data,
+        stride: jpg.planes[i].stride,
+        w,
+        h,
+    };
+    let (w, h) = (jpg.width as usize, jpg.height as usize);
+    Some(ycc_planes_to_rgba(
+        w,
+        h,
+        (dh, dv),
+        &pl(0, w, h),
+        &pl(1, cw, ch),
+        &pl(2, cw, ch),
+        true,
+    ))
+}
+
+/// One component plane of a decoded JPEG.
+struct JpegPlane<'a> {
+    data: &'a [u8],
+    stride: usize,
+    w: usize,
+    h: usize,
+}
+
+/// libjpeg's "fancy" chroma upsampling (h1v1, h2v1, h2v2) or sample
+/// replication (other factors) of one plane to w × h.
+fn jpeg_upsample(p: &JpegPlane, w: usize, h: usize, (dh, dv): (usize, usize)) -> Vec<u8> {
+    let (cw, ch) = (p.w.max(1), p.h.max(1));
+    let at = |x: usize, y: usize| p.data[y * p.stride + x] as i32;
+    if (dh, dv) == (1, 2) {
+        // libjpeg-turbo's h1v2 fancy upsampling: (3·nearer + further + 1
+        // or 2) / 4 down each column
+        let mut out = vec![0u8; w * h];
+        for oy in 0..h {
+            let cy = (oy / 2).min(ch - 1);
+            let (far, bias) = if oy % 2 == 0 {
+                (cy.saturating_sub(1), 1)
+            } else {
+                ((cy + 1).min(ch - 1), 2)
+            };
+            for ox in 0..w {
+                let x = ox.min(cw - 1);
+                out[oy * w + ox] = ((3 * at(x, cy) + at(x, far) + bias) >> 2) as u8;
+            }
+        }
+        return out;
+    }
+    if !matches!((dh, dv), (1, 1) | (2, 1) | (2, 2)) {
+        let mut out = vec![0u8; w * h];
+        for oy in 0..h {
+            for ox in 0..w {
+                out[oy * w + ox] = at((ox / dh).min(cw - 1), (oy / dv).min(ch - 1)) as u8;
+            }
+        }
+        return out;
+    }
+    {
         // vertical: (3·nearer + further) row sums (×4 scale) for 4:2:0
         let mut out = vec![0u8; w * h];
         for oy in 0..h {
@@ -1965,16 +2031,35 @@ fn jpeg_ycc_to_rgba(jpg: &oxideav_mjpeg::JpegImage) -> Option<Vec<u8>> {
             }
         }
         out
-    };
-    let cb = up(&jpg.planes[1]);
-    let cr = up(&jpg.planes[2]);
+    }
+}
+
+/// Planar YCbCr (or RGB when `ycc` is false) to packed RGBA through
+/// libjpeg's upsampling and fixed-point conversion tables.
+fn ycc_planes_to_rgba(
+    w: usize,
+    h: usize,
+    fac: (usize, usize),
+    yp: &JpegPlane,
+    cbp: &JpegPlane,
+    crp: &JpegPlane,
+    ycc: bool,
+) -> Vec<u8> {
+    let cb = jpeg_upsample(cbp, w, h, fac);
+    let cr = jpeg_upsample(crp, w, h, fac);
     let fix = |x: f64| (x * 65536.0 + 0.5) as i32;
     let half = 1 << 15;
-    let yp = &jpg.planes[0];
     let mut out = vec![255u8; w * h * 4];
     for y in 0..h {
         for x in 0..w {
             let yy = yp.data[y * yp.stride + x] as i32;
+            if !ycc {
+                let o = &mut out[(y * w + x) * 4..];
+                o[0] = yy as u8;
+                o[1] = cb[y * w + x];
+                o[2] = cr[y * w + x];
+                continue;
+            }
             let b = cb[y * w + x] as i32 - 128;
             let r = cr[y * w + x] as i32 - 128;
             let rr = yy + ((fix(1.40200) * r + half) >> 16);
@@ -1985,6 +2070,109 @@ fn jpeg_ycc_to_rgba(jpg: &oxideav_mjpeg::JpegImage) -> Option<Vec<u8>> {
             o[1] = gg.clamp(0, 255) as u8;
             o[2] = bb.clamp(0, 255) as u8;
         }
+    }
+    out
+}
+
+/// The pixels of a baseline/progressive 8-bit gray or three-component
+/// JPEG through goro's ISLOW coefficient decoder (bit-exact with
+/// libjpeg), and whether it is gray; None for anything else.
+fn jpeg_islow_rgba(data: &[u8]) -> Option<(Vec<u8>, bool)> {
+    let d = crate::jpeg_coef::decode(data)?;
+    let (w, h) = (d.width, d.height);
+    let c = &d.components;
+    let plane = |k: usize| JpegPlane {
+        data: &c[k].data,
+        stride: c[k].stride,
+        w: c[k].width,
+        h: c[k].height,
+    };
+    match c.len() {
+        1 => {
+            let p = plane(0);
+            let mut out = vec![255u8; w * h * 4];
+            for y in 0..h {
+                for x in 0..w {
+                    let v = p.data[y * p.stride + x];
+                    let o = &mut out[(y * w + x) * 4..];
+                    o[0] = v;
+                    o[1] = v;
+                    o[2] = v;
+                }
+            }
+            Some((out, true))
+        }
+        3 => {
+            if c[1].h != c[2].h || c[1].v != c[2].v {
+                return None;
+            }
+            if c[0].h % c[1].h != 0 || c[0].v % c[1].v != 0 {
+                return None;
+            }
+            let fac = (c[0].h / c[1].h, c[0].v / c[1].v);
+            let rgb = d.adobe_transform == Some(0)
+                || (d.adobe_transform.is_none()
+                    && !d.jfif
+                    && c[0].id == b'R'
+                    && c[1].id == b'G'
+                    && c[2].id == b'B');
+            Some((
+                ycc_planes_to_rgba(w, h, fac, &plane(0), &plane(1), &plane(2), !rgb),
+                false,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The CMYK samples (packed, 4 per pixel) of a four-component JPEG through
+/// the ISLOW decoder: YCCK goes through the YCbCr tables and is inverted,
+/// and Adobe-marked CMYK is stored inverted.
+fn jpeg_islow_cmyk(data: &[u8]) -> Option<Vec<u8>> {
+    let d = crate::jpeg_coef::decode(data)?;
+    let c = &d.components;
+    if c.len() != 4 {
+        return None;
+    }
+    let (w, h) = (d.width, d.height);
+    let hmax = c.iter().map(|c| c.h).max()?;
+    let vmax = c.iter().map(|c| c.v).max()?;
+    let mut planes = Vec::new();
+    for k in c {
+        if hmax % k.h != 0 || vmax % k.v != 0 {
+            return None;
+        }
+        let p = JpegPlane {
+            data: &k.data,
+            stride: k.stride,
+            w: k.width,
+            h: k.height,
+        };
+        planes.push(jpeg_upsample(&p, w, h, (hmax / k.h, vmax / k.v)));
+    }
+    let ycck = d.adobe_transform == Some(2);
+    let fix = |x: f64| (x * 65536.0 + 0.5) as i32;
+    let half = 1 << 15;
+    let mut out = vec![0u8; w * h * 4];
+    for i in 0..w * h {
+        let mut s = [planes[0][i], planes[1][i], planes[2][i], planes[3][i]];
+        if ycck {
+            let yy = s[0] as i32;
+            let b = s[1] as i32 - 128;
+            let r = s[2] as i32 - 128;
+            let rr = (yy + ((fix(1.40200) * r + half) >> 16)).clamp(0, 255);
+            let gg = (yy + ((-fix(0.34414) * b - fix(0.71414) * r + half) >> 16)).clamp(0, 255);
+            let bb = (yy + ((fix(1.77200) * b + half) >> 16)).clamp(0, 255);
+            s[0] = 255 - rr as u8;
+            s[1] = 255 - gg as u8;
+            s[2] = 255 - bb as u8;
+        }
+        if d.adobe_transform.is_some() {
+            for v in &mut s {
+                *v = 255 - *v;
+            }
+        }
+        out[i * 4..i * 4 + 4].copy_from_slice(&s);
     }
     Some(out)
 }
