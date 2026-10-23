@@ -5281,234 +5281,251 @@ fn strip_tags_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
 
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let allowed = args.get(1);
-
-    // Build the lowercased allow string. PHP doesn't pre-parse tag names —
-    // it just lowercases the supplied allow string (or builds one from the
-    // array form by concatenating `<tagname>` per element) and does substring
-    // search against the normalized current tag. This makes weird inputs like
-    // `<?php<html>` correctly enable the `html` tag (the substring `<html>`
-    // is present at index 11).
-    let allow_lower: Vec<u8> = match allowed.map(|v| v.deref()) {
+    // The allow string: given as is, or "<tag>" per element of the array
+    // form (an empty array means none).
+    let allow: Option<Vec<u8>> = match args.get(1).map(|v| v.deref()) {
         Some(Value::Array(arr)) => {
-            let arr = arr.borrow();
+            let values: Vec<Value> = arr.borrow().values().cloned().collect();
             let mut buf = Vec::new();
-            for (_, v) in arr.iter() {
-                let tag = v.to_php_string().to_string_lossy().to_ascii_lowercase();
+            for v in values {
+                let tag = _vm.value_to_string(&v);
                 buf.push(b'<');
                 buf.extend_from_slice(tag.as_bytes());
                 buf.push(b'>');
             }
-            buf
+            (!buf.is_empty()).then_some(buf)
         }
-        Some(Value::Null) | None => Vec::new(),
-        Some(other) => other.to_php_string().as_bytes().to_ascii_lowercase(),
+        Some(Value::Null) | None => None,
+        Some(other) => Some(_vm.value_to_string(&other).as_bytes().to_vec()),
     };
+    let result = php_strip_tags_ex(s.as_bytes(), allow.as_deref(), false);
+    Ok(Value::String(PhpString::from_vec(result)))
+}
 
-    let bytes = s.as_bytes();
-    let mut result = Vec::new();
-    let mut i = 0;
+/// C isspace() (C locale)
+fn c_isspace(c: u8) -> bool {
+    matches!(c, b' ' | b'\t' | b'\n' | b'\r' | 0x0B | 0x0C)
+}
 
-    while i < bytes.len() {
-        // PHP strip_tags strips NUL bytes
-        if bytes[i] == 0 {
-            i += 1;
-            continue;
+/// php_tag_find(): whether the tag in `tag` ("<...>"), normalized to
+/// "<name>", occurs in the (lowercased) allow string.
+fn php_tag_find(tag: &[u8], set: &[u8]) -> bool {
+    let mut norm = Vec::with_capacity(tag.len() + 1);
+    let mut state = 0;
+    let mut t = 0;
+    while t < tag.len() {
+        let c = tag[t].to_ascii_lowercase();
+        match c {
+            b'<' => norm.push(c),
+            b'>' => break,
+            _ => {
+                if !c_isspace(c) {
+                    state = 1;
+                    let prev = if t > 0 { tag[t - 1] } else { 0 };
+                    let next = tag.get(t + 1).copied().unwrap_or(0);
+                    if c != b'/' || (prev != b'<' && next != b'>') {
+                        norm.push(c);
+                    }
+                } else if state == 1 {
+                    break;
+                }
+            }
         }
-        if bytes[i] == b'<' {
-            // PHP only rejects `<` followed by whitespace (`< ` is kept as a
-            // literal `<`); every other follower starts a tag — including `<<`,
-            // `<>`, `</`, `<?`, `<!`, or any non-whitespace char.
-            if i + 1 < bytes.len() {
-                let next = bytes[i + 1];
-                if matches!(next, b' ' | b'\t' | b'\n' | b'\r') {
-                    result.push(bytes[i]);
-                    i += 1;
-                    continue;
-                }
-            } else {
-                // `<` at end of string — output literally.
-                result.push(bytes[i]);
-                i += 1;
-                continue;
-            }
+        t += 1;
+    }
+    norm.push(b'>');
+    // strstr(): the allow string ends at its first NUL
+    let set = &set[..set.iter().position(|&b| b == 0).unwrap_or(set.len())];
+    set.windows(norm.len()).any(|w| w == norm.as_slice())
+}
 
-            // Check for PHP/XML processing instructions and ASP-style tags
-            if i + 1 < bytes.len() && (bytes[i + 1] == b'?' || bytes[i + 1] == b'%') {
-                // Check if this is an XML processing instruction: <?xml (case-insensitive)
-                // <?xml ends at first >, all other <? tags end at ?>
-                let is_xml_pi = i + 4 < bytes.len()
-                    && bytes[i + 2..i + 5].eq_ignore_ascii_case(b"xml")
-                    && (i + 5 >= bytes.len() || !bytes[i + 5].is_ascii_alphanumeric());
-                if is_xml_pi {
-                    // <?xml is treated as XML PI: after the `<?xml` prefix,
-                    // PHP switches to HTML-tag state with is_xml flag and ends
-                    // at first '>' NOT preceded by '-' (so '->' inside content
-                    // doesn't end the tag, but '?>' does).
-                    i += 2;
-                    let mut prev: u8 = 0;
-                    while i < bytes.len() {
-                        if bytes[i] == b'>' && prev != b'-' {
-                            i += 1;
-                            break;
+/// php_strip_tags_ex(): the state machine stripping HTML and PHP tags
+/// (0: output, 1: inside a tag, 2: inside a PHP tag, 3: inside a `<!`
+/// construct, 4: inside a comment). Tags named in `allow` are kept.
+fn php_strip_tags_ex(buf: &[u8], allow: Option<&[u8]>, allow_tag_spaces: bool) -> Vec<u8> {
+    let allow = allow.map(|a| a.to_ascii_lowercase());
+    // (the C buffer is NUL-terminated)
+    let at = |i: usize| buf.get(i).copied().unwrap_or(0);
+    let mut out = Vec::with_capacity(buf.len());
+    let mut tbuf: Vec<u8> = Vec::new();
+    let (mut lc, mut br, mut depth, mut in_q) = (0u8, 0i64, 0i64, 0u8);
+    let mut state = 0u8;
+    let mut is_xml = false;
+    let toggle_q = |in_q: &mut u8, c: u8| *in_q = if *in_q != 0 { 0 } else { c };
+    let mut p = 0;
+    while p < buf.len() {
+        let c = buf[p];
+        match state {
+            0 => match c {
+                0 => {}
+                b'<' => {
+                    if in_q != 0 {
+                    } else if c_isspace(at(p + 1)) && !allow_tag_spaces {
+                        out.push(c);
+                    } else {
+                        lc = b'<';
+                        state = 1;
+                        if allow.is_some() {
+                            tbuf.push(b'<');
                         }
-                        prev = bytes[i];
-                        i += 1;
-                    }
-                } else {
-                    // PHP/ASP tag - skip until ?> or %> respectively, tracking
-                    // single/double quotes so nested `<?` inside a quoted string
-                    // doesn't end the outer tag early (bug78346).
-                    let close_char = bytes[i + 1]; // ? or %
-                    i += 2;
-                    let mut in_q: u8 = 0;
-                    while i < bytes.len() {
-                        let c = bytes[i];
-                        if c == b'\'' || c == b'"' {
-                            let prev_is_bs = i > 0 && bytes[i - 1] == b'\\';
-                            if !prev_is_bs {
-                                if in_q == 0 {
-                                    in_q = c;
-                                } else if in_q == c {
-                                    in_q = 0;
-                                }
-                            }
-                        } else if c == b'>' && in_q == 0 && i > 0 && bytes[i - 1] == close_char {
-                            i += 1;
-                            break;
-                        }
-                        i += 1;
                     }
                 }
-                continue;
-            }
-
-            // Check for HTML comments: <!-- ... -->
-            if i + 3 < bytes.len()
-                && bytes[i + 1] == b'!'
-                && bytes[i + 2] == b'-'
-                && bytes[i + 3] == b'-'
-            {
-                // HTML comment - skip until -->
-                i += 4;
-                while i < bytes.len() {
-                    if bytes[i] == b'-'
-                        && i + 2 < bytes.len()
-                        && bytes[i + 1] == b'-'
-                        && bytes[i + 2] == b'>'
-                    {
-                        i += 3;
-                        break;
-                    }
-                    i += 1;
-                }
-                continue;
-            }
-
-            // Check for SGML/XML declarations: <! ... >
-            if i + 1 < bytes.len() && bytes[i + 1] == b'!' {
-                // Skip until >
-                i += 2;
-                while i < bytes.len() && bytes[i] != b'>' {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
-                continue;
-            }
-
-            // Mirror PHP's state_1: build a "tbuf" containing only the tag's
-            // canonical bytes — the leading `<`, the tag body, and the final
-            // `>`. Extra `<` inside the tag bump `depth` (state machine bracket
-            // counter); extra `>` at depth>0 decrement it. Neither is copied
-            // into tbuf. When `>` closes at depth=0 the tag ends and tbuf is
-            // normalized into `<tagname>` and checked via substring search
-            // against the lowercased allow string, emitting tbuf verbatim if
-            // present. This makes `<<htmL>>` resolve to `<htmL>` and weird
-            // allow strings like `<?php<html>` correctly enable the `html` tag.
-            let mut tbuf: Vec<u8> = Vec::with_capacity(16);
-            let mut tag_name_lower: Vec<u8> = Vec::new();
-            // Track whether we're still reading the tag name (first whitespace
-            // / quote / etc. ends it). Slash handling matches PHP's
-            // php_tag_find normalization: a `/` immediately after `<` (a
-            // closing tag) or immediately before `>` (a self-closing slash)
-            // is dropped from the normalized tag name.
-            let mut name_done = false;
-            tbuf.push(b'<');
-            i += 1;
-            // Consume any inner `<` runs (state_1 case '<' = depth++) before
-            // looking for the closing-tag `/`. So `<</htmL>>` correctly sees
-            // the `/` and treats `htmL` as a closing tag.
-            let mut depth: u32 = 0;
-            while i < bytes.len() && bytes[i] == b'<' {
-                depth += 1;
-                i += 1;
-            }
-            let _is_closing = i < bytes.len() && bytes[i] == b'/';
-            if _is_closing {
-                tbuf.push(b'/');
-                i += 1;
-            }
-            let mut in_quote: u8 = 0;
-            while i < bytes.len() {
-                let c = bytes[i];
-                if in_quote != 0 {
-                    if c == in_quote {
-                        in_quote = 0;
-                    }
-                    tbuf.push(c);
-                } else if c == b'"' || c == b'\'' {
-                    in_quote = c;
-                    tbuf.push(c);
-                    name_done = true;
-                } else if c == b'<' {
-                    depth += 1;
-                    // not appended to tbuf — matches PHP state_1 case '<'
-                } else if c == b'>' {
+                b'>' => {
                     if depth > 0 {
                         depth -= 1;
-                        // not appended — matches PHP state_1 case '>' depth>0
-                    } else {
-                        tbuf.push(b'>');
-                        i += 1;
-                        break;
+                    } else if in_q == 0 {
+                        out.push(c);
                     }
-                } else {
-                    if !name_done {
-                        if matches!(c, b' ' | b'\t' | b'\n' | b'\r') {
-                            name_done = true;
-                        } else if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
-                            // self-closing `/` dropped from the name.
+                }
+                _ => out.push(c),
+            },
+            1 => {
+                let mut reg_char = false;
+                match c {
+                    0 => {}
+                    b'<' => {
+                        if in_q != 0 {
+                        } else if c_isspace(at(p + 1)) && !allow_tag_spaces {
+                            reg_char = true;
                         } else {
-                            tag_name_lower.push(c.to_ascii_lowercase());
+                            depth += 1;
                         }
                     }
+                    b'>' => {
+                        if depth > 0 {
+                            depth -= 1;
+                        } else if in_q == 0 {
+                            lc = b'>';
+                            if !(is_xml && p >= 1 && buf[p - 1] == b'-') {
+                                in_q = 0;
+                                state = 0;
+                                is_xml = false;
+                                if let Some(set) = &allow {
+                                    tbuf.push(b'>');
+                                    if php_tag_find(&tbuf, set) {
+                                        out.extend_from_slice(&tbuf);
+                                    }
+                                    tbuf.clear();
+                                }
+                            }
+                        }
+                    }
+                    b'"' | b'\'' => {
+                        if p != 0 && (in_q == 0 || c == in_q) {
+                            toggle_q(&mut in_q, c);
+                        }
+                        reg_char = true;
+                    }
+                    b'!' => {
+                        // JavaScript & other HTML scripting languages
+                        if p >= 1 && buf[p - 1] == b'<' {
+                            state = 3;
+                            lc = c;
+                        } else {
+                            reg_char = true;
+                        }
+                    }
+                    b'?' => {
+                        if p >= 1 && buf[p - 1] == b'<' {
+                            br = 0;
+                            state = 2;
+                        } else {
+                            reg_char = true;
+                        }
+                    }
+                    _ => reg_char = true,
+                }
+                if reg_char && allow.is_some() {
                     tbuf.push(c);
                 }
-                i += 1;
             }
-
-            // Allowed iff `<tagname>` appears as a substring of the allow
-            // string (php_tag_find's strstr check, after lowercase normalize).
-            if !tag_name_lower.is_empty() && !allow_lower.is_empty() {
-                let mut needle: Vec<u8> = Vec::with_capacity(tag_name_lower.len() + 2);
-                needle.push(b'<');
-                needle.extend_from_slice(&tag_name_lower);
-                needle.push(b'>');
-                if allow_lower
-                    .windows(needle.len())
-                    .any(|w| w == needle.as_slice())
-                {
-                    result.extend_from_slice(&tbuf);
+            2 => match c {
+                b'(' => {
+                    if lc != b'"' && lc != b'\'' {
+                        lc = b'(';
+                        br += 1;
+                    }
+                }
+                b')' => {
+                    if lc != b'"' && lc != b'\'' {
+                        lc = b')';
+                        br -= 1;
+                    }
+                }
+                b'>' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    } else if in_q == 0 && br == 0 && p >= 1 && lc != b'"' && buf[p - 1] == b'?' {
+                        in_q = 0;
+                        state = 0;
+                        tbuf.clear();
+                    }
+                }
+                b'"' | b'\'' => {
+                    if p >= 1 && buf[p - 1] != b'\\' {
+                        if lc == c {
+                            lc = 0;
+                        } else if lc != b'\\' {
+                            lc = c;
+                        }
+                        if in_q == 0 || c == in_q {
+                            toggle_q(&mut in_q, c);
+                        }
+                    }
+                }
+                b'l' | b'L' => {
+                    // `<?xml` is not PHP: back to HTML
+                    if p > 4
+                        && matches!(buf[p - 1], b'm' | b'M')
+                        && matches!(buf[p - 2], b'x' | b'X')
+                        && buf[p - 3] == b'?'
+                        && buf[p - 4] == b'<'
+                    {
+                        state = 1;
+                        is_xml = true;
+                    }
+                }
+                _ => {}
+            },
+            3 => match c {
+                b'>' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    } else if in_q == 0 {
+                        in_q = 0;
+                        state = 0;
+                        tbuf.clear();
+                    }
+                }
+                b'"' | b'\'' => {
+                    if p != 0 && buf[p - 1] != b'\\' && (in_q == 0 || c == in_q) {
+                        toggle_q(&mut in_q, c);
+                    }
+                }
+                b'-' => {
+                    if p >= 2 && buf[p - 1] == b'-' && buf[p - 2] == b'!' {
+                        state = 4;
+                    }
+                }
+                b'E' | b'e' => {
+                    // !DOCTYPE exception
+                    if p > 6 && buf[p - 6..p].eq_ignore_ascii_case(b"doctyp") {
+                        state = 1;
+                    }
+                }
+                _ => {}
+            },
+            _ => {
+                if c == b'>' && in_q == 0 && p >= 2 && buf[p - 1] == b'-' && buf[p - 2] == b'-' {
+                    in_q = 0;
+                    state = 0;
+                    tbuf.clear();
                 }
             }
-        } else {
-            result.push(bytes[i]);
-            i += 1;
         }
+        p += 1;
     }
-    Ok(Value::String(PhpString::from_vec(result)))
+    out
 }
 
 fn nl2br_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
