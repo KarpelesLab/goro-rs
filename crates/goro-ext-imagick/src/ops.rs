@@ -2365,16 +2365,20 @@ fn opaque_paint_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) ->
 }
 
 #[allow(clippy::manual_memcpy)] // each channel looks up its own entry
+/// ClutImage(): each channel indexes the table at v·(n-1), blending the
+/// two neighbouring entries linearly.
 fn clut_of(i: &mut Image, clut: &Image) {
     let n = (clut.columns * clut.rows).max(1);
+    let cols = clut.columns.max(1);
+    let at = |k: usize| clut.px(k % cols, (k / cols).min(clut.rows.saturating_sub(1)));
     for p in i.pixels.chunks_exact_mut(4) {
         for c in 0..3 {
-            let idx = ((p[c] as f64 / 65535.0) * (n - 1) as f64).round() as usize;
-            let cp = clut.px(
-                idx % clut.columns.max(1),
-                (idx / clut.columns.max(1)).min(clut.rows - 1),
-            );
-            p[c] = cp[c];
+            let pos = (p[c] as f64 / 65535.0) * (n - 1) as f64;
+            let k0 = (pos.floor() as usize).min(n - 1);
+            let k1 = (k0 + 1).min(n - 1);
+            let f = pos - k0 as f64;
+            let v = at(k0)[c] as f64 * (1.0 - f) + at(k1)[c] as f64 * f;
+            p[c] = to_q16(v);
         }
     }
     i.colors = None;

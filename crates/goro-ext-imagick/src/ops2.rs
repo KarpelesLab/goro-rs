@@ -378,15 +378,38 @@ fn hald_clut_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
         if cube < 2 {
             return Ok(());
         }
-        for p in i.pixels.chunks_exact_mut(4) {
-            let idx = |v: u16| ((v as f64 / 65535.0) * (cube - 1) as f64).round() as usize;
-            let (r, g, b) = (idx(p[0]), idx(p[1]), idx(p[2]));
+        // trilinear between the eight surrounding table entries
+        let entry = |r: usize, g: usize, b: usize| {
             let n = r + g * cube + b * cube * cube;
-            let (x, y) = (n % hald.columns, (n / hald.columns).min(hald.rows - 1));
-            let q = hald.px(x, y);
-            p[0] = q[0];
-            p[1] = q[1];
-            p[2] = q[2];
+            hald.px(n % hald.columns, (n / hald.columns).min(hald.rows - 1))
+        };
+        for p in i.pixels.chunks_exact_mut(4) {
+            let pos = |v: u16| {
+                let t = (v as f64 / 65535.0) * (cube - 1) as f64;
+                let k = (t.floor() as usize).min(cube - 1);
+                (k, (k + 1).min(cube - 1), t - k as f64)
+            };
+            let (r0, r1, fr) = pos(p[0]);
+            let (g0, g1, fg) = pos(p[1]);
+            let (b0, b1, fb) = pos(p[2]);
+            let mut out = [0f64; 3];
+            for (b, wb) in [(b0, 1.0 - fb), (b1, fb)] {
+                for (g, wg) in [(g0, 1.0 - fg), (g1, fg)] {
+                    for (r, wr) in [(r0, 1.0 - fr), (r1, fr)] {
+                        let w = wr * wg * wb;
+                        if w == 0.0 {
+                            continue;
+                        }
+                        let q = entry(r, g, b);
+                        for c in 0..3 {
+                            out[c] += w * q[c] as f64;
+                        }
+                    }
+                }
+            }
+            for c in 0..3 {
+                p[c] = to_q16(out[c]);
+            }
         }
         i.colors = None;
         Ok(())
