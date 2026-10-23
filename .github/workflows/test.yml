@@ -108,8 +108,8 @@ jobs:
           retention-days: 30
 
   pecl:
-    # The test suites of the PECL extensions goro implements (uuid), from
-    # tests/pecl.
+    # The test suites of the PECL extensions goro implements (uuid,
+    # mailparse), from tests/pecl.
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15

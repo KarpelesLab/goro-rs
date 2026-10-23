@@ -121,6 +121,7 @@ foreach ($dirs as $dir => $ext) {
 // PECL extensions goro implements: their stubs live in the extension crates.
 $pecl = [
     'crates/goro-ext-uuid' => 'uuid',
+    'crates/goro-ext-mailparse' => 'mailparse',
 ];
 foreach ($pecl as $dir => $ext) {
     $files = glob(dirname(__DIR__) . "/$dir/*.stub.php");

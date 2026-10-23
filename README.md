@@ -64,6 +64,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/tidy (tidy-html5 5.8.0 port) | 50 | 50 | 100% |
 | sapi/cli (incl. `php -S` and `php -a`) | 101 | 102 | 99.0% |
 | PECL uuid 1.3 (`tests/pecl/uuid`) | 14 | 14 | 100% |
+| PECL mailparse 3.2 (`tests/pecl/mailparse`, 1 upstream XFAIL) | 38 | 39 | 97.4% |
 
 
 *The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
@@ -108,8 +109,9 @@ Highlights beyond the core language:
   Zend OPcache (an in-memory script cache with the opcache_*() API, preloading and the file
   cache's entries; no optimizer or JIT, the directives are reported as php-src does),
   sqlite3 and pdo_sqlite (on goro-sqlite, a pure-Rust port of SQLite 3.54.1 incl. WAL, JSON and virtual tables),
-  zend_test; and the PECL extension uuid (RFC 9562 UUIDs v1/v3/v4/v5/v6/v7, the API of
-  util-linux libuuid).
+  zend_test; and the PECL extensions uuid (RFC 9562 UUIDs v1/v3/v4/v5/v6/v7, the API of
+  util-linux libuuid) and mailparse (RFC 822 address parsing, an incremental MIME parser with
+  part extraction and transfer decoding, uuencoded attachments).
 
 ### Not Yet Implemented
 - ffi, odbc, snmp, enchant (out of scope for now)
@@ -167,6 +169,7 @@ Workspace crates:
 - `goro-ldap` - a pure-Rust LDAP client modelled on OpenLDAP's libldap/liblber (BER, LDAPv3, URL/DN, filters, controls, TLS over purecrypto)
 - `goro-ext-ldap` - ext/ldap (LDAP\Connection, LDAP\Result, LDAP\ResultEntry) on `goro-ldap`
 - `goro-ext-uuid` - PECL uuid (uuid_create() & co., libuuid semantics)
+- `goro-ext-mailparse` - PECL mailparse (mailparse_msg_*(), mailparse_rfc822_parse_addresses(), mimemessage)
 - `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,sodium,xml,zlib}` - misc extensions
 - `goro-phpt` - PHPT test file runner
 

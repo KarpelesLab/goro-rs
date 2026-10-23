@@ -17968,6 +17968,9 @@ fn phpversion_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 "uuid" if _vm.loaded_extensions.contains(b"uuid".as_slice()) => {
                     return Ok(Value::String(PhpString::from_bytes(b"1.3.0")));
                 }
+                "mailparse" if _vm.loaded_extensions.contains(b"mailparse".as_slice()) => {
+                    return Ok(Value::String(PhpString::from_bytes(b"3.2.1-dev")));
+                }
                 _ => return Ok(Value::False),
             }
         }

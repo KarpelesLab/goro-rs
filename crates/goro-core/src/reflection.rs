@@ -10361,6 +10361,7 @@ pub fn reflection_extension_method(
             match ext_lower.as_str() {
                 // PECL extensions have their own version
                 "uuid" => b"1.3.0".as_slice(),
+                "mailparse" => b"3.2.1-dev",
                 _ => b"8.5.4",
             },
         ))),
@@ -10654,6 +10655,7 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         "tidy" => &["tidy", "tidyNode"],
         "ftp" => &["FTP\\Connection"],
         "ldap" => &["LDAP\\Connection", "LDAP\\Result", "LDAP\\ResultEntry"],
+        "mailparse" => &["mimemessage"],
         "xsl" => &["XSLTProcessor"],
         "shmop" => &["Shmop"],
         "sysvsem" => &["SysvSemaphore"],
@@ -10797,6 +10799,7 @@ fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
         "tidy" => &["tidy.default_config", "tidy.clean_output"],
         "sqlite3" => &["sqlite3.extension_dir", "sqlite3.defensive"],
         "ldap" => &["ldap.max_links"],
+        "mailparse" => &["mailparse.def_charset"],
         "filter" => &["filter.default", "filter.default_flags"],
         "exif" => &[
             "exif.encode_unicode",

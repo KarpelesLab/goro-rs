@@ -57,6 +57,7 @@ goro-ext-intl = { path = "../goro-ext-intl" }
 goro-ext-sqlite3 = { path = "../goro-ext-sqlite3" }
 goro-ext-ldap = { path = "../goro-ext-ldap" }
 goro-ext-uuid = { path = "../goro-ext-uuid" }
+goro-ext-mailparse = { path = "../goro-ext-mailparse" }
 goro-ldap = { path = "../goro-ldap" }
 libc = "0.2"
 tempfile = "3"
