@@ -1865,24 +1865,22 @@ fn blur_common(vm: &mut Vm, o: Option<&Obj>, radius: f64, sigma: f64, msg: &str)
 
 fn blur_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dd|l", args)?;
-    blur_common(
-        vm,
-        o,
-        a[0].double_or(0.0),
-        a[1].double_or(1.0),
-        "Unable to blur image",
-    )
+    let (r, s) = (a[0].double_or(0.0), a[1].double_or(1.0));
+    let ch = a[2].long_or(channel::DEFAULT);
+    image_op(vm, &d_(o), "Unable to blur image", |i| {
+        goro_imagick::convolve::blur(i, r, s, ch);
+        Ok(())
+    })
 }
 
 fn gaussian_blur_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dd|l", args)?;
-    blur_common(
-        vm,
-        o,
-        a[0].double_or(0.0),
-        a[1].double_or(1.0),
-        "Unable to gaussian blur image",
-    )
+    let (r, s) = (a[0].double_or(0.0), a[1].double_or(1.0));
+    let ch = a[2].long_or(channel::DEFAULT);
+    image_op(vm, &d_(o), "Unable to gaussian blur image", |i| {
+        goro_imagick::convolve::gaussian_blur(i, r, s, ch);
+        Ok(())
+    })
 }
 
 fn adaptive_blur_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
@@ -2136,68 +2134,75 @@ fn vignette_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
         a[2].long_or(0),
         a[3].long_or(0),
     );
-    let _ = r;
     image_op(vm, &d_(o), "Unable to apply vignette filter", |i| {
-        vignette(i, s, x as f64, y as f64);
+        vignette(i, r, s, x as f64, y as f64);
         Ok(())
     })
 }
 
-/// -vignette: a centred ellipse inset by (x, y), blurred by `sigma`,
-/// blends the image with its background colour.
-fn vignette(i: &mut Image, sigma: f64, x: f64, y: f64) {
+/// VignetteImage(): an anti-aliased ellipse centred on the image, its
+/// radii (columns/2 - x, rows/2 - y) plus half a pixel, blurred with
+/// BlurImage(radius, sigma), blends the image with its background colour.
+fn vignette(i: &mut Image, radius: f64, sigma: f64, x: f64, y: f64) {
     let (w, h) = (i.columns, i.rows);
     if w == 0 || h == 0 {
         return;
     }
     let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
-    let (rx, ry) = ((cx - x).max(0.0), (cy - y).max(0.0));
-    let mut mask = vec![0f64; w * h];
+    let (rx, ry) = (cx - x + 0.5, cy - y + 0.5);
+    let mut mask = Image::blank(w, h);
     if rx > 0.0 && ry > 0.0 {
+        const S: usize = 8;
+        let inside = |px: f64, py: f64| {
+            let (dx, dy) = ((px - cx) / rx, (py - cy) / ry);
+            dx * dx + dy * dy <= 1.0
+        };
         for py in 0..h {
             for px in 0..w {
-                let dx = (px as f64 + 0.5 - cx) / rx;
-                let dy = (py as f64 + 0.5 - cy) / ry;
-                if dx * dx + dy * dy <= 1.0 {
-                    mask[py * w + px] = 1.0;
-                }
+                let (fx, fy) = (px as f64, py as f64);
+                // pixel squares wholly inside or outside need no samples
+                let (dx, dy) = ((fx - cx).abs(), (fy - cy).abs());
+                let near = |ddx: f64, ddy: f64| {
+                    let (a, b) = (ddx / rx, ddy / ry);
+                    a * a + b * b
+                };
+                let far = near(dx + 0.5, dy + 0.5);
+                let close = near((dx - 0.5).max(0.0), (dy - 0.5).max(0.0));
+                let cov = if far <= 1.0 {
+                    1.0
+                } else if close > 1.0 {
+                    0.0
+                } else {
+                    let mut n = 0;
+                    for a in 0..S {
+                        for b in 0..S {
+                            let sx = fx - 0.5 + (a as f64 + 0.5) / S as f64;
+                            let sy = fy - 0.5 + (b as f64 + 0.5) / S as f64;
+                            if inside(sx, sy) {
+                                n += 1;
+                            }
+                        }
+                    }
+                    n as f64 / (S * S) as f64
+                };
+                let v = to_q16(cov * 65535.0);
+                mask.set_px(px, py, [v, v, v, 65535]);
             }
         }
     }
     if sigma > 0.0 {
-        let rad = (3.0 * sigma).ceil() as i64;
-        let k: Vec<f64> = (-rad..=rad)
-            .map(|t| (-(t * t) as f64 / (2.0 * sigma * sigma)).exp())
-            .collect();
-        let ks: f64 = k.iter().sum();
-        let blur = |src: &[f64], horiz: bool| -> Vec<f64> {
-            let mut out = vec![0f64; w * h];
-            for py in 0..h {
-                for px in 0..w {
-                    let mut acc = 0.0;
-                    for (j, kv) in k.iter().enumerate() {
-                        let o = j as i64 - rad;
-                        let (sx, sy) = if horiz {
-                            ((px as i64 + o).clamp(0, w as i64 - 1) as usize, py)
-                        } else {
-                            (px, (py as i64 + o).clamp(0, h as i64 - 1) as usize)
-                        };
-                        acc += kv * src[sy * w + sx];
-                    }
-                    out[py * w + px] = acc / ks;
-                }
-            }
-            out
-        };
-        mask = blur(&blur(&mask, true), false);
+        goro_imagick::convolve::blur(&mut mask, radius, sigma, channel::DEFAULT);
     }
     i.enable_alpha();
     let bg = i.background_color.to_rgba16();
-    for (p, m) in i.pixels.chunks_exact_mut(4).zip(mask) {
+    for (p, m) in i
+        .pixels
+        .chunks_exact_mut(4)
+        .zip(mask.pixels.chunks_exact(4))
+    {
+        let m = m[0] as f64 / 65535.0;
         for c in 0..4 {
-            p[c] = (p[c] as f64 * m + bg[c] as f64 * (1.0 - m))
-                .round()
-                .clamp(0.0, 65535.0) as u16;
+            p[c] = to_q16(p[c] as f64 * m + bg[c] as f64 * (1.0 - m));
         }
     }
     i.colors = None;
