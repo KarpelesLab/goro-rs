@@ -25,7 +25,7 @@ pub enum Diag {
 /// The compiled form of a script, as include/require executes it.
 pub struct Compiled {
     pub op_array: OpArray,
-    pub classes: Vec<ClassEntry>,
+    pub classes: Rc<Vec<ClassEntry>>,
     pub diags: Vec<Diag>,
 }
 
@@ -380,7 +380,7 @@ fn cache_key(path: &str, cfg: &Config) -> String {
 }
 
 /// Records a freshly compiled script (a cache miss).
-pub fn store_compiled(path: &str, compiled: Compiled) {
+pub fn store_compiled(path: &str, compiled: Rc<Compiled>) {
     let cfg = CONFIG.with(|c| c.borrow().clone());
     if !cfg.enabled {
         return;
@@ -396,7 +396,7 @@ pub fn store_compiled(path: &str, compiled: Compiled) {
         return;
     };
     let size = estimate_size(&compiled.op_array);
-    insert(path, Some(Rc::new(compiled)), mtime, size);
+    insert(path, Some(compiled), mtime, size);
     log(LOG_INFO, &format!("Cached script '{}'", path));
 }
 
@@ -508,40 +508,33 @@ impl crate::vm::Vm {
     pub(crate) fn cache_compiled_script(
         &mut self,
         path: &str,
-        op_array: &OpArray,
-        classes: &[ClassEntry],
+        mut compiled: Compiled,
         lex_diags: &[(bool, String, u32)],
         warnings: &[(String, u32)],
-    ) {
+    ) -> Rc<Compiled> {
         if crate::preload::active() {
-            crate::preload::note_compiled(path, op_array, classes);
-            return;
+            crate::preload::note_compiled(path, &compiled.op_array, &compiled.classes);
+            return Rc::new(compiled);
         }
         file_cache_store(path);
         if !enabled() {
-            return;
+            return Rc::new(compiled);
         }
         if log_enabled(LOG_INFO) {
             self.flush_cli_output();
         }
         let record = CONFIG.with(|c| c.borrow().record_warnings);
-        let mut diags = Vec::new();
         if record {
             for (d, m, l) in lex_diags {
-                diags.push(Diag::Lex(*d, m.clone(), *l));
+                compiled.diags.push(Diag::Lex(*d, m.clone(), *l));
             }
             for (m, l) in warnings {
-                diags.push(Diag::Compile(m.clone(), *l));
+                compiled.diags.push(Diag::Compile(m.clone(), *l));
             }
         }
-        store_compiled(
-            path,
-            Compiled {
-                op_array: op_array.clone(),
-                classes: classes.to_vec(),
-                diags,
-            },
-        );
+        let compiled = Rc::new(compiled);
+        store_compiled(path, compiled.clone());
+        compiled
     }
 
     /// zend_emit_recorded_errors(): the diagnostics of a cached script's
@@ -646,7 +639,16 @@ impl crate::vm::Vm {
                         Err(_) => CompileOnly::CompileError,
                     }
                 } else {
-                    self.cache_compiled_script(path, &op_array, &classes, &lex_diags, &warnings);
+                    self.cache_compiled_script(
+                        path,
+                        Compiled {
+                            op_array,
+                            classes: Rc::new(classes),
+                            diags: Vec::new(),
+                        },
+                        &lex_diags,
+                        &warnings,
+                    );
                     CompileOnly::Compiled
                 }
             }

@@ -553,7 +553,7 @@ impl Vm {
             self.emit_compile_diagnostic(msg, *wline);
         }
         note_compiled(path, &op_array, &classes);
-        let saved_pending = std::mem::replace(&mut self.pending_classes, classes);
+        let saved_pending = std::mem::replace(&mut self.pending_classes, std::rc::Rc::new(classes));
         let r = self.execute_chunk(&op_array);
         self.pending_classes = saved_pending;
         match r {

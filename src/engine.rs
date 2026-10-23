@@ -301,6 +301,14 @@ pub fn compile(
     match compiler.compile(&program) {
         Ok((op_array, classes, compile_warnings)) => {
             let _ = goro_core::compiler::take_pending_compile_warnings();
+            if std::env::var_os("GORO_DUMP_OPS").is_some() {
+                eprint!("{}", op_array.dump());
+                for c in &classes {
+                    for m in c.methods.values() {
+                        eprint!("{}", m.op_array.dump());
+                    }
+                }
+            }
             Ok(Compiled {
                 op_array,
                 classes,

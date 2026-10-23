@@ -92,7 +92,7 @@ fn clear_lines(op: &mut OpArray) {
     op.end_line = 0;
     op.filename.clear();
     for c in &mut op.child_functions {
-        clear_lines(c);
+        clear_lines(std::rc::Rc::make_mut(c));
     }
 }
 

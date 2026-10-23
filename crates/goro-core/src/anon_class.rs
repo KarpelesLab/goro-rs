@@ -77,7 +77,8 @@ impl Vm {
             result: OperandType::Unused,
             line: 0,
         });
-        let saved_pending = std::mem::replace(&mut self.pending_classes, vec![class]);
+        let saved_pending =
+            std::mem::replace(&mut self.pending_classes, std::rc::Rc::new(vec![class]));
         let saved_anon = std::mem::replace(&mut self.declaring_anon, true);
         let r = self.execute_op_array_pub(&op_array, Vec::new());
         self.declaring_anon = saved_anon;

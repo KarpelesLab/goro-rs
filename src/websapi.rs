@@ -128,11 +128,11 @@ impl PhpRun {
                 if goro_core::script_cache::enabled() {
                     goro_core::script_cache::store_compiled(
                         &name,
-                        goro_core::script_cache::Compiled {
+                        std::rc::Rc::new(goro_core::script_cache::Compiled {
                             op_array: c.op_array.clone(),
-                            classes: c.classes.clone(),
+                            classes: c.classes.clone().into(),
                             diags: Vec::new(),
-                        },
+                        }),
                     );
                 }
                 engine::load(&mut self.vm, &mut c);

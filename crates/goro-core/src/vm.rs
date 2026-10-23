@@ -1168,7 +1168,8 @@ pub struct Vm {
     /// infinite recursion when the initializer accesses properties on $this.
     lazy_init_in_progress: std::collections::HashSet<u64>,
     /// Pending class definitions (from compiler, indexed by position)
-    pub(crate) pending_classes: Vec<ClassEntry>,
+    /// (shared with the script cache)
+    pub(crate) pending_classes: Rc<Vec<ClassEntry>>,
     /// Whether we're executing the top-level script (vs a function)
     pub is_global_scope: bool,
     /// User-defined constants (from define())
@@ -1720,6 +1721,8 @@ pub struct SocketStreamHooks {
 impl Vm {
     pub fn new() -> Self {
         crate::stack::install_parser_stack_grower();
+        // (what call sites of cached code found belongs to earlier engines)
+        crate::opcode::new_site_epoch();
         let mut vm = Self {
             output: Vec::new(),
             cli_direct_output: false,
@@ -1764,7 +1767,7 @@ impl Vm {
             next_object_id: 1,
             free_object_ids: Vec::new(),
             lazy_init_in_progress: std::collections::HashSet::new(),
-            pending_classes: Vec::new(),
+            pending_classes: Rc::new(Vec::new()),
             is_global_scope: true,
             current_exception: None,
             constant_attributes: HashMap::new(),
@@ -9167,7 +9170,7 @@ impl Vm {
 
     /// Register a class (from the compiler's compiled_classes list)
     pub fn register_class(&mut self, class: ClassEntry) {
-        self.pending_classes.push(class);
+        Rc::make_mut(&mut self.pending_classes).push(class);
     }
 
     /// If `obj` is an uninitialized lazy object (ghost / proxy), run its
@@ -9653,9 +9656,9 @@ impl Vm {
     }
 
     /// Register a user-defined function
-    pub fn register_user_function(&mut self, name: &[u8], op_array: OpArray) {
+    pub fn register_user_function(&mut self, name: &[u8], op_array: impl Into<Rc<OpArray>>) {
         self.user_functions
-            .insert(name.to_ascii_lowercase(), Rc::new(op_array));
+            .insert(name.to_ascii_lowercase(), op_array.into());
     }
 
     /// Set up `$closure->method(...)` on a Closure object: pushes the pending
@@ -10166,6 +10169,7 @@ impl Vm {
                     new_op.cv_names.remove(pos);
                     // Insert at 0
                     new_op.cv_names.insert(0, b"this".to_vec());
+                    new_op.cv_names_changed();
                     // Remap CV references in opcodes:
                     // Old CV[pos] -> new CV[0]
                     // Old CV[0..pos-1] -> new CV[1..pos]
@@ -10191,6 +10195,7 @@ impl Vm {
             } else {
                 // $this doesn't exist at all - insert at CV[0], shifting everything
                 new_op.cv_names.insert(0, b"this".to_vec());
+                new_op.cv_names_changed();
                 for op_instr in &mut new_op.ops {
                     shift_cv_operand(&mut op_instr.op1);
                     shift_cv_operand(&mut op_instr.op2);
@@ -10677,7 +10682,7 @@ impl Vm {
         op_array: &OpArray,
         classes: Vec<ClassEntry>,
     ) -> Result<Value, VmError> {
-        let saved_pending = std::mem::replace(&mut self.pending_classes, classes);
+        let saved_pending = std::mem::replace(&mut self.pending_classes, std::rc::Rc::new(classes));
         let cvs = vec![Value::Undef; op_array.cv_names.len()];
         self.observe_code = true;
         // (Extensions run this at registration, before the INI settings
@@ -18203,6 +18208,44 @@ impl Vm {
         }
     }
 
+    /// A freshly compiled included file, as it runs (and as the script
+    /// cache keeps it): a file that does not `return` yields 1
+    /// (zend_emit_final_return(1)).
+    #[inline(never)]
+    fn include_compiled(
+        &mut self,
+        abs_path: &str,
+        mut op: OpArray,
+        classes: Vec<ClassEntry>,
+        cacheable: bool,
+        lex_diags: &[(bool, String, u32)],
+        warnings: &[(String, u32)],
+    ) -> Rc<crate::script_cache::Compiled> {
+        let implicit_ret = op
+            .ops
+            .last()
+            .is_some_and(|l| l.opcode == OpCode::Return && l.line == 0);
+        if implicit_ret {
+            let one = op.add_literal(Value::Long(1));
+            if let Some(l) = op.ops.last_mut() {
+                l.op1 = OperandType::Const(one);
+            }
+        }
+        if crate::preload::done() {
+            self.preload_strip_declares(abs_path, &mut op);
+        }
+        let compiled = crate::script_cache::Compiled {
+            op_array: op,
+            classes: Rc::new(classes),
+            diags: Vec::new(),
+        };
+        if cacheable {
+            self.cache_compiled_script(abs_path, compiled, lex_diags, warnings)
+        } else {
+            Rc::new(compiled)
+        }
+    }
+
     /// execute_op_array() for a call made by the executor itself (a user
     /// function called by DO_FCALL, an included file).
     #[inline]
@@ -18435,7 +18478,7 @@ impl Vm {
                 _ => None,
             };
             o.and_then(|o| {
-                let sites = op_array.sites.borrow();
+                let sites = op_array.sites().borrow();
                 let (c, name, by_val) = sites.as_ref()?.spl_sites.get(&(ip as u32))?;
                 let same = o.borrow().class_name == *c;
                 same.then(|| (Value::Object(o), name.clone(), *by_val))
@@ -18541,7 +18584,7 @@ impl Vm {
         if let Value::Object(o) = &obj_val {
             let class = o.borrow().class_name.clone();
             op_array
-                .sites
+                .sites()
                 .borrow_mut()
                 .get_or_insert_with(Default::default)
                 .spl_sites
@@ -19583,7 +19626,7 @@ impl Vm {
         let fn_gen = self.user_functions.len() + 1;
         // What the site resolved to last, for the same classes.
         let cached = {
-            let sites = op_array.sites.borrow();
+            let sites = op_array.sites().borrow();
             sites
                 .as_ref()
                 .and_then(|s| s.forward_sites.get(&(ip as u32)))
@@ -19643,7 +19686,7 @@ impl Vm {
                     fn_gen,
                 };
                 op_array
-                    .sites
+                    .sites()
                     .borrow_mut()
                     .get_or_insert_with(Default::default)
                     .forward_sites
@@ -19746,7 +19789,7 @@ impl Vm {
         fn_gen: usize,
         t: &mut CallTarget,
     ) -> bool {
-        let sites = op_array.sites.borrow();
+        let sites = op_array.sites().borrow();
         let Some(c) = sites
             .as_ref()
             .and_then(|s| s.call_targets.get(&(ip as u32)))
@@ -19828,7 +19871,7 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn ns_fallback_cached(&self, op_array: &OpArray, site: u32, lower: &[u8]) -> bool {
         op_array
-            .sites
+            .sites()
             .borrow()
             .as_ref()
             .and_then(|s| s.ns_fallbacks.get(&site))
@@ -19838,7 +19881,7 @@ impl Vm {
     #[inline(never)]
     pub(crate) fn ns_fallback_remember(op_array: &OpArray, site: u32, lower: &[u8]) {
         op_array
-            .sites
+            .sites()
             .borrow_mut()
             .get_or_insert_with(Default::default)
             .ns_fallbacks
@@ -19923,7 +19966,7 @@ impl Vm {
             t.method_info = Some(Rc::new(self.method_call_info(f, &name, sep as usize)));
         }
         op_array
-            .sites
+            .sites()
             .borrow_mut()
             .get_or_insert_with(Default::default)
             .call_targets
@@ -20551,14 +20594,11 @@ impl Vm {
         // (ZEND_HANDLE_EXCEPTION's live ZEND_LIVE_SILENCE ranges).
         let mut try_er_depths: Vec<(u32, usize)> = Vec::new();
         // $GLOBALS is the symbol table itself.
+        let names = op_array.cv_name_info();
         let globals_cv: Option<u32> = if single_step.is_some() {
             None
         } else {
-            op_array
-                .cv_names
-                .iter()
-                .position(|n| n == b"GLOBALS")
-                .map(|i| i as u32)
+            names.globals
         };
         if let Some(i) = globals_cv {
             if let Some(slot) = cvs.get_mut(i as usize) {
@@ -20583,11 +20623,9 @@ impl Vm {
         if single_step.is_none() && !fsym.as_ref().is_some_and(|f| f.tab.global) {
             // Bind auto-global CVs ($_SERVER, $_GET, ...) to the shared global
             // slot so reads, writes and unset of elements act on the real global.
-            for (i, cv_name) in op_array.cv_names.iter().enumerate() {
-                if is_auto_global_name(cv_name)
-                    && matches!(cvs.get(i), Some(Value::Undef))
-                    && self.global_exists(cv_name)
-                {
+            for &i in names.auto_globals.iter() {
+                let (i, cv_name) = (i as usize, &op_array.cv_names[i as usize]);
+                if matches!(cvs.get(i), Some(Value::Undef)) && self.global_exists(cv_name) {
                     cvs[i] = Value::Reference(self.global_cell(cv_name));
                 }
             }
@@ -42478,47 +42516,34 @@ impl Vm {
                             match parsed {
                                 Ok(program) => {
                                     self.current_file = RcStr::from(&abs_path);
-                                    let fresh = program.is_ok();
                                     let compiled = match program {
                                         Err(c) => {
                                             self.replay_cached_diags(&c.diags);
-                                            Ok((c.op_array.clone(), c.classes.clone(), Vec::new()))
+                                            Ok((Err(c), Vec::new()))
                                         }
                                         Ok(program) => {
                                             let mut compiler = crate::compiler::Compiler::new();
                                             compiler.source_file = abs_path.as_bytes().to_vec();
-                                            compiler.compile(&program)
+                                            compiler
+                                                .compile(&program)
+                                                .map(|(o, c, w)| (Ok((o, c)), w))
                                         }
                                     };
                                     match compiled {
-                                        Ok((mut inc_op_array, inc_classes, inc_warnings)) => {
-                                            // A file that does not `return` yields 1
-                                            // (zend_emit_final_return(1)).
-                                            let implicit_ret = fresh
-                                                && inc_op_array.ops.last().is_some_and(|l| {
-                                                    l.opcode == OpCode::Return && l.line == 0
-                                                });
-                                            if implicit_ret {
-                                                let one = inc_op_array.add_literal(Value::Long(1));
-                                                if let Some(l) = inc_op_array.ops.last_mut() {
-                                                    l.op1 = OperandType::Const(one);
-                                                }
-                                            }
-                                            if crate::preload::done() {
-                                                self.preload_strip_declares(
+                                        Ok((code, inc_warnings)) => {
+                                            // (the cached compilation is run as is)
+                                            let shared = match code {
+                                                Err(c) => c,
+                                                Ok((op, classes)) => self.include_compiled(
                                                     &abs_path,
-                                                    &mut inc_op_array,
-                                                );
-                                            }
-                                            if fresh && plain_file && !is_stream_path {
-                                                self.cache_compiled_script(
-                                                    &abs_path,
-                                                    &inc_op_array,
-                                                    &inc_classes,
+                                                    op,
+                                                    classes,
+                                                    plain_file && !is_stream_path,
                                                     &lex_diags,
                                                     &inc_warnings,
-                                                );
-                                            }
+                                                ),
+                                            };
+                                            let inc_op_array = &shared.op_array;
                                             // The scanner's diagnostics, then the compiler's
                                             for (deprecation, msg, wline) in lex_diags {
                                                 if deprecation {
@@ -42534,7 +42559,7 @@ impl Vm {
                                             // compilation are relative to 0 (not the global list)
                                             let saved_pending = std::mem::replace(
                                                 &mut self.pending_classes,
-                                                inc_classes,
+                                                shared.classes.clone(),
                                             );
                                             // Execute included file's op_array, sharing caller's scope
                                             let mut inc_cvs =
@@ -42570,7 +42595,7 @@ impl Vm {
                                             ));
                                             let exec_r = {
                                                 self.observe_code = true;
-                                                self.execute_op_array_vm(&inc_op_array, inc_cvs)
+                                                self.execute_op_array_vm(inc_op_array, inc_cvs)
                                             };
                                             self.call_stack.pop();
                                             let result = match exec_r {
@@ -42801,10 +42826,7 @@ impl Vm {
                                             self.current_file = saved;
                                         }
                                         // Swap pending_classes so DeclareClass indices are relative to 0
-                                        let eval_saved_pending = std::mem::replace(
-                                            &mut self.pending_classes,
-                                            eval_classes,
-                                        );
+                                        let eval_saved_pending = std::mem::replace(&mut self.pending_classes, std::rc::Rc::new(eval_classes));
                                         // Eval shares the calling scope's variables
                                         let mut eval_cvs =
                                             vec![Value::Undef; eval_op_array.cv_names.len()];

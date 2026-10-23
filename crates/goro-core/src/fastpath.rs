@@ -1163,7 +1163,7 @@ impl crate::vm::Vm {
         // once declared)
         let scope = self.class_scope_ref();
         let cached = match op_array
-            .sites
+            .sites()
             .borrow()
             .as_ref()
             .and_then(|s| s.prop_sites.get(&(ip as u32)))
@@ -1185,7 +1185,7 @@ impl crate::vm::Vm {
             None => {
                 let p = self.plain_public_prop(&ob.class_name, name, write || w_fetch, scope);
                 op_array
-                    .sites
+                    .sites()
                     .borrow_mut()
                     .get_or_insert_with(Default::default)
                     .prop_sites

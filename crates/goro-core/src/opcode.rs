@@ -497,7 +497,9 @@ pub struct OpArray {
     /// If set, the last param is variadic (...$args) at this CV index
     pub variadic_param: Option<u32>,
     /// Nested function OpArrays (for DeclareFunction)
-    pub child_functions: Vec<OpArray>,
+    /// (shared: declaring one registers it without a copy, and a cached
+    /// script's functions are those of every request)
+    pub child_functions: Vec<std::rc::Rc<OpArray>>,
     /// Whether this function is a generator (contains yield)
     pub is_generator: bool,
     /// Parameter type information (indexed by CV index, None if no type hint)
@@ -567,12 +569,36 @@ pub struct OpArray {
     /// What this code's call sites and property accesses found (allocated
     /// on first use: an OpArray stays small, the compiler keeps some in
     /// its recursive frames).
-    pub(crate) sites: std::cell::RefCell<Option<Box<SiteCaches>>>,
+    /// (of the request that made them: see OpArray::sites())
+    sites: std::cell::RefCell<Option<Box<SiteCaches>>>,
+    /// See OpArray::cv_name_info().
+    cv_info: std::cell::OnceCell<CvNameInfo>,
+}
+
+/// The variables a frame binds as it starts: `$GLOBALS` and the auto
+/// globals (`$_SERVER`, ...), by CV index.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CvNameInfo {
+    pub(crate) globals: Option<u32>,
+    pub(crate) auto_globals: Box<[u32]>,
+}
+
+thread_local! {
+    /// The request whose call sites the SiteCaches are for: code kept by
+    /// the script cache serves later requests, which start from nothing.
+    static SITE_EPOCH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A new request starts (see SITE_EPOCH).
+pub fn new_site_epoch() {
+    SITE_EPOCH.with(|e| e.set(e.get().wrapping_add(1)));
 }
 
 /// See OpArray::sites; entries are by opcode index.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct SiteCaches {
+    /// The SITE_EPOCH they were made in.
+    epoch: u32,
     /// What the plain function calls of the INIT_FCALLs resolved to (see
     /// Vm::plain_call_target).
     pub(crate) call_targets: crate::fxhash::FxHashMap<u32, crate::vm::CachedCallTarget>,
@@ -598,7 +624,110 @@ pub(crate) struct SiteCaches {
     pub(crate) ns_fallbacks: crate::fxhash::FxHashMap<u32, Vec<u8>>,
 }
 
+impl Default for SiteCaches {
+    fn default() -> Self {
+        SiteCaches {
+            epoch: SITE_EPOCH.with(|e| e.get()),
+            call_targets: Default::default(),
+            prop_sites: Default::default(),
+            method_sites: Default::default(),
+            forward_sites: Default::default(),
+            spl_sites: Default::default(),
+            new_sites: Default::default(),
+            ns_fallbacks: Default::default(),
+        }
+    }
+}
+
 impl OpArray {
+    /// Which of the CVs are `$GLOBALS` and the auto globals (`cv_names`
+    /// is complete once the code runs).
+    #[inline]
+    pub(crate) fn cv_name_info(&self) -> &CvNameInfo {
+        self.cv_info.get_or_init(|| CvNameInfo {
+            globals: self
+                .cv_names
+                .iter()
+                .position(|n| n == b"GLOBALS")
+                .map(|i| i as u32),
+            auto_globals: (0..self.cv_names.len() as u32)
+                .filter(|&i| crate::vm::is_auto_global_name(&self.cv_names[i as usize]))
+                .collect(),
+        })
+    }
+
+    /// A listing of the opcodes (and those of the nested functions), for
+    /// debugging (`GORO_DUMP_OPS=1` prints the main script's).
+    pub fn dump(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        let name = String::from_utf8_lossy(self.effective_name());
+        let _ = writeln!(
+            out,
+            "== {} ({} cvs, {} tmps)",
+            if name.is_empty() {
+                "(main)".into()
+            } else {
+                name
+            },
+            self.cv_names.len(),
+            self.temp_count
+        );
+        let operand = |o: &OperandType| match o {
+            OperandType::Unused => "-".to_string(),
+            OperandType::Cv(i) => format!(
+                "${}",
+                self.cv_names
+                    .get(*i as usize)
+                    .map(|n| String::from_utf8_lossy(n).into_owned())
+                    .unwrap_or_else(|| format!("cv{}", i))
+            ),
+            OperandType::Tmp(i) => format!("T{}", i),
+            OperandType::Const(i) => match self.literals.get(*i as usize) {
+                Some(Value::String(s)) => format!("{:?}", s.to_string_lossy()),
+                Some(v) => format!("{:?}", v),
+                None => format!("c{}", i),
+            },
+            OperandType::JmpTarget(t) => format!("->{}", t),
+        };
+        for (i, op) in self.ops.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "{:5} L{:<5} {:?} {} {} {}",
+                i,
+                op.line,
+                op.opcode,
+                operand(&op.op1),
+                operand(&op.op2),
+                operand(&op.result)
+            );
+        }
+        for f in &self.child_functions {
+            out.push_str(&f.dump());
+        }
+        out
+    }
+
+    /// `cv_names` was edited (see cv_name_info()).
+    pub(crate) fn cv_names_changed(&mut self) {
+        self.cv_info.take();
+    }
+
+    /// What this code's call sites found in the current request.
+    #[inline]
+    pub(crate) fn sites(&self) -> &std::cell::RefCell<Option<Box<SiteCaches>>> {
+        let stale = match self.sites.try_borrow() {
+            Ok(s) => s
+                .as_ref()
+                .is_some_and(|c| c.epoch != SITE_EPOCH.with(|e| e.get())),
+            Err(_) => false,
+        };
+        if stale {
+            *self.sites.borrow_mut() = None;
+        }
+        &self.sites
+    }
+
     /// `filename` (lossily decoded) as a shared string: entering the
     /// function and its backtrace frames share one copy of it.
     ///
@@ -653,6 +782,7 @@ impl OpArray {
             fcc_desc: None,
             closure_called_class: None,
             sites: Default::default(),
+            cv_info: Default::default(),
         }
     }
 
@@ -693,6 +823,7 @@ impl OpArray {
         }
         let idx = self.cv_names.len() as u32;
         self.cv_names.push(name.to_vec());
+        self.cv_names_changed();
         idx
     }
 

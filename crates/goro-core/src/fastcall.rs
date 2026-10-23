@@ -111,7 +111,7 @@ impl Vm {
         // The template the site used last, while the class still has it
         // (its name lowercased then).
         let site = op_array
-            .sites
+            .sites()
             .borrow()
             .as_ref()
             .and_then(|s| s.new_sites.get(&(ip as u32)).cloned());
@@ -237,7 +237,7 @@ impl Vm {
 
     fn note_new_site(op_array: &OpArray, ip: usize, t: &Rc<NewTemplate>) {
         op_array
-            .sites
+            .sites()
             .borrow_mut()
             .get_or_insert_with(Default::default)
             .new_sites
@@ -335,7 +335,7 @@ impl Vm {
                 return false;
             }
             let scope = self.class_scope_ref();
-            let sites = op_array.sites.borrow();
+            let sites = op_array.sites().borrow();
             match sites
                 .as_ref()
                 .and_then(|s| s.method_sites.get(&(ip as u32)))
@@ -416,7 +416,7 @@ impl Vm {
         // (what the call site remembers when the general handler is to run)
         let fallback = |class_name: Vec<u8>, scope: Option<Vec<u8>>| {
             op_array
-                .sites
+                .sites()
                 .borrow_mut()
                 .get_or_insert_with(Default::default)
                 .method_sites
@@ -450,7 +450,7 @@ impl Vm {
             // (the call site's, not counted by memory_get_usage(), see MethodSite)
             let func_name = PhpString::from_bytes_untracked(&func_name);
             op_array
-                .sites
+                .sites()
                 .borrow_mut()
                 .get_or_insert_with(Default::default)
                 .method_sites
@@ -499,7 +499,7 @@ impl Vm {
         let func_name = PhpString::from_bytes_untracked(&func_name);
         let info = Rc::new(self.method_call_info(&method_op_array, &func_name, sep));
         op_array
-            .sites
+            .sites()
             .borrow_mut()
             .get_or_insert_with(Default::default)
             .method_sites
@@ -587,7 +587,7 @@ impl Vm {
             }
             let fn_gen = self.user_functions.len() + 1;
             if let Some(s) = op_array
-                .sites
+                .sites()
                 .borrow_mut()
                 .get_or_insert_with(Default::default)
                 .method_sites
