@@ -4533,14 +4533,49 @@ fn bin2hex(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 /// zval_get_long() of a pack() argument: an out-of-range float warns.
+/// zend_value_error() and friends format the message, then pass it on as a
+/// C string: a NUL (from a `%c` of the format) ends it.
+fn cut_at_nul(mut msg: String) -> String {
+    if let Some(p) = msg.find('\0') {
+        msg.truncate(p);
+    }
+    msg
+}
+
+/// zval_get_long() / zval_get_double() of an object without a cast
+/// handler warns "could not be converted to int/float".
+fn pack_object_warning(vm: &mut Vm, v: &Value, kind: u8, tname: &str) {
+    if let Value::Object(obj) = v {
+        if goro_core::value::native_cast(obj, kind).is_none() {
+            let class_name = goro_core::value::display_class_name(&obj.borrow().class_name);
+            vm.emit_warning(&format!(
+                "Object of class {} could not be converted to {}",
+                class_name, tname
+            ));
+        }
+    }
+}
+
+/// zval_get_long() for php_pack()
 fn pack_long(vm: &mut Vm, v: Option<&Value>) -> i64 {
     let Some(v) = v else { return 0 };
+    let v = v.deref();
+    pack_object_warning(vm, &v, 1, "int");
     let line = vm.current_line;
-    vm.warn_oob_float_to_int(v, line);
+    vm.warn_oob_float_to_int(&v, line);
     v.to_long()
 }
 
+/// zval_get_double() for pack()
+fn pack_double(vm: &mut Vm, v: Option<&Value>) -> f64 {
+    let Some(v) = v else { return 0.0 };
+    let v = v.deref();
+    pack_object_warning(vm, &v, 2, "float");
+    v.to_double()
+}
+
 fn pack_value_error(vm: &mut Vm, msg: String) -> VmError {
+    let msg = cut_at_nul(msg);
     let exc = vm.create_exception(b"ValueError", &msg, 0);
     vm.current_exception = Some(exc);
     VmError {
@@ -4557,8 +4592,9 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let num_args = argv.len() as i64;
     let int_size = std::mem::size_of::<std::ffi::c_int>() as i64;
 
-    // Preprocess the format into (code, arg) pairs, converting the string
-    // arguments of '*' codes up front like try_convert_to_string().
+    // Preprocess the format into (code, arg) pairs, validating the codes and
+    // argument counts; only the string arguments of '*' codes are converted
+    // here (try_convert_to_string()), the rest when packing.
     let mut codes: Vec<(u8, i64)> = Vec::new();
     let mut strs: Vec<Option<PhpString>> = vec![None; argv.len()];
     let mut currentarg: i64 = 0;
@@ -4573,13 +4609,15 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 arg = -1;
                 i += 1;
             } else if c.is_ascii_digit() {
-                // atoi()
+                // atoi(): (int)strtol(), which saturates at LONG_MAX
                 let mut n: i64 = 0;
                 while i < format.len() && format[i].is_ascii_digit() {
-                    n = (n * 10 + (format[i] - b'0') as i64) & 0xffff_ffff;
+                    n = n
+                        .saturating_mul(10)
+                        .saturating_add((format[i] - b'0') as i64);
                     i += 1;
                 }
-                arg = n as u32 as i32 as i64;
+                arg = n as i32 as i64;
             }
         }
         match code {
@@ -4607,14 +4645,14 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     ));
                 }
                 let idx = currentarg as usize;
-                let s = vm.value_to_string_checked(&argv[idx])?;
                 if arg < 0 {
+                    let s = vm.value_to_string_checked(&argv[idx].deref())?;
                     arg = s.len() as i64;
                     if code == b'Z' {
                         arg += 1;
                     }
+                    strs[idx] = Some(s);
                 }
-                strs[idx] = Some(s);
                 currentarg += 1;
             }
             b'q' | b'Q' | b'J' | b'P' | b'c' | b'C' | b's' | b'S' | b'i' | b'I' | b'l' | b'L'
@@ -4712,7 +4750,10 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         match code {
             b'a' | b'A' | b'Z' => {
                 let arg_cp = if code != b'Z' { n } else { n.saturating_sub(1) };
-                let s = strs[currentarg].take().unwrap_or_else(PhpString::empty);
+                let s = match strs[currentarg].take() {
+                    Some(s) => s,
+                    None => vm.value_to_string_checked(&argv[currentarg].deref())?,
+                };
                 currentarg += 1;
                 let fill = if code == b'A' { b' ' } else { 0 };
                 out[pos..pos + n].fill(fill);
@@ -4723,7 +4764,10 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             b'h' | b'H' => {
                 let mut nibbleshift = if code == b'h' { 0 } else { 4 };
                 let mut first = true;
-                let s = strs[currentarg].take().unwrap_or_else(PhpString::empty);
+                let s = match strs[currentarg].take() {
+                    Some(s) => s,
+                    None => vm.value_to_string_checked(&argv[currentarg].deref())?,
+                };
                 currentarg += 1;
                 let mut cnt = n;
                 if cnt > s.len() {
@@ -4793,7 +4837,7 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             b'f' | b'g' | b'G' => {
                 for _ in 0..n {
-                    let v = argv.get(currentarg).map(|v| v.to_double()).unwrap_or(0.0) as f32;
+                    let v = pack_double(vm, argv.get(currentarg)) as f32;
                     currentarg += 1;
                     let b = if code == b'G' {
                         v.to_be_bytes()
@@ -4806,7 +4850,7 @@ fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             b'd' | b'e' | b'E' => {
                 for _ in 0..n {
-                    let v = argv.get(currentarg).map(|v| v.to_double()).unwrap_or(0.0);
+                    let v = pack_double(vm, argv.get(currentarg));
                     currentarg += 1;
                     let b = if code == b'E' {
                         v.to_be_bytes()
