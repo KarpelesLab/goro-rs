@@ -3806,10 +3806,15 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, first, "array_filter", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
+        // (zval_add_ref(): a reference only the array holds is copied as
+        // its value)
         let arr_data: Vec<(ArrayKey, Value)> = arr
             .borrow()
             .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| match v {
+                Value::Reference(r) if Rc::strong_count(r) == 1 => (k.clone(), v.deref()),
+                _ => (k.clone(), v.clone()),
+            })
             .collect();
         let callback = args.get(1);
         let mode = args.get(2).map(|v| v.to_long()).unwrap_or(0);
