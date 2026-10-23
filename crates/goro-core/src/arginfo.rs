@@ -1071,6 +1071,29 @@ impl Vm {
                     ),
                 ));
             }
+            // An object given to a class-typed parameter (Z_PARAM_OBJ_OF_CLASS,
+            // Z_PARAM_ITERABLE...): it must be an instance of one of them.
+            if p.by_ref == 0
+                && m & T_CLASS != 0
+                && m & (T_OBJECT | T_CALLABLE | T_MIXED) == 0
+                && matches!(v, Value::Object(_) | Value::Generator(_))
+            {
+                let ok =
+                    p.ty.split('|')
+                        .map(|t| t.trim_start_matches('?'))
+                        .filter(|t| t.bytes().next().is_some_and(|c| c.is_ascii_uppercase()))
+                        .any(|cn| {
+                            self.value_matches_type_mode(
+                                &v,
+                                &crate::opcode::ParamType::Simple(cn.as_bytes().to_vec()),
+                                true,
+                            )
+                        });
+                if !ok {
+                    return Err(self.zpp_type_error(info, i, p, &v));
+                }
+                break;
+            }
             if p.by_ref != 0 || m == 0 || m & (T_CLASS | T_OBJECT | T_CALLABLE) != 0 {
                 // Validated by the function itself; leave the rest to it too
                 // so errors keep zpp's left-to-right order.

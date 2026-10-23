@@ -6737,7 +6737,12 @@ impl Vm {
         }
     }
 
-    fn value_matches_type_mode(&self, value: &Value, param_type: &ParamType, strict: bool) -> bool {
+    pub(crate) fn value_matches_type_mode(
+        &self,
+        value: &Value,
+        param_type: &ParamType,
+        strict: bool,
+    ) -> bool {
         match param_type {
             ParamType::Simple(type_name) => {
                 match type_name.as_slice() {

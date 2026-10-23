@@ -6805,8 +6805,24 @@ fn str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
+fn number_format(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // Z_PARAM_NUMBER(num): int|float, numeric strings and bools converted.
+    let num = match args.first().map(|v| v.deref()).unwrap_or(Value::Null) {
+        v @ (Value::Long(_) | Value::Double(_)) => v,
+        Value::True => Value::Long(1),
+        Value::False => Value::Long(0),
+        // (the null deprecation is raised by the builtin parameter types)
+        Value::Null | Value::Undef => Value::Long(0),
+        other => match &other {
+            Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
+                Some((goro_core::value::NumStr::Long(n), _)) => Value::Long(n),
+                Some((goro_core::value::NumStr::Double(d), _)) => Value::Double(d),
+                None => return Err(number_format_type_error(vm, &other)),
+            },
+            _ => return Err(number_format_type_error(vm, &other)),
+        },
+    };
+    let val = &num;
     let dec = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let dec_point = match args.get(2).map(|v| v.deref()) {
         Some(Value::Null) | Some(Value::Undef) | None => PhpString::from_bytes(b"."),
@@ -6841,6 +6857,19 @@ fn number_format(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         dec_point.as_bytes(),
         thousands_sep.as_bytes(),
     ))))
+}
+
+fn number_format_type_error(vm: &mut Vm, v: &Value) -> VmError {
+    let msg = format!(
+        "number_format(): Argument #1 ($num) must be of type int|float, {} given",
+        Vm::value_type_name(v)
+    );
+    let exc = vm.create_exception(b"TypeError", &msg, 0);
+    vm.current_exception = Some(exc);
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
 }
 
 /// _php_math_number_format_ex() (ext/standard/math.c).
