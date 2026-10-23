@@ -95,7 +95,12 @@ fn construct(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 fn get_hsl(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
     let c = color(vm, &this(o))?;
-    let (h, s, l) = c.to_hsl();
+    // the stored channels as they are (a CMYK colour's C, M, Y too)
+    let (h, s, l) = goro_imagick::color::rgb_to_hsl(
+        clamp_to_quantum(c.red) * QUANTUM_SCALE,
+        clamp_to_quantum(c.green) * QUANTUM_SCALE,
+        clamp_to_quantum(c.blue) * QUANTUM_SCALE,
+    );
     let mut a = PhpArray::new();
     set(&mut a, "hue", Value::Double(h));
     set(&mut a, "saturation", Value::Double(s));
