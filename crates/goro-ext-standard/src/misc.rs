@@ -9943,7 +9943,7 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         // Redirect lazy proxy to real backing object.
         let obj_rc = vm.proxy_redirect(outer);
         let class_lower = obj_rc.borrow().class_name.to_ascii_lowercase();
-        let table = vm.object_prop_table(&obj_rc);
+        let table = vm.object_prop_table_info_order(&obj_rc);
         let mut arr = PhpArray::new();
         for e in table {
             let is_dynamic = e.slot.is_none();

@@ -361,8 +361,9 @@ impl Vm {
                 n
             };
             // A redeclared (non-private) property keeps the slot of its
-            // topmost declaration.
-            let mut defs: Vec<(usize, usize, &crate::object::PropertyDef)> = ce
+            // topmost declaration with storage (a property its parent left
+            // virtual gets a new slot, in the child's declaration order).
+            let mut defs: Vec<(usize, usize, usize, &crate::object::PropertyDef)> = ce
                 .properties
                 .iter()
                 .enumerate()
@@ -372,13 +373,13 @@ impl Vm {
                     let root = if p.visibility == Visibility::Private {
                         decl
                     } else {
-                        self.prop_root_of(&decl, &p.name)
+                        self.slot_root_of(&decl, &p.name)
                     };
-                    (depth(&root), i, p)
+                    (depth(&root), self.own_decl_pos(&root, &p.name), i, p)
                 })
                 .collect();
-            defs.sort_by_key(|(d, i, _)| (*d, *i));
-            for (_, _, p) in defs {
+            defs.sort_by_key(|(d, pos, i, _)| (*d, *pos, *i));
+            for (_, _, _, p) in defs {
                 let decl = lower(&p.declaring_class);
                 let slot = PropSlot {
                     name: p.name.clone(),
@@ -712,6 +713,40 @@ impl Vm {
     /// The property table of `obj` (zend_std_get_properties): declared slots
     /// in slot order (uninitialized ones skipped, except hooked properties,
     /// which have no backing value to show), then dynamic properties.
+    /// The property table as zend_hooked_object_build_properties() orders it
+    /// for a class with hooked properties (get_object_vars(), json_encode()):
+    /// the declared properties in property-info order (inherited first, a
+    /// redeclared one at its first declaration), then the dynamic ones. Slot
+    /// order differs when a child gives storage to a property its parent
+    /// left virtual. Other classes: object_prop_table().
+    pub fn object_prop_table_info_order(&self, obj: &Rc<RefCell<PhpObject>>) -> Vec<PropEntry> {
+        let mut t = self.object_prop_table(obj);
+        let cl = obj.borrow().class_name.to_ascii_lowercase();
+        let Some(ce) = self.classes.get(&cl) else {
+            return t;
+        };
+        if !ce.properties.iter().any(|p| p.has_get_hook || p.has_set_hook) {
+            return t;
+        }
+        let pos = |e: &PropEntry| -> usize {
+            match &e.slot {
+                Some(s) => ce
+                    .properties
+                    .iter()
+                    .filter(|p| !p.is_static)
+                    .position(|p| {
+                        p.name == s.name
+                            && (s.vis != Visibility::Private
+                                || p.declaring_class.eq_ignore_ascii_case(&s.decl))
+                    })
+                    .unwrap_or(usize::MAX - 1),
+                None => usize::MAX,
+            }
+        };
+        t.sort_by_cached_key(pos);
+        t
+    }
+
     pub fn object_prop_table(&self, obj: &Rc<RefCell<PhpObject>>) -> Vec<PropEntry> {
         let ob = obj.borrow();
         let layout = self.class_layout_of(&ob.class_name);
@@ -930,6 +965,46 @@ impl Vm {
     /// The class of the property's prototype (its topmost non-private declaration).
     fn prop_root_class(&self, _slots: &[PropSlot], info: &PropSlot) -> Vec<u8> {
         self.prop_root_of(&info.decl, &info.name)
+    }
+
+    /// The topmost ancestor of `decl` declaring non-private property `name`
+    /// with storage (the class whose slot the property uses).
+    fn slot_root_of(&self, decl: &[u8], name: &[u8]) -> Vec<u8> {
+        let mut root = decl.to_vec();
+        let mut cur = decl.to_vec();
+        for _ in 0..64 {
+            let Some(p) = self.classes.get(&cur).and_then(|c| c.parent.as_ref()) else {
+                break;
+            };
+            let p = lower(p);
+            let declares = self.classes.get(&p).is_some_and(|c| {
+                c.properties.iter().any(|d| {
+                    d.name == name
+                        && !d.is_static
+                        && !d.is_virtual
+                        && d.visibility != Visibility::Private
+                        && lower(&d.declaring_class) == p
+                })
+            });
+            if declares {
+                root = p.clone();
+            }
+            cur = p;
+        }
+        root
+    }
+
+    /// Position of `name` among the properties class `cl` itself declares.
+    fn own_decl_pos(&self, cl: &[u8], name: &[u8]) -> usize {
+        let Some(c) = self.classes.get(cl) else {
+            return 0;
+        };
+        if c.own_prop_order.is_empty() {
+            c.properties.iter().position(|p| p.name == name)
+        } else {
+            c.own_prop_order.iter().position(|n| n == name)
+        }
+        .unwrap_or(usize::MAX)
     }
 
     /// The topmost ancestor of `decl` declaring non-private property `name`.

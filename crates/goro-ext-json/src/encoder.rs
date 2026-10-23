@@ -395,7 +395,7 @@ fn json_properties(
     let cl = class_lower(&target);
     if vm.class_has_hooked_props(&cl) {
         let mut out = Vec::new();
-        for e in vm.object_prop_table(&target) {
+        for e in vm.object_prop_table_info_order(&target) {
             let key = ArrayKey::String(goro_core::string::PhpString::from_vec(e.key));
             match e.slot {
                 Some(slot) if slot.has_get_hook => {
