@@ -4722,6 +4722,15 @@ fn sort_regular_cmp(vm: &mut Vm, a: &Value, b: &Value) -> i64 {
             a.compare_zend(&casted)
         };
     }
+    // (zend_compare() casts an object compared with a number, noticing)
+    if matches!(
+        (&a, &b),
+        (Value::Object(_), Value::Long(_) | Value::Double(_))
+            | (Value::Long(_) | Value::Double(_), Value::Object(_))
+    ) {
+        let line = vm.current_line;
+        vm.emit_object_comparison_notice(&a, &b, line);
+    }
     a.compare_zend(&b)
 }
 

@@ -5467,7 +5467,7 @@ impl Vm {
         Some((build(na), build(nb)))
     }
 
-    fn emit_object_comparison_notice(&mut self, a: &Value, b: &Value, line: u32) {
+    pub fn emit_object_comparison_notice(&mut self, a: &Value, b: &Value, line: u32) {
         let a_inner = match a {
             Value::Reference(r) => r.borrow().clone(),
             _ => a.clone(),
