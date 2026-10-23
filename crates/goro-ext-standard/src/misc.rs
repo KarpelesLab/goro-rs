@@ -13172,7 +13172,8 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .get(b"auto_detect_line_endings".as_slice())
         .map(ini_parse_bool)
         .unwrap_or(false);
-    FILE_HANDLES.with(|handles| {
+    let mut read_errno = 0;
+    let r = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             if fh.eol == EOL_UNSET {
@@ -13217,6 +13218,12 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                     Err(e) => {
                         failed = e.kind() != std::io::ErrorKind::WouldBlock;
+                        if fh.sock.is_none() {
+                            if let Some(n) = e.raw_os_error().filter(|n| *n != 9 && *n != libc::EAGAIN) {
+                                read_errno = n;
+                                fh.eof = true;
+                            }
+                        }
                         break;
                     }
                 }
@@ -13243,7 +13250,11 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         } else {
             Ok(Value::False)
         }
-    })
+    });
+    if read_errno != 0 {
+        read_failed_notice(vm, "fgets", read_errno);
+    }
+    r
 }
 
 fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -18352,7 +18363,8 @@ fn fgetc_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     }
-    FILE_HANDLES.with(|handles| {
+    let mut failed_errno = 0;
+    let r = FILE_HANDLES.with(|handles| {
         let mut handles = handles.borrow_mut();
         if let Some(fh) = handles.get_mut(&fid) {
             let mut buf = [0u8; 1];
@@ -18362,12 +18374,37 @@ fn fgetc_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     Ok(Value::False)
                 }
                 Ok(_) => Ok(Value::String(PhpString::from_bytes(&buf))),
-                Err(_) => Ok(Value::False),
+                Err(e) => {
+                    if let Some(n) = e.raw_os_error().filter(|n| *n != 9 && *n != libc::EAGAIN) {
+                        failed_errno = n;
+                        fh.eof = true;
+                    }
+                    Ok(Value::False)
+                }
             }
         } else {
             Ok(Value::False)
         }
-    })
+    });
+    if failed_errno != 0 {
+        read_failed_notice(vm, "fgetc", failed_errno);
+    }
+    r
+}
+
+/// php_stdiop_read()'s notice for a failed read() (8192: the buffer size
+/// PHP reads with).
+fn read_failed_notice(vm: &mut Vm, fname: &str, errno: i32) {
+    let msg = std::io::Error::from_raw_os_error(errno).to_string();
+    let msg = msg.split(" (os error").next().unwrap_or("Unknown error").to_string();
+    let line = vm.current_line;
+    vm.emit_notice_at(
+        &format!(
+            "{}(): Read of 8192 bytes failed with errno={} {}",
+            fname, errno, msg
+        ),
+        line,
+    );
 }
 
 fn flock_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
