@@ -570,6 +570,7 @@ impl PhpObject {
 
     pub fn set_property(&mut self, name: Vec<u8>, value: Value) {
         if let Some(value) = self.set_existing_property(&name, value) {
+            self.lazy_ht_check(&name);
             self.properties.push((name, value));
             self.account();
         }
@@ -578,6 +579,7 @@ impl PhpObject {
     /// set_property() by a borrowed name (copied only for a new property).
     pub fn set_property_slice(&mut self, name: &[u8], value: Value) {
         if let Some(value) = self.set_existing_property(name, value) {
+            self.lazy_ht_check(name);
             self.properties.push((name.to_vec(), value));
             self.account();
         }
@@ -615,8 +617,49 @@ impl PhpObject {
                 return;
             }
         }
+        self.lazy_ht_check(&name);
         self.properties.push((name, Value::Reference(r)));
         self.account();
+    }
+
+    /// A property is being added to this object: if it is the lazy ghost
+    /// whose initializer runs with its properties table built (see
+    /// LAZY_HT_WATCH), the table is separated now.
+    #[inline]
+    fn lazy_ht_check(&mut self, name: &[u8]) {
+        let w = LAZY_HT_WATCH.load(std::sync::atomic::Ordering::Relaxed);
+        if w != 0
+            && w == self as *const PhpObject as usize
+            && !LAZY_HT_DECLARED.with(|d| d.borrow().iter().any(|k| k == name))
+        {
+            self.lazy_ht_separate();
+        }
+    }
+
+    /// zend_array_dup() of a properties table holding INDIRECT slots (a
+    /// lazy ghost's, shared with the initialization snapshot when its
+    /// initializer adds a dynamic property): the copy holds the declared
+    /// properties' values as they are now, and the views built from the
+    /// table (var_dump(), (array), get_object_vars(), ...) keep showing
+    /// them. Stored as `__lazy_frozen` (storage key => value).
+    #[cold]
+    #[inline(never)]
+    fn lazy_ht_separate(&mut self) {
+        LAZY_HT_WATCH.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut arr = crate::array::PhpArray::new();
+        for (k, v) in &self.properties {
+            if crate::proptable::is_internal_prop_name(k) || matches!(v, Value::Undef) {
+                continue;
+            }
+            arr.set(
+                crate::array::ArrayKey::String(crate::string::PhpString::from_vec(k.clone())),
+                v.clone(),
+            );
+        }
+        self.properties.push((
+            b"__lazy_frozen".to_vec(),
+            Value::Array(std::rc::Rc::new(std::cell::RefCell::new(arr))),
+        ));
     }
 
     /// Get (creating if needed) a reference to a property slot (`$x = &$obj->p`).
@@ -640,6 +683,7 @@ impl PhpObject {
             }
         }
         let r = std::rc::Rc::new(std::cell::RefCell::new(Value::Null));
+        self.lazy_ht_check(name);
         self.properties
             .push((name.to_vec(), Value::Reference(r.clone())));
         self.account();
@@ -660,6 +704,18 @@ impl PhpObject {
             }
         });
     }
+}
+
+/// The lazy ghost (its PhpObject address) whose initializer runs while its
+/// properties table exists (built by a view while it was lazy): the first
+/// property added to it separates the table (PhpObject::lazy_ht_separate).
+pub static LAZY_HT_WATCH: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+std::thread_local! {
+    /// The storage keys of the watched object's declared properties (adding
+    /// one back after unset() is not a dynamic property).
+    pub static LAZY_HT_DECLARED: std::cell::RefCell<Vec<Vec<u8>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// A copy of a property slot's value (the slot still holds it) about to be

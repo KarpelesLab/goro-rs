@@ -221,6 +221,53 @@ fn table_rows<'a>(
     out
 }
 
+/// A view of a lazy object's properties table: building one for a ghost not
+/// initialized yet creates the table (rebuild_object_properties(), noted as
+/// `__lazy_ht`); a table its initialization separated (`__lazy_frozen`,
+/// see PhpObject::lazy_ht_separate) shows the declared values it copied.
+fn lazy_ht_view(obj: &Rc<RefCell<PhpObject>>) -> Option<crate::array::PhpArray> {
+    let (ghost, has_ht, frozen) = {
+        let ob = obj.borrow();
+        let mut ghost = false;
+        let mut has_ht = false;
+        let mut frozen = None;
+        for (k, v) in &ob.properties {
+            if !k.starts_with(b"__lazy_") {
+                continue;
+            }
+            match k.as_slice() {
+                b"__lazy_state" => {
+                    ghost = matches!(v, Value::String(s) if s.as_bytes() == b"ghost")
+                }
+                b"__lazy_ht" => has_ht = true,
+                b"__lazy_frozen" => {
+                    if let Value::Array(a) = v {
+                        frozen = Some(a.borrow().clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        (ghost, has_ht, frozen)
+    };
+    if ghost && !has_ht {
+        if let Ok(mut b) = obj.try_borrow_mut() {
+            b.properties.push((b"__lazy_ht".to_vec(), Value::True));
+        }
+    }
+    frozen
+}
+
+/// The key a slot's value has in a `__lazy_frozen` table.
+fn frozen_key(obj: &Rc<RefCell<PhpObject>>, slot: &PropSlot) -> crate::array::ArrayKey {
+    let ob = obj.borrow();
+    let key = match &slot.moved_key {
+        Some(mk) if ob.has_property(mk) => mk.clone(),
+        _ => slot.storage_key.clone(),
+    };
+    crate::array::ArrayKey::String(crate::string::PhpString::from_vec(key))
+}
+
 /// The value of a simple stub default (`""`, `0`, `null`, `[]`, ...).
 /// The value a slot the object stores nothing for has when it moves to its
 /// mangled key: an internal slot's default, else unset.
@@ -748,6 +795,23 @@ impl Vm {
     }
 
     pub fn object_prop_table(&self, obj: &Rc<RefCell<PhpObject>>) -> Vec<PropEntry> {
+        let mut out = self.object_prop_table_live(obj);
+        if let Some(frozen) = lazy_ht_view(obj) {
+            out.retain_mut(|e| match &e.slot {
+                Some(slot) => match frozen.get(&frozen_key(obj, slot)) {
+                    Some(v) => {
+                        e.value = v.clone();
+                        true
+                    }
+                    None => false,
+                },
+                None => true,
+            });
+        }
+        out
+    }
+
+    fn object_prop_table_live(&self, obj: &Rc<RefCell<PhpObject>>) -> Vec<PropEntry> {
         let ob = obj.borrow();
         let layout = self.class_layout_of(&ob.class_name);
         let props = &ob.properties;
@@ -799,6 +863,32 @@ impl Vm {
     /// values; an uninitialized typed slot comes with its type (shown as
     /// `uninitialized(type)`), virtual properties have no entry.
     pub fn object_debug_table(
+        &self,
+        obj: &Rc<RefCell<PhpObject>>,
+    ) -> Vec<(Vec<u8>, Value, Option<String>)> {
+        let mut out = self.object_debug_table_live(obj);
+        if let Some(frozen) = lazy_ht_view(obj) {
+            let ob = obj.borrow();
+            let layout = self.class_layout_of(&ob.class_name);
+            drop(ob);
+            out.retain_mut(|(k, v, t)| {
+                let Some(slot) = layout.slots.iter().find(|s| s.mangled() == *k) else {
+                    return true;
+                };
+                match frozen.get(&frozen_key(obj, slot)) {
+                    Some(fv) => {
+                        *v = fv.clone();
+                        *t = None;
+                        true
+                    }
+                    None => false,
+                }
+            });
+        }
+        out
+    }
+
+    fn object_debug_table_live(
         &self,
         obj: &Rc<RefCell<PhpObject>>,
     ) -> Vec<(Vec<u8>, Value, Option<String>)> {

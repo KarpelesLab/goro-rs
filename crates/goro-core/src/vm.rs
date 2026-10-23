@@ -9530,7 +9530,26 @@ impl Vm {
         // The initializer appears in backtraces as called from the code that
         // triggered initialization.
         self.ucf_call_line = Some(self.current_line);
+        // A properties table a view built while the object was lazy is shared
+        // with the initialization snapshot: watch for its separation.
+        let ht_watch = state_bytes == b"ghost" && obj.borrow().has_property(b"__lazy_ht");
+        let prev_watch = ht_watch.then(|| {
+            let layout = self.class_layout_of(&class_name);
+            let keys: Vec<Vec<u8>> = layout
+                .slots
+                .iter()
+                .flat_map(|s| std::iter::once(s.storage_key.clone()).chain(s.moved_key.clone()))
+                .collect();
+            let prev_keys = crate::object::LAZY_HT_DECLARED.with(|d| d.replace(keys));
+            let prev = crate::object::LAZY_HT_WATCH
+                .swap(obj.as_ptr() as usize, std::sync::atomic::Ordering::Relaxed);
+            (prev, prev_keys)
+        });
         let result = self.call_closure_value(&initializer, vec![this_val.clone()]);
+        if let Some((p, keys)) = prev_watch {
+            crate::object::LAZY_HT_WATCH.store(p, std::sync::atomic::Ordering::Relaxed);
+            crate::object::LAZY_HT_DECLARED.with(|d| *d.borrow_mut() = keys);
+        }
         self.lazy_init_attempt = Some(Rc::as_ptr(obj) as usize);
         self.ucf_call_line = None;
         let threw = !exc_before && self.current_exception.is_some();
