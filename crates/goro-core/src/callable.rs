@@ -165,7 +165,12 @@ impl Vm {
                             is_abstract: false,
                         });
                     }
-                    cur = lower(c.parent.as_ref()?);
+                    match &c.parent {
+                        Some(p) => cur = lower(p),
+                        // an extension class whose methods its native
+                        // handler serves: its stub declares them
+                        None => break,
+                    }
                 }
                 None => break,
             }

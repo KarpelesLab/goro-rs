@@ -1399,6 +1399,10 @@ impl Vm {
             || self.spl_has_builtin_tostring(&lower)
             // SimpleXMLIterator and user subclasses keep the cast handler
             || self.class_extends(&lower, b"simplexmlelement")
+            // extension classes whose native handler serves __toString()
+            || self
+                .find_native_class_handler(&lower)
+                .is_some_and(|(c, h)| (h.has_method)(&c, b"__tostring", false))
     }
 }
 

@@ -313,7 +313,9 @@ pub(crate) fn rmethods<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::M
             Some(c) => c,
             None => break,
         };
-        if !vm.classes.contains_key(&p) {
+        // an internal parent (or a bare extension entry whose methods its
+        // native handler serves) gives the methods the user class lacks
+        if !vm.classes.contains_key(&p) || vm.classes.get(&p).is_some_and(bare_entry) {
             for m in pce.methods.values() {
                 if !out.iter().any(|x| x.name.eq_ignore_ascii_case(&m.name)) {
                     out.push(m);
@@ -10431,6 +10433,7 @@ pub fn reflection_extension_method(
                 // PECL extensions have their own version
                 "uuid" => b"1.3.0".as_slice(),
                 "mailparse" => b"3.2.1-dev",
+                "imagick" => b"3.8.1",
                 _ => b"8.5.4",
             },
         ))),
@@ -10725,6 +10728,18 @@ fn get_extension_classes(ext: &str) -> &'static [&'static str] {
         "ftp" => &["FTP\\Connection"],
         "ldap" => &["LDAP\\Connection", "LDAP\\Result", "LDAP\\ResultEntry"],
         "mailparse" => &["mimemessage"],
+        "imagick" => &[
+            "Imagick",
+            "ImagickDraw",
+            "ImagickPixel",
+            "ImagickPixelIterator",
+            "ImagickKernel",
+            "ImagickException",
+            "ImagickDrawException",
+            "ImagickPixelException",
+            "ImagickPixelIteratorException",
+            "ImagickKernelException",
+        ],
         "xsl" => &["XSLTProcessor"],
         "shmop" => &["Shmop"],
         "sysvsem" => &["SysvSemaphore"],
@@ -10869,6 +10884,14 @@ fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
         "sqlite3" => &["sqlite3.extension_dir", "sqlite3.defensive"],
         "ldap" => &["ldap.max_links"],
         "mailparse" => &["mailparse.def_charset"],
+        "imagick" => &[
+            "imagick.locale_fix",
+            "imagick.skip_version_check",
+            "imagick.progress_monitor",
+            "imagick.set_single_thread",
+            "imagick.shutdown_sleep_count",
+            "imagick.allow_zero_dimension_images",
+        ],
         "filter" => &["filter.default", "filter.default_flags"],
         "exif" => &[
             "exif.encode_unicode",
