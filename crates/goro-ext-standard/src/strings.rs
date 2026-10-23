@@ -543,7 +543,14 @@ fn str_repeat(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // zend_string_safe_alloc(): bail out like the Zend allocator would.
     let mem_limit = goro_core::value::memory_get_limit();
     if mem_limit > 0 {
-        vm.memory_check(total_len.saturating_add(25) & !7)?;
+        // (safe_emalloc(len, times, 32): a huge block's size is reported
+        // as requested)
+        let want = if total_len >= 2 * 1024 * 1024 {
+            total_len.saturating_add(32)
+        } else {
+            total_len.saturating_add(25) & !7
+        };
+        vm.memory_check(want)?;
     } else if total_len > (1usize << 40) {
         let msg = format!(
             "Allowed memory size of {} bytes exhausted (tried to allocate {} bytes)",
