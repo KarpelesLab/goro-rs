@@ -1258,6 +1258,13 @@ pub struct Vm {
     /// The dimension fetch in progress is bound by reference (FE_RESET_RW
     /// & co.: "Cannot create references to/from string offsets").
     pub(crate) str_wb_ref_ctx: bool,
+    /// The dimension fetch in progress is the container of another write
+    /// fetch (FETCH_DIM_W chain), not of the final assignment: a reference
+    /// to false it reaches is converted to an array silently.
+    pub(crate) dim_w_chain: bool,
+    /// The variable the dimension fetch in progress starts from is a PHP
+    /// reference (not just a global's binding cell).
+    pub(crate) dim_w_cv_ref: bool,
     /// The severity an uncaught exception is reported with
     /// (zend_exception_error(ex, severity)); E_ERROR when None.
     pub uncaught_severity: Option<i64>,
@@ -1904,6 +1911,8 @@ impl Vm {
             str_wb_pending: None,
             str_wb_obj_ctx: false,
             str_wb_ref_ctx: false,
+            dim_w_chain: false,
+            dim_w_cv_ref: false,
             uncaught_severity: None,
             functions: Default::default(),
             builtin_param_names: Default::default(),
@@ -4143,6 +4152,48 @@ impl Vm {
         self.called_class_stack.pop();
         self.class_scope_stack.pop();
         r
+    }
+
+    /// Whether the dimension write fetch `op` is the container of the next
+    /// op's own write fetch (`$a[x][y] = v`'s first FETCH_DIM_W) rather than
+    /// of the assignment.
+    #[inline(never)]
+    fn dim_w_feeds_fetch(op: &crate::opcode::Op, next: Option<&crate::opcode::Op>) -> bool {
+        matches!(next, Some(n) if n.op1 == op.result
+        && matches!(
+            n.opcode,
+            OpCode::ArrayGetW
+                | OpCode::ArrayGetWRW
+                | OpCode::ArrayGetWObj
+                | OpCode::ArrayGetWObjRW
+                | OpCode::ArrayGetWUnset
+        ))
+    }
+
+    /// Whether CV slot `slot` (number `i`) holds a PHP reference: a global
+    /// scope variable's cell shared with the symbol table entry alone (and
+    /// the frame's binding) is not one.
+    #[inline(never)]
+    fn cv_is_php_ref(
+        slot: Option<&Value>,
+        i: usize,
+        fsym: &Option<crate::symtab::FrameSymtab>,
+    ) -> bool {
+        let Some(Value::Reference(r)) = slot else {
+            return false;
+        };
+        match fsym {
+            Some(fs)
+                if fs
+                    .bind
+                    .cells
+                    .get(i)
+                    .is_some_and(|c| c.as_ref().is_some_and(|c| Rc::ptr_eq(c, r))) =>
+            {
+                Rc::strong_count(r) > 3
+            }
+            _ => true,
+        }
     }
 
     /// FE_RESET_RW on a variable: SEPARATE_ARRAY() of the array it holds
@@ -47219,10 +47270,19 @@ impl Vm {
                     // deprecation), scalars and plain objects cannot be used.
                     let append = matches!(op.op2, OperandType::Unused);
                     let arr_val = if matches!(arr_val, Value::False) {
-                        self.emit_deprecated_at(
-                            "Automatic conversion of false to array is deprecated",
-                            op.line,
-                        );
+                        // (a reference to false converts silently)
+                        let is_ref = match op.op1 {
+                            OperandType::Cv(ai) => {
+                                Self::cv_is_php_ref(cvs.get(ai as usize), ai as usize, fsym)
+                            }
+                            _ => false,
+                        };
+                        if !is_ref {
+                            self.emit_deprecated_at(
+                                "Automatic conversion of false to array is deprecated",
+                                op.line,
+                            );
+                        }
                         Value::Null
                     } else {
                         arr_val
@@ -47627,13 +47687,16 @@ impl Vm {
                         Some(o) if o.opcode == OpCode::ForeachInitRef && o.op1 == op.result
                     );
                     let abort_before = self.dim_rw_abort;
+                    self.dim_w_chain = Self::dim_w_feeds_fetch(op, op_array.ops.get(ip));
                     let fetched = match op.op1 {
                         OperandType::Cv(ci) => {
                             let i = ci as usize;
                             let name = op_array.cv_names.get(i).map(|n| n.as_slice());
+                            self.dim_w_cv_ref = Self::cv_is_php_ref(cvs.get(i), i, fsym);
                             let mut slot =
                                 cvs.get_mut(i).map(std::mem::take).unwrap_or(Value::Undef);
                             let r = self.fetch_dim_for_write(&mut slot, key, mode, name, op.line);
+                            self.dim_w_cv_ref = false;
                             if let Some(s) = cvs.get_mut(i) {
                                 *s = slot;
                             }
@@ -47654,6 +47717,7 @@ impl Vm {
                             self.fetch_dim_for_write(&mut v, key, mode, None, op.line)
                         }
                     };
+                    self.dim_w_chain = false;
                     // (an abandoned assignment is the next opcode's only)
                     if self.dim_rw_abort != abort_before
                         && !matches!(

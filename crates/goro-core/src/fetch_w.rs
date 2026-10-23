@@ -249,7 +249,13 @@ impl Vm {
                         );
                     }
                 }
-                if matches!(cur, Value::False) {
+                // (FETCH_DIM_W converts a reference to false silently)
+                let quiet = match &cell {
+                    Some(_) if undef_cv.is_some() => self.dim_w_cv_ref,
+                    Some(_) => true,
+                    None => false,
+                };
+                if matches!(cur, Value::False) && !quiet {
                     self.emit_deprecated_at(
                         "Automatic conversion of false to array is deprecated",
                         line,
@@ -997,10 +1003,14 @@ impl Vm {
                         Some(Value::Array(rc))
                     }
                     Value::False if mode != DimFetch::Unset => {
-                        self.emit_deprecated_at(
-                            "Automatic conversion of false to array is deprecated",
-                            line,
-                        );
+                        // (the next write fetch's container is a reference:
+                        // FETCH_DIM_W converts it silently, ASSIGN_DIM not)
+                        if !self.dim_w_chain {
+                            self.emit_deprecated_at(
+                                "Automatic conversion of false to array is deprecated",
+                                line,
+                            );
+                        }
                         let rc = Rc::new(RefCell::new(PhpArray::new()));
                         *r.borrow_mut() = Value::Array(rc.clone());
                         Some(Value::Array(rc))
