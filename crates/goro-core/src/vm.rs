@@ -38745,6 +38745,7 @@ impl Vm {
                         op.line,
                     );
 
+                    let mut gen_iter_handle: Option<Value>;
                     if let Value::Generator(gen_rc) = &arr_val {
                         // For generators, advance to the first yield on init only if not already started.
                         // If valid()/current()/key() was called before foreach, the generator is
@@ -38779,6 +38780,10 @@ impl Vm {
                                     line: op.line,
                                 });
                             }
+                            // zend_generator_get_iterator() allocates the
+                            // iterator (an object handle) before the rewind
+                            // runs the generator to its first yield.
+                            gen_iter_handle = Some(self.foreach_iterator_handle());
                             let mut gen_borrow = gen_rc.borrow_mut();
                             if gen_borrow.state == crate::generator::GeneratorState::Created {
                                 let prev_caller = self.generator_caller.take();
@@ -38839,7 +38844,9 @@ impl Vm {
                             &static_cv_keys,
                         );
                         if let OperandType::Tmp(t) = op.result {
-                            let h = self.foreach_iterator_handle();
+                            let h = gen_iter_handle
+                                .take()
+                                .unwrap_or_else(|| self.foreach_iterator_handle());
                             foreach_iter_handles.insert(t, h);
                             // The iterator now owns a temporary generator
                             // (FE_RESET frees op1).
@@ -39915,6 +39922,8 @@ impl Vm {
                                 line: op.line,
                             });
                         }
+                        // (the iterator's object handle, taken before the rewind)
+                        let iter_handle = self.foreach_iterator_handle();
                         {
                             let mut gen_borrow = gen_rc.borrow_mut();
                             if gen_borrow.state == crate::generator::GeneratorState::Created {
@@ -39946,6 +39955,16 @@ impl Vm {
                         );
                         if let OperandType::Tmp(iter_idx) = op.result {
                             foreach_positions.insert(iter_idx, 0usize);
+                            foreach_iter_handles.insert(iter_idx, iter_handle);
+                            // The iterator now owns a temporary generator
+                            // (FE_RESET_RW frees op1).
+                            if let OperandType::Tmp(src) = op.op1 {
+                                if src != iter_idx {
+                                    if let Some(slot) = tmps.get_mut(src as usize) {
+                                        *slot = Value::Undef;
+                                    }
+                                }
+                            }
                         }
                         return Ok(Flow::Continue);
                     }
