@@ -1249,6 +1249,25 @@ impl Vm {
                 push_linking(cur);
                 for n in &unresolved {
                     self.try_autoload_class(n);
+                    // zend_exception_uncaught_error(): an exception thrown
+                    // while loading a class the check needs is fatal.
+                    if let Some(exc) = self.current_exception.take() {
+                        pop_linking();
+                        let shown = self
+                            .call_object_method(&exc, b"__toString", &[])
+                            .map(|v| v.to_php_string().to_string_lossy())
+                            .unwrap_or_default();
+                        self.current_exception = None;
+                        return Some((
+                            format!(
+                                "During inheritance of {}, while autoloading {}: Uncaught {}",
+                                String::from_utf8_lossy(&cur.name),
+                                String::from_utf8_lossy(n),
+                                shown
+                            ),
+                            false,
+                        ));
+                    }
                 }
                 pop_linking();
                 continue;
