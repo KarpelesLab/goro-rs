@@ -243,7 +243,8 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
                 vm.write_output(format!("{}*RECURSION*\n", prefix).as_bytes());
                 return;
             }
-            let rc = Rc::strong_count(arr).saturating_sub(bias);
+            // (the copies sharing its storage are holders of PHP's array)
+            let rc = (Rc::strong_count(arr) + arr.borrow().shared_copies()).saturating_sub(bias);
             let a = arr.borrow();
             if a.is_empty() {
                 vm.write_output(format!("{}array(0) interned {{\n", prefix).as_bytes());

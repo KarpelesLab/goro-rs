@@ -360,6 +360,14 @@ impl PhpArray {
 
     /// This array's entries (its own, or the storage it shares).
     #[inline(always)]
+    /// The other copies sharing this array's storage (see cow_clone()):
+    /// each holds the zend_array PHP would share once more.
+    pub fn shared_copies(&self) -> usize {
+        self.shared
+            .as_ref()
+            .map_or(0, |s| std::rc::Rc::strong_count(s) - 1)
+    }
+
     fn ents(&self) -> &Vec<(ArrayKey, Value)> {
         match &self.shared {
             Some(s) => &s.entries,
