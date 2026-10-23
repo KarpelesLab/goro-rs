@@ -36324,7 +36324,16 @@ impl Vm {
                     // of just stored narrow fields, which wait for them)
                     return Ok(match op.op1 {
                         OperandType::Cv(i) => match &cvs[i as usize] {
-                            Value::Reference(r) => r.borrow().clone(),
+                            // (a referenced array outlives the frame: the
+                            // caller gets its own copy)
+                            Value::Reference(r) => {
+                                let v = r.borrow().clone();
+                                if matches!(v, Value::Array(_)) {
+                                    self.dup_array_value(v)
+                                } else {
+                                    v
+                                }
+                            }
                             v => v.clone(),
                         },
                         OperandType::Tmp(i) => match std::mem::take(&mut tmps[i as usize]) {
@@ -36381,14 +36390,15 @@ impl Vm {
                                 );
                             }
                         }
-                        self.read_operand_warn(
+                        let v = self.read_operand_warn(
                             &op.op1,
                             &cvs,
                             &tmps,
                             &op_array.literals,
                             op_array,
                             op.line,
-                        )
+                        );
+                        self.dup_returned_ref_array(&op.op1, &cvs, v)
                     };
                     // An error handler that threw on the operand's warning
                     // ("Undefined variable") aborts the return.
@@ -59495,6 +59505,25 @@ impl Vm {
     /// array are copied as plain values.
     /// An array read from a variable or literal and stored elsewhere is a
     /// copy (temporaries are already owned by the store).
+    /// `return $v` by value where `$v` is a reference (static, global,
+    /// by-ref parameter or capture): the referenced array outlives the
+    /// frame, so the caller gets its own copy (PHP shares it refcounted and
+    /// separates on the next write).
+    #[inline]
+    pub(crate) fn dup_returned_ref_array(
+        &self,
+        src: &OperandType,
+        cvs: &[Value],
+        value: Value,
+    ) -> Value {
+        if let (Value::Array(_), OperandType::Cv(i)) = (&value, src) {
+            if matches!(cvs.get(*i as usize), Some(Value::Reference(_))) {
+                return self.dup_array_value(value);
+            }
+        }
+        value
+    }
+
     fn dup_stored_array(&self, src: &OperandType, value: Value) -> Value {
         if matches!(value, Value::Array(_))
             && matches!(src, OperandType::Cv(_) | OperandType::Const(_))
