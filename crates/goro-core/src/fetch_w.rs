@@ -119,6 +119,14 @@ impl Vm {
         let value = value.deref();
         let bytes = match &value {
             Value::String(v) => v.as_bytes().to_vec(),
+            // (zval_try_get_string_func())
+            Value::Array(_) => {
+                self.emit_warning_at("Array to string conversion", line);
+                if self.current_exception.is_some() {
+                    return StrOffsetAssign::Threw;
+                }
+                b"Array".to_vec()
+            }
             other => match self.value_to_string_checked(other) {
                 Ok(v) => v.as_bytes().to_vec(),
                 Err(_) => return StrOffsetAssign::Threw,

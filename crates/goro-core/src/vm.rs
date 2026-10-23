@@ -46105,6 +46105,16 @@ impl Vm {
                                 None => {}
                             }
                         }
+                    } else if matches!(arr_val, Value::String(_)) {
+                        // zend_use_new_element_for_string()
+                        self.throw_error_msg_pub("[] operator not supported for strings", op.line);
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
                     } else if matches!(
                         &arr_val,
                         Value::True | Value::Long(_) | Value::Double(_) | Value::Resource(_)
@@ -46129,6 +46139,8 @@ impl Vm {
                     // $arr[key] = &$var — set array element as reference
                     // op1 = array CV, op2 = value CV (to be made ref), result = key
                     let key_val = self.read_operand(&op.result, &cvs, &tmps, &op_array.literals);
+                    // The variable a failed container fetch leaves undefined.
+                    let mut ref_from_undef: Option<usize> = None;
 
                     // Get or create a reference for the value CV
                     let ref_val = if let OperandType::Cv(vi) = &op.op2 {
@@ -46136,7 +46148,14 @@ impl Vm {
                         if let Some(Value::Reference(r)) = cvs.get(i) {
                             Value::Reference(r.clone())
                         } else {
-                            let current = cvs.get(i).cloned().unwrap_or(Value::Null);
+                            // (an undefined variable is bound as null)
+                            let current = match cvs.get(i) {
+                                None | Some(Value::Undef) => {
+                                    ref_from_undef = Some(i);
+                                    Value::Null
+                                }
+                                Some(v) => v.clone(),
+                            };
                             let r = Rc::new(RefCell::new(current));
                             cvs[i] = Value::Reference(r.clone());
                             Value::Reference(r)
@@ -46288,11 +46307,38 @@ impl Vm {
                                 }
                             }
                         }
+                    } else if matches!(arr_val, Value::String(_)) {
+                        // zend_check_string_offset(), then zend_wrong_string_offset():
+                        // a string offset is not a referenceable place.
+                        if self.check_string_offset_w(
+                            &key_val,
+                            crate::fetch_w::DimFetch::W,
+                            op.line,
+                        ) && self.current_exception.is_none()
+                        {
+                            self.throw_error_msg_pub(
+                                "Cannot create references to/from string offsets",
+                                op.line,
+                            );
+                        }
+                        if let Some(i) = ref_from_undef {
+                            cvs[i] = Value::Undef;
+                        }
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
                     } else if matches!(
                         &arr_val,
                         Value::True | Value::Long(_) | Value::Double(_) | Value::Resource(_)
                     ) {
                         self.throw_error_msg_pub("Cannot use a scalar value as an array", op.line);
+                        if let Some(i) = ref_from_undef {
+                            cvs[i] = Value::Undef;
+                        }
                         native_exc_check!(
                             self,
                             exception_handlers,
