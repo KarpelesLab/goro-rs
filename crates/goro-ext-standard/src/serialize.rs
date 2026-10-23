@@ -2369,9 +2369,16 @@ impl<'a> Parser<'a> {
             {
                 return Ok((mk, d.2.clone(), canonical_class_name(vm, &d.6, &d.6)));
             }
+            // The property table of an object whose properties are served
+            // by handlers (ZipArchive) is rebuilt by get_properties: what
+            // is unserialized into it is not checked against the type.
+            let handler_backed = vm
+                .native_class_handlers
+                .get(&d.6)
+                .is_some_and(|h| h.prop_read.is_some());
             return Ok((
                 d.1.clone(),
-                d.2.clone(),
+                if handler_backed { None } else { d.2.clone() },
                 canonical_class_name(vm, &d.6, &d.6),
             ));
         }
