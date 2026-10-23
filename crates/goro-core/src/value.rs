@@ -1435,8 +1435,8 @@ impl Value {
                         // ext/date DateInterval objects are not comparable
                         false
                     } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
-                        && a_b.has_property(b"__spl_array")
-                        && b_b.has_property(b"__spl_array")
+                        && (crate::spl_dll::is_spl_array_object(&a_b)
+                            || crate::spl_dll::is_spl_array_object(&b_b))
                     {
                         // spl_array_compare_objects(): the storages, then the
                         // (non-internal) properties.
@@ -1451,6 +1451,13 @@ impl Value {
                         crate::spl_dll::spl_storage_view(&a_b)
                             .equals(&crate::spl_dll::spl_storage_view(&b_b))
                             && av.len() == bv.len()
+                            && av.iter().all(|(k, v)| v.equals(&b_b.get_property(k)))
+                    } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
+                        && (has_internal_slots(&a_b) || has_internal_slots(&b_b))
+                    {
+                        // (engine bookkeeping slots are not properties)
+                        let (av, bv) = (real_props(&a_b), real_props(&b_b));
+                        av.len() == bv.len()
                             && av.iter().all(|(k, v)| v.equals(&b_b.get_property(k)))
                     } else if a_b.class_name.eq_ignore_ascii_case(&b_b.class_name)
                         && a_b.properties.len() == b_b.properties.len()
@@ -1917,7 +1924,9 @@ impl Value {
                 }
                 // spl_array_compare_objects(): the storages, then the
                 // (non-internal) properties.
-                if a_borrow.has_property(b"__spl_array") && b_borrow.has_property(b"__spl_array") {
+                if crate::spl_dll::is_spl_array_object(&a_borrow)
+                    || crate::spl_dll::is_spl_array_object(&b_borrow)
+                {
                     let cmp = crate::spl_dll::spl_storage_view(&a_borrow)
                         .compare(&crate::spl_dll::spl_storage_view(&b_borrow));
                     if cmp != 0 {
@@ -1937,6 +1946,20 @@ impl Value {
                     for (key, a_val) in &av {
                         let b_val = b_borrow.get_property(key);
                         let cmp = a_val.compare(&b_val);
+                        if cmp != 0 {
+                            return cmp;
+                        }
+                    }
+                    return 0;
+                }
+                // (engine bookkeeping slots are not properties)
+                if has_internal_slots(&a_borrow) || has_internal_slots(&b_borrow) {
+                    let (av, bv) = (real_props(&a_borrow), real_props(&b_borrow));
+                    if av.len() != bv.len() {
+                        return if av.len() < bv.len() { -1 } else { 1 };
+                    }
+                    for (key, a_val) in &av {
+                        let cmp = a_val.compare(&b_borrow.get_property(key));
                         if cmp != 0 {
                             return cmp;
                         }
@@ -2440,6 +2463,21 @@ fn enum_compare(a: &Value, b: &Value) -> Option<i64> {
         (Value::False, _) => -1,
         _ => i64::MIN,
     })
+}
+
+fn has_internal_slots(o: &crate::object::PhpObject) -> bool {
+    o.properties
+        .iter()
+        .any(|(k, _)| crate::foreach_obj::is_internal_slot(k))
+}
+
+/// The properties of an object without the engine's bookkeeping slots.
+fn real_props(o: &crate::object::PhpObject) -> Vec<(Vec<u8>, Value)> {
+    o.properties
+        .iter()
+        .filter(|(k, _)| !crate::foreach_obj::is_internal_slot(k))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
 }
 
 /// The `oflow` of `_is_numeric_string_ex()` for a numeric string: -1 / 1

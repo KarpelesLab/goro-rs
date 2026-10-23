@@ -9470,11 +9470,8 @@ impl Vm {
         // Proxy: if initialized, use the real backing object's props.
         let target = self.proxy_redirect(obj);
         let ob = target.borrow();
-        // SPL array handling
-        let spl_arr = crate::spl_dll::spl_storage_view(&ob);
-        if let Value::Array(a) = spl_arr {
-            return Rc::new(RefCell::new(a.borrow().clone()));
-        }
+        // (SplDoublyLinkedList, SplHeap, SplObjectStorage...: no
+        // get_properties handler, the cast shows their real properties)
         let class_name_lower: Vec<u8> = ob
             .class_name
             .iter()
@@ -11429,12 +11426,12 @@ impl Vm {
                     match method_lower {
                         b"getregex" => {
                             let ob = obj.borrow();
-                            let pat = ob.get_property(b"__regex_pattern");
+                            let pat = ob.get_property(b"__spl_regex_pattern");
                             return Some(pat);
                         }
                         b"getmode" => {
                             let ob = obj.borrow();
-                            return Some(ob.get_property(b"__regex_mode"));
+                            return Some(ob.get_property(b"__spl_regex_mode"));
                         }
                         b"setmode" | b"setflags" | b"setpregflags" => {
                             // Handled in handle_spl_docall where args are available.
@@ -11442,11 +11439,11 @@ impl Vm {
                         }
                         b"getflags" => {
                             let ob = obj.borrow();
-                            return Some(ob.get_property(b"__regex_flags"));
+                            return Some(ob.get_property(b"__spl_regex_flags"));
                         }
                         b"getpregflags" => {
                             let ob = obj.borrow();
-                            return Some(ob.get_property(b"__regex_preg_flags"));
+                            return Some(ob.get_property(b"__spl_regex_preg_flags"));
                         }
                         _ => {}
                     }
@@ -13030,8 +13027,8 @@ impl Vm {
                 {
                     // RegexIterator: match current() against the stored regex pattern
                     let ob = obj.borrow();
-                    let pattern = ob.get_property(b"__regex_pattern");
-                    let _regex_mode = ob.get_property(b"__regex_mode").to_long();
+                    let pattern = ob.get_property(b"__spl_regex_pattern");
+                    let _regex_mode = ob.get_property(b"__spl_regex_mode").to_long();
                     drop(ob);
                     // USE_KEY = 1 (mode flag that uses key instead of current value)
                     let subject_val = self
@@ -13521,19 +13518,21 @@ impl Vm {
                                 return Some(Value::Null);
                             }
                             obj.borrow_mut()
-                                .set_property(b"__regex_mode".to_vec(), Value::Long(mode));
+                                .set_property(b"__spl_regex_mode".to_vec(), Value::Long(mode));
                             Some(Value::Null)
                         }
                         b"setflags" => {
                             let flags = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
                             obj.borrow_mut()
-                                .set_property(b"__regex_flags".to_vec(), Value::Long(flags));
+                                .set_property(b"__spl_regex_flags".to_vec(), Value::Long(flags));
                             Some(Value::Null)
                         }
                         b"setpregflags" => {
                             let flags = args.get(1).cloned().unwrap_or(Value::Long(0)).to_long();
-                            obj.borrow_mut()
-                                .set_property(b"__regex_preg_flags".to_vec(), Value::Long(flags));
+                            obj.borrow_mut().set_property(
+                                b"__spl_regex_preg_flags".to_vec(),
+                                Value::Long(flags),
+                            );
                             Some(Value::Null)
                         }
                         _ => None,
@@ -32446,7 +32445,7 @@ impl Vm {
                                                 // Pattern is arg[2]
                                                 if call.args.len() > 2 {
                                                     obj_mut.set_property(
-                                                        b"__regex_pattern".to_vec(),
+                                                        b"__spl_regex_pattern".to_vec(),
                                                         call.args[2].clone(),
                                                     );
                                                 }
@@ -32457,7 +32456,7 @@ impl Vm {
                                                     0
                                                 };
                                                 obj_mut.set_property(
-                                                    b"__regex_mode".to_vec(),
+                                                    b"__spl_regex_mode".to_vec(),
                                                     Value::Long(mode),
                                                 );
                                                 // Flags is arg[4]
@@ -32467,7 +32466,7 @@ impl Vm {
                                                     0
                                                 };
                                                 obj_mut.set_property(
-                                                    b"__regex_flags".to_vec(),
+                                                    b"__spl_regex_flags".to_vec(),
                                                     Value::Long(flags),
                                                 );
                                                 // Preg flags is arg[5]
@@ -32477,7 +32476,7 @@ impl Vm {
                                                     0
                                                 };
                                                 obj_mut.set_property(
-                                                    b"__regex_preg_flags".to_vec(),
+                                                    b"__spl_regex_preg_flags".to_vec(),
                                                     Value::Long(preg_flags),
                                                 );
                                             }

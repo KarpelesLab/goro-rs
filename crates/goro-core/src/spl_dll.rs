@@ -744,6 +744,15 @@ impl Vm {
 /// An object's `__spl_array` storage as other code expects to see it: for
 /// a doubly linked list (keyed by node id) or an SplObjectStorage (keyed by
 /// object hash) a copy keyed by position.
+/// An ArrayObject/ArrayIterator or SplObjectStorage, whose compare handler
+/// compares the storage (spl_array_compare_objects(),
+/// spl_object_storage_compare_objects()); lists, heaps and fixed arrays
+/// have none and compare by their real properties only.
+pub fn is_spl_array_object(ob: &PhpObject) -> bool {
+    ob.has_property(b"__spl_array")
+        && (ob.has_property(b"__spl_flags") || ob.has_property(b"__spl_objects"))
+}
+
 pub fn spl_storage_view(ob: &PhpObject) -> Value {
     let v = ob.get_property(b"__spl_array");
     match &v {

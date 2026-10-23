@@ -14,7 +14,7 @@
 //!   __spl_limit_offset / __spl_limit_count
 //!   __spl_cit_flags / __spl_cache / __spl_cit_str / __spl_cit_children
 //!   __spl_append_it  (ArrayIterator of appended iterators)
-//!   __regex_pattern / __regex_mode / __regex_flags / __regex_preg_flags
+//!   __spl_regex_pattern / __spl_regex_mode / __spl_regex_flags / __spl_regex_preg_flags
 //!   __spl_callback
 //!   __spl_rii_its / __spl_rii_st / __spl_rii_mode / __spl_rii_flags /
 //!   __spl_rii_maxd / __spl_rii_initer / __spl_rii_hooks
@@ -1006,10 +1006,10 @@ impl Vm {
                     return false;
                 }
                 let mut ob = obj.borrow_mut();
-                ob.set_property_slice(b"__regex_pattern", Value::String(pattern));
-                ob.set_property_slice(b"__regex_mode", Value::Long(mode));
-                ob.set_property_slice(b"__regex_flags", Value::Long(flags));
-                ob.set_property_slice(b"__regex_preg_flags", Value::Long(preg_flags));
+                ob.set_property_slice(b"__spl_regex_pattern", Value::String(pattern));
+                ob.set_property_slice(b"__spl_regex_mode", Value::Long(mode));
+                ob.set_property_slice(b"__spl_regex_flags", Value::Long(flags));
+                ob.set_property_slice(b"__spl_regex_preg_flags", Value::Long(preg_flags));
                 if !ob.has_property(b"replacement") {
                     ob.set_property_slice(b"replacement", Value::Null);
                 }
@@ -1173,10 +1173,10 @@ impl Vm {
                 let ch = ch.unwrap_or(Value::Null);
                 let a = [
                     ch,
-                    prop(obj, b"__regex_pattern"),
-                    prop(obj, b"__regex_mode"),
-                    prop(obj, b"__regex_flags"),
-                    prop(obj, b"__regex_preg_flags"),
+                    prop(obj, b"__spl_regex_pattern"),
+                    prop(obj, b"__spl_regex_mode"),
+                    prop(obj, b"__spl_regex_flags"),
+                    prop(obj, b"__spl_regex_preg_flags"),
                 ];
                 return Some(self.spl_new_same_class(obj, &a));
             }
@@ -1531,8 +1531,8 @@ impl Vm {
                 }
                 return Some(self.regex_accept(obj));
             }
-            (b"regexiterator", b"getregex") => prop(obj, b"__regex_pattern"),
-            (b"regexiterator", b"getmode") => Value::Long(lprop(obj, b"__regex_mode", 0)),
+            (b"regexiterator", b"getregex") => prop(obj, b"__spl_regex_pattern"),
+            (b"regexiterator", b"getmode") => Value::Long(lprop(obj, b"__spl_regex_mode", 0)),
             (b"regexiterator", b"setmode") => {
                 let m = match args.first() {
                     Some(v) => match self.spl_arg_long("RegexIterator::setMode", 1, "mode", v) {
@@ -1544,10 +1544,10 @@ impl Vm {
                 if !(0..5).contains(&m) {
                     return self.spl_throw(b"ValueError", "RegexIterator::setMode(): Argument #1 ($mode) must be RegexIterator::MATCH, RegexIterator::GET_MATCH, RegexIterator::ALL_MATCHES, RegexIterator::SPLIT, or RegexIterator::REPLACE");
                 }
-                set_prop(obj, b"__regex_mode", Value::Long(m));
+                set_prop(obj, b"__spl_regex_mode", Value::Long(m));
                 Value::Null
             }
-            (b"regexiterator", b"getflags") => Value::Long(lprop(obj, b"__regex_flags", 0)),
+            (b"regexiterator", b"getflags") => Value::Long(lprop(obj, b"__spl_regex_flags", 0)),
             (b"regexiterator", b"setflags") => {
                 let f = match args.first() {
                     Some(v) => match self.spl_arg_long("RegexIterator::setFlags", 1, "flags", v) {
@@ -1556,11 +1556,11 @@ impl Vm {
                     },
                     None => 0,
                 };
-                set_prop(obj, b"__regex_flags", Value::Long(f));
+                set_prop(obj, b"__spl_regex_flags", Value::Long(f));
                 Value::Null
             }
             (b"regexiterator", b"getpregflags") => {
-                Value::Long(lprop(obj, b"__regex_preg_flags", 0))
+                Value::Long(lprop(obj, b"__spl_regex_preg_flags", 0))
             }
             (b"regexiterator", b"setpregflags") => {
                 let f = match args.first() {
@@ -1572,7 +1572,7 @@ impl Vm {
                     }
                     None => 0,
                 };
-                set_prop(obj, b"__regex_preg_flags", Value::Long(f));
+                set_prop(obj, b"__spl_regex_preg_flags", Value::Long(f));
                 Value::Null
             }
             _ => {
@@ -1620,7 +1620,7 @@ impl Vm {
         if !Self::dit_has_cur(obj) {
             return Value::False;
         }
-        let flags = lprop(obj, b"__regex_flags", 0);
+        let flags = lprop(obj, b"__spl_regex_flags", 0);
         let subject = if flags & REGIT_USE_KEY != 0 {
             let k = Self::dit_key(obj);
             self.spl_zval_get_string(&k)
@@ -1634,12 +1634,12 @@ impl Vm {
         if self.exc() {
             return Value::Null;
         }
-        let pattern = prop(obj, b"__regex_pattern");
-        let preg_flags = lprop(obj, b"__regex_preg_flags", 0);
+        let pattern = prop(obj, b"__spl_regex_pattern");
+        let preg_flags = lprop(obj, b"__spl_regex_preg_flags", 0);
         let subj = Value::String(subject.clone());
-        let mut result = match lprop(obj, b"__regex_mode", 0) {
+        let mut result = match lprop(obj, b"__spl_regex_mode", 0) {
             1 | 2 => {
-                let all = lprop(obj, b"__regex_mode", 0) == 2;
+                let all = lprop(obj, b"__spl_regex_mode", 0) == 2;
                 let out = Value::Reference(Rc::new(RefCell::new(Value::Null)));
                 let f: &[u8] = if all {
                     b"preg_match_all"
