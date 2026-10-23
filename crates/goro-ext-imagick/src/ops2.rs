@@ -478,17 +478,21 @@ fn shadow_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
                 } else {
                     0
                 };
-                let a = (a as f64 * op / 100.0) as u16;
+                let a = (a as f64 * op / 100.0).round() as u16;
                 s.set_px(x, y, [bg[0], bg[1], bg[2], a]);
             }
         }
         if sigma > 0.0 {
-            apply_oxideav(
-                &mut s,
-                &of::Blur::new((3.0 * sigma).ceil() as u32).with_sigma(sigma as f32),
-            )?;
+            goro_imagick::convolve::blur(&mut s, 0.0, sigma, channel::ALPHA);
         }
-        s.page = Rect::new(w, h, dx - pad as i64, dy - pad as i64);
+        // (ImageMagick grows the page by the offset too)
+        let (px, py) = (dx - pad as i64, dy - pad as i64);
+        s.page = Rect::new(
+            (w as i64 + px).max(0) as usize,
+            (h as i64 + py).max(0) as usize,
+            px,
+            py,
+        );
         s.colors = None;
         Ok(s)
     })
