@@ -3904,6 +3904,23 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .unwrap_or_else(|| PhpString::from_bytes(b"\n"));
     let cut_long = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
 
+    let bytes = s.as_bytes();
+    let brk_bytes = brk.as_bytes();
+
+    if bytes.is_empty() {
+        return Ok(Value::String(PhpString::empty()));
+    }
+
+    if brk_bytes.is_empty() {
+        let msg = "wordwrap(): Argument #3 ($break) must not be empty".to_string();
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
+    }
+
     if width == 0 && cut_long {
         let msg = "wordwrap(): Argument #4 ($cut_long_words) cannot be true when argument #2 ($width) is 0";
         let exc = vm.create_exception(b"ValueError", msg, 0);
@@ -3912,26 +3929,6 @@ fn wordwrap(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             message: msg.into(),
             line: vm.current_line,
         });
-    }
-
-    let bytes = s.as_bytes();
-    let brk_bytes = brk.as_bytes();
-
-    if brk_bytes.is_empty() {
-        let msg = "wordwrap(): Argument #3 ($break) must not be empty".to_string();
-        let exc = vm.throw_type_error(msg.clone());
-        if let Value::Object(obj) = &exc {
-            obj.borrow_mut().class_name = b"ValueError".to_vec();
-        }
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg,
-            line: vm.current_line,
-        });
-    }
-
-    if bytes.is_empty() {
-        return Ok(Value::String(PhpString::empty()));
     }
 
     // Pre-flight memory check: PHP's zend_string_safe_alloc bails out with a
