@@ -1902,17 +1902,19 @@ fn sketch_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 
 fn oil_paint_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "d", args)?;
-    let r = a[0].double_or(3.0).max(1.0).round() as u32;
+    let r = a[0].double_or(3.0);
     image_op(vm, &d_(o), "Unable to oilpaint image", |i| {
-        apply_oxideav(i, &of::Paint::new(r))
+        goro_imagick::effects::oil_paint(i, r, 1.0);
+        Ok(())
     })
 }
 
 fn oil_paint_image_with_sigma(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dd", args)?;
-    let r = radius_of(a[0].double_or(0.0), a[1].double_or(1.0));
+    let (r, sg) = (a[0].double_or(0.0), a[1].double_or(1.0));
     image_op(vm, &d_(o), "Unable to oilPaintImageWithSigma image", |i| {
-        apply_oxideav(i, &of::Paint::new(r))
+        goro_imagick::effects::oil_paint(i, r, sg);
+        Ok(())
     })
 }
 
@@ -2003,14 +2005,16 @@ fn spread_image_with_method(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Valu
 fn despeckle_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
     image_op(vm, &d_(o), "Unable to despeckle image", |i| {
-        apply_oxideav(i, &of::Despeckle::new(1))
+        goro_imagick::effects::despeckle(i);
+        Ok(())
     })
 }
 
 fn enhance_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
     image_op(vm, &d_(o), "Unable to enhance image", |i| {
-        apply_oxideav(i, &of::Despeckle::new(1))
+        goro_imagick::effects::enhance(i);
+        Ok(())
     })
 }
 

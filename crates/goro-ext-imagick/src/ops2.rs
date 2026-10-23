@@ -462,14 +462,10 @@ fn selective_blur_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) 
         a[1].double_or(1.0),
         a[2].double_or(0.0),
     );
+    let ch = a[3].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to selectiveblurimage", |i| {
-        let radius = if r >= 1.0 {
-            r as u32
-        } else {
-            (3.0 * s).ceil().max(1.0) as u32
-        };
-        let range = (t / 65535.0 * 255.0).max(1.0) as f32;
-        apply_oxideav(i, &of::BilateralBlur::new(radius, s.max(0.1) as f32, range))
+        goro_imagick::effects::selective_blur(i, r, s, t, ch);
+        Ok(())
     })
 }
 
@@ -920,23 +916,8 @@ fn canny_edge_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R
         a[3].double_or(0.3),
     );
     image_op(vm, &d_(o), "Unable to cannyEdgeImage", |i| {
-        let radius = if r >= 1.0 {
-            r as u32
-        } else {
-            (3.0 * s).ceil().max(1.0) as u32
-        };
-        let pct = |v: f64| {
-            (if v <= 1.0 {
-                v * 255.0
-            } else {
-                v / 100.0 * 255.0
-            })
-            .clamp(0.0, 255.0) as u8
-        };
-        apply_oxideav(
-            i,
-            &of::Canny::new(radius, s.max(0.1) as f32, pct(lo), pct(hi)),
-        )
+        goro_imagick::effects::canny(i, r, s, lo, hi);
+        Ok(())
     })
 }
 
