@@ -6832,23 +6832,13 @@ fn str_split(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn number_format(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    // Z_PARAM_NUMBER(num): int|float, numeric strings and bools converted.
-    let num = match args.first().map(|v| v.deref()).unwrap_or(Value::Null) {
-        v @ (Value::Long(_) | Value::Double(_)) => v,
-        Value::True => Value::Long(1),
-        Value::False => Value::Long(0),
-        // (the null deprecation is raised by the builtin parameter types)
-        Value::Null | Value::Undef => Value::Long(0),
-        other => match &other {
-            Value::String(s) => match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
-                Some((goro_core::value::NumStr::Long(n), _)) => Value::Long(n),
-                Some((goro_core::value::NumStr::Double(d), _)) => Value::Double(d),
-                None => return Err(number_format_type_error(vm, &other)),
-            },
-            _ => return Err(number_format_type_error(vm, &other)),
-        },
+    // (the arguments were parsed by the generic zpp layer: Z_PARAM_NUMBER,
+    // Z_PARAM_LONG, Z_PARAM_STRING_OR_NULL x2)
+    let num = match args.first().map(|v| v.deref()) {
+        Some(v @ (Value::Long(_) | Value::Double(_))) => v,
+        Some(v) => Value::Double(v.to_double()),
+        None => Value::Long(0),
     };
-    let val = &num;
     let dec = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     let dec_point = match args.get(2).map(|v| v.deref()) {
         Some(Value::Null) | Some(Value::Undef) | None => PhpString::from_bytes(b"."),
@@ -6861,7 +6851,7 @@ fn number_format(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // _php_math_number_format_long(): integers (and doubles >= 2^52 that
     // fit a long) are formatted exactly.
-    let as_long = match val.deref() {
+    let as_long = match num {
         Value::Long(n) => Some(n),
         Value::Double(d)
             if (d >= 4503599627370496.0 || d <= -4503599627370496.0)
@@ -6871,35 +6861,29 @@ fn number_format(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         _ => None,
     };
-    if let Some(n) = as_long {
-        return Ok(Value::String(PhpString::from_vec(
-            crate::math::number_format_long(n, dec, dec_point.as_bytes(), thousands_sep.as_bytes()),
-        )));
-    }
-    let dec = dec.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
-    Ok(Value::String(PhpString::from_vec(number_format_ex(
-        val.to_double(),
-        dec,
-        dec_point.as_bytes(),
-        thousands_sep.as_bytes(),
-    ))))
-}
-
-fn number_format_type_error(vm: &mut Vm, v: &Value) -> VmError {
-    let msg = format!(
-        "number_format(): Argument #1 ($num) must be of type int|float, {} given",
-        Vm::value_type_name(v)
-    );
-    let exc = vm.create_exception(b"TypeError", &msg, 0);
-    vm.current_exception = Some(exc);
-    VmError {
-        message: msg,
-        line: vm.current_line,
-    }
+    let out = if let Some(n) = as_long {
+        crate::math::number_format_long(vm, n, dec, dec_point.as_bytes(), thousands_sep.as_bytes())?
+    } else {
+        let dec = dec.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+        number_format_ex(
+            vm,
+            num.to_double(),
+            dec,
+            dec_point.as_bytes(),
+            thousands_sep.as_bytes(),
+        )?
+    };
+    Ok(Value::String(PhpString::from_vec(out)))
 }
 
 /// _php_math_number_format_ex() (ext/standard/math.c).
-pub(crate) fn number_format_ex(d: f64, dec: i32, dec_point: &[u8], thousand_sep: &[u8]) -> Vec<u8> {
+pub(crate) fn number_format_ex(
+    vm: &mut Vm,
+    d: f64,
+    dec: i32,
+    dec_point: &[u8],
+    thousand_sep: &[u8],
+) -> Result<Vec<u8>, VmError> {
     let mut is_negative = d < 0.0;
     let d = crate::math::php_math_round(d.abs(), dec, 1);
     let dec = dec.max(0) as usize;
@@ -6912,7 +6896,7 @@ pub(crate) fn number_format_ex(d: f64, dec: i32, dec_point: &[u8], thousand_sep:
         format!("{:.*}", dec.min(318), d).into_bytes()
     };
     if !tmpbuf.first().is_some_and(|c| c.is_ascii_digit()) {
-        return tmpbuf;
+        return Ok(tmpbuf);
     }
     if is_negative && d == 0.0 {
         is_negative = false;
@@ -6923,7 +6907,14 @@ pub(crate) fn number_format_ex(d: f64, dec: i32, dec_point: &[u8], thousand_sep:
         None
     };
     let int_part = &tmpbuf[..dp.unwrap_or(tmpbuf.len())];
-    let mut out = Vec::with_capacity(tmpbuf.len() + int_part.len() / 3 * thousand_sep.len() + 2);
+    // reslen, as allocated
+    let mut reslen = int_part.len() + (int_part.len() - 1) / 3 * thousand_sep.len();
+    if dec > 0 {
+        reslen = reslen.saturating_add(dec).saturating_add(dec_point.len());
+    }
+    reslen += is_negative as usize;
+    vm.memory_check(crate::math::zend_string_alloc_size(reslen))?;
+    let mut out = Vec::with_capacity(reslen);
     if is_negative {
         out.push(b'-');
     }
@@ -6942,7 +6933,7 @@ pub(crate) fn number_format_ex(d: f64, dec: i32, dec_point: &[u8], thousand_sep:
         out.extend_from_slice(frac);
         out.extend(std::iter::repeat_n(b'0', dec.saturating_sub(frac.len())));
     }
-    out
+    Ok(out)
 }
 
 fn money_format(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {

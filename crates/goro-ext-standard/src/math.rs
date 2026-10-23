@@ -107,14 +107,12 @@ pub fn register(vm: &mut Vm) {
     vm.register_builtin_param_types(b"is_nan", vec![f()]);
     vm.register_builtin_param_types(b"is_infinite", vec![f()]);
     vm.register_builtin_param_types(b"is_finite", vec![f()]);
-    let ns = || {
-        Some(ParamType::Nullable(Box::new(ParamType::Simple(
-            b"string".to_vec(),
-        ))))
-    };
-    // (arginfo says float: the null deprecation names it; Z_PARAM_NUMBER
-    // errors say int|float)
-    vm.register_builtin_param_types(b"number_format", vec![f(), i(), ns(), ns()]);
+    // (the generic zpp layer; its arginfo says float but Z_PARAM_NUMBER
+    // parses it: see arginfo::zpp_number_param())
+    vm.zpp_extension_verified.insert(
+        b"number_format".to_vec(),
+        goro_core::arginfo::CHECK_ARITY | goro_core::arginfo::CHECK_TYPES,
+    );
     vm.register_builtin_param_types(b"fdiv", vec![f(), f()]);
     // These validate their own arguments (check_math_num_arg/check_int_arg) and
     // emit the null / float-to-int deprecations themselves.
@@ -1763,13 +1761,19 @@ fn lcg_value_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Double(goro_core::random::combined_lcg()))
 }
 
+/// zend_string_alloc(len): the emalloc() size of a string of `len` bytes.
+pub(crate) fn zend_string_alloc_size(len: usize) -> usize {
+    len.saturating_add(24 + 1 + 7) & !7
+}
+
 /// _php_math_number_format_long()
 pub(crate) fn number_format_long(
+    vm: &mut Vm,
     num: i64,
     dec: i64,
     dec_point: &[u8],
     thousand_sep: &[u8],
-) -> Vec<u8> {
+) -> Result<Vec<u8>, VmError> {
     let mut is_negative = num < 0;
     let mut tmpnum = num.unsigned_abs();
     if dec < 0 {
@@ -1790,7 +1794,16 @@ pub(crate) fn number_format_long(
         }
     }
     let digits = tmpnum.to_string().into_bytes();
-    let mut out = Vec::with_capacity(digits.len() * 2);
+    // reslen, as allocated
+    let mut reslen = digits.len() + (digits.len() - 1) / 3 * thousand_sep.len();
+    reslen += is_negative as usize;
+    if dec > 0 {
+        reslen = reslen
+            .saturating_add(dec as usize)
+            .saturating_add(dec_point.len());
+    }
+    vm.memory_check(zend_string_alloc_size(reslen))?;
+    let mut out = Vec::with_capacity(reslen);
     if is_negative {
         out.push(b'-');
     }
@@ -1804,5 +1817,5 @@ pub(crate) fn number_format_long(
         out.extend_from_slice(dec_point);
         out.resize(out.len() + dec as usize, b'0');
     }
-    out
+    Ok(out)
 }

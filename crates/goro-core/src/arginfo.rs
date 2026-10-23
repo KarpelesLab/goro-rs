@@ -341,6 +341,14 @@ fn verified_method(key: &str) -> Option<(&'static FuncInfo, u8)> {
     map.get(key).map(|(i, f)| (i, *f))
 }
 
+/// Parameters declared `float` in their stub that the C function parses
+/// with Z_PARAM_NUMBER: ints are kept, numeric strings become int or float
+/// and type errors name int|float (the null deprecation still names the
+/// arginfo type).
+fn zpp_number_param(info: &FuncInfo, i: usize) -> bool {
+    i == 0 && info.name == "number_format"
+}
+
 /// Why a call to an internal function failed before it ran.
 pub enum ZppError {
     /// Throw a new `class` exception with this message.
@@ -992,7 +1000,8 @@ impl Vm {
         }
         for i in 0..args.len() {
             let Some(p) = info.param(i) else { break };
-            let m = p.mask;
+            let number = zpp_number_param(info, i);
+            let m = if number { T_INT | T_FLOAT } else { p.mask };
             if m & T_MIXED != 0 || (p.by_ref != 0 && m == 0) {
                 continue;
             }
@@ -1126,7 +1135,7 @@ impl Vm {
                 // Z_PARAM_OBJ_OF_CLASS_OR_STR: a Stringable object is a string
                 // (in weak mode, zend_parse_arg_str_weak()).
                 if !ok && !(!strict && m & T_STRING != 0 && self.zpp_object_has_tostring(&v)) {
-                    return Err(self.zpp_type_error(info, i, p, &v));
+                    return Err(self.zpp_type_error_n(info, i, p, &v, number));
                 }
                 break;
             }
@@ -1158,11 +1167,11 @@ impl Vm {
                     }
                     continue;
                 }
-                return Err(self.zpp_type_error(info, i, p, &v));
+                return Err(self.zpp_type_error_n(info, i, p, &v, number));
             }
             if vt == T_NULL {
                 if m & (T_BOOL | T_INT | T_FLOAT | T_STRING) == 0 {
-                    return Err(self.zpp_type_error(info, i, p, &v));
+                    return Err(self.zpp_type_error_n(info, i, p, &v, number));
                 }
                 let msg = match info.arg_name(i) {
                     Some(n) => format!(
@@ -1197,7 +1206,7 @@ impl Vm {
             }
             match self.zpp_weak_coerce(m, &mut v, line) {
                 Ok(true) => self.zpp_set_arg(args, orig, i, m, v),
-                Ok(false) => return Err(self.zpp_type_error(info, i, p, &v)),
+                Ok(false) => return Err(self.zpp_type_error_n(info, i, p, &v, number)),
                 Err(e) => return Err(e),
             }
         }
@@ -1268,13 +1277,26 @@ impl Vm {
         args[i] = v;
     }
 
-    fn zpp_type_error(&self, info: &FuncInfo, i: usize, p: &ArgInfo, arg: &Value) -> ZppError {
+    /// The TypeError for argument `i`; `number`: it is parsed with
+    /// Z_PARAM_NUMBER, whose error names int|float whatever the arginfo says.
+    fn zpp_type_error_n(
+        &self,
+        info: &FuncInfo,
+        i: usize,
+        p: &ArgInfo,
+        arg: &Value,
+        number: bool,
+    ) -> ZppError {
         ZppError::Throw(
             b"TypeError",
             format!(
                 "{} must be of type {}, {} given",
                 info.arg_prefix(i),
-                arg_type_display(p),
+                if number {
+                    "int|float"
+                } else {
+                    arg_type_display(p)
+                },
                 value_name(arg)
             ),
         )
