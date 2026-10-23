@@ -1928,16 +1928,20 @@ impl<'a> Parser<'a> {
         }
         if let Some(base) = throwable_base(vm, class_lower) {
             let _ = base;
+            // zend_default_exception_new(): the object is created where
+            // unserialize() runs (the payload's props then replace these).
+            let trace = vm.build_exception_trace();
+            vm.filter_new_exception_trace(class_lower, &trace);
             for (k, v) in [
                 (&b"message"[..], Value::String(PhpString::empty())),
                 (b"code", Value::Long(0)),
-                (b"file", Value::String(PhpString::empty())),
-                (b"line", Value::Long(0)),
-                (b"previous", Value::Null),
                 (
-                    b"trace",
-                    Value::Array(Rc::new(RefCell::new(PhpArray::new()))),
+                    b"file",
+                    Value::String(PhpString::from_bytes(vm.current_file.as_bytes())),
                 ),
+                (b"line", Value::Long(vm.current_line as i64)),
+                (b"previous", Value::Null),
+                (b"trace", trace),
             ] {
                 if !obj.has_property(k) {
                     obj.set_property(k.to_vec(), v);

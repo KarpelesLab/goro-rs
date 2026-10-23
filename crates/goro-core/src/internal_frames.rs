@@ -38,6 +38,9 @@ pub struct BuiltinFrame {
     /// Index this frame takes in `call_stack` once materialized
     depth: usize,
     materialized: bool,
+    /// Materialized as the equivalent entry the builtin pushed itself
+    /// (which it pops)
+    shadowed: bool,
 }
 
 impl Vm {
@@ -60,6 +63,7 @@ impl Vm {
             line,
             depth,
             materialized: false,
+            shadowed: false,
         });
     }
 
@@ -87,7 +91,7 @@ impl Vm {
     #[inline]
     pub fn pop_builtin_frame(&mut self) {
         if let Some(f) = self.builtin_frames.pop() {
-            if f.materialized && f.depth < self.call_stack.len() {
+            if f.materialized && !f.shadowed && f.depth < self.call_stack.len() {
                 self.call_stack.remove(f.depth);
             }
         }
@@ -122,9 +126,20 @@ impl Vm {
             // Likewise a builtin run as a fiber's callback right under the
             // fiber's own "[internal function]" entry for it.
             let same = |e: &crate::vm::CallFrame| e.2 == line && e.0.eq_ignore_ascii_case(&name);
-            if self.call_stack.get(at).is_some_and(same)
-                || (line == 0 && at > 0 && self.call_stack.get(at - 1).is_some_and(same))
-            {
+            // (it stands for the frame, which later frames are counted
+            // above)
+            let shadow = if self.call_stack.get(at).is_some_and(same) {
+                Some(at)
+            } else if line == 0 && at > 0 && self.call_stack.get(at - 1).is_some_and(same) {
+                Some(at - 1)
+            } else {
+                None
+            };
+            if let Some(d) = shadow {
+                let f = &mut self.builtin_frames[i];
+                f.depth = d;
+                f.materialized = true;
+                f.shadowed = true;
                 continue;
             }
             let file = if line == 0 {
