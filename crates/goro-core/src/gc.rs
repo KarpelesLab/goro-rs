@@ -296,6 +296,15 @@ pub fn possible_root(v: &Value) {
     }
 }
 
+/// A lazy object's initializer closure released when the object is
+/// initialized or realized: Zend holds it twice (the zval and the fcc), so
+/// dropping the zval roots it before the fcc frees it.
+pub fn root_released_initializer(v: &Value) {
+    if let Value::Object(o) = v {
+        buffer_object(o);
+    }
+}
+
 /// An object a call holds as its $this, released when the call returns
 /// (rooted when the call is set up): a possible root unless it already is
 /// one, or nothing else holds it.

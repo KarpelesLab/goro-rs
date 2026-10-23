@@ -1445,6 +1445,10 @@ pub struct Vm {
     pub(crate) enum_tables_building: Vec<Vec<u8>>,
     /// A self-referencing enum case value was reported (see enum_cases_resolving).
     pub(crate) enum_case_cycle: bool,
+    /// maybe_run_lazy_init_op(): check whether the initializer released the object.
+    lazy_release_check: bool,
+    /// The object whose initializer last ran (see maybe_run_lazy_init()).
+    lazy_init_attempt: Option<usize>,
     /// Whether a fiber is currently suspended (set by Fiber::suspend())
     pub fiber_suspended: bool,
     /// The value passed to Fiber::suspend()
@@ -1935,6 +1939,8 @@ impl Vm {
             enum_cases_resolving: Vec::new(),
             enum_tables_building: Vec::new(),
             enum_case_cycle: false,
+            lazy_release_check: false,
+            lazy_init_attempt: None,
             fiber_suspended: false,
             fiber_suspend_value: Value::Null,
             fiber_resume_value: Value::Null,
@@ -9405,6 +9411,54 @@ impl Vm {
     ///
     /// Returns true if initialization happened.
     pub fn maybe_run_lazy_init(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        if !std::mem::take(&mut self.lazy_release_check) {
+            return self.lazy_init_inner(obj);
+        }
+        self.lazy_init_attempt = None;
+        let r = self.lazy_init_inner(obj);
+        if self.lazy_init_attempt.take() == Some(Rc::as_ptr(obj) as usize) {
+            self.lazy_check_released(obj, r)
+        } else {
+            r
+        }
+    }
+
+    /// maybe_run_lazy_init() for an object an opcode works on in place (a
+    /// property fetch, foreach, clone, ...): PHP's op holds no reference of
+    /// its own, so an initializer dropping the last one releases the object
+    /// ("Lazy object was released during initialization"). The caller holds
+    /// exactly one clone of `obj`.
+    pub(crate) fn maybe_run_lazy_init_op(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        self.lazy_release_check = true;
+        let r = self.maybe_run_lazy_init(obj);
+        self.lazy_release_check = false;
+        r
+    }
+
+    /// The end of zend_lazy_object_init(): when the initializer released the
+    /// object (only the op's clone and the destructor list hold it), throw
+    /// (chained to a pending exception) and report no instance.
+    #[inline(never)]
+    fn lazy_check_released(&mut self, obj: &Rc<RefCell<PhpObject>>, r: bool) -> bool {
+        let listed = obj.try_borrow().map(|b| b.dtor_listed.get()).unwrap_or(false);
+        if Rc::strong_count(obj) > 1 + listed as usize {
+            return r;
+        }
+        let exc = self.create_exception(
+            b"Error",
+            "Lazy object was released during initialization",
+            self.current_line,
+        );
+        if let Some(prev) = self.current_exception.take() {
+            Self::exception_set_previous(&exc, prev);
+        }
+        self.current_exception = Some(exc);
+        // zend_objects_store_del(): an initialized object is destroyed now.
+        crate::gc::note_dtor_candidate(obj);
+        false
+    }
+
+    fn lazy_init_inner(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         // (most objects are not lazy: no `__lazy_state` slot)
         if !obj
             .borrow()
@@ -9477,6 +9531,7 @@ impl Vm {
         // triggered initialization.
         self.ucf_call_line = Some(self.current_line);
         let result = self.call_closure_value(&initializer, vec![this_val.clone()]);
+        self.lazy_init_attempt = Some(Rc::as_ptr(obj) as usize);
         self.ucf_call_line = None;
         let threw = !exc_before && self.current_exception.is_some();
         self.lazy_init_in_progress.remove(&object_id);
@@ -9569,7 +9624,7 @@ impl Vm {
         // Clear initializer so it can be garbage-collected
         {
             let mut ob = obj.borrow_mut();
-            ob.remove_property(b"__lazy_initializer");
+            Self::lazy_drop_initializer(&mut ob);
             ob.remove_property(b"__lazy_skipped");
             ob.remove_property(b"__lazy_flags");
         }
@@ -10944,7 +10999,7 @@ impl Vm {
         {
             let mut ob = obj.borrow_mut();
             ob.remove_property(b"__lazy_state");
-            ob.remove_property(b"__lazy_initializer");
+            Self::lazy_drop_initializer(&mut ob);
             ob.remove_property(b"__lazy_skipped");
             ob.remove_property(b"__lazy_flags");
         }
@@ -10967,6 +11022,15 @@ impl Vm {
         {
             self.list_destructible(Value::Object(obj.clone()));
         }
+    }
+
+    /// zend_lazy_object_del_info(): the initializer closure is released
+    /// (and rooted on the way, see gc::root_released_initializer).
+    fn lazy_drop_initializer(ob: &mut PhpObject) {
+        let init = ob.get_property(b"__lazy_initializer");
+        crate::gc::root_released_initializer(&init);
+        drop(init);
+        ob.remove_property(b"__lazy_initializer");
     }
 
     /// True if `obj` is an uninitialized lazy object (ghost, or proxy
@@ -39346,7 +39410,7 @@ impl Vm {
                             // Plain object: trigger lazy init and convert
                             // properties to an array for iteration.
                             // If lazy init throws, propagate immediately.
-                            self.maybe_run_lazy_init(obj);
+                            self.maybe_run_lazy_init_op(obj);
                             if self.current_exception.is_some() {
                                 if let Some((catch_target, _, _, _, saved_pc)) =
                                     exception_handlers.pop()
@@ -39380,7 +39444,7 @@ impl Vm {
                                 if !is_lazy || Rc::ptr_eq(&target, obj) {
                                     break;
                                 }
-                                self.maybe_run_lazy_init(&target);
+                                self.maybe_run_lazy_init_op(&target);
                                 if self.current_exception.is_some() {
                                     break;
                                 }
@@ -40220,7 +40284,7 @@ impl Vm {
                             match &arr_val {
                                 Value::Object(obj) => {
                                     // Trigger lazy init for lazy objects.
-                                    self.maybe_run_lazy_init(obj);
+                                    self.maybe_run_lazy_init_op(obj);
                                     if self.current_exception.is_some() {
                                         if let Some((catch_target, _, _, _, saved_pc)) =
                                             exception_handlers.pop()
@@ -44280,7 +44344,20 @@ impl Vm {
                                     || fetch_get
                                     || self.has_unguarded_get_hook(&class_lower, pn));
                             if !skip_init {
-                                self.maybe_run_lazy_init(obj);
+                                let exc_before_init = self.current_exception.is_some();
+                                self.maybe_run_lazy_init_op(obj);
+                                // An initializer exception aborts the operation.
+                                if !exc_before_init && self.current_exception.is_some() {
+                                    if let Some((c, f, _, _, pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(pc);
+                                        ip = if c > 0 { c } else { f } as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: "Uncaught exception".into(),
+                                        line: op.line,
+                                    });
+                                }
                                 if guard_active && is_proxy {
                                     if let Value::Object(real) =
                                         obj.borrow().get_property(b"__lazy_real")
@@ -44987,7 +45064,20 @@ impl Vm {
                                 && ((has_unset && !prop_declared && !guard_active)
                                     || is_hooked_prop);
                             if !skip_init {
-                                self.maybe_run_lazy_init(obj);
+                                let exc_before_init = self.current_exception.is_some();
+                                self.maybe_run_lazy_init_op(obj);
+                                // An initializer exception aborts the operation.
+                                if !exc_before_init && self.current_exception.is_some() {
+                                    if let Some((c, f, _, _, pc)) = exception_handlers.pop() {
+                                        pending_calls_catch_depth = Some(pc);
+                                        ip = if c > 0 { c } else { f } as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: "Uncaught exception".into(),
+                                        line: op.line,
+                                    });
+                                }
                                 if guard_active && is_proxy {
                                     if let Value::Object(real) =
                                         obj.borrow().get_property(b"__lazy_real")
@@ -55140,7 +55230,7 @@ impl Vm {
                                         self.magic_prop_guards.contains(&(id, pn.to_vec(), 0u8));
                                     (p, r, id, ga)
                                 };
-                                self.maybe_run_lazy_init(obj);
+                                self.maybe_run_lazy_init_op(obj);
                                 // If guard was active on the proxy before init,
                                 // propagate to the real backing so the read
                                 // doesn't re-enter __get.
@@ -56592,7 +56682,7 @@ impl Vm {
                                     ));
                             if !skip_init {
                                 let exc_before_init = self.current_exception.is_some();
-                                self.maybe_run_lazy_init(obj);
+                                self.maybe_run_lazy_init_op(obj);
                                 // An initializer exception aborts the write.
                                 if !exc_before_init && self.current_exception.is_some() {
                                     if let Some((c, f, _, _, pc)) = exception_handlers.pop() {
@@ -61746,7 +61836,7 @@ impl Vm {
         }
         let cl = o.borrow().class_name.to_ascii_lowercase();
         if !self.has_unguarded_get_hook(&cl, pn) {
-            self.maybe_run_lazy_init(o);
+            self.maybe_run_lazy_init_op(o);
         }
         Value::Object(self.proxy_redirect(o))
     }

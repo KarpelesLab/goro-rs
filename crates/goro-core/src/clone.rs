@@ -23,7 +23,7 @@ impl Vm {
         // Proxies initialize their backing object; the clone is a fresh
         // proxy with a cloned instance.
         if let Value::Object(obj) = val {
-            self.maybe_run_lazy_init(obj);
+            self.maybe_run_lazy_init_op(obj);
             // If the lazy initializer threw, propagate and skip cloning.
             if self.current_exception.is_some() {
                 return Value::Null;
