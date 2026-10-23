@@ -53766,7 +53766,11 @@ impl Vm {
                     // A user class (see new_object_fast)
                     match self.new_object_fast(op_array, ip - 1, &tmps) {
                         fastcall::NewFast::No => {}
-                        fastcall::NewFast::Obj(obj_value) => {
+                        fastcall::NewFast::Obj(obj_value, no_ctor) => {
+                            // ZEND_NEW of a class without a constructor, with
+                            // no arguments: the constructor call is skipped.
+                            let skip = no_ctor
+                                && self.new_skips_ctor_call(op_array, ip, &obj_value);
                             self.write_operand(
                                 &op.result,
                                 obj_value,
@@ -53774,6 +53778,19 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
+                            if skip {
+                                // (what DO_FCALL of the call leaves: a NULL result)
+                                let fcall = &op_array.ops[ip + 1];
+                                self.write_operand(
+                                    &fcall.result,
+                                    Value::Null,
+                                    &mut cvs,
+                                    &mut tmps,
+                                    &static_cv_keys,
+                                );
+                                ip += 2;
+                                return Ok(Flow::Continue);
+                            }
                             return Ok(Flow::Next);
                         }
                         fastcall::NewFast::Failed => {

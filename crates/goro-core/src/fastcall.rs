@@ -20,8 +20,9 @@ use crate::value::Value;
 pub(crate) enum NewFast {
     /// Not a plain user class: nothing was done.
     No,
-    /// The new object, for the result operand.
-    Obj(Value),
+    /// The new object, for the result operand, and whether its class is
+    /// known to have no constructor (see NewTemplate::no_ctor).
+    Obj(Value, bool),
     /// Evaluating the class's constant expressions threw.
     Failed,
 }
@@ -141,7 +142,7 @@ impl Vm {
                     .is_some_and(|ct| Rc::ptr_eq(ct, &t) && t.fits(ce))
             });
             if same {
-                return NewFast::Obj(self.new_from_template(&t, op, tmps));
+                return NewFast::Obj(self.new_from_template(&t, op, tmps), t.no_ctor);
             }
         }
         let OperandType::Const(ci) = op.op1 else {
@@ -180,7 +181,7 @@ impl Vm {
         };
         if let Some(t) = template {
             Self::note_new_site(op_array, ip, &t);
-            return NewFast::Obj(self.new_from_template(&t, op, tmps));
+            return NewFast::Obj(self.new_from_template(&t, op, tmps), t.no_ctor);
         }
         if !self.user_class_chain(name_lower) {
             return NewFast::No;
@@ -245,13 +246,62 @@ impl Vm {
                     slots,
                     arrays,
                     has_destruct,
+                    no_ctor: !ce.methods.contains_key(b"__construct".as_slice()),
                     create_hook: self.object_create_hook_of(name_lower),
                 });
                 Self::note_new_site(op_array, ip, &t);
                 *ce.new_template.borrow_mut() = Some(t);
             }
         }
-        NewFast::Obj(obj_value)
+        NewFast::Obj(obj_value, false)
+    }
+
+    /// Whether the NEW before `ip` (that made `obj`, of a class without a
+    /// constructor) is followed by its constructor call without arguments:
+    /// INIT_METHOD_CALL `__construct` on the new object, then DO_FCALL.
+    /// ZEND_NEW then jumps over them (what DO_FCALL would do for the call of
+    /// the missing constructor is done by the caller: a NULL result). Not
+    /// with an observer (it watches the call), nor with an exception or an
+    /// error handler's throw to dispatch.
+    #[inline(never)]
+    pub(crate) fn new_skips_ctor_call(
+        &mut self,
+        op_array: &OpArray,
+        ip: usize,
+        obj: &Value,
+    ) -> bool {
+        let (Some(init), Some(fcall)) = (op_array.ops.get(ip), op_array.ops.get(ip + 1)) else {
+            return false;
+        };
+        let new_op = &op_array.ops[ip - 1];
+        let ctor_named = match init.op2 {
+            OperandType::Const(c) => matches!(op_array.literals.get(c as usize),
+                Some(Value::String(s)) if s.as_bytes().eq_ignore_ascii_case(b"__construct")),
+            _ => false,
+        };
+        if init.opcode != crate::opcode::OpCode::InitMethodCall
+            || !ctor_named
+            || init.op1 != new_op.result
+            || !matches!(new_op.result, OperandType::Tmp(_))
+            || fcall.opcode != crate::opcode::OpCode::DoFCall
+            || !matches!(fcall.op1, OperandType::Unused)
+            || !matches!(fcall.result, OperandType::Tmp(_) | OperandType::Unused)
+            || self.observer.is_some()
+            || self.current_exception.is_some()
+            || self.error_handler_threw
+        {
+            return false;
+        }
+        // (what the DO_FCALL of the missing constructor does)
+        self.last_call_by_ref = false;
+        self.call_result_unused = None;
+        if let Value::Object(o) = obj {
+            let mut ob = o.borrow_mut();
+            if ob.has_property(b"__ctor_pending") {
+                ob.properties.retain(|(k, _)| k != b"__ctor_pending");
+            }
+        }
+        true
     }
 
     fn note_new_site(op_array: &OpArray, ip: usize, t: &Rc<NewTemplate>) {

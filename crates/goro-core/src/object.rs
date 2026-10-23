@@ -124,6 +124,9 @@ pub struct NewTemplate {
     )>,
     /// The class has a destructor.
     pub(crate) has_destruct: bool,
+    /// The class has no constructor (none declared or inherited): `new`
+    /// without arguments skips the constructor call (ZEND_NEW).
+    pub(crate) no_ctor: bool,
     /// The extension create_object hook its objects get (see
     /// Vm::object_create_hook_of).
     pub(crate) create_hook:
