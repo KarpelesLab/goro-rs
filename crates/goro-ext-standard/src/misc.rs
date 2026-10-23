@@ -7864,310 +7864,289 @@ fn http_build_query_max_depth(vm: &Vm) -> usize {
     usable / 256
 }
 
-#[allow(clippy::only_used_in_recursion)] // build_query_recursive keeps `separator` for signature parity
-fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let data = args.first().unwrap_or(&Value::Null);
-    // Top-level enum: throw TypeError.
-    if let Value::Object(obj) = data {
-        let cls_lower: Vec<u8> = obj
-            .borrow()
-            .class_name
-            .iter()
-            .map(|b| b.to_ascii_lowercase())
-            .collect();
-        if let Some(ce) = vm.classes.get(&cls_lower) {
-            if ce.is_enum {
-                let name = obj.borrow().class_name.clone();
-                let msg = format!(
-                    "http_build_query(): Argument #1 ($data) must not be an enum, {} given",
-                    goro_core::string::msg_str(&name)
-                );
-                let exc = vm.create_exception(b"TypeError", &msg, 0);
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: "Uncaught TypeError".to_string(),
-                    line: 0,
-                });
-            }
-        }
-    }
-    let _numeric_prefix = args.get(1).and_then(|v| {
-        if matches!(v, Value::Null | Value::Undef) {
-            None
+/// php_url_encode_to_smart_str(): urlencode(), or rawurlencode() for
+/// PHP_QUERY_RFC3986.
+fn hbq_url_encode(out: &mut Vec<u8>, s: &[u8], raw: bool) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    for &c in s {
+        if c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.') || (raw && c == b'~') {
+            out.push(c);
+        } else if !raw && c == b' ' {
+            out.push(b'+');
         } else {
-            Some(v.to_php_string().to_msg_string())
+            out.extend_from_slice(&[b'%', HEX[(c >> 4) as usize], HEX[(c & 15) as usize]]);
         }
-    });
-    let separator = args
-        .get(2)
-        .and_then(|v| {
-            if matches!(v, Value::Null | Value::Undef) {
-                None
-            } else {
-                Some(v.to_php_string().to_msg_string())
-            }
-        })
-        .unwrap_or_else(|| "&".to_string());
-    let enc_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // PHP_QUERY_RFC1738 = 1
-    let mut parts = Vec::new();
-
-    // (the strings carry raw bytes as msg_str()'s private-use characters)
-    fn url_encode(s: &str, enc_type: i64) -> String {
-        let mut result = String::new();
-        for byte in goro_core::errdisplay::raw_error_bytes(s).iter().copied() {
-            match byte {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
-                    result.push(byte as char);
-                }
-                b'~' if enc_type == 2 => {
-                    // RFC3986 doesn't encode ~
-                    result.push('~');
-                }
-                b' ' if enc_type == 1 => {
-                    // RFC1738: space -> +
-                    result.push('+');
-                }
-                _ => {
-                    result.push_str(&format!("%{:02X}", byte));
-                }
-            }
-        }
-        result
     }
+}
 
-    fn build_query_recursive(
-        vm: &mut Vm,
-        parts: &mut Vec<String>,
-        prefix: &str,
-        val: &Value,
-        separator: &str,
-        enc_type: i64,
-        numeric_prefix: &Option<String>,
-        depth: usize,
-    ) {
-        // zend_call_stack_overflowed(): nesting deeper than the stack
-        // allows (zend.max_allowed_stack_size, ~256 bytes per level).
-        if depth > http_build_query_max_depth(vm) {
-            if vm.current_exception.is_none() {
-                let exc = vm.create_exception(
-                    b"Error",
-                    "Maximum call stack size reached.",
-                    vm.current_line,
-                );
-                vm.current_exception = Some(exc);
-            }
-            return;
+/// A key of the table php_url_encode_hash_ex() walks.
+enum HbqKey {
+    Int(i64),
+    Str(Vec<u8>),
+}
+
+/// The entries of HASH_OF(`v`) as php_url_encode_hash_ex() sees them: an
+/// array's elements, or the properties of an object accessible from the
+/// calling scope (zend_check_property_access()) under their unmangled
+/// names, with the table's identity. None when `v` has no table.
+#[allow(clippy::type_complexity)]
+fn hbq_entries(vm: &mut Vm, v: &Value) -> Option<(usize, Vec<(HbqKey, Value)>)> {
+    match v {
+        Value::Array(arr) => {
+            let entries = arr
+                .borrow()
+                .iter()
+                .map(|(k, v)| {
+                    let k = match k {
+                        goro_core::array::ArrayKey::Int(n) => HbqKey::Int(*n),
+                        goro_core::array::ArrayKey::String(s) => HbqKey::Str(s.as_bytes().to_vec()),
+                    };
+                    (k, v.clone())
+                })
+                .collect();
+            Some((Rc::as_ptr(arr) as *const u8 as usize, entries))
         }
+        Value::Object(outer) => {
+            vm.maybe_run_lazy_init(outer);
+            if vm.current_exception.is_some() {
+                return None;
+            }
+            let obj = vm.proxy_redirect(outer);
+            let class_lower = obj.borrow().class_name.to_ascii_lowercase();
+            let mut entries = Vec::new();
+            for e in vm.object_prop_table(&obj) {
+                let is_dynamic = e.slot.is_none();
+                if is_dynamic
+                    && (goro_core::proptable::is_internal_prop_name(&e.key)
+                        || goro_core::foreach_obj::is_date_view_prop(&obj.borrow(), &e.key))
+                {
+                    continue;
+                }
+                // (IS_INDIRECT to an undefined slot: virtual / uninitialized)
+                if matches!(e.value, Value::Undef) {
+                    continue;
+                }
+                if !vm.check_property_access(&class_lower, &e.key, is_dynamic) {
+                    continue;
+                }
+                let name = match e.slot {
+                    Some(slot) => slot.name,
+                    None => e.key,
+                };
+                entries.push((HbqKey::Str(name), e.value));
+            }
+            Some((Rc::as_ptr(&obj) as *const u8 as usize, entries))
+        }
+        // (a Generator's property table is empty)
+        Value::Generator(g) => Some((Rc::as_ptr(g) as *const u8 as usize, Vec::new())),
+        _ => None,
+    }
+}
+
+/// Whether `v` (dereferenced) is an enum case.
+fn hbq_is_enum(vm: &Vm, v: &Value) -> bool {
+    match v {
+        Value::Object(o) => {
+            let lower = o.borrow().class_name.to_ascii_lowercase();
+            vm.classes.get(&lower).is_some_and(|c| c.is_enum)
+        }
+        _ => false,
+    }
+}
+
+/// php_url_encode_hash_ex(); `out` is the form string (None: nothing
+/// appended yet, so no separator before the next pair).
+#[allow(clippy::too_many_arguments)]
+fn hbq_encode_hash(
+    vm: &mut Vm,
+    out: &mut Option<Vec<u8>>,
+    data: &Value,
+    num_prefix: Option<&[u8]>,
+    key_prefix: Option<&[u8]>,
+    arg_sep: &[u8],
+    enc_type: i64,
+    depth: usize,
+) {
+    let raw = enc_type == 2; // PHP_QUERY_RFC3986
+    let Some((ptr, entries)) = hbq_entries(vm, data) else {
+        return;
+    };
+    // GC_IS_RECURSIVE: a table already being encoded is skipped.
+    if HBQ_ACTIVE.with(|a| a.borrow().contains(&ptr)) {
+        return;
+    }
+    // zend_call_stack_overflowed(): nesting deeper than the stack allows
+    // (zend.max_allowed_stack_size, ~256 bytes per level).
+    if depth > http_build_query_max_depth(vm) {
+        if vm.current_exception.is_none() {
+            let exc = vm.create_exception(
+                b"Error",
+                "Maximum call stack size reached.",
+                vm.current_line,
+            );
+            vm.current_exception = Some(exc);
+        }
+        return;
+    }
+    for (key, zdata) in entries {
         if vm.current_exception.is_some() {
             return;
         }
-        match val {
-            Value::Array(arr) => {
-                // GC_IS_RECURSIVE: an array already being encoded is skipped.
-                let ptr = Rc::as_ptr(arr) as usize;
-                if HBQ_ACTIVE.with(|a| a.borrow().contains(&ptr)) {
-                    return;
-                }
-                HBQ_ACTIVE.with(|a| a.borrow_mut().push(ptr));
-                struct Pop;
-                impl Drop for Pop {
-                    fn drop(&mut self) {
-                        HBQ_ACTIVE.with(|a| {
-                            a.borrow_mut().pop();
-                        });
+        let zdata = zdata.deref();
+        let is_table = match &zdata {
+            Value::Array(_) | Value::Generator(_) => true,
+            Value::Object(_) => !hbq_is_enum(vm, &zdata),
+            _ => false,
+        };
+        if is_table {
+            let mut new_prefix = Vec::new();
+            if let Some(kp) = key_prefix {
+                new_prefix.extend_from_slice(kp);
+            }
+            match &key {
+                HbqKey::Str(name) => hbq_url_encode(&mut new_prefix, name, raw),
+                HbqKey::Int(idx) => {
+                    if let Some(np) = num_prefix {
+                        new_prefix.extend_from_slice(np);
                     }
-                }
-                let _pop = Pop;
-                let pairs: Vec<(goro_core::array::ArrayKey, Value)> = arr
-                    .borrow()
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                for (key, v) in pairs {
-                    let k = match &key {
-                        goro_core::array::ArrayKey::Int(n) => {
-                            if prefix.is_empty() {
-                                if let Some(np) = numeric_prefix {
-                                    format!("{}{}", np, n)
-                                } else {
-                                    n.to_string()
-                                }
-                            } else {
-                                n.to_string()
-                            }
-                        }
-                        goro_core::array::ArrayKey::String(s) => s.to_msg_string(),
-                    };
-                    let new_prefix = if prefix.is_empty() {
-                        url_encode(&k, enc_type)
-                    } else {
-                        format!("{}%5B{}%5D", prefix, url_encode(&k, enc_type))
-                    };
-                    build_query_recursive(
-                        vm,
-                        parts,
-                        &new_prefix,
-                        &v,
-                        separator,
-                        enc_type,
-                        numeric_prefix,
-                        depth + 1,
-                    );
+                    new_prefix.extend_from_slice(idx.to_string().as_bytes());
                 }
             }
-            Value::Object(obj) => {
-                let ptr = Rc::as_ptr(obj) as usize;
-                if HBQ_ACTIVE.with(|a| a.borrow().contains(&ptr)) {
-                    return;
-                }
-                HBQ_ACTIVE.with(|a| a.borrow_mut().push(ptr));
-                struct Pop;
-                impl Drop for Pop {
-                    fn drop(&mut self) {
-                        HBQ_ACTIVE.with(|a| {
-                            a.borrow_mut().pop();
-                        });
-                    }
-                }
-                let _pop = Pop;
-                // Handle enums specially:
-                //   - backed enum case → use its backing value
-                //   - unbacked enum   → ValueError
-                let class_lower: Vec<u8> = obj
-                    .borrow()
-                    .class_name
-                    .iter()
-                    .map(|b| b.to_ascii_lowercase())
-                    .collect();
-                let (is_enum, has_backing, class_name) = vm
-                    .classes
-                    .get(&class_lower)
-                    .map(|ce| (ce.is_enum, ce.enum_backing_type.is_some(), ce.name.clone()))
-                    .unwrap_or((false, false, Vec::new()));
-                if is_enum {
-                    if has_backing {
-                        let val = obj.borrow().get_property(b"value");
-                        let v = url_encode(&val.to_php_string().to_msg_string(), enc_type);
-                        parts.push(format!("{}={}", prefix, v));
-                    } else {
-                        let msg = format!(
-                            "Unbacked enum {} cannot be converted to a string",
-                            goro_core::string::msg_str(&class_name)
-                        );
-                        let exc = vm.create_exception(b"ValueError", &msg, 0);
-                        vm.current_exception = Some(exc);
-                    }
-                    return;
-                }
-                // Treat objects like arrays: iterate accessible properties.
-                let obj_b = obj.borrow();
-                let scope_class: Option<Vec<u8>> = vm
-                    .current_class_scope()
-                    .map(|name| name.iter().map(|b| b.to_ascii_lowercase()).collect());
-                let mut visibility_map: std::collections::HashMap<
-                    Vec<u8>,
-                    (goro_core::object::Visibility, Vec<u8>),
-                > = std::collections::HashMap::new();
-                let mut walk_class = Some(class_lower.clone());
-                while let Some(c) = walk_class {
-                    if let Some(ce) = vm.classes.get(&c) {
-                        for p in &ce.properties {
-                            visibility_map
-                                .entry(p.name.clone())
-                                .or_insert((p.visibility, p.declaring_class.clone()));
-                        }
-                        walk_class = ce
-                            .parent
-                            .as_ref()
-                            .map(|p| p.iter().map(|b| b.to_ascii_lowercase()).collect());
-                    } else {
-                        walk_class = None;
-                    }
-                }
-                let props: Vec<(Vec<u8>, Value)> = obj_b.properties.to_vec();
-                drop(obj_b);
-                for (prop_name, prop_val) in props {
-                    let visible = if let Some((vis, decl)) = visibility_map.get(&prop_name) {
-                        match vis {
-                            goro_core::object::Visibility::Public => true,
-                            goro_core::object::Visibility::Protected => {
-                                if let Some(ref s) = scope_class {
-                                    s == &class_lower
-                                        || vm.class_extends(s, &class_lower)
-                                        || vm.class_extends(&class_lower, s)
-                                } else {
-                                    false
-                                }
-                            }
-                            goro_core::object::Visibility::Private => {
-                                if let Some(ref s) = scope_class {
-                                    s == decl
-                                } else {
-                                    false
-                                }
-                            }
-                        }
-                    } else {
-                        true
-                    };
-                    if !visible {
-                        continue;
-                    }
-                    let k = goro_core::string::msg_str(&prop_name).to_string();
-                    let new_prefix = if prefix.is_empty() {
-                        url_encode(&k, enc_type)
-                    } else {
-                        format!("{}%5B{}%5D", prefix, url_encode(&k, enc_type))
-                    };
-                    build_query_recursive(
-                        vm,
-                        parts,
-                        &new_prefix,
-                        &prop_val,
-                        separator,
-                        enc_type,
-                        numeric_prefix,
-                        depth + 1,
-                    );
-                }
+            new_prefix.extend_from_slice(if key_prefix.is_some() {
+                b"%5D%5B"
+            } else {
+                b"%5B"
+            });
+            HBQ_ACTIVE.with(|a| a.borrow_mut().push(ptr));
+            hbq_encode_hash(
+                vm,
+                out,
+                &zdata,
+                None,
+                Some(&new_prefix),
+                arg_sep,
+                enc_type,
+                depth + 1,
+            );
+            HBQ_ACTIVE.with(|a| {
+                a.borrow_mut().pop();
+            });
+            continue;
+        }
+        if matches!(zdata, Value::Null | Value::Undef | Value::Resource(_)) {
+            continue;
+        }
+        // php_url_encode_scalar()
+        let form = match out {
+            Some(form) => {
+                form.extend_from_slice(arg_sep);
+                form
             }
-            Value::Null | Value::Undef => {
-                // PHP's http_build_query skips null entirely
-            }
-            Value::Resource(_) => {
-                // PHP's http_build_query skips resources entirely
-            }
-            Value::True => {
-                parts.push(format!("{}=1", prefix));
-            }
-            Value::False => {
-                parts.push(format!("{}=0", prefix));
-            }
-            _ => {
-                let v = url_encode(&val.to_php_string().to_msg_string(), enc_type);
-                parts.push(format!("{}={}", prefix, v));
+            None => out.insert(Vec::new()),
+        };
+        if let Some(kp) = key_prefix {
+            form.extend_from_slice(kp);
+        }
+        match &key {
+            HbqKey::Str(name) => hbq_url_encode(form, name, raw),
+            HbqKey::Int(idx) => {
+                if let Some(np) = num_prefix {
+                    form.extend_from_slice(np);
+                }
+                form.extend_from_slice(idx.to_string().as_bytes());
             }
         }
+        if key_prefix.is_some() {
+            form.extend_from_slice(b"%5D");
+        }
+        form.push(b'=');
+        let mut scalar = zdata;
+        if let Value::Object(o) = &scalar {
+            let lower = o.borrow().class_name.to_ascii_lowercase();
+            let (backed, name) = vm
+                .classes
+                .get(&lower)
+                .map(|c| (c.enum_backing_type.is_some(), c.name.clone()))
+                .unwrap_or((false, Vec::new()));
+            if !backed {
+                let msg = format!(
+                    "Unbacked enum {} cannot be converted to a string",
+                    goro_core::string::msg_str(&name)
+                );
+                let exc = vm.create_exception(b"ValueError", &msg, 0);
+                vm.current_exception = Some(exc);
+                return;
+            }
+            let v = o.borrow().get_property(b"value");
+            scalar = v;
+        }
+        match &scalar {
+            Value::String(s) => hbq_url_encode(form, s.as_bytes(), raw),
+            Value::Long(n) => form.extend_from_slice(n.to_string().as_bytes()),
+            Value::Double(d) => {
+                let s = scalar.to_php_string();
+                hbq_url_encode(form, s.as_bytes(), raw);
+                // zend_double_to_str()
+                if d.is_nan() {
+                    vm.emit_warning_at(
+                        "unexpected NAN value was coerced to string",
+                        vm.current_line,
+                    );
+                }
+            }
+            Value::False => form.push(b'0'),
+            Value::True => form.push(b'1'),
+            _ => {}
+        }
     }
+}
 
-    // Use the recursive function with empty prefix for the top level.
-    // For arrays/objects this iterates entries; scalar top-level args would
-    // produce a TypeError in PHP — we silently no-op for unsupported types.
-    if matches!(data, Value::Array(_) | Value::Object(_)) {
-        build_query_recursive(
-            vm,
-            &mut parts,
-            "",
-            data,
-            &separator,
-            enc_type,
-            &_numeric_prefix,
-            0,
+fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // (zpp checked the arguments: array|object, string, ?string, int)
+    let data = args.first().map(|v| v.deref()).unwrap_or(Value::Null);
+    if let (true, Value::Object(obj)) = (hbq_is_enum(vm, &data), &data) {
+        let name = obj.borrow().class_name.clone();
+        let msg = format!(
+            "http_build_query(): Argument #1 ($data) must not be an enum, {} given",
+            goro_core::string::msg_str(&name)
         );
+        let exc = vm.create_exception(b"TypeError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: "Uncaught TypeError".to_string(),
+            line: 0,
+        });
     }
-    Ok(Value::String(PhpString::from_vec(
-        goro_core::errdisplay::raw_error_bytes(&parts.join(&separator)).into_owned(),
-    )))
+    let num_prefix = match args.get(1).map(|v| v.deref()) {
+        Some(Value::Null) | Some(Value::Undef) | None => None,
+        Some(v) => Some(v.to_php_string()),
+    };
+    let arg_sep = match args.get(2).map(|v| v.deref()) {
+        Some(Value::Null) | Some(Value::Undef) | None => {
+            // PG(arg_separator).output, "&" when empty
+            match vm.constants.get(b"arg_separator.output".as_slice()) {
+                Some(v) if !v.to_php_string().is_empty() => v.to_php_string(),
+                _ => PhpString::from_bytes(b"&"),
+            }
+        }
+        Some(v) => v.to_php_string(),
+    };
+    let enc_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // PHP_QUERY_RFC1738
+    let mut out = None;
+    hbq_encode_hash(
+        vm,
+        &mut out,
+        &data,
+        num_prefix.as_ref().map(|p| p.as_bytes()),
+        None,
+        arg_sep.as_bytes(),
+        enc_type,
+        0,
+    );
+    if vm.current_exception.is_some() {
+        return Ok(Value::Null);
+    }
+    Ok(Value::String(PhpString::from_vec(out.unwrap_or_default())))
 }
 
 // JSON functions moved to goro-ext-json

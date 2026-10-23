@@ -1091,6 +1091,11 @@ impl Vm {
                 // key("abc"), iterator_to_array(true)); the rest is left to
                 // the function.
                 if m & value_type_bit(&v) != 0 {
+                    // array|object (Z_PARAM_ARRAY_OR_OBJECT) given an
+                    // array: fully checked, go on with the next ones.
+                    if m & !(T_ARRAY | T_OBJECT | T_NULL) == 0 {
+                        continue;
+                    }
                     break;
                 }
                 if m & (T_BOOL | T_INT | T_FLOAT | T_STRING) != 0 {
@@ -1138,6 +1143,15 @@ impl Vm {
                     return Err(self.zpp_type_error_n(info, i, p, &v, number));
                 }
                 break;
+            }
+            // An object given to an `object` / `array|object` parameter
+            // (Z_PARAM_OBJECT, Z_PARAM_ARRAY_OR_OBJECT): fully checked.
+            if p.by_ref == 0
+                && m & T_OBJECT != 0
+                && m & !(T_ARRAY | T_OBJECT | T_NULL) == 0
+                && matches!(v, Value::Object(_) | Value::Generator(_))
+            {
+                continue;
             }
             if p.by_ref != 0 || m == 0 || m & (T_CLASS | T_OBJECT | T_CALLABLE) != 0 {
                 // Validated by the function itself; leave the rest to it too
