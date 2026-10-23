@@ -392,13 +392,13 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                             vm.current_exception = Some(exc);
                             return Ok(Value::Array(Rc::new(RefCell::new(result))));
                         }
-                        Value::Object(_) => {
+                        o @ Value::Object(_) => {
                             let line = vm.current_line;
-                            let exc = vm.create_exception(
-                                b"TypeError",
-                                "Cannot access offset of type object on array",
-                                line,
+                            let msg = format!(
+                                "Cannot access offset of type {} on array",
+                                Vm::value_type_name(&o)
                             );
+                            let exc = vm.create_exception(b"TypeError", &msg, line);
                             vm.current_exception = Some(exc);
                             return Ok(Value::Array(Rc::new(RefCell::new(result))));
                         }

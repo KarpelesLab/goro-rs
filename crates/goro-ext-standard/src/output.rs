@@ -2165,7 +2165,12 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                     .map(|c| c.name.clone())
                     .unwrap_or_else(|| ob.class_name.clone());
                 (
-                    goro_core::value::display_class_name(&name),
+                    // (an anonymous class keeps its whole NUL-separated name)
+                    if name.contains(&0) {
+                        name.clone()
+                    } else {
+                        goro_core::value::display_class_name(&name).into_bytes()
+                    },
                     ob.has_property(b"__enum_case"),
                     cl,
                 )
@@ -2273,7 +2278,7 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                 buf.extend_from_slice(b"(object) array(\n");
             } else {
                 buf.push(b'\\');
-                buf.extend_from_slice(class_name.as_bytes());
+                buf.extend_from_slice(&class_name);
                 if is_enum {
                     let case_name = obj.borrow().get_property(b"name").to_php_string();
                     buf.extend_from_slice(b"::");

@@ -522,11 +522,7 @@ fn format_serialize_double_gcvt(f: f64) -> String {
         let e = format!("{:.0e}", f.abs());
         let (digit, exp) = e.split_once('e').unwrap_or(("0", "0"));
         let exp: i32 = exp.parse().unwrap_or(0);
-        let sign = if f.is_sign_negative() && f != 0.0 {
-            "-"
-        } else {
-            ""
-        };
+        let sign = if f.is_sign_negative() { "-" } else { "" };
         let decpt = exp + 1;
         if !(-3..=0).contains(&decpt) {
             format!(
@@ -877,7 +873,15 @@ impl Serializer {
                         "serialize(): {}::__sleep() should return an array only containing the names of instance-variables to serialize",
                         goro_core::value::display_class_name(&display)), saved_line);
                 }
-                let name = name_val.to_php_string().as_bytes().to_vec();
+                // zval_get_tmp_string(): an object without __toString() throws
+                let name = if matches!(name_val, Value::Object(_)) {
+                    match vm.value_to_string_checked(name_val) {
+                        Ok(s) if vm.current_exception.is_none() => s.as_bytes().to_vec(),
+                        _ => return,
+                    }
+                } else {
+                    name_val.to_php_string().as_bytes().to_vec()
+                };
                 let candidates = [name.clone(), mangle(&display, &name), mangle(b"*", &name)];
                 let mut found = false;
                 for cand in candidates.iter() {
@@ -1618,6 +1622,11 @@ impl<'a> Parser<'a> {
                     }
                 }
                 let (is_enum, has_case, has_const, canon) = match vm.classes.get(&cl) {
+                    // An internal class that is not an enum.
+                    None if vm.is_known_builtin_class(&cl) => {
+                        self.warn(vm, &format!("Class '{}' is not an enum", en));
+                        return None;
+                    }
                     None => {
                         self.warn(vm, &format!("Class '{}' not found", en));
                         return None;

@@ -2327,7 +2327,17 @@ fn reflection_parameter_construct_impl(vm: &mut Vm, args: &[Value], _line: u32) 
         );
     } else if let Some(idx) = param_idx_opt {
         // No userland function - still set enough for later calls.
-        let internal_name = rfunc(vm, &func_lower).and_then(|op| op.cv_names.get(idx).cloned());
+        let internal = rfunc(vm, &func_lower);
+        // An internal function's parameter offset must exist too.
+        if let Some(op) = &internal {
+            if idx >= op.param_count as usize && op.variadic_param.is_none() {
+                let err_msg = "The parameter specified by its offset could not be found";
+                let exc = vm.create_exception(b"ReflectionException", err_msg, _line);
+                vm.current_exception = Some(exc);
+                return false;
+            }
+        }
+        let internal_name = internal.and_then(|op| op.cv_names.get(idx).cloned());
         let mut obj = this.borrow_mut();
         if let Some(n) = internal_name {
             obj.set_property(b"name".to_vec(), Value::String(PhpString::from_vec(n)));

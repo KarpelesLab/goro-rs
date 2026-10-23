@@ -36739,11 +36739,8 @@ impl Vm {
                                 b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
                             ) && matches!(&key_val, Value::Array(_) | Value::Object(_))
                             {
-                                let t = if matches!(&key_val, Value::Array(_)) {
-                                    "array"
-                                } else {
-                                    "object"
-                                };
+                                // (zend_zval_type_name(): an object is named by its class)
+                                let t = Self::value_type_name(&key_val);
                                 let msg =
                                     format!("Cannot access offset of type {} on ArrayObject", t);
                                 let exc = self.create_exception(b"TypeError", &msg, op.line);
@@ -37678,11 +37675,8 @@ impl Vm {
                         ) {
                             let bad = matches!(&key_val, Value::Array(_) | Value::Object(_));
                             if bad {
-                                let t = match &key_val {
-                                    Value::Array(_) => "array",
-                                    Value::Object(_) => "object",
-                                    _ => "?",
-                                };
+                                // (zend_zval_type_name(): an object is named by its class)
+                                let t = Self::value_type_name(&key_val);
                                 let msg =
                                     format!("Cannot access offset of type {} on ArrayObject", t);
                                 let exc = self.create_exception(b"TypeError", &msg, op.line);
@@ -45772,11 +45766,8 @@ impl Vm {
                             b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
                         ) && matches!(&key_val, Value::Array(_) | Value::Object(_))
                         {
-                            let t = if matches!(&key_val, Value::Array(_)) {
-                                "array"
-                            } else {
-                                "object"
-                            };
+                            // (zend_zval_type_name(): an object is named by its class)
+                            let t = Self::value_type_name(&key_val);
                             let msg = format!("Cannot access offset of type {} on ArrayObject", t);
                             let exc = self.create_exception(b"TypeError", &msg, op.line);
                             self.current_exception = Some(exc);
