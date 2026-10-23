@@ -218,7 +218,39 @@ fn similar(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value], quantum: bool
     };
     let fuzz = a[1].double_or(0.0);
     let fuzz = if quantum { fuzz * QUANTUM_RANGE } else { fuzz };
-    Ok(bool_val(c.is_similar(&other, fuzz)))
+    Ok(bool_val(pixel_similar(&c, &other, fuzz)))
+}
+
+/// isPixelSimilar() as pecl imagick 3.8 on ImageMagick 7 answers it
+/// (black-box): the alpha-weighted RGB distance over √6 against the
+/// fuzz (in quantum units), and alphas that differ by more than the
+/// unscaled fuzz never match.
+fn pixel_similar(a: &PixelInfo, b: &PixelInfo, fuzz: f64) -> bool {
+    let aa = if a.alpha_trait {
+        a.alpha
+    } else {
+        QUANTUM_RANGE
+    };
+    let ba = if b.alpha_trait {
+        b.alpha
+    } else {
+        QUANTUM_RANGE
+    };
+    let mut scale = 1.0;
+    if a.alpha_trait || b.alpha_trait {
+        let p = aa - ba;
+        if p * p > fuzz * fuzz / (QUANTUM_RANGE * QUANTUM_RANGE) {
+            return false;
+        }
+        scale = (aa * QUANTUM_SCALE) * (ba * QUANTUM_SCALE);
+    }
+    let (r1, g1, b1) = a.rgb_q();
+    let (r2, g2, b2) = b.rgb_q();
+    let d: f64 = [(r1, r2), (g1, g2), (b1, b2)]
+        .iter()
+        .map(|(x, y)| scale * (x - y) * (x - y))
+        .sum();
+    d <= 6.0 * fuzz * fuzz
 }
 
 fn is_similar(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
