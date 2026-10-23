@@ -296,6 +296,15 @@ pub fn possible_root(v: &Value) {
     }
 }
 
+/// possible_root() of an object.
+#[inline]
+pub fn possible_root_object(o: &Rc<RefCell<PhpObject>>) {
+    if Rc::strong_count(o) > 1 {
+        note_dtor_candidate(o);
+        buffer_object(o);
+    }
+}
+
 /// `o` is losing one holder: when the only other one is the VM's list of
 /// objects awaiting destruction, queue it so the next release point runs its
 /// destructor (regardless of where it sits in that list).

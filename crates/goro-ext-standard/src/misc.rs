@@ -1792,6 +1792,19 @@ fn call_scoped_method_callable(
 }
 
 pub(crate) fn call_user_func(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let closure = match args.first() {
+        Some(Value::Object(o)) if o.borrow().closure.is_some() => Some(Rc::downgrade(o)),
+        _ => None,
+    };
+    let r = call_user_func_inner(vm, args);
+    // zend_call_function() of a closure releases it (ZEND_CALL_CLOSURE).
+    if let Some(o) = closure.and_then(|w| w.upgrade()) {
+        goro_core::gc::possible_root_object(&o);
+    }
+    r
+}
+
+fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if args.is_empty() {
         return Ok(Value::Null);
     }
@@ -3328,6 +3341,19 @@ fn array_map(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             });
         }
     }
+    // (each zend_call_function() of a closure releases it: see the end)
+    let closure = match &callback {
+        Value::Object(o) if o.borrow().closure.is_some() => Some(Rc::downgrade(o)),
+        _ => None,
+    };
+    let r = array_map_impl(vm, args, callback);
+    if let Some(o) = closure.and_then(|w| w.upgrade()) {
+        goro_core::gc::possible_root_object(&o);
+    }
+    r
+}
+
+fn array_map_impl(vm: &mut Vm, args: &[Value], callback: Value) -> Result<Value, VmError> {
     let callback = callback.closure_callable();
     let mut arrays: Vec<Rc<RefCell<PhpArray>>> = Vec::new();
     for i in 1..args.len() {

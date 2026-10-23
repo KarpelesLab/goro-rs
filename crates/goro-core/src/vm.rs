@@ -1103,6 +1103,9 @@ pub struct Vm {
     /// zend_fiber_switch_blocking: >0 while tick functions or signal
     /// handlers run (Fiber::start/resume/throw/suspend throw).
     pub fiber_switch_blocking: u32,
+    /// The $this Closure::call() binds (Rc pointer; 0 = none): the frame it
+    /// starts does not release it (see execute_op_array_inner).
+    pub(crate) unowned_this: usize,
     /// Indices into `pending_calls` of calls dispatched through a Closure
     /// object (closures bypass method visibility checks).
     pub closure_pending_calls: Vec<usize>,
@@ -1591,6 +1594,7 @@ impl Vm {
             interrupt_hook: None,
             tick_hook: None,
             fiber_switch_blocking: 0,
+            unowned_this: 0,
             closure_pending_calls: Vec::new(),
             error_handler_threw: false,
             fatal_bailout: false,
@@ -3720,6 +3724,19 @@ impl Vm {
     }
 
     pub fn call_callback(&mut self, callback: &Value, args: &[Value]) -> Result<Value, VmError> {
+        let closure = match callback {
+            Value::Object(o) if o.borrow().closure.is_some() => Some(Rc::downgrade(o)),
+            _ => None,
+        };
+        let r = self.call_callback_inner(callback, args);
+        // zend_call_function() of a closure releases it (ZEND_CALL_CLOSURE).
+        if let Some(o) = closure.and_then(|w| w.upgrade()) {
+            crate::gc::possible_root_object(&o);
+        }
+        r
+    }
+
+    fn call_callback_inner(&mut self, callback: &Value, args: &[Value]) -> Result<Value, VmError> {
         let callback = callback.closure_callable();
         if let Some(t) = self.internal_static_target(&callback) {
             return self.call_internal_static(t, args, Vec::new());
@@ -17989,6 +18006,7 @@ impl Vm {
                     *slot = Value::Undef;
                 }
             }
+            Self::root_internal_call_this(op, op_array, &obj_val);
             let mut args = self.take_values(0);
             args.push(obj_val);
             let target = target(self, by_val);
@@ -18075,6 +18093,7 @@ impl Vm {
                 .spl_sites
                 .insert(ip as u32, (class, name.clone(), by_val));
         }
+        Self::root_internal_call_this(op, op_array, &obj_val);
         let mut args = self.take_values(0);
         args.push(obj_val);
         let target = target(self, by_val);
@@ -18085,6 +18104,40 @@ impl Vm {
             target,
         });
         true
+    }
+
+    /// ZEND_CALL_RELEASE_THIS of a call to an internal method: the call
+    /// releases its $this when it returns, a possible cycle root (unless
+    /// it is the calling method's own $this: `$this->m()` holds none).
+    #[inline]
+    fn root_internal_call_this(op: &crate::opcode::Op, op_array: &OpArray, this: &Value) {
+        if let OperandType::Cv(i) = op.op1 {
+            if op_array
+                .cv_names
+                .get(i as usize)
+                .is_some_and(|n| n.as_slice() == b"this")
+            {
+                return;
+            }
+        }
+        crate::gc::possible_root(this);
+    }
+
+    /// Whether the constructor of a class (lowercase name) without a user
+    /// one is an internal class's.
+    #[inline(never)]
+    fn has_internal_ctor(&self, class_lower: &[u8]) -> bool {
+        let mut cur = class_lower.to_vec();
+        for _ in 0..64 {
+            match self.classes.get(&cur) {
+                Some(c) if c.filename.is_some() => match &c.parent {
+                    Some(p) => cur = p.to_ascii_lowercase(),
+                    None => return false,
+                },
+                _ => return crate::stubs::find_method(&cur, b"__construct").is_some(),
+            }
+        }
+        false
     }
 
     /// INIT_FCALL `op` of a call through a Closure object (in a variable or
@@ -19705,6 +19758,12 @@ impl Vm {
         let mut fin = Vec::new();
         let saved_file = self.enter_op_array_file(op_array);
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
+        // Closure::call()'s $this is not the frame's to release (no
+        // ZEND_CALL_RELEASE_THIS).
+        let this_unowned = self.unowned_this != 0 && {
+            let u = std::mem::take(&mut self.unowned_this);
+            has_this && matches!(cvs.first(), Some(Value::Object(o)) if Rc::as_ptr(o) as usize == u)
+        };
         // The frame's symbol table, if it gets one.
         let mut sym = None;
         // (boxed, from the states of finished frames: kept off the native
@@ -19733,7 +19792,7 @@ impl Vm {
         }
         // i_free_compiled_variables: locals still shared elsewhere become
         // possible cycle roots.
-        crate::gc::release_frame(&cvs);
+        crate::gc::release_frame(if this_unowned { &cvs[1..] } else { &cvs });
         self.leave_op_array_file(saved_file);
         // An exception leaving the frame escapes every finally block still
         // running: each one's pending exception becomes its previous.
@@ -24713,6 +24772,17 @@ impl Vm {
                         let at = self.pending_calls.len();
                         self.closure_call_objs.retain(|(i, _)| *i < at);
                         self.closure_call_objs.push((at, Rc::downgrade(o)));
+                        // ZEND_CALL_CLOSURE: the call releases the closure (a
+                        // real closure's call does so when it returns).
+                        let fake = match o.borrow().closure.as_deref() {
+                            Some(inner) => !crate::closure::is_closure_fn_name(
+                                &crate::closure::closure_parts(inner).0,
+                            ),
+                            None => false,
+                        };
+                        if fake {
+                            crate::gc::possible_root_object(o);
+                        }
                     }
                     let name_val = name_val.unwrap_closure();
                     // `$callable()` where $callable is an [obj|class, method] array
@@ -26190,9 +26260,16 @@ impl Vm {
                         }
                         .min(call.args.len());
                         let call_frame_depth = self.call_stack.len();
+                        // (the Closure object the call goes through)
+                        let mut closure_obj = None;
                         if captures.is_some() {
                             let known = call.target.closure;
                             self.note_closure_frame(&call.name, &display, known);
+                            closure_obj = self
+                                .closure_frames
+                                .last()
+                                .filter(|f| f.0 == call_frame_depth + 1)
+                                .map(|f| f.2.clone());
                         }
                         // The frame is built in place, its file and arguments
                         // filled there (in the buffers of finished calls'):
@@ -26416,6 +26493,17 @@ impl Vm {
                                 return Err(e);
                             }
                         };
+                        // ZEND_CALL_CLOSURE: the call releases the closure.
+                        if let Some(o) = closure_obj.and_then(|w| w.upgrade()) {
+                            crate::gc::possible_root_object(&o);
+                        }
+                        // zend_free_extra_args(): extra arguments still
+                        // shared elsewhere become possible roots.
+                        if call.args.len() > bound {
+                            for a in &call.args[bound..] {
+                                crate::gc::on_child_released(a);
+                            }
+                        }
                         // The arguments are released when the call returns.
                         if self.has_release_work() && !call.args.is_empty() {
                             call.args.clear();
@@ -28504,6 +28592,9 @@ impl Vm {
                         } else {
                             Value::Null
                         };
+                        if let Value::Object(o) = &new_this {
+                            self.unowned_this = Rc::as_ptr(o) as usize;
+                        }
                         let bound = self
                             .bind_closure(&closure, new_this, scope, true)
                             .unwrap_closure();
@@ -28538,12 +28629,20 @@ impl Vm {
 
                         // Now call the bound closure
                         if let Value::Array(arr) = &bound {
-                            let arr_borrow = arr.borrow();
-                            let mut values: Vec<Value> = arr_borrow.values().cloned().collect();
+                            // (moved out of the temporary binding: Zend calls a
+                            // copy of the function on the stack, which holds
+                            // nothing to release)
+                            let mut values: Vec<Value> = if Rc::strong_count(arr) == 1 {
+                                arr.borrow_mut()
+                                    .iter_mut()
+                                    .map(|(_, v)| std::mem::replace(v, Value::Null))
+                                    .collect()
+                            } else {
+                                arr.borrow().values().cloned().collect()
+                            };
                             if !values.is_empty() {
                                 let name = values.remove(0).to_php_string();
                                 values.extend(extra_args);
-                                drop(arr_borrow);
                                 self.pending_calls.push(PendingCall {
                                     name,
                                     args: values,
@@ -55504,6 +55603,8 @@ impl Vm {
                         _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
                     };
                     if obj_val.is_closure_obj() {
+                        // (an internal method: ZEND_CALL_RELEASE_THIS)
+                        Self::root_internal_call_this(op, op_array, &obj_val);
                         if let Err(msg) =
                             self.init_closure_method_call(&obj_val, method_name.as_bytes())
                         {
@@ -55548,6 +55649,15 @@ impl Vm {
                             .get(&class_name_lower)
                             .map(|c| c.methods.contains_key(&method_name_lower))
                             .unwrap_or(false);
+                        // (ZEND_NEW calls an internal constructor with
+                        // ZEND_CALL_RELEASE_THIS too; a class without one has
+                        // no call)
+                        if !has_user_method
+                            && (method_name_lower != b"__construct"
+                                || self.has_internal_ctor(&class_name_lower))
+                        {
+                            Self::root_internal_call_this(op, op_array, &obj_val);
+                        }
 
                         // Only apply builtin exception methods to Throwable subclasses
                         // (only consulted without a user method: not computed otherwise).
