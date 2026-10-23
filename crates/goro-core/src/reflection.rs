@@ -7145,13 +7145,15 @@ pub fn reflection_function_method(
         {
             let ob = obj.borrow();
             let name = ob.get_property(b"name").to_php_string().to_string_lossy();
+            // (strlen(...): a Closure of an internal function)
+            let is_closure = ob.has_property(b"__reflection_is_closure");
             drop(ob);
             let op = rfunc(vm, &func_lower).unwrap();
             let ctx = FnStrCtx {
                 op,
                 method: None,
                 scope: None,
-                is_closure: false,
+                is_closure,
                 internal_fn_ext: None,
                 display_name: &name,
                 filename: "",
@@ -7189,6 +7191,27 @@ pub fn reflection_function_method(
             } else {
                 String::from_utf8_lossy(&op.filename).into_owned()
             };
+            // A closure's leading CVs are its captured values ($this
+            // first), not parameters.
+            let captures = if is_closure && crate::closure::is_closure_fn_name(&op.name) {
+                op.closure_capture_names.len()
+            } else if is_closure && op.cv_names.first().is_some_and(|n| n.as_slice() == b"this") {
+                // (a method's closure, $obj->m(...): its $this)
+                1
+            } else {
+                0
+            };
+            // A method's closure is named after the method.
+            let display = match display.rsplit_once("::") {
+                Some((_, m)) if is_closure && !display.starts_with("{closure") => m.to_string(),
+                _ => display,
+            };
+            let bound: Vec<String> = op
+                .closure_capture_names
+                .iter()
+                .filter(|n| n.as_slice() != b"this")
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+                .collect();
             let ctx = FnStrCtx {
                 op,
                 method: None,
@@ -7198,28 +7221,13 @@ pub fn reflection_function_method(
                 display_name: &display,
                 filename: &filename,
                 internal_user_arginfo: false,
-                params_skip: None,
+                params_skip: (captures > 0).then_some(captures),
             };
             let mut out = function_string(vm, &ctx, "");
             // Bound variables (closure `use` vars) go right after the @@ line.
-            if is_closure && !captured.is_empty() {
-                let skip = if op
-                    .cv_names
-                    .first()
-                    .map(|n| n.as_slice() == b"this")
-                    .unwrap_or(false)
-                {
-                    1
-                } else {
-                    0
-                };
-                let mut bv = format!("\n  - Bound Variables [{}] {{\n", captured.len());
-                for i in 0..captured.len() {
-                    let n = op
-                        .cv_names
-                        .get(skip + op.param_count as usize + i)
-                        .map(|n| String::from_utf8_lossy(n).to_string())
-                        .unwrap_or_default();
+            if is_closure && !captured.is_empty() && !bound.is_empty() {
+                let mut bv = format!("\n  - Bound Variables [{}] {{\n", bound.len());
+                for (i, n) in bound.iter().enumerate() {
                     bv.push_str(&format!("      Variable #{} [ ${} ]\n", i, n));
                 }
                 bv.push_str("  }\n");
@@ -7679,7 +7687,8 @@ pub fn reflection_property_method(
         b"hasdefaultvalue" => {
             let has = rcls(vm, &class_lower)
                 .and_then(|_c| rprop(vm, &class_lower, prop_name.as_bytes()))
-                .map(|p| !matches!(p.default, Value::Undef))
+                // (a virtual property has no default)
+                .map(|p| !p.is_virtual && !matches!(p.default, Value::Undef))
                 .unwrap_or(false);
             Some(if has { Value::True } else { Value::False })
         }
