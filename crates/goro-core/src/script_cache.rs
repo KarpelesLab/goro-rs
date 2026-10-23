@@ -22,6 +22,27 @@ pub enum Diag {
     Compile(String, u32),
 }
 
+/// A script's compile-time diagnostics in the order php-src raises them:
+/// the scanner's own first, then those zend_compile emits (`${...}`
+/// interpolation, compiler warnings), in source order as it compiles.
+pub fn merged_compile_diags(lex: &[(bool, String, u32)], warnings: &[(String, u32)]) -> Vec<Diag> {
+    let compile_time = |m: &str| m.starts_with("Using ${");
+    let mut out: Vec<Diag> = lex
+        .iter()
+        .filter(|(_, m, _)| !compile_time(m))
+        .map(|(d, m, l)| Diag::Lex(*d, m.clone(), *l))
+        .collect();
+    let mut late = lex.iter().filter(|(_, m, _)| compile_time(m)).peekable();
+    for (m, l) in warnings {
+        while let Some((d, lm, ll)) = late.next_if(|(_, _, ll)| *ll <= *l) {
+            out.push(Diag::Lex(*d, lm.clone(), *ll));
+        }
+        out.push(Diag::Compile(m.clone(), *l));
+    }
+    out.extend(late.map(|(d, m, l)| Diag::Lex(*d, m.clone(), *l)));
+    out
+}
+
 /// The compiled form of a script, as include/require executes it.
 pub struct Compiled {
     pub op_array: OpArray,
@@ -707,12 +728,7 @@ impl crate::vm::Vm {
         }
         let record = CONFIG.with(|c| c.borrow().record_warnings);
         if record {
-            for (d, m, l) in lex_diags {
-                compiled.diags.push(Diag::Lex(*d, m.clone(), *l));
-            }
-            for (m, l) in warnings {
-                compiled.diags.push(Diag::Compile(m.clone(), *l));
-            }
+            compiled.diags = merged_compile_diags(lex_diags, warnings);
         }
         let compiled = Rc::new(compiled);
         if store_compiled(path, compiled.clone()) {
@@ -816,16 +832,7 @@ impl crate::vm::Vm {
                         l.op1 = crate::opcode::OperandType::Const(one);
                     }
                 }
-                for (deprecation, msg, wline) in &lex_diags {
-                    if *deprecation {
-                        self.emit_deprecated_at(msg, *wline);
-                    } else {
-                        self.emit_warning_at(msg, *wline);
-                    }
-                }
-                for (msg, wline) in &warnings {
-                    self.emit_compile_diagnostic(msg, *wline);
-                }
+                self.replay_cached_diags(&merged_compile_diags(&lex_diags, &warnings));
                 if crate::preload::active() {
                     match self.preload_compiled_only(path, &program, &op_array, &classes) {
                         Ok(()) => CompileOnly::Compiled,

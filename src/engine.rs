@@ -331,18 +331,10 @@ pub fn compile(
 /// Load a compiled script into the engine: compile-time diagnostics and
 /// class declarations.
 pub fn load(vm: &mut Vm, compiled: &mut Compiled) {
-    for (deprecation, msg, line) in
-        goro_parser::order_lexer_diagnostics(&compiled.lexer_deprecations, &compiled.lexer_warnings)
-    {
-        if deprecation {
-            vm.emit_deprecated_at(&msg, line);
-        } else {
-            vm.emit_warning_at(&msg, line);
-        }
-    }
-    for (msg, line) in &compiled.compile_warnings {
-        vm.emit_compile_diagnostic(msg, *line);
-    }
+    vm.replay_cached_diags(&goro_core::script_cache::merged_compile_diags(
+        &goro_parser::order_lexer_diagnostics(&compiled.lexer_deprecations, &compiled.lexer_warnings),
+        &compiled.compile_warnings,
+    ));
     for class in std::mem::take(&mut compiled.classes) {
         vm.register_class(class);
     }

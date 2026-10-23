@@ -1730,18 +1730,10 @@ fn execute_php_inner_impl(
     let mut vm = Vm::new();
     vm.current_file = filename.into();
     // Emit lexer deprecations first (e.g. `${var}` syntax), then compile warnings.
-    for (deprecation, msg, wline) in
-        goro_parser::order_lexer_diagnostics(&lexer_deprecations, &lexer_warnings)
-    {
-        if deprecation {
-            vm.emit_deprecated_at(&msg, wline);
-        } else {
-            vm.emit_warning_at(&msg, wline);
-        }
-    }
-    for (msg, wline) in &compile_warnings {
-        vm.emit_compile_diagnostic(msg, *wline);
-    }
+    vm.replay_cached_diags(&goro_core::script_cache::merged_compile_diags(
+        &goro_parser::order_lexer_diagnostics(&lexer_deprecations, &lexer_warnings),
+        &compile_warnings,
+    ));
     goro_ext_standard::register_standard_functions(&mut vm);
     goro_ext_date::register(&mut vm);
     goro_ext_json::register(&mut vm);

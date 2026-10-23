@@ -542,16 +542,9 @@ impl Vm {
                 return false;
             }
         };
-        for (deprecation, msg, wline) in &lex_diags {
-            if *deprecation {
-                self.emit_deprecated_at(msg, *wline);
-            } else {
-                self.emit_warning_at(msg, *wline);
-            }
-        }
-        for (msg, wline) in &warnings {
-            self.emit_compile_diagnostic(msg, *wline);
-        }
+        self.replay_cached_diags(&crate::script_cache::merged_compile_diags(
+            &lex_diags, &warnings,
+        ));
         note_compiled(path, &op_array, &classes);
         let saved_pending = std::mem::replace(&mut self.pending_classes, std::rc::Rc::new(classes));
         let r = self.execute_chunk(&op_array);

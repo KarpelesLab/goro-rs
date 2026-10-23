@@ -43211,16 +43211,10 @@ impl Vm {
                                             };
                                             let inc_op_array = &shared.op_array;
                                             // The scanner's diagnostics, then the compiler's
-                                            for (deprecation, msg, wline) in lex_diags {
-                                                if deprecation {
-                                                    self.emit_deprecated_at(&msg, wline);
-                                                } else {
-                                                    self.emit_warning_at(&msg, wline);
-                                                }
-                                            }
-                                            for (msg, wline) in &inc_warnings {
-                                                self.emit_compile_diagnostic(msg, *wline);
-                                            }
+                                            self.replay_cached_diags(&crate::script_cache::merged_compile_diags(
+                                                &lex_diags,
+                                                &inc_warnings,
+                                            ));
                                             // Swap pending_classes so DeclareClass indices from this
                                             // compilation are relative to 0 (not the global list)
                                             let saved_pending = std::mem::replace(
@@ -43479,16 +43473,10 @@ impl Vm {
                                                 String::from_utf8_lossy(&compiler_file)
                                                     .into(),
                                             );
-                                            for (deprecation, msg, wline) in lex_diags {
-                                                if deprecation {
-                                                    self.emit_deprecated_at(&msg, wline);
-                                                } else {
-                                                    self.emit_warning_at(&msg, wline);
-                                                }
-                                            }
-                                            for (msg, wline) in &eval_warnings {
-                                                self.emit_compile_diagnostic(msg, *wline);
-                                            }
+                                            self.replay_cached_diags(&crate::script_cache::merged_compile_diags(
+                                                &lex_diags,
+                                                &eval_warnings,
+                                            ));
                                             self.current_file = saved;
                                         }
                                         // Swap pending_classes so DeclareClass indices are relative to 0
