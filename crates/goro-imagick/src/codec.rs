@@ -643,6 +643,7 @@ pub fn decode(data: &[u8], magick: &str, opts: &ReadOptions) -> MResult<Vec<Imag
         "PNM" | "PPM" | "PGM" | "PBM" | "PAM" => decode_pnm(data)?,
         "FARBFELD" => decode_farbfeld(data)?,
         "PCX" => crate::formats::decode_pcx(data)?,
+        "MIFF" => crate::formats::decode_miff(data)?,
         "DDS" => crate::formats::decode_dds(data)?,
         "JXL" => crate::formats::decode_jxl(data)?,
         "HDR" => crate::formats::decode_hdr(data)?,
@@ -1588,6 +1589,10 @@ impl WriteOptions {
 /// `adjoin`) in a format.
 pub fn encode(images: &[&Image], magick: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
     let m = canonical_format(magick);
+    if m == "MIFF" {
+        // MIFF keeps the image's own colourspace
+        return Ok(crate::formats::encode_miff(images));
+    }
     let converted: Vec<std::borrow::Cow<'_, Image>> = images
         .iter()
         .map(|i| crate::colorspace::for_output(i))

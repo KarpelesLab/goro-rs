@@ -30,6 +30,7 @@ oxideav-ico = { version = "=0.0.8", default-features = false }
 oxideav-tga = { version = "=0.0.5", default-features = false }
 oxideav-qoi = { version = "=0.1.7", default-features = false }
 oxideav-pbm = { version = "=0.0.5", default-features = false }
+goro-zlib = { path = "../goro-zlib" }
 oxideav-pcx = { version = "=0.1.2", default-features = false }
 oxideav-hdr = { version = "=0.0.6", default-features = false }
 oxideav-dds = { version = "=0.0.6", default-features = false }
