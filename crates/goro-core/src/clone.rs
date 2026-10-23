@@ -265,6 +265,9 @@ impl Vm {
                 if let Some((st, fl)) = ao_clone {
                     new_obj.set_property(b"__spl_array".to_vec(), st);
                     new_obj.set_property(b"__spl_flags".to_vec(), Value::Long(fl));
+                    // (a fresh hash iterator: the clone starts at the beginning)
+                    new_obj.set_property(b"__spl_pos".to_vec(), Value::Long(0));
+                    new_obj.set_property(b"__spl_pos_key".to_vec(), Value::Null);
                 }
                 // For WeakMap, copy the live entries from the source.
                 let original_oid = obj_borrow.object_id;

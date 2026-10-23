@@ -776,6 +776,11 @@ pub fn spl_storage_view(ob: &PhpObject) -> Value {
             }
             val_arr(l)
         }
+        // USE_OTHER: the storage of the ArrayObject/ArrayIterator it wraps
+        // (spl_array_get_hash_table()).
+        Value::Object(o) if o.try_borrow().is_ok_and(|b| is_spl_array_object(&b)) => {
+            spl_storage_view(&o.borrow())
+        }
         _ => v,
     }
 }
