@@ -29,6 +29,18 @@ pub(crate) const OPS2: &[(&str, Impl, bool)] = &[
     ),
     ("deskewImage", deskew_image, false),
     ("complexImages", complex_images, false),
+    ("encipherImage", encipher_image, false),
+    ("decipherImage", decipher_image, false),
+    (
+        "forwardFourierTransformImage",
+        forward_fourier_transform_image,
+        false,
+    ),
+    (
+        "inverseFourierTransformImage",
+        inverse_fourier_transform_image,
+        false,
+    ),
     ("floodfillPaintImage", floodfill_paint_image, false),
     ("haldClutImage", hald_clut_image, false),
     ("roundCornersImage", round_corners_image, false),
@@ -1748,4 +1760,76 @@ fn montage_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     };
     let nw = new_wand_from(&d, vec![out]);
     Ok(new_imagick(vm, nw))
+}
+
+fn encipher_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    let a = zpp::parse(vm, f, "s", args)?;
+    let pass = a[0].str_or(b"").to_vec();
+    image_op(vm, &d_(o), "Unable to encipher image", |i| {
+        goro_imagick::cipher::encipher(i, &pass)
+    })
+}
+
+fn decipher_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    let a = zpp::parse(vm, f, "s", args)?;
+    let pass = a[0].str_or(b"").to_vec();
+    image_op(vm, &d_(o), "Unable to decipher image", |i| {
+        goro_imagick::cipher::decipher(i, &pass)
+    })
+}
+
+/// MagickForwardFourierTransformImage(): the wand's images become the
+/// (magnitude, phase) or (real, imaginary) pair of the current image.
+fn forward_fourier_transform_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    let a = zpp::parse(vm, f, "b", args)?;
+    let magnitude = a[0].bool_or(true);
+    let d = d_(o);
+    not_empty(vm, &d)?;
+    let r = {
+        let w = d.wand.borrow();
+        goro_imagick::fourier::forward(w.image().unwrap(), magnitude)
+    };
+    match r {
+        Ok(pair) => {
+            let mut w = d.wand.borrow_mut();
+            w.clear();
+            w.insert_images(pair);
+            Ok(Value::True)
+        }
+        Err(e) => convert_exception(
+            vm,
+            Some(e),
+            Cls::Imagick,
+            "Unable to forward fourier transform image",
+        ),
+    }
+}
+
+/// MagickInverseFourierTransformImage(): this wand's current image and
+/// the other wand's make the spatial image, which replaces this wand's.
+fn inverse_fourier_transform_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    let a = zpp::parse(vm, f, "zb", args)?;
+    let magnitude = a[1].bool_or(true);
+    let d = d_(o);
+    not_empty(vm, &d)?;
+    let other = other_imagick(vm, f, 1, &a[0])?;
+    let second = other.wand.borrow().image().unwrap().clone();
+    let r = {
+        let w = d.wand.borrow();
+        goro_imagick::fourier::inverse(w.image().unwrap(), &second, magnitude)
+    };
+    match r {
+        Ok(img) => {
+            let mut w = d.wand.borrow_mut();
+            w.clear();
+            w.insert_images(vec![img]);
+            Ok(Value::True)
+        }
+        Err(e) => convert_exception(
+            vm,
+            Some(e),
+            Cls::Imagick,
+            "Unable to inverse fourier transform image",
+        ),
+    }
 }

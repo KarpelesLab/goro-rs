@@ -16,6 +16,7 @@
     clippy::manual_range_contains
 )]
 
+pub mod cipher;
 pub mod codec;
 pub mod color;
 mod color_names;
@@ -25,6 +26,7 @@ pub mod draw;
 pub mod error;
 pub mod filters;
 pub mod fonts;
+pub mod fourier;
 pub mod fx;
 pub mod geometry;
 pub mod image;
