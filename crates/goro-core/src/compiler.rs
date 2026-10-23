@@ -1214,11 +1214,24 @@ impl Compiler {
                 ));
             }
         }
-        // Note: We intentionally skip Override and Deprecated here, because:
-        //   - Override target validation is part of runtime inheritance
-        //     checks (we already pass those tests today).
-        //   - Deprecated allows class (for traits), function, method, and
-        //     constants; the runtime validates trait usage separately.
+        // Override and Deprecated (their own placement checks, such as a
+        // Deprecated class that is not a trait, come later).
+        if bare.eq_ignore_ascii_case(b"Override") || bare.eq_ignore_ascii_case(b"Deprecated") {
+            let cfg = internal_attribute(bare)?;
+            let flag = attribute_target_flag(target);
+            if flag != 0 && cfg.flags & flag == 0 {
+                return Some(format!(
+                    "Attribute \"{}\" cannot target {} (allowed targets: {})",
+                    if bare.eq_ignore_ascii_case(b"Override") {
+                        "Override"
+                    } else {
+                        "Deprecated"
+                    },
+                    target,
+                    attribute_target_names(cfg.flags)
+                ));
+            }
+        }
         None
     }
 
@@ -10534,12 +10547,31 @@ impl Compiler {
         if let ExprKind::PropertyAccess {
             object,
             property,
-            nullsafe: false,
+            nullsafe,
         } = &expr.kind
         {
             {
                 let base = self.compile_isset_prop_chain(object, line, patches)?;
                 let base = self.snapshot_cv(base, line);
+                if *nullsafe {
+                    // `?->` on null: the whole chain is null
+                    let not_null = self.op_array.alloc_temp();
+                    self.op_array.emit(Op {
+                        opcode: OpCode::IssetCheck,
+                        op1: base,
+                        op2: OperandType::Unused,
+                        result: OperandType::Tmp(not_null),
+                        line,
+                    });
+                    let jmp = self.op_array.emit(Op {
+                        opcode: OpCode::JmpZ,
+                        op1: OperandType::Tmp(not_null),
+                        op2: OperandType::JmpTarget(0),
+                        result: OperandType::Unused,
+                        line,
+                    });
+                    patches.push(jmp);
+                }
                 let prop_op = self.compile_property_name(property)?;
                 let prop_op = self.snapshot_cv(prop_op, line);
                 let isset_tmp = self.op_array.alloc_temp();
@@ -14394,13 +14426,7 @@ impl Compiler {
                 // $a->b->c ?? d: property fetches in the chain go through
                 // __isset before __get (FETCH_OBJ_IS semantics).
                 let mut isset_patches: Vec<u32> = Vec::new();
-                let left_val = if matches!(
-                    &left.kind,
-                    ExprKind::PropertyAccess {
-                        nullsafe: false,
-                        ..
-                    }
-                ) {
+                let left_val = if matches!(&left.kind, ExprKind::PropertyAccess { .. }) {
                     self.compile_isset_prop_chain(left, expr.span.line, &mut isset_patches)?
                 } else if Self::is_static_prop_expr(left) {
                     let (t, j) = self.compile_static_prop_quiet(left)?;
