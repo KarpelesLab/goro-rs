@@ -38,22 +38,22 @@ fn copy_range(out: &mut Vec<u8>, buf: &[u8], from: isize, to: isize) {
     }
 }
 
-/// `php_fgetcsv_lookup_trailing_spaces`: index just before a trailing
-/// "\r\n", "\n" or "\r".
+/// `php_fgetcsv_lookup_trailing_spaces`: the length without a trailing
+/// "\r\n", "\n" or "\r". The last characters are tracked with
+/// `php_mblen()`, which in the "C" locale rejects bytes >= 0x80: those are
+/// skipped, so a line break followed only by such bytes still counts as
+/// trailing (and as many bytes as the line break has are cut from the end).
 pub fn lookup_trailing_spaces(buf: &[u8]) -> usize {
-    let len = buf.len();
-    if len == 0 {
-        return 0;
-    }
-    match buf[len - 1] {
-        b'\n' => {
-            if len >= 2 && buf[len - 2] == b'\r' {
-                len - 2
-            } else {
-                len - 1
-            }
+    let mut last_chars = [0u8; 2];
+    for &c in buf {
+        if c < 0x80 {
+            last_chars = [last_chars[1], c];
         }
-        b'\r' => len - 1,
+    }
+    let len = buf.len();
+    match last_chars {
+        [b'\r', b'\n'] => len - 2,
+        [_, b'\n' | b'\r'] => len - 1,
         _ => len,
     }
 }
