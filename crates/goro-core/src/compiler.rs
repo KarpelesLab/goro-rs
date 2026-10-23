@@ -12711,6 +12711,21 @@ impl Compiler {
         r
     }
 
+    /// Whether `left ?? r` fetches `left` quietly (a variable, element or
+    /// property: zend_compile_var(BP_VAR_IS)); other expressions warn.
+    #[inline(never)]
+    fn coalesce_left_is_quiet(left: &Expr) -> bool {
+        matches!(
+            left.kind,
+            ExprKind::Variable(_)
+                | ExprKind::DynamicVariable(_)
+                | ExprKind::ArrayAccess { .. }
+                | ExprKind::PropertyAccess { .. }
+                | ExprKind::StaticPropertyAccess { .. }
+                | ExprKind::DynamicStaticPropertyAccess { .. }
+        )
+    }
+
     fn is_static_prop_expr(e: &Expr) -> bool {
         matches!(
             e.kind,
@@ -14721,13 +14736,18 @@ impl Compiler {
             ExprKind::NullCoalesce { left, right } => {
                 // $a ?? $b: if $a is not null, use $a, else use $b
                 // Suppress warnings for the left side (undefined keys, undefined vars, etc.)
-                self.op_array.emit(Op {
-                    opcode: OpCode::ErrorSuppress,
-                    op1: OperandType::Unused,
-                    op2: OperandType::Unused,
-                    result: OperandType::Unused,
-                    line: expr.span.line,
-                });
+                // when it is a variable (fetched BP_VAR_IS); any other
+                // expression is compiled (and warns) as usual.
+                let quiet = Self::coalesce_left_is_quiet(left);
+                if quiet {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorSuppress,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                }
 
                 let result_tmp = self.op_array.alloc_temp();
 
@@ -14884,13 +14904,15 @@ impl Compiler {
                     for p in &isset_patches {
                         self.op_array.ops[*p as usize].op2 = OperandType::JmpTarget(fail_label);
                     }
-                    self.op_array.emit(Op {
-                        opcode: OpCode::ErrorRestore,
-                        op1: OperandType::Unused,
-                        op2: OperandType::Unused,
-                        result: OperandType::Unused,
-                        line: expr.span.line,
-                    });
+                    if quiet {
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ErrorRestore,
+                            op1: OperandType::Unused,
+                            op2: OperandType::Unused,
+                            result: OperandType::Unused,
+                            line: expr.span.line,
+                        });
+                    }
                     isset_fail_jmp = Some(self.op_array.emit(Op {
                         opcode: OpCode::Jmp,
                         op1: OperandType::JmpTarget(0),
@@ -14901,13 +14923,15 @@ impl Compiler {
                     let after = self.op_array.current_offset();
                     self.op_array.patch_jump(over, after);
                 }
-                self.op_array.emit(Op {
-                    opcode: OpCode::ErrorRestore,
-                    op1: OperandType::Unused,
-                    op2: OperandType::Unused,
-                    result: OperandType::Unused,
-                    line: expr.span.line,
-                });
+                if quiet {
+                    self.op_array.emit(Op {
+                        opcode: OpCode::ErrorRestore,
+                        op1: OperandType::Unused,
+                        op2: OperandType::Unused,
+                        result: OperandType::Unused,
+                        line: expr.span.line,
+                    });
+                }
 
                 // Check if left is set (not null and not undef)
                 let check_tmp = self.op_array.alloc_temp();
