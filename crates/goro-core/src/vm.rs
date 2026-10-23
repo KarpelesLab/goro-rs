@@ -49803,9 +49803,11 @@ impl Vm {
                                     if let Some(parent_prop) =
                                         parent.properties.iter().find(|p| p.name == child_prop.name)
                                     {
-                                        let parent_has_backing = !parent_prop.has_get_hook
-                                            && !parent_prop.has_set_hook
-                                            && !parent_prop.is_virtual;
+                                        // (a backed parent property, hooked or
+                                        // not: zend_do_inheritance() drops
+                                        // ZEND_ACC_VIRTUAL)
+                                        let parent_has_backing =
+                                            !parent_prop.is_virtual && !parent_prop.is_static;
                                         if parent_has_backing {
                                             child_prop.is_virtual = false;
                                         }
