@@ -7,7 +7,8 @@ use goro_core::vm::Vm;
 
 fn call(vm: &mut Vm, name: &[u8], args: &[Value]) -> Option<Value> {
     let f = vm.functions.get(name).copied()?;
-    f(vm, args).ok()
+    // (a stream made here is owned by the zval PDO hands out)
+    goro_core::value::call_builtin_adopting(vm, f, args).ok()
 }
 
 /// php_stream_from_zval_no_verify + php_stream_copy_to_mem: None when the

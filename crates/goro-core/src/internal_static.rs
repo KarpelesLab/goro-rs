@@ -560,7 +560,7 @@ impl Vm {
                             .get(&t.class_lower)
                             .map(|c| c.name.clone())
                             .unwrap_or_else(|| self.builtin_canonical_name(&t.class_lower).into());
-                        (h.call)(self, &native, &t.method_lower, &called, None, &args)
+                        h.invoke(self, &native, &t.method_lower, &called, None, &args)
                     }
                     Err(n) => {
                         let msg =

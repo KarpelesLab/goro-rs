@@ -31,8 +31,13 @@ pub(crate) fn register(vm: &mut Vm) {
     );
 }
 
-/// object_init_ex(dir_class_entry_ptr) with the path and handle set.
+/// object_init_ex(dir_class_entry_ptr) with the path and handle set; the
+/// (just opened) handle is owned by its zvals, the object's property and
+/// DIRG(default_dir).
 pub(crate) fn new_directory(vm: &mut Vm, path: Value, handle: Value) -> Value {
+    if let Value::Resource(r) = &handle {
+        goro_core::value::adopt_new_resource(r.id());
+    }
     let obj = vm.spl_instantiate(b"Directory");
     {
         let mut o = obj.borrow_mut();

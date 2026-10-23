@@ -255,6 +255,26 @@ pub struct NativeClassHandler {
     pub param_names: Option<fn(&[u8], &[u8]) -> Option<&'static [&'static str]>>,
 }
 
+impl NativeClassHandler {
+    /// Run method `method` (see `call`): a resource it creates and returns
+    /// is owned by the zvals holding it, as for a builtin function.
+    #[inline]
+    pub fn invoke(
+        &self,
+        vm: &mut Vm,
+        class: &[u8],
+        method: &[u8],
+        called: &[u8],
+        this: Option<&Value>,
+        args: &[Value],
+    ) -> Value {
+        let first = crate::value::next_resource_id();
+        let r = (self.call)(vm, class, method, called, this, args);
+        crate::value::adopt_returned_resources(first, &r);
+        r
+    }
+}
+
 /// The function call hooks of the observer API (zend_observer.h), installed
 /// by an extension (`Vm::observer`): `begin` runs as a function starts
 /// executing (fcall_init + begin handlers), `end` as it finishes, with its
@@ -4226,7 +4246,7 @@ impl Vm {
                         if (h.has_method)(&native, &method_lower, false) {
                             let called = obj.borrow().class_name.clone();
                             let had_exc = self.current_exception.is_some();
-                            let r = (h.call)(
+                            let r = h.invoke(
                                 self,
                                 &native,
                                 &method_lower,
@@ -13557,7 +13577,7 @@ impl Vm {
             } else {
                 class.to_vec()
             };
-            return Some((h.call)(
+            return Some(h.invoke(
                 self,
                 class,
                 method,
@@ -28009,7 +28029,7 @@ impl Vm {
                                         ));
                                     }
                                     let result = match merged {
-                                        Ok(()) => (h.call)(
+                                        Ok(()) => h.invoke(
                                             self,
                                             &native,
                                             &method_part,

@@ -451,10 +451,8 @@ impl Vm {
         if crate::value::VM_INTERRUPT.load(std::sync::atomic::Ordering::Relaxed) {
             self.fcall_interrupt();
         }
-        if let Ok(Value::Resource(res)) = &r {
-            if res.id() >= first_res {
-                crate::value::adopt_new_resource(res.id());
-            }
+        if let Ok(v) = &r {
+            crate::value::adopt_returned_resources(first_res, v);
         }
         r
     }

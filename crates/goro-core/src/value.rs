@@ -581,6 +581,52 @@ pub fn adopt_new_resource(id: i64) {
     });
 }
 
+/// A builtin (function or method) started when the next resource id was
+/// `first` and returned `r`: the resources it created and returned, as the
+/// value or as an element of a returned array (stream_socket_pair()), are
+/// owned by the zvals holding them from now on, as in C.
+#[inline]
+pub fn adopt_returned_resources(first: i64, r: &Value) {
+    if next_resource_id() == first {
+        return;
+    }
+    adopt_returned_resources_slow(first, r);
+}
+
+#[cold]
+#[inline(never)]
+fn adopt_returned_resources_slow(first: i64, r: &Value) {
+    match r {
+        Value::Resource(res) if res.id() >= first => adopt_new_resource(res.id()),
+        Value::Array(a) => {
+            for (_, v) in a.borrow().iter() {
+                if let Value::Resource(res) = v.deref() {
+                    if res.id() >= first {
+                        adopt_new_resource(res.id());
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Call builtin `f` from Rust code the way PHP code calls it: a resource
+/// it creates and returns (a stream, a stream context, a socket) is freed
+/// with the last zval holding it, not only at shutdown.
+pub fn call_builtin_adopting(
+    vm: &mut crate::vm::Vm,
+    f: crate::vm::BuiltinFn,
+    args: &[Value],
+) -> Result<Value, crate::vm::VmError> {
+    let first = next_resource_id();
+    let r = f(vm, args);
+    if let Ok(v) = &r {
+        adopt_returned_resources(first, v);
+    }
+    r
+}
+
 /// Whether released resources wait for their destructor.
 #[inline]
 pub fn has_freed_resources() -> bool {

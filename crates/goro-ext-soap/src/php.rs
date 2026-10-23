@@ -290,21 +290,14 @@ fn priv_key(o: &Obj, class: &str, name: &str) -> Vec<u8> {
     }
 }
 
-/// A private property of SoapClient (OBJ_PROP_NUM).
 /// Call builtin `f` as the C code calls its implementation: a resource it
 /// creates (a stream, a stream context) is owned by the zvals holding it,
 /// and freed with the last one (as the VM does for calls from PHP code).
 pub fn call_adopting(vm: &mut Vm, f: goro_core::vm::BuiltinFn, args: &[Value]) -> Option<Value> {
-    let first = goro_core::value::next_resource_id();
-    let r = f(vm, args).ok()?;
-    if let Value::Resource(res) = &r {
-        if res.id() >= first {
-            goro_core::value::adopt_new_resource(res.id());
-        }
-    }
-    Some(r)
+    goro_core::value::call_builtin_adopting(vm, f, args).ok()
 }
 
+/// A private property of SoapClient (OBJ_PROP_NUM).
 pub fn cprop(o: &Obj, name: &str) -> Value {
     let k = priv_key(o, "SoapClient", name);
     let b = o.borrow();

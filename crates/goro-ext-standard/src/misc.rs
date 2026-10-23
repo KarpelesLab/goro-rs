@@ -1850,7 +1850,7 @@ fn call_scoped_method_callable(
             return None;
         }
         let had = vm.current_exception.is_some();
-        let r = (h.call)(vm, &native, m, &org_name, this.as_ref(), call_args);
+        let r = h.invoke(vm, &native, m, &org_name, this.as_ref(), call_args);
         return Some(if !had && vm.current_exception.is_some() {
             Err(fail(vm))
         } else {
@@ -2173,7 +2173,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         {
                             if (h.has_method)(&native, &method_lower, true) {
                                 let called = class_bytes.to_vec();
-                                return Ok((h.call)(
+                                return Ok(h.invoke(
                                     vm,
                                     &native,
                                     &method_lower,

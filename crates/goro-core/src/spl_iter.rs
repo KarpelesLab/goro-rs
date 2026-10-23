@@ -930,7 +930,7 @@ impl Vm {
                         (h.has_method)(c, b"getiterator", false).then_some((c.clone(), h))
                     });
                     if let Some((c, h)) = native_iter {
-                        let r = (h.call)(self, &c, b"getIterator", &c, Some(&inner), &[]);
+                        let r = h.invoke(self, &c, b"getIterator", &c, Some(&inner), &[]);
                         if self.exc() {
                             return false;
                         }
