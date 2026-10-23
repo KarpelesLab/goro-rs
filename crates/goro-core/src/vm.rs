@@ -9111,7 +9111,25 @@ impl Vm {
             }
         }
         drop(ob);
-        Self::proptable_to_symtable(self.object_props_mangled(&target))
+        let arr = self.object_props_mangled(&target);
+        // A reference only the property holds is copied as its value
+        // (the copy here and the slot: two counts).
+        let has_ref = arr
+            .borrow()
+            .values()
+            .any(|v| matches!(v, Value::Reference(r) if Rc::strong_count(r) == 2));
+        if has_ref {
+            let mut a = arr.borrow_mut();
+            for (_, v) in a.iter_mut() {
+                if let Value::Reference(r) = v {
+                    if Rc::strong_count(r) == 2 {
+                        let inner = r.borrow().clone();
+                        *v = inner;
+                    }
+                }
+            }
+        }
+        Self::proptable_to_symtable(arr)
     }
 
     /// zend_proptable_to_symtable(): numeric string property names become
