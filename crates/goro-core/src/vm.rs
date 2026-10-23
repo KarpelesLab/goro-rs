@@ -6637,7 +6637,21 @@ impl Vm {
         let sensitive = self.any_sensitive_params();
         // zend.exception_ignore_args: frames carry no "args"
         let ignore_args = self.exception_ignore_args();
-        let frame_list: Vec<CallFrame> = self.call_stack.iter().rev().cloned().collect();
+        let mut frame_list: Vec<CallFrame> = self.call_stack.iter().rev().cloned().collect();
+        // zend_fetch_debug_backtrace(): while a constant expression is
+        // evaluated (EG(filename_override)), its "[constant expression]"
+        // entry is the first one, at the executing position, even for code
+        // it called.
+        if let Some(k) = frame_list
+            .iter()
+            .position(|f| f.0 == "[constant expression]")
+            .filter(|&k| k > 0)
+        {
+            let mut f = frame_list.remove(k);
+            f.1 = self.current_file.clone();
+            f.2 = self.current_line;
+            frame_list.insert(0, f);
+        }
         let named_args = if ignore_args {
             Vec::new()
         } else {
