@@ -21204,13 +21204,13 @@ impl Vm {
                         internal_code,
                         true,
                         no_release,
-                        &|| {
-                            crate::fastpath::FeTmps::of(
-                                foreach_snap
-                                    .keys()
-                                    .chain(foreach_obj.keys())
-                                    .chain(foreach_iter_handles.keys()),
-                            )
+                        &mut crate::fastpath::FeView {
+                            positions: foreach_positions,
+                            snap: foreach_snap,
+                            obj: foreach_obj,
+                            iter_handles: foreach_iter_handles,
+                            cur_key: foreach_cur_key,
+                            weakmap: weakmap_iter_keys,
                         },
                         foreach_iter_handles.is_empty() && foreach_ref_arrays.is_empty(),
                         (bound || globals_cv.is_some()).then_some(globals_cv),

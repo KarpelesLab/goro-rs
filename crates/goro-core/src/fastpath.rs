@@ -656,6 +656,76 @@ pub(crate) fn fast_op(
     }
 }
 
+/// FE_FETCH of the next element of an array a foreach loop iterates live
+/// (see FeView::live_array): what the general handler does then, but for
+/// the end of the loop.
+#[inline(never)]
+fn fast_foreach_next(op: &Op, tmps: &mut [Value], fe: &mut FeView) -> Fast {
+    let OperandType::Tmp(it) = op.op1 else {
+        return Fast::No;
+    };
+    if !matches!(op.result, OperandType::Tmp(_)) || !tmp_writable(&op.result, tmps) {
+        return Fast::No;
+    }
+    let Some(arr) = fe.live_array(it, tmps) else {
+        return Fast::No;
+    };
+    let pos = fe.positions.get(&it).copied().unwrap_or(0);
+    let v = {
+        let Ok(a) = arr.try_borrow() else {
+            return Fast::No;
+        };
+        match a.entry_at(pos) {
+            Some((_, v)) => v.deref(),
+            None => return Fast::No,
+        }
+    };
+    match &v {
+        Value::Object(o) => crate::gc::track_object(o),
+        Value::Generator(g) => crate::gc::track_generator(g),
+        _ => {}
+    }
+    store_tmp(&op.result, v, tmps);
+    fe.positions.insert(it, pos + 1);
+    Fast::Done
+}
+
+/// The key of the element FE_FETCH fetched last from an array a foreach
+/// loop iterates live (see fast_foreach_next).
+#[inline(never)]
+fn fast_foreach_key(op: &Op, tmps: &mut [Value], fe: &mut FeView) -> Fast {
+    let OperandType::Tmp(it) = op.op1 else {
+        return Fast::No;
+    };
+    if !matches!(op.result, OperandType::Tmp(_))
+        || !tmp_writable(&op.result, tmps)
+        || (!fe.cur_key.is_empty() && fe.cur_key.contains_key(&it))
+    {
+        return Fast::No;
+    }
+    let Some(arr) = fe.live_array(it, tmps) else {
+        return Fast::No;
+    };
+    let pos = fe
+        .positions
+        .get(&it)
+        .copied()
+        .unwrap_or(1)
+        .saturating_sub(1);
+    let k = {
+        let Ok(a) = arr.try_borrow() else {
+            return Fast::No;
+        };
+        match a.entry_at(pos) {
+            Some((crate::array::ArrayKey::Int(n), _)) => Value::Long(*n),
+            Some((crate::array::ArrayKey::String(s), _)) => Value::String(s.clone()),
+            None => return Fast::No,
+        }
+    };
+    store_tmp(&op.result, k, tmps);
+    Fast::Done
+}
+
 /// fast_op() for the dispatch loop's own fast attempt (which runs when
 /// run_fast_ops() cannot: out of line, the loop's frame stays small).
 #[inline(never)]
@@ -756,6 +826,48 @@ impl FeTmps {
     }
 }
 
+/// The iteration state of a frame's running foreach loops that
+/// run_fast_ops() reads (FreeTmps) and advances (FE_FETCH of an array
+/// iterated live): see vm::ForeachState.
+pub(crate) struct FeView<'a> {
+    pub(crate) positions: &'a mut crate::fxhash::FxHashMap<u32, usize>,
+    pub(crate) snap: &'a crate::fxhash::FxHashMap<u32, Vec<(crate::array::ArrayKey, Value)>>,
+    pub(crate) obj:
+        &'a crate::fxhash::FxHashMap<u32, std::rc::Weak<RefCell<crate::object::PhpObject>>>,
+    pub(crate) iter_handles: &'a crate::fxhash::FxHashMap<u32, Value>,
+    pub(crate) cur_key: &'a crate::fxhash::FxHashMap<u32, crate::array::ArrayKey>,
+    pub(crate) weakmap: &'a crate::fxhash::FxHashMap<u32, Vec<Value>>,
+}
+
+impl FeView<'_> {
+    /// The temporaries whose foreach state (snapshot, object or iterator
+    /// handle) the frame holds.
+    fn busy(&self) -> FeTmps {
+        FeTmps::of(
+            self.snap
+                .keys()
+                .chain(self.obj.keys())
+                .chain(self.iter_handles.keys()),
+        )
+    }
+
+    /// The array a foreach loop over an array iterates live through its
+    /// iterator temporary `it` (no snapshot, object or WeakMap state).
+    #[inline]
+    fn live_array(&self, it: u32, tmps: &[Value]) -> Option<Rc<RefCell<crate::array::PhpArray>>> {
+        let Some(Value::Array(a)) = tmps.get(it as usize) else {
+            return None;
+        };
+        if self.snap.contains_key(&it)
+            || (!self.obj.is_empty() && self.obj.contains_key(&it))
+            || (!self.weakmap.is_empty() && self.weakmap.contains_key(&it))
+        {
+            return None;
+        }
+        Some(a.clone())
+    }
+}
+
 /// Whether run_fast_ops() may handle an opcode (a superset of what the
 /// dispatch loop's own fast attempt handles).
 #[inline(always)]
@@ -806,6 +918,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::ErrorSuppress
             | OpCode::ErrorRestore
             | OpCode::Nop
+            | OpCode::ForeachNext
+            | OpCode::ForeachKey
     )
 }
 
@@ -816,8 +930,8 @@ impl crate::vm::Vm {
     /// opcodes changes, but for memory_limit and max_execution_time, which
     /// hand control back to it). Returns the index of the first opcode not
     /// handled (or of the next one to run when the loop has to look).
-    /// `refs_ok` / `no_release`: see fast_op(); `fe_busy`: gives the temporaries
-    /// running foreach loops keep state for (see FreeTmps; asked only there); `fe_quiet`: no foreach
+    /// `refs_ok` / `no_release`: see fast_op(); `fe`: the frame's foreach
+    /// loops (see FreeTmps, ForeachNext); `fe_quiet`: no foreach
     /// iterator handle or by-reference loop pins a temporary (see
     /// fast_assign()); `bound`: the frame's
     /// variables are bound to a symbol table or it uses $GLOBALS (the CV
@@ -833,7 +947,7 @@ impl crate::vm::Vm {
         internal_code: bool,
         refs_ok: bool,
         no_release: bool,
-        fe_busy: &dyn Fn() -> FeTmps,
+        fe: &mut FeView,
         fe_quiet: bool,
         bound: Option<Option<u32>>,
     ) -> usize {
@@ -950,7 +1064,7 @@ impl crate::vm::Vm {
                         break 'run ip;
                     };
                     // (no running foreach's state is held by these)
-                    if fe_busy().any_in(a, b) {
+                    if fe.busy().any_in(a, b) {
                         break 'run ip;
                     }
                     let end = (b as usize).min(tmps.len());
@@ -1031,6 +1145,8 @@ impl crate::vm::Vm {
                     Fast::Done
                 }
                 OpCode::Nop => Fast::Done,
+                OpCode::ForeachNext => fast_foreach_next(op, tmps, fe),
+                OpCode::ForeachKey => fast_foreach_key(op, tmps, fe),
                 _ => return ip,
             };
             ip = match fast {
