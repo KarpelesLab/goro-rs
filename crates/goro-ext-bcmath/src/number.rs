@@ -222,7 +222,7 @@ fn operand(vm: &mut Vm, v: &Value) -> Result<(Num, usize), bool> {
             if d.fract() != 0.0 {
                 let msg = format!(
                     "Implicit conversion from float {} to int loses precision",
-                    goro_core::value::format_php_float(*d)
+                    goro_core::value::format_php_float_repr(*d)
                 );
                 let line = vm.current_line;
                 vm.emit_deprecated_at(&msg, line);

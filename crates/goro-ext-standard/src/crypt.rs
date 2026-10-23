@@ -1407,7 +1407,7 @@ fn zpp_str_or_long_or_null(
             if d.fract() != 0.0 {
                 vm.emit_deprecated(&format!(
                     "Implicit conversion from float {} to int loses precision",
-                    Value::Double(*d).to_php_string().to_msg_string()
+                    goro_core::value::format_php_float_repr(*d)
                 ));
             }
             Ok(AlgoArg::Long(*d as i64))

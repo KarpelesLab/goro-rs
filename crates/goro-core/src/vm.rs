@@ -6098,6 +6098,10 @@ impl Vm {
                 crate::value::format_php_float_repr(d)
             );
             self.emit_warning(&msg);
+            // (NAN passes ZEND_DOUBLE_FITS_LONG(), and 0 is not NAN)
+            if d.is_nan() {
+                self.emit_deprecated("Implicit conversion from float NAN to int loses precision");
+            }
             return 0;
         }
         if !(d >= -two63 && d < two63) {
@@ -6359,9 +6363,7 @@ impl Vm {
                     self.emit_deprecated_at(
                         &format!(
                             "Implicit conversion from float {} to int loses precision",
-                            crate::value::Value::Double(*f)
-                                .to_php_string()
-                                .to_msg_string()
+                            crate::value::format_php_float_repr(*f)
                         ),
                         line,
                     );
@@ -8021,7 +8023,7 @@ impl Vm {
                     self.emit_deprecated_at(
                         &format!(
                             "Implicit conversion from float {} to int loses precision",
-                            crate::value::format_php_float(f)
+                            crate::value::format_php_float_repr(f)
                         ),
                         line,
                     );
@@ -23053,8 +23055,26 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
                 OpCode::BoolXor => {
-                    let a = self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals);
-                    let b = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
+                    // (BOOL_XOR: undefined operands warn, each one is
+                    // converted with zend_is_true() in turn)
+                    let a = self.read_operand_warn(
+                        &op.op1,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    let b = self.read_operand_warn(
+                        &op.op2,
+                        &cvs,
+                        &tmps,
+                        &op_array.literals,
+                        op_array,
+                        op.line,
+                    );
+                    self.warn_nan_coercion(&a, "bool", op.line);
+                    self.warn_nan_coercion(&b, "bool", op.line);
                     let result = if a.is_truthy() ^ b.is_truthy() {
                         Value::True
                     } else {
@@ -23121,17 +23141,9 @@ impl Vm {
                         let res: Vec<u8> = bytes.iter().map(|b| !b).collect();
                         Value::String(crate::string::PhpString::from_vec(res))
                     } else if let Value::Double(d) = a.deref() {
-                        if d.is_finite() && d.fract() != 0.0 && d.abs() < 9.2e18 {
-                            let repr = Value::Double(d).to_php_string().to_string_lossy();
-                            self.emit_deprecated_at(
-                                &format!(
-                                    "Implicit conversion from float {} to int loses precision",
-                                    repr
-                                ),
-                                op.line,
-                            );
-                        }
-                        let n = self.float_to_int_cast(d, op.line);
+                        // (zend_dval_to_lval_safe())
+                        self.current_line = op.line;
+                        let n = self.dval_to_lval_safe(d);
                         if self.current_exception.is_some() {
                             if let Some((catch_target, _, _, _, saved_pc)) =
                                 exception_handlers.pop()

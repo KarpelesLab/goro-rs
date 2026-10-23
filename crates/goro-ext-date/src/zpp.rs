@@ -193,7 +193,7 @@ fn float_to_long(
             )),
             None => vm.emit_deprecated(&format!(
                 "Implicit conversion from float {} to int loses precision",
-                goro_core::value::format_php_float(d)
+                goro_core::value::format_php_float_repr(d)
             )),
         }
     }

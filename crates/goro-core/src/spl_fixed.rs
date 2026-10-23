@@ -124,7 +124,7 @@ impl Vm {
                 if d.is_finite() && d.fract() != 0.0 {
                     let msg = format!(
                         "Implicit conversion from float {} to int loses precision",
-                        Value::Double(d).to_php_string().to_msg_string()
+                        crate::value::format_php_float_repr(d)
                     );
                     self.emit_deprecated(&msg);
                 }

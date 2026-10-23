@@ -246,7 +246,7 @@ fn check_int_arg(
                     vm.emit_deprecated_at(
                         &format!(
                             "Implicit conversion from float {} to int loses precision",
-                            goro_core::value::format_php_float(*f)
+                            goro_core::value::format_php_float_repr(*f)
                         ),
                         vm.current_line,
                     );

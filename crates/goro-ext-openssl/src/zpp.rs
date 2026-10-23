@@ -169,9 +169,7 @@ pub fn long(vm: &mut Vm, args: &[Value], idx: usize, f: &str, pname: &str) -> Re
         if d.fract() != 0.0 {
             vm.emit_deprecated(&format!(
                 "Implicit conversion from float {} to int loses precision",
-                goro_core::value::Value::Double(d)
-                    .to_php_string()
-                    .to_string_lossy()
+                goro_core::value::format_php_float_repr(d)
             ));
         }
         Ok(d as i64)

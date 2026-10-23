@@ -1359,7 +1359,7 @@ impl Vm {
                 if d.fract() != 0.0 {
                     let msg = format!(
                         "Implicit conversion from float {} to int loses precision",
-                        crate::value::format_php_float(*d)
+                        crate::value::format_php_float_repr(*d)
                     );
                     self.emit_deprecated_at(&msg, line);
                     if self.current_exception.is_some() {

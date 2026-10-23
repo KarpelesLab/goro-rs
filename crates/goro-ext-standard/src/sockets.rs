@@ -235,7 +235,7 @@ fn double_to_long(
     if d.fract() != 0.0 {
         vm.emit_deprecated(&format!(
             "Implicit conversion from float {} to int loses precision",
-            Value::Double(d).to_php_string().to_msg_string()
+            goro_core::value::format_php_float_repr(d)
         ));
         if vm.current_exception.is_some() {
             return Err(VmError {

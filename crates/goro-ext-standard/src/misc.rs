@@ -6659,7 +6659,7 @@ fn array_column(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if f.is_finite() && f.fract() != 0.0 {
                     vm.emit_deprecated(&format!(
                         "Implicit conversion from float {} to int loses precision",
-                        goro_core::value::format_php_float(*f)
+                        goro_core::value::format_php_float_repr(*f)
                     ));
                 }
                 Ok(Some(Value::Long(*f as i64)))
