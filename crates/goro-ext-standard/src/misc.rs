@@ -2992,6 +2992,7 @@ fn array_flip(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let arr = arr.borrow();
         let mut result = PhpArray::new();
         for (key, val) in arr.iter() {
+            let val = &val.deref();
             let new_key = match val {
                 Value::Long(n) => goro_core::array::ArrayKey::Int(*n),
                 Value::String(s) => {
@@ -3035,10 +3036,12 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // SORT_STRING: keep the first element of each string value
             // (zval_get_tmp_string(): "Array to string conversion",
             // __toString(), or an Error for unconvertible objects).
+            // (zval_add_ref(): a reference only the array holds is copied
+            // as its value)
             let entries: Vec<(ArrayKey, Value)> = arr
                 .borrow()
                 .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| (k.clone(), unwrap_rc1_ref(v)))
                 .collect();
             let mut result = PhpArray::new();
             let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
@@ -3055,7 +3058,7 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     return Ok(Value::Null);
                 }
                 if seen.insert(s) {
-                    result.set(key, unwrap_rc1_ref(&val));
+                    result.set(key, val);
                 }
             }
             return Ok(Value::Array(Rc::new(RefCell::new(result))));
@@ -3857,11 +3860,22 @@ fn array_filter(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
 
+            // An internal function receives the element's value (its
+            // by-value parameter derefs a reference element).
+            let internal_cb = match &cb {
+                Value::String(s) => {
+                    let lower = s.as_bytes().to_ascii_lowercase();
+                    let name = lower.strip_prefix(b"\\").unwrap_or(&lower);
+                    !vm.user_functions.contains_key(name)
+                }
+                _ => false,
+            };
             for (key, val) in &arr_data {
                 let key_val = match key {
                     ArrayKey::Int(n) => Value::Long(*n),
                     ArrayKey::String(s) => Value::String(s.clone()),
                 };
+                let val = &if internal_cb { val.deref() } else { val.clone() };
                 let keep = match mode {
                     1 => {
                         // ARRAY_FILTER_USE_BOTH - pass value and key
@@ -4327,7 +4341,7 @@ fn array_combine(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let mut result = PhpArray::new();
     let keys_vec: Vec<_> = keys.values().cloned().collect();
-    let vals_vec: Vec<_> = vals.values().cloned().collect();
+    let vals_vec: Vec<_> = vals.values().map(unwrap_rc1_ref).collect();
     drop(keys);
     drop(vals);
     for (k, v) in keys_vec.iter().zip(vals_vec.iter()) {
@@ -4383,7 +4397,7 @@ fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let size = size as usize;
         let preserve_keys = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
         let arr = arr.borrow();
-        let entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let entries: Vec<_> = arr.iter().map(|(k, v)| (k.clone(), unwrap_rc1_ref(v))).collect();
         let mut result = PhpArray::new();
         for chunk in entries.chunks(size) {
             let mut sub = PhpArray::new();
@@ -16433,7 +16447,9 @@ fn array_replace_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if let Value::Array(arr) = arg {
             let arr = arr.borrow();
             for (key, value) in arr.iter() {
-                result.set(key.clone(), value.clone());
+                // (zend_array_dup() / zval_add_ref(): a reference only the
+                // array holds is copied as its value)
+                result.set(key.clone(), unwrap_rc1_ref(value));
             }
         }
     }

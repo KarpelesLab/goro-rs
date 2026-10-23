@@ -625,10 +625,12 @@ pub fn array_diff(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             exclude.insert(sort_cmp_string(vm, &v));
         }
     }
+    // (zval_add_ref(): a reference only the array holds is copied as its
+    // value)
     let entries: Vec<(ArrayKey, Value)> = first
         .borrow()
         .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
+        .map(|(k, v)| (k.clone(), unwrap_rc1(v)))
         .collect();
     let mut result = PhpArray::new();
     for (k, v) in entries {
