@@ -3015,7 +3015,7 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
             return Ok(Value::Array(Rc::new(RefCell::new(result))));
         }
-        return array_unique_sorted(vm, arr, flags);
+        array_unique_sorted(vm, arr, flags)
     } else {
         Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
     }

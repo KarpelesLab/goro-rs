@@ -2078,9 +2078,7 @@ pub fn zend_gcvt(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> Vec<u8
     } else if decpt < 0 {
         dst.push(b'0');
         dst.push(dec_point);
-        for _ in decpt..0 {
-            dst.push(b'0');
-        }
+        dst.extend(std::iter::repeat_n(b'0', decpt.unsigned_abs() as usize));
         dst.extend_from_slice(&digits);
     } else {
         let decpt = decpt as usize;
