@@ -715,12 +715,13 @@ fn dim_key(
 /// Whether the CVs `op` names all hold references, none of them `globals`.
 #[inline]
 fn cv_operands_bound(op: &Op, cvs: &[Value], globals: Option<u32>) -> bool {
-    [op.op1, op.op2, op.result].iter().all(|o| match o {
+    let ok = |o: OperandType| match o {
         OperandType::Cv(i) => {
-            Some(*i) != globals && matches!(cvs.get(*i as usize), Some(Value::Reference(_)))
+            Some(i) != globals && matches!(cvs.get(i as usize), Some(Value::Reference(_)))
         }
         _ => true,
-    })
+    };
+    ok(op.op1) && ok(op.op2) && ok(op.result)
 }
 
 /// The temporaries whose foreach iteration state (snapshot, object or
@@ -815,8 +816,8 @@ impl crate::vm::Vm {
     /// opcodes changes, but for memory_limit and max_execution_time, which
     /// hand control back to it). Returns the index of the first opcode not
     /// handled (or of the next one to run when the loop has to look).
-    /// `refs_ok` / `no_release`: see fast_op(); `fe_busy`: the temporaries
-    /// running foreach loops keep state for (see FreeTmps); `fe_quiet`: no foreach
+    /// `refs_ok` / `no_release`: see fast_op(); `fe_busy`: gives the temporaries
+    /// running foreach loops keep state for (see FreeTmps; asked only there); `fe_quiet`: no foreach
     /// iterator handle or by-reference loop pins a temporary (see
     /// fast_assign()); `bound`: the frame's
     /// variables are bound to a symbol table or it uses $GLOBALS (the CV
@@ -832,7 +833,7 @@ impl crate::vm::Vm {
         internal_code: bool,
         refs_ok: bool,
         no_release: bool,
-        fe_busy: FeTmps,
+        fe_busy: &dyn Fn() -> FeTmps,
         fe_quiet: bool,
         bound: Option<Option<u32>>,
     ) -> usize {
@@ -949,7 +950,7 @@ impl crate::vm::Vm {
                         break 'run ip;
                     };
                     // (no running foreach's state is held by these)
-                    if fe_busy.any_in(a, b) {
+                    if fe_busy().any_in(a, b) {
                         break 'run ip;
                     }
                     let end = (b as usize).min(tmps.len());
@@ -1322,6 +1323,16 @@ impl crate::vm::Vm {
             };
             match val {
                 Some(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => Some(v.clone()),
+                // (a variable bound to a reference, as in the global scope:
+                // its value is stored)
+                Some(Value::Reference(r)) if matches!(op.op2, OperandType::Cv(_)) => {
+                    match r.try_borrow().as_deref() {
+                        Ok(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => {
+                            Some(v.clone())
+                        }
+                        _ => return Fast::No,
+                    }
+                }
                 _ => return Fast::No,
             }
         } else {

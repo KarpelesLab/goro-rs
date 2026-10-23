@@ -434,17 +434,34 @@ impl Vm {
         if self.object_create_handlers.is_empty() {
             return;
         }
-        let mut cur = rc.borrow().class_name.to_ascii_lowercase();
+        let lower = rc.borrow().class_name.to_ascii_lowercase();
+        if let Some(h) = self.object_create_hook_of(&lower) {
+            h(self, rc);
+        }
+    }
+
+    /// The extension create_object hook objects of the class `lower` (or of
+    /// its first ancestor that has one) get.
+    pub(crate) fn object_create_hook_of(
+        &self,
+        lower: &[u8],
+    ) -> Option<fn(&mut Vm, &Rc<RefCell<PhpObject>>)> {
+        if self.object_create_handlers.is_empty() {
+            return None;
+        }
+        let mut cur = lower.to_vec();
         for _ in 0..64 {
             if let Some(h) = self.object_create_handlers.get(&cur).copied() {
-                h(self, rc);
-                return;
+                return Some(h);
             }
-            match self.classes.get(&cur).and_then(|c| c.parent.as_ref()) {
-                Some(p) => cur = p.to_ascii_lowercase(),
-                None => return,
-            }
+            cur = self
+                .classes
+                .get(&cur)?
+                .parent
+                .as_ref()?
+                .to_ascii_lowercase();
         }
+        None
     }
 
     /// Place named arguments of a native method call at their positions.
@@ -20908,12 +20925,14 @@ impl Vm {
                         internal_code,
                         true,
                         no_release,
-                        crate::fastpath::FeTmps::of(
-                            foreach_snap
-                                .keys()
-                                .chain(foreach_obj.keys())
-                                .chain(foreach_iter_handles.keys()),
-                        ),
+                        &|| {
+                            crate::fastpath::FeTmps::of(
+                                foreach_snap
+                                    .keys()
+                                    .chain(foreach_obj.keys())
+                                    .chain(foreach_iter_handles.keys()),
+                            )
+                        },
                         foreach_iter_handles.is_empty() && foreach_ref_arrays.is_empty(),
                         (bound || globals_cv.is_some()).then_some(globals_cv),
                     );

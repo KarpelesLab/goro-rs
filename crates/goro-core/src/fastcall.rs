@@ -245,6 +245,7 @@ impl Vm {
                     slots,
                     arrays,
                     has_destruct,
+                    create_hook: self.object_create_hook_of(name_lower),
                 });
                 Self::note_new_site(op_array, ip, &t);
                 *ce.new_template.borrow_mut() = Some(t);
@@ -288,7 +289,9 @@ impl Vm {
         }
         obj.mark_declared();
         let rc = Rc::new(RefCell::new(obj));
-        self.run_object_create_hook(&rc);
+        if let Some(h) = t.create_hook {
+            h(self, &rc);
+        }
         let obj_value = Value::Object(rc);
         if t.has_destruct {
             if let Value::Object(ref rc) = obj_value {

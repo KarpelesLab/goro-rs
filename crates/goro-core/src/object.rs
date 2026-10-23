@@ -119,6 +119,10 @@ pub struct NewTemplate {
     )>,
     /// The class has a destructor.
     pub(crate) has_destruct: bool,
+    /// The extension create_object hook its objects get (see
+    /// Vm::object_create_hook_of).
+    pub(crate) create_hook:
+        Option<fn(&mut crate::vm::Vm, &std::rc::Rc<std::cell::RefCell<PhpObject>>)>,
 }
 
 impl NewTemplate {
