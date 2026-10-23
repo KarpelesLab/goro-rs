@@ -10095,7 +10095,7 @@ fn reflection_running_generator(
                     vm.call_stack
                         .iter()
                         .rev()
-                        .find(|f| f.0 == names[i - 1])
+                        .find(|f| f.0 == *name)
                         .map(|f| (f.1.clone(), f.2))
                         .unwrap_or_default()
                 };

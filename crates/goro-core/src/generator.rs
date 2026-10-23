@@ -956,11 +956,15 @@ impl PhpGenerator {
             path.push(g);
         }
         let base_cs = vm.call_stack.len();
+        // (the generators between us and the root are running too: their
+        // frames are on the stack, ReflectionGenerator sees them)
+        let base_rg = vm.running_generators.len();
         let outer_caller = vm.generator_caller.clone();
         // The frames of the generators between us and the root appear in
         // backtraces taken while the root runs.
         let f = self.trace_frame(vm, &outer_caller);
         vm.call_stack.push(f);
+        vm.push_delegating_generator(self);
         for i in 0..path.len().saturating_sub(1) {
             let site = if i == 0 {
                 self.yield_from_site()
@@ -969,6 +973,7 @@ impl PhpGenerator {
             };
             let f = path[i].borrow().trace_frame(vm, &Some(site));
             vm.call_stack.push(f);
+            vm.push_delegating_generator(&path[i].borrow());
         }
         // The generators the loop holds belong to a fiber suspended in it
         // (unpinned by drive()).
@@ -980,6 +985,7 @@ impl PhpGenerator {
             let Some(root) = root_slot.as_ref() else {
                 // We are the root again: continue our own body.
                 vm.call_stack.truncate(base_cs);
+                vm.running_generators.truncate(base_rg);
                 vm.generator_caller = outer_caller.clone();
                 let r = match kick {
                     Kick::Throw => self.resume_single_throw(vm),
@@ -988,6 +994,7 @@ impl PhpGenerator {
                 if std::mem::take(&mut self.just_delegated) && r.is_ok() {
                     let f = self.trace_frame(vm, &outer_caller);
                     vm.call_stack.push(f);
+                    vm.push_delegating_generator(self);
                     if let Some(d) = self.live_delegate() {
                         path.push(d);
                     }
@@ -1013,6 +1020,9 @@ impl PhpGenerator {
                 // runs.
                 path.pop();
                 vm.call_stack.pop();
+                if vm.running_generators.len() > base_rg {
+                    vm.running_generators.pop();
+                }
                 let closed = !returned && !matches!(kick, Kick::Throw);
                 let child = path.last().cloned();
                 let mut child_ref;
@@ -1099,6 +1109,7 @@ impl PhpGenerator {
             if std::mem::take(&mut rb.just_delegated) && r.is_ok() {
                 let f = rb.trace_frame(vm, &Some(site));
                 vm.call_stack.push(f);
+                vm.push_delegating_generator(&rb);
                 let d = rb.live_delegate();
                 drop(rb);
                 if let Some(d) = d {
@@ -1127,6 +1138,7 @@ impl PhpGenerator {
             }
         };
         vm.call_stack.truncate(base_cs);
+        vm.running_generators.truncate(base_rg);
         vm.generator_caller = outer_caller;
         self.do_init = false;
         if let Ok(true) = result {
@@ -2505,6 +2517,15 @@ impl Vm {
                     .unwrap_or_default()
             }
         }
+    }
+
+    /// Generator `g` delegates with `yield from` to the one that runs: it
+    /// is on the running stack too.
+    #[inline(never)]
+    fn push_delegating_generator(&mut self, g: &PhpGenerator) {
+        let fname = self.generator_function_name_of(g);
+        self.running_generators
+            .push((g as *const PhpGenerator as usize, fname, g.object_id));
     }
 
     /// The object handle of a generator (also while it runs).
