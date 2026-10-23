@@ -677,6 +677,25 @@ pub fn decode(data: &[u8], magick: &str, opts: &ReadOptions) -> MResult<Vec<Imag
             img.page = Rect::new(img.columns, img.rows, 0, 0);
         }
         crate::properties::parse_profiles(img);
+        if fmt == "PNG" || fmt == "WEBP" {
+            // an EXIF profile's resolution wins over pHYs (and gives WebP one)
+            let rat = |k: &str| {
+                img.properties.get(k).and_then(|v| {
+                    let (a, b) = v.split_once('/')?;
+                    let (a, b): (f64, f64) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+                    (b != 0.0).then_some(a / b)
+                })
+            };
+            if let (Some(x), Some(y)) = (rat("exif:XResolution"), rat("exif:YResolution")) {
+                img.x_resolution = x;
+                img.y_resolution = y;
+                img.units = match img.properties.get("exif:ResolutionUnit") {
+                    Some("3") => ResolutionType::PixelsPerCentimeter,
+                    Some("2") => ResolutionType::PixelsPerInch,
+                    _ => img.units,
+                };
+            }
+        }
     }
     Ok(images)
 }
@@ -1108,12 +1127,13 @@ fn jpeg_frame_properties(img: &mut Image, data: &[u8]) {
                 .filter_map(|k| seg.get(6 + 3 * k + 1))
                 .map(|f| format!("{}x{}", f >> 4, f & 15))
                 .collect();
-            let cs = match (nc, adobe) {
-                (1, _) => 1,
-                (3, Some(0)) => 3,
-                (3, _) => 2,
-                (4, Some(2)) => 5,
-                (4, _) => 4,
+            // libjpeg's output colour space: YCbCr and RGB come out RGB,
+            // YCCK and CMYK come out CMYK
+            let _ = adobe;
+            let cs = match nc {
+                1 => 1,
+                3 => 2,
+                4 => 4,
                 _ => 0,
             };
             img.properties.set("jpeg:colorspace", &cs.to_string());
@@ -1301,7 +1321,6 @@ fn decode_webp(data: &[u8]) -> MResult<Vec<Image>> {
     }
     for img in out.iter_mut() {
         img.depth = 8;
-        img.compression = CompressionType::WebP;
         if let Some(m) = &meta {
             if let Some(icc) = &m.icc {
                 img.set_profile("icc", icc.clone());
@@ -1433,7 +1452,101 @@ fn decode_tiff(data: &[u8]) -> MResult<Vec<Image>> {
     if out.is_empty() {
         return Err(corrupt("TIFF", "no pages"));
     }
+    // the per-page tags ImageMagick reports: compression, tiff:endian,
+    // tiff:photometric, tiff:rows-per-strip
+    let le = data.starts_with(b"II");
+    for (img, tags) in out.iter_mut().zip(tiff_ifd_tags(data)) {
+        let get = |t: u16| tags.iter().find(|(k, _)| *k == t).map(|(_, v)| *v);
+        img.compression = match get(259).unwrap_or(1) {
+            1 => CompressionType::No,
+            2 | 3 => CompressionType::Fax,
+            4 => CompressionType::Group4,
+            5 => CompressionType::LZW,
+            6 | 7 => CompressionType::JPEG,
+            8 | 32946 => CompressionType::Zip,
+            32773 => CompressionType::RLE,
+            34925 => CompressionType::LZMA,
+            50000 => CompressionType::Zstd,
+            50001 => CompressionType::WebP,
+            _ => CompressionType::Undefined,
+        };
+        img.properties
+            .set("tiff:endian", if le { "lsb" } else { "msb" });
+        if let Some(ph) = get(262) {
+            let name = match ph {
+                0 => "min-is-white",
+                1 => "min-is-black",
+                2 => "RGB",
+                3 => "palette",
+                4 => "mask",
+                5 => "separated",
+                6 => "YCBCR",
+                8 => "CIELAB",
+                _ => "unknown",
+            };
+            img.properties.set("tiff:photometric", name);
+        }
+        // ImageMagick reports libtiff's default strip height for the
+        // scanline (8 KiB worth of rows), not the file's RowsPerStrip
+        // ImageMagick reports the file's RowsPerStrip for a compressed
+        // file, libtiff's default strip height (8 KiB of rows) for an
+        // uncompressed one
+        let spp = get(277).unwrap_or(1).max(1) as usize;
+        let bps = img.depth.max(1) as usize;
+        let line = (img.columns * spp * bps).div_ceil(8).max(1);
+        let rows = match (get(259).unwrap_or(1), get(278)) {
+            (1, _) | (_, None) => (8192 / line).max(1),
+            (_, Some(r)) => r as usize,
+        };
+        img.properties.set("tiff:rows-per-strip", &rows.to_string());
+    }
     Ok(out)
+}
+
+/// The first value of every tag in each IFD of a TIFF.
+fn tiff_ifd_tags(data: &[u8]) -> Vec<Vec<(u16, u32)>> {
+    let le = data.starts_with(b"II");
+    let u16_at = |o: usize| -> Option<u16> {
+        let b = data.get(o..o + 2)?;
+        Some(if le {
+            u16::from_le_bytes([b[0], b[1]])
+        } else {
+            u16::from_be_bytes([b[0], b[1]])
+        })
+    };
+    let u32_at = |o: usize| -> Option<u32> {
+        let b: [u8; 4] = data.get(o..o + 4)?.try_into().ok()?;
+        Some(if le {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
+    };
+    let mut out = Vec::new();
+    let mut off = u32_at(4).unwrap_or(0) as usize;
+    let mut guard = 0;
+    while off != 0 && guard < 4096 {
+        guard += 1;
+        let Some(n) = u16_at(off) else { break };
+        let mut tags = Vec::new();
+        for i in 0..n as usize {
+            let e = off + 2 + i * 12;
+            let (Some(tag), Some(ty)) = (u16_at(e), u16_at(e + 2)) else {
+                break;
+            };
+            let v = match ty {
+                3 => u16_at(e + 8).map(|v| v as u32),
+                4 => u32_at(e + 8),
+                _ => None,
+            };
+            if let Some(v) = v {
+                tags.push((tag, v));
+            }
+        }
+        out.push(tags);
+        off = u32_at(off + 2 + n as usize * 12).unwrap_or(0) as usize;
+    }
+    out
 }
 
 fn decode_ico(data: &[u8]) -> MResult<Vec<Image>> {

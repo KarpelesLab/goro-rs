@@ -308,6 +308,8 @@ fn walk_ifd(
         if !gps && (tag == 0x8769 || tag == 0xa005) {
             if let Some(sub) = t.u32(voff) {
                 if tag == 0x8769 {
+                    // ImageMagick lists the pointer itself as ExifOffset
+                    out.push(("ExifOffset".to_string(), sub.to_string()));
                     walk_ifd(t, sub as usize, false, out, seen, depth + 1);
                 }
             }
@@ -315,6 +317,7 @@ fn walk_ifd(
         }
         if !gps && tag == 0x8825 {
             if let Some(sub) = t.u32(voff) {
+                out.push(("GPSInfo".to_string(), sub.to_string()));
                 walk_ifd(t, sub as usize, true, out, seen, depth + 1);
             }
             continue;
@@ -367,21 +370,17 @@ fn walk_ifd(
             9 => (0..count as usize)
                 .filter_map(|i| t.u32(voff + i * 4).map(|v| (v as i32).to_string()))
                 .collect(),
+            // ImageMagick 7.1.2 prints a rational array's first element
+            // once per element
             5 => (0..count as usize)
-                .filter_map(|i| {
-                    Some(format!(
-                        "{}/{}",
-                        t.u32(voff + i * 8)?,
-                        t.u32(voff + i * 8 + 4)?
-                    ))
-                })
+                .filter_map(|_| Some(format!("{}/{}", t.u32(voff)?, t.u32(voff + 4)?)))
                 .collect(),
             10 => (0..count as usize)
-                .filter_map(|i| {
+                .filter_map(|_| {
                     Some(format!(
                         "{}/{}",
-                        t.u32(voff + i * 8)? as i32,
-                        t.u32(voff + i * 8 + 4)? as i32
+                        t.u32(voff)? as i32,
+                        t.u32(voff + 4)? as i32
                     ))
                 })
                 .collect(),
@@ -397,9 +396,122 @@ fn walk_ifd(
     }
 }
 
+/// The text of an ICC tag ('desc' / 'mluc' / 'text' types).
+fn icc_text(icc: &[u8], sig: &[u8; 4]) -> Option<String> {
+    let be32 = |o: usize| -> Option<usize> {
+        Some(u32::from_be_bytes(icc.get(o..o + 4)?.try_into().ok()?) as usize)
+    };
+    let n = be32(128)?;
+    for k in 0..n.min(256) {
+        let e = 132 + k * 12;
+        if icc.get(e..e + 4)? != sig {
+            continue;
+        }
+        let (off, len) = (be32(e + 4)?, be32(e + 8)?);
+        let t = icc.get(off..off + len)?;
+        let txt = match t.get(0..4)? {
+            b"desc" => {
+                let l = u32::from_be_bytes(t.get(8..12)?.try_into().ok()?) as usize;
+                String::from_utf8_lossy(t.get(12..12 + l)?).to_string()
+            }
+            b"text" => String::from_utf8_lossy(t.get(8..)?).to_string(),
+            b"mluc" => {
+                let rs = u32::from_be_bytes(t.get(12..16)?.try_into().ok()?) as usize;
+                let _ = rs;
+                let l = u32::from_be_bytes(t.get(20..24)?.try_into().ok()?) as usize;
+                let o = u32::from_be_bytes(t.get(24..28)?.try_into().ok()?) as usize;
+                let u: Vec<u16> = t
+                    .get(o..o + l)?
+                    .chunks_exact(2)
+                    .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&u)
+            }
+            _ => return None,
+        };
+        return Some(txt.trim_end_matches('\0').to_string());
+    }
+    None
+}
+
+/// The simple properties of an XMP packet: every leaf element (and
+/// rdf:Description attribute) outside the rdf:/x: namespaces, as
+/// "prefix:Name".
+fn xmp_properties(xmp: &[u8]) -> Vec<(String, String)> {
+    let s = String::from_utf8_lossy(xmp);
+    let mut out = Vec::new();
+    let b = s.as_bytes();
+    let mut i = 0;
+    while let Some(lt) = s[i..].find('<') {
+        let st = i + lt + 1;
+        let Some(gt) = s[st..].find('>') else { break };
+        let tag = &s[st..st + gt];
+        i = st + gt + 1;
+        if tag.starts_with('/') || tag.starts_with('?') || tag.starts_with('!') {
+            continue;
+        }
+        let name: &str = tag
+            .split(|c: char| c.is_whitespace() || c == '/')
+            .next()
+            .unwrap_or("");
+        if name == "rdf:Description" {
+            // attributes ns:Name="value"
+            for part in tag.split_whitespace().skip(1) {
+                if let Some((k, v)) = part.split_once('=') {
+                    let v = v.trim_end_matches('/').trim_matches('"');
+                    if k.contains(':') && !k.starts_with("xmlns") && !k.starts_with("rdf:") {
+                        out.push((k.to_string(), v.to_string()));
+                    }
+                }
+            }
+            continue;
+        }
+        if !name.contains(':')
+            || name.starts_with("rdf:")
+            || name.starts_with("x:")
+            || tag.ends_with('/')
+        {
+            continue;
+        }
+        // a leaf: text up to the closing tag, no child element
+        let close = format!("</{name}>");
+        if let Some(c) = s[i..].find(&close) {
+            let text = &s[i..i + c];
+            if !text.contains('<') {
+                out.push((name.to_string(), text.trim().to_string()));
+                i += c + close.len();
+            }
+        }
+        let _ = b;
+    }
+    out
+}
+
 /// Derive properties from the image's profiles (as ImageMagick does when
-/// it reads an image): the EXIF tags, the orientation.
+/// it reads an image): the EXIF tags, the orientation, the ICC profile's
+/// description/copyright/manufacturer/model and the XMP leaves.
 pub fn parse_profiles(img: &mut Image) {
+    if let Some(icc) = img.profile("icc").map(|e| e.to_vec()) {
+        for (sig, key) in [
+            (b"desc", "icc:description"),
+            (b"cprt", "icc:copyright"),
+            (b"dmnd", "icc:manufacturer"),
+            (b"dmdd", "icc:model"),
+        ] {
+            if let Some(t) = icc_text(&icc, sig) {
+                if img.properties.get(key).is_none() && !t.is_empty() {
+                    img.properties.set(key, &t);
+                }
+            }
+        }
+    }
+    if let Some(xmp) = img.profile("xmp").map(|e| e.to_vec()) {
+        for (k, v) in xmp_properties(&xmp) {
+            if img.properties.get(&k).is_none() {
+                img.properties.set(&k, &v);
+            }
+        }
+    }
     if let Some(exif) = img.profile("exif").map(|e| e.to_vec()) {
         for (k, v) in parse_exif(&exif) {
             if k == "Orientation" {

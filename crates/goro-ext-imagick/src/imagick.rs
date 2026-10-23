@@ -1442,6 +1442,14 @@ fn identify_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let raw = a[0].bool_or(false);
     let d = this(o);
     not_empty(vm, &d)?;
+    // SignatureImage() leaves the digest in the "signature" property
+    {
+        let mut w = d.wand.borrow_mut();
+        if let Some(img) = w.image_mut() {
+            let sig = signature(img);
+            img.properties.set("signature", &sig);
+        }
+    }
     let w = d.wand.borrow();
     let img = w.image().unwrap();
     let fmt = w.image_format(img);
@@ -3066,6 +3074,9 @@ fn set_image_alpha(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
 fn get_image_signature(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
     let s = with_image(vm, &this(o), |i| signature(i))?;
+    if let Some(img) = this(o).wand.borrow_mut().image_mut() {
+        img.properties.set("signature", &s);
+    }
     Ok(str_val(&s))
 }
 
