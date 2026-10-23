@@ -40858,11 +40858,23 @@ impl Vm {
                             // fires PREFIX's and SUFFIX's deprecation. We fold the value at
                             // compile time but record the references in constants_meta to
                             // replay those deprecations here.
+                            // (only the references to constants with attributes)
                             let refs: Vec<(Vec<u8>, Vec<u8>)> = self
                                 .classes
                                 .get(&class_lower)
                                 .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
-                                .map(|meta| meta.referenced_constants.clone())
+                                .map(|meta| {
+                                    meta.referenced_constants
+                                        .iter()
+                                        .filter(|(rc, rn)| {
+                                            self.classes
+                                                .get(rc)
+                                                .and_then(|c| c.constants_meta.get(rn.as_slice()))
+                                                .is_some_and(|m| !m.attributes.is_empty())
+                                        })
+                                        .cloned()
+                                        .collect()
+                                })
                                 .unwrap_or_default();
                             for (ref_class_lower, ref_const_name) in &refs {
                                 // Skip self-reference (would be circular).
