@@ -7946,6 +7946,14 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                         _ => {}
                     }
                 }
+                // SensitiveParameterValue keeps its value out of sight.
+                if let (Some(Value::Object(o)), true) =
+                    (args.get(1), prop_name.as_bytes() == b"value")
+                {
+                    if o.borrow().class_name.eq_ignore_ascii_case(b"SensitiveParameterValue") {
+                        return Some(o.borrow().get_property(b"__sensitive_value"));
+                    }
+                }
                 if is_static {
                     // Static properties are stored on the class that declared
                     // them, even when reflected via a subclass. Walk up the
