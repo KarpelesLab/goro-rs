@@ -489,6 +489,17 @@ fn add_root(n: WeakNode) -> Option<u32> {
         .flatten()
 }
 
+/// Nothing a release point would do is waiting in the collector's state:
+/// no destructor candidate, dead WeakMap entry, deferred object id or due
+/// collection (see Vm::run_pending_destructors).
+#[inline]
+pub fn release_quiet() -> bool {
+    !GC_PENDING.with(|p| p.get())
+        && !WEAK_DIRTY.with(|d| d.get())
+        && DTOR_CANDIDATES.with(|c| c.borrow().is_empty())
+        && DEFERRED_IDS.with(|m| m.borrow().is_empty())
+}
+
 /// True when the possible-root buffer reached the collection threshold.
 #[inline]
 pub fn gc_pending() -> bool {

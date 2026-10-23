@@ -622,6 +622,9 @@ pub(crate) struct SiteCaches {
     /// Like the runtime cache of INIT_NS_FCALL_BY_NAME, a function of that
     /// name declared later is not seen by the site.
     pub(crate) ns_fallbacks: crate::fxhash::FxHashMap<u32, Vec<u8>>,
+    /// What a class constant fetch (`A::C`, `self::C`, `A::class`) found,
+    /// for the class scope it ran in (see Vm::fast_class_const).
+    pub(crate) const_sites: crate::fxhash::FxHashMap<u32, (Option<Vec<u8>>, Value)>,
 }
 
 impl Default for SiteCaches {
@@ -635,6 +638,7 @@ impl Default for SiteCaches {
             spl_sites: Default::default(),
             new_sites: Default::default(),
             ns_fallbacks: Default::default(),
+            const_sites: Default::default(),
         }
     }
 }

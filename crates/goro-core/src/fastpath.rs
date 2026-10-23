@@ -430,12 +430,48 @@ pub(crate) fn fast_op(
             store!(bool_val(r))
         }
         OpCode::Equal | OpCode::NotEqual => {
-            let a = num!(op.op1);
-            let b = num!(op.op2);
-            let eq = a.value().equals(&b.value());
+            let eq = match (
+                num_operand(&op.op1, cvs, tmps, literals),
+                num_operand(&op.op2, cvs, tmps, literals),
+            ) {
+                (Some(a), Some(b)) => a.value().equals(&b.value()),
+                // Scalars (strings compared as numbers when both are
+                // numeric): no conversion with a side effect.
+                _ => {
+                    let Some(a) = defined_operand(&op.op1, cvs, tmps, literals) else {
+                        return Fast::No;
+                    };
+                    let Some(b) = defined_operand(&op.op2, cvs, tmps, literals) else {
+                        return Fast::No;
+                    };
+                    if !is_plain_scalar(&a) || !is_plain_scalar(&b) {
+                        return Fast::No;
+                    }
+                    a.equals_with_object_cast(&b)
+                }
+            };
             store!(bool_val(eq == (op.opcode == OpCode::Equal)))
         }
         OpCode::Identical | OpCode::NotIdentical => {
+            // `$p === <undef literal>`: the compiled check of whether an
+            // optional parameter was passed (no warning).
+            if let OperandType::Const(c) = op.op2 {
+                if matches!(literals.get(c as usize), Some(Value::Undef)) {
+                    let undef = match op.op1 {
+                        OperandType::Cv(i) => match cvs.get(i as usize) {
+                            Some(Value::Undef) => true,
+                            Some(Value::Reference(r)) => match r.try_borrow() {
+                                Ok(v) => matches!(*v, Value::Undef),
+                                Err(_) => return Fast::No,
+                            },
+                            Some(_) => false,
+                            None => return Fast::No,
+                        },
+                        _ => return Fast::No,
+                    };
+                    return store!(bool_val(undef == (op.opcode == OpCode::Identical)));
+                }
+            }
             // Scalars and objects (arrays are compared element by element,
             // with a recursion guard: the general handler's).
             let Some(a) = defined_operand(&op.op1, cvs, tmps, literals) else {
@@ -687,6 +723,38 @@ fn cv_operands_bound(op: &Op, cvs: &[Value], globals: Option<u32>) -> bool {
     })
 }
 
+/// The temporaries whose foreach iteration state (snapshot, object or
+/// iterator handle) a frame holds, for FreeTmps (a few; more count as all).
+#[derive(Clone, Copy)]
+pub(crate) struct FeTmps {
+    n: u8,
+    keys: [u32; 6],
+}
+
+impl FeTmps {
+    pub(crate) fn of<'a>(keys: impl Iterator<Item = &'a u32>) -> FeTmps {
+        let mut t = FeTmps { n: 0, keys: [0; 6] };
+        for &k in keys {
+            if t.n as usize == t.keys.len() {
+                t.n = u8::MAX;
+                break;
+            }
+            t.keys[t.n as usize] = k;
+            t.n += 1;
+        }
+        t
+    }
+
+    /// Whether one of them is in `a..b` (all are, when there were many).
+    #[inline]
+    fn any_in(&self, a: u32, b: u32) -> bool {
+        self.n == u8::MAX
+            || self.keys[..self.n as usize]
+                .iter()
+                .any(|k| (a..b).contains(k))
+    }
+}
+
 /// Whether run_fast_ops() may handle an opcode (a superset of what the
 /// dispatch loop's own fast attempt handles).
 #[inline(always)]
@@ -730,6 +798,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::FreeTmps
             | OpCode::InitFCall
             | OpCode::SendVal
+            | OpCode::SendValChecked
+            | OpCode::StaticPropGet
             | OpCode::BooleanNot
             | OpCode::CastBool
             | OpCode::ErrorSuppress
@@ -745,8 +815,10 @@ impl crate::vm::Vm {
     /// opcodes changes, but for memory_limit and max_execution_time, which
     /// hand control back to it). Returns the index of the first opcode not
     /// handled (or of the next one to run when the loop has to look).
-    /// `refs_ok` / `no_release`: see fast_op(); `foreach_idle`: the frame
-    /// has no foreach iteration state (see FreeTmps); `bound`: the frame's
+    /// `refs_ok` / `no_release`: see fast_op(); `fe_busy`: the temporaries
+    /// running foreach loops keep state for (see FreeTmps); `fe_quiet`: no foreach
+    /// iterator handle or by-reference loop pins a temporary (see
+    /// fast_assign()); `bound`: the frame's
     /// variables are bound to a symbol table or it uses $GLOBALS (the CV
     /// index of $GLOBALS, if it does).
     #[inline(never)]
@@ -760,7 +832,8 @@ impl crate::vm::Vm {
         internal_code: bool,
         refs_ok: bool,
         no_release: bool,
-        foreach_idle: bool,
+        fe_busy: FeTmps,
+        fe_quiet: bool,
         bound: Option<Option<u32>>,
     ) -> usize {
         let ops = &op_array.ops;
@@ -798,6 +871,18 @@ impl crate::vm::Vm {
                         break 'run ip;
                     }
                 }
+                // A non-variable argument of a user function's by-value
+                // parameter (SEND_VAL_EX / SEND_VAR_NO_REF_EX): sent as is.
+                OpCode::SendValChecked => {
+                    let user_target = self.pending_calls.last().is_some_and(|c| {
+                        c.target.user.is_some() && c.target.fn_gen == self.user_functions.len() + 1
+                    });
+                    if user_target && self.send_val_fast(op, cvs, tmps, literals) {
+                        Fast::Done
+                    } else {
+                        break 'run ip;
+                    }
+                }
                 // (the read of `$o->p++` is one of an object's property)
                 OpCode::PropertyGet
                 | OpCode::PropertySet
@@ -814,6 +899,25 @@ impl crate::vm::Vm {
                     self.fast_dim_op(op, cvs, tmps, literals)
                 }
                 OpCode::ArrayIsset => self.fast_dim_isset(op, cvs, tmps, literals),
+                // A class constant its site resolved (see fast_class_const).
+                OpCode::StaticPropGet => {
+                    if !tmp_writable(&op.result, tmps) {
+                        break 'run ip;
+                    }
+                    match self.fast_class_const(op_array, ip) {
+                        Some(v) => {
+                            if let Value::Object(o) = &v {
+                                crate::gc::track_object(o);
+                            }
+                            if store_tmp(&op.result, v, tmps) {
+                                Fast::Done
+                            } else {
+                                Fast::No
+                            }
+                        }
+                        None => Fast::No,
+                    }
+                }
                 OpCode::Jmp => match op.op1 {
                     OperandType::JmpTarget(t) => Fast::Jump(t as usize),
                     _ => return ip,
@@ -821,10 +925,14 @@ impl crate::vm::Vm {
                 // A statement's temporaries that hold plain values, with no
                 // foreach state and nothing to destroy: the general handler
                 // just empties them.
-                OpCode::FreeTmps if foreach_idle && no_release => {
+                OpCode::FreeTmps if no_release => {
                     let (OperandType::Tmp(a), OperandType::Tmp(b)) = (op.op1, op.op2) else {
                         break 'run ip;
                     };
+                    // (no running foreach's state is held by these)
+                    if fe_busy.any_in(a, b) {
+                        break 'run ip;
+                    }
                     let end = (b as usize).min(tmps.len());
                     let range = &mut tmps[(a as usize).min(end)..end];
                     // An array or object held elsewhere too only loses a
@@ -877,7 +985,9 @@ impl crate::vm::Vm {
                 OpCode::JmpZ => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::JmpNz => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
                 OpCode::Assign => match fast_op(op, cvs, tmps, literals, refs_ok, no_release) {
-                    Fast::No => self.fast_assign_container(op, cvs, tmps, literals, refs_ok),
+                    Fast::No => {
+                        self.fast_assign(op, cvs, tmps, literals, refs_ok, no_release, fe_quiet)
+                    }
                     f => f,
                 },
                 OpCode::QmAssign => fast_op(op, cvs, tmps, literals, refs_ok, no_release),
@@ -955,46 +1065,86 @@ impl crate::vm::Vm {
         }
     }
 
-    /// `$cv = <array|object>` over a plain value or an undefined variable
-    /// (nothing is released): what write_operand() stores (a variable's or
-    /// a literal's array is copied, a temporary's is moved; objects are
-    /// registered with the cycle collector).
-    fn fast_assign_container(
+    /// The assignments fast_op() leaves: `$cv = <array|object>` (a
+    /// variable's or a literal's array is copied, a temporary's moved, as
+    /// write_operand() stores them; objects are registered with the cycle
+    /// collector), assignments to a temporary (short-circuit results, the
+    /// release of a temporary), and assignments over an array or object
+    /// whose release destroys nothing (held elsewhere too, or a small
+    /// array of plain values), when no destructor can be due. `fe_quiet`:
+    /// no foreach iterator handle or by-reference loop pins a temporary.
+    #[allow(clippy::too_many_arguments)]
+    fn fast_assign(
         &self,
         op: &Op,
         cvs: &mut [Value],
         tmps: &mut [Value],
         literals: &[Value],
         refs_ok: bool,
+        no_release: bool,
+        fe_quiet: bool,
     ) -> Fast {
-        let OperandType::Cv(ci) = op.op1 else {
-            return Fast::No;
-        };
-        if !tmp_writable(&op.result, tmps) {
+        // (the general handler is a release point: it is only bypassed when
+        // no destructor can be due)
+        if !no_release || !tmp_writable(&op.result, tmps) {
             return Fast::No;
         }
-        let target_ok = match cvs.get(ci as usize) {
-            Some(Value::Reference(r)) => {
-                refs_ok && r.try_borrow_mut().is_ok_and(|b| is_plain_scalar(&b))
+        // (an overwritten array or object loses this holder)
+        let releasable = |v: &Value| match v {
+            Value::Array(a) => {
+                !Rc::ptr_eq(a, &self.globals)
+                    && (Rc::strong_count(a) > 1
+                        || a.try_borrow()
+                            .is_ok_and(|a| a.len() <= 64 && a.values().all(is_plain_scalar)))
             }
-            Some(v) => is_plain_scalar(v),
-            None => false,
+            Value::Object(o) => Rc::strong_count(o) > 1,
+            v => is_plain_scalar(v),
         };
-        if !target_ok {
-            return Fast::No;
-        }
+        let to_tmp = match op.op1 {
+            OperandType::Cv(ci) => {
+                let ok = match cvs.get(ci as usize) {
+                    Some(Value::Reference(r)) => {
+                        refs_ok && r.try_borrow_mut().is_ok_and(|b| releasable(&b))
+                    }
+                    Some(v) => releasable(v),
+                    None => false,
+                };
+                if !ok {
+                    return Fast::No;
+                }
+                None
+            }
+            // (a temporary holding a plain value, not an iterator's)
+            OperandType::Tmp(ti) if fe_quiet => match tmps.get(ti as usize) {
+                Some(v) if is_plain_scalar(v) => Some(ti as usize),
+                _ => return Fast::No,
+            },
+            _ => return Fast::No,
+        };
         let val = match op.op2 {
             OperandType::Tmp(i) => match tmps.get(i as usize) {
                 Some(Value::Object(_)) | Some(Value::Array(_)) => {
+                    std::mem::replace(&mut tmps[i as usize], Value::Undef)
+                }
+                Some(v)
+                    if is_plain_scalar(v) && (to_tmp.is_some() || !matches!(v, Value::Undef)) =>
+                {
                     std::mem::replace(&mut tmps[i as usize], Value::Undef)
                 }
                 _ => return Fast::No,
             },
             OperandType::Cv(i) => match cvs.get(i as usize) {
                 Some(v @ (Value::Object(_) | Value::Array(_))) => v.clone(),
+                Some(v) if is_plain_scalar(v) && !matches!(v, Value::Undef) => v.clone(),
                 _ => return Fast::No,
             },
             OperandType::Const(i) => match literals.get(i as usize) {
+                // (an Undef literal releases a temporary)
+                Some(v)
+                    if is_plain_scalar(v) && (to_tmp.is_some() || !matches!(v, Value::Undef)) =>
+                {
+                    v.clone()
+                }
                 Some(v @ Value::Array(_)) => v.clone(),
                 _ => return Fast::No,
             },
@@ -1008,7 +1158,8 @@ impl crate::vm::Vm {
                 }
                 return Fast::No;
             }
-            Value::Array(a) if Rc::strong_count(&a) == 1 => Value::Array(a),
+            // (a temporary's array is moved, also into a temporary)
+            Value::Array(a) if to_tmp.is_some() || Rc::strong_count(&a) == 1 => Value::Array(a),
             v @ Value::Array(_) => self.dup_array_value(v),
             Value::Object(o) => {
                 crate::gc::track_object(&o);
@@ -1017,14 +1168,27 @@ impl crate::vm::Vm {
             v => v,
         };
         let result = matches!(op.result, OperandType::Tmp(_)).then(|| val.clone());
-        match &mut cvs[ci as usize] {
-            Value::Reference(r) => {
-                let Ok(mut b) = r.try_borrow_mut() else {
-                    return Fast::No;
-                };
-                *b = val;
-            }
-            slot => *slot = val,
+        if let Some(ti) = to_tmp {
+            tmps[ti] = val;
+        } else if let OperandType::Cv(ci) = op.op1 {
+            let old = match &mut cvs[ci as usize] {
+                Value::Reference(r) => {
+                    let Ok(mut b) = r.try_borrow_mut() else {
+                        return Fast::No;
+                    };
+                    let old = std::mem::replace(&mut *b, val);
+                    // (as write_operand(): the overwritten value loses a holder)
+                    crate::gc::on_value_replaced(&old, &b);
+                    old
+                }
+                slot => {
+                    if matches!(slot, Value::Object(_) | Value::Array(_)) {
+                        crate::gc::possible_root(slot);
+                    }
+                    std::mem::replace(slot, val)
+                }
+            };
+            drop(old);
         }
         if let Some(v) = result {
             store_tmp(&op.result, v, tmps);

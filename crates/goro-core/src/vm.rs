@@ -18210,6 +18210,78 @@ impl Vm {
         }
     }
 
+    /// A class constant fetch (FETCH_CLASS_CONSTANT) of a constant name of
+    /// a class named by a literal or `self`, which found `val` in class
+    /// `class_lower`: the site remembers it for the class scope it ran in
+    /// when nothing about the constant has an effect of its own (a user
+    /// class's constant without attributes, whose value expression names
+    /// no other class constant, already evaluated).
+    #[inline(never)]
+    fn note_class_const_site(
+        &self,
+        op_array: &OpArray,
+        ip: usize,
+        class_lower: &[u8],
+        name: &PhpString,
+        val: &Value,
+    ) {
+        let op = &op_array.ops[ip];
+        let OperandType::Const(c) = op.op1 else {
+            return;
+        };
+        let Some(Value::String(cls)) = op_array.literals.get(c as usize) else {
+            return;
+        };
+        let cls = cls.as_bytes();
+        if cls.eq_ignore_ascii_case(b"static") || cls.eq_ignore_ascii_case(b"parent") {
+            return;
+        }
+        let OperandType::Const(n) = op.op2 else {
+            return;
+        };
+        if !matches!(op_array.literals.get(n as usize), Some(Value::String(_))) {
+            return;
+        }
+        let Some(ce) = self.classes.get(class_lower) else {
+            return;
+        };
+        if ce.filename.is_none() || ce.is_trait {
+            return;
+        }
+        if name.as_bytes() != b"class" {
+            let Some(meta) = ce.constants_meta.get(name.as_bytes()) else {
+                return;
+            };
+            if !meta.attributes.is_empty() || !meta.referenced_constants.is_empty() {
+                return;
+            }
+            // (the stored value: no thunk or deferred marker left)
+            match ce.constants.get(name.as_bytes()) {
+                Some(v)
+                    if v.identical(val)
+                        || matches!((v, val), (Value::Array(a), Value::Array(b)) if Rc::ptr_eq(a, b)) =>
+                    {}
+                _ => return,
+            }
+        }
+        let scope = self.class_scope_ref().map(|s| s.to_vec());
+        op_array
+            .sites()
+            .borrow_mut()
+            .get_or_insert_with(Default::default)
+            .const_sites
+            .insert(ip as u32, (scope, val.clone()));
+    }
+
+    /// A class constant fetch its site already resolved (see
+    /// note_class_const_site), in the same class scope.
+    #[inline]
+    pub(crate) fn fast_class_const(&self, op_array: &OpArray, ip: usize) -> Option<Value> {
+        let sites = op_array.sites().borrow();
+        let (scope, v) = sites.as_ref()?.const_sites.get(&(ip as u32))?;
+        (scope.as_deref() == self.class_scope_ref()).then(|| v.clone())
+    }
+
     /// A freshly compiled included file, as it runs (and as the script
     /// cache keeps it): a file that does not `return` yields 1
     /// (zend_emit_final_return(1)).
@@ -20161,7 +20233,9 @@ impl Vm {
             && !self.has_release_work()
             && matches!(result, Ok(ref v) if !matches!(v, Value::Reference(_)))
         {
-            self.run_pending_destructors();
+            if !crate::gc::release_quiet() {
+                self.run_pending_destructors();
+            }
             if self.current_exception.is_none() {
                 return result.map(|v| match v {
                     Value::Undef => Value::Null,
@@ -20815,9 +20889,13 @@ impl Vm {
                         internal_code,
                         true,
                         no_release,
-                        foreach_snap.is_empty()
-                            && foreach_obj.is_empty()
-                            && foreach_iter_handles.is_empty(),
+                        crate::fastpath::FeTmps::of(
+                            foreach_snap
+                                .keys()
+                                .chain(foreach_obj.keys())
+                                .chain(foreach_iter_handles.keys()),
+                        ),
+                        foreach_iter_handles.is_empty() && foreach_ref_arrays.is_empty(),
                         (bound || globals_cv.is_some()).then_some(globals_cv),
                     );
                     if next != ip {
@@ -35800,6 +35878,42 @@ impl Vm {
                     Flow::Return(v) => return Ok(v),
                 },
 
+                // The plain return of a value from a function (no return
+                // type, by-value, no finally or exception around, a defined
+                // operand): what the general handler below does then.
+                OpCode::Return
+                    if fsym.is_none()
+                        && fin.is_empty()
+                        && !op_array.returns_by_ref
+                        && op_array.return_type.is_none()
+                        && !op_array.is_generator
+                        && self.current_exception.is_none()
+                        && self.pending_return.is_none()
+                        && self.pending_finally_jump.is_none()
+                        && !matches!(op.op1, OperandType::Cv(i) if match cvs.get(i as usize) {
+                            Some(Value::Undef) | None => true,
+                            Some(Value::Reference(r)) => !r.try_borrow().is_ok_and(|v| !matches!(*v, Value::Undef)),
+                            _ => false,
+                        }) =>
+                {
+                    self.return_discarded_exc = None;
+                    self.last_return_line = op.line;
+                    // (read_operand(), the value built in the result: a
+                    // value built apart and moved in is copied by wide loads
+                    // of just stored narrow fields, which wait for them)
+                    return Ok(match op.op1 {
+                        OperandType::Cv(i) => match &cvs[i as usize] {
+                            Value::Reference(r) => r.borrow().clone(),
+                            v => v.clone(),
+                        },
+                        OperandType::Tmp(i) => match std::mem::take(&mut tmps[i as usize]) {
+                            Value::Undef => Value::Null,
+                            v => v,
+                        },
+                        OperandType::Const(i) => op_array.literals[i as usize].clone(),
+                        _ => Value::Null,
+                    });
+                }
                 OpCode::Return => match outlined(|| -> Result<Flow, VmError> {
                     let had_exc = self.current_exception.is_some();
                     // A return from a finally block entered by an exception
@@ -41885,6 +41999,9 @@ impl Vm {
                                     }
                                 }
                             }
+                        }
+                        if self.current_exception.is_none() {
+                            self.note_class_const_site(op_array, ip - 1, &class_lower, &prop_name, &val);
                         }
                         self.write_operand(&op.result, val, &mut cvs, &mut tmps, &static_cv_keys);
                     }
