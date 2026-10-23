@@ -4500,12 +4500,12 @@ fn sort_regular_cmp(vm: &mut Vm, a: &Value, b: &Value) -> i64 {
         }
         let casted = Value::String(vm.value_to_string(&Value::Object(o)));
         return if object_lhs {
-            casted.compare(&b)
+            casted.compare_zend(&b)
         } else {
-            a.compare(&casted)
+            a.compare_zend(&casted)
         };
     }
-    a.compare(&b)
+    a.compare_zend(&b)
 }
 
 /// php_get_data_compare_func(): unstable value comparison for the given flags.
@@ -4541,14 +4541,27 @@ fn php_data_cmp(vm: &mut Vm, a: &Value, b: &Value, flags: i64) -> i32 {
         }
         _ => {
             let r = sort_regular_cmp(vm, a, b);
-            if r < 0 {
-                -1
-            } else if r > 0 {
-                1
-            } else {
-                0
+            // php_array_data_compare_unstable_i(): uncomparable enum cases
+            // are grouped by identity and shifted to the end.
+            if r == 1 {
+                if let Some(rp) = enum_identity(b) {
+                    return match enum_identity(a) {
+                        Some(lp) => three_way(lp, rp),
+                        None => -1,
+                    };
+                }
             }
+            three_way(r, 0)
         }
+    }
+}
+
+fn enum_identity(v: &Value) -> Option<usize> {
+    match v.deref() {
+        Value::Object(o) if o.borrow().has_property(b"__enum_case") => {
+            Some(Rc::as_ptr(&o) as *const u8 as usize)
+        }
+        _ => None,
     }
 }
 

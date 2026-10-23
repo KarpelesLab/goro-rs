@@ -4502,6 +4502,12 @@ impl Vm {
             Value::Reference(r) => r.borrow().clone(),
             _ => b.clone(),
         };
+        // Enums are not comparable: no cast is attempted.
+        let is_enum =
+            |v: &Value| matches!(v, Value::Object(o) if o.borrow().has_property(b"__enum_case"));
+        if is_enum(&a_inner) || is_enum(&b_inner) {
+            return;
+        }
         match (&a_inner, &b_inner) {
             (Value::Object(obj), Value::Long(_)) | (Value::Long(_), Value::Object(obj))
                 if crate::value::native_cast(obj, 1).is_none()
@@ -23126,7 +23132,7 @@ impl Vm {
                     }
                     self.write_operand(
                         &op.result,
-                        Value::Long(a.compare(&b)),
+                        Value::Long(a.compare_zend(&b)),
                         &mut cvs,
                         &mut tmps,
                         &static_cv_keys,

@@ -1232,6 +1232,9 @@ impl Value {
         if let Value::Reference(r) = other {
             return self.equals(&r.borrow());
         }
+        if let Some(c) = enum_compare(self, other) {
+            return c == 0;
+        }
         if let Some(c) = native_compare(self, other) {
             return c == 0;
         }
@@ -1304,7 +1307,9 @@ impl Value {
                 if let Some(num) = parse_numeric_string(s_bytes) {
                     num == *f
                 } else {
-                    false
+                    // compare_double_to_string(): a non-numeric string is
+                    // compared with the float's string form ("INF" == INF).
+                    !f.is_nan() && format_php_float(*f).as_bytes() == s_bytes
                 }
             }
             (Value::Array(a), Value::Array(b)) => {
@@ -1495,6 +1500,15 @@ impl Value {
         }
     }
 
+    /// zend_compare(): like compare(), with an uncomparable pair reported
+    /// as 1 (ZEND_UNCOMPARABLE) the way `<=>`, sort() and max() see it.
+    pub fn compare_zend(&self, other: &Value) -> i64 {
+        match self.compare(other) {
+            i64::MIN => 1,
+            c => c,
+        }
+    }
+
     /// PHP <=> comparison, returns -1, 0, or 1
     pub fn compare(&self, other: &Value) -> i64 {
         // Arrays nested into themselves through references: stop instead of
@@ -1523,6 +1537,9 @@ impl Value {
         }
         if let Some(c) = native_compare(self, other) {
             return if c > 1 { 1 } else { c };
+        }
+        if let Some(c) = enum_compare(self, other) {
+            return c;
         }
         match (self, other) {
             (Value::Resource(a), Value::Resource(b)) => {
@@ -2338,77 +2355,44 @@ pub fn parse_leading_numeric_string(s: &[u8]) -> Option<(f64, bool)> {
         .map(|v| (v, is_fully_numeric))
 }
 
-/// Parse a PHP numeric string, returning its value as f64 if it's numeric.
+/// Parse a PHP numeric string, returning its value as f64 if it's numeric
+/// (`is_numeric_string()`: no trailing garbage; "INF"/"NAN" are not numeric).
 pub fn parse_numeric_string(s: &[u8]) -> Option<f64> {
-    let s = std::str::from_utf8(s).ok()?;
-    let s = s.trim();
-    if s.is_empty() {
+    match parse_numeric_str(s, false)? {
+        (NumStr::Long(n), _) => Some(n as f64),
+        (NumStr::Double(d), _) => Some(d),
+    }
+}
+
+/// Enum operands (zend_compare() with zend_objects_not_comparable): a case
+/// equals only itself, is greater than null and compares with true/false
+/// as `true`; any other
+/// pairing is uncomparable (i64::MIN).
+fn enum_compare(a: &Value, b: &Value) -> Option<i64> {
+    let is_enum = |v: &Value| match v {
+        Value::Object(o) => o
+            .try_borrow()
+            .map(|o| o.has_property(b"__enum_case"))
+            .unwrap_or(false),
+        _ => false,
+    };
+    let (ae, be) = (is_enum(a), is_enum(b));
+    if !ae && !be {
         return None;
     }
-    // Check for INF/NAN
-    if s.eq_ignore_ascii_case("inf") || s.eq_ignore_ascii_case("infinity") {
-        return Some(f64::INFINITY);
-    }
-    if s.eq_ignore_ascii_case("-inf") || s.eq_ignore_ascii_case("-infinity") {
-        return Some(f64::NEG_INFINITY);
-    }
-    if s.eq_ignore_ascii_case("nan") {
-        return Some(f64::NAN);
-    }
-    // Try parsing as a number (handles int, float, scientific notation)
-    let mut chars = s.chars().peekable();
-
-    // Optional sign
-    if matches!(chars.peek(), Some('+') | Some('-')) {
-        chars.next();
-    }
-
-    // Must start with digit or '.'
-    let has_leading_digit = matches!(chars.peek(), Some('0'..='9'));
-    let mut has_dot = false;
-    let mut has_digits = false;
-
-    // Integer/decimal part
-    while let Some(&c) = chars.peek() {
-        if c.is_ascii_digit() {
-            has_digits = true;
-            chars.next();
-        } else if c == '.' && !has_dot {
-            has_dot = true;
-            chars.next();
-        } else {
-            break;
+    if let (Value::Object(x), Value::Object(y)) = (a, b) {
+        if Rc::ptr_eq(x, y) {
+            return Some(0);
         }
     }
-
-    if !has_digits && !has_leading_digit {
-        return None;
-    }
-
-    // Optional exponent
-    if matches!(chars.peek(), Some('e') | Some('E')) {
-        chars.next();
-        if matches!(chars.peek(), Some('+') | Some('-')) {
-            chars.next();
-        }
-        if !matches!(chars.peek(), Some('0'..='9')) {
-            return None;
-        }
-        while let Some(&c) = chars.peek() {
-            if c.is_ascii_digit() {
-                chars.next();
-            } else {
-                break;
-            }
-        }
-    }
-
-    // Must have consumed everything (trailing whitespace was already trimmed)
-    if chars.peek().is_some() {
-        return None;
-    }
-
-    s.parse::<f64>().ok()
+    Some(match (a, b) {
+        (_, Value::Null | Value::Undef) => 1,
+        (Value::Null | Value::Undef, _) => -1,
+        (_, Value::True) | (Value::True, _) => 0,
+        (_, Value::False) => 1,
+        (Value::False, _) => -1,
+        _ => i64::MIN,
+    })
 }
 
 /// Check if a trimmed string is a pure integer (digits only, with optional leading sign)
