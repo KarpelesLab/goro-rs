@@ -2,7 +2,6 @@
 //! the W3C "Compositing and Blending" specification, on straight
 //! (non-premultiplied) alpha, as ImageMagick's compose methods name them.
 
-use crate::color::rgb_to_hsl;
 use crate::image::Image;
 use crate::types::{Colorspace, CompositeOp as C};
 
@@ -575,23 +574,23 @@ pub fn compose_pixel(op: C, s: [f64; 4], d: [f64; 4], args: &ComposeArgs) -> [f6
             o
         }
         C::Modulate => {
-            let (_, ss, sl) = rgb_to_hsl(s[0], s[1], s[2]);
-            let _ = (ss, sl);
-            let (dh, ds, dl) = rgb_to_hsl(d[0], d[1], d[2]);
-            let percent_b = if args.set { args.a } else { 100.0 };
-            let percent_s = if args.set && !args.b.is_nan() {
+            // the source's intensity shifts the destination's HCL luma by
+            // 2(I - 1/2) x brightness%, and its chroma scales by saturation%;
+            // a transparent source leaves the destination
+            if sa <= 0.0 {
+                return d;
+            }
+            let pb = if args.set { args.a } else { 100.0 };
+            let ps = if args.set && !args.b.is_nan() {
                 args.b
             } else {
                 100.0
             };
-            let i = intensity(s);
-            let off = i - 0.5;
-            let (r, g, b) = crate::color::hsl_to_rgb(
-                dh,
-                (ds * (1.0 + off * percent_s / 100.0 * 2.0)).clamp(0.0, 1.0),
-                (dl + off * percent_b / 100.0).clamp(0.0, 1.0),
-            );
-            [r, g, b, da]
+            let h = crate::colorspace::from_srgb(Colorspace::HCL, [d[0], d[1], d[2]]).unwrap();
+            let l = h[2] + 2.0 * (intensity(s) - 0.5) * pb / 100.0;
+            let o =
+                crate::colorspace::to_srgb(Colorspace::HCL, [h[0], h[1] * ps / 100.0, l]).unwrap();
+            [o[0], o[1], o[2], da]
         }
         _ if is_separable_blend(op) => {
             let mut b = [0.0; 4];
