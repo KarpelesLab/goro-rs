@@ -1250,7 +1250,9 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
         // (zend_get_closure_invoke_method() proxies it).
         if let (Value::String(f), Some(m)) = (a[1].clone(), args.get(2)) {
             let fb = f.as_bytes();
-            if m.to_php_string().as_bytes().eq_ignore_ascii_case(b"__invoke")
+            if m.to_php_string()
+                .as_bytes()
+                .eq_ignore_ascii_case(b"__invoke")
                 && !fb.starts_with(b"__")
             {
                 if let Some(p) = fb.windows(2).position(|w| w == b"::") {
@@ -5615,8 +5617,7 @@ pub fn reflection_method_method(
                     String::from_utf8_lossy(&m.op_array.filename).into_owned()
                 };
                 // (a property hook is named `$prop::get` / `$prop::set`)
-                let display = if m.name.starts_with(b"__property_") && !m.op_array.name.is_empty()
-                {
+                let display = if m.name.starts_with(b"__property_") && !m.op_array.name.is_empty() {
                     String::from_utf8_lossy(&m.op_array.name).to_string()
                 } else {
                     String::from_utf8_lossy(&m.name).to_string()
@@ -13929,11 +13930,7 @@ fn op_array_is_deprecated(op: &OpArray, attrs: &[RuntimeAttribute]) -> bool {
 /// the root-most ancestor declaration it overrides, with interface methods
 /// taking precedence. Constructors only get one from abstract/interface
 /// declarations.
-fn method_prototype(
-    vm: &Vm,
-    m: &crate::object::MethodDef,
-    scope: Option<&[u8]>,
-) -> Option<String> {
+fn method_prototype(vm: &Vm, m: &crate::object::MethodDef, scope: Option<&[u8]>) -> Option<String> {
     if m.visibility == Visibility::Private {
         return None;
     }

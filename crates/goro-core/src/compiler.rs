@@ -1209,8 +1209,7 @@ impl Compiler {
             ));
         }
         // "Deprecated" cannot target parameters or properties.
-        if bare.eq_ignore_ascii_case(b"Deprecated") && matches!(target, "parameter" | "property")
-        {
+        if bare.eq_ignore_ascii_case(b"Deprecated") && matches!(target, "parameter" | "property") {
             return Some(format!(
                 "Attribute \"Deprecated\" cannot target {} (allowed targets: class, function, method, class constant, constant)",
                 target
@@ -4043,8 +4042,8 @@ impl Compiler {
                         array,
                         index: Some(index),
                     } if *by_ref && !expr_is_in_nullsafe_chain(expr) => {
-                        let container = self
-                            .compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::W)?;
+                        let container =
+                            self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::W)?;
                         let key = self.compile_expr(index)?;
                         let tmp = self.op_array.alloc_temp();
                         self.op_array.emit(Op {
@@ -7051,7 +7050,7 @@ impl Compiler {
                                         );
                                         cc.source_file = self.source_file.clone();
                                         let args_cv = cc.op_array.get_or_create_cv(b"arguments");
-        fcc_variadic_mixed(&mut cc.op_array);
+                                        fcc_variadic_mixed(&mut cc.op_array);
                                         cc.op_array.param_count = 1;
                                         cc.op_array.required_param_count = 0;
                                         cc.op_array.variadic_param = Some(args_cv);
@@ -7456,8 +7455,7 @@ impl Compiler {
                                     .bytes()
                                     .map(|b| b.to_ascii_lowercase())
                                     .collect();
-                                let get_attrs =
-                                    self.compile_hook_attributes(&hook_attrs.get);
+                                let get_attrs = self.compile_hook_attributes(&hook_attrs.get);
                                 class.methods.insert(
                                     lower_hook_name,
                                     MethodDef {
@@ -7544,8 +7542,7 @@ impl Compiler {
                                         &hook_attrs.set_param,
                                         "parameter",
                                     )];
-                                let set_attrs =
-                                    self.compile_hook_attributes(&hook_attrs.set);
+                                let set_attrs = self.compile_hook_attributes(&hook_attrs.set);
                                 hook_compiler.op_array.required_param_count = 1; // $value is required
 
                                 for s in hook_body {
@@ -8421,9 +8418,8 @@ impl Compiler {
                                                     .bytes()
                                                     .map(|b| b.to_ascii_lowercase())
                                                     .collect();
-                                                let get_attrs = self.compile_hook_attributes(
-                                                    &param.hook_attrs.get,
-                                                );
+                                                let get_attrs = self
+                                                    .compile_hook_attributes(&param.hook_attrs.get);
                                                 class.methods.insert(
                                                     lower_hook_name,
                                                     MethodDef {
@@ -8492,9 +8488,8 @@ impl Compiler {
                                                         &param.hook_attrs.set_param,
                                                         "parameter",
                                                     )];
-                                                let set_attrs = self.compile_hook_attributes(
-                                                    &param.hook_attrs.set,
-                                                );
+                                                let set_attrs = self
+                                                    .compile_hook_attributes(&param.hook_attrs.set);
                                                 hook_compiler.op_array.required_param_count = 1;
                                                 for s in hook_body.iter() {
                                                     hook_compiler.compile_stmt(s)?;
@@ -9704,7 +9699,7 @@ impl Compiler {
                                         cc.source_file = self.source_file.clone();
                                         // Set up variadic ...$args parameter
                                         let args_cv = cc.op_array.get_or_create_cv(b"arguments");
-        fcc_variadic_mixed(&mut cc.op_array);
+                                        fcc_variadic_mixed(&mut cc.op_array);
                                         cc.op_array.param_count = 1;
                                         cc.op_array.required_param_count = 0;
                                         cc.op_array.variadic_param = Some(args_cv);
@@ -11568,7 +11563,8 @@ impl Compiler {
             }
             // FETCH_STATIC_PROP_UNSET: an uninitialized typed property is
             // no error (the unset does nothing).
-            ExprKind::StaticPropertyAccess { .. } | ExprKind::DynamicStaticPropertyAccess { .. }
+            ExprKind::StaticPropertyAccess { .. }
+            | ExprKind::DynamicStaticPropertyAccess { .. }
                 if mode == DimFetch::Unset =>
             {
                 self.compile_static_prop_unset_container(object)
@@ -14857,7 +14853,8 @@ impl Compiler {
                         let val = self.compile_expr(&elem.value)?;
                         // ([&$this] holds a reference to a copy of $this,
                         // which nothing else shares)
-                        let is_this = matches!(&elem.value.kind, ExprKind::Variable(n) if n == b"this");
+                        let is_this =
+                            matches!(&elem.value.kind, ExprKind::Variable(n) if n == b"this");
                         if let (OperandType::Cv(cv), false) = (val, is_this) {
                             self.op_array.emit(Op {
                                 opcode: OpCode::MakeRef,
@@ -17505,7 +17502,11 @@ impl Compiler {
                         op1: discard_flag,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
-                        line: if *method_line > 0 { *method_line } else { expr.span.line },
+                        line: if *method_line > 0 {
+                            *method_line
+                        } else {
+                            expr.span.line
+                        },
                     });
 
                     Some(jmp)
@@ -17612,7 +17613,11 @@ impl Compiler {
                         op1: discard_flag,
                         op2: OperandType::Unused,
                         result: OperandType::Tmp(tmp),
-                        line: if *method_line > 0 { *method_line } else { expr.span.line },
+                        line: if *method_line > 0 {
+                            *method_line
+                        } else {
+                            expr.span.line
+                        },
                     });
 
                     None

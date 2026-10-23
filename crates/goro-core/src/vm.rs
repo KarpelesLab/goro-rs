@@ -4065,7 +4065,12 @@ impl Vm {
     fn try_autoload_class_inner(&mut self, class_name: &[u8]) -> bool {
         // A class being linked is in the class table already (unusable,
         // but not autoloaded either).
-        if variance::is_linking(&class_name.strip_prefix(b"\\").unwrap_or(class_name).to_ascii_lowercase()) {
+        if variance::is_linking(
+            &class_name
+                .strip_prefix(b"\\")
+                .unwrap_or(class_name)
+                .to_ascii_lowercase(),
+        ) {
             return false;
         }
         if !self.anon_pending.is_empty() {
@@ -4339,12 +4344,13 @@ impl Vm {
                 Some(s) => (a, s),
                 None => (a, b),
             },
-            (x @ (Value::Array(_) | Value::Object(_)), y @ (Value::Array(_) | Value::Object(_))) => {
-                match self.compare_precast_elements(&x, &y, &mut 4096) {
-                    Some((x, y)) => (x, y),
-                    None => (a, b),
-                }
-            }
+            (
+                x @ (Value::Array(_) | Value::Object(_)),
+                y @ (Value::Array(_) | Value::Object(_)),
+            ) => match self.compare_precast_elements(&x, &y, &mut 4096) {
+                Some((x, y)) => (x, y),
+                None => (a, b),
+            },
             _ => (a, b),
         }
     }
@@ -4409,8 +4415,14 @@ impl Vm {
                 if x.native.is_some()
                     || y.native.is_some()
                     || !x.class_name.eq_ignore_ascii_case(&y.class_name)
-                    || !x.properties.iter().any(|(_, v)| matches!(v.deref(), Value::Object(_)))
-                        && !y.properties.iter().any(|(_, v)| matches!(v.deref(), Value::Object(_)))
+                    || !x
+                        .properties
+                        .iter()
+                        .any(|(_, v)| matches!(v.deref(), Value::Object(_)))
+                        && !y
+                            .properties
+                            .iter()
+                            .any(|(_, v)| matches!(v.deref(), Value::Object(_)))
                 {
                     return None;
                 }
@@ -8372,7 +8384,8 @@ impl Vm {
                 let Some(p) = cv_idx.checked_sub(hidden_cvs) else {
                     continue;
                 };
-                if matches!(call.args[i], Value::Undef) && p < op_array.required_param_count as usize
+                if matches!(call.args[i], Value::Undef)
+                    && p < op_array.required_param_count as usize
                 {
                     let fname = if !op_array.display_name.is_empty() {
                         String::from_utf8_lossy(&op_array.display_name).to_string()
@@ -17266,10 +17279,14 @@ impl Vm {
         if had_exc {
             return;
         }
-        if let (Some(exc), Some(handler)) =
-            (self.current_exception.take(), self.exception_handler.clone())
-        {
-            if self.call_callback(&handler, std::slice::from_ref(&exc)).is_err() {
+        if let (Some(exc), Some(handler)) = (
+            self.current_exception.take(),
+            self.exception_handler.clone(),
+        ) {
+            if self
+                .call_callback(&handler, std::slice::from_ref(&exc))
+                .is_err()
+            {
                 if let Some(e) = self.current_exception.clone() {
                     let _ = e;
                 }
@@ -19181,7 +19198,9 @@ impl Vm {
                 Some(Value::Array(a)) if Rc::ptr_eq(a, &self.globals) => return false,
                 // (a call's array result sent where a reference may be
                 // taken: the general handler separates it)
-                Some(Value::Array(_)) if matches!(op.result, OperandType::Const(_)) => return false,
+                Some(Value::Array(_)) if matches!(op.result, OperandType::Const(_)) => {
+                    return false;
+                }
                 Some(slot) => match std::mem::replace(slot, Value::Undef) {
                     Value::Undef => Value::Null,
                     v => v,
@@ -59672,7 +59691,10 @@ impl Vm {
         m.extend_from_slice(kind);
         m.push(b'_');
         m.extend(prop.iter().map(|b| b.to_ascii_lowercase()));
-        let md = self.classes.get(&decl.to_ascii_lowercase())?.get_method(&m)?;
+        let md = self
+            .classes
+            .get(&decl.to_ascii_lowercase())?
+            .get_method(&m)?;
         (!md.attributes.is_empty()).then(|| md.attributes.clone())
     }
 
@@ -59874,9 +59896,8 @@ impl Vm {
             && matches!(op1, OperandType::Tmp(_))
             && matches!(result, OperandType::Const(_))
             && self.pending_calls.last().is_some_and(|c| {
-                self.pending_builtin_name(c).is_some_and(|n| {
-                    crate::compiler::Compiler::is_array_ref_builtin(Some(&n))
-                })
+                self.pending_builtin_name(c)
+                    .is_some_and(|n| crate::compiler::Compiler::is_array_ref_builtin(Some(&n)))
             })
     }
 

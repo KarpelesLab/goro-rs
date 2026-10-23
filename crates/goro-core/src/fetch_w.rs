@@ -237,7 +237,8 @@ impl Vm {
                 }
                 // A reference bound to typed properties must accept the array.
                 if let Some(r) = &cell {
-                    if let Err(msg) = self.typed_ref_auto_init_check(Some(&Value::Reference(r.clone())))
+                    if let Err(msg) =
+                        self.typed_ref_auto_init_check(Some(&Value::Reference(r.clone())))
                     {
                         self.throw_error_msg(b"TypeError", &msg);
                         return None;

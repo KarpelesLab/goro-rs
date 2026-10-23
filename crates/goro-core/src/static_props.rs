@@ -303,15 +303,17 @@ impl Vm {
                     ParamType::Simple(selfn.to_vec())
                 }
                 ParamType::Simple(n) if n.eq_ignore_ascii_case(b"parent") => ParamType::Simple(
-                    parent.map(|p| p.to_vec()).unwrap_or_else(|| b"\0never".to_vec()),
+                    parent
+                        .map(|p| p.to_vec())
+                        .unwrap_or_else(|| b"\0never".to_vec()),
                 ),
                 ParamType::Nullable(i) => ParamType::Nullable(Box::new(walk(*i, selfn, parent))),
                 ParamType::Union(v) => {
                     ParamType::Union(v.into_iter().map(|t| walk(t, selfn, parent)).collect())
                 }
-                ParamType::Intersection(v) => ParamType::Intersection(
-                    v.into_iter().map(|t| walk(t, selfn, parent)).collect(),
-                ),
+                ParamType::Intersection(v) => {
+                    ParamType::Intersection(v.into_iter().map(|t| walk(t, selfn, parent)).collect())
+                }
                 other => other,
             }
         }

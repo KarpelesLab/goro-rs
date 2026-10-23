@@ -1072,7 +1072,10 @@ fn define(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 /// A constant's copy of array `a`: references replaced by their values;
 /// None when the array contains itself.
-fn const_array_copy(a: &Rc<RefCell<PhpArray>>, stack: &mut Vec<*const RefCell<PhpArray>>) -> Option<Value> {
+fn const_array_copy(
+    a: &Rc<RefCell<PhpArray>>,
+    stack: &mut Vec<*const RefCell<PhpArray>>,
+) -> Option<Value> {
     let p = Rc::as_ptr(a);
     if stack.contains(&p) {
         return None;

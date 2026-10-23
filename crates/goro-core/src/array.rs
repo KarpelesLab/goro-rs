@@ -300,7 +300,10 @@ impl PhpArray {
     pub fn iterator_attach(&mut self, it: &std::rc::Rc<std::cell::Cell<usize>>) {
         let list = self.iters.get_or_insert_with(Default::default);
         list.retain(|w| w.strong_count() > 0);
-        if !list.iter().any(|w| std::ptr::eq(w.as_ptr(), std::rc::Rc::as_ptr(it))) {
+        if !list
+            .iter()
+            .any(|w| std::ptr::eq(w.as_ptr(), std::rc::Rc::as_ptr(it)))
+        {
             list.push(std::rc::Rc::downgrade(it));
         }
     }
