@@ -133,33 +133,16 @@ impl OutlinePen for Pen<'_> {
     }
 }
 
-/// The legacy 'kern' table's horizontal kerning (font units) between two
-/// glyphs, as FreeType's FT_Get_Kerning reads it.
-fn kern_units(font: &FontRef, left: skrifa::GlyphId, right: skrifa::GlyphId) -> i32 {
-    use skrifa::raw::TableProvider;
-    use skrifa::raw::tables::kern::SubtableKind;
-    let Ok(kern) = font.kern() else {
-        return 0;
-    };
-    let mut total = 0;
-    for st in kern.subtables().flatten() {
-        if !st.is_horizontal() || st.is_cross_stream() || st.is_variable() {
-            continue;
-        }
-        let v = match st.kind() {
-            Ok(SubtableKind::Format0(t)) => t.kerning(left, right),
-            Ok(SubtableKind::Format2(t)) => t.kerning(left, right),
-            Ok(SubtableKind::Format3(t)) => t.kerning(left, right),
-            _ => None,
-        };
-        total += v.unwrap_or(0);
-    }
-    total
-}
-
 /// Text laid out with a font: the glyph outlines (baseline of the first
 /// line at y = 0, the text starting at x = 0) and the metrics.
 /// `res` is the (x, y) resolution: sizes are points at that density.
+///
+/// Like ImageMagick on FreeType, glyphs are hinted for the light target
+/// (the auto-hinter, vertical only) and advance by their rounded hinted
+/// advances; the ascender is rounded
+/// up and the descender down, the character size is the rounded ppem,
+/// and the bounding box is the union of the glyphs' own boxes, each
+/// relative to its origin.
 pub fn layout(
     data: &[u8],
     pointsize: f64,
@@ -168,6 +151,7 @@ pub fn layout(
     interline: f64,
     kerning: f64,
 ) -> Option<(Vec<v::PathCommand>, FontMetrics)> {
+    use skrifa::outline::{HintingInstance, HintingOptions};
     let font = FontRef::from_index(data, 0).ok()?;
     let px_y = (pointsize * res.1 / 72.0) as f32;
     let sx = if res.1 > 0.0 {
@@ -181,56 +165,83 @@ pub fn layout(
     let gm = font.glyph_metrics(size, loc);
     let cmap = font.charmap();
     let outlines = font.outline_glyphs();
-    // ImageMagick reads FreeType's grid-fitted size metrics: the ascender
-    // rounded up, the descender down, advances to whole pixels
-    let height = (m.ascent - m.descent + m.leading) as f64;
+    // FreeType's light target: the auto-hinter, vertical only
+    let opts = HintingOptions {
+        engine: skrifa::outline::Engine::Auto(None),
+        target: skrifa::outline::SmoothMode::Light.into(),
+    };
+    let hinter = HintingInstance::new(&outlines, size, loc, opts).ok();
     let ascent = (m.ascent as f64).ceil();
     let descent = (m.descent as f64).floor();
     let line_h = ascent - descent + interline;
     let mut cmds = Vec::new();
     let mut max_w: f64 = 0.0;
     let mut max_adv: f64 = 0.0;
+    let (mut bx0, mut by0, mut bx1, mut by1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     let lines: Vec<&str> = text.split('\n').collect();
     for (li, line) in lines.iter().enumerate() {
         let mut x = 0f64;
         let y = li as f64 * line_h;
-        let mut prev: Option<skrifa::GlyphId> = None;
-        let upem = font.metrics(Size::unscaled(), loc).units_per_em.max(1) as f64;
         for ch in line.chars() {
             let gid = cmap.map(ch).unwrap_or_default();
-            if let Some(p) = prev {
-                let k = kern_units(&font, p, gid);
-                if k != 0 {
-                    x += (k as f64 * px_y as f64 / upem * sx as f64).round();
-                }
-            }
-            prev = Some(gid);
+            let mut adv = None;
             if let Some(g) = outlines.get(gid) {
+                let start = cmds.len();
                 let mut pen = Pen {
                     out: &mut cmds,
                     dx: x as f32,
                     dy: y as f32,
                     sx,
                 };
-                let _ = g.draw(DrawSettings::unhinted(size, loc), &mut pen);
+                let r = match &hinter {
+                    Some(h) => g.draw(DrawSettings::hinted(h, false), &mut pen),
+                    None => g.draw(DrawSettings::unhinted(size, loc), &mut pen),
+                };
+                if let Ok(am) = r {
+                    adv = am.advance_width.map(|a| a as f64);
+                }
+                for c in &cmds[start..] {
+                    let pts: &[v::Point] = match c {
+                        v::PathCommand::MoveTo(p) | v::PathCommand::LineTo(p) => {
+                            std::slice::from_ref(p)
+                        }
+                        v::PathCommand::QuadCurveTo { end, .. } => std::slice::from_ref(end),
+                        v::PathCommand::CubicCurveTo { end, .. } => std::slice::from_ref(end),
+                        _ => &[],
+                    };
+                    for p in pts {
+                        let (gx, gy) = (p.x as f64 - x, -(p.y as f64 - y));
+                        bx0 = bx0.min(gx);
+                        bx1 = bx1.max(gx);
+                        by0 = by0.min(gy);
+                        by1 = by1.max(gy);
+                    }
+                }
             }
-            let adv = (gm.advance_width(gid).unwrap_or(px_y * 0.5) as f64 * sx as f64).round();
+            let linear = gm.advance_width(gid).unwrap_or(px_y * 0.5) as f64;
+            let adv = adv.unwrap_or(linear.round()) * sx as f64;
             max_adv = max_adv.max(adv);
             x += adv + kerning;
         }
         max_w = max_w.max(x);
     }
+    if bx0 > bx1 {
+        (bx0, by0, bx1, by1) = (0.0, 0.0, 0.0, 0.0);
+    }
+    // the box always holds the origin's column
+    bx0 = bx0.min(0.0);
     let n = lines.len() as f64;
+    let ppem_x = (pointsize * res.0 / 72.0 + 0.5).floor();
+    let ppem_y = (pointsize * res.1 / 72.0 + 0.5).floor();
     let metrics = FontMetrics {
-        character_width: pointsize * res.0 / 72.0,
-        character_height: pointsize * res.1 / 72.0,
+        character_width: ppem_x,
+        character_height: ppem_y,
         ascender: ascent,
         descender: descent,
         text_width: max_w,
-        // one line: the font's height, rounded; several: whole lines
-        text_height: if n > 1.0 { line_h * n } else { height.round() },
+        text_height: if n > 1.0 { line_h * n } else { ppem_y },
         max_horizontal_advance: m.max_width.map(|w| (w as f64).round()).unwrap_or(max_adv),
-        bounds: (0.0, descent, max_w, ascent),
+        bounds: (bx0, by0, bx1, by1),
         origin: (max_w, 0.0),
     };
     Some((cmds, metrics))

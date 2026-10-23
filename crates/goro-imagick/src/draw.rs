@@ -1506,6 +1506,146 @@ impl DrawingWand {
         true
     }
 
+    /// Text with ImageMagick's placement and FreeType-like coverage: the
+    /// hinted glyphs at the floored origin, area coverage in 8-bit levels.
+    fn raster_text(
+        &self,
+        img: &mut Image,
+        p: &Primitive,
+        x: f64,
+        y: f64,
+        text: &str,
+        nodes: &mut Vec<v::Node>,
+    ) -> bool {
+        let gc = &p.gc;
+        let stroked = gc.stroke_width > 0.0 && gc.stroke.alpha > 0.0;
+        if gc.clip_path.is_some()
+            || gc.fill_pattern.is_some()
+            || gc.under_color.alpha > 0.0
+            || gc.decoration > 1
+            || stroked
+        {
+            return false;
+        }
+        let Some((cmds, m, ox, oy)) = self.text_place(p, x, y, text, img.columns, img.rows) else {
+            return false;
+        };
+        Self::flush_nodes(img, nodes);
+        // the origin goes through the affine and is floored; the glyphs
+        // through its linear part
+        let a = gc.affine;
+        let (dx, dy) = (a.sx * ox + a.ry * oy + a.tx, a.rx * ox + a.sy * oy + a.ty);
+        let (fx, fy) = (dx.floor(), dy.floor());
+        // flatten the outlines
+        let mut segs: Vec<(mvg::Pt, mvg::Pt)> = Vec::new();
+        let mut cur = (0.0, 0.0);
+        let mut start = (0.0, 0.0);
+        let tp = |q: &v::Point| {
+            let (gx, gy) = (q.x as f64, q.y as f64);
+            (a.sx * gx + a.ry * gy + fx, a.rx * gx + a.sy * gy + fy)
+        };
+        for c in &cmds {
+            match c {
+                v::PathCommand::MoveTo(q) => {
+                    if cur != start {
+                        segs.push((cur, start));
+                    }
+                    cur = tp(q);
+                    start = cur;
+                }
+                v::PathCommand::LineTo(q) => {
+                    let n = tp(q);
+                    segs.push((cur, n));
+                    cur = n;
+                }
+                v::PathCommand::QuadCurveTo { control, end } => {
+                    let (c1, e) = (tp(control), tp(end));
+                    // FreeType's smooth rasteriser: quarter the deviation
+                    // (26.6 units) until it is at most a quarter pixel,
+                    // doubling the number of segments each time
+                    let dev = ((cur.0 - 2.0 * c1.0 + e.0).abs())
+                        .max((cur.1 - 2.0 * c1.1 + e.1).abs())
+                        * 64.0;
+                    let mut dev = dev.round() as i64;
+                    let mut n = 1usize;
+                    while dev > 16 {
+                        dev >>= 2;
+                        n <<= 1;
+                    }
+                    for i in 1..=n {
+                        let t = i as f64 / n as f64;
+                        let u = 1.0 - t;
+                        let q = (
+                            u * u * cur.0 + 2.0 * u * t * c1.0 + t * t * e.0,
+                            u * u * cur.1 + 2.0 * u * t * c1.1 + t * t * e.1,
+                        );
+                        segs.push((if i == 1 { cur } else { segs.last().unwrap().1 }, q));
+                    }
+                    cur = e;
+                }
+                v::PathCommand::CubicCurveTo { c1, c2, end } => {
+                    let (a, b, e) = (tp(c1), tp(c2), tp(end));
+                    let n = 24;
+                    for i in 1..=n {
+                        let t = i as f64 / n as f64;
+                        let u = 1.0 - t;
+                        let q = (
+                            u * u * u * cur.0
+                                + 3.0 * u * u * t * a.0
+                                + 3.0 * u * t * t * b.0
+                                + t * t * t * e.0,
+                            u * u * u * cur.1
+                                + 3.0 * u * u * t * a.1
+                                + 3.0 * u * t * t * b.1
+                                + t * t * t * e.1,
+                        );
+                        segs.push((if i == 1 { cur } else { segs.last().unwrap().1 }, q));
+                    }
+                    cur = e;
+                }
+                v::PathCommand::Close => {
+                    if cur != start {
+                        segs.push((cur, start));
+                    }
+                    cur = start;
+                }
+                _ => {}
+            }
+        }
+        if cur != start {
+            segs.push((cur, start));
+        }
+        let _ = m;
+        if segs.is_empty() {
+            return true;
+        }
+        let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+        for (a, b) in &segs {
+            for q in [a, b] {
+                x0 = x0.min(q.0);
+                x1 = x1.max(q.0);
+                y0 = y0.min(q.1);
+                y1 = y1.max(q.1);
+            }
+        }
+        let (gx0, gy0) = (x0.floor() as i64, y0.floor() as i64);
+        let (gw, gh) = (
+            (x1.ceil() as i64 - gx0 + 1).max(1) as usize,
+            (y1.ceil() as i64 - gy0 + 1).max(1) as usize,
+        );
+        let cov = mvg::area_coverage(&segs, gx0, gy0, gw, gh);
+        let c = &gc.fill;
+        let al = if c.alpha_trait { c.alpha } else { 65535.0 };
+        let color = [
+            c.red,
+            c.green,
+            c.blue,
+            (al * gc.fill_opacity * gc.opacity).clamp(0.0, 65535.0),
+        ];
+        mvg::composite_coverage(img, &cov, gx0, gy0, gw, &color);
+        true
+    }
+
     pub fn render_onto(&self, img: &mut Image) -> crate::error::MResult<()> {
         let (w, h) = (img.columns, img.rows);
         if w == 0 || h == 0 {
@@ -1524,6 +1664,9 @@ impl DrawingWand {
                     points.push((px.round() as i64, py.round() as i64, c.to_rgba16()));
                 }
                 Shape::Text { x, y, text } => {
+                    if self.raster_text(img, p, *x, *y, text, &mut nodes) {
+                        continue;
+                    }
                     if let Some(n) = self.text_node(p, *x, *y, text, w, h) {
                         nodes.extend(n);
                     }
@@ -1637,7 +1780,9 @@ impl DrawingWand {
 
     /// A text primitive: the glyphs (and the under colour box), placed by
     /// gravity and alignment.
-    fn text_node(
+    /// The laid-out glyphs of a text primitive and its baseline origin,
+    /// placed by gravity and alignment.
+    fn text_place(
         &self,
         p: &Primitive,
         x: f64,
@@ -1645,7 +1790,7 @@ impl DrawingWand {
         text: &str,
         w: usize,
         h: usize,
-    ) -> Option<Vec<v::Node>> {
+    ) -> Option<(Vec<v::PathCommand>, crate::text::FontMetrics, f64, f64)> {
         let gc = &p.gc;
         let path = crate::text::find_font(gc.font.as_deref(), gc.family.as_deref())?;
         let data = crate::text::font_data(&path)?;
@@ -1680,6 +1825,21 @@ impl DrawingWand {
             }
         }
         oy -= 0.0;
+        Some((cmds, m, ox, oy))
+    }
+
+    fn text_node(
+        &self,
+        p: &Primitive,
+        x: f64,
+        y: f64,
+        text: &str,
+        w: usize,
+        h: usize,
+    ) -> Option<Vec<v::Node>> {
+        let gc = &p.gc;
+        let (cmds, m, ox, oy) = self.text_place(p, x, y, text, w, h)?;
+        let (tw, th) = (m.text_width, m.text_height);
         let mut out = Vec::new();
         if gc.under_color.alpha > 0.0 {
             let box_cmds = vec![

@@ -650,3 +650,120 @@ fn stroke_outline(img: &mut Image, subs: &[Sub], st: &StrokeStyle) {
         }
     }
 }
+
+/// Exact area coverage of closed outlines (line segments, device space,
+/// pixel (x, y) covering [x, x+1]×[y, y+1]) over a `w`×`h` grid at
+/// (x0, y0), by signed-area accumulation (non-zero, non-overlapping).
+pub fn area_coverage(segs: &[(Pt, Pt)], x0: i64, y0: i64, w: usize, h: usize) -> Vec<f64> {
+    let mut acc = vec![0f64; w * h + 2];
+    let stride = w;
+    for &(a, b) in segs {
+        let (p0, p1) = (
+            (a.0 - x0 as f64, a.1 - y0 as f64),
+            (b.0 - x0 as f64, b.1 - y0 as f64),
+        );
+        if p0.1 == p1.1 {
+            continue;
+        }
+        let (dir, p0, p1) = if p0.1 < p1.1 {
+            (1.0, p0, p1)
+        } else {
+            (-1.0, p1, p0)
+        };
+        let dxdy = (p1.0 - p0.0) / (p1.1 - p0.1);
+        let mut x = p0.0;
+        let ys = p0.1.max(0.0);
+        if p0.1 < 0.0 {
+            x -= p0.1 * dxdy;
+        }
+        let ye = p1.1.min(h as f64);
+        if ys >= ye {
+            continue;
+        }
+        let mut y = ys as usize;
+        while (y as f64) < ye {
+            let linestart = y * stride;
+            let dy = ((y + 1) as f64).min(ye) - (y as f64).max(ys);
+            let xnext = x + dxdy * dy;
+            let d = dy * dir;
+            let (xa, xb) = if x < xnext { (x, xnext) } else { (xnext, x) };
+            let xa_f = xa.floor();
+            let xai = xa_f as i64;
+            let xb_c = xb.ceil();
+            let xbi = xb_c as i64;
+            let put = |acc: &mut Vec<f64>, xi: i64, v: f64| {
+                if xi < 0 {
+                    acc[linestart] += v;
+                } else if (xi as usize) < stride {
+                    acc[linestart + xi as usize] += v;
+                } else {
+                    // right of the grid: no effect on it
+                }
+            };
+            if xbi <= xai + 1 {
+                let xmf = 0.5 * (x + xnext) - xa_f;
+                put(&mut acc, xai, d - d * xmf);
+                put(&mut acc, xai + 1, d * xmf);
+            } else {
+                let s = 1.0 / (xb - xa);
+                let x0f = xa - xa_f;
+                let a0 = 0.5 * s * (1.0 - x0f) * (1.0 - x0f);
+                let x1f = xb - xb_c + 1.0;
+                let am = 0.5 * s * x1f * x1f;
+                put(&mut acc, xai, d * a0);
+                if xbi == xai + 2 {
+                    put(&mut acc, xai + 1, d * (1.0 - a0 - am));
+                } else {
+                    let a1 = s * (1.5 - x0f);
+                    put(&mut acc, xai + 1, d * (a1 - a0));
+                    for xi in xai + 2..xbi - 1 {
+                        put(&mut acc, xi, d * s);
+                    }
+                    let a2 = a1 + (xbi - xai - 3) as f64 * s;
+                    put(&mut acc, xbi - 1, d * (1.0 - a2 - am));
+                }
+                put(&mut acc, xbi, d * am);
+            }
+            x = xnext;
+            y += 1;
+        }
+    }
+    let mut out = vec![0f64; w * h];
+    for yy in 0..h {
+        let mut s = 0f64;
+        for xx in 0..w {
+            s += acc[yy * stride + xx];
+            out[yy * w + xx] = s.abs().min(1.0);
+        }
+    }
+    out
+}
+
+/// Composite a coverage grid (8-bit levels, as FreeType renders them) of
+/// `color` over the image.
+pub fn composite_coverage(
+    img: &mut Image,
+    cov: &[f64],
+    x0: i64,
+    y0: i64,
+    w: usize,
+    color: &[f64; 4],
+) {
+    let h = cov.len().checked_div(w).unwrap_or(0);
+    for yy in 0..h {
+        let y = y0 + yy as i64;
+        if y < 0 || y >= img.rows as i64 {
+            continue;
+        }
+        for xx in 0..w {
+            let x = x0 + xx as i64;
+            if x < 0 || x >= img.columns as i64 {
+                continue;
+            }
+            let level = (cov[yy * w + xx] * 256.0 + 1e-9).floor().min(255.0);
+            if level > 0.0 {
+                over(img, x as usize, y as usize, color, level / 255.0);
+            }
+        }
+    }
+}
