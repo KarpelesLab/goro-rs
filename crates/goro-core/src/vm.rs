@@ -43781,7 +43781,6 @@ impl Vm {
                                         if numeric
                                             || !valid_name(&name)
                                             || name == b"this"
-                                            || name == b"GLOBALS"
                                             || exists(&cvs, self, &name)
                                         {
                                             None
@@ -43846,10 +43845,10 @@ impl Vm {
                                 if name.is_empty() && !numeric && etype == 3 {
                                     continue;
                                 }
-                                if target == b"GLOBALS" && etype == 0 {
-                                    // $GLOBALS is not part of the symbol table; the
-                                    // variable is created but unreachable.
-                                    count += 1;
+                                // An existing "GLOBALS" entry is never overwritten;
+                                // otherwise the variable is created (unreachable
+                                // by name: $GLOBALS is compiled specially).
+                                if target == b"GLOBALS" && tab.exists(&target) {
                                     continue;
                                 }
                                 if !valid_name(&target) {
@@ -43901,7 +43900,18 @@ impl Vm {
                         }
                     }
                     if let Some((class, msg)) = err {
+                        // (thrown from inside extract(): its frame is in the trace)
+                        let mut fargs = vec![arr_val.clone(), Value::Long(flags)];
+                        if let Value::Array(m) = &meta_val {
+                            if let Some(p) = m.borrow().iter().nth(1).map(|(_, v)| v.deref()) {
+                                if !matches!(p, Value::Null) {
+                                    fargs.push(p);
+                                }
+                            }
+                        }
+                        self.push_builtin_frame(b"extract", &fargs, op.line);
                         let exc_val = self.create_exception(class, &msg, op.line);
+                        self.pop_builtin_frame();
                         self.current_exception = Some(exc_val);
                         if let Some((catch_target, _, _, _, saved_pc)) = exception_handlers.pop() {
                             pending_calls_catch_depth = Some(saved_pc);
