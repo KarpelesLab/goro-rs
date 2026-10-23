@@ -493,3 +493,78 @@ pub fn bilateral_blur(img: &mut Image, width: f64, height: f64, isigma: f64, ssi
     }
     img.colors = None;
 }
+
+/// MeanShiftImage(): from each pixel, repeatedly average the position
+/// and colour of the pixels in the (w/2, h/2) ellipse around the rounded
+/// position whose RGB distance to the running mean colour is at most
+/// `distance` (quantum units; edge virtual pixels), until the squared
+/// shift (pixels, colour in 8-bit units) is at most 3 or 100 rounds pass.
+pub fn mean_shift(img: &mut Image, width: usize, height: usize, distance: f64) {
+    let (w, h) = (img.columns, img.rows);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let (rx, ry) = ((width / 2) as i64, (height / 2) as i64);
+    let mut offs = Vec::new();
+    for v in -ry..=ry {
+        for u in -rx..=rx {
+            if rx > 0 && ry > 0 {
+                let e = (u * u) as f64 / (rx * rx) as f64 + (v * v) as f64 / (ry * ry) as f64;
+                if e > 1.0 {
+                    continue;
+                }
+            }
+            offs.push((u, v));
+        }
+    }
+    let src = img.clone();
+    let d2 = distance * distance;
+    for y in 0..h {
+        for x in 0..w {
+            let (mut cx, mut cy) = (x as f64, y as f64);
+            let p0 = src.px(x, y);
+            let mut col = [p0[0] as f64, p0[1] as f64, p0[2] as f64];
+            for _ in 0..100 {
+                let (ix, iy) = ((cx + 0.5).floor() as i64, (cy + 0.5).floor() as i64);
+                let (mut sx, mut sy, mut n) = (0f64, 0f64, 0f64);
+                let mut sc = [0f64; 3];
+                for &(u, v) in &offs {
+                    let (xx, yy) = (ix + u, iy + v);
+                    let p = edge_px(&src, xx, yy);
+                    let dr = p[0] as f64 - col[0];
+                    let dg = p[1] as f64 - col[1];
+                    let db = p[2] as f64 - col[2];
+                    if dr * dr + dg * dg + db * db <= d2 {
+                        sx += xx as f64;
+                        sy += yy as f64;
+                        for k in 0..3 {
+                            sc[k] += p[k] as f64;
+                        }
+                        n += 1.0;
+                    }
+                }
+                if n == 0.0 {
+                    break;
+                }
+                let (nx, ny) = (sx / n, sy / n);
+                let nc = [sc[0] / n, sc[1] / n, sc[2] / n];
+                let mut shift = (nx - cx) * (nx - cx) + (ny - cy) * (ny - cy);
+                for k in 0..3 {
+                    let d = (nc[k] - col[k]) / 257.0;
+                    shift += d * d;
+                }
+                cx = nx;
+                cy = ny;
+                col = nc;
+                if shift <= 3.0 {
+                    break;
+                }
+            }
+            let idx = (y * w + x) * 4;
+            for k in 0..3 {
+                img.pixels[idx + k] = clamp_to_quantum(col[k]) as u16;
+            }
+        }
+    }
+    img.colors = None;
+}

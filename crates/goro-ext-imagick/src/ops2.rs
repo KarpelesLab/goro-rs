@@ -959,11 +959,8 @@ fn mean_shift_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R
     let a = zpp::parse(vm, f, "lld", args)?;
     let (w, h, dist) = (a[0].long_or(3), a[1].long_or(3), a[2].double_or(0.1));
     image_op(vm, &d_(o), "Unable to meanShiftImage", |i| {
-        let r = (w.max(h).max(1) / 2).max(1) as u32;
-        apply_oxideav(
-            i,
-            &of::BilateralBlur::new(r, r as f32, (dist * 255.0).max(1.0) as f32),
-        )
+        goro_imagick::effects::mean_shift(i, w.max(0) as usize, h.max(0) as usize, dist);
+        Ok(())
     })
 }
 
