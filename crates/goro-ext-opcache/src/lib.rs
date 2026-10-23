@@ -951,8 +951,8 @@ fn startup(vm: &mut Vm) {
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or(main);
         script_cache::file_cache_store(&path);
-        if !file_cache_only {
-            script_cache::store_main(&path);
+        if !file_cache_only && script_cache::store_main(&path) {
+            vm.run_optimizer_passes();
         }
     }
 }

@@ -380,43 +380,47 @@ fn cache_key(path: &str, cfg: &Config) -> String {
 }
 
 /// Records a freshly compiled script (a cache miss).
-pub fn store_compiled(path: &str, compiled: Rc<Compiled>) {
+/// Whether the script was cached (and so optimized).
+pub fn store_compiled(path: &str, compiled: Rc<Compiled>) -> bool {
     let cfg = CONFIG.with(|c| c.borrow().clone());
     if !cfg.enabled {
-        return;
+        return false;
     }
     let key = cache_key(path, &cfg);
     let path = key.as_str();
     STATS.with(|s| s.borrow_mut().misses += 1);
     if is_blacklisted(path) {
         STATS.with(|s| s.borrow_mut().blacklist_misses += 1);
-        return;
+        return false;
     }
     let Some(mtime) = cacheable(path, &cfg) else {
-        return;
+        return false;
     };
     let size = estimate_size(&compiled.op_array);
     insert(path, Some(compiled), mtime, size);
     log(LOG_INFO, &format!("Cached script '{}'", path));
+    true
 }
 
 /// Records the main script (compiled by the SAPI).
-pub fn store_main(path: &str) {
+/// Whether the script was cached (and so optimized).
+pub fn store_main(path: &str) -> bool {
     let cfg = CONFIG.with(|c| c.borrow().clone());
     if !cfg.enabled {
-        return;
+        return false;
     }
     STATS.with(|s| s.borrow_mut().misses += 1);
     if is_blacklisted(path) {
         STATS.with(|s| s.borrow_mut().blacklist_misses += 1);
-        return;
+        return false;
     }
     let Some(mtime) = cacheable(path, &cfg) else {
-        return;
+        return false;
     };
     let size = std::fs::metadata(path).map(|m| m.len() as i64).unwrap_or(0) * 8 + 1024;
     insert(path, None, mtime, size);
     log(LOG_INFO, &format!("Cached script '{}'", path));
+    true
 }
 
 fn estimate_size(op: &OpArray) -> i64 {
@@ -533,8 +537,19 @@ impl crate::vm::Vm {
             }
         }
         let compiled = Rc::new(compiled);
-        store_compiled(path, compiled.clone());
+        if store_compiled(path, compiled.clone()) {
+            self.run_optimizer_passes();
+        }
         compiled
+    }
+
+    /// zend_optimize_script()'s zend_optimizer_call_registered_passes():
+    /// opcache optimized a script it caches.
+    #[inline(never)]
+    pub fn run_optimizer_passes(&mut self) {
+        for pass in self.optimizer_passes.clone() {
+            pass(self);
+        }
     }
 
     /// zend_emit_recorded_errors(): the diagnostics of a cached script's

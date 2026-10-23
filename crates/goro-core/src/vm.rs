@@ -1656,6 +1656,9 @@ pub struct Vm {
     /// Extension startup handlers, run by the SAPI once the INI settings
     /// are in place and before the script runs.
     pub startup_hooks: Vec<fn(&mut Vm)>,
+    /// zend_optimizer_register_pass(): run when opcache optimizes a script
+    /// it caches (zend_optimizer_call_registered_passes()).
+    pub optimizer_passes: Vec<fn(&mut Vm)>,
     /// Extension request-startup handlers (RINIT), run by the SAPI after the
     /// request superglobals have been registered.
     pub request_startup_hooks: Vec<fn(&mut Vm)>,
@@ -2915,6 +2918,7 @@ impl Vm {
             treat_data_hook: None,
             phpinfo_hooks: Vec::new(),
             startup_hooks: Vec::new(),
+            optimizer_passes: Vec::new(),
             request_startup_hooks: Vec::new(),
             request_shutdown_hooks: Vec::new(),
             headers_sent: false,

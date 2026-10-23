@@ -85,7 +85,16 @@ pub fn register(vm: &mut Vm) {
     handlers::register(vm);
     handlers::register_dimension_handlers(vm);
     observer::register(vm);
+    vm.startup_hooks.push(register_passes);
     vm.module_shutdown_hooks.push(mshutdown);
+}
+
+/// zend_test.register_passes: zend_optimizer_register_pass(pass1 / pass2).
+fn register_passes(vm: &mut Vm) {
+    if ini::ini_bool(vm, "zend_test.register_passes") {
+        vm.optimizer_passes.push(|vm| vm.write_output(b"pass1\n"));
+        vm.optimizer_passes.push(|vm| vm.write_output(b"pass2\n"));
+    }
 }
 
 /// PHP_MSHUTDOWN_FUNCTION(zend_test)
