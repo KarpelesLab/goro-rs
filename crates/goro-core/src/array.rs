@@ -80,7 +80,9 @@ pub struct PhpArray {
     /// entries pointing at it): each holds the insertion-order position of
     /// the next element to fetch, kept in step with removals and
     /// insertions the way zend_hash keeps its iterator positions. Dead
-    /// iterators (the loop is gone) are pruned lazily.
+    /// iterators (the loop is gone) are pruned lazily. (Boxed: one word in
+    /// every array, most of which never have one.)
+    #[allow(clippy::box_collection)]
     iters: Option<Box<Vec<std::rc::Weak<std::cell::Cell<usize>>>>>,
 }
 

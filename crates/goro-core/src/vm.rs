@@ -10410,9 +10410,7 @@ impl Vm {
         false
     }
 
-    /// Get the output buffer contents
     /// Format the current call stack as a PHP-style stack trace string
-
     pub fn format_stack_trace(&self) -> String {
         let mut lines = Vec::new();
         // The call stack is ordered from outermost to innermost
@@ -53310,9 +53308,7 @@ impl Vm {
                                     && (is_ghost || (is_proxy && !already_real))
                                 {
                                     true
-                                } else if is_ghost {
-                                    has_get && !is_declared && !guard_active
-                                } else if is_proxy && !already_real {
+                                } else if is_ghost || (is_proxy && !already_real) {
                                     has_get && !is_declared && !guard_active
                                 } else {
                                     false
