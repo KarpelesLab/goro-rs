@@ -1279,7 +1279,14 @@ impl Vm {
                     return self.spl_throw(b"Error", &msg);
                 }
                 let v = a.first().map_or(Value::Null, Value::deref_for_storage);
-                self.ao_offset_set(obj, &Value::Null, v);
+                // spl_array_write_dimension(): an overridden offsetSet()
+                // is called.
+                if self.ao_user_has(obj, b"offsetset") {
+                    let this = Value::Object(obj.clone());
+                    self.spl_call_method(&this, b"offsetSet", &[Value::Null, v]);
+                } else {
+                    self.ao_offset_set(obj, &Value::Null, v);
+                }
                 Value::Null
             }
             b"getarraycopy" => {
