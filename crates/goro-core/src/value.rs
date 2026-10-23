@@ -2068,7 +2068,7 @@ fn zend_gcvt_string(value: f64, ndigit: i32, dec_point: u8, exp_char: u8) -> Str
 pub fn shortest_tie_to_even(v: f64, digits: &mut [u8], exp: i32) {
     let n = digits.len();
     let last = digits[n - 1];
-    if (last - b'0') % 2 == 0 {
+    if (last - b'0').is_multiple_of(2) {
         return;
     }
     // The candidate one unit lower in the last digit must round-trip too...
