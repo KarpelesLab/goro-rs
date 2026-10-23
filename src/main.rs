@@ -9,6 +9,7 @@ use goro_core::vm::Vm;
 
 mod cgi;
 mod cli_server;
+mod fpm;
 mod getopt;
 #[allow(dead_code)] // the ported parser also handles responses
 mod http_parser;
@@ -79,6 +80,10 @@ fn main() {
     // goro's own test runner mode.
     if args.len() >= 2 && args[1] == b"--test" {
         run_tests(&args);
+    }
+    // Invoked as php-fpm: the FastCGI Process Manager.
+    if args.first().is_some_and(|a| fpm::is_fpm_name(a)) {
+        process::exit(fpm::fpm_main(args));
     }
     // Invoked as php-cgi: the CGI SAPI.
     if args.first().is_some_and(|a| cgi::is_cgi_name(a)) {

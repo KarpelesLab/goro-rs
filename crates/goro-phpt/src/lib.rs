@@ -1040,6 +1040,35 @@ fn in_test_grandchild() -> bool {
     }
 }
 
+/// php-fpm masters run in a session of their own: one a test (through
+/// sapi/fpm/tests/tester.inc) left running is killed with its workers,
+/// found by the configuration file the tester made for the test.
+fn kill_stray_fpm(filename: &str) {
+    let Some(base) = filename.strip_suffix(".php") else {
+        return;
+    };
+    let ini = format!("{}.ini", base);
+    let Ok(dir) = std::fs::read_dir("/proc") else {
+        return;
+    };
+    for e in dir.flatten() {
+        let name = e.file_name();
+        let Some(pid) = name.to_str().and_then(|n| n.parse::<i32>().ok()) else {
+            continue;
+        };
+        let comm = std::fs::read(format!("/proc/{}/comm", pid)).unwrap_or_default();
+        if comm.trim_ascii_end() != b"php-fpm" {
+            continue;
+        }
+        let cmdline = std::fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or_default();
+        if cmdline.split(|&c| c == 0).any(|a| a == ini.as_bytes()) {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 fn execute_php_with_timeout_and_filename(
     source: &[u8],
     timeout_secs: u64,
@@ -1237,6 +1266,7 @@ fn execute_php_with_timeout_and_filename(
                 unsafe {
                     libc::kill(-pid, libc::SIGKILL);
                 }
+                kill_stray_fpm(filename);
                 // A test that replaced itself (pcntl_exec()) did not remove
                 // its file.
                 if !filename.is_empty() && filename != "Unknown.php" {
@@ -1264,6 +1294,7 @@ fn execute_php_with_timeout_and_filename(
                 unsafe {
                     libc::waitpid(pid, std::ptr::null_mut(), 0);
                 }
+                kill_stray_fpm(filename);
                 unsafe {
                     libc::close(read_fd);
                     libc::close(cap_r);
@@ -2634,6 +2665,34 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
             if cgi.exists() {
                 unsafe {
                     std::env::set_var("TEST_PHP_CGI_EXECUTABLE", &cgi);
+                }
+            }
+        }
+    }
+    // sapi/fpm/tests look for php-fpm in the sbin directory next to the bin
+    // directory of TEST_PHP_EXECUTABLE (an installation layout): goro is
+    // php-fpm when run under that name.
+    if std::env::var_os("TEST_FPM_EXECUTABLE").is_none() {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(root) = exe.parent().and_then(|d| d.parent()) {
+                let sbin = root.join("sbin");
+                let _ = std::fs::create_dir_all(&sbin);
+                let fpm = sbin.join("php-fpm");
+                if std::fs::symlink_metadata(&fpm).is_err() {
+                    let _ = std::os::unix::fs::symlink(&exe, &fpm);
+                }
+                if fpm.exists() {
+                    unsafe {
+                        std::env::set_var("TEST_FPM_EXECUTABLE", &fpm);
+                        // the tester loads the extensions a test needs
+                        // with -dextension= from there
+                        if std::env::var_os("TEST_FPM_EXTENSION_DIR").is_none() {
+                            std::env::set_var(
+                                "TEST_FPM_EXTENSION_DIR",
+                                exe.with_file_name("extensions"),
+                            );
+                        }
+                    }
                 }
             }
         }
