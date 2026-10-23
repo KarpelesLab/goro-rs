@@ -3151,7 +3151,11 @@ impl Compiler {
                         .collect();
                     // A name taken by an internal class can't be bound at
                     // compile time: the declaration fails at runtime instead.
-                    if self.class_is_early_bindable(modifiers, extends, implements, body)
+                    if self.hoist_name_taken(&qn_lower) {
+                        // A second declaration of a hoisted name is not early
+                        // bound (zend_try_early_bind fails): it is declared,
+                        // and the redeclaration reported, at its position.
+                    } else if self.class_is_early_bindable(modifiers, extends, implements, body)
                         && !crate::vm::is_known_builtin_class_name(&qn_lower)
                     {
                         self.in_hoisting_pass = true;
@@ -3184,6 +3188,12 @@ impl Compiler {
             }
         }
         Ok(())
+    }
+
+    /// Whether an earlier declaration in this file already hoisted `qn_lower`.
+    #[inline(never)]
+    fn hoist_name_taken(&self, qn_lower: &[u8]) -> bool {
+        self.hoisted_class_idx.contains_key(qn_lower)
     }
 
     /// A top-level class that is not early-bindable only because its parent
