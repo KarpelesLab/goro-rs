@@ -135,7 +135,35 @@ cargo build --release
 
 # Run PHPT tests
 ./target/release/goro --test /path/to/tests/
+
+# goro's own regression tests
+./target/release/goro --test tests/goro/
 ```
+
+### Web server SAPI (goro-httpd)
+
+`goro-httpd` serves a document root over HTTP and HTTPS the way php-fpm
+behind nginx (or mod_php) would, on the pure-Rust [httpsd](https://crates.io/crates/httpsd)
+server core (HTTP/1.1, HTTP/2 over TLS via purecrypto, gzip):
+
+```bash
+./target/release/goro-httpd -t /var/www -l 127.0.0.1:8080 \
+    -s 127.0.0.1:8443 --tls-cert cert.pem --tls-key key.pem   # or --self-signed
+```
+
+`index.php` directory indexes, `/script.php/path/info`, static files with
+their MIME types, and requests for missing files routed to a front
+controller (`/index.php`, like WordPress' `.htaccess` rewrite); `$_SERVER`
+has the CGI variables (`SCRIPT_NAME`, `PATH_INFO`, `REQUEST_URI`, `HTTPS`,
+`REMOTE_ADDR`, `HTTP_*`, …). Requests run on a pool of worker threads, each
+in a fresh engine, with a per-worker opcache. `goro-httpd --help` lists the
+options.
+
+[samples/wordpress](samples/wordpress/) runs a stock WordPress on it with
+SQLite (the official SQLite Database Integration plugin over goro's PDO
+SQLite) and has an end-to-end smoke test: installer, login, dashboard,
+pretty permalinks, publishing through the REST API, comments, uploads with
+thumbnails and HTTPS.
 
 ## Architecture
 
