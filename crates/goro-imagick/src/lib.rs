@@ -43,6 +43,7 @@ pub mod pixels;
 pub mod properties;
 pub mod pseudo;
 pub mod resize;
+pub mod segment;
 pub mod shear;
 pub mod statistics;
 pub mod svg;

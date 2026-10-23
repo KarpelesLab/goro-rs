@@ -452,9 +452,11 @@ fn selective_blur_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) 
 
 fn segment_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "ldd|b", args)?;
-    let _ = a;
+    let cs = Colorspace(a[0].long_or(0) as i32);
+    let (ct, st) = (a[1].double_or(1.0), a[2].double_or(1.5));
     image_op(vm, &d_(o), "Unable to segment image", |i| {
-        apply_oxideav(i, &of::Quantize::new(16))
+        goro_imagick::segment::segment(i, cs, ct, st);
+        Ok(())
     })
 }
 
