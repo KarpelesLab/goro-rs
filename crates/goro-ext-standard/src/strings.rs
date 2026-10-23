@@ -3266,7 +3266,12 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
+    // metaphone.c walks a NUL-terminated C string.
     let word_bytes = word.as_bytes();
+    let word_bytes = &word_bytes[..word_bytes
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(word_bytes.len())];
     let max = if max_phonemes > 0 {
         max_phonemes as usize
     } else {
@@ -5696,7 +5701,7 @@ fn quotemeta_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn utf8_decode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated_at("Function utf8_decode() is deprecated since 8.2, visit the php.net documentation for various alternatives", 0);
+    vm.emit_deprecated_at("Function utf8_decode() is deprecated since 8.2, visit the php.net documentation for various alternatives", vm.current_line);
     // Convert UTF-8 to ISO-8859-1 (simplified: just keep bytes < 256)
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let utf8 = s.to_string_lossy();
@@ -5712,7 +5717,7 @@ fn utf8_decode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn utf8_encode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    vm.emit_deprecated_at("Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives", 0);
+    vm.emit_deprecated_at("Function utf8_encode() is deprecated since 8.2, visit the php.net documentation for various alternatives", vm.current_line);
     // Convert ISO-8859-1 to UTF-8
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();

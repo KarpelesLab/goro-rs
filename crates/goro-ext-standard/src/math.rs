@@ -788,7 +788,8 @@ fn pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let base_f = base.to_double();
     let exp_f = exp.to_double();
     if base_f == 0.0 && exp_f < 0.0 {
-        vm.emit_deprecated_at("Power of base 0 and negative exponent is deprecated", 0);
+        let line = vm.current_line;
+        vm.emit_deprecated_at("Power of base 0 and negative exponent is deprecated", line);
     }
     Ok(base.pow(exp))
 }
