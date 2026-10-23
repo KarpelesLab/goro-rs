@@ -898,21 +898,18 @@ impl Vm {
         let mut set = vec![false; positional];
         set.iter_mut().for_each(|s| *s = true);
         let num_args = info.num_args();
+        // Unknown names given to a variadic function are collected as extra
+        // named params; zpp rejects them once it has checked the argument
+        // count (that the named ones placed so far are part of).
+        let mut extra_named = false;
         for (name, val) in named {
             let idx = info.params[..num_args]
                 .iter()
                 .position(|p| p.name.as_bytes() == name.as_slice());
             let Some(idx) = idx else {
                 if info.is_variadic() {
-                    // Collected as extra named params: zpp checks the
-                    // positional argument count before rejecting them.
-                    if let Some(msg) = info.arity_error(positional) {
-                        return Err(ZppError::Throw(b"ArgumentCountError", msg));
-                    }
-                    return Err(ZppError::Throw(
-                        b"ArgumentCountError",
-                        format!("{}() does not accept unknown named parameters", info.name),
-                    ));
+                    extra_named = true;
+                    continue;
                 }
                 return Err(ZppError::Throw(
                     b"Error",
@@ -969,6 +966,15 @@ impl Vm {
                 dv
             };
             defaulted.push(i);
+        }
+        if extra_named {
+            if let Some(msg) = info.arity_error(args.len()) {
+                return Err(ZppError::Throw(b"ArgumentCountError", msg));
+            }
+            return Err(ZppError::Throw(
+                b"ArgumentCountError",
+                format!("{}() does not accept unknown named parameters", info.name),
+            ));
         }
         Ok(defaulted)
     }
@@ -1380,6 +1386,13 @@ impl Vm {
         if m & T_BOOL == T_BOOL
             && matches!(arg, Value::Long(_) | Value::Double(_) | Value::String(_))
         {
+            // zend_parse_arg_bool_weak()
+            if matches!(arg, Value::Double(d) if d.is_nan()) {
+                self.emit_warning_at("unexpected NAN value was coerced to bool", line);
+                if self.current_exception.is_some() {
+                    return Err(ZppError::Pending);
+                }
+            }
             *arg = if arg.is_truthy() {
                 Value::True
             } else {
