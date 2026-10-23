@@ -1258,6 +1258,18 @@ fn reflection_method_construct_impl(vm: &mut Vm, args: &[Value], line: u32) -> b
                 if let Some(p) = fb.windows(2).position(|w| w == b"::") {
                     a[1] = Value::String(PhpString::from_vec(fb[..p].to_vec()));
                     a[2] = Value::String(PhpString::from_vec(fb[p + 2..].to_vec()));
+                } else {
+                    // A closure of a plain function: Closure::__invoke with
+                    // that function's signature.
+                    a[1] = Value::String(PhpString::from_bytes(b"Closure"));
+                    let ok = reflection_method_construct(vm, &a, line);
+                    if ok {
+                        this.borrow_mut().set_property(
+                            b"__reflection_closure_fn".to_vec(),
+                            Value::String(PhpString::from_vec(fb.to_ascii_lowercase())),
+                        );
+                    }
+                    return ok;
                 }
             }
         }
@@ -4985,23 +4997,19 @@ pub fn reflection_method_method(
     if let Some(ref fn_lower) = closure_fn {
         match method {
             b"getnumberofparameters" => {
-                let count = vm
-                    .user_functions
-                    .get(fn_lower.as_slice())
+                let count = rfunc(vm, fn_lower.as_slice())
                     .map(|op| op.param_count as i64)
                     .unwrap_or(0);
                 return Some(Value::Long(count));
             }
             b"getnumberofrequiredparameters" => {
-                let count = vm
-                    .user_functions
-                    .get(fn_lower.as_slice())
+                let count = rfunc(vm, fn_lower.as_slice())
                     .map(|op| op.required_param_count as i64)
                     .unwrap_or(0);
                 return Some(Value::Long(count));
             }
             b"getparameters" => {
-                if let Some(op_array) = vm.user_functions.get(fn_lower.as_slice()).cloned() {
+                if let Some(op_array) = rfunc(vm, fn_lower.as_slice()).cloned() {
                     let params = create_reflection_parameters(vm, &op_array);
                     // Closure::__invoke is an internal trampoline with
                     // userland arginfo: defaults are not retrievable.
@@ -5020,9 +5028,7 @@ pub fn reflection_method_method(
                 return Some(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
             }
             b"getreturntype" => {
-                let rt = vm
-                    .user_functions
-                    .get(fn_lower.as_slice())
+                let rt = rfunc(vm, fn_lower.as_slice())
                     .and_then(|op| op.return_type.as_ref())
                     .cloned();
                 return Some(match rt {
@@ -5031,9 +5037,7 @@ pub fn reflection_method_method(
                 });
             }
             b"hasreturntype" => {
-                let has = vm
-                    .user_functions
-                    .get(fn_lower.as_slice())
+                let has = rfunc(vm, fn_lower.as_slice())
                     .and_then(|op| op.return_type.as_ref())
                     .is_some();
                 return Some(if has { Value::True } else { Value::False });
@@ -5042,9 +5046,7 @@ pub fn reflection_method_method(
                 return Some(Value::False);
             }
             b"isvariadic" => {
-                let is_var = vm
-                    .user_functions
-                    .get(fn_lower.as_slice())
+                let is_var = rfunc(vm, fn_lower.as_slice())
                     .and_then(|op| op.variadic_param)
                     .is_some();
                 return Some(if is_var { Value::True } else { Value::False });
@@ -9326,15 +9328,32 @@ pub fn reflection_parameter_method(
             let class_name_opt = resolved_op_array.as_ref()
                 .and_then(|op| op.param_types.get(type_idx).cloned().flatten())
                 .and_then(|pti| {
+                    // ZEND_TYPE_HAS_NAME(): one class name, plus any builtin
+                    // types (`iterable` is Traversable|array).
                     fn single_name(pt: &crate::opcode::ParamType) -> Option<Vec<u8>> {
+                        use crate::opcode::ParamType;
+                        let is_builtin = |t: &ParamType| {
+                            matches!(t, ParamType::Simple(n) if matches!(
+                                n.to_ascii_lowercase().as_slice(),
+                                b"int" | b"float" | b"string" | b"bool" | b"array"
+                                    | b"object" | b"callable" | b"mixed" | b"null"
+                                    | b"void" | b"false" | b"true" | b"never"
+                            ))
+                        };
                         match pt {
-                            crate::opcode::ParamType::Simple(n) => Some(n.clone()),
-                            crate::opcode::ParamType::Nullable(inner) => single_name(inner),
-                            crate::opcode::ParamType::Union(items) => {
-                                let non_null: Vec<&crate::opcode::ParamType> = items.iter()
-                                    .filter(|t| !matches!(t, crate::opcode::ParamType::Simple(n) if n.eq_ignore_ascii_case(b"null")))
-                                    .collect();
-                                if non_null.len() == 1 && non_null.len() + 1 == items.len() { single_name(non_null[0]) } else { None }
+                            ParamType::Simple(n) if n.eq_ignore_ascii_case(b"iterable") => {
+                                Some(b"Traversable".to_vec())
+                            }
+                            ParamType::Simple(n) => Some(n.clone()),
+                            ParamType::Nullable(inner) => single_name(inner),
+                            ParamType::Union(items) => {
+                                let named: Vec<&ParamType> =
+                                    items.iter().filter(|t| !is_builtin(t)).collect();
+                                if named.len() == 1 && !matches!(named[0], ParamType::Intersection(_)) {
+                                    single_name(named[0])
+                                } else {
+                                    None
+                                }
                             }
                             _ => None,
                         }
