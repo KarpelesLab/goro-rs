@@ -4,23 +4,33 @@
 //! clamps them to the quantum range).
 //!
 //! The constants were established against `magick -colorspace X` (black
-//! box): XYZ comes from the IEC 61966-2-1 four-decimal matrix (inverted
-//! for RGB → XYZ) and the D65 white of its column sums; Lab / LCH store
+//! box): RGB → XYZ is the inverse of the IEC 61966-2-1 four-decimal
+//! matrix, XYZ → RGB the full-precision one; Lab, Luv and their LCH forms
+//! use the D65 white (0.95047, 1, 1.08883) and unrounded a/b; Lab / LCH store
 //! L/100, a/255+½, b/255+½, C/255+½, H/360; Luv stores (u+134)/354 and
 //! (v+140)/262; the luma-based spaces use (0.298839, 0.586811, 0.114350)
 //! with chroma offset by ½; Oklch stores its hue in radians; Jzazbz uses
 //! a white luminance of 1 cd/m²; Display P3, Adobe98 and ProPhoto encode
-//! with the sRGB transfer; LCH hues come from Q16-rounded a/b (u/v).
+//! with the sRGB transfer; PhotoYCC crushes samples below 0.018 and
+//! inverts with Kodak's matrix scaled by 1/1.3555.
 
 use crate::image::Image;
 use crate::types::Colorspace;
 
 type V3 = [f64; 3];
 
+/// RGB → XYZ is the inverse of the four-decimal matrix ...
 const XYZ_TO_RGB: [V3; 3] = [
     [3.2406, -1.5372, -0.4986],
     [-0.9689, 1.8758, 0.0415],
     [0.0557, -0.2040, 1.0570],
+];
+
+/// ... while XYZ → RGB uses the full-precision IEC 61966-2-1 matrix.
+const XYZ_TO_RGB_FULL: [V3; 3] = [
+    [3.2409699419, -1.5373831776, -0.4986107603],
+    [-0.9692436363, 1.8759675015, 0.0415550574],
+    [0.0556300797, -0.2039769589, 1.0569715142],
 ];
 
 fn mul(m: &[V3; 3], v: V3) -> V3 {
@@ -57,14 +67,9 @@ fn rgb_to_xyz_m() -> [V3; 3] {
     inv(&XYZ_TO_RGB)
 }
 
-/// The D65 white (the column sums of the RGB → XYZ matrix).
+/// The D65 reference white Lab, Luv and their LCH forms use.
 fn white() -> V3 {
-    let m = rgb_to_xyz_m();
-    [
-        m[0][0] + m[0][1] + m[0][2],
-        m[1][0] + m[1][1] + m[1][2],
-        m[2][0] + m[2][1] + m[2][2],
-    ]
+    [0.95047, 1.0, 1.08883]
 }
 
 /// sRGB transfer: encoded → linear.
@@ -98,7 +103,7 @@ fn to_xyz(c: V3) -> V3 {
 }
 
 fn from_xyz(x: V3) -> V3 {
-    unlin(mul(&XYZ_TO_RGB, x))
+    unlin(mul(&XYZ_TO_RGB_FULL, x))
 }
 
 const LAB_E: f64 = 216.0 / 24389.0;
@@ -407,10 +412,7 @@ pub fn from_srgb(cs: Colorspace, c: V3) -> Option<V3> {
             [l[0] / 100.0, l[1] / 255.0 + 0.5, l[2] / 255.0 + 0.5]
         }
         Colorspace::LCH | Colorspace::LCHab => {
-            // the chroma and hue of the Lab samples as stored (Q16)
             let l = xyz_to_lab(to_xyz(c));
-            let qz = |v: f64| ((v / 255.0 + 0.5) * 65535.0).round() / 65535.0;
-            let l = [l[0], (qz(l[1]) - 0.5) * 255.0, (qz(l[2]) - 0.5) * 255.0];
             [
                 l[0] / 100.0,
                 l[1].hypot(l[2]) / 255.0 + 0.5,
@@ -422,10 +424,7 @@ pub fn from_srgb(cs: Colorspace, c: V3) -> Option<V3> {
             [l[0] / 100.0, (l[1] + 134.0) / 354.0, (l[2] + 140.0) / 262.0]
         }
         Colorspace::LCHuv => {
-            // the chroma and hue of the Luv samples as stored (Q16)
             let l = xyz_to_luv(to_xyz(c));
-            let qz = |v: f64, o: f64, r: f64| ((v + o) / r * 65535.0).round() / 65535.0 * r - o;
-            let l = [l[0], qz(l[1], 134.0, 354.0), qz(l[2], 140.0, 262.0)];
             let h = if l[1] == 0.0 && l[2] == 0.0 {
                 0.0
             } else {
@@ -541,11 +540,14 @@ pub fn from_srgb(cs: Colorspace, c: V3) -> Option<V3> {
         }
         Colorspace::Log => [to_log(c[0]), to_log(c[1]), to_log(c[2])],
         Colorspace::YCC => {
-            let y = luma(c);
+            // samples below 0.018 are crushed to 0.018·v/1.099 first; the
+            // chroma rows use 0.886 and 0.701 rather than 1 - luma
+            let f = |v: f64| if v < 0.018 { 0.018 * v / YCC_K } else { v };
+            let (r, g, b) = (f(c[0]), f(c[1]), f(c[2]));
             [
-                YCC_K * y,
-                YCC_C1 + YCC_K * (c[2] - y),
-                YCC_C2 + YCC_K * (c[0] - y),
+                YCC_K * (LUMA[0] * r + LUMA[1] * g + LUMA[2] * b),
+                YCC_C1 + YCC_K * (-LUMA[0] * r - LUMA[1] * g + 0.886 * b),
+                YCC_C2 + YCC_K * (0.701 * r - LUMA[1] * g - LUMA[2] * b),
             ]
         }
         _ => {
@@ -657,11 +659,16 @@ pub fn to_srgb(cs: Colorspace, c: V3) -> Option<V3> {
         Colorspace::ProPhoto => from_xyz(mul(&inv(&PROPHOTO_M), lin(c))),
         Colorspace::Log => [from_log(c[0]), from_log(c[1]), from_log(c[2])],
         Colorspace::YCC => {
-            let y = c[0] / YCC_K;
-            let b = (c[1] - YCC_C1) / YCC_K + y;
-            let r = (c[2] - YCC_C2) / YCC_K + y;
-            let g = (y - LUMA[0] * r - LUMA[2] * b) / LUMA[1];
-            [r, g, b]
+            // Kodak's PhotoYCC inverse, scaled by 1/1.3555
+            let l = 1.3584 * c[0];
+            let c1 = 2.2179 * (c[1] - YCC_C1);
+            let c2 = 1.8215 * (c[2] - YCC_C2);
+            let k = 1.0 / 1.3555;
+            [
+                k * (l + c2),
+                k * (l - 0.194 * c1 - 0.509 * c2),
+                k * (l + c1),
+            ]
         }
         _ => {
             let (m, off) = linear_space(cs)?;
@@ -796,12 +803,9 @@ mod tests {
                     continue;
                 };
                 let b = to_srgb(cs, f).unwrap();
-                // LCH hues come from Q16-rounded a/b, u/v
-                let tol = if matches!(cs, Colorspace::LCH | Colorspace::LCHab | Colorspace::LCHuv) {
-                    1e-4
-                } else {
-                    1e-6
-                };
+                // PhotoYCC's two matrices are not exact inverses, and the
+                // XYZ pair differs in precision
+                let tol = 2e-3;
                 for k in 0..3 {
                     assert!(
                         (b[k] - s[k]).abs() < tol,
