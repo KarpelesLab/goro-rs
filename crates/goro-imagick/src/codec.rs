@@ -1107,6 +1107,89 @@ fn decode_gif(data: &[u8]) -> MResult<Vec<Image>> {
     Ok(out)
 }
 
+/// libwebp's default lossy output (and so ImageMagick's): "fancy" 4:2:0
+/// upsampling, each output chroma sample about (9·near + 3·side + 3·side +
+/// far)/16 of the four surrounding chroma samples, then libwebp's
+/// 14-bit fixed-point BT.601 conversion. oxideav-webp upsamples nearest
+/// and converts in Q16, a level or more off.
+fn webp_yuv_to_rgba(im: &oxideav_webp::WebpImage) -> Option<Vec<u8>> {
+    use oxideav_webp::PixelFormat as P;
+    if !matches!(im.format, P::Yuv420P | P::Yuva420P) || im.planes.len() < 3 {
+        return None;
+    }
+    let (w, h) = (im.width as usize, im.height as usize);
+    let (yp, up, vp) = (&im.planes[0], &im.planes[1], &im.planes[2]);
+    let ap = im.planes.get(3);
+    let cw = w.div_ceil(2);
+    let ch = h.div_ceil(2);
+    let mult_hi = |v: i32, c: i32| (v * c) >> 8;
+    let clip8 = |v: i32| -> u8 {
+        if v & !((256 << 6) - 1) == 0 {
+            (v >> 6) as u8
+        } else if v < 0 {
+            0
+        } else {
+            255
+        }
+    };
+    let to_rgb = |y: i32, u: i32, v: i32| -> [u8; 3] {
+        let yy = mult_hi(y, 19077);
+        [
+            clip8(yy + mult_hi(v, 26149) - 14234),
+            clip8(yy - mult_hi(u, 6419) - mult_hi(v, 13320) + 8708),
+            clip8(yy + mult_hi(u, 33050) - 17685),
+        ]
+    };
+    let cu = |x: usize, y: usize| up.data[y.min(ch - 1) * up.stride + x.min(cw - 1)] as i32;
+    let cv = |x: usize, y: usize| vp.data[y.min(ch - 1) * vp.stride + x.min(cw - 1)] as i32;
+    // the chroma for pixel (x, y): output rows pair chroma rows j-1, j
+    // (row 0 and an even last row repeat theirs); columns likewise
+    let sample = |x: usize, y: usize, get: &dyn Fn(usize, usize) -> i32| -> i32 {
+        // nearest and far chroma rows
+        let (jn, jf) = if y == 0 {
+            (0, 0)
+        } else {
+            let j = (y + 1) / 2; // the lower chroma row of the pair
+            if y % 2 == 1 {
+                (j - 1, j.min(ch - 1))
+            } else {
+                (j.min(ch - 1), j - 1)
+            }
+        };
+        let (in_, if_) = if x == 0 {
+            (0, 0)
+        } else {
+            let i = (x + 1) / 2;
+            if x % 2 == 1 {
+                (i - 1, i.min(cw - 1))
+            } else {
+                (i.min(cw - 1), i - 1)
+            }
+        };
+        let (a, c) = (get(in_, jn), get(in_, jf));
+        if in_ == if_ {
+            // the first and an even last column interpolate vertically only
+            return (3 * a + c + 2) >> 2;
+        }
+        let (b, d) = (get(if_, jn), get(if_, jf));
+        // libwebp's two-stage rounding: a diagonal average, then halfway
+        (((a + 3 * b + 3 * c + d + 8) >> 3) + a) >> 1
+    };
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let yy = yp.data[y * yp.stride + x] as i32;
+            let u = sample(x, y, &cu);
+            let v = sample(x, y, &cv);
+            let rgb = to_rgb(yy, u, v);
+            let o = (y * w + x) * 4;
+            out[o..o + 3].copy_from_slice(&rgb);
+            out[o + 3] = ap.map_or(255, |a| a.data[y * a.stride + x]);
+        }
+    }
+    Some(out)
+}
+
 fn decode_webp(data: &[u8]) -> MResult<Vec<Image>> {
     let info = oxideav_webp::info(data).map_err(|e| corrupt("WEBP", e))?;
     let meta = oxideav_webp::read_metadata(data).ok();
@@ -1124,7 +1207,8 @@ fn decode_webp(data: &[u8]) -> MResult<Vec<Image>> {
     } else {
         let im = oxideav_webp::decode(data).map_err(|e| corrupt("WEBP", e))?;
         let alpha = info.has_alpha;
-        out.push(from_rgba8(im.width, im.height, &im.to_rgba8(), alpha));
+        let rgba = webp_yuv_to_rgba(&im).unwrap_or_else(|| im.to_rgba8());
+        out.push(from_rgba8(im.width, im.height, &rgba, alpha));
     }
     for img in out.iter_mut() {
         img.depth = 8;
