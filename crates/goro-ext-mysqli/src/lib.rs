@@ -1187,7 +1187,6 @@ fn ini_set_hook(vm: &mut Vm, key: &[u8], value: &Value) -> bool {
     true
 }
 
-
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"mysqlnd");
     vm.register_extension(b"mysqli");

@@ -276,13 +276,12 @@ impl Vm {
                                     _ => String::new(),
                                 };
                                 let cl = o.borrow().class_name.to_ascii_lowercase();
-                                let base = if self.class_extends_any(&cl, &[b"error"])
-                                    || cl == b"error"
-                                {
-                                    "Error"
-                                } else {
-                                    "Exception"
-                                };
+                                let base =
+                                    if self.class_extends_any(&cl, &[b"error"]) || cl == b"error" {
+                                        "Error"
+                                    } else {
+                                        "Exception"
+                                    };
                                 let fatal = format!(
                                     "Uncaught Error: {} in [no active file]:0\nStack trace:\n#0 [internal function]: {}->__toString()\n#1 {{main}}\n  thrown",
                                     text, base

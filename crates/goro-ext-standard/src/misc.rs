@@ -3766,7 +3766,11 @@ fn array_walk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         .unwrap_or_else(|| sl.storage_key.clone()),
                     None => e.key.clone(),
                 };
-                (ArrayKey::String(PhpString::from_vec(e.key)), storage, e.value)
+                (
+                    ArrayKey::String(PhpString::from_vec(e.key)),
+                    storage,
+                    e.value,
+                )
             })
             .collect();
         let extra_data = args.get(2);

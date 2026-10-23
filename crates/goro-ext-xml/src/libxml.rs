@@ -443,7 +443,6 @@ fn libxml_get_external_entity_loader(_vm: &mut Vm, _args: &[Value]) -> Result<Va
     Ok(entity_loader().unwrap_or(Value::Null))
 }
 
-
 pub fn register(vm: &mut Vm) {
     crate::image_svg::register(vm);
     let c = |vm: &mut Vm, n: &str, v: i64| {

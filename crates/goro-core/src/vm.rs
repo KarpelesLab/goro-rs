@@ -5129,7 +5129,9 @@ impl Vm {
             || key != name.as_bytes()
             || name.as_bytes().starts_with(b"__")
             || !self.dynamic_property_deprecated(class_lower)
-            || self.find_property_def(class_lower, name.as_bytes()).is_some()
+            || self
+                .find_property_def(class_lower, name.as_bytes())
+                .is_some()
         {
             return None;
         }
@@ -5765,7 +5767,10 @@ impl Vm {
             let Some(c) = self.classes.get(&cur).filter(|c| c.filename.is_some()) else {
                 break;
             };
-            if c.properties.iter().any(|p| p.has_get_hook || p.has_set_hook) {
+            if c.properties
+                .iter()
+                .any(|p| p.has_get_hook || p.has_set_hook)
+            {
                 hooked = true;
                 break;
             }

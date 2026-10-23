@@ -555,7 +555,6 @@ fn register_constants(vm: &mut Vm) {
     vm.ext_class_constants.insert(b"pdo\\mysql".to_vec(), my);
 }
 
-
 /// pdo_drivers()
 fn w_pdo_drivers(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let f = Func::function("pdo_drivers");
