@@ -384,11 +384,9 @@ pub struct Tm {
     pub year: i64,
     pub wday: i64,
     pub yday: i64,
-    #[allow(dead_code)]
     pub isdst: i64,
     pub gmtoff: i64,
     pub zone: String,
-    pub ts: i64,
 }
 
 fn iso_week_based(tm: &Tm) -> (i64, i64) {
@@ -429,6 +427,26 @@ pub fn strftime(format: &[u8], tm: &Tm, maxsize: usize) -> Option<Vec<u8>> {
     let mut out = Vec::new();
     strftime_internal(&mut out, maxsize, format, tm, false)?;
     Some(out)
+}
+
+/// mktime() of a copy of the broken-down time (the C library interprets it
+/// in the TZ environment's zone, not PHP's).
+fn c_mktime(tm: &Tm) -> i64 {
+    // SAFETY: a zeroed struct tm is valid; mktime() only reads/normalises
+    // the struct it is given.
+    unsafe {
+        let mut t: libc::tm = std::mem::zeroed();
+        t.tm_sec = tm.sec as libc::c_int;
+        t.tm_min = tm.min as libc::c_int;
+        t.tm_hour = tm.hour as libc::c_int;
+        t.tm_mday = tm.mday as libc::c_int;
+        t.tm_mon = tm.mon as libc::c_int;
+        t.tm_year = tm.year as libc::c_int;
+        t.tm_wday = tm.wday as libc::c_int;
+        t.tm_yday = tm.yday as libc::c_int;
+        t.tm_isdst = tm.isdst as libc::c_int;
+        libc::mktime(&mut t) as i64
+    }
 }
 
 /// glibc's add(): `n` bytes produced by `f`, right-aligned in `width`
@@ -606,8 +624,9 @@ fn strftime_internal(
             b'R' => Sub(b"%H:%M"),
             b'r' => Sub(b"%I:%M:%S %p"),
             b'S' if modifier != b'E' => Num(2, tm.sec as i32),
-            // (digits = 1: only the width pads it)
-            b's' => Text(tm.ts.to_string().into_bytes()),
+            // mktime() of the fields, in the process's time zone (digits =
+            // 1: only the width pads it)
+            b's' => Text(c_mktime(tm).to_string().into_bytes()),
             b'X' if modifier != b'O' => Sub(b"%H:%M:%S"),
             b'T' => Sub(b"%H:%M:%S"),
             b'u' => Num(1, ((tm.wday - 1 + 7) % 7 + 1) as i32),

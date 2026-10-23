@@ -304,7 +304,6 @@ fn php_strftime(vm: &mut Vm, args: &[Value], fname: &str, gmt: bool) -> R<Value>
         isdst,
         gmtoff,
         zone,
-        ts,
     };
     // The buffer starts at 256 bytes and is doubled while strftime() returns
     // 0, up to 4096 bytes; an empty result is a failure too.
