@@ -2602,17 +2602,51 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Ok(Value::String(PhpString::from_vec(result)))
-    } else if let Some(Value::Array(replacements)) = args.get(1) {
-        let replacements = replacements.borrow();
-        // Sort by key length descending for correct replacement order; PHP
-        // also warns when a replacement key is the empty string and ignores
-        // that pair entirely.
-        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(replacements.len());
-        for (k, v) in replacements.iter() {
-            let key = match k {
-                goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
-                goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
-            };
+    } else if let Some(Value::Array(replacements)) = args.get(1).map(|v| v.deref()) {
+        // php_strtr_array()
+        let entries: Vec<(Vec<u8>, Value)> = replacements
+            .borrow()
+            .iter()
+            .map(|(k, v)| {
+                let key = match k {
+                    goro_core::array::ArrayKey::String(s) => s.as_bytes().to_vec(),
+                    goro_core::array::ArrayKey::Int(n) => n.to_string().into_bytes(),
+                };
+                (key, v.clone())
+            })
+            .collect();
+        let src = subject.as_bytes();
+        if entries.is_empty() {
+            return Ok(Value::String(subject));
+        }
+        if entries.len() == 1 {
+            // The replacement is converted up front.
+            let (key, value) = &entries[0];
+            let replace = strtr_zval_get_string(vm, value)?;
+            if key.is_empty() {
+                vm.emit_warning_at(
+                    "strtr(): Ignoring replacement of empty string",
+                    vm.current_line,
+                );
+                return Ok(Value::String(subject));
+            }
+            let mut result = Vec::with_capacity(src.len());
+            let mut i = 0;
+            while i < src.len() {
+                if src[i..].starts_with(key) {
+                    result.extend_from_slice(replace.as_bytes());
+                    i += key.len();
+                } else {
+                    result.push(src[i]);
+                    i += 1;
+                }
+            }
+            return Ok(Value::String(PhpString::from_vec(result)));
+        }
+        // php_strtr_array_ex(): longest match first at each position; a
+        // replacement is converted to a string each time it is used.
+        let mut pairs: Vec<(Vec<u8>, Value)> = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
             if key.is_empty() {
                 vm.emit_warning_at(
                     "strtr(): Ignoring replacement of empty string",
@@ -2620,26 +2654,29 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 );
                 continue;
             }
-            pairs.push((key, v.to_php_string().as_bytes().to_vec()));
+            if key.len() <= src.len() {
+                pairs.push((key, value));
+            }
         }
         pairs.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
 
-        let src = subject.as_bytes();
         let mut result = Vec::with_capacity(src.len());
         let mut i = 0;
         while i < src.len() {
-            let mut replaced = false;
-            for (from, to) in &pairs {
-                if i + from.len() <= src.len() && &src[i..i + from.len()] == from.as_slice() {
-                    result.extend_from_slice(to);
-                    i += from.len();
-                    replaced = true;
-                    break;
+            let found = pairs
+                .iter()
+                .find(|(from, _)| src[i..].starts_with(from))
+                .map(|(from, to)| (from.len(), to.clone()));
+            match found {
+                Some((len, to)) => {
+                    let to = strtr_zval_get_string(vm, &to)?;
+                    result.extend_from_slice(to.as_bytes());
+                    i += len;
                 }
-            }
-            if !replaced {
-                result.push(src[i]);
-                i += 1;
+                None => {
+                    result.push(src[i]);
+                    i += 1;
+                }
             }
         }
         Ok(Value::String(PhpString::from_vec(result)))
@@ -2660,6 +2697,16 @@ fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         Ok(Value::String(subject))
     }
+}
+
+/// zval_get_string() of a strtr() replacement.
+fn strtr_zval_get_string(vm: &mut Vm, v: &Value) -> Result<PhpString, VmError> {
+    let v = v.deref();
+    if matches!(v, Value::Array(_)) {
+        vm.emit_warning_at("Array to string conversion", vm.current_line);
+        return Ok(PhpString::from_bytes(b"Array"));
+    }
+    vm.value_to_string_checked(&v)
 }
 
 fn str_shuffle(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
