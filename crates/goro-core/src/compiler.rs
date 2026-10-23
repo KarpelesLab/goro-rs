@@ -11561,7 +11561,9 @@ impl Compiler {
             | ExprKind::StaticPropertyAccess { .. }
                 if !expr_is_in_nullsafe_chain(expr) =>
             {
-                self.compile_dim_write_base(expr)
+                // (fetched like FETCH_OBJ_UNSET: no array is auto-initialized,
+                // a missing property becomes null and foreach warns)
+                self.compile_dim_write_base_mode(expr, crate::fetch_w::DimFetch::Unset)
             }
             _ => self.compile_expr(expr),
         }
