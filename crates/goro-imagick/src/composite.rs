@@ -230,6 +230,17 @@ fn sdiv(a: f64, b: f64, z: f64) -> f64 {
     if b.abs() > 1e-12 { a / b } else { z }
 }
 
+/// `v` modulo 1, robust to the rounding of sums that land on a whole
+/// number (ImageMagick works in quantum units).
+fn wrap(v: f64) -> f64 {
+    let r = v - v.floor();
+    if (1e-9..=1.0 - 1e-9).contains(&r) {
+        r
+    } else {
+        0.0
+    }
+}
+
 /// The Rec. 709 luma of straight samples.
 fn intensity(c: [f64; 4]) -> f64 {
     0.212656 * c[0] + 0.715158 * c[1] + 0.072186 * c[2]
@@ -393,7 +404,7 @@ pub fn compose_pixel(op: C, s: [f64; 4], d: [f64; 4], args: &ComposeArgs) -> [f6
         C::ModulusAdd => {
             let a = sa + da;
             each(
-                &|c| (sca(c) + dca(c)) % 1.0,
+                &|c| wrap(sca(c) + dca(c)),
                 if a > 1.0 { a - 1.0 } else { a },
             )
         }
@@ -402,7 +413,7 @@ pub fn compose_pixel(op: C, s: [f64; 4], d: [f64; 4], args: &ComposeArgs) -> [f6
             each(
                 &|c| {
                     let v = sca(c) - dca(c);
-                    v - v.floor()
+                    wrap(v)
                 },
                 if a < 0.0 { a + 1.0 } else { a },
             )
