@@ -12,7 +12,7 @@ pub(crate) struct ProcHandle {
     pub pipes: Vec<i64>,
     /// The references the handle holds on its pipes (GC_ADDREF in
     /// proc_open()): they stay open while the process resource lives.
-    pub pipe_refs: Vec<Value>,
+    pub _pipe_refs: Vec<Value>,
     pub cached_status: Option<i32>,
 }
 
@@ -786,7 +786,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ProcHandle {
                 pid,
                 command,
-                pipe_refs: pipe_ids.iter().map(Value::resource).collect(),
+                _pipe_refs: pipe_ids.iter().map(Value::resource).collect(),
                 pipes: pipe_ids,
                 cached_status: None,
             },

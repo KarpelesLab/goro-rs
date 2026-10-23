@@ -8013,7 +8013,7 @@ impl Vm {
     fn free_released_resources(&mut self) {
         // (released by user code: the destructor runs at its line, as
         // php-src's runs in the user frame; or under a builtin's frame)
-        let at = (!self.in_builtin_frame()).then(|| (self.call_stack.len(), self.current_line));
+        let at = (!self.in_builtin_frame()).then_some((self.call_stack.len(), self.current_line));
         let prev_at = std::mem::replace(&mut self.release_call_at, at);
         while crate::value::has_freed_resources() {
             for (id, dtor) in crate::value::take_freed_resources() {
