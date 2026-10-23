@@ -18030,6 +18030,12 @@ impl Vm {
 
     /// The object handle taken by an internal foreach iterator (php-src's
     /// zend_object_iterator is a zend_object in the objects store).
+    /// The handle a builtin iterating a Traversable takes for its
+    /// zend_object_iterator (iterator_to_array(), iterator_count()).
+    pub fn internal_iterator_handle(&mut self) -> Value {
+        self.foreach_iterator_handle()
+    }
+
     fn foreach_iterator_handle(&mut self) -> Value {
         let id = self.alloc_object_id();
         Value::Object(Rc::new(RefCell::new(PhpObject::new(

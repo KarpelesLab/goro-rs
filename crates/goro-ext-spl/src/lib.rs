@@ -238,12 +238,18 @@ fn iterator_to_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         args.to_vec(),
         false,
     ));
-    let r = iterator_to_array_impl(vm, args);
+    let r = iterator_to_array_impl(vm, args, true);
     vm.call_stack.pop();
     r
 }
 
-fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// `take_handle`: the zend_object_iterator spl_iterator_apply() gets takes
+/// an object handle (released after the iterator it wraps).
+fn iterator_to_array_impl(
+    vm: &mut Vm,
+    args: &[Value],
+    take_handle: bool,
+) -> Result<Value, VmError> {
     let use_keys = args.get(1).map(|v| v.is_truthy()).unwrap_or(true);
     // Type check first argument
     if let Some(first) = args.first() {
@@ -301,11 +307,16 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                 if vm.current_exception.is_some() {
                     return Ok(Value::Null);
                 }
-                return iterator_to_array_impl(
+                let handle = take_handle.then(|| vm.internal_iterator_handle());
+                let r = iterator_to_array_impl(
                     vm,
                     &[iter_val, if use_keys { Value::True } else { Value::False }],
+                    false,
                 );
+                drop(handle);
+                return r;
             }
+            let _handle = take_handle.then(|| vm.internal_iterator_handle());
             let mut result = PhpArray::new();
             // Call rewind, then iterate with valid/current/key/next
             vm.call_object_method(val, b"rewind", &[]);
@@ -336,6 +347,7 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
             Ok(Value::Array(Rc::new(RefCell::new(result))))
         }
         Some(g @ Value::Generator(_)) => {
+            let _handle = take_handle.then(|| vm.internal_iterator_handle());
             let mut result = PhpArray::new();
             if !vm.generator_traverse_start(g) {
                 return Ok(Value::Null);
@@ -369,7 +381,7 @@ fn iterator_to_array_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError>
                             if f.fract() != 0.0 {
                                 vm.emit_deprecated(&format!(
                                     "Implicit conversion from float {} to int loses precision",
-                                    f
+                                    goro_core::value::format_php_float_repr(f)
                                 ));
                             }
                             result.set(ArrayKey::Int(f as i64), value);
@@ -434,6 +446,17 @@ fn iterator_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     r
 }
 
+/// iterator_count() of a resolved Traversable: its zend_object_iterator
+/// takes a handle, released after what it iterates.
+fn iterator_count_resolved(vm: &mut Vm, resolved: Option<Value>) -> Result<Value, VmError> {
+    let handle = matches!(resolved, Some(Value::Object(_) | Value::Generator(_)))
+        .then(|| vm.internal_iterator_handle());
+    let r = iterator_count_iterate(vm, resolved.as_ref());
+    drop(resolved);
+    drop(handle);
+    r
+}
+
 fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Type check first argument
     if let Some(first) = args.first() {
@@ -467,7 +490,11 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
         other => other.cloned(),
     };
-    match resolved.as_ref() {
+    iterator_count_resolved(vm, resolved)
+}
+
+fn iterator_count_iterate(vm: &mut Vm, resolved: Option<&Value>) -> Result<Value, VmError> {
+    match resolved {
         Some(Value::Array(arr)) => Ok(Value::Long(arr.borrow().len() as i64)),
         Some(val @ Value::Object(_)) => {
             let mut count: i64 = 0;
