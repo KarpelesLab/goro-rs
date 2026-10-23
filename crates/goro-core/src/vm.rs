@@ -5111,6 +5111,48 @@ impl Vm {
         true
     }
 
+    /// zend_std_get_property_ptr_ptr() creating dynamic property `name` of
+    /// `obj` (storage key `key`): the deprecation, after which an error
+    /// handler may have released the object ("Cannot create dynamic
+    /// property", zend_deprecated_dynamic_property()). None when the fetch
+    /// goes on; Some(None) when the error handler threw; Some(Some(msg))
+    /// for the error.
+    #[inline(never)]
+    fn ref_fetch_dynamic_deprecation(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        class_lower: &[u8],
+        key: &[u8],
+        name: &PhpString,
+    ) -> Option<Option<String>> {
+        if obj.borrow().has_property(key)
+            || key != name.as_bytes()
+            || name.as_bytes().starts_with(b"__")
+            || !self.dynamic_property_deprecated(class_lower)
+            || self.find_property_def(class_lower, name.as_bytes()).is_some()
+        {
+            return None;
+        }
+        let class_display = crate::value::display_class_name(&obj.borrow().class_name);
+        let before = Rc::strong_count(obj);
+        self.emit_deprecated(&format!(
+            "Creation of dynamic property {}::${} is deprecated",
+            class_display,
+            name.to_string_lossy()
+        ));
+        if Rc::strong_count(obj) < before && Rc::strong_count(obj) <= 1 {
+            return Some(Some(format!(
+                "Cannot create dynamic property {}::${}",
+                class_display,
+                name.to_string_lossy()
+            )));
+        }
+        if self.current_exception.is_some() {
+            return Some(None);
+        }
+        None
+    }
+
     /// What a dimension-write container slot holds, to tell whether an
     /// error handler replaced it: the array's address, or its type.
     fn dim_container_identity(v: &Value) -> (u8, usize) {
@@ -5702,6 +5744,99 @@ impl Vm {
         err_obj.set_property(b"trace".to_vec(), trace);
         err_obj.set_property(b"previous".to_vec(), Value::Null);
         Value::Object(Rc::new(RefCell::new(err_obj)))
+    }
+
+    /// Exception/Error/ErrorException::__construct() (`args[0]` is `$this`)
+    /// of an object whose class has hooked properties: the properties are
+    /// updated through the write handler (zend_update_property_num_checked()
+    /// -> zend_update_property_ex()) in Zend's order, stopping at an
+    /// exception. Some(false) when one was thrown; None when the class has
+    /// no hooked property (the caller stores the properties itself).
+    #[inline(never)]
+    fn exception_ctor_via_hooks(
+        &mut self,
+        obj: &Rc<RefCell<PhpObject>>,
+        args: &[Value],
+    ) -> Option<bool> {
+        let cl = obj.borrow().class_name.to_ascii_lowercase();
+        let mut cur = cl.clone();
+        let mut hooked = false;
+        for _ in 0..64 {
+            let Some(c) = self.classes.get(&cur).filter(|c| c.filename.is_some()) else {
+                break;
+            };
+            if c.properties.iter().any(|p| p.has_get_hook || p.has_set_hook) {
+                hooked = true;
+                break;
+            }
+            match &c.parent {
+                Some(p) => cur = p.to_ascii_lowercase(),
+                None => break,
+            }
+        }
+        if !hooked || !self.class_extends_any(&cl, &[b"exception", b"error"]) {
+            return None;
+        }
+        let ee = self.class_extends(&cl, b"errorexception");
+        let arg = |i: usize| {
+            args.get(i)
+                .map(|v| v.deref())
+                .filter(|v| !matches!(v, Value::Undef))
+        };
+        let message = match arg(1) {
+            None => None,
+            Some(v @ Value::String(_)) => Some(v),
+            Some(v @ (Value::Long(_) | Value::Double(_) | Value::True | Value::False)) => {
+                Some(Value::String(v.to_php_string()))
+            }
+            // (zpp errors: the plain constructor reports them)
+            Some(_) => return None,
+        };
+        let code = arg(2).filter(|v| v.to_long() != 0);
+        let previous = arg(if ee { 6 } else { 3 }).filter(|v| !matches!(v, Value::Null));
+        // (property, value, written from Exception's scope)
+        let mut writes: Vec<(&[u8], Value, bool)> = Vec::new();
+        if let Some(m) = message {
+            writes.push((b"message", m, false));
+        }
+        if let Some(c) = code {
+            writes.push((b"code", Value::Long(c.to_long()), false));
+        }
+        if let Some(p) = previous {
+            writes.push((b"previous", p, true));
+        }
+        if ee {
+            let severity = arg(3).map(|v| v.to_long()).unwrap_or(1);
+            writes.push((b"severity", Value::Long(severity), true));
+            let file = arg(4).filter(|v| !matches!(v, Value::Null));
+            let line = arg(5).filter(|v| !matches!(v, Value::Null));
+            let has_file = file.is_some();
+            if let Some(f) = file {
+                writes.push((b"file", Value::String(f.to_php_string()), false));
+            }
+            match line {
+                Some(l) => writes.push((b"line", Value::Long(l.to_long()), false)),
+                None if has_file => writes.push((b"line", Value::Long(0), false)),
+                None => {}
+            }
+        }
+        for (name, value, base_scope) in writes {
+            let scope: &[u8] = if base_scope { b"exception" } else { &cl };
+            let r = crate::reflection::run_snippet_in_scope(
+                self,
+                "$__o->{$__n} = $__v;",
+                &[
+                    ("__o", Value::Object(obj.clone())),
+                    ("__n", Value::String(PhpString::from_vec(name.to_vec()))),
+                    ("__v", value),
+                ],
+                scope,
+            );
+            if r.is_none() && self.current_exception.is_some() {
+                return Some(false);
+            }
+        }
+        Some(true)
     }
 
     /// Build a trace array for exceptions from the current call stack
@@ -30845,6 +30980,34 @@ impl Vm {
                                     });
                                 }
                             }
+                            // An exception whose class has hooked properties: the
+                            // constructor writes through the write handler.
+                            if let Some(Value::Object(o)) = call.args.first() {
+                                let o = o.clone();
+                                if let Some(ok) = self.exception_ctor_via_hooks(&o, &call.args) {
+                                    if !ok {
+                                        if let Some((catch_target, _, _, _, saved_pc)) =
+                                            exception_handlers.pop()
+                                        {
+                                            pending_calls_catch_depth = Some(saved_pc);
+                                            ip = catch_target as usize;
+                                            return Ok(Flow::Continue);
+                                        }
+                                        return Err(VmError {
+                                            message: self.uncaught_exception_message(),
+                                            line: op.line,
+                                        });
+                                    }
+                                    self.write_operand(
+                                        &op.result,
+                                        Value::Null,
+                                        &mut cvs,
+                                        &mut tmps,
+                                        &static_cv_keys,
+                                    );
+                                    return Ok(Flow::Continue);
+                                }
+                            }
                             // For Exception-like classes, set message/code from args
                             if !call.args.is_empty() {
                                 // For constructors, args[0] is always $this
@@ -45363,6 +45526,25 @@ impl Vm {
                             }
                         } else if ref_error.is_some() {
                             Value::Null
+                        } else if let Some(r) =
+                            self.ref_fetch_dynamic_deprecation(obj, &class_lower, &pkey, &prop_name)
+                        {
+                            if r.is_none() {
+                                // (the error handler threw)
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    return Ok(Flow::Continue);
+                                }
+                                return Err(VmError {
+                                    message: self.uncaught_exception_message(),
+                                    line: op.line,
+                                });
+                            }
+                            ref_error = r;
+                            Value::Null
                         } else if obj.try_borrow_mut().is_ok() {
                             let pn: &[u8] = &pkey;
                             // Shadowed privates live in mangled slots this path
@@ -52277,6 +52459,12 @@ impl Vm {
                         let trace = self.build_exception_trace();
                         self.filter_new_exception_trace(&name_lower, &trace);
                         obj.set_property(b"trace".to_vec(), trace);
+                        // ErrorException::$severity = E_ERROR
+                        if name_lower == b"errorexception"
+                            || self.class_extends(&name_lower, b"errorexception")
+                        {
+                            obj.set_property(b"severity".to_vec(), Value::Long(1));
+                        }
                     }
 
                     // Initialize SPL class internal storage
@@ -55389,7 +55577,11 @@ impl Vm {
                                                     && !self.prop_def_hidden(p, &class_lower)
                                             })
                                         })
-                                        .unwrap_or(false);
+                                        .unwrap_or(false)
+                                        // (or by an internal ancestor)
+                                        || self
+                                            .find_property_def(&class_lower, prop_name.as_bytes())
+                                            .is_some();
                                     if !prop_declared {
                                         let is_internal =
                                             is_builtin_subclass(&class_lower, b"stdclass")
