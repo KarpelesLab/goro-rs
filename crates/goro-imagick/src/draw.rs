@@ -1190,40 +1190,13 @@ impl DrawingWand {
     // --- rendering --------------------------------------------------------
 
     /// DrawImage(): render the primitives onto the image.
-    pub fn render_onto(&self, img: &mut Image) -> crate::error::MResult<()> {
+    /// Render vector nodes onto the image (over).
+    fn flush_nodes(img: &mut Image, nodes: &mut Vec<v::Node>) {
         let (w, h) = (img.columns, img.rows);
-        if w == 0 || h == 0 {
-            return Ok(());
-        }
-        let mut nodes = Vec::new();
-        let mut points: Vec<(i64, i64, [u16; 4])> = Vec::new();
-        let mut composites = Vec::new();
-        for p in &self.primitives {
-            match &p.shape {
-                Shape::Point(x, y) => {
-                    let a = p.gc.affine;
-                    let (px, py) = (a.sx * x + a.ry * y + a.tx, a.rx * x + a.sy * y + a.ty);
-                    let mut c = p.gc.fill.clone();
-                    c.alpha *= p.gc.fill_opacity * p.gc.opacity;
-                    points.push((px.round() as i64, py.round() as i64, c.to_rgba16()));
-                }
-                Shape::Text { x, y, text } => {
-                    if let Some(n) = self.text_node(p, *x, *y, text, w, h) {
-                        nodes.extend(n);
-                    }
-                }
-                Shape::Composite { .. } => composites.push(p),
-                Shape::Path { path, open } => {
-                    if let Some(n) = self.path_node(p, path, *open) {
-                        nodes.push(n);
-                    }
-                }
-            }
-        }
         if !nodes.is_empty() {
             let root = v::Group::new()
                 .with_transform(v::Transform2D::translate(0.5, 0.5))
-                .with_children(nodes);
+                .with_children(std::mem::take(nodes));
             let frame = v::VectorFrame::new(w as f32, h as f32).with_root(root);
             let out = oxideav_raster::Renderer::new(w as u32, h as u32).render(&frame);
             let plane = &out.planes[0];
@@ -1258,6 +1231,140 @@ impl DrawingWand {
                 &ComposeArgs::default(),
             );
         }
+    }
+
+    /// Fill a path with a pattern: the pattern's tile, drawn on its own,
+    /// repeated from its origin, through the path's coverage.
+    fn fill_with_pattern(
+        &self,
+        img: &mut Image,
+        p: &Primitive,
+        cmds: &[v::PathCommand],
+        pattern: &(String, (f64, f64, f64, f64), Vec<Primitive>),
+    ) -> crate::error::MResult<()> {
+        let (w, h) = (img.columns, img.rows);
+        let (px, py, pw, ph) = pattern.1;
+        let (tw, th) = (pw.round().max(1.0) as usize, ph.round().max(1.0) as usize);
+        let mut tile = Image::blank(tw, th);
+        tile.alpha = true;
+        for q in tile.pixels.chunks_exact_mut(4) {
+            q.copy_from_slice(&[0, 0, 0, 0]);
+        }
+        let mut sub = DrawingWand::default();
+        sub.clip_paths = self.clip_paths.clone();
+        sub.patterns = self.patterns.clone();
+        sub.font_resolution = self.font_resolution;
+        sub.primitives = pattern.2.clone();
+        sub.render_onto(&mut tile)?;
+        // the coverage of the shape
+        let mut mp = p.clone();
+        mp.gc.fill_pattern = None;
+        mp.gc.fill = PixelInfo::white();
+        mp.gc.fill_opacity = 1.0;
+        mp.gc.opacity = 1.0;
+        mp.gc.stroke.alpha = 0.0;
+        let mut mask = Image::blank(w, h);
+        mask.alpha = true;
+        for q in mask.pixels.chunks_exact_mut(4) {
+            q.copy_from_slice(&[0, 0, 0, 0]);
+        }
+        if let Some(n) = self.path_node(&mp, cmds, false) {
+            Self::flush_nodes(&mut mask, &mut vec![n]);
+        }
+        let k = p.gc.fill_opacity * p.gc.opacity;
+        let mut layer = Image::blank(w, h);
+        layer.alpha = true;
+        // the tiles start a pixel before the shape's bounds (the
+        // pattern's own origin is not used), as ImageMagick lays them
+        let _ = (px, py);
+        let a = p.gc.affine;
+        let (mut minx, mut miny) = (f64::MAX, f64::MAX);
+        for c in cmds {
+            let pts: &[v::Point] = match c {
+                v::PathCommand::MoveTo(q) | v::PathCommand::LineTo(q) => std::slice::from_ref(q),
+                v::PathCommand::QuadCurveTo { end, .. }
+                | v::PathCommand::CubicCurveTo { end, .. }
+                | v::PathCommand::ArcTo { end, .. } => std::slice::from_ref(end),
+                _ => &[],
+            };
+            for q in pts {
+                let (x, y) = (q.x as f64, q.y as f64);
+                minx = minx.min(a.sx * x + a.ry * y + a.tx);
+                miny = miny.min(a.rx * x + a.sy * y + a.ty);
+            }
+        }
+        if minx == f64::MAX {
+            (minx, miny) = (0.0, 0.0);
+        }
+        let (ox, oy) = (minx.floor() as i64 - 1, miny.floor() as i64 - 1);
+        for y in 0..h {
+            for x in 0..w {
+                let cov = mask.px(x, y)[3] as f64 / 65535.0 * k;
+                let tx = (x as i64 - ox).rem_euclid(tw as i64) as usize;
+                let ty = (y as i64 - oy).rem_euclid(th as i64) as usize;
+                let mut c = tile.px(tx, ty);
+                c[3] = (c[3] as f64 * cov).round() as u16;
+                layer.set_px(x, y, c);
+            }
+        }
+        composite_image(
+            img,
+            &layer,
+            CompositeOp::Over,
+            0,
+            0,
+            &ComposeArgs::default(),
+        );
+        Ok(())
+    }
+
+    pub fn render_onto(&self, img: &mut Image) -> crate::error::MResult<()> {
+        let (w, h) = (img.columns, img.rows);
+        if w == 0 || h == 0 {
+            return Ok(());
+        }
+        let mut nodes = Vec::new();
+        let mut points: Vec<(i64, i64, [u16; 4])> = Vec::new();
+        let mut composites = Vec::new();
+        for p in &self.primitives {
+            match &p.shape {
+                Shape::Point(x, y) => {
+                    let a = p.gc.affine;
+                    let (px, py) = (a.sx * x + a.ry * y + a.tx, a.rx * x + a.sy * y + a.ty);
+                    let mut c = p.gc.fill.clone();
+                    c.alpha *= p.gc.fill_opacity * p.gc.opacity;
+                    points.push((px.round() as i64, py.round() as i64, c.to_rgba16()));
+                }
+                Shape::Text { x, y, text } => {
+                    if let Some(n) = self.text_node(p, *x, *y, text, w, h) {
+                        nodes.extend(n);
+                    }
+                }
+                Shape::Composite { .. } => composites.push(p),
+                Shape::Path { path, open } => {
+                    let pattern =
+                        p.gc.fill_pattern
+                            .as_ref()
+                            .filter(|_| !*open)
+                            .and_then(|id| self.patterns.iter().find(|e| &e.0 == id));
+                    if let Some(pat) = pattern {
+                        // keep the drawing order
+                        Self::flush_nodes(img, &mut nodes);
+                        self.fill_with_pattern(img, p, path, pat)?;
+                        let mut sp = p.clone();
+                        sp.gc.fill.alpha = 0.0;
+                        if let Some(n) = self.path_node(&sp, path, *open) {
+                            nodes.push(n);
+                        }
+                        continue;
+                    }
+                    if let Some(n) = self.path_node(p, path, *open) {
+                        nodes.push(n);
+                    }
+                }
+            }
+        }
+        Self::flush_nodes(img, &mut nodes);
         for (x, y, c) in points {
             if x >= 0 && y >= 0 && (x as usize) < w && (y as usize) < h {
                 if c[3] < 65535 {
@@ -1417,6 +1524,33 @@ impl DrawingWand {
         tp.gc.fill_rule = 2;
         if let Some(n) = self.path_node(&tp, &placed, false) {
             out.push(n);
+        }
+        // text decorations: a bar across the text, its thickness and
+        // place in proportion to the point size (as ImageMagick draws them,
+        // whatever the font)
+        let size = gc.font_size * self.text_resolution().1 / 72.0;
+        let centre = match gc.decoration {
+            2 => Some(0.09 * size),
+            3 => Some(-0.77 * size),
+            4 => Some(-0.295 * size),
+            _ => None,
+        };
+        if let Some(c) = centre {
+            let t = (size / 20.0).max(1.0);
+            let (y0, y1) = (oy + c - t / 2.0 - 0.5, oy + c + t / 2.0 - 0.5);
+            let (x0, x1) = (ox - 0.5, ox + tw - 0.5);
+            let bar = vec![
+                v::PathCommand::MoveTo(pt(x0, y0)),
+                v::PathCommand::LineTo(pt(x1, y0)),
+                v::PathCommand::LineTo(pt(x1, y1)),
+                v::PathCommand::LineTo(pt(x0, y1)),
+                v::PathCommand::Close,
+            ];
+            let mut bp = p.clone();
+            bp.gc.stroke.alpha = 0.0;
+            if let Some(n) = self.path_node(&bp, &bar, false) {
+                out.push(n);
+            }
         }
         Some(out)
     }
