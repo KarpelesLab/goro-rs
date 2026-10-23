@@ -18030,6 +18030,54 @@ impl Vm {
 
     /// The object handle taken by an internal foreach iterator (php-src's
     /// zend_object_iterator is a zend_object in the objects store).
+    /// The order of a class's properties_info table: its own properties,
+    /// then each ancestor's in turn (zend_do_inheritance() appends the
+    /// inherited properties a class does not redeclare).
+    #[inline(never)]
+    fn properties_info_order(&self, ce: &crate::object::ClassEntry) -> Vec<usize> {
+        let mut chain: Vec<Vec<u8>> = vec![ce.name.to_ascii_lowercase()];
+        let mut cur = ce.parent.clone();
+        while let Some(p) = cur {
+            let lp = p.to_ascii_lowercase();
+            if chain.contains(&lp) {
+                break;
+            }
+            cur = self.classes.get(&lp).and_then(|c| c.parent.clone());
+            chain.push(lp);
+        }
+        let mut order = Vec::with_capacity(ce.properties.len());
+        for (depth, c) in chain.iter().enumerate() {
+            let decl = if depth == 0 {
+                Some(&ce.own_prop_order)
+            } else {
+                self.classes.get(c).map(|k| &k.own_prop_order)
+            };
+            // (in the declaring class's source order)
+            if let Some(decl) = decl {
+                for name in decl {
+                    if let Some(i) = ce.properties.iter().position(|p| {
+                        &p.name == name && p.declaring_class.eq_ignore_ascii_case(c)
+                    }) {
+                        if !order.contains(&i) {
+                            order.push(i);
+                        }
+                    }
+                }
+            }
+            for (i, p) in ce.properties.iter().enumerate() {
+                if p.declaring_class.eq_ignore_ascii_case(c) && !order.contains(&i) {
+                    order.push(i);
+                }
+            }
+        }
+        for i in 0..ce.properties.len() {
+            if !order.contains(&i) {
+                order.push(i);
+            }
+        }
+        order
+    }
+
     /// The handle a builtin iterating a Traversable takes for its
     /// zend_object_iterator (iterator_to_array(), iterator_count()).
     pub fn internal_iterator_handle(&mut self) -> Value {
@@ -49616,7 +49664,8 @@ impl Vm {
                                 // do_inherit_property(): each parent property in turn,
                                 // checked for final, static, readonly, set visibility,
                                 // visibility, then type.
-                                for cur_prop in &parent.properties {
+                                let info_order = self.properties_info_order(&parent);
+                                for cur_prop in info_order.iter().map(|&i| &parent.properties[i]) {
                                 let cur_props = std::slice::from_ref(cur_prop);
                                 // Check final-property overrides: if parent has a final property,
                                 // the child cannot redeclare it.
@@ -49703,8 +49752,11 @@ impl Vm {
                                         class.properties.iter().find(|p| p.name == parent_prop.name)
                                     {
                                         if parent_prop.is_readonly && !child_prop.is_readonly {
-                                            let parent_display =
-                                                crate::string::msg_str(parent_name).to_string();
+                                            let parent_display = self
+                                                .classes
+                                                .get(&parent_prop.declaring_class.to_ascii_lowercase())
+                                                .map(|c| crate::string::msg_str(&c.name).to_string())
+                                                .unwrap_or_else(|| crate::string::msg_str(parent_name).to_string());
                                             let child_display =
                                                 crate::string::msg_str(&class.name).to_string();
                                             let prop_display =
@@ -49722,8 +49774,11 @@ impl Vm {
                                             });
                                         }
                                         if !parent_prop.is_readonly && child_prop.is_readonly {
-                                            let parent_display =
-                                                crate::string::msg_str(parent_name).to_string();
+                                            let parent_display = self
+                                                .classes
+                                                .get(&parent_prop.declaring_class.to_ascii_lowercase())
+                                                .map(|c| crate::string::msg_str(&c.name).to_string())
+                                                .unwrap_or_else(|| crate::string::msg_str(parent_name).to_string());
                                             let child_display =
                                                 crate::string::msg_str(&class.name).to_string();
                                             let prop_display =
@@ -49852,9 +49907,14 @@ impl Vm {
                                                 let child_display =
                                                     crate::string::msg_str(&class.name)
                                                         .to_string();
-                                                let parent_display =
-                                                    crate::string::msg_str(parent_name)
-                                                        .to_string();
+                                                // (parent_info->ce: the class declaring it)
+                                                let parent_display = self
+                                                    .classes
+                                                    .get(&parent_prop.declaring_class.to_ascii_lowercase())
+                                                    .map(|c| crate::string::msg_str(&c.name).to_string())
+                                                    .unwrap_or_else(|| {
+                                                        crate::string::msg_str(parent_name).to_string()
+                                                    });
                                                 let prop_display =
                                                     crate::string::msg_str(&parent_prop.name)
                                                         .to_string();
