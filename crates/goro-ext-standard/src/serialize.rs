@@ -2616,6 +2616,23 @@ impl<'a> Parser<'a> {
                         .ref_props
                         .insert((Rc::as_ptr(obj) as usize, storage.clone()), this_src);
                 }
+                // zend_verify_property_type() in strict mode still widens
+                // an int for a float (and not int) property.
+                let mut inner = inner;
+                if let Value::Long(n) = inner {
+                    let tys: Vec<&str> = type_name
+                        .split(['|', '?', '(', ')', '&'])
+                        .filter(|t| !t.is_empty())
+                        .collect();
+                    let has = |t: &str| tys.iter().any(|x| x.eq_ignore_ascii_case(t));
+                    if has("float") && !has("int") && !has("mixed") {
+                        inner = Value::Double(n as f64);
+                        match &raw {
+                            Value::Reference(r) => *r.borrow_mut() = inner.clone(),
+                            _ => slot_set(&self.d, &slot, inner.clone()),
+                        }
+                    }
+                }
                 if !vm.value_matches_type_strict_pub(&inner, &pt) {
                     let display = if decl_name.is_empty() {
                         goro_core::value::display_class_name(&obj.borrow().class_name)

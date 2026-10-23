@@ -1668,10 +1668,24 @@ fn print_r_value_inner(
     classes: &goro_core::vm::ClassMap,
     closure_info_table: &std::collections::HashMap<Vec<u8>, ClosurePrintInfo>,
 ) {
-    if indent > 128 {
+    // (deep but finite nesting is printed; real recursion is detected by
+    // PRINT_R_SEEN)
+    if goro_core::stack::with_room(|| {
+        print_r_value_body(val, buf, indent, classes, closure_info_table)
+    })
+    .is_err()
+    {
         buf.extend_from_slice(b" *RECURSION*");
-        return;
     }
+}
+
+fn print_r_value_body(
+    val: &Value,
+    buf: &mut Vec<u8>,
+    indent: usize,
+    classes: &goro_core::vm::ClassMap,
+    closure_info_table: &std::collections::HashMap<Vec<u8>, ClosurePrintInfo>,
+) {
     match val {
         Value::Null | Value::Undef => buf.extend_from_slice(b""),
         Value::True => buf.extend_from_slice(b"1"),
