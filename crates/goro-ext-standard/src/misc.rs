@@ -11537,7 +11537,31 @@ fn temp_stream_mode(mode: &str) -> &'static str {
 /// stream resource), this throws a TypeError matching PHP's wording.
 ///
 /// Returns Ok(fid) for valid streams (FILE_HANDLES contains the id).
+/// PHP_Z_PARAM_STREAM: a non-resource is a parameter type error.
+pub(crate) fn require_resource_arg(
+    vm: &mut Vm,
+    val: &Value,
+    func_name: &str,
+) -> Result<(), VmError> {
+    let v = val.deref();
+    if matches!(v, Value::Resource(_)) {
+        return Ok(());
+    }
+    let msg = format!(
+        "{}(): Argument #1 ($stream) must be of type resource, {} given",
+        func_name,
+        Vm::value_type_name(&v)
+    );
+    let exc = vm.throw_type_error(msg.clone());
+    vm.current_exception = Some(exc);
+    Err(VmError {
+        message: msg,
+        line: vm.current_line,
+    })
+}
+
 fn require_open_stream(vm: &mut Vm, val: &Value, func_name: &str) -> Result<i64, VmError> {
+    require_resource_arg(vm, val, func_name)?;
     let fid = val.to_long();
     let has_handle = FILE_HANDLES.with(|h| h.borrow().contains_key(&fid));
     if has_handle {
@@ -12182,6 +12206,7 @@ pub(crate) fn called_as(vm: &Vm, name: &str) -> String {
             "gztell" => "ftell",
             "gzpassthru" => "fpassthru",
             "gzclose" => "fclose",
+            "fputs" => "fwrite",
             _ => "",
         };
         if alias_of == name {
@@ -12214,6 +12239,11 @@ fn stream_resource_dtor(vm: &mut Vm, id: i64) {
 }
 
 pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    require_resource_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        &called_as(vm, "fclose"),
+    )?;
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     // PHP_STREAM_FLAG_NO_FCLOSE: a filter callback is running on it.
     if crate::stream_filters::in_filter_callback(fid) {
@@ -12657,7 +12687,8 @@ fn fwrite_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
     // For STDOUT/STDERR (1/2/3) without FILE_HANDLES entry, accept long IDs.
     let raw_fid = arg.to_long();
-    let is_special_writer = raw_fid == 1 || raw_fid == 2 || raw_fid == 3;
+    let is_special_writer =
+        matches!(arg.deref(), Value::Resource(_)) && (raw_fid == 1 || raw_fid == 2 || raw_fid == 3);
     let fid = if is_special_writer {
         raw_fid
     } else {
@@ -13054,6 +13085,7 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn feof_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
+    require_resource_arg(vm, arg, &called_as(vm, "feof"))?;
     let fid = arg.to_long();
     let has_handle = FILE_HANDLES.with(|handles| handles.borrow().contains_key(&fid));
     if !has_handle {
@@ -13206,6 +13238,7 @@ fn fseek_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
+    require_resource_arg(vm, arg, &called_as(vm, "ftell"))?;
     let fid = arg.to_long();
     let has_handle = FILE_HANDLES.with(|handles| handles.borrow().contains_key(&fid));
     if !has_handle {
@@ -13257,6 +13290,11 @@ fn ftell_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fflush_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    require_resource_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        &called_as(vm, "fflush"),
+    )?;
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     flush_write_filters(vm, fid, false);
     FILE_HANDLES.with(|handles| {
@@ -17694,6 +17732,11 @@ fn fpassthru_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn fpassthru_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    require_resource_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        &called_as(vm, "fpassthru"),
+    )?;
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     // A write-only plain file: read() fails with EBADF (php_stdiop_read()).
     let write_only = FILE_HANDLES.with(|h| {
@@ -18948,6 +18991,11 @@ pub(crate) fn stream_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Valu
 }
 
 fn stream_get_contents_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    require_resource_arg(
+        vm,
+        args.first().unwrap_or(&Value::Null),
+        &called_as(vm, "stream_get_contents"),
+    )?;
     let fid = args.first().unwrap_or(&Value::Null).to_long();
     let max_length = match args.get(1).map(|v| v.deref()) {
         None | Some(Value::Null) | Some(Value::Undef) => -1,

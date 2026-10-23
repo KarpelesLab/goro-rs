@@ -73,7 +73,7 @@ fn opt_string(
 /// `PHP_Z_PARAM_STREAM`: returns the handle value (dereferenced).
 fn zpp_stream(vm: &mut Vm, func: &str, v: Option<&Value>) -> Result<Value, VmError> {
     let h = v.map(|v| v.deref()).unwrap_or(Value::Null);
-    if !matches!(h, Value::Resource(..) | Value::Long(_)) {
+    if !matches!(h, Value::Resource(..)) {
         return Err(type_error(
             vm,
             format!(
@@ -87,7 +87,7 @@ fn zpp_stream(vm: &mut Vm, func: &str, v: Option<&Value>) -> Result<Value, VmErr
         return Err(type_error(
             vm,
             format!(
-                "{}(): supplied resource is not a valid stream resource",
+                "{}(): Argument #1 ($stream) must be an open stream resource",
                 func
             ),
         ));

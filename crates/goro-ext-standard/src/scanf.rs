@@ -934,7 +934,7 @@ pub fn fscanf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Z_PARAM_RESOURCE
     let handle = args[0].deref();
-    if !matches!(handle, Value::Resource(..) | Value::Long(_)) {
+    if !matches!(handle, Value::Resource(..)) {
         let msg = format!(
             "fscanf(): Argument #1 ($stream) must be of type resource, {} given",
             Vm::value_type_name(&handle)
