@@ -53,8 +53,9 @@ impl Vm {
         Some(Value::Null)
     }
 
-    /// PHP `<=>` that also handles objects with __toString compared against
-    /// strings (calls the user's __toString).
+    /// zend_compare(): PHP `<=>` that also handles objects with __toString
+    /// compared against strings (calls the user's __toString); an
+    /// uncomparable pair is 1 (ZEND_UNCOMPARABLE).
     pub(crate) fn spl_compare_values(&mut self, a: &Value, b: &Value) -> i64 {
         let a = a.deref();
         let b = b.deref();
@@ -78,14 +79,14 @@ impl Vm {
                         return 0;
                     }
                     return if obj_left {
-                        s.compare(&b)
+                        s.compare_zend(&b)
                     } else {
-                        a.compare(&s)
+                        a.compare_zend(&s)
                     };
                 }
-                a.compare(&b)
+                a.compare_zend(&b)
             }
-            _ => a.compare(&b),
+            _ => a.compare_zend(&b),
         }
     }
 
