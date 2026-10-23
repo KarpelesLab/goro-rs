@@ -8,6 +8,7 @@ mod funcs;
 mod state;
 mod zpp;
 
+use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{NativeClassHandler, Vm, VmError};
 
@@ -372,6 +373,17 @@ pub fn register(vm: &mut Vm) {
     }
     vm.ini_validators
         .insert(b"date.timezone".to_vec(), funcs::validate_date_timezone);
+    // PHP_INI_ENTRY defaults (PHP_INI_ALL, no validator)
+    for (k, v) in [
+        (&b"date.default_latitude"[..], &b"31.7667"[..]),
+        (b"date.default_longitude", b"35.2333"),
+        (b"date.sunset_zenith", b"90.833333"),
+        (b"date.sunrise_zenith", b"90.833333"),
+    ] {
+        vm.constants
+            .entry(k.to_vec())
+            .or_insert_with(|| Value::String(PhpString::from_bytes(v)));
+    }
     vm.object_construct_handlers
         .insert(b"datetime".to_vec(), construct_datetime);
     vm.object_construct_handlers
