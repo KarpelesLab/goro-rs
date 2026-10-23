@@ -1406,10 +1406,16 @@ fn solarize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 fn posterize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "lb", args)?;
     let levels = a[0].long_or(2).max(2) as f64;
+    // the dither flag goes to ImageMagick as a DitherMethod: false is
+    // Undefined (Floyd-Steinberg), true is None
+    let dither = !a[1].bool_or(false);
     image_op(vm, &d_(o), "Unable to posterize image", |i| {
-        goro_imagick::filters::map_channels(i, channel::DEFAULT, |v| {
-            ((v / 65535.0 * (levels - 1.0)).round() / (levels - 1.0)) * 65535.0
-        });
+        let post = |v: f64| ((v / 65535.0 * (levels - 1.0)).round() / (levels - 1.0)) * 65535.0;
+        if dither {
+            goro_imagick::diffuse::floyd_steinberg(i, &|c| [post(c[0]), post(c[1]), post(c[2])]);
+        } else {
+            goro_imagick::filters::map_channels(i, channel::DEFAULT, post);
+        }
         Ok(())
     })
 }

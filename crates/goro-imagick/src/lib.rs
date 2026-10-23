@@ -22,6 +22,7 @@ pub mod color;
 mod color_names;
 pub mod colorspace;
 pub mod composite;
+pub mod diffuse;
 pub mod distort;
 pub mod dither;
 pub mod draw;
