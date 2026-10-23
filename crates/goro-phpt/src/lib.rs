@@ -2789,6 +2789,22 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
     }
     // Make sure subprocesses launched by tests (e.g. via proc_open from
     // php_cli_server.inc) use this goro binary rather than the system `php`.
+    // run-tests.php hands the tests a php-cgi binary when there is one
+    // (TEST_PHP_CGI_EXECUTABLE; sapi/cgi/tests look next to the php
+    // binary): goro is php-cgi when run under that name.
+    if std::env::var_os("TEST_PHP_CGI_EXECUTABLE").is_none() {
+        if let Ok(exe) = std::env::current_exe() {
+            let cgi = exe.with_file_name("php-cgi");
+            if std::fs::symlink_metadata(&cgi).is_err() {
+                let _ = std::os::unix::fs::symlink(&exe, &cgi);
+            }
+            if cgi.exists() {
+                unsafe {
+                    std::env::set_var("TEST_PHP_CGI_EXECUTABLE", &cgi);
+                }
+            }
+        }
+    }
     if std::env::var("TEST_PHP_EXECUTABLE").is_err() {
         if let Ok(exe) = std::env::current_exe() {
             unsafe {

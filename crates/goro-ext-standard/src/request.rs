@@ -340,6 +340,16 @@ fn ctx_warn(ctx: &mut Ctx, msg: &str) {
     }
 }
 
+/// sapi_module.sapi_error(E_WARNING) while parsing the request body
+/// (php_error(): no function prefix, never an exception).
+fn ctx_sapi_warning(ctx: &mut Ctx, msg: &str) {
+    if ctx.parse_body {
+        ctx.vm.emit_warning(msg);
+    } else {
+        emit_startup(ctx.vm, "Warning", msg);
+    }
+}
+
 /// php_error_docref(E_WARNING) while parsing the request body.
 fn ctx_docref_warning(ctx: &mut Ctx, msg: &str) {
     if ctx.parse_body {
@@ -531,7 +541,15 @@ fn emit_startup(vm: &mut Vm, level: &str, msg: &str) {
         _ => 8,
     };
     if vm.error_reporting & bit != 0 {
-        vm.write_output(format!("\n{}: {} in Unknown on line 0\n", level, msg).as_bytes());
+        let html = vm
+            .constants
+            .get(b"html_errors".as_slice())
+            .is_some_and(|v| ini_bool(Some(v.to_php_string().to_string_lossy()), false));
+        if html {
+            vm.display_error(level, msg, "Unknown", 0);
+        } else {
+            vm.write_output(format!("\n{}: {} in Unknown on line 0\n", level, msg).as_bytes());
+        }
     }
 }
 
@@ -1049,7 +1067,7 @@ fn rfc1867_handler(
         boundary = &boundary[..p];
     }
     if boundary.len() > FILLUNIT - 4 {
-        ctx_warn(ctx, "Boundary too large in multipart/form-data POST data");
+        ctx_sapi_warning(ctx, "Boundary too large in multipart/form-data POST data");
         return 0;
     }
 

@@ -7,6 +7,7 @@ use std::process;
 
 use goro_core::vm::Vm;
 
+mod cgi;
 mod cli_server;
 mod getopt;
 #[allow(dead_code)] // the ported parser also handles responses
@@ -79,6 +80,10 @@ fn main() {
     if args.len() >= 2 && args[1] == b"--test" {
         run_tests(&args);
     }
+    // Invoked as php-cgi: the CGI SAPI.
+    if args.first().is_some_and(|a| cgi::is_cgi_name(a)) {
+        process::exit(cgi::cgi_main(args));
+    }
 
     process::exit(cli_main(args));
 }
@@ -96,7 +101,8 @@ fn run_tests(args: &[Vec<u8>]) -> ! {
     println!("Skip:  {}", c.skip);
     println!("Error: {}", c.error);
     // Expected failures (--XFAIL--) are not failures, like in
-    // run-tests.php; XPass: XFAIL tests that passed.
+    // run-tests.php; XPass: XFAIL tests that passed (included in Pass,
+    // which run-tests.php reports them as).
     println!("XFail: {}", c.xfail);
     println!("XPass: {}", c.xpass);
     println!("Total: {}", c.total());
@@ -206,7 +212,13 @@ fn ini_define_line(arg: &[u8], out: &mut Vec<u8>) {
 }
 
 /// php_init_config(): locate and parse php.ini (unless -n was given).
-fn load_php_ini(ini_path_override: Option<&[u8]>, ini_ignore: bool, ini: &mut IniSettings) {
+/// `sapi_ini` is the SAPI's own php-SAPI.ini name, tried before php.ini.
+fn load_php_ini(
+    ini_path_override: Option<&[u8]>,
+    ini_ignore: bool,
+    ini: &mut IniSettings,
+    sapi_ini: &str,
+) {
     if ini_ignore {
         return;
     }
@@ -216,7 +228,7 @@ fn load_php_ini(ini_path_override: Option<&[u8]>, ini_ignore: bool, ini: &mut In
     } else if let Ok(rc) = std::env::var("PHPRC") {
         search.push(rc.into());
     }
-    load_php_ini_file(search, ini);
+    load_php_ini_file(search, ini, sapi_ini);
     scan_ini_dirs(ini);
 }
 
@@ -270,10 +282,10 @@ fn scan_ini_dirs(ini: &mut IniSettings) {
     }
 }
 
-fn load_php_ini_file(search: Vec<std::path::PathBuf>, ini: &mut IniSettings) {
+fn load_php_ini_file(search: Vec<std::path::PathBuf>, ini: &mut IniSettings, sapi_ini: &str) {
     for p in search {
         let candidates: Vec<std::path::PathBuf> = if p.is_dir() {
-            vec![p.join("php-cli.ini"), p.join("php.ini")]
+            vec![p.join(sapi_ini), p.join("php.ini")]
         } else {
             vec![p.clone()]
         };
@@ -345,7 +357,12 @@ fn cli_main(mut argv: Vec<Vec<u8>>) -> i32 {
         ("html_errors".to_string(), "1".to_string()),
         ("display_errors".to_string(), "1".to_string()),
     ];
-    load_php_ini(ini_path_override.as_deref(), ini_ignore, &mut ini);
+    load_php_ini(
+        ini_path_override.as_deref(),
+        ini_ignore,
+        &mut ini,
+        "php-cli.ini",
+    );
     if !server_mode && defines.is_empty() {
         // (what parsing HARDCODED_INI gives, without the scratch engine
         // that parsing needs)

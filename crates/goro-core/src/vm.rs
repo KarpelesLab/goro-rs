@@ -1054,6 +1054,9 @@ pub struct Vm {
     /// CLI: unbuffered output is written right away (like sapi_cli's
     /// ub_write), for processes sharing stdout (pcntl_fork()).
     pub cli_write_through: bool,
+    /// sapi_module.send_headers: run when the headers get sent (the first
+    /// output, or request shutdown), e.g. by the CGI SAPI.
+    pub sapi_send_headers: Option<fn(&mut Vm)>,
     /// Output buffer stack for ob_start/ob_end_clean/ob_get_contents
     pub ob_stack: Vec<Vec<u8>>,
     /// Output handler metadata, index-aligned with `ob_stack` (see ob.rs)
@@ -1666,6 +1669,7 @@ impl Vm {
             output: Vec::new(),
             cli_direct_output: false,
             cli_write_through: false,
+            sapi_send_headers: None,
             ob_stack: Vec::new(),
             ob_handlers: Vec::new(),
             ob_running: None,
@@ -17612,6 +17616,9 @@ impl Vm {
                 }
             }
             self.headers_sent = true;
+            if let Some(send) = self.sapi_send_headers {
+                send(self);
+            }
         }
     }
 

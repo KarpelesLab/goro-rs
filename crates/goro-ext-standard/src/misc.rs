@@ -13761,6 +13761,14 @@ pub fn set_request_body(body: Vec<u8>) {
 pub fn get_request_body() -> Vec<u8> {
     REQUEST_BODY.with(|b| b.borrow().clone())
 }
+/// SG(sapi_headers).headers, as (name, value) pairs.
+pub fn peek_sent_headers() -> Vec<(Vec<u8>, Vec<u8>)> {
+    SENT_HEADERS.with(|h| h.borrow().clone())
+}
+/// SG(sapi_headers).http_status_line
+pub fn peek_status_line() -> Option<Vec<u8>> {
+    STATUS_LINE.with(|s| s.borrow().clone())
+}
 pub fn take_sent_headers() -> Vec<(Vec<u8>, Vec<u8>)> {
     SENT_HEADERS.with(|h| {
         let mut g = h.borrow_mut();
@@ -14241,13 +14249,30 @@ fn headers_sent_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn header_remove_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // sapi_header_op(SAPI_HEADER_DELETE[_ALL])
+    if headers_already_sent_error(_vm) {
+        return Ok(Value::Null);
+    }
     if let Some(name_val) = args.first() {
         if matches!(name_val, Value::Null) {
             // Remove all
             SENT_HEADERS.with(|h| h.borrow_mut().clear());
         } else {
             let name = name_val.to_php_string();
-            let name_bytes = name.as_bytes();
+            let mut name_bytes = name.as_bytes();
+            if name_bytes.is_empty() {
+                return Ok(Value::Null);
+            }
+            while let Some((&c, rest)) = name_bytes.split_last() {
+                if !c.is_ascii_whitespace() && c != 0x0b {
+                    break;
+                }
+                name_bytes = rest;
+            }
+            if name_bytes.contains(&b':') {
+                _vm.emit_warning("Header to delete may not contain colon.");
+                return Ok(Value::Null);
+            }
             SENT_HEADERS.with(|h| {
                 let mut hh = h.borrow_mut();
                 hh.retain(|(k, _)| !k.eq_ignore_ascii_case(name_bytes));
@@ -14330,7 +14355,8 @@ fn apache_response_headers_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, Vm
         );
     }
     SENT_HEADERS.with(|h| {
-        for (k, v) in h.borrow().iter() {
+        // (add_response_header(): a header without a name is left out)
+        for (k, v) in h.borrow().iter().filter(|(k, _)| !k.is_empty()) {
             arr.set(
                 ArrayKey::String(PhpString::from_vec(k.clone())),
                 Value::String(PhpString::from_vec(v.clone())),

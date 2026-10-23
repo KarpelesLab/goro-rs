@@ -57,6 +57,29 @@ pub const OPTIONS: &[Opt] = &[
     o(16, 1, "repeat"),
 ];
 
+/// sapi/cgi/cgi_main.c OPTIONS[]
+pub const CGI_OPTIONS: &[Opt] = &[
+    o('a' as i32, 0, "interactive"),
+    o('b' as i32, 1, "bindpath"),
+    o('C' as i32, 0, "no-chdir"),
+    o('c' as i32, 1, "php-ini"),
+    o('d' as i32, 1, "define"),
+    o('e' as i32, 0, "profile-info"),
+    o('f' as i32, 1, "file"),
+    o('h' as i32, 0, "help"),
+    o('i' as i32, 0, "info"),
+    o('l' as i32, 0, "syntax-check"),
+    o('m' as i32, 0, "modules"),
+    o('n' as i32, 0, "no-php-ini"),
+    o('q' as i32, 0, "no-header"),
+    o('s' as i32, 0, "syntax-highlight"),
+    o('s' as i32, 0, "syntax-highlighting"),
+    o('w' as i32, 0, "strip"),
+    o('?' as i32, 0, "usage"),
+    o('v' as i32, 0, "version"),
+    o('T' as i32, 1, "timing"),
+];
+
 pub const GETOPT_INVALID_ARG: i32 = -2;
 
 const OPTERRCOLON: i32 = 1;
@@ -70,6 +93,7 @@ pub struct GetOpt<'a> {
     optchr: usize,
     dash: bool,
     show_err: bool,
+    options: &'static [Opt],
 }
 
 /// Byte at `i` of `s`, or NUL past the end (C string semantics).
@@ -79,12 +103,18 @@ fn at(s: &[u8], i: usize) -> u8 {
 
 impl<'a> GetOpt<'a> {
     pub fn new(argv: &'a [Vec<u8>], show_err: bool) -> Self {
+        Self::with_options(argv, show_err, OPTIONS)
+    }
+
+    /// A parser for another SAPI's option table.
+    pub fn with_options(argv: &'a [Vec<u8>], show_err: bool, options: &'static [Opt]) -> Self {
         GetOpt {
             argv,
             optind: 1,
             optchr: 0,
             dash: false,
             show_err,
+            options,
         }
     }
 
@@ -145,11 +175,11 @@ impl<'a> GetOpt<'a> {
             }
             loop {
                 optidx += 1;
-                if optidx as usize >= OPTIONS.len() {
+                if optidx as usize >= self.options.len() {
                     self.optind += 1;
                     return self.error(self.optind - 1, self.optchr, OPTERRARG);
                 }
-                let name = OPTIONS[optidx as usize].opt_name.as_bytes();
+                let name = self.options[optidx as usize].opt_name.as_bytes();
                 // strncmp(&argv[2], name, arg_end) && arg_end == strlen(name)
                 if arg_end == name.len() && cur.len() >= 2 + arg_end && &cur[2..2 + arg_end] == name
                 {
@@ -158,7 +188,7 @@ impl<'a> GetOpt<'a> {
             }
             self.optchr = 0;
             self.dash = false;
-            arg_start += OPTIONS[optidx as usize].opt_name.len();
+            arg_start += self.options[optidx as usize].opt_name.len();
         } else {
             if !self.dash {
                 self.dash = true;
@@ -175,7 +205,7 @@ impl<'a> GetOpt<'a> {
         if optidx < 0 {
             loop {
                 optidx += 1;
-                if optidx as usize >= OPTIONS.len() {
+                if optidx as usize >= self.options.len() {
                     let errind = self.optind;
                     let errchr = self.optchr;
                     if at(cur, self.optchr + 1) == 0 {
@@ -185,12 +215,12 @@ impl<'a> GetOpt<'a> {
                         self.optchr += 1;
                     }
                     return self.error(errind, errchr, OPTERRNF);
-                } else if at(cur, self.optchr) as i32 == OPTIONS[optidx as usize].opt_char {
+                } else if at(cur, self.optchr) as i32 == self.options[optidx as usize].opt_char {
                     break;
                 }
             }
         }
-        let opt = &OPTIONS[optidx as usize];
+        let opt = &self.options[optidx as usize];
         if opt.need_param != 0 {
             // -<arg> <val>, -<arg>=<val> or -<arg><val>
             self.dash = false;
