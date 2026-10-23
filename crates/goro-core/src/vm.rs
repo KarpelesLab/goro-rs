@@ -26036,6 +26036,23 @@ impl Vm {
                                 .unwrap_or_default();
                             let from_traversable = !matches!(val, Value::Array(_));
                             let mut by_value_refs: Vec<usize> = Vec::new();
+                            // (a named Traversable entry for a by-reference
+                            // parameter is passed by value too)
+                            let callee_param_names: Vec<Vec<u8>> = if pairs.iter().any(|p| p.0) {
+                                self.pending_calls
+                                    .last()
+                                    .and_then(|c| self.call_user_fn(c))
+                                    .map(|f| {
+                                        f.cv_names
+                                            .iter()
+                                            .take(f.param_count as usize)
+                                            .cloned()
+                                            .collect()
+                                    })
+                                    .unwrap_or_default()
+                            } else {
+                                Vec::new()
+                            };
                             let r = if let Some(call) = self.pending_calls.last_mut() {
                                 let mut had_named = false;
                                 let mut result = Ok(());
@@ -26049,6 +26066,33 @@ impl Vm {
                                                 String::from_utf8_lossy(&name_bytes)
                                             ));
                                             break;
+                                        }
+                                        let mut v = v;
+                                        if let Some(pos) =
+                                            callee_param_names.iter().position(|n| *n == name_bytes)
+                                        {
+                                            if callee_by_ref
+                                                .as_ref()
+                                                .and_then(|br| br.get(pos).copied())
+                                                .unwrap_or(false)
+                                            {
+                                                if from_traversable {
+                                                    by_value_refs.push(pos);
+                                                } else if let Some(src_arr) = source_arr_rc.as_ref() {
+                                                    // The parameter binds to the element.
+                                                    let r = match v {
+                                                        Value::Reference(r) => r,
+                                                        v => Rc::new(RefCell::new(v)),
+                                                    };
+                                                    src_arr.borrow_mut().set(
+                                                        ArrayKey::String(PhpString::from_vec(
+                                                            name_bytes.clone(),
+                                                        )),
+                                                        Value::Reference(r.clone()),
+                                                    );
+                                                    v = Value::Reference(r);
+                                                }
+                                            }
                                         }
                                         call.named_args.push((name_bytes, v));
                                     } else {
