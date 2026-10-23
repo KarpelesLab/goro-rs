@@ -261,6 +261,11 @@ fn read_efp(vm: &mut Vm, entry: &EntryRef, follow_links: bool, len: usize) -> Op
     let off = src.borrow().offset.max(0) as usize;
     let data = fp.borrow();
     if off > data.len() {
+        // the archive's own file can be sought past its end (it may have
+        // been rewritten in place since it was opened): nothing to read
+        if src.borrow().fp_type == FpType::Fp {
+            return Some(Vec::new());
+        }
         return None;
     }
     let end = (off + len).min(data.len());

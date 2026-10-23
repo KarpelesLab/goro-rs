@@ -222,6 +222,9 @@ pub struct Archive {
     pub min_timestamp: u32,
     pub max_timestamp: u32,
     pub fp: Option<Buf>,
+    /// The file `fp` was read from, (device, inode): php's phar->fp is an
+    /// open stream, which sees the file rewritten in place.
+    pub fp_ino: Option<(u64, u64)>,
     pub ufp: Option<Buf>,
     pub refcount: i32,
     pub sig_flags: u32,
@@ -253,6 +256,7 @@ impl Default for Archive {
             min_timestamp: 0,
             max_timestamp: 0,
             fp: None,
+            fp_ino: None,
             ufp: None,
             refcount: 0,
             sig_flags: 0,
@@ -427,6 +431,35 @@ pub fn set_inode(entry: &mut Entry, phar_fname: &[u8]) {
     let len2 = (tmp_len - len1).min(entry.filename.len());
     tmp.extend_from_slice(&entry.filename[..len2]);
     entry.inode = zend_hash_func(&tmp) as u16;
+}
+
+/// The (device, inode) of a plain file.
+pub fn file_ino(fname: &[u8]) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::metadata(l(fname)).ok()?;
+        m.is_file().then(|| (m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fname;
+        None
+    }
+}
+
+/// What reading the archive's open stream sees now: the file it was
+/// opened from, when that file was rewritten in place since (a file
+/// replaced by another one leaves the stream on the old contents).
+fn fp_current(p: &Archive, fp: Buf) -> Buf {
+    if p.fp_ino.is_some() && file_ino(&p.fname) == p.fp_ino {
+        if let Some(now) = read_file(&p.fname) {
+            if now != *fp.borrow() {
+                *fp.borrow_mut() = now;
+            }
+        }
+    }
+    fp
 }
 
 /// php_stream_open_wrapper(fname, "rb", IGNORE_URL|STREAM_MUST_SEEK)
@@ -959,6 +992,12 @@ pub fn parse_pharfile(
         d.alias = Some(alias.clone().unwrap_or_else(|| fname.to_vec()));
         d.sig_flags = sig_flags;
         d.fp = Some(Rc::new(RefCell::new(fp)));
+        // (a compressed phar's fp is a decompressed copy)
+        d.fp_ino = if compression == PHAR_FILE_COMPRESSED_NONE {
+            file_ino(fname)
+        } else {
+            None
+        };
         d.signature = signature;
     }
     request_initialize();
@@ -1875,6 +1914,7 @@ pub fn flush_ex(
             None
         }
     };
+    let oldfile = oldfile.map(|b| fp_current(&phar.borrow(), b));
     let oldfile = oldfile.or_else(|| read_file(&fname).map(|v| Rc::new(RefCell::new(v))));
     let mut newfile: Vec<u8> = Vec::new();
     if let Some(stub) = user_stub {
@@ -2177,6 +2217,7 @@ pub fn flush_ex(
         let out = out.unwrap_or_default();
         if std::fs::write(l(&fname), &out).is_err() {
             phar.borrow_mut().fp = Some(newbuf);
+            phar.borrow_mut().fp_ino = None;
             let msg = format!("unable to open new phar \"{}\" for writing", f);
             vm.emit_warning(&format!(
                 "{}({}): Failed to open stream: {}",
@@ -2191,6 +2232,18 @@ pub fn flush_ex(
             return Some(msg);
         }
     }
-    phar.borrow_mut().fp = Some(newbuf);
+    let mut p = phar.borrow_mut();
+    p.fp = Some(newbuf);
+    // fp is the file's contents again, unless the archive is buffering
+    // (the new contents are not written yet)
+    p.fp_ino = if donotflush || flags_compressed(p.flags) {
+        None
+    } else {
+        file_ino(&fname)
+    };
     None
+}
+
+fn flags_compressed(flags: u32) -> bool {
+    flags & (PHAR_FILE_COMPRESSED_GZ | PHAR_FILE_COMPRESSED_BZ2) != 0
 }
