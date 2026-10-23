@@ -369,6 +369,13 @@ impl Vm {
             self.emit_warning("Array to string conversion");
             return PhpString::from_bytes(b"Array");
         }
+        if matches!(v, Value::Generator(_)) {
+            self.spl_throw(
+                b"Error",
+                "Object of class Generator could not be converted to string",
+            );
+            return PhpString::empty();
+        }
         // convert_to_string(): objects without __toString() throw.
         self.value_to_string_checked(&v)
             .unwrap_or_else(|_| PhpString::empty())
@@ -666,6 +673,9 @@ impl Vm {
                     self.spl_zval_get_string(&d)
                 };
                 set_prop(obj, b"__spl_cit_str", Value::String(s));
+                if self.exc() {
+                    return;
+                }
             }
             self.dit_next(obj, false);
         } else {
