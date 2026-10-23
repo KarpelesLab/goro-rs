@@ -218,7 +218,7 @@ impl Vm {
                 // the other) is separated before it is written.
                 // (a plain CV owns its array: arrays are copied when assigned)
                 let rc = if cell.is_some()
-                    && Rc::strong_count(&rc) > 2
+                    && crate::array::shared_beyond(&rc, 2)
                     && !Rc::ptr_eq(&rc, &self.globals)
                 {
                     let sep = Rc::new(RefCell::new(rc.borrow().clone()));
@@ -995,7 +995,7 @@ impl Vm {
                         // The reference holds one count, `inner` the other.
                         // (unset() leaves a referenced array in place: a builtin may
                         // be working on it through the reference.)
-                        if Rc::strong_count(&rc) > 2 && mode != DimFetch::Unset {
+                        if crate::array::shared_beyond(&rc, 2) && mode != DimFetch::Unset {
                             let sep = Rc::new(RefCell::new(rc.borrow().clone()));
                             *r.borrow_mut() = Value::Array(sep.clone());
                             Some(Value::Array(sep))
@@ -1268,7 +1268,7 @@ impl Vm {
                     a
                 }
                 // The reference holds one count, `cur` the other.
-                Value::Array(a) if Rc::strong_count(&a) > 2 => {
+                Value::Array(a) if crate::array::shared_beyond(&a, 2) => {
                     let sep = Value::Array(Rc::new(RefCell::new(a.borrow().clone())));
                     *r.borrow_mut() = sep.clone();
                     sep

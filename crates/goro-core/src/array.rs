@@ -131,6 +131,20 @@ thread_local! {
     static NEXT_IDENT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+/// Whether an array its holder and one fetched copy (`base` counts) hold
+/// is also held elsewhere: written, it is separated (copy-on-write). The
+/// running by-reference foreach loops over it don't count (each holds it
+/// twice; PHP's holds the reference instead, FE_RESET_RW).
+#[inline]
+pub fn shared_beyond(rc: &std::rc::Rc<std::cell::RefCell<PhpArray>>, base: usize) -> bool {
+    let n = std::rc::Rc::strong_count(rc);
+    n > base
+        && match rc.try_borrow() {
+            Ok(a) => n > base + 2 * a.foreach_ref_pins(),
+            Err(_) => true,
+        }
+}
+
 /// SEPARATE_ARRAY() for a slot about to be bound to a reference: an array
 /// still shared with another holder (properties and elements share an
 /// array assigned from one another until either is written) gets its own
@@ -296,6 +310,15 @@ impl PhpArray {
         {
             list.push(std::rc::Rc::downgrade(it));
         }
+    }
+
+    /// The running by-reference foreach loops over this array: each holds
+    /// it twice (its state and its iterator temporary), which a
+    /// reference's holder does not count as sharing it.
+    pub fn foreach_ref_pins(&self) -> usize {
+        self.iters
+            .as_ref()
+            .map_or(0, |l| l.iter().filter(|w| w.strong_count() > 0).count())
     }
 
     /// Whether `it` is tracked by this array.

@@ -623,6 +623,8 @@ impl Vm {
                 }
             }
         }
+        // (not a holder of the value the fetch hands out)
+        drop(deferred);
         let Some(cell) = self.sp_cell(&slot, name) else {
             return Ok(Value::Null);
         };
@@ -678,7 +680,7 @@ impl Vm {
                     // the declaration's default value, e.g. a class entry
                     // reused from the script cache: the slot and `cur`
                     // hold two counts) is separated before it is written.
-                    Value::Array(a) if Rc::strong_count(&a) > 2 => {
+                    Value::Array(a) if crate::array::shared_beyond(&a, 2) => {
                         let sep = Value::Array(Rc::new(RefCell::new(a.borrow().clone())));
                         match rc {
                             Some(r) => *r.borrow_mut() = sep.clone(),

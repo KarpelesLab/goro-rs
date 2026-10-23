@@ -716,6 +716,10 @@ pub(crate) struct ForeachState {
     /// By-reference foreach over an array: the iterator (position of the
     /// next element) the array keeps in step with its modifications.
     pub(crate) ref_iters: crate::fxhash::FxHashMap<u32, Rc<std::cell::Cell<usize>>>,
+    /// By-reference foreach over a property, an element or a static
+    /// property: the reference the source was made (FE_RESET_RW's
+    /// ZVAL_MAKE_REF), read again at each iteration like a variable.
+    pub(crate) ref_cells: crate::fxhash::FxHashMap<u32, Rc<RefCell<Value>>>,
 }
 
 impl ForeachState {
@@ -743,7 +747,8 @@ impl ForeachState {
             weakmap_iter_keys,
             ref_arrays,
             ref_src,
-            ref_iters
+            ref_iters,
+            ref_cells
         );
     }
 
@@ -768,6 +773,9 @@ impl ForeachState {
         for a in self.ref_arrays.values() {
             f(&Value::Array(a.clone()));
         }
+        for c in self.ref_cells.values() {
+            f(&Value::Reference(c.clone()));
+        }
     }
 
     /// Detach the values the loops hold (a garbage generator's frame).
@@ -784,6 +792,11 @@ impl ForeachState {
             std::mem::take(&mut self.ref_arrays)
                 .into_values()
                 .map(Value::Array),
+        );
+        out.extend(
+            std::mem::take(&mut self.ref_cells)
+                .into_values()
+                .map(Value::Reference),
         );
     }
 }
@@ -4028,6 +4041,50 @@ impl Vm {
         self.called_class_stack.pop();
         self.class_scope_stack.pop();
         r
+    }
+
+    /// FE_FETCH_RW of a by-reference foreach over a reference (a property,
+    /// an element, a static property): another array assigned to it
+    /// meanwhile is iterated from its internal pointer; anything else but
+    /// an array or object ends the loop with a warning (returns true).
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn foreach_ref_cell_reread(
+        &mut self,
+        iter_idx: u32,
+        cell: &Rc<RefCell<Value>>,
+        arrays: &mut crate::fxhash::FxHashMap<u32, Rc<RefCell<PhpArray>>>,
+        iters: &mut crate::fxhash::FxHashMap<u32, Rc<std::cell::Cell<usize>>>,
+        positions: &mut crate::fxhash::FxHashMap<u32, usize>,
+        cur_ref: &mut crate::fxhash::FxHashMap<u32, std::rc::Weak<RefCell<Value>>>,
+        line: u32,
+    ) -> bool {
+        let cur = cell.borrow().clone();
+        match cur {
+            Value::Array(a) => {
+                if arrays.get(&iter_idx).is_some_and(|c| !Rc::ptr_eq(c, &a)) {
+                    if let Some(it) = iters.get(&iter_idx) {
+                        let p = a.borrow().pointer;
+                        it.set(p);
+                        a.borrow_mut().iterator_attach(it);
+                        positions.insert(iter_idx, p);
+                        cur_ref.remove(&iter_idx);
+                        arrays.insert(iter_idx, a);
+                    }
+                }
+                false
+            }
+            Value::Object(_) => false,
+            other => {
+                let msg = format!(
+                    "foreach() argument must be of type array|object, {} given",
+                    Vm::value_type_name(&other)
+                );
+                self.emit_warning_at(&msg, line);
+                arrays.remove(&iter_idx);
+                true
+            }
+        }
     }
 
     /// The __callStatic() trampoline of a callable `called::method`
@@ -20905,6 +20962,7 @@ impl Vm {
             ref_arrays: foreach_ref_arrays,
             ref_src: foreach_ref_src,
             ref_iters: foreach_ref_iters,
+            ref_cells: foreach_ref_cells,
         } = fe;
         // Maps CV index -> static var key (for saving back on write)
         let static_cv_keys: crate::fxhash::FxHashMap<u32, Vec<u8>> = Default::default();
@@ -21291,6 +21349,7 @@ impl Vm {
                             *slot = Value::Undef;
                         }
                         foreach_iter_handles.remove(&t);
+                        foreach_ref_cells.remove(&t);
                         if self.has_release_work() {
                             let had_exc = self.current_exception.is_some();
                             self.run_pending_destructors();
@@ -21580,6 +21639,7 @@ impl Vm {
                     if let OperandType::Tmp(t) = op.op1 {
                         if !foreach_ref_arrays.is_empty() {
                             foreach_ref_iters.remove(&t);
+                            foreach_ref_cells.remove(&t);
                             if let Some(a) = foreach_ref_arrays.remove(&t) {
                                 crate::gc::possible_root(&Value::Array(a));
                             }
@@ -39666,6 +39726,14 @@ impl Vm {
                         op_array,
                         op.line,
                     );
+                    // A property or element made a reference that holds an
+                    // object: the object is iterated.
+                    if let Value::Reference(r) = &arr_val {
+                        let inner = r.borrow().clone();
+                        if matches!(inner, Value::Object(_) | Value::Generator(_)) {
+                            arr_val = inner;
+                        }
+                    }
                     // User iterators: an IteratorAggregate whose getIterator()
                     // is a by-ref generator is iterated through it; other
                     // iterators cannot be iterated by reference.
@@ -39810,6 +39878,13 @@ impl Vm {
                         _ => 0,
                     };
 
+                    // FE_RESET_RW: the reference's array is separated from
+                    // its other holders (SEPARATE_ARRAY).
+                    if let (OperandType::Tmp(_), Value::Reference(r)) = (&op.op1, &arr_val) {
+                        if let Ok(mut inner) = r.try_borrow_mut() {
+                            crate::array::separate_shared(&mut inner);
+                        }
+                    }
                     // For by-ref foreach, we need to work on the original array
                     // If the source is a CV, get the actual Rc from it
                     let arr_rc = match &arr_val {
@@ -39983,6 +40058,17 @@ impl Vm {
                         foreach_ref_arrays.remove(&iter_idx);
                     } else {
                         foreach_ref_arrays.insert(iter_idx, arr_rc.clone());
+                    }
+                    match (&op.op1, &arr_val) {
+                        (OperandType::Tmp(_), Value::Reference(r))
+                            if foreach_ref_arrays.contains_key(&iter_idx)
+                                && matches!(&*r.borrow(), Value::Array(_)) =>
+                        {
+                            foreach_ref_cells.insert(iter_idx, r.clone());
+                        }
+                        _ => {
+                            foreach_ref_cells.remove(&iter_idx);
+                        }
                     }
                     match &op.op1 {
                         OperandType::Cv(idx)
@@ -40277,6 +40363,23 @@ impl Vm {
                             }
                         }
                     }
+                    if let Some(cell) = foreach_ref_cells.get(&iter_idx).cloned() {
+                        if self.foreach_ref_cell_reread(
+                            iter_idx,
+                            &cell,
+                            foreach_ref_arrays,
+                            foreach_ref_iters,
+                            foreach_positions,
+                            foreach_cur_ref,
+                            op.line,
+                        ) {
+                            foreach_ref_cells.remove(&iter_idx);
+                            if let OperandType::JmpTarget(target) = op.op2 {
+                                ip = target as usize;
+                            }
+                            return Ok(Flow::Continue);
+                        }
+                    }
                     let pos = foreach_positions.get(&iter_idx).copied().unwrap_or(0);
                     let done = if let Some(arr_rc) = foreach_ref_arrays.get(&iter_idx).cloned() {
                         let ref_iter = foreach_ref_iters.get(&iter_idx).cloned();
@@ -40379,6 +40482,7 @@ impl Vm {
                         // The iteration is over: release the iterated array
                         // (for an object, its references to the property slots).
                         foreach_ref_iters.remove(&iter_idx);
+                        foreach_ref_cells.remove(&iter_idx);
                         if foreach_ref_arrays.remove(&iter_idx).is_some() {
                             if let Some(slot) = tmps.get_mut(iter_idx as usize) {
                                 if matches!(slot, Value::Array(_)) {
@@ -55435,8 +55539,10 @@ impl Vm {
                                     });
                                 }
                                 // Separate an array shared with other holders (copy-on-write).
+                                // (a by-reference foreach over the property holds
+                                // the reference, not the array: FE_RESET_RW)
                                 if let Value::Array(rc) = &prop {
-                                    if Rc::strong_count(rc) > 2 {
+                                    if crate::array::shared_beyond(rc, 2) {
                                         let sep = Value::Array(Rc::new(RefCell::new(
                                             rc.borrow().clone(),
                                         )));

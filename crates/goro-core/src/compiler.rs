@@ -4258,23 +4258,14 @@ impl Compiler {
                 // foreach ($a[k] as &$v): the element is fetched for writing
                 // (FE_RESET_RW of a FETCH_DIM_W).
                 let arr = match &expr.kind {
+                    // (made a reference, FE_RESET_RW: the loop reads it again
+                    // at each iteration)
                     ExprKind::ArrayAccess {
                         array,
                         index: Some(index),
-                    } if *by_ref && !expr_is_in_nullsafe_chain(expr) => {
-                        let container =
-                            self.compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::W)?;
-                        let key = self.compile_expr(index)?;
-                        let tmp = self.op_array.alloc_temp();
-                        self.op_array.emit(Op {
-                            opcode: OpCode::ArrayGetW,
-                            op1: container,
-                            op2: key,
-                            result: OperandType::Tmp(tmp),
-                            line: expr.span.line,
-                        });
-                        OperandType::Tmp(tmp)
-                    }
+                    } if *by_ref && !expr_is_in_nullsafe_chain(expr) => OperandType::Tmp(
+                        self.compile_dim_ref(array, Some(index), expr.span.line)?,
+                    ),
                     // (a property: fetched for writing too)
                     _ if *by_ref => self.compile_foreach_ref_source(expr)?,
                     _ => self.compile_expr(expr)?,
@@ -11650,15 +11641,19 @@ impl Compiler {
     #[inline(never)]
     fn compile_foreach_ref_source(&mut self, expr: &Expr) -> CompileResult<OperandType> {
         match &expr.kind {
+            // (made a reference: a missing property becomes null and
+            // foreach warns)
             ExprKind::PropertyAccess {
-                nullsafe: false, ..
-            }
-            | ExprKind::StaticPropertyAccess { .. }
-                if !expr_is_in_nullsafe_chain(expr) =>
-            {
-                // (fetched like FETCH_OBJ_UNSET: no array is auto-initialized,
-                // a missing property becomes null and foreach warns)
-                self.compile_dim_write_base_mode(expr, crate::fetch_w::DimFetch::Unset)
+                object,
+                property,
+                nullsafe: false,
+            } if !expr_is_in_nullsafe_chain(expr) => Ok(OperandType::Tmp(
+                self.compile_property_ref(object, property, expr.span.line)?,
+            )),
+            ExprKind::StaticPropertyAccess { .. } if !expr_is_in_nullsafe_chain(expr) => {
+                let v = self.compile_expr(expr)?;
+                self.ref_static_prop(&v);
+                Ok(v)
             }
             _ => self.compile_expr(expr),
         }
