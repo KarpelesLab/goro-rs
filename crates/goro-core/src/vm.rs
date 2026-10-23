@@ -49899,7 +49899,8 @@ impl Vm {
                                                                     String::from_utf8_lossy(
                                                                         &m.op_array.filename,
                                                                     )
-                                                                    .into_owned();
+                                                                    .into_owned()
+                                                                    .into();
                                                             }
                                                             return Err(VmError {
                                                                 message: err_msg,

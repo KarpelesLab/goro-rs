@@ -854,6 +854,7 @@ fn internal_attribute_attr(name: &str) -> Option<crate::object::RuntimeAttribute
     Some(crate::object::RuntimeAttribute {
         name: b"Attribute".to_vec(),
         args_op_array: oa,
+        validation_error: None,
     })
 }
 

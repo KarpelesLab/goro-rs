@@ -4913,18 +4913,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 }
             }
             b"getattributes" => {
-                let mut attrs = rcls(vm, &class_lower)
+                let attrs = rcls(vm, &class_lower)
                     .map(|c| c.attributes.clone())
                     .unwrap_or_default();
-                // An internal attribute class is itself declared with
-                // #[Attribute(<its flags>)].
-                if attrs.is_empty()
-                    && rcls(vm, &class_lower).is_none_or(|c| c.filename.is_none())
-                {
-                    if let Some(cfg) = crate::compiler::internal_attribute(&class_lower) {
-                        attrs.push(internal_attribute_attribute(cfg.flags));
-                    }
-                }
                 let filter_name = args.get(1).and_then(|v| {
                     if matches!(v, Value::Null) {
                         None
@@ -7944,14 +7935,6 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                             return Some(Value::Null);
                         }
                         _ => {}
-                    }
-                }
-                // SensitiveParameterValue keeps its value out of sight.
-                if let (Some(Value::Object(o)), true) =
-                    (args.get(1), prop_name.as_bytes() == b"value")
-                {
-                    if o.borrow().class_name.eq_ignore_ascii_case(b"SensitiveParameterValue") {
-                        return Some(o.borrow().get_property(b"__sensitive_value"));
                     }
                 }
                 if is_static {
@@ -12958,41 +12941,6 @@ thread_local! {
 
 /// The (lazily evaluated) arguments array of a ReflectionAttribute.
 /// None if evaluating them threw.
-/// `#[Attribute(flags)]`, the attribute of an internal attribute class.
-fn internal_attribute_attribute(flags: u32) -> crate::object::RuntimeAttribute {
-    use crate::opcode::{Op, OpCode, OperandType};
-    let mut op = OpArray::new();
-    let arr = op.alloc_temp();
-    op.emit(Op {
-        opcode: OpCode::ArrayNew,
-        op1: OperandType::Unused,
-        op2: OperandType::Unused,
-        result: OperandType::Tmp(arr),
-        line: 0,
-    });
-    let f = op.add_literal(Value::Long(flags as i64));
-    op.emit(Op {
-        opcode: OpCode::ArrayAppend,
-        op1: OperandType::Tmp(arr),
-        op2: OperandType::Const(f),
-        result: OperandType::Unused,
-        line: 0,
-    });
-    op.emit(Op {
-        opcode: OpCode::Return,
-        op1: OperandType::Tmp(arr),
-        op2: OperandType::Unused,
-        result: OperandType::Unused,
-        line: 0,
-    });
-    op.param_default_repr = vec![Some(flags.to_string())];
-    crate::object::RuntimeAttribute {
-        name: b"Attribute".to_vec(),
-        args_op_array: op,
-        validation_error: None,
-    }
-}
-
 /// Set the class scope the attribute arguments of the ReflectionAttribute
 /// (or ReflectionParameter) objects in `list` are evaluated in: a trait
 /// method's attributes see the using class, a closure's its bound scope.

@@ -76,7 +76,7 @@ fn fcc_variadic_mixed(op: &mut OpArray) {
 }
 
 /// The config of internal attribute `name` (resolved, any case).
-pub(crate) fn internal_attribute(name: &[u8]) -> Option<InternalAttribute> {
+fn internal_attribute(name: &[u8]) -> Option<InternalAttribute> {
     let n = name
         .strip_prefix(b"\\")
         .unwrap_or(name)
