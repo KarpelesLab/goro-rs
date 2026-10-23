@@ -196,6 +196,10 @@ pub struct MatchContext {
     pub depth_limit: u32,
     pub heap_limit: u32,
     pub offset_limit: usize,
+    /// Emulated JIT matching (pcre2_jit_compile() done): a match that JIT
+    /// could run ignores the depth limits and fails with
+    /// PCRE2_ERROR_JIT_STACKLIMIT past this nesting depth instead.
+    pub jit_depth_limit: Option<u32>,
 }
 
 impl Default for MatchContext {
@@ -205,6 +209,7 @@ impl Default for MatchContext {
             depth_limit: MATCH_LIMIT_DEPTH,
             heap_limit: HEAP_LIMIT,
             offset_limit: PCRE2_UNSET,
+            jit_depth_limit: None,
         }
     }
 }
@@ -245,6 +250,8 @@ struct Matcher<'a> {
 
     match_limit: u32,
     match_limit_depth: u32,
+    /// The depth limit is the emulated JIT stack's.
+    jit: bool,
     match_call_count: u32,
     hasthen: bool,
     start_offset: usize,
@@ -606,7 +613,11 @@ impl<'a> Matcher<'a> {
             return Act::Ret(PCRE2_ERROR_MATCHLIMIT);
         }
         if rdepth >= self.match_limit_depth {
-            return Act::Ret(PCRE2_ERROR_DEPTHLIMIT);
+            return Act::Ret(if self.jit {
+                PCRE2_ERROR_JIT_STACKLIMIT
+            } else {
+                PCRE2_ERROR_DEPTHLIMIT
+            });
         }
         Act::Next
     }
@@ -3145,6 +3156,12 @@ impl Code {
         };
 
         let ovs = self.top_bracket as usize * 2;
+        // pcre2_match() runs the JIT code unless the pattern has (*NO_JIT)
+        // or the options include one JIT does not support.
+        let jit_depth = mcontext.jit_depth_limit.filter(|_| {
+            self.flags & PCRE2_NOJIT == 0
+                && options & (PCRE2_ANCHORED | PCRE2_ENDANCHORED | PCRE2_NO_JIT) == 0
+        });
         let mut m = Matcher {
             code: &self.block,
             subj: subject,
@@ -3155,7 +3172,9 @@ impl Code {
             f: 0,
             top_bracket: self.top_bracket,
             match_limit: mcontext.match_limit.min(self.limit_match),
-            match_limit_depth: mcontext.depth_limit.min(self.limit_depth),
+            match_limit_depth: jit_depth
+                .unwrap_or_else(|| mcontext.depth_limit.min(self.limit_depth)),
+            jit: jit_depth.is_some(),
             match_call_count: 0,
             hasthen: (self.flags & PCRE2_HASTHEN) != 0,
             start_offset,

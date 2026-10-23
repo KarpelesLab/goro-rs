@@ -1081,6 +1081,31 @@ fn builtin_module_info(vm: &mut Vm) -> String {
             v = goro_zlib::ZLIB_VERSION,
         ));
     }
+    {
+        // PHP_MINFO_FUNCTION(pcre)
+        let ini = |k: &[u8], default: &str| {
+            vm.constants
+                .get(k)
+                .map(|v| v.to_php_string().to_string_lossy())
+                .unwrap_or_else(|| default.to_string())
+        };
+        let jit = ini(b"pcre.jit", "1");
+        let jit = if matches!(
+            jit.to_ascii_lowercase().as_str(),
+            "1" | "on" | "yes" | "true"
+        ) {
+            "On"
+        } else {
+            "Off"
+        };
+        out.push_str(&format!(
+            "\npcre\n\nPCRE (Perl Compatible Regular Expressions) Support => enabled\nPCRE Library Version => {}\nPCRE Unicode Version => {}\nPCRE JIT Support => enabled\nPCRE JIT Target => x86 64bit (little endian + unaligned)\n\nDirective => Local Value => Master Value\npcre.backtrack_limit => {bl} => {bl}\npcre.jit => {jit} => {jit}\npcre.recursion_limit => {rl} => {rl}\n",
+            goro_pcre::VERSION,
+            goro_pcre::UNICODE_VERSION,
+            bl = ini(b"pcre.backtrack_limit", "1000000"),
+            rl = ini(b"pcre.recursion_limit", "100000"),
+        ));
+    }
     out
 }
 

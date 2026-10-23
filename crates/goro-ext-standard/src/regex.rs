@@ -27,6 +27,15 @@ const PHP_PCRE_BACKTRACK_LIMIT_ERROR: i64 = 2;
 const PHP_PCRE_RECURSION_LIMIT_ERROR: i64 = 3;
 const PHP_PCRE_BAD_UTF8_ERROR: i64 = 4;
 const PHP_PCRE_BAD_UTF8_OFFSET_ERROR: i64 = 5;
+const PHP_PCRE_JIT_STACKLIMIT_ERROR: i64 = 6;
+
+/// The match depth at which the emulated JIT runs out of its stack.
+/// goro-pcre is an interpreter: pcre.jit=1 (the default, like a PHP built
+/// with PCRE JIT support) gives JIT semantics instead, where
+/// pcre.recursion_limit does not apply and a match nesting deeper than
+/// about what PHP's 192 KiB JIT stack holds (some 10000 repetitions of a
+/// capturing group) fails with PREG_JIT_STACKLIMIT_ERROR.
+const JIT_DEPTH_LIMIT: u32 = 20_000;
 
 const PCRE_CACHE_SIZE: usize = 4096;
 
@@ -104,6 +113,7 @@ fn throw(vm: &mut Vm, class: &[u8], msg: String) -> VmError {
 fn pcre_handle_exec_error(vm: &mut Vm, pcre_code: i32) {
     let preg_code = match pcre_code {
         PCRE2_ERROR_MATCHLIMIT => PHP_PCRE_BACKTRACK_LIMIT_ERROR,
+        PCRE2_ERROR_JIT_STACKLIMIT => PHP_PCRE_JIT_STACKLIMIT_ERROR,
         PCRE2_ERROR_RECURSIONLIMIT => PHP_PCRE_RECURSION_LIMIT_ERROR,
         PCRE2_ERROR_BADUTFOFFSET => PHP_PCRE_BAD_UTF8_OFFSET_ERROR,
         c if (PCRE2_ERROR_UTF8_ERR21..=PCRE2_ERROR_UTF8_ERR1).contains(&c) => {
@@ -125,6 +135,7 @@ fn php_pcre_get_error_msg(code: i64) -> &'static str {
         }
         PHP_PCRE_BACKTRACK_LIMIT_ERROR => "Backtrack limit exhausted",
         PHP_PCRE_RECURSION_LIMIT_ERROR => "Recursion limit exhausted",
+        PHP_PCRE_JIT_STACKLIMIT_ERROR => "JIT stack limit exhausted",
         _ => "Unknown error",
     }
 }
@@ -179,8 +190,13 @@ fn ini_strtol(v: &Value) -> i64 {
     }
 }
 
-/// The match context: pcre.backtrack_limit and pcre.recursion_limit.
+/// The match context: pcre.backtrack_limit and pcre.recursion_limit (not
+/// used by the JIT: see JIT_DEPTH_LIMIT).
 fn match_context(vm: &Vm) -> MatchContext {
+    let jit = vm
+        .constants
+        .get(b"pcre.jit".as_ref())
+        .is_none_or(|v| ini_strtol(v) != 0);
     let bl = vm
         .constants
         .get(b"pcre.backtrack_limit".as_ref())
@@ -194,6 +210,7 @@ fn match_context(vm: &Vm) -> MatchContext {
     MatchContext {
         match_limit: bl as u32,
         depth_limit: rl as u32,
+        jit_depth_limit: jit.then_some(JIT_DEPTH_LIMIT),
         ..Default::default()
     }
 }
@@ -1969,7 +1986,9 @@ pub fn register(vm: &mut Vm) {
     );
     c.insert(b"PCRE_VERSION_MAJOR".to_vec(), Value::Long(10));
     c.insert(b"PCRE_VERSION_MINOR".to_vec(), Value::Long(44));
-    c.insert(b"PCRE_JIT_SUPPORT".to_vec(), Value::False);
+    c.insert(b"PCRE_JIT_SUPPORT".to_vec(), Value::True);
+    c.entry(b"pcre.jit".to_vec())
+        .or_insert_with(|| Value::String(PhpString::from_bytes(b"1")));
     c.entry(b"pcre.backtrack_limit".to_vec())
         .or_insert_with(|| Value::String(PhpString::from_bytes(b"1000000")));
     c.entry(b"pcre.recursion_limit".to_vec())

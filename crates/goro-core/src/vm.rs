@@ -2067,7 +2067,7 @@ impl Vm {
                 c.insert(b"PREG_BAD_UTF8_ERROR".to_vec(), Value::Long(4));
                 c.insert(b"PREG_BAD_UTF8_OFFSET_ERROR".to_vec(), Value::Long(5));
                 c.insert(b"PREG_JIT_STACKLIMIT_ERROR".to_vec(), Value::Long(6));
-                c.insert(b"PCRE_JIT_SUPPORT".to_vec(), Value::False);
+                c.insert(b"PCRE_JIT_SUPPORT".to_vec(), Value::True);
                 c.insert(
                     b"PCRE_VERSION".to_vec(),
                     Value::String(PhpString::from_bytes(b"10.42 2022-12-11")),

@@ -10821,6 +10821,7 @@ pub fn extension_ini_entries(ext: &str) -> &'static [&'static str] {
 fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
     match ext {
         "bcmath" => &["bcmath.scale"],
+        "pcre" => &["pcre.backtrack_limit", "pcre.recursion_limit", "pcre.jit"],
         "gd" => &["gd.jpeg_ignore_warning"],
         "dba" => &["dba.default_handler"],
         "zend opcache" => &[
