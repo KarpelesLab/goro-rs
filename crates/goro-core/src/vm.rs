@@ -4063,6 +4063,11 @@ impl Vm {
     }
 
     fn try_autoload_class_inner(&mut self, class_name: &[u8]) -> bool {
+        // A class being linked is in the class table already (unusable,
+        // but not autoloaded either).
+        if variance::is_linking(&class_name.strip_prefix(b"\\").unwrap_or(class_name).to_ascii_lowercase()) {
+            return false;
+        }
         if !self.anon_pending.is_empty() {
             if let Some(found) = self.bind_pending_anon_class(class_name) {
                 return found;
@@ -48598,7 +48603,9 @@ impl Vm {
                                 // implicit interfaces of enums are internal
                                 && !matches!(iface_lower.as_slice(), b"unitenum" | b"backedenum")
                             {
+                                variance::push_linking_ex(&class, false);
                                 self.try_autoload_class(iface_name);
+                                variance::pop_linking();
                                 if let Some(e) = variance::take_autoload_fatal() {
                                     return Err(e);
                                 }
