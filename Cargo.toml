@@ -82,6 +82,8 @@ workspace = true
 [dependencies]
 goro-core = { path = "crates/goro-core" }
 libc = "0.2"
+# goro-httpd: HTTP/1.1, HTTP/2 and TLS (sans-I/O; goro-httpd drives the sockets)
+httpsd = { version = "0.1.3", default-features = false, features = ["tls", "compress", "h2"] }
 goro-parser = { path = "crates/goro-parser" }
 goro-vfs = { path = "crates/goro-vfs" }
 goro-sapi = { path = "crates/goro-sapi" }

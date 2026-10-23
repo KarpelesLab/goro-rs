@@ -8,17 +8,15 @@ use std::process;
 use goro_core::vm::Vm;
 
 mod cli_server;
-mod engine;
 mod getopt;
 #[allow(dead_code)] // the ported parser also handles responses
 mod http_parser;
-mod mime_types;
 mod readline_shell;
+
+use goro::{PHP_VERSION, engine, mime_types, websapi};
 
 use engine::IniSettings;
 use getopt::{GETOPT_INVALID_ARG, GetOpt};
-
-const PHP_VERSION: &str = "8.5.4";
 const ZEND_VERSION: &str = "4.5.4";
 
 const HARDCODED_INI: &str = "html_errors=0\n\

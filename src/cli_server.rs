@@ -4,21 +4,21 @@
 //! the HTTP parser and dispatches complete requests: PHP scripts (and the
 //! router script) run in a fresh engine, static files are sent as they are.
 
-use std::cell::RefCell;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::AsRawFd;
-use std::rc::Rc;
 
-use goro_core::array::{ArrayKey, PhpArray};
-use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::vm::{Vm, VmError};
+use goro_core::vm::VmError;
 
-use crate::engine::{self, IniSettings};
+use crate::engine::IniSettings;
 use crate::getopt::GetOpt;
 use crate::http_parser::{HttpParser, Method, ParserCallbacks, ParserInfo};
+use crate::websapi::{
+    LastError, PhpRun, ScriptOutput, ScriptRequest, apply_default_charset, auth_vars, cstr,
+    mangle_var_name, status_string,
+};
 
 const LOG_PROCESS: i32 = 1;
 const LOG_ERROR: i32 = 2;
@@ -27,9 +27,6 @@ const LOG_MESSAGE: i32 = 3;
 thread_local! {
     static LOG_LEVEL: std::cell::Cell<i32> = const { std::cell::Cell::new(3) };
     static WORKERS_MAX: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
-    /// The request headers of the request being executed, in their original
-    /// case (apache_request_headers()).
-    static REQUEST_HEADERS: RefCell<Vec<(Vec<u8>, Vec<u8>)>> = const { RefCell::new(Vec::new()) };
 }
 
 const CSS: &str = "<style>\n\
@@ -38,61 +35,6 @@ h1 { font-size: 1.5em; font-weight: normal; background-color: #9999cc; min-heigh
 h1, p { padding-left: 10px; }\n\
 code.url { background-color: #eeeeee; font-family:monospace; padding:0 2px;}\n\
 </style>\n";
-
-/// main/http_status_codes.h
-fn status_string(code: i32) -> &'static str {
-    match code {
-        100 => "Continue",
-        101 => "Switching Protocols",
-        200 => "OK",
-        201 => "Created",
-        202 => "Accepted",
-        203 => "Non-Authoritative Information",
-        204 => "No Content",
-        205 => "Reset Content",
-        206 => "Partial Content",
-        300 => "Multiple Choices",
-        301 => "Moved Permanently",
-        302 => "Found",
-        303 => "See Other",
-        304 => "Not Modified",
-        305 => "Use Proxy",
-        307 => "Temporary Redirect",
-        308 => "Permanent Redirect",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        402 => "Payment Required",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        406 => "Not Acceptable",
-        407 => "Proxy Authentication Required",
-        408 => "Request Timeout",
-        409 => "Conflict",
-        410 => "Gone",
-        411 => "Length Required",
-        412 => "Precondition Failed",
-        413 => "Request Entity Too Large",
-        414 => "Request-URI Too Long",
-        415 => "Unsupported Media Type",
-        416 => "Requested Range Not Satisfiable",
-        417 => "Expectation Failed",
-        426 => "Upgrade Required",
-        428 => "Precondition Required",
-        429 => "Too Many Requests",
-        431 => "Request Header Fields Too Large",
-        451 => "Unavailable For Legal Reasons",
-        500 => "Internal Server Error",
-        501 => "Not Implemented",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        505 => "HTTP Version Not Supported",
-        506 => "Variant Also Negotiates",
-        511 => "Network Authentication Required",
-        _ => "Unknown Status Code",
-    }
-}
 
 fn template_string(code: i32) -> Option<&'static str> {
     match code {
@@ -110,11 +52,7 @@ fn template_string(code: i32) -> Option<&'static str> {
 }
 
 fn mime_type(ext: &[u8]) -> Option<&'static str> {
-    let lower = String::from_utf8_lossy(ext).to_ascii_lowercase();
-    crate::mime_types::MIME_TYPES
-        .binary_search_by(|(e, _)| (*e).cmp(lower.as_str()))
-        .ok()
-        .map(|i| crate::mime_types::MIME_TYPES[i].1)
+    crate::mime_types::lookup(ext)
 }
 
 /// The local time like asctime() without the trailing newline.
@@ -628,13 +566,6 @@ impl Client {
     }
 }
 
-struct LastError {
-    fatal: bool,
-    message: String,
-    file: String,
-    line: u32,
-}
-
 /// The status line and the "essential headers" (Host, Date, Connection).
 fn append_status_line(buf: &mut Vec<u8>, protocol_version: u16, code: i32) {
     let code = if code == 0 { 200 } else { code };
@@ -820,76 +751,6 @@ fn begin_send_static(client: &mut Client) {
     client.log_response(200, None, None);
 }
 
-/// php_handle_auth_data(): PHP_AUTH_USER / PHP_AUTH_PW / PHP_AUTH_DIGEST.
-fn auth_vars(auth: &[u8], out: &mut Vec<(Vec<u8>, Vec<u8>)>) {
-    if auth.len() >= 6 && auth[..6].eq_ignore_ascii_case(b"Basic ") {
-        if let Some(user) = base64_decode(&auth[6..]) {
-            let user = match user.iter().position(|&c| c == 0) {
-                Some(z) => user[..z].to_vec(),
-                None => user,
-            };
-            if let Some(colon) = user.iter().position(|&c| c == b':') {
-                out.push((b"PHP_AUTH_USER".to_vec(), user[..colon].to_vec()));
-                let pass = &user[colon + 1..];
-                if !pass.is_empty() {
-                    out.push((b"PHP_AUTH_PW".to_vec(), pass.to_vec()));
-                }
-                return;
-            }
-        }
-    }
-    if auth.len() >= 7 && auth[..7].eq_ignore_ascii_case(b"Digest ") {
-        out.push((b"PHP_AUTH_DIGEST".to_vec(), auth[7..].to_vec()));
-    }
-}
-
-/// php_base64_decode() (non-strict: skips invalid characters).
-fn base64_decode(s: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::new();
-    let mut acc = 0u32;
-    let mut bits = 0;
-    for &c in s {
-        let v = match c {
-            b'A'..=b'Z' => c - b'A',
-            b'a'..=b'z' => c - b'a' + 26,
-            b'0'..=b'9' => c - b'0' + 52,
-            b'+' => 62,
-            b'/' => 63,
-            b'=' => break,
-            _ => continue,
-        };
-        acc = (acc << 6) | v as u32;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((acc >> bits) as u8);
-        }
-    }
-    Some(out)
-}
-
-/// php_register_variable_safe(): the variable name as PHP registers it
-/// ('.' and ' ' become '_'; names with '[' are not plain keys).
-fn mangle_var_name(name: &[u8]) -> Option<Vec<u8>> {
-    let mut start = 0;
-    while start < name.len() && name[start] == b' ' {
-        start += 1;
-    }
-    let name = &name[start..];
-    if name.is_empty() {
-        return None;
-    }
-    let mut out = Vec::with_capacity(name.len());
-    for &c in name {
-        match c {
-            b' ' | b'.' => out.push(b'_'),
-            b'[' => break,
-            _ => out.push(c),
-        }
-    }
-    Some(out)
-}
-
 /// sapi_cli_server_register_variables()
 fn server_variables(server: &Server, client: &Client) -> Vec<(Vec<u8>, Vec<u8>)> {
     let req = &client.request;
@@ -987,28 +848,6 @@ fn server_variables(server: &Server, client: &Client) -> Vec<(Vec<u8>, Vec<u8>)>
     v
 }
 
-/// The bytes up to the first NUL (C string view).
-fn cstr(b: &[u8]) -> &[u8] {
-    match b.iter().position(|&c| c == 0) {
-        Some(z) => &b[..z],
-        None => b,
-    }
-}
-
-/// apache_request_headers() / getallheaders()
-fn apache_request_headers(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
-    let mut arr = PhpArray::new();
-    REQUEST_HEADERS.with(|h| {
-        for (k, v) in h.borrow().iter() {
-            arr.set(
-                ArrayKey::String(PhpString::from_bytes(k)),
-                Value::String(PhpString::from_bytes(v)),
-            );
-        }
-    });
-    Ok(Value::Array(Rc::new(RefCell::new(arr))))
-}
-
 /// The response being built from the script's output (the SAPI headers
 /// are sent when the request ends, since output is collected).
 struct ScriptResponse {
@@ -1018,9 +857,10 @@ struct ScriptResponse {
 
 /// sapi_cli_server_send_headers() (with sapi_send_headers()'s default
 /// content type).
-fn build_script_headers(client: &Client, sapi_headers: &[(Vec<u8>, Vec<u8>)]) -> Vec<u8> {
-    let status_line = goro_ext_standard::misc::take_status_line();
-    let code = goro_ext_standard::misc::take_response_code() as i32;
+fn build_script_headers(client: &Client, out: &ScriptOutput) -> Vec<u8> {
+    let status_line = out.status_line.clone();
+    let code = out.code;
+    let sapi_headers = &out.headers;
     let mut buf = Vec::new();
     match status_line {
         Some(l) => {
@@ -1054,153 +894,38 @@ fn build_script_headers(client: &Client, sapi_headers: &[(Vec<u8>, Vec<u8>)]) ->
     buf
 }
 
-/// sapi_apply_default_charset()
-fn apply_default_charset(mimetype: &[u8]) -> Vec<u8> {
-    let mut m = mimetype.to_vec();
-    if m.starts_with(b"text/") && !m.windows(8).any(|w| w == b"charset=") {
-        m.extend_from_slice(b";charset=UTF-8");
-    }
-    m
+/// Request startup for the client's request.
+fn startup(server: &Server, client: &Client) -> PhpRun {
+    let req = &client.request;
+    let method = req.method();
+    let script_filename = req
+        .path_translated
+        .clone()
+        .or_else(|| server.router.clone())
+        .unwrap_or_default();
+    PhpRun::startup(&ScriptRequest {
+        ini: &server.ini,
+        sapi: "cli-server",
+        method: method.as_str().as_bytes(),
+        query_string: req.query_string.as_deref().unwrap_or_default(),
+        headers: &req.headers_original_case,
+        cookie: req.header(b"cookie"),
+        content_type: req.header(b"content-type"),
+        body: req.content.as_deref().unwrap_or_default(),
+        script_filename,
+        path_translated: req.path_translated.as_deref(),
+        server_vars: server_variables(server, client),
+    })
 }
 
-/// Run the router or a script for the client's request. Returns the
-/// router's decision (true = declined) and the response.
-struct PhpRun {
-    vm: Vm,
-}
-
-impl PhpRun {
-    #[allow(clippy::field_reassign_with_default)] // fields filled in step by step
-    fn startup(server: &Server, client: &Client) -> PhpRun {
-        let mut vm = engine::new_vm(&server.ini, "cli-server");
-        vm.register_function(b"apache_request_headers", apache_request_headers);
-        vm.register_function(b"getallheaders", apache_request_headers);
-        REQUEST_HEADERS.with(|h| *h.borrow_mut() = client.request.headers_original_case.clone());
-        let _ = goro_ext_standard::misc::take_sent_headers();
-        let _ = goro_ext_standard::misc::take_status_line();
-        let _ = goro_ext_standard::misc::take_response_code();
-        let req = &client.request;
-        let mut info = goro_ext_standard::request::RequestInfo::default();
-        info.cgi = true;
-        info.request_method = Some(req.method().as_str().as_bytes().to_vec());
-        info.query_string = req.query_string.clone().unwrap_or_default();
-        info.cookie_data = req.header(b"cookie").map(|c| c.to_vec());
-        info.content_type = req.header(b"content-type").map(|c| c.to_vec());
-        info.content_length = req.content.as_ref().map(|c| c.len()).unwrap_or(0) as i64;
-        info.body = req.content.clone().unwrap_or_default();
-        info.script_filename = req
-            .path_translated
-            .clone()
-            .or_else(|| server.router.clone())
-            .unwrap_or_default();
-        info.env = std::env::vars_os()
-            .map(|(k, v)| (k.as_bytes().to_vec(), v.as_bytes().to_vec()))
-            .collect();
-        info.server_vars = Some(server_variables(server, client));
-        goro_ext_standard::misc::set_translated_path(
-            req.path_translated
-                .as_ref()
-                .map(|p| String::from_utf8_lossy(cstr(p)).into_owned()),
-        );
-        engine::request_startup(&mut vm, &info, &server.ini);
-        PhpRun { vm }
+/// Request shutdown: the response to send.
+fn shutdown(run: PhpRun, result: Result<Value, VmError>, client: &Client) -> ScriptResponse {
+    let out = run.shutdown(result);
+    let head = build_script_headers(client, &out);
+    ScriptResponse {
+        head,
+        body: out.body,
     }
-
-    /// Compile and run `path` as a main script piece.
-    fn run_file(&mut self, path: &[u8]) -> Result<Value, VmError> {
-        let src = match std::fs::read(std::ffi::OsStr::from_bytes(cstr(path))) {
-            Ok(s) => s,
-            Err(_) => {
-                let p = String::from_utf8_lossy(path).into_owned();
-                self.vm.display_error(
-                    "Warning",
-                    "Unknown: Failed to open stream: No such file or directory",
-                    "Unknown",
-                    0,
-                );
-                let _ = p;
-                return Ok(Value::Null);
-            }
-        };
-        let name = std::fs::canonicalize(std::ffi::OsStr::from_bytes(cstr(path)))
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_else(|_| String::from_utf8_lossy(path).into_owned());
-        self.vm.current_file = name.as_str().into();
-        match engine::compile(&src, &name, true) {
-            Ok(mut c) => {
-                engine::load(&mut self.vm, &mut c);
-                self.vm.execute_chunk(&c.op_array)
-            }
-            Err(e) => {
-                engine::report_compile_error(&mut self.vm, &e, &name);
-                self.vm.fatal_emitted = true;
-                self.vm.last_error = Some((4, e.message.clone(), name, e.line));
-                Err(VmError {
-                    message: e.message,
-                    line: e.line,
-                })
-            }
-        }
-    }
-
-    fn last_error(&self) -> Option<LastError> {
-        self.vm
-            .last_error
-            .as_ref()
-            .map(|(ty, msg, file, line)| LastError {
-                // E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_RECOVERABLE_ERROR | E_PARSE
-                fatal: ty & (1 | 16 | 64 | 256 | 4096 | 4) != 0,
-                message: msg.clone(),
-                file: file.clone(),
-                line: *line,
-            })
-    }
-
-    /// php_request_shutdown(): shutdown functions, destructors, output.
-    fn shutdown(mut self, result: Result<Value, VmError>, client: &Client) -> ScriptResponse {
-        let headers_sent_before_error = self.vm.headers_sent;
-        let r = self.vm.finish_request(result);
-        let failed = r.is_err() || self.vm.fatal_emitted;
-        if let Err(e) = r {
-            if self.vm.current_exception.is_some() || !self.vm.fatal_emitted {
-                self.vm.report_uncaught(&e);
-            }
-            self.vm.run_shutdown_destructors();
-        }
-        // php_error_cb(): a fatal error with display_errors off turns a
-        // 200 response that has not started into a 500.
-        if failed && !headers_sent_before_error {
-            let display = self
-                .vm
-                .constants
-                .get(b"display_errors".as_slice())
-                .map(|v| v.to_php_string().to_string_lossy().to_ascii_lowercase())
-                .unwrap_or_default();
-            let off = matches!(display.trim(), "" | "0" | "off" | "no" | "false" | "none");
-            if off && goro_ext_standard::misc::peek_response_code() == 200 {
-                goro_ext_standard::misc::set_status_line(b"HTTP/1.0 500 Internal Server Error");
-            }
-        }
-        let body = self.vm.take_output();
-        let headers = goro_ext_standard::misc::take_sent_headers();
-        let head = build_script_headers(client, &headers);
-        goro_ext_standard::request::shutdown();
-        ScriptResponse { head, body }
-    }
-}
-
-fn with_cwd<R>(dir: Option<std::path::PathBuf>, f: impl FnOnce() -> R) -> R {
-    let old = std::env::current_dir().ok();
-    if let Some(d) = &dir {
-        let _ = std::env::set_current_dir(d);
-    }
-    let r = f();
-    if dir.is_some() {
-        if let Some(o) = old {
-            let _ = std::env::set_current_dir(o);
-        }
-    }
-    r
 }
 
 /// php_cli_server_dispatch()
@@ -1214,7 +939,7 @@ fn dispatch(server: &Server, client: &mut Client) {
         return;
     }
 
-    let mut run = PhpRun::startup(server, client);
+    let mut run = startup(server, client);
     let mut result: Result<Value, VmError> = Ok(Value::Null);
 
     if let Some(router) = &server.router {
@@ -1226,14 +951,14 @@ fn dispatch(server: &Server, client: &mut Client) {
             let le = run.last_error();
             let code = goro_ext_standard::misc::peek_response_code() as i32;
             client.log_response(code, None, le.as_ref());
-            let resp = run.shutdown(result, client);
+            let resp = shutdown(run, result, client);
             finish_script_response(client, resp);
             return;
         }
         if is_static {
             // The declined router's request ends; output it produced went
             // out with its headers before the static file.
-            let out = run.shutdown(Ok(Value::Null), client);
+            let out = shutdown(run, Ok(Value::Null), client);
             if !out.body.is_empty() {
                 let mut buf = out.head;
                 buf.extend_from_slice(&out.body);
@@ -1251,17 +976,13 @@ fn dispatch(server: &Server, client: &mut Client) {
         send_error_page(client, 400);
         return;
     }
-    // php_execute_script() changes to the script's directory.
-    let dir = std::path::Path::new(std::ffi::OsStr::from_bytes(&pt))
-        .parent()
-        .map(|p| p.to_path_buf());
     if result.is_ok() {
-        result = with_cwd(dir, || run.run_file(&pt));
+        result = run.execute_script(&pt);
     }
     let le = run.last_error();
     let code = goro_ext_standard::misc::peek_response_code() as i32;
     client.log_response(code, None, le.as_ref());
-    let resp = run.shutdown(result, client);
+    let resp = shutdown(run, result, client);
     finish_script_response(client, resp);
 }
 

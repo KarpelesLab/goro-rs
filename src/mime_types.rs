@@ -1253,3 +1253,12 @@ pub const MIME_TYPES: &[(&str, &str)] = &[
     ("zirz", "application/vnd.zul"),
     ("zmm", "application/vnd.handheld-entertainment+xml"),
 ];
+
+/// The MIME type of a file extension (case-insensitive).
+pub fn lookup(ext: &[u8]) -> Option<&'static str> {
+    let lower = String::from_utf8_lossy(ext).to_ascii_lowercase();
+    MIME_TYPES
+        .binary_search_by(|(e, _)| (*e).cmp(lower.as_str()))
+        .ok()
+        .map(|i| MIME_TYPES[i].1)
+}
