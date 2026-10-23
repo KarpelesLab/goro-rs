@@ -141,12 +141,13 @@ fn check_instantiable(vm: &mut Vm, cls: &[u8]) -> R<()> {
 
 fn cstr(b: &[u8]) -> String {
     let z = b.iter().position(|&c| c == 0).unwrap_or(b.len());
-    String::from_utf8_lossy(&b[..z]).into_owned()
+    // (a message: raw bytes kept, see msg_str())
+    goro_core::string::msg_str(&b[..z]).into_owned()
 }
 
 fn first_error_char(e: &ErrorMessage) -> char {
     if e.character != 0 {
-        e.character as char
+        goro_core::string::msg_char(e.character)
     } else {
         ' '
     }
@@ -294,43 +295,9 @@ fn initialize_from_ts_double(vm: &mut Vm, fname: &str, ts: f64) -> R<Time> {
     Ok(initialize_from_ts_long(sec, usec))
 }
 
-/// C's "%g" formatting
+/// spprintf()'s %g: php_gcvt(value, 6, '.', 'e') ("1.0e+20").
 pub fn fmt_g(v: f64) -> String {
-    if v.is_nan() {
-        return "NAN".into();
-    }
-    if v.is_infinite() {
-        return if v > 0.0 { "INF".into() } else { "-INF".into() };
-    }
-    if v == 0.0 {
-        return if v.is_sign_negative() {
-            "-0".into()
-        } else {
-            "0".into()
-        };
-    }
-    let exp = v.abs().log10().floor() as i32;
-    let p = 6;
-    if exp < -4 || exp >= p {
-        let s = format!("{:.*e}", (p - 1) as usize, v);
-        // trim mantissa zeros
-        let (m, e) = s.split_once('e').unwrap();
-        let m = if m.contains('.') {
-            m.trim_end_matches('0').trim_end_matches('.')
-        } else {
-            m
-        };
-        let ev: i32 = e.parse().unwrap();
-        format!("{}e{}{:02}", m, if ev < 0 { '-' } else { '+' }, ev.abs())
-    } else {
-        let decimals = (p - 1 - exp).max(0) as usize;
-        let s = format!("{:.*}", decimals, v);
-        if s.contains('.') {
-            s.trim_end_matches('0').trim_end_matches('.').to_string()
-        } else {
-            s
-        }
-    }
+    String::from_utf8(goro_core::value::zend_gcvt(v, 6, b'.', b'e')).unwrap_or_default()
 }
 
 /// php_date_modify

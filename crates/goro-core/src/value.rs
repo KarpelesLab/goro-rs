@@ -2070,10 +2070,7 @@ pub fn shortest_tie_to_even(v: f64, digits: &mut [u8], exp: i32) {
     let exact = format!("{:.800e}", v);
     let (mant, _) = exact.split_once('e').unwrap_or((&exact, ""));
     let ed: Vec<u8> = mant.bytes().filter(|c| c.is_ascii_digit()).collect();
-    if ed.len() > n
-        && ed[..n] == alt[..]
-        && ed[n] == b'5'
-        && ed[n + 1..].iter().all(|&c| c == b'0')
+    if ed.len() > n && ed[..n] == alt[..] && ed[n] == b'5' && ed[n + 1..].iter().all(|&c| c == b'0')
     {
         digits[n - 1] = last - 1;
     }

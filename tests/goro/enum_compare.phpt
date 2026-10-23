@@ -33,10 +33,10 @@ int(1)
 int(1)
 int(1)
 int(1)
-int(1)
-enum(E::A)
 enum(E::A)
 int(1)
+int(1)
+enum(E::A)
 array(4) {
   [0]=>
   int(1)

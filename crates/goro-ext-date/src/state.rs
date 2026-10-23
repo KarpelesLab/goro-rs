@@ -475,9 +475,18 @@ pub fn interval_get(o: &Rc<RefCell<PhpObject>>) -> Option<IntervalObj> {
         match ob.get_property(b"f") {
             Value::Undef => {}
             v => {
-                let f = v.to_double() * 1000000.0;
+                let fv = v.to_double();
+                let f = fv * 1000000.0;
                 diff.us = if f.is_finite() && f.abs() < 9.2e18 {
-                    f as i64
+                    // The property holds us / 1e6 of the interval's integer
+                    // microseconds: recover them exactly; a value written
+                    // otherwise truncates (date_interval_write_property()).
+                    let r = f.round();
+                    if r / 1000000.0 == fv {
+                        r as i64
+                    } else {
+                        f as i64
+                    }
                 } else {
                     0
                 };

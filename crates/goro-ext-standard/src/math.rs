@@ -653,6 +653,26 @@ fn max(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // ZEND_FRAMELESS_FUNCTION(max, 2): what a direct two-argument call runs
+    // (the lhs unless it compares below the rhs; uncomparable gives the lhs).
+    if args.len() == 2 {
+        let c = vm.zend_compare(&args[0], &args[1]);
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
+        }
+        let lhs_wins = match (args[0].deref(), args[1].deref()) {
+            (Value::Long(a), Value::Long(b)) => a >= b,
+            (Value::Double(a), Value::Double(b)) => a >= b,
+            (Value::Long(a), Value::Double(b)) => a as f64 >= b,
+            (Value::Double(a), Value::Long(b)) => a >= b as f64,
+            _ => c >= 0,
+        };
+        return Ok(if lhs_wins {
+            args[0].clone()
+        } else {
+            args[1].clone()
+        });
+    }
     let mut max_val = args[0].clone();
     for arg in &args[1..] {
         if vm.zend_compare(arg, &max_val) > 0 {
@@ -718,6 +738,26 @@ fn min(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // ZEND_FRAMELESS_FUNCTION(min, 2): what a direct two-argument call runs
+    // (the lhs only when it compares below the rhs).
+    if args.len() == 2 {
+        let c = vm.zend_compare(&args[0], &args[1]);
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
+        }
+        let lhs_wins = match (args[0].deref(), args[1].deref()) {
+            (Value::Long(a), Value::Long(b)) => a < b,
+            (Value::Double(a), Value::Double(b)) => a < b,
+            (Value::Long(a), Value::Double(b)) => (a as f64) < b,
+            (Value::Double(a), Value::Long(b)) => a < b as f64,
+            _ => c < 0,
+        };
+        return Ok(if lhs_wins {
+            args[0].clone()
+        } else {
+            args[1].clone()
+        });
+    }
     let mut min_val = args[0].clone();
     for arg in &args[1..] {
         if vm.zend_compare(arg, &min_val) < 0 {

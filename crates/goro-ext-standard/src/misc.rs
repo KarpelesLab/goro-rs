@@ -9848,6 +9848,9 @@ fn get_object_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut arr = PhpArray::new();
         for e in table {
             let is_dynamic = e.slot.is_none();
+            if is_dynamic && goro_core::foreach_obj::is_date_view_prop(&obj_rc.borrow(), &e.key) {
+                continue;
+            }
             if !vm.check_property_access(&class_lower, &e.key, is_dynamic) {
                 continue;
             }

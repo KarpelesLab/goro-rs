@@ -45,6 +45,20 @@ pub(crate) fn is_internal_slot(name: &[u8]) -> bool {
     name.starts_with(b"__") && PREFIXES.iter().any(|p| name.starts_with(p))
 }
 
+/// The date/timezone fields a DateTime / DateTimeZone object keeps as
+/// properties for its debug, array-cast and serialize views
+/// (get_properties_for): not part of its real property table, so neither
+/// foreach nor get_object_vars() see them.
+pub fn is_date_view_prop(ob: &PhpObject, name: &[u8]) -> bool {
+    match name {
+        b"date" => ob.has_property(b"__timestamp_state"),
+        b"timezone_type" | b"timezone" => {
+            ob.has_property(b"__timestamp_state") || ob.has_property(b"__timestamp_tzobj")
+        }
+        _ => false,
+    }
+}
+
 impl Vm {
     /// The foreach key of property slot `name` of an object of class
     /// `obj_class_lower` seen from `scope_lower`, or None when the slot is
@@ -189,7 +203,10 @@ impl Vm {
                 }
             };
             i += 1;
-            if is_internal_slot(&name) || matches!(value, Value::Undef) {
+            if is_internal_slot(&name)
+                || matches!(value, Value::Undef)
+                || is_date_view_prop(&obj.borrow(), &name)
+            {
                 continue;
             }
             // A dynamic property an inherited private one moved away from
@@ -446,7 +463,10 @@ impl Vm {
                 }
             };
             j += 1;
-            if is_internal_slot(&name) || matches!(value, Value::Undef) || declared.contains(&name)
+            if is_internal_slot(&name)
+                || matches!(value, Value::Undef)
+                || declared.contains(&name)
+                || is_date_view_prop(&obj.borrow(), &name)
             {
                 continue;
             }
