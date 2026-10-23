@@ -4,7 +4,7 @@
 use goro_core::array::PhpArray;
 use goro_core::value::Value;
 use goro_core::vm::Vm;
-use goro_imagick::color::{PixelInfo, to_q16};
+use goro_imagick::color::{PixelInfo, clamp_to_quantum, to_q16};
 use goro_imagick::composite::{ComposeArgs, composite_image};
 use goro_imagick::filters::apply_oxideav;
 use goro_imagick::geometry::Rect;
@@ -931,8 +931,10 @@ fn range_threshold_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value])
         a[3].double_or(0.0),
     );
     image_op(vm, &d_(o), "Unable to rangeThresholdImage", |i| {
-        goro_imagick::filters::map_channels(i, channel::DEFAULT, |v| {
-            if v < lb || v > hb {
+        // RangeThresholdImage(): every channel from the pixel intensity
+        for p in i.pixels.chunks_exact_mut(4) {
+            let v = Image::intensity(p);
+            let o = if v < lb || v > hb {
                 0.0
             } else if v >= lw && v <= hw {
                 65535.0
@@ -940,8 +942,13 @@ fn range_threshold_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value])
                 (v - lb) / (lw - lb).max(1e-9) * 65535.0
             } else {
                 (hb - v) / (hb - hw).max(1e-9) * 65535.0
-            }
-        });
+            };
+            let o = clamp_to_quantum(o) as u16;
+            p[0] = o;
+            p[1] = o;
+            p[2] = o;
+        }
+        i.colors = None;
         Ok(())
     })
 }

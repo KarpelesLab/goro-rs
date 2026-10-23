@@ -1374,13 +1374,15 @@ fn threshold_color(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value], white
         "Unable to black threshold image"
     };
     image_op(vm, &d_(o), msg, |i| {
+        // each channel is held against the pixel intensity, not itself
         for p in i.pixels.chunks_exact_mut(4) {
+            let int = Image::intensity(p);
             for ch in 0..3 {
                 if white {
-                    if p[ch] > t[ch] {
+                    if int > t[ch] as f64 {
                         p[ch] = 65535;
                     }
-                } else if p[ch] < t[ch] {
+                } else if int < t[ch] as f64 {
                     p[ch] = 0;
                 }
             }
@@ -1693,9 +1695,21 @@ fn brightness_contrast_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Val
     let a = zpp::parse(vm, f, "dd|l", args)?;
     let (b, c) = (a[0].double_or(0.0), a[1].double_or(0.0));
     let ch = a[2].long_or(channel::DEFAULT);
-    let _ = ch;
     image_op(vm, &d_(o), "Unable to brightnesscontrastimage", |i| {
-        apply_oxideav(i, &of::BrightnessContrast::new(b as f32, c as f32))
+        // BrightnessContrastImage(): a line through mid-gray, slope
+        // 100/(100-c) (or 1+c/100 for negative contrast), shifted by the
+        // brightness percentage before the slope
+        let slope = if c >= 0.0 {
+            100.0 / (100.0 - c)
+        } else {
+            1.0 + c / 100.0
+        };
+        let shift = b / 100.0 * 65535.0;
+        goro_imagick::filters::map_channels(i, ch, |v| {
+            let y = 32767.5 + slope * (v - 32767.5 + shift);
+            if y.is_nan() { 32767.5 } else { y }
+        });
+        Ok(())
     })
 }
 
@@ -2124,7 +2138,19 @@ fn blue_shift_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R
     let a = zpp::parse(vm, f, "|d", args)?;
     let fct = a[0].double_or(1.5);
     image_op(vm, &d_(o), "Unable to blue shift image", |i| {
-        apply_oxideav(i, &of::BlueShift::new(fct as f32))
+        // BlueShiftImage(): halfway to factor x the darkest sample, then
+        // halfway to factor x the brightest
+        for p in i.pixels.chunks_exact_mut(4) {
+            let (r, g, b) = (p[0] as f64, p[1] as f64, p[2] as f64);
+            let lo = r.min(g).min(b);
+            let hi = r.max(g).max(b);
+            let step = |v: f64| 0.5 * (0.5 * (v + fct * lo) + fct * hi);
+            p[0] = to_q16(step(r));
+            p[1] = to_q16(step(g));
+            p[2] = to_q16(step(b));
+        }
+        i.colors = None;
+        Ok(())
     })
 }
 
