@@ -797,6 +797,10 @@ pub(crate) struct CallTarget {
     /// (a qualified, fully qualified or imported name, or a dynamic call:
     /// INIT_FCALL_BY_NAME rather than INIT_NS_FCALL_BY_NAME).
     pub(crate) no_ns_fallback: bool,
+    /// An unqualified namespaced name whose call site fell back to the
+    /// global function: it calls that one, even once the namespaced one
+    /// exists (see SiteCaches::ns_fallbacks).
+    pub(crate) ns_global: bool,
     /// A `$closure()` call (see init_closure_call_fast): `user` is the
     /// closure's function, registered under the call's name.
     pub(crate) closure: bool,
@@ -861,9 +865,8 @@ pub(crate) struct CachedCallTarget {
     /// (of a method: see MethodCallInfo)
     method_info: Option<Rc<MethodCallInfo>>,
     fn_gen: usize,
-    /// An unqualified namespaced name that resolved to the global function
-    /// (see SiteCaches::ns_fallbacks): the name the call is made by.
-    global_name: Option<PhpString>,
+    /// (see CallTarget::ns_global)
+    ns_global: bool,
 }
 
 // A pending call is moved on every call (pushed, popped): larger than this,
@@ -879,6 +882,7 @@ impl CallTarget {
         method: None,
         no_ctor: false,
         no_ns_fallback: false,
+        ns_global: false,
         closure: false,
         forward: None,
         forward_this: false,
@@ -19123,6 +19127,7 @@ impl Vm {
                 method,
                 no_ctor: false,
                 no_ns_fallback: false,
+                ns_global: false,
                 closure: false,
                 forward: None,
                 forward_this: false,
@@ -19158,6 +19163,7 @@ impl Vm {
             method: None,
             no_ctor: false,
             no_ns_fallback: false,
+            ns_global: false,
             closure: false,
             forward: None,
             forward_this: false,
@@ -19339,25 +19345,11 @@ impl Vm {
         if let Some(buf) = self.value_pool.pop() {
             call.args = buf;
         }
-        let mut global = None;
-        if !Self::cached_call_target(
-            op_array,
-            ip,
-            call.name.as_bytes(),
-            fn_gen,
-            &mut call.target,
-            &mut global,
-        ) {
+        if !Self::cached_call_target(op_array, ip, call.name.as_bytes(), fn_gen, &mut call.target) {
             let name = call.name.clone();
-            let (target, g) = self.plain_call_target_ns(op_array, ip, name.as_bytes(), ns_fallback);
-            global = g;
+            let target = self.plain_call_target_ns(op_array, ip, name.as_bytes(), ns_fallback);
             if let Some(call) = self.pending_calls.last_mut() {
                 call.target = target;
-            }
-        }
-        if let Some(g) = global {
-            if let Some(call) = self.pending_calls.last_mut() {
-                call.name = g;
             }
         }
     }
@@ -19564,7 +19556,6 @@ impl Vm {
         name: &[u8],
         fn_gen: usize,
         t: &mut CallTarget,
-        global: &mut Option<PhpString>,
     ) -> bool {
         let sites = op_array.sites.borrow();
         let Some(c) = sites
@@ -19589,9 +19580,7 @@ impl Vm {
         t.method = c.method;
         t.method_info = c.method_info.clone();
         t.fn_gen = fn_gen;
-        if c.global_name.is_some() {
-            global.clone_from(&c.global_name);
-        }
+        t.ns_global = c.ns_global;
         true
     }
 
@@ -19660,17 +19649,16 @@ impl Vm {
     ) -> CallTarget {
         let fn_gen = self.user_functions.len() + 1;
         let mut t = CallTarget::NONE;
-        let mut global = None;
-        if Self::cached_call_target(op_array, ip, name, fn_gen, &mut t, &mut global) {
+        if Self::cached_call_target(op_array, ip, name, fn_gen, &mut t) {
             return t;
         }
-        self.plain_call_target_ns(op_array, ip, name, false).0
+        self.plain_call_target_ns(op_array, ip, name, false)
     }
 
     /// plain_call_target() past the site's cache. `ns_fallback`: an
     /// unqualified name in a namespace (INIT_NS_FCALL_BY_NAME) that falls
-    /// back to the global function when the namespaced one does not exist;
-    /// the name to call then comes back too (the site keeps it).
+    /// back to the global function when the namespaced one does not exist
+    /// (the site keeps it: CallTarget::ns_global).
     #[inline(never)]
     pub(crate) fn plain_call_target_ns(
         &mut self,
@@ -19678,7 +19666,7 @@ impl Vm {
         ip: usize,
         name: &[u8],
         ns_fallback: bool,
-    ) -> (CallTarget, Option<PhpString>) {
+    ) -> CallTarget {
         let global_name = if ns_fallback
             && name.contains(&b'\\')
             && !name.windows(2).any(|w| w == b"::")
@@ -19692,6 +19680,7 @@ impl Vm {
             None => name,
         };
         let mut t = self.resolve_call_target(resolved);
+        t.ns_global = global_name.is_some();
         // A static method call's frame name and scope (see MethodCallInfo).
         if let (Some((sep, _)), Some(f)) = (t.method, &t.user) {
             let name = PhpString::from_bytes_untracked(name);
@@ -19712,10 +19701,10 @@ impl Vm {
                     method: t.method,
                     method_info: t.method_info.clone(),
                     fn_gen: t.fn_gen,
-                    global_name: global_name.clone(),
+                    ns_global: t.ns_global,
                 },
             );
-        (t, global_name)
+        t
     }
 
     /// The global function name an unqualified namespaced call `name` at
@@ -27413,8 +27402,11 @@ impl Vm {
                         && !call.target.no_ns_fallback
                     {
                         // Only for plain function calls (not Class::method)
-                        let has_user = self.user_functions.contains_key(&func_name_lower);
-                        let has_builtin = self.functions.contains_key(&func_name_lower);
+                        let ns_global = call.target.ns_global;
+                        let has_user =
+                            !ns_global && self.user_functions.contains_key(&func_name_lower);
+                        let has_builtin =
+                            !ns_global && self.functions.contains_key(&func_name_lower);
                         if !has_user && !has_builtin {
                             // Try unqualified name (after last backslash)
                             if let Some(last_sep) =
