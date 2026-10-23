@@ -7354,7 +7354,8 @@ impl Compiler {
                                         crate::string::msg_str(name),
                                         crate::string::msg_str(prop_name)
                                     ),
-                                    line: stmt.span.line,
+                                    // (at the redeclared property)
+                                    line: if *prop_line > 0 { *prop_line } else { stmt.span.line },
                                 });
                             }
                             // Determine if property is virtual (hooks don't access backing store)
