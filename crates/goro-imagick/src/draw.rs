@@ -7,6 +7,7 @@ use oxideav_core::vector as v;
 use crate::color::{PixelInfo, fmt_g_prec};
 use crate::composite::{ComposeArgs, composite_image};
 use crate::image::Image;
+use crate::mvg::{self, Sub};
 use crate::types::*;
 
 /// An affine matrix (sx, rx, ry, sy, tx, ty) as AffineMatrix.
@@ -161,6 +162,8 @@ pub enum Shape {
         path: Vec<v::PathCommand>,
         /// Open paths are stroked only (lines, polylines).
         open: bool,
+        /// The point lists ImageMagick rasterises (user space), when known.
+        im: Vec<Sub>,
     },
     Point(f64, f64),
     Text {
@@ -204,6 +207,7 @@ pub struct DrawingWand {
     indent: usize,
     path: Vec<v::PathCommand>,
     path_mvg: String,
+    im_path: Vec<Sub>,
     path_start: Option<(f64, f64)>,
     cur: (f64, f64),
     last_ctrl: Option<(f64, f64)>,
@@ -482,6 +486,10 @@ impl DrawingWand {
             num(x2),
             num(y2)
         ));
+        let im = vec![Sub {
+            pts: vec![(x1, y1), (x1, y2), (x2, y2), (x2, y1), (x1, y1)],
+            closed: true,
+        }];
         // the corners are pixel centres: the fill covers both of them
         let (x1, x2) = (x1.min(x2) - 0.5, x1.max(x2) + 0.5);
         let (y1, y2) = (y1.min(y2) - 0.5, y1.max(y2) + 0.5);
@@ -492,7 +500,11 @@ impl DrawingWand {
             v::PathCommand::LineTo(pt(x1, y2)),
             v::PathCommand::Close,
         ];
-        self.add(Shape::Path { path, open: false });
+        self.add(Shape::Path {
+            path,
+            open: false,
+            im,
+        });
     }
 
     pub fn round_rectangle(&mut self, x1: f64, y1: f64, x2: f64, y2: f64, rx: f64, ry: f64) {
@@ -505,6 +517,21 @@ impl DrawingWand {
             num(rx),
             num(ry)
         ));
+        let im = {
+            let (ax, bx) = (x1.min(x2), x1.max(x2));
+            let (ay, by) = (y1.min(y2), y1.max(y2));
+            let rx = rx.abs().min((bx - ax) / 2.0);
+            let ry = ry.abs().min((by - ay) / 2.0);
+            let mut pts = Vec::new();
+            pts.extend(mvg::ellipse_points(bx - rx, ay + ry, rx, ry, 270.0, 360.0));
+            pts.extend(mvg::ellipse_points(bx - rx, by - ry, rx, ry, 0.0, 90.0));
+            pts.extend(mvg::ellipse_points(ax + rx, by - ry, rx, ry, 90.0, 180.0));
+            pts.extend(mvg::ellipse_points(ax + rx, ay + ry, rx, ry, 180.0, 270.0));
+            if let Some(&f) = pts.first() {
+                pts.push(f);
+            }
+            vec![Sub { pts, closed: true }]
+        };
         let (x1, x2) = (x1.min(x2) - 0.5, x1.max(x2) + 0.5);
         let (y1, y2) = (y1.min(y2) - 0.5, y1.max(y2) + 0.5);
         let rx = rx.min((x2 - x1) / 2.0).max(0.0);
@@ -529,7 +556,11 @@ impl DrawingWand {
             arc(pt(x1 + rx, y1)),
             v::PathCommand::Close,
         ];
-        self.add(Shape::Path { path, open: false });
+        self.add(Shape::Path {
+            path,
+            open: false,
+            im,
+        });
     }
 
     fn ellipse_path(
@@ -579,7 +610,15 @@ impl DrawingWand {
         ));
         let r = ((px - ox).powi(2) + (py - oy).powi(2)).sqrt();
         let path = Self::ellipse_path(ox, oy, r, r, 0.0, 360.0, false);
-        self.add(Shape::Path { path, open: false });
+        let im = vec![Sub {
+            pts: mvg::ellipse_points(ox, oy, r, r, 0.0, 360.0),
+            closed: false,
+        }];
+        self.add(Shape::Path {
+            path,
+            open: false,
+            im,
+        });
     }
 
     pub fn ellipse(&mut self, ox: f64, oy: f64, rx: f64, ry: f64, start: f64, end: f64) {
@@ -594,7 +633,11 @@ impl DrawingWand {
         ));
         let path = Self::ellipse_path(ox, oy, rx, ry, start, end, false);
         let open = (end - start).abs() < 360.0;
-        self.add(Shape::Path { path, open });
+        let im = vec![Sub {
+            pts: mvg::ellipse_points(ox, oy, rx, ry, start, end),
+            closed: false,
+        }];
+        self.add(Shape::Path { path, open, im });
     }
 
     pub fn arc(&mut self, sx: f64, sy: f64, ex: f64, ey: f64, sd: f64, ed: f64) {
@@ -610,7 +653,15 @@ impl DrawingWand {
         let (cx, cy) = ((sx + ex) / 2.0, (sy + ey) / 2.0);
         let (rx, ry) = ((ex - sx).abs() / 2.0, (ey - sy).abs() / 2.0);
         let path = Self::ellipse_path(cx, cy, rx, ry, sd, ed, false);
-        self.add(Shape::Path { path, open: false });
+        let im = vec![Sub {
+            pts: mvg::ellipse_points(cx, cy, rx, ry, sd, ed),
+            closed: false,
+        }];
+        self.add(Shape::Path {
+            path,
+            open: false,
+            im,
+        });
     }
 
     pub fn line(&mut self, x1: f64, y1: f64, x2: f64, y2: f64) {
@@ -621,6 +672,10 @@ impl DrawingWand {
             num(x2),
             num(y2)
         ));
+        let im = vec![Sub {
+            pts: vec![(x1, y1), (x2, y2)],
+            closed: false,
+        }];
         // both end points are drawn: extend the line by half a pixel
         let (dx, dy) = (x2 - x1, y2 - y1);
         let len = (dx * dx + dy * dy).sqrt();
@@ -633,7 +688,11 @@ impl DrawingWand {
             v::PathCommand::MoveTo(pt(x1 - ex, y1 - ey)),
             v::PathCommand::LineTo(pt(x2 + ex, y2 + ey)),
         ];
-        self.add(Shape::Path { path, open: true });
+        self.add(Shape::Path {
+            path,
+            open: true,
+            im,
+        });
     }
 
     pub fn point(&mut self, x: f64, y: f64) {
@@ -661,7 +720,19 @@ impl DrawingWand {
         if close {
             path.push(v::PathCommand::Close);
         }
-        self.add(Shape::Path { path, open: !close });
+        let mut ip = pts.to_vec();
+        if close {
+            ip.push(pts[0]);
+        }
+        let im = vec![Sub {
+            pts: ip,
+            closed: close,
+        }];
+        self.add(Shape::Path {
+            path,
+            open: !close,
+            im,
+        });
     }
 
     pub fn polygon(&mut self, pts: &[(f64, f64)]) {
@@ -705,7 +776,15 @@ impl DrawingWand {
                 v::PathCommand::LineTo(q)
             });
         }
-        self.add(Shape::Path { path, open: false });
+        let im = vec![Sub {
+            pts: mvg::bezier_points(pts),
+            closed: false,
+        }];
+        self.add(Shape::Path {
+            path,
+            open: false,
+            im,
+        });
     }
 
     pub fn annotation(&mut self, x: f64, y: f64, text: &str) {
@@ -741,6 +820,7 @@ impl DrawingWand {
 
     pub fn path_start(&mut self) {
         self.path.clear();
+        self.im_path.clear();
         self.path_mvg.clear();
         self.path_start = None;
         self.cur = (0.0, 0.0);
@@ -752,8 +832,13 @@ impl DrawingWand {
         let mvg = std::mem::take(&mut self.path_mvg);
         self.print(&format!("path '{}'", mvg));
         let path = std::mem::take(&mut self.path);
+        let im = std::mem::take(&mut self.im_path);
         if !path.is_empty() {
-            self.add(Shape::Path { path, open: false });
+            self.add(Shape::Path {
+                path,
+                open: false,
+                im,
+            });
         }
     }
 
@@ -774,6 +859,10 @@ impl DrawingWand {
             num(y)
         ));
         self.path.push(v::PathCommand::MoveTo(pt(x, y)));
+        self.im_path.push(Sub {
+            pts: vec![(x, y)],
+            closed: false,
+        });
         self.path_start = Some((x, y));
         self.cur = (x, y);
         self.last_ctrl = None;
@@ -795,6 +884,7 @@ impl DrawingWand {
         ));
         self.ensure_start();
         self.path.push(v::PathCommand::LineTo(pt(x, y)));
+        self.im_push(&[(x, y)]);
         self.cur = (x, y);
         self.last_ctrl = None;
         self.last_qctrl = None;
@@ -805,6 +895,7 @@ impl DrawingWand {
         self.path_text(&format!("{}{}", if rel { 'h' } else { 'H' }, num(x)));
         self.ensure_start();
         self.path.push(v::PathCommand::LineTo(pt(nx, self.cur.1)));
+        self.im_push(&[(nx, self.cur.1)]);
         self.cur.0 = nx;
     }
 
@@ -813,6 +904,7 @@ impl DrawingWand {
         self.path_text(&format!("{}{}", if rel { 'v' } else { 'V' }, num(y)));
         self.ensure_start();
         self.path.push(v::PathCommand::LineTo(pt(self.cur.0, ny)));
+        self.im_push(&[(self.cur.0, ny)]);
         self.cur.1 = ny;
     }
 
@@ -822,6 +914,37 @@ impl DrawingWand {
                 .push(v::PathCommand::MoveTo(pt(self.cur.0, self.cur.1)));
             self.path_start = Some(self.cur);
         }
+        if self.im_path.is_empty() {
+            self.im_path.push(Sub {
+                pts: vec![self.cur],
+                closed: false,
+            });
+        }
+    }
+
+    /// Append points to the current ImageMagick subpath.
+    fn im_push(&mut self, pts: &[(f64, f64)]) {
+        if self.im_path.is_empty() {
+            self.im_path.push(Sub {
+                pts: vec![self.cur],
+                closed: false,
+            });
+        }
+        let s = self.im_path.last_mut().unwrap();
+        if s.closed {
+            // drawing on after a close starts a new subpath at its start
+            let start = *s.pts.first().unwrap_or(&self.cur);
+            self.im_path.push(Sub {
+                pts: vec![start],
+                closed: false,
+            });
+        }
+        self.im_path.last_mut().unwrap().pts.extend_from_slice(pts);
+    }
+
+    fn im_curve(&mut self, cp: &[(f64, f64)]) {
+        let pts = mvg::bezier_points(cp);
+        self.im_push(&pts[1..]);
     }
 
     pub fn path_curve_to(&mut self, rel: bool, x1: f64, y1: f64, x2: f64, y2: f64, x: f64, y: f64) {
@@ -847,6 +970,7 @@ impl DrawingWand {
             c2: pt(c2.0, c2.1),
             end: pt(e.0, e.1),
         });
+        self.im_curve(&[self.cur, c1, c2, e]);
         self.last_ctrl = Some(c2);
         self.last_qctrl = None;
         self.cur = e;
@@ -873,6 +997,7 @@ impl DrawingWand {
             c2: pt(c2.0, c2.1),
             end: pt(e.0, e.1),
         });
+        self.im_curve(&[self.cur, c1, c2, e]);
         self.last_ctrl = Some(c2);
         self.last_qctrl = None;
         self.cur = e;
@@ -894,6 +1019,7 @@ impl DrawingWand {
             control: pt(c.0, c.1),
             end: pt(e.0, e.1),
         });
+        self.im_curve(&[self.cur, c, e]);
         self.last_qctrl = Some(c);
         self.last_ctrl = None;
         self.cur = e;
@@ -917,6 +1043,7 @@ impl DrawingWand {
             control: pt(c.0, c.1),
             end: pt(e.0, e.1),
         });
+        self.im_curve(&[self.cur, c, e]);
         self.last_qctrl = Some(c);
         self.last_ctrl = None;
         self.cur = e;
@@ -956,6 +1083,9 @@ impl DrawingWand {
             sweep,
             end: pt(e.0, e.1),
         });
+        for b in mvg::arc_beziers(self.cur, rx, ry, rot, large, sweep, e) {
+            self.im_curve(&b);
+        }
         self.cur = e;
         self.last_ctrl = None;
         self.last_qctrl = None;
@@ -964,6 +1094,12 @@ impl DrawingWand {
     pub fn path_close(&mut self) {
         self.path_text("Z");
         self.path.push(v::PathCommand::Close);
+        if let Some(s) = self.im_path.last_mut() {
+            if let Some(&f) = s.pts.first() {
+                s.pts.push(f);
+            }
+            s.closed = true;
+        }
         if let Some(s) = self.path_start {
             self.cur = s;
         }
@@ -1320,6 +1456,56 @@ impl DrawingWand {
         Ok(())
     }
 
+    /// Draw a primitive with ImageMagick's own rasteriser, when its point
+    /// lists are known and no pattern, clip path or dash is involved.
+    fn raster_im(
+        &self,
+        img: &mut Image,
+        p: &Primitive,
+        im: &[Sub],
+        nodes: &mut Vec<v::Node>,
+    ) -> bool {
+        let gc = &p.gc;
+        if im.is_empty()
+            || gc.fill_pattern.is_some()
+            || gc.stroke_pattern.is_some()
+            || gc.clip_path.is_some()
+            || gc.dash.iter().any(|d| *d > 0.0)
+        {
+            return false;
+        }
+        Self::flush_nodes(img, nodes);
+        let a = gc.affine;
+        let subs: Vec<Sub> = im
+            .iter()
+            .map(|s| Sub {
+                pts: s
+                    .pts
+                    .iter()
+                    .map(|&(x, y)| (a.sx * x + a.ry * y + a.tx, a.rx * x + a.sy * y + a.ty))
+                    .collect(),
+                closed: s.closed,
+            })
+            .collect();
+        let col = |c: &PixelInfo, mult: f64| -> [f64; 4] {
+            let al = if c.alpha_trait { c.alpha } else { 65535.0 };
+            [c.red, c.green, c.blue, (al * mult).clamp(0.0, 65535.0)]
+        };
+        let fill = col(&gc.fill, gc.fill_opacity * gc.opacity);
+        let expand = (a.sx * a.sy - a.rx * a.ry).abs().sqrt();
+        let width = gc.stroke_width * expand;
+        let sc = col(&gc.stroke, gc.opacity);
+        let stroke = (gc.stroke_width > 0.0).then_some(mvg::StrokeStyle {
+            color: sc,
+            width,
+            join: gc.line_join,
+            cap: gc.line_cap,
+            miter_limit: gc.miter_limit,
+        });
+        mvg::draw(img, &subs, Some((fill, gc.fill_rule == 2)), stroke, width);
+        true
+    }
+
     pub fn render_onto(&self, img: &mut Image) -> crate::error::MResult<()> {
         let (w, h) = (img.columns, img.rows);
         if w == 0 || h == 0 {
@@ -1343,7 +1529,10 @@ impl DrawingWand {
                     }
                 }
                 Shape::Composite { .. } => composites.push(p),
-                Shape::Path { path, open } => {
+                Shape::Path { path, open, im } => {
+                    if self.raster_im(img, p, im, &mut nodes) {
+                        continue;
+                    }
                     let pattern =
                         p.gc.fill_pattern
                             .as_ref()

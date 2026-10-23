@@ -2086,54 +2086,32 @@ fn vignette_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 }
 
 /// VignetteImage(): an anti-aliased ellipse centred on the image, its
-/// radii (columns/2 - x, rows/2 - y) plus half a pixel, blurred with
+/// radii (columns/2 - x, rows/2 - y), blurred with
 /// BlurImage(radius, sigma), blends the image with its background colour.
 fn vignette(i: &mut Image, radius: f64, sigma: f64, x: f64, y: f64) {
     let (w, h) = (i.columns, i.rows);
     if w == 0 || h == 0 {
         return;
     }
+    // an ellipse filled and stroked (width 1) in white on black, with
+    // ImageMagick's rasteriser
     let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
-    let (rx, ry) = (cx - x + 0.5, cy - y + 0.5);
+    let (rx, ry) = (cx - x, cy - y);
     let mut mask = Image::blank(w, h);
     if rx > 0.0 && ry > 0.0 {
-        const S: usize = 8;
-        let inside = |px: f64, py: f64| {
-            let (dx, dy) = ((px - cx) / rx, (py - cy) / ry);
-            dx * dx + dy * dy <= 1.0
+        let white = [65535.0; 4];
+        let sub = goro_imagick::mvg::Sub {
+            pts: goro_imagick::mvg::ellipse_points(cx, cy, rx, ry, 0.0, 360.0),
+            closed: false,
         };
-        for py in 0..h {
-            for px in 0..w {
-                let (fx, fy) = (px as f64, py as f64);
-                // pixel squares wholly inside or outside need no samples
-                let (dx, dy) = ((fx - cx).abs(), (fy - cy).abs());
-                let near = |ddx: f64, ddy: f64| {
-                    let (a, b) = (ddx / rx, ddy / ry);
-                    a * a + b * b
-                };
-                let far = near(dx + 0.5, dy + 0.5);
-                let close = near((dx - 0.5).max(0.0), (dy - 0.5).max(0.0));
-                let cov = if far <= 1.0 {
-                    1.0
-                } else if close > 1.0 {
-                    0.0
-                } else {
-                    let mut n = 0;
-                    for a in 0..S {
-                        for b in 0..S {
-                            let sx = fx - 0.5 + (a as f64 + 0.5) / S as f64;
-                            let sy = fy - 0.5 + (b as f64 + 0.5) / S as f64;
-                            if inside(sx, sy) {
-                                n += 1;
-                            }
-                        }
-                    }
-                    n as f64 / (S * S) as f64
-                };
-                let v = to_q16(cov * 65535.0);
-                mask.set_px(px, py, [v, v, v, 65535]);
-            }
-        }
+        let stroke = goro_imagick::mvg::StrokeStyle {
+            color: white,
+            width: 1.0,
+            join: 1,
+            cap: 1,
+            miter_limit: 10.0,
+        };
+        goro_imagick::mvg::draw(&mut mask, &[sub], Some((white, false)), Some(stroke), 1.0);
     }
     if sigma > 0.0 {
         goro_imagick::convolve::blur(&mut mask, radius, sigma, channel::DEFAULT);

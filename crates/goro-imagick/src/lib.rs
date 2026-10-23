@@ -42,6 +42,7 @@ pub mod image;
 pub mod interp;
 pub mod jpeg_coef;
 pub mod label;
+pub mod mvg;
 pub mod pixels;
 pub mod properties;
 pub mod pseudo;
