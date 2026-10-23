@@ -722,68 +722,23 @@ fn class_implements_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let class_lower: Vec<u8> = class_name.iter().map(|b| b.to_ascii_lowercase()).collect();
     let mut result = PhpArray::new();
-
-    // Get interfaces from the class definition
-    if let Some(class) = vm.classes.get(&class_lower) {
-        for iface in &class.interfaces {
-            let iface_str = PhpString::from_vec(iface.clone());
-            result.set(
-                ArrayKey::String(iface_str.clone()),
-                Value::String(iface_str),
-            );
+    // ce->interfaces (as ReflectionClass::getInterfaceNames()): inherited
+    // ones and the parents of implemented interfaces included.
+    let mut add = |name: &[u8]| {
+        let s = PhpString::from_vec(name.to_vec());
+        if !result.iter().any(
+            |(k, _)| matches!(k, ArrayKey::String(k) if k.as_bytes().eq_ignore_ascii_case(name)),
+        ) {
+            result.set(ArrayKey::String(s.clone()), Value::String(s));
         }
+    };
+    for iface in goro_core::reflection::class_all_interface_names(vm, &class_lower) {
+        add(iface.as_bytes());
     }
-
-    // Also check built-in interface implementations
-    let builtins = goro_core::vm::get_builtin_interfaces(&class_lower);
-    for iface in builtins {
-        let iface_str = PhpString::from_vec(iface.clone());
-        result.set(
-            ArrayKey::String(iface_str.clone()),
-            Value::String(iface_str),
-        );
-    }
-
-    // Check for implicit Stringable (class or any parent has __tostring)
-    if vm.class_implements_interface(&class_lower, b"stringable") {
-        let iface_str = PhpString::from_vec(b"Stringable".to_vec());
-        if !result.iter().any(|(k, _)| matches!(k, ArrayKey::String(s) if s.as_bytes().eq_ignore_ascii_case(b"Stringable"))) {
-            result.set(ArrayKey::String(iface_str.clone()), Value::String(iface_str));
-        }
-    }
-
-    // Walk parent chain for inherited interfaces
-    let mut current = class_lower.clone();
-    for _ in 0..50 {
-        let parent = if let Some(class) = vm.classes.get(&current) {
-            class.parent.clone()
-        } else {
-            None
-        };
-        if let Some(parent_name) = parent {
-            let parent_lower: Vec<u8> =
-                parent_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-            if let Some(parent_class) = vm.classes.get(&parent_lower) {
-                for iface in &parent_class.interfaces {
-                    let iface_str = PhpString::from_vec(iface.clone());
-                    result.set(
-                        ArrayKey::String(iface_str.clone()),
-                        Value::String(iface_str),
-                    );
-                }
-            }
-            let parent_builtins = goro_core::vm::get_builtin_interfaces(&parent_lower);
-            for iface in parent_builtins {
-                let iface_str = PhpString::from_vec(iface.clone());
-                result.set(
-                    ArrayKey::String(iface_str.clone()),
-                    Value::String(iface_str),
-                );
-            }
-            current = parent_lower;
-        } else {
-            break;
-        }
+    // The implicit Stringable (traits implement no interfaces).
+    let is_trait = vm.classes.get(&class_lower).is_some_and(|c| c.is_trait);
+    if !is_trait && vm.class_implements_interface(&class_lower, b"stringable") {
+        add(b"Stringable");
     }
 
     Ok(Value::Array(Rc::new(RefCell::new(result))))

@@ -168,11 +168,13 @@ pub fn idate_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
         b'I' => offset.is_dst as i64,
         b'Z' => offset.offset as i64,
         b'U' => t.sse as i32 as i64,
-        _ => {
-            vm.emit_warning("idate(): Unrecognized date format token");
-            return Ok(Value::False);
-        }
+        _ => -1,
     };
+    // php_idate() returns -1 for an unknown token: any -1 result is one.
+    if r == -1 {
+        vm.emit_warning("idate(): Unrecognized date format token");
+        return Ok(Value::False);
+    }
     Ok(Value::Long(r))
 }
 

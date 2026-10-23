@@ -15669,7 +15669,7 @@ impl Vm {
                 b"IS_PRIVATE" => Some(Value::Long(4)),
                 b"IS_PROTECTED_SET" => Some(Value::Long(0x800)),
                 b"IS_PRIVATE_SET" => Some(Value::Long(0x1000)),
-                b"IS_READONLY" => Some(Value::Long(0x10000)),
+                b"IS_READONLY" => Some(Value::Long(0x80)),
                 b"IS_ABSTRACT" => Some(Value::Long(0x40)),
                 b"IS_FINAL" => Some(Value::Long(0x20)),
                 b"IS_VIRTUAL" => Some(Value::Long(0x200)),
@@ -37994,12 +37994,19 @@ impl Vm {
                         // A finished generator cannot be iterated again (zend_generator_get_iterator()).
                         // iterating again is an error.
                         {
-                            let already_closed = {
+                            // (zend_generator_get_iterator() / its rewind:
+                            // a generator past its first yield cannot restart)
+                            let refused = {
                                 let gen_borrow = gen_rc.borrow();
-                                gen_borrow.state == crate::generator::GeneratorState::Completed
+                                if gen_borrow.state == crate::generator::GeneratorState::Completed {
+                                    Some("Cannot traverse an already closed generator")
+                                } else if gen_borrow.advanced_past_first {
+                                    Some("Cannot rewind a generator that was already run")
+                                } else {
+                                    None
+                                }
                             };
-                            if already_closed {
-                                let msg = "Cannot traverse an already closed generator";
+                            if let Some(msg) = refused {
                                 let exc = self.create_exception(b"Exception", msg, op.line);
                                 self.current_exception = Some(exc);
                                 if let Some((catch_target, _, _, _, saved_pc)) =

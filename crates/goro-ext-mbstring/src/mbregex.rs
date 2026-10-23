@@ -581,6 +581,22 @@ fn replace_exec(
     let mut callback = Value::Null;
     if callable {
         callback = args.get(1).cloned().unwrap_or(Value::Null).deref();
+        // Z_PARAM_FUNC
+        if let Some(e) = vm.callable_error(&callback) {
+            if vm.current_exception.is_none() {
+                return Err(type_error(
+                    vm,
+                    format!(
+                        "{}(): Argument #2 ($callback) must be a valid callback, {}",
+                        f, e
+                    ),
+                ));
+            }
+            return Err(VmError {
+                message: e,
+                line: vm.current_line,
+            });
+        }
     } else {
         replace = str_arg(vm, f, args, 1, "replacement")?;
     }
@@ -652,8 +668,14 @@ fn replace_exec(
                     line: vm.current_line,
                 });
             }
-            let s = vm.value_to_string(&r);
-            out.extend_from_slice(s.as_bytes());
+            // convert_to_string(): an array warns
+            if matches!(r.deref(), Value::Array(_)) {
+                vm.emit_warning("Array to string conversion");
+                out.extend_from_slice(b"Array");
+            } else {
+                let s = vm.value_to_string(&r);
+                out.extend_from_slice(s.as_bytes());
+            }
         }
         if pos < mend {
             pos = mend;

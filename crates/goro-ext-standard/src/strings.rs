@@ -420,7 +420,7 @@ fn substr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         Some(l) if l >= 0 => {
-            let end_pos = start as i64 + l;
+            let end_pos = (start as i64).saturating_add(l);
             if end_pos > bytes.len() as i64 {
                 bytes.len()
             } else {
@@ -1651,21 +1651,8 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                                 goro_core::value::format_php_float_repr(f)
                             ));
                         }
-                        if !f.is_finite() {
-                            return 0;
-                        }
-                        let two64 = 18446744073709551616.0f64;
-                        let mut dmod = f % two64;
-                        if dmod < 0.0 {
-                            if dmod == -9223372036854775808.0 {
-                                return i64::MIN;
-                            }
-                            dmod += two64;
-                        }
-                        if dmod > 9223372036854775807.0 {
-                            dmod -= two64;
-                        }
-                        return dmod as i64;
+                        // (zend_dval_to_lval(): modular, 2**63 wraps to PHP_INT_MIN)
+                        return goro_core::value::php_dval_to_lval(f);
                     }
                     f as i64
                 }
@@ -3289,48 +3276,38 @@ fn metaphone(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 #[allow(clippy::needless_range_loop)] // index loop mirrors the C implementation
+/// reference_levdist() (ext/standard/levenshtein.c): bytes, signed costs.
 fn levenshtein(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s1 = args
-        .first()
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-    let s2 = args
-        .get(1)
-        .unwrap_or(&Value::Null)
-        .to_php_string()
-        .to_string_lossy();
-
-    // Optional costs: insertion_cost, replacement_cost, deletion_cost
-    let ins_cost = args.get(2).map(|v| v.to_long() as usize).unwrap_or(1);
-    let rep_cost = args.get(3).map(|v| v.to_long() as usize).unwrap_or(1);
-    let del_cost = args.get(4).map(|v| v.to_long() as usize).unwrap_or(1);
-
-    let len1 = s1.len();
-    let len2 = s2.len();
-    let mut matrix = vec![vec![0usize; len2 + 1]; len1 + 1];
-
-    for i in 0..=len1 {
-        matrix[i][0] = i * del_cost;
+    let s1 = args.first().unwrap_or(&Value::Null).to_php_string();
+    let s2 = args.get(1).unwrap_or(&Value::Null).to_php_string();
+    let (s1, s2) = (s1.as_bytes(), s2.as_bytes());
+    let cost = |i: usize| args.get(i).map(|v| v.to_long()).unwrap_or(1);
+    let (ins, rep, del) = (cost(2), cost(3), cost(4));
+    if s1.is_empty() {
+        return Ok(Value::Long((s2.len() as i64).wrapping_mul(ins)));
     }
-    for j in 0..=len2 {
-        matrix[0][j] = j * ins_cost;
+    if s2.is_empty() {
+        return Ok(Value::Long((s1.len() as i64).wrapping_mul(del)));
     }
-
-    for i in 1..=len1 {
-        for j in 1..=len2 {
-            let cost = if s1.as_bytes()[i - 1] == s2.as_bytes()[j - 1] {
-                0
-            } else {
-                rep_cost
-            };
-            matrix[i][j] = (matrix[i - 1][j] + del_cost)
-                .min(matrix[i][j - 1] + ins_cost)
-                .min(matrix[i - 1][j - 1] + cost);
+    let mut p1: Vec<i64> = (0..=s2.len() as i64).map(|i| i.wrapping_mul(ins)).collect();
+    let mut p2 = vec![0i64; s2.len() + 1];
+    for &c1 in s1 {
+        p2[0] = p1[0].wrapping_add(del);
+        for (i2, &c2) in s2.iter().enumerate() {
+            let mut c0 = p1[i2].wrapping_add(if c1 == c2 { 0 } else { rep });
+            let d = p1[i2 + 1].wrapping_add(del);
+            if d < c0 {
+                c0 = d;
+            }
+            let n = p2[i2].wrapping_add(ins);
+            if n < c0 {
+                c0 = n;
+            }
+            p2[i2 + 1] = c0;
         }
+        std::mem::swap(&mut p1, &mut p2);
     }
-
-    Ok(Value::Long(matrix[len1][len2] as i64))
+    Ok(Value::Long(p1[s2.len()]))
 }
 
 #[allow(clippy::needless_range_loop)] // index loop mirrors the C implementation
@@ -4633,6 +4610,8 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if let Value::Array(len_arr) = la {
                     let len_arr = len_arr.borrow();
                     len_arr.iter().nth(i).map(|(_, v)| v.to_long())
+                } else if matches!(la.deref(), Value::Null) {
+                    None // (?int $length = null: to the end)
                 } else {
                     Some(la.to_long())
                 }
@@ -4679,6 +4658,8 @@ fn substr_replace(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if let Value::Array(len_arr) = la {
                 let len_arr = len_arr.borrow();
                 len_arr.iter().next().map(|(_, v)| v.to_long())
+            } else if matches!(la.deref(), Value::Null) {
+                None // (?int $length = null: to the end)
             } else {
                 Some(la.to_long())
             }

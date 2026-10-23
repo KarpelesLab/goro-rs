@@ -11996,37 +11996,34 @@ pub fn reflection_static_call(
                 "getmodifiernames" => {
                     let modifiers = args.first().map(|v| v.to_long()).unwrap_or(0);
                     let mut names = PhpArray::new();
-                    // Order matches PHP: abstract, final, public, protected,
-                    // private, static, readonly, virtual, protected(set), private(set).
+                    // ZEND_METHOD(Reflection, getModifierNames)
+                    let mut add = |n: &[u8]| names.push(Value::String(PhpString::from_bytes(n)));
                     if modifiers & 0x40 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"abstract")));
+                        add(b"abstract");
                     }
                     if modifiers & 0x20 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"final")));
-                    }
-                    if modifiers & 1 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"public")));
-                    }
-                    if modifiers & 2 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"protected")));
-                    }
-                    if modifiers & 4 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"private")));
-                    }
-                    if modifiers & 0x10 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"static")));
-                    }
-                    if modifiers & 0x10000 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"readonly")));
+                        add(b"final");
                     }
                     if modifiers & 0x200 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"virtual")));
+                        add(b"virtual");
                     }
-                    if modifiers & 0x800 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"protected(set)")));
+                    match modifiers & 7 {
+                        1 => add(b"public"),
+                        4 => add(b"private"),
+                        2 => add(b"protected"),
+                        _ => {}
                     }
-                    if modifiers & 0x1000 != 0 {
-                        names.push(Value::String(PhpString::from_bytes(b"private(set)")));
+                    match modifiers & 0x1800 {
+                        0x800 => add(b"protected(set)"),
+                        0x1000 => add(b"private(set)"),
+                        _ => {}
+                    }
+                    if modifiers & 0x10 != 0 {
+                        add(b"static");
+                    }
+                    // ZEND_ACC_READONLY | ZEND_ACC_READONLY_CLASS
+                    if modifiers & (0x80 | 0x10000) != 0 {
+                        add(b"readonly");
                     }
                     Some(Value::Array(Rc::new(RefCell::new(names))))
                 }
@@ -12997,7 +12994,7 @@ fn reflection_property_modifiers_static(prop: &crate::object::PropertyDef) -> i6
         mods |= 0x200;
     }
     if prop.is_readonly {
-        mods |= 0x10000;
+        mods |= 0x80; // ZEND_ACC_READONLY
     }
     // Set visibility (zend_declare_typed_property): public readonly implies
     // protected(set); private(set) implies final.
@@ -15234,7 +15231,7 @@ fn method_section_string(
 /// `ce->interfaces` names in Zend's order: the parent's interfaces, then
 /// the declared ones, then interfaces inherited from those (appended while
 /// each is implemented).
-pub(crate) fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<String> {
+pub fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<String> {
     fn canon(vm: &Vm, n: &[u8]) -> String {
         rcls(vm, &n.to_ascii_lowercase())
             .map(|c| String::from_utf8_lossy(&c.name).to_string())
@@ -15245,20 +15242,36 @@ pub(crate) fn class_all_interface_names(vm: &Vm, class_lower: &[u8]) -> Vec<Stri
         if depth > 32 {
             return out;
         }
+        // An internal class: linked as zend_register_internal_class_ex()
+        // and zend_class_implements() do.
+        if is_internal_class(vm, lower) && crate::stubs::find_class(lower).is_some() {
+            return crate::stubs::class_interfaces(lower)
+                .into_iter()
+                .map(|n| canon(vm, n.as_bytes()))
+                .collect();
+        }
         let ce = match rcls(vm, lower) {
             Some(c) => c,
             None => return out,
         };
         // User interfaces keep their first extended interface as `parent`.
         let mut declared: Vec<Vec<u8>> = Vec::new();
+        declared.extend(ce.interfaces.iter().cloned());
         if let Some(p) = &ce.parent {
             if ce.is_interface {
-                declared.push(p.clone());
+                declared.insert(0, p.clone());
             } else {
                 out = compute(vm, &p.to_ascii_lowercase(), depth + 1);
+                // The parent's interfaces are inherited backwards
+                // (zend_do_inherit_interfaces()) by an internal class
+                // (zend_do_inheritance_ex()) and by a user class declaring
+                // none (zend_do_link_class()); a user class declaring
+                // interfaces copies them in order.
+                if declared.is_empty() {
+                    out.reverse();
+                }
             }
         }
-        declared.extend(ce.interfaces.iter().cloned());
         let n_parent = out.len();
         for i in &declared {
             let cn = canon(vm, i);

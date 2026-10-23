@@ -76,7 +76,16 @@ impl Vm {
                         | b"reflectionreference"
                 );
                 let spl_uncloneable = self
-                    .spl_find_base(&class_lower, &[b"splfileobject", b"globiterator"])
+                    .spl_find_base(
+                        &class_lower,
+                        &[
+                            b"splfileobject",
+                            b"globiterator",
+                            // spl_handlers_dual_it / spl_handlers_rec_it_it: clone_obj = NULL
+                            b"iteratoriterator",
+                            b"recursiveiteratoriterator",
+                        ],
+                    )
                     .is_some();
                 if reflection_uncloneable
                     || spl_uncloneable

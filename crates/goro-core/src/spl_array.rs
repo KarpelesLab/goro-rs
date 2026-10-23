@@ -1270,6 +1270,18 @@ impl Vm {
             }
             b"uasort" | b"uksort" => {
                 let cb = a.first().cloned().unwrap_or(Value::Null);
+                // (the sort function's zpp: its argument #2)
+                if let Some(e) = self.callable_error(&cb) {
+                    if self.current_exception.is_some() {
+                        return Some(Value::Null);
+                    }
+                    let msg = format!(
+                        "{}(): Argument #2 ($callback) must be a valid callback, {}",
+                        String::from_utf8_lossy(method),
+                        e
+                    );
+                    return self.spl_throw(b"TypeError", &msg);
+                }
                 return self.ao_sort(obj, method, Some(cb));
             }
             b"natsort" | b"natcasesort" => return self.ao_sort(obj, method, None),

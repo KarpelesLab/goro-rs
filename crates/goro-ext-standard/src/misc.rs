@@ -4463,7 +4463,8 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 Value::Resource(n) => ArrayKey::String(PhpString::from_vec(
                     format!("Resource id #{}", n).into_bytes(),
                 )),
-                Value::Double(_) => ArrayKey::String(val.to_php_string()),
+                // (zend_symtable_update() of the string: "1" is the key 1)
+                Value::Double(_) => Vm::value_to_array_key(Value::String(val.to_php_string())),
                 // Only canonical integer strings become int keys ("05" stays a string)
                 Value::String(_) => Vm::value_to_array_key(val.clone()),
                 Value::True => ArrayKey::Int(1),
@@ -4478,7 +4479,7 @@ fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     // Use __toString if available; otherwise fall back to to_php_string.
                     let obj_val = Value::Object(obj.clone());
                     if let Some(s) = vm.call_object_method(&obj_val, b"__toString", &[]) {
-                        ArrayKey::String(s.to_php_string())
+                        Vm::value_to_array_key(Value::String(s.to_php_string()))
                     } else {
                         ArrayKey::String(val.to_php_string())
                     }
@@ -6255,6 +6256,11 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         }
     }
 
+    // An internal class (or the internal ancestor of a user class): its
+    // stub's methods, inherited ones included.
+    if goro_core::stubs::find_method(&current, &method_lower).is_some() {
+        return Ok(Value::True);
+    }
     // Extension-provided built-in classes
     if let Some((native, h)) = vm.find_native_class_handler(&class_lower) {
         if (h.has_method)(&native, &method_lower, false)
@@ -7797,7 +7803,7 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         if matches!(v, Value::Null | Value::Undef) {
             None
         } else {
-            Some(v.to_php_string().to_string_lossy())
+            Some(v.to_php_string().to_msg_string())
         }
     });
     let separator = args
@@ -7806,16 +7812,17 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             if matches!(v, Value::Null | Value::Undef) {
                 None
             } else {
-                Some(v.to_php_string().to_string_lossy())
+                Some(v.to_php_string().to_msg_string())
             }
         })
         .unwrap_or_else(|| "&".to_string());
     let enc_type = args.get(3).map(|v| v.to_long()).unwrap_or(1); // PHP_QUERY_RFC1738 = 1
     let mut parts = Vec::new();
 
+    // (the strings carry raw bytes as msg_str()'s private-use characters)
     fn url_encode(s: &str, enc_type: i64) -> String {
         let mut result = String::new();
-        for byte in s.bytes() {
+        for byte in goro_core::errdisplay::raw_error_bytes(s).iter().copied() {
             match byte {
                 b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => {
                     result.push(byte as char);
@@ -7897,7 +7904,7 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 n.to_string()
                             }
                         }
-                        goro_core::array::ArrayKey::String(s) => s.to_string_lossy(),
+                        goro_core::array::ArrayKey::String(s) => s.to_msg_string(),
                     };
                     let new_prefix = if prefix.is_empty() {
                         url_encode(&k, enc_type)
@@ -7948,7 +7955,7 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if is_enum {
                     if has_backing {
                         let val = obj.borrow().get_property(b"value");
-                        let v = url_encode(&val.to_php_string().to_string_lossy(), enc_type);
+                        let v = url_encode(&val.to_php_string().to_msg_string(), enc_type);
                         parts.push(format!("{}={}", prefix, v));
                     } else {
                         let msg = format!(
@@ -8014,7 +8021,7 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if !visible {
                         continue;
                     }
-                    let k = String::from_utf8_lossy(&prop_name).to_string();
+                    let k = goro_core::string::msg_str(&prop_name).to_string();
                     let new_prefix = if prefix.is_empty() {
                         url_encode(&k, enc_type)
                     } else {
@@ -8045,7 +8052,7 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 parts.push(format!("{}=0", prefix));
             }
             _ => {
-                let v = url_encode(&val.to_php_string().to_string_lossy(), enc_type);
+                let v = url_encode(&val.to_php_string().to_msg_string(), enc_type);
                 parts.push(format!("{}={}", prefix, v));
             }
         }
@@ -8066,8 +8073,8 @@ fn http_build_query_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             0,
         );
     }
-    Ok(Value::String(PhpString::from_string(
-        parts.join(&separator),
+    Ok(Value::String(PhpString::from_vec(
+        goro_core::errdisplay::raw_error_bytes(&parts.join(&separator)).into_owned(),
     )))
 }
 
@@ -10458,6 +10465,10 @@ fn get_parent_class_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         && let Some(ref parent) = class.parent
     {
         return Ok(Value::String(PhpString::from_vec(parent.clone())));
+    }
+    // An internal class's parent.
+    if let Some(parent) = goro_core::vm::get_builtin_parent(&class_lower) {
+        return Ok(Value::String(PhpString::from_bytes(parent)));
     }
     Ok(Value::False)
 }

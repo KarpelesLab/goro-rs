@@ -417,34 +417,48 @@ pub fn find_method(class: &[u8], method: &[u8]) -> Option<(&'static StubClass, &
 /// PHP's order (parent's interfaces first, then own ones with their parents).
 pub fn class_interfaces(name: &[u8]) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
+    // zend_do_implement_interface(): the interface, then (when it was not
+    // there yet) the interfaces it inherits, walked backwards
+    // (zend_do_inherit_interfaces()).
     fn add_iface(n: &'static str, out: &mut Vec<&'static str>, depth: usize) {
         if depth > 32 {
             return;
         }
         let c = find_class(n.as_bytes());
         let canon = c.map(|c| c.name).unwrap_or(n);
-        if let Some(c) = c {
-            for i in c.interfaces {
-                add_iface(i, out, depth + 1);
-            }
-        }
-        if !out.iter().any(|x| x.eq_ignore_ascii_case(canon)) {
-            out.push(canon);
-        }
-    }
-    fn walk(c: &'static StubClass, out: &mut Vec<&'static str>, depth: usize) {
-        if depth > 32 {
+        if out.iter().any(|x| x.eq_ignore_ascii_case(canon)) {
             return;
         }
-        if let Some(p) = c.parent.and_then(|p| find_class(p.as_bytes())) {
-            walk(p, out, depth + 1);
-        }
-        for i in c.interfaces {
-            add_iface(i, out, depth + 1);
+        out.push(canon);
+        if c.is_some() {
+            for i in class_interfaces(canon.as_bytes()).into_iter().rev() {
+                if !out.iter().any(|x| x.eq_ignore_ascii_case(i)) {
+                    out.push(i);
+                }
+            }
         }
     }
     if let Some(c) = find_class(name) {
-        walk(c, &mut out, 0);
+        // A class declaring __toString() implements Stringable as its
+        // methods are registered (zend_register_functions()), first.
+        if c.kind != K_INTERFACE
+            && c.methods
+                .iter()
+                .any(|m| m.name.eq_ignore_ascii_case("__toString"))
+        {
+            out.push("Stringable");
+        }
+        // (the parent's, inherited backwards by zend_do_inheritance_ex())
+        if let Some(p) = c.parent.and_then(|p| find_class(p.as_bytes())) {
+            for i in class_interfaces(p.name.as_bytes()).into_iter().rev() {
+                if !out.iter().any(|x| x.eq_ignore_ascii_case(i)) {
+                    out.push(i);
+                }
+            }
+        }
+        for i in c.interfaces {
+            add_iface(i, &mut out, 1);
+        }
     }
     out
 }

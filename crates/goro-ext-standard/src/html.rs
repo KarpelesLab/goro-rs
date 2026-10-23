@@ -858,9 +858,32 @@ fn existing_entity_len(
     }
 }
 
-fn parse_html_args(vm: &mut Vm, args: &[Value], fn_name: &str) -> (Vec<u8>, i64, Charset, bool) {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = s.as_bytes().to_vec();
+fn parse_html_args(
+    vm: &mut Vm,
+    args: &[Value],
+    fn_name: &str,
+) -> Result<(Vec<u8>, i64, Charset, bool), VmError> {
+    // Z_PARAM_STR: arrays and objects without __toString() are rejected.
+    let first = args.first().map_or(Value::Null, |v| v.deref());
+    let bytes = match &first {
+        Value::Array(_) => return Err(html_string_type_error(vm, fn_name, "array")),
+        Value::Object(o) => {
+            let cls = o.borrow().class_name.to_ascii_lowercase();
+            if !vm.class_implements_interface(&cls, b"stringable") {
+                let name = goro_core::value::display_class_name(&o.borrow().class_name);
+                return Err(html_string_type_error(vm, fn_name, &name));
+            }
+            let s = vm.value_to_string(&first);
+            if vm.current_exception.is_some() {
+                return Err(VmError {
+                    message: "exception".into(),
+                    line: vm.current_line,
+                });
+            }
+            s.as_bytes().to_vec()
+        }
+        v => v.to_php_string().as_bytes().to_vec(),
+    };
     // PHP 8.1+ default: ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401
     let flags = args
         .get(1)
@@ -871,17 +894,30 @@ fn parse_html_args(vm: &mut Vm, args: &[Value], fn_name: &str) -> (Vec<u8>, i64,
         None | Some(Value::Null) => true,
         Some(v) => v.is_truthy(),
     };
-    (bytes, flags, cs, double_encode)
+    Ok((bytes, flags, cs, double_encode))
+}
+
+fn html_string_type_error(vm: &mut Vm, fn_name: &str, given: &str) -> VmError {
+    let msg = format!(
+        "{}(): Argument #1 ($string) must be of type string, {} given",
+        fn_name, given
+    );
+    let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+    vm.current_exception = Some(exc);
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
 }
 
 fn htmlspecialchars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let (bytes, flags, cs, double_encode) = parse_html_args(vm, args, "htmlspecialchars");
+    let (bytes, flags, cs, double_encode) = parse_html_args(vm, args, "htmlspecialchars")?;
     let out = encode_html(&bytes, cs, flags, double_encode, false);
     Ok(Value::String(PhpString::from_vec(out)))
 }
 
 fn htmlentities_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let (bytes, flags, cs, double_encode) = parse_html_args(vm, args, "htmlentities");
+    let (bytes, flags, cs, double_encode) = parse_html_args(vm, args, "htmlentities")?;
     let doctype = flags & ENT_HTML_DOC_TYPE_MASK;
     // PHP fires this notice once when htmlentities is asked to use the full
     // table but the charset can't support it (partial-support multi-byte) or
