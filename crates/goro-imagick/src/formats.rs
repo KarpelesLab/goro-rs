@@ -463,9 +463,9 @@ pub fn decode_miff(data: &[u8]) -> MResult<Vec<Image>> {
 }
 
 /// WriteMIFFImage(): the header as ImageMagick writes it, the profiles,
-/// then uncompressed DirectClass samples (8 or 16 bits, MSB first) in the
-/// image's colourspace.
-pub fn encode_miff(images: &[&Image]) -> Vec<u8> {
+/// then DirectClass samples (8 or 16 bits, MSB first) in the image's
+/// colourspace, uncompressed, RLE or Zip as the wand's compression asks.
+pub fn encode_miff(images: &[&Image], compression: CompressionType) -> Vec<u8> {
     let mut out = Vec::new();
     for img in images {
         let depth = if img.depth > 8 { 16 } else { 8 };
@@ -492,11 +492,19 @@ pub fn encode_miff(images: &[&Image]) -> Vec<u8> {
         if img.alpha {
             h.push_str("matte=True\n");
         }
+        let comp = match compression {
+            CompressionType::Zip => "Zip",
+            CompressionType::RLE => "RLE",
+            _ => "",
+        };
         h.push_str(&format!(
             "columns={}  rows={}  depth={depth}\n",
             img.columns, img.rows
         ));
         h.push_str(&format!("colorspace={}\n", cs.name()));
+        if !comp.is_empty() {
+            h.push_str(&format!("compression={comp}  quality={}\n", img.quality));
+        }
         if img.units != ResolutionType::Undefined {
             h.push_str(&format!("units={}\n", img.units.name()));
         }
@@ -551,20 +559,71 @@ pub fn encode_miff(images: &[&Image]) -> Vec<u8> {
                 out.push(crate::image::q_to_u8(v));
             }
         };
+        let mut raw = Vec::with_capacity(img.columns * img.rows * nch * depth / 8);
         for (k, p) in img.pixels.chunks_exact(4).enumerate() {
             if gray {
-                put(&mut out, p[0]);
+                put(&mut raw, p[0]);
             } else {
-                put(&mut out, p[0]);
-                put(&mut out, p[1]);
-                put(&mut out, p[2]);
+                put(&mut raw, p[0]);
+                put(&mut raw, p[1]);
+                put(&mut raw, p[2]);
                 if cmyk {
-                    put(&mut out, img.black.as_ref().map_or(0, |b| b[k]));
+                    put(&mut raw, img.black.as_ref().map_or(0, |b| b[k]));
                 }
             }
             if img.alpha {
-                put(&mut out, p[3]);
+                put(&mut raw, p[3]);
             }
+        }
+        let px = nch * depth / 8;
+        match comp {
+            "RLE" => {
+                // a pixel then (run length - 1), runs of at most 256
+                let mut k = 0;
+                let n = raw.len() / px;
+                while k < n {
+                    let cur = &raw[k * px..(k + 1) * px];
+                    let mut run = 1;
+                    while k + run < n
+                        && run < 256
+                        && &raw[(k + run) * px..(k + run + 1) * px] == cur
+                    {
+                        run += 1;
+                    }
+                    out.extend_from_slice(cur);
+                    out.push((run - 1) as u8);
+                    k += run;
+                }
+            }
+            "Zip" => {
+                use goro_zlib::{Deflate, Io, Z_DEFLATED, Z_FINISH, Z_SYNC_FLUSH};
+                let row = img.columns * px;
+                if let Ok(mut d) = Deflate::new(7, Z_DEFLATED, 15, 8, 0) {
+                    let mut buf = vec![0u8; row * 2 + 1024];
+                    for (y, r) in raw.chunks(row.max(1)).enumerate() {
+                        let flush = if y + 1 == img.rows {
+                            Z_FINISH
+                        } else {
+                            Z_SYNC_FLUSH
+                        };
+                        let mut chunk = Vec::new();
+                        let mut pos = 0;
+                        loop {
+                            let mut io = Io::new(&r[pos..], &mut buf);
+                            d.deflate(&mut io, flush);
+                            pos += io.in_pos;
+                            let n = io.out_pos;
+                            chunk.extend_from_slice(&buf[..n]);
+                            if pos >= r.len() && n < buf.len() {
+                                break;
+                            }
+                        }
+                        out.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+                        out.extend_from_slice(&chunk);
+                    }
+                }
+            }
+            _ => out.extend_from_slice(&raw),
         }
     }
     out

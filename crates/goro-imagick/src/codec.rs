@@ -2,7 +2,7 @@
 //! encoding them, on the OxideAV format crates' standalone APIs, plus the
 //! raw sample formats (RGB, RGBA, GRAY, CMYK...) and farbfeld done here.
 
-use crate::color::PixelInfo;
+use crate::color::{PixelInfo, clamp_to_quantum};
 use crate::error::{MResult, MagickError, severity};
 use crate::geometry::Rect;
 use crate::image::{Image, q_to_u8};
@@ -1574,6 +1574,9 @@ fn decode_raw(data: &[u8], m: &str, opts: &ReadOptions) -> MResult<Vec<Image>> {
 pub struct WriteOptions {
     /// `-define` style options ("png:bit-depth", "webp:lossless"...).
     pub defines: Vec<(String, String)>,
+    /// The wand's compression setting (setCompression()); some coders
+    /// follow it rather than the image's.
+    pub compression: CompressionType,
 }
 
 impl WriteOptions {
@@ -1591,7 +1594,7 @@ pub fn encode(images: &[&Image], magick: &str, opts: &WriteOptions) -> MResult<V
     let m = canonical_format(magick);
     if m == "MIFF" {
         // MIFF keeps the image's own colourspace
-        return Ok(crate::formats::encode_miff(images));
+        return Ok(crate::formats::encode_miff(images, opts.compression));
     }
     let converted: Vec<std::borrow::Cow<'_, Image>> = images
         .iter()
@@ -1608,9 +1611,9 @@ pub fn encode(images: &[&Image], magick: &str, opts: &WriteOptions) -> MResult<V
         "GIF" | "GIF87" => encode_gif(images, &m),
         "WEBP" => encode_webp(images, opts),
         "BMP" | "BMP2" | "BMP3" => encode_bmp(first),
-        "TIFF" | "TIF" => encode_tiff(images),
+        "TIFF" | "TIF" => encode_tiff(images, opts),
         "ICO" | "CUR" => encode_ico(images, &m),
-        "TGA" => encode_tga(first),
+        "TGA" => encode_tga(first, opts),
         "QOI" => encode_qoi(first),
         "PNM" | "PPM" | "PGM" | "PBM" | "PAM" => encode_pnm(first, &m),
         "FARBFELD" => Ok(encode_farbfeld(first)),
@@ -1632,9 +1635,16 @@ fn rgb8(img: &Image) -> Vec<u8> {
     out
 }
 
+/// Gray samples: the Rec. 709 luma of the pixel, rounded.
+fn gray16(img: &Image) -> Vec<u16> {
+    img.pixels
+        .chunks_exact(4)
+        .map(|p| clamp_to_quantum(Image::intensity(p)) as u16)
+        .collect()
+}
+
 fn gray8(img: &Image) -> Vec<u8> {
-    let rgba = img.to_rgba8();
-    rgba.chunks_exact(4).map(|p| p[0]).collect()
+    gray16(img).into_iter().map(q_to_u8).collect()
 }
 
 fn le16(vals: impl Iterator<Item = u16>) -> Vec<u8> {
@@ -2479,26 +2489,119 @@ fn encode_webp(images: &[&Image], opts: &WriteOptions) -> MResult<Vec<u8>> {
 }
 
 fn encode_bmp(img: &Image) -> MResult<Vec<u8>> {
+    // WriteBMPImage() as ImageMagick 7 writes it by default: a
+    // BITMAPV5HEADER tagged sRGB ('BGRs', the sRGB primaries, intent
+    // "images"), bottom-up rows padded to 4 bytes; 24-bit BI_RGB, 32-bit
+    // BI_BITFIELDS BGRA with alpha, or a 1/4/8-bit palette for a
+    // PseudoClass image without alpha
     let mut img = img.clone();
     img.cmyk_to_rgb();
-    let (w, h) = (img.columns as u32, img.rows as u32);
-    let opts = oxideav_bmp::EncodeOptions::default();
-    let mut out = if img.alpha && !img.is_opaque() {
-        oxideav_bmp::encode_rgba8(w, h, &img.to_rgba8(), &opts)
-    } else {
-        oxideav_bmp::encode_rgb8(w, h, &rgb8(&img), &opts)
+    let (w, h) = (img.columns, img.rows);
+    let alpha = img.alpha && !img.is_opaque();
+    let rgba = img.to_rgba8();
+    let mut palette: Vec<[u8; 3]> = Vec::new();
+    let mut index: Vec<u8> = Vec::new();
+    if !alpha && img.colors.is_some_and(|n| n <= 256) {
+        let mut map = std::collections::HashMap::new();
+        for p in rgba.chunks_exact(4) {
+            let c = [p[0], p[1], p[2]];
+            let k = *map.entry(c).or_insert_with(|| {
+                palette.push(c);
+                palette.len() - 1
+            });
+            if palette.len() > 256 {
+                break;
+            }
+            index.push(k as u8);
+        }
+        if palette.len() > 256 {
+            palette.clear();
+        }
     }
-    .map_err(|e| coder_err("BMP", e))?;
-    if out.len() > 46 && img.x_resolution > 0.0 {
-        let f = match img.units {
-            ResolutionType::PixelsPerInch => 100.0 / 2.54,
-            ResolutionType::PixelsPerCentimeter => 100.0,
-            _ => 1.0,
-        };
-        let xr = (img.x_resolution * f).round() as i32;
-        let yr = (img.y_resolution * f).round() as i32;
-        out[38..42].copy_from_slice(&xr.to_le_bytes());
-        out[42..46].copy_from_slice(&yr.to_le_bytes());
+    let bpp: usize = if alpha {
+        32
+    } else if palette.is_empty() {
+        24
+    } else if palette.len() <= 2 {
+        1
+    } else if palette.len() <= 16 {
+        4
+    } else {
+        8
+    };
+    let stride = (w * bpp).div_ceil(32) * 4;
+    let ncol = if bpp <= 8 { 1usize << bpp } else { 0 };
+    let used = if bpp <= 8 { palette.len().max(1) } else { 0 };
+    let offset = 14 + 124 + ncol * 4;
+    let size = offset + stride * h;
+    let mut out = Vec::with_capacity(size);
+    let u32le = |o: &mut Vec<u8>, v: u32| o.extend_from_slice(&v.to_le_bytes());
+    out.extend_from_slice(b"BM");
+    u32le(&mut out, size as u32);
+    u32le(&mut out, 0);
+    u32le(&mut out, offset as u32);
+    u32le(&mut out, 124);
+    u32le(&mut out, w as u32);
+    u32le(&mut out, h as u32);
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&(bpp as u16).to_le_bytes());
+    u32le(&mut out, if alpha { 3 } else { 0 });
+    u32le(&mut out, (stride * h) as u32);
+    let f = match img.units {
+        ResolutionType::PixelsPerInch => 100.0 / 2.54,
+        ResolutionType::PixelsPerCentimeter => 100.0,
+        _ => 1.0,
+    };
+    u32le(&mut out, (img.x_resolution * f).round().max(0.0) as u32);
+    u32le(&mut out, (img.y_resolution * f).round().max(0.0) as u32);
+    u32le(&mut out, if bpp <= 8 { used as u32 } else { 0 });
+    u32le(&mut out, if bpp <= 8 { used as u32 } else { 0 });
+    for m in [0x00ff_0000u32, 0x0000_ff00, 0x0000_00ff, 0xff00_0000] {
+        u32le(&mut out, m);
+    }
+    out.extend_from_slice(b"BGRs");
+    // the sRGB primaries' CIE XYZ as 2.30 fixed point
+    for v in [0.64, 0.33, 0.03, 0.3, 0.6, 0.1, 0.15, 0.06, 0.79f64] {
+        u32le(&mut out, (v * (1u64 << 30) as f64) as u32);
+    }
+    for _ in 0..3 {
+        u32le(&mut out, 0);
+    }
+    u32le(&mut out, 4);
+    for _ in 0..3 {
+        u32le(&mut out, 0);
+    }
+    for k in 0..ncol {
+        let c = palette.get(k).copied().unwrap_or([0, 0, 0]);
+        out.extend_from_slice(&[c[2], c[1], c[0], 0]);
+    }
+    for y in (0..h).rev() {
+        let start = out.len();
+        for x in 0..w {
+            let i = y * w + x;
+            let p = &rgba[i * 4..i * 4 + 4];
+            match bpp {
+                32 => out.extend_from_slice(&[p[2], p[1], p[0], p[3]]),
+                24 => out.extend_from_slice(&[p[2], p[1], p[0]]),
+                8 => out.push(index[i]),
+                4 => {
+                    if x % 2 == 0 {
+                        out.push(index[i] << 4);
+                    } else {
+                        *out.last_mut().unwrap() |= index[i];
+                    }
+                }
+                _ => {
+                    if x % 8 == 0 {
+                        out.push(0);
+                    }
+                    *out.last_mut().unwrap() |= index[i] << (7 - x % 8);
+                }
+            }
+        }
+        while out.len() - start < stride {
+            out.push(0);
+        }
     }
     Ok(out)
 }
@@ -2540,9 +2643,11 @@ fn tiff_image(img: &Image) -> MResult<oxideav_tiff::TiffImage> {
     TiffImage::new(w, h, format, vec![Plane::new(stride, data)]).map_err(|e| coder_err("TIFF", e))
 }
 
-fn encode_tiff(images: &[&Image]) -> MResult<Vec<u8>> {
+fn encode_tiff(images: &[&Image], wopts: &WriteOptions) -> MResult<Vec<u8>> {
     let first = images[0];
-    let compression = match first.compression {
+    // WriteTIFFImage() follows the wand's compression setting, not the
+    // image's (a PNG read as Zip still writes uncompressed)
+    let compression = match wopts.compression {
         CompressionType::No => oxideav_tiff::TiffCompression::None,
         CompressionType::Zip => oxideav_tiff::TiffCompression::Deflate,
         CompressionType::RLE => oxideav_tiff::TiffCompression::PackBits,
@@ -2602,11 +2707,62 @@ fn encode_ico(images: &[&Image], m: &str) -> MResult<Vec<u8>> {
     oxideav_ico::encode_all(&frames, &opts).map_err(|e| coder_err("ICON", e))
 }
 
-fn encode_tga(img: &Image) -> MResult<Vec<u8>> {
+fn encode_tga(img: &Image, wopts: &WriteOptions) -> MResult<Vec<u8>> {
     let mut img = img.clone();
     img.cmyk_to_rgb();
     let (w, h) = (img.columns as u32, img.rows as u32);
-    let opts = oxideav_tga::EncodeOptions::default();
+    // run-length packets only when RLE was asked for (wand or image)
+    let rle = wopts.compression == CompressionType::RLE || img.compression == CompressionType::RLE;
+    if !rle && !(img.alpha && !img.is_opaque()) {
+        // a gray image is written 8-bit gray (type 3), a PseudoClass one
+        // colour-mapped (type 1, 24-bit map), top-down
+        let gray = img.colorspace == Colorspace::Gray;
+        let rgba = img.to_rgba8();
+        let mut palette: Vec<[u8; 3]> = Vec::new();
+        let mut index = Vec::new();
+        if !gray && img.colors.is_some_and(|n| n <= 256) {
+            let mut map = std::collections::HashMap::new();
+            for p in rgba.chunks_exact(4) {
+                let c = [p[0], p[1], p[2]];
+                let k = *map.entry(c).or_insert_with(|| {
+                    palette.push(c);
+                    palette.len() - 1
+                });
+                index.push(k as u8);
+                if palette.len() > 256 {
+                    break;
+                }
+            }
+            if palette.len() > 256 {
+                palette.clear();
+            }
+        }
+        if gray || !palette.is_empty() {
+            let mut out = Vec::new();
+            let pal = !palette.is_empty();
+            out.push(0);
+            out.push(pal as u8);
+            out.push(if pal { 1 } else { 3 });
+            out.extend_from_slice(&0u16.to_le_bytes());
+            out.extend_from_slice(&(palette.len() as u16).to_le_bytes());
+            out.push(if pal { 24 } else { 0 });
+            out.extend_from_slice(&[0, 0, 0, 0]);
+            out.extend_from_slice(&(w as u16).to_le_bytes());
+            out.extend_from_slice(&(h as u16).to_le_bytes());
+            out.push(8);
+            out.push(0x20);
+            for c in &palette {
+                out.extend_from_slice(&[c[2], c[1], c[0]]);
+            }
+            if pal {
+                out.extend_from_slice(&index);
+            } else {
+                out.extend(gray8(&img));
+            }
+            return Ok(out);
+        }
+    }
+    let opts = oxideav_tga::EncodeOptions::default().with_rle(rle);
     if img.alpha && !img.is_opaque() {
         oxideav_tga::encode_rgba8(w, h, &img.to_rgba8(), &opts)
     } else {
@@ -2675,10 +2831,7 @@ fn encode_pnm(img: &Image, m: &str) -> MResult<Vec<u8>> {
                     w,
                     h,
                     P::Gray16Le,
-                    vec![Plane::new(
-                        w as usize * 2,
-                        le16(img.pixels.chunks_exact(4).map(|p| p[0])),
-                    )],
+                    vec![Plane::new(w as usize * 2, le16(gray16(&img).into_iter()))],
                 )
             } else {
                 PbmImage::new(w, h, P::Gray8, vec![Plane::new(w as usize, gray8(&img))])
@@ -2687,13 +2840,40 @@ fn encode_pnm(img: &Image, m: &str) -> MResult<Vec<u8>> {
             oxideav_pbm::encode(&pi, &opts)
         }
         "PAM" => {
-            let pi = PbmImage::new(
-                w,
-                h,
-                P::Rgba,
-                vec![Plane::new(w as usize * 4, img.to_rgba8())],
-            )
-            .map_err(|e| coder_err("PNM", e))?;
+            // the tuple type follows the image: GRAYSCALE or RGB, with
+            // _ALPHA only when it has alpha; 16 bits when deep
+            let gray = img.colorspace == Colorspace::Gray;
+            let (fmt, bpc) = match (gray, img.alpha, deep) {
+                (true, false, false) => (P::Gray8, 1),
+                (true, true, false) => (P::Ya8, 2),
+                (false, false, false) => (P::Rgb24, 3),
+                (false, true, false) => (P::Rgba, 4),
+                (true, false, true) => (P::Gray16Le, 2),
+                (true, true, true) => (P::Ya16Le, 4),
+                (false, false, true) => (P::Rgb48Le, 6),
+                (false, true, true) => (P::Rgba64Le, 8),
+            };
+            let g = gray16(&img);
+            let mut data = Vec::with_capacity(w as usize * h as usize * bpc);
+            for (k, p) in img.pixels.chunks_exact(4).enumerate() {
+                let mut vals: Vec<u16> = if gray {
+                    vec![g[k]]
+                } else {
+                    vec![p[0], p[1], p[2]]
+                };
+                if img.alpha {
+                    vals.push(p[3]);
+                }
+                for v in vals {
+                    if deep {
+                        data.extend_from_slice(&v.to_le_bytes());
+                    } else {
+                        data.push(q_to_u8(v));
+                    }
+                }
+            }
+            let pi = PbmImage::new(w, h, fmt, vec![Plane::new(w as usize * bpc, data)])
+                .map_err(|e| coder_err("PNM", e))?;
             oxideav_pbm::encode(&pi, &opts.with_pam(true))
         }
         _ => {

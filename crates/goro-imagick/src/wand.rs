@@ -568,7 +568,10 @@ impl Wand {
             let v = sf.get(1).copied().unwrap_or(h).max(1.0);
             defines.push(("jpeg:sampling-factor".into(), format!("{h}x{v}")));
         }
-        WriteOptions { defines }
+        WriteOptions {
+            defines,
+            compression: self.settings.compression,
+        }
     }
 
     /// The format of an image (its "magick").
