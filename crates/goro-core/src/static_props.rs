@@ -674,8 +674,18 @@ impl Vm {
                         }
                         Ok(arr)
                     }
-                    // Arrays are copied on assignment, so the slot's array is
-                    // not shared with another variable and is written in place.
+                    // Copy-on-write: an array the slot still shares (with
+                    // the declaration's default value, e.g. a class entry
+                    // reused from the script cache: the slot and `cur`
+                    // hold two counts) is separated before it is written.
+                    Value::Array(a) if Rc::strong_count(&a) > 2 => {
+                        let sep = Value::Array(Rc::new(RefCell::new(a.borrow().clone())));
+                        match rc {
+                            Some(r) => *r.borrow_mut() = sep.clone(),
+                            None => *cell = sep.clone(),
+                        }
+                        Ok(sep)
+                    }
                     other => Ok(other),
                 }
             }
