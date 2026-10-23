@@ -7334,7 +7334,8 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     crate::strings::deprecate_null_format(vm, "fprintf", 2, args.get(1));
     let fid = args[0].to_long();
     let format_args = &args[1..]; // skip the handle, pass format + args
-    let formatted = crate::strings::do_sprintf_vm_named(vm, "fprintf", format_args)?;
+    let (formatted, pending) =
+        crate::strings::do_sprintf_vm_named_partial(vm, "fprintf", format_args)?;
     let len = formatted.len();
 
     // php_stream_write() on the stream (filters, read buffer, sockets).
@@ -7343,7 +7344,7 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         vm.write_output(&formatted);
     }
-    Ok(Value::Long(len as i64))
+    pending.map_or(Ok(Value::Long(len as i64)), Err)
 }
 
 fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -7372,7 +7373,8 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             format_args.push(v.clone());
         }
     }
-    let formatted = crate::strings::do_sprintf_vm_named(vm, "vfprintf", &format_args)?;
+    let (formatted, pending) =
+        crate::strings::do_sprintf_vm_named_partial(vm, "vfprintf", &format_args)?;
     let len = formatted.len();
 
     if has_file_handle(fid) {
@@ -7380,7 +7382,7 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         vm.write_output(&formatted);
     }
-    Ok(Value::Long(len as i64))
+    pending.map_or(Ok(Value::Long(len as i64)), Err)
 }
 
 // === Shell ===

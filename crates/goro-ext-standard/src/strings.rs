@@ -1189,13 +1189,15 @@ fn sprintf(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 /// Shared sprintf implementation used by both sprintf() and printf().
 /// No-VM variant: error paths return the empty string.
 pub fn do_sprintf(args: &[Value]) -> Vec<u8> {
-    do_sprintf_inner(None, args).unwrap_or_default()
+    do_sprintf_inner(None, args, &mut None).unwrap_or_default()
 }
 
 /// Sprintf implementation with VM reference (for __toString invocation and
 /// for raising errors). Errors set the VM's current_exception.
 pub fn do_sprintf_vm(vm: &mut Vm, args: &[Value]) -> Result<Vec<u8>, VmError> {
-    do_sprintf_inner(Some(vm), args)
+    let mut pending = None;
+    let out = do_sprintf_inner(Some(vm), args, &mut pending)?;
+    pending.map_or(Ok(out), Err)
 }
 
 thread_local! {
@@ -1209,10 +1211,24 @@ pub fn do_sprintf_vm_named(
     fname: &'static str,
     args: &[Value],
 ) -> Result<Vec<u8>, VmError> {
+    let (out, pending) = do_sprintf_vm_named_partial(vm, fname, args)?;
+    pending.map_or(Ok(out), Err)
+}
+
+/// do_sprintf_vm_named() for the printing functions: a `%s` argument that
+/// cannot be converted throws, but php_formatted_print() goes on with an
+/// empty string, and the result is still written before the exception
+/// propagates. Returns the output and that pending exception.
+pub fn do_sprintf_vm_named_partial(
+    vm: &mut Vm,
+    fname: &'static str,
+    args: &[Value],
+) -> Result<(Vec<u8>, Option<VmError>), VmError> {
     let prev = SPRINTF_FNAME.with(|f| f.replace(fname));
-    let r = do_sprintf_inner(Some(vm), args);
+    let mut pending = None;
+    let r = do_sprintf_inner(Some(vm), args, &mut pending);
     SPRINTF_FNAME.with(|f| f.set(prev));
-    r
+    Ok((r?, pending))
 }
 
 /// The `nb_additional_parameters` of php_formatted_print() for the running
@@ -1287,7 +1303,11 @@ fn sprintf_append_string(
     }
 }
 
-fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, VmError> {
+fn do_sprintf_inner(
+    mut vm: Option<&mut Vm>,
+    args: &[Value],
+    pending: &mut Option<VmError>,
+) -> Result<Vec<u8>, VmError> {
     if args.is_empty() {
         return Ok(Vec::new());
     }
@@ -1303,6 +1323,7 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
 
     // Helper: raise an exception of `class` (or no-op if no VM).
     fn raise_class(vm: &mut Option<&mut Vm>, class: &[u8], msg: String) -> VmError {
+        let msg = cut_at_nul(msg);
         if let Some(vm_ref) = vm.as_deref_mut() {
             let exc = vm_ref.create_exception(class, &msg, 0);
             vm_ref.current_exception = Some(exc);
@@ -1569,7 +1590,15 @@ fn do_sprintf_inner(mut vm: Option<&mut Vm>, args: &[Value]) -> Result<Vec<u8>, 
                     }
                 }
                 let s: Vec<u8> = if let Some(vm_ref) = vm.as_deref_mut() {
-                    vm_ref.value_to_string_checked(arg)?.as_bytes().to_vec()
+                    // zval_get_tmp_string(): on an exception the formatting
+                    // goes on with an empty string.
+                    match vm_ref.value_to_string_checked(arg) {
+                        Ok(s) => s.as_bytes().to_vec(),
+                        Err(e) => {
+                            *pending = Some(e);
+                            Vec::new()
+                        }
+                    }
                 } else {
                     arg.to_php_string().as_bytes().to_vec()
                 };
@@ -3566,10 +3595,10 @@ fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let mut all_args = vec![Value::String(format)];
     all_args.extend(fmt_args);
-    let result = do_sprintf_vm_named(vm, "vprintf", &all_args)?;
+    let (result, pending) = do_sprintf_vm_named_partial(vm, "vprintf", &all_args)?;
     let len = result.len();
     vm.write_output(&result);
-    Ok(Value::Long(len as i64))
+    pending.map_or(Ok(Value::Long(len as i64)), Err)
 }
 
 fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3584,10 +3613,10 @@ fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     validate_sprintf_format_arg(vm, "printf", args.first())?;
     deprecate_null_format(vm, "printf", 1, args.first());
-    let result = do_sprintf_vm_named(vm, "printf", args)?;
+    let (result, pending) = do_sprintf_vm_named_partial(vm, "printf", args)?;
     let len = result.len();
     vm.write_output(&result);
-    Ok(Value::Long(len as i64))
+    pending.map_or(Ok(Value::Long(len as i64)), Err)
 }
 
 fn strrchr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
