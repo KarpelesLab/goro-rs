@@ -16125,17 +16125,52 @@ fn copy_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::False);
         }
     }
-    match std::fs::copy(&*from_str, &*to_str) {
-        Ok(_) => Ok(Value::True),
+    // php_copy_file_ctx(): the source is read and the destination opened
+    // like fopen($to, "wb") (a new file gets 0666 & ~umask, an existing one
+    // keeps its permissions; std::fs::copy() would copy the source's).
+    let src = match std::fs::File::open(&*from_str) {
+        Ok(f) => f,
         Err(e) => {
             let msg = strip_os_error(&e.to_string());
             vm.emit_warning(&format!(
                 "copy({}): Failed to open stream: {}",
                 from_str, msg
             ));
-            Ok(Value::False)
+            return Ok(Value::False);
+        }
+    };
+    let dst = match std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&*to_str)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            let msg = strip_os_error(&e.to_string());
+            vm.emit_warning(&format!(
+                "copy({}): Failed to open stream: {}",
+                to_str, msg
+            ));
+            return Ok(Value::False);
+        }
+    };
+    // (read()/write() in chunks, as the stream copy does)
+    let (mut src, mut dst) = (src, dst);
+    let mut buf = vec![0u8; 8192];
+    loop {
+        use std::io::{Read, Write};
+        match src.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if dst.write_all(&buf[..n]).is_err() {
+                    return Ok(Value::False);
+                }
+            }
+            Err(_) => return Ok(Value::False),
         }
     }
+    Ok(Value::True)
 }
 
 fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
