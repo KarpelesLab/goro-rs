@@ -317,117 +317,100 @@ fn iterator_to_array_impl(
                 return r;
             }
             let _handle = take_handle.then(|| vm.internal_iterator_handle());
-            let mut result = PhpArray::new();
-            // Call rewind, then iterate with valid/current/key/next
-            vm.call_object_method(val, b"rewind", &[]);
-            loop {
-                let valid = vm
-                    .call_object_method(val, b"valid", &[])
-                    .unwrap_or(Value::False);
-                if !valid.is_truthy() {
-                    break;
-                }
-                let current = vm
-                    .call_object_method(val, b"current", &[])
-                    .unwrap_or(Value::Null);
-                if use_keys {
-                    let key = vm
-                        .call_object_method(val, b"key", &[])
-                        .unwrap_or(Value::Null);
-                    match key {
-                        Value::Long(n) => result.set(ArrayKey::Int(n), current),
-                        Value::String(s) => result.set(ArrayKey::String(s), current),
-                        _ => result.push(current),
-                    }
-                } else {
-                    result.push(current);
-                }
-                vm.call_object_method(val, b"next", &[]);
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(result))))
+            iterator_to_array_iterate(vm, val, use_keys)
         }
         Some(g @ Value::Generator(_)) => {
             let _handle = take_handle.then(|| vm.internal_iterator_handle());
-            let mut result = PhpArray::new();
             if !vm.generator_traverse_start(g) {
                 return Ok(Value::Null);
             }
-            loop {
-                if !vm.it_valid(g) {
-                    break;
-                }
-                let value = vm.it_current(g);
-                let key = vm.it_key(g);
-                if use_keys {
-                    match key {
-                        Value::Long(n) => result.set(ArrayKey::Int(n), value),
-                        Value::String(s) => {
-                            // PHP coerces numeric strings to int keys in array
-                            // context. Match the engine's behaviour.
-                            let key_bytes = s.as_bytes();
-                            let trimmed = std::str::from_utf8(key_bytes)
-                                .ok()
-                                .and_then(|t| t.parse::<i64>().ok());
-                            match trimmed {
-                                Some(n) if n.to_string().as_bytes() == key_bytes => {
-                                    result.set(ArrayKey::Int(n), value)
-                                }
-                                _ => result.set(ArrayKey::String(s), value),
-                            }
-                        }
-                        Value::Double(f) => {
-                            // PHP emits a deprecation notice for non-integer
-                            // float keys and truncates toward zero.
-                            if f.fract() != 0.0 {
-                                vm.emit_deprecated(&format!(
-                                    "Implicit conversion from float {} to int loses precision",
-                                    goro_core::value::format_php_float_repr(f)
-                                ));
-                            }
-                            result.set(ArrayKey::Int(f as i64), value);
-                        }
-                        Value::True => result.set(ArrayKey::Int(1), value),
-                        Value::False => result.set(ArrayKey::Int(0), value),
-                        Value::Null => {
-                            vm.emit_deprecated("Using null as an array offset is deprecated, use an empty string instead");
-                            result.set(ArrayKey::String(PhpString::from_bytes(b"")), value);
-                        }
-                        Value::Array(_) => {
-                            // PHP throws TypeError "Cannot access offset of
-                            // type array on array".
-                            let line = vm.current_line;
-                            let exc = vm.create_exception(
-                                b"TypeError",
-                                "Cannot access offset of type array on array",
-                                line,
-                            );
-                            vm.current_exception = Some(exc);
-                            return Ok(Value::Array(Rc::new(RefCell::new(result))));
-                        }
-                        o @ Value::Object(_) => {
-                            let line = vm.current_line;
-                            let msg = format!(
-                                "Cannot access offset of type {} on array",
-                                Vm::value_type_name(&o)
-                            );
-                            let exc = vm.create_exception(b"TypeError", &msg, line);
-                            vm.current_exception = Some(exc);
-                            return Ok(Value::Array(Rc::new(RefCell::new(result))));
-                        }
-                        _ => result.push(value),
-                    }
-                } else {
-                    result.push(value);
-                }
-                vm.it_next(g);
-                if vm.current_exception.is_some() {
-                    return Ok(Value::Null);
-                }
-            }
-            Ok(Value::Array(Rc::new(RefCell::new(result))))
+            iterator_to_array_iterate(vm, g, use_keys)
         }
         _ => Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new())))),
     }
+}
+
+/// spl_iterator_apply() with spl_iterator_to_array_apply(): walk the
+/// iterator through its zend_object_iterator funcs (a generator is already
+/// rewound), stopping at the first exception.
+fn iterator_to_array_iterate(vm: &mut Vm, it: &Value, use_keys: bool) -> Result<Value, VmError> {
+    let mut result = PhpArray::new();
+    if matches!(it, Value::Object(_)) {
+        vm.it_rewind(it);
+    }
+    while vm.current_exception.is_none() && vm.it_valid(it) {
+        if vm.current_exception.is_some() {
+            break;
+        }
+        let value = vm.it_current(it);
+        if vm.current_exception.is_some() {
+            break;
+        }
+        if use_keys {
+            let key = vm.it_key(it);
+            if vm.current_exception.is_some() || !array_set_zval_key(vm, &mut result, key, value) {
+                break;
+            }
+        } else {
+            result.push(value);
+        }
+        vm.it_next(it);
+    }
+    if vm.current_exception.is_some() {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
+}
+
+/// array_set_zval_key(): store `value` under an iterator key.
+fn array_set_zval_key(vm: &mut Vm, result: &mut PhpArray, key: Value, value: Value) -> bool {
+    match key.deref() {
+        Value::Long(n) => result.set(ArrayKey::Int(n), value),
+        Value::String(s) => {
+            let k = Vm::value_to_array_key(Value::String(s));
+            result.set(k, value)
+        }
+        Value::Double(f) => {
+            // zend_dval_to_lval_safe()
+            if f.fract() != 0.0 {
+                vm.emit_deprecated(&format!(
+                    "Implicit conversion from float {} to int loses precision",
+                    goro_core::value::format_php_float_repr(f)
+                ));
+            }
+            result.set(ArrayKey::Int(f as i64), value);
+        }
+        Value::True => result.set(ArrayKey::Int(1), value),
+        Value::False => result.set(ArrayKey::Int(0), value),
+        Value::Resource(r) => {
+            let id = r.id();
+            vm.emit_warning(&format!(
+                "Resource ID#{} used as offset, casting to integer ({})",
+                id, id
+            ));
+            result.set(ArrayKey::Int(id), value);
+        }
+        Value::Null | Value::Undef => {
+            vm.emit_deprecated(
+                "Using null as an array offset is deprecated, use an empty string instead",
+            );
+            if vm.current_exception.is_some() {
+                return false;
+            }
+            result.set(ArrayKey::String(PhpString::from_bytes(b"")), value);
+        }
+        o => {
+            let line = vm.current_line;
+            let msg = format!(
+                "Cannot access offset of type {} on array",
+                Vm::value_type_name(&o)
+            );
+            let exc = vm.create_exception(b"TypeError", &msg, line);
+            vm.current_exception = Some(exc);
+            return false;
+        }
+    }
+    true
 }
 
 fn iterator_count_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -496,32 +479,25 @@ fn iterator_count_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn iterator_count_iterate(vm: &mut Vm, resolved: Option<&Value>) -> Result<Value, VmError> {
     match resolved {
         Some(Value::Array(arr)) => Ok(Value::Long(arr.borrow().len() as i64)),
-        Some(val @ Value::Object(_)) => {
+        Some(it @ (Value::Object(_) | Value::Generator(_))) => {
+            // spl_iterator_apply() with spl_iterator_count_apply()
             let mut count: i64 = 0;
-            vm.call_object_method(val, b"rewind", &[]);
-            loop {
-                let valid = vm
-                    .call_object_method(val, b"valid", &[])
-                    .unwrap_or(Value::False);
-                if !valid.is_truthy() {
+            if let Value::Generator(_) = it {
+                if !vm.generator_traverse_start(it) {
+                    return Ok(Value::Null);
+                }
+            } else {
+                vm.it_rewind(it);
+            }
+            while vm.current_exception.is_none() && vm.it_valid(it) {
+                if vm.current_exception.is_some() {
                     break;
                 }
                 count += 1;
-                vm.call_object_method(val, b"next", &[]);
+                vm.it_next(it);
             }
-            Ok(Value::Long(count))
-        }
-        Some(g @ Value::Generator(_)) => {
-            let mut count: i64 = 0;
-            if !vm.generator_traverse_start(g) {
+            if vm.current_exception.is_some() {
                 return Ok(Value::Null);
-            }
-            while vm.it_valid(g) {
-                count += 1;
-                vm.it_next(g);
-                if vm.current_exception.is_some() {
-                    return Ok(Value::Null);
-                }
             }
             Ok(Value::Long(count))
         }
