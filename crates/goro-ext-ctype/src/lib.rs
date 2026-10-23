@@ -15,6 +15,24 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"ctype_print", ctype_print);
     vm.register_function(b"ctype_punct", ctype_punct);
     vm.register_function(b"ctype_xdigit", ctype_xdigit);
+    // ctype_impl() parses exactly one zval (Z_PARAM_ZVAL): the arginfo's
+    // argument count holds.
+    for name in [
+        "ctype_alpha",
+        "ctype_digit",
+        "ctype_alnum",
+        "ctype_upper",
+        "ctype_lower",
+        "ctype_space",
+        "ctype_cntrl",
+        "ctype_graph",
+        "ctype_print",
+        "ctype_punct",
+        "ctype_xdigit",
+    ] {
+        vm.zpp_extension_verified
+            .insert(name.as_bytes().to_vec(), goro_core::arginfo::CHECK_ARITY);
+    }
 }
 
 /// Returns the PHP type name used in error messages

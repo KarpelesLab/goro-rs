@@ -82,6 +82,37 @@ pub fn register_standard_functions(vm: &mut Vm) {
     misc::userstream::install_ext_streams();
     netdb::register(vm);
     register_builtin_param_names(vm);
+    // Functions whose C implementation parses a fixed parameter list the
+    // arginfo describes (outside the generated whitelist because they are
+    // macro-generated or take untyped/resource parameters): argument counts.
+    for name in [
+        "is_file",
+        "is_dir",
+        "is_link",
+        "is_executable",
+        "is_readable",
+        "is_writable",
+        "is_writeable",
+        "file_exists",
+        "filesize",
+        "filemtime",
+        "fileatime",
+        "filectime",
+        "fileinode",
+        "fileowner",
+        "filegroup",
+        "fileperms",
+        "filetype",
+        "method_exists",
+        "property_exists",
+        "get_class",
+        "call_user_func",
+        "call_user_func_array",
+    ] {
+        vm.zpp_extension_verified
+            .entry(name.as_bytes().to_vec())
+            .or_insert(goro_core::arginfo::CHECK_ARITY);
+    }
 }
 
 /// ext/bz2's stream functions (bzopen(), bzread(), bzerr*() and the bz*
