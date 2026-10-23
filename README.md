@@ -64,6 +64,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/tidy (tidy-html5 5.8.0 port) | 50 | 50 | 100% |
 | sapi/cli (incl. `php -S` and `php -a`) | 102 | 103 | 99.0% |
 | sapi/cgi (goro runs as php-cgi under a `*cgi*` name) | 22 | 23 | 95.7% |
+| sapi/fpm (php-fpm; 7 skips need root, AppArmor or FreeBSD) | 133 | 133 | 100% |
 | PECL uuid 1.3 (`tests/pecl/uuid`) | 14 | 14 | 100% |
 | PECL mailparse 3.2 (`tests/pecl/mailparse`, 1 upstream XFAIL) | 38 | 39 | 97.4% |
 | PECL imagick 3.8 (`tests/pecl/imagick`, ImageMagick 7.1 semantics; 13 skips) | 315 | 338 | 93.2% |
@@ -145,6 +146,23 @@ cargo build --release
 # goro's own regression tests
 ./target/release/goro --test tests/goro/
 ```
+
+### SAPIs
+
+- **CLI** (`goro`, with `-S` and `-a`)
+- **php-cgi**: goro run under a name containing `cgi` (e.g. a `php-cgi`
+  symlink) is the CGI SAPI, with its FastCGI mode (`-b 127.0.0.1:9000`,
+  `PHP_FCGI_CHILDREN`, `PHP_FCGI_MAX_REQUESTS`)
+- **php-fpm**: goro run under a name containing `fpm` is the FastCGI Process
+  Manager: php-fpm.conf pools (`static`, `dynamic`, `ondemand`), TCP/unix
+  sockets, signals (USR1 reopens logs, USR2 reloads), the error, access and
+  slow logs, `catch_workers_output`, the status and ping pages,
+  `fpm_get_status()` and `fastcgi_finish_request()`:
+  ```bash
+  ln -s goro target/release/php-fpm
+  ./target/release/php-fpm -y php-fpm.conf -F
+  ```
+- **goro-httpd**, below
 
 ### Web server SAPI (goro-httpd)
 
