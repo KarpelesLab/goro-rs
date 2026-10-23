@@ -1600,6 +1600,10 @@ impl Vm {
                     Self::ao_set_pos(obj, pos as usize, key.as_ref());
                     Value::Null
                 } else {
+                    // (a non-negative position was walked to the end)
+                    if pos >= 0 {
+                        Self::ao_set_pos(obj, len, None);
+                    }
                     let msg = format!("Seek position {} is out of range", pos);
                     return self.spl_throw(b"OutOfBoundsException", &msg);
                 }
