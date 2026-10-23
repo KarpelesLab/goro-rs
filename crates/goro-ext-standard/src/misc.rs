@@ -11151,6 +11151,9 @@ struct FileHandle {
     /// 0 and advances by what is written (while the descriptor jumps to the
     /// end): (position, descriptor offset) at the last write or seek.
     pub append_pos: Option<(u64, u64)>,
+    /// php://temp still held in memory: the size at which it moves to a
+    /// temporary file (a new stream, which takes a resource id).
+    pub temp_max: Option<u64>,
 }
 
 impl FileHandle {
@@ -11381,6 +11384,7 @@ fn register_std_streams() {
                     pipe_pos: if seekable { None } else { Some(-1) },
                     eol: EOL_UNSET,
                     append_pos: None,
+                    temp_max: None,
                 },
             );
         }
@@ -11708,6 +11712,7 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
                     pipe_pos,
                     eol: EOL_UNSET,
                     append_pos: None,
+                    temp_max: None,
                 },
             );
         });
@@ -12066,6 +12071,17 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if is_temp {
                         // php_stream_temp_create(): its inner memory stream.
                         goro_core::value::alloc_resource_id();
+                        let max = lower
+                            .strip_prefix("temp/maxmemory:")
+                            .and_then(|m| m.parse::<i64>().ok())
+                            .filter(|m| *m >= 0)
+                            .map(|m| m as u64)
+                            .unwrap_or(2 * 1024 * 1024);
+                        FILE_HANDLES.with(|h| {
+                            if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                                fh.temp_max = Some(max);
+                            }
+                        });
                     }
                     goro_core::value::register_resource(fid, b"stream");
                     return Ok(Value::resource(fid));
@@ -12460,6 +12476,15 @@ fn write_to_stream_inner(vm: &mut Vm, fid: i64, bytes: &[u8]) -> usize {
                         .collect();
                     if mode_chars.starts_with('a') {
                         let _ = fh.file.seek(SeekFrom::End(0));
+                    }
+                    // php_stream_temp_write(): reaching the limit moves the
+                    // data to a temporary file stream.
+                    if let Some(max) = fh.temp_max {
+                        let len = fh.file.metadata().map(|m| m.len()).unwrap_or(0);
+                        if len + bytes.len() as u64 >= max {
+                            fh.temp_max = None;
+                            goro_core::value::alloc_resource_id();
+                        }
                     }
                     fh.file.write(bytes).unwrap_or_default()
                 } else {
