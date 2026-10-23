@@ -2027,7 +2027,11 @@ impl Compiler {
                 }
                 if !is_byref && !Self::is_writable_lvalue(&arg.value) {
                     if let Some(fname) = func_name {
-                        let array_ref = i == 0 && Self::is_array_ref_builtin(Some(fname));
+                        // An IS_VAR result (new, ...) gets its notice from
+                        // the checked send at run time.
+                        let array_ref = i == 0
+                            && Self::is_array_ref_builtin(Some(fname))
+                            && !Self::is_var_result_expr(&arg.value);
                         if array_ref {
                             let is_call = matches!(
                                 &arg.value.kind,
@@ -2063,12 +2067,13 @@ impl Compiler {
                     // A function result gets the notice (ZEND_SEND_VAR_NO_REF);
                     // any other expression cannot be passed by reference at
                     // all (ZEND_SEND_VAL_EX throws).
-                    let is_call = matches!(
+                    let is_call = (matches!(
                         &arg.value.kind,
                         ExprKind::FunctionCall { .. }
                             | ExprKind::MethodCall { .. }
                             | ExprKind::StaticMethodCall { .. }
-                    ) && !self.is_special_builtin_call(&arg.value);
+                    ) && !self.is_special_builtin_call(&arg.value))
+                        || Self::is_var_result_expr(&arg.value);
                     let info = func_name.and_then(|f| {
                         crate::arginfo::lookup(&f.to_ascii_lowercase())
                             .and_then(|fi| fi.params.get(i).map(|p| (fi.name, p.name)))
@@ -2455,6 +2460,20 @@ impl Compiler {
             ExprKind::ArrayAccess { .. } => true,
             _ => false,
         }
+    }
+
+    /// Expressions whose Zend result is an IS_VAR (new, =&, yield,
+    /// include/eval): passed by reference they get ZEND_SEND_VAR_NO_REF's
+    /// "Only variables should be passed by reference" notice, not an Error.
+    fn is_var_result_expr(expr: &Expr) -> bool {
+        matches!(
+            expr.kind,
+            ExprKind::New { .. }
+                | ExprKind::AssignRef { .. }
+                | ExprKind::Yield(..)
+                | ExprKind::Include { .. }
+                | ExprKind::Eval(_)
+        )
     }
 
     fn extract_break_continue_level(level_expr: &Option<Expr>) -> (usize, bool) {
