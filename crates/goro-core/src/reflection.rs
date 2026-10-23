@@ -4043,6 +4043,8 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 }
             }
             b"newinstance" => {
+                // (extra named arguments, see spl_place_named_args())
+                let fwd_named = std::mem::take(&mut vm.pending_named_args);
                 // Internal types that cannot be created via reflection at all.
                 let no_new: &[(&[u8], &str)] = &[(b"generator", "Generator"), (b"fiber", "Fiber")];
                 if let Some((_, name)) = no_new.iter().find(|(c, _)| *c == class_lower.as_slice()) {
@@ -4072,7 +4074,7 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     || native_ctor_in_chain(vm, &class_lower);
 
                 // If no constructor and args were passed, throw
-                if !has_constructor && args.len() > 1 {
+                if !has_constructor && (args.len() > 1 || !fwd_named.is_empty()) {
                     let canonical_name = String::from_utf8_lossy(&canonical).to_string();
                     let err_msg = format!(
                         "Class {} does not have a constructor, so you cannot pass any constructor arguments",
@@ -4114,6 +4116,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                     for arg in args.iter().skip(1) {
                         a.push(arg.clone());
                     }
+                    for (n, v) in fwd_named {
+                        a.set(ArrayKey::String(PhpString::from_vec(n)), v);
+                    }
                     return Some(
                         run_snippet_in_scope(
                             vm,
@@ -4130,6 +4135,9 @@ pub fn reflection_class_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> Op
                 let mut a = PhpArray::new();
                 for arg in args.iter().skip(1) {
                     a.push(arg.clone());
+                }
+                for (n, v) in fwd_named {
+                    a.set(ArrayKey::String(PhpString::from_vec(n)), v);
                 }
                 Some(reflection_new_instance(
                     vm,
@@ -5702,6 +5710,8 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                 }
                 let target_obj = args.get(1)?.clone();
                 let invoke_args: Vec<Value> = args.iter().skip(2).cloned().collect();
+                // (extra named arguments, see spl_place_named_args())
+                let invoke_named = std::mem::take(&mut vm.pending_named_args);
 
                 // Block direct instantiation of internal classes via invoke($obj, __construct)
                 if method_lower_bytes.as_bytes() == b"__construct" {
@@ -5837,7 +5847,7 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                     {
                         // Internal callers report "N passed and exactly M expected".
                         let req = m.op_array.required_param_count as usize;
-                        if invoke_args.len() < req {
+                        if invoke_args.len() < req && invoke_named.is_empty() {
                             let canonical = rcls(vm, &m.declaring_class.to_ascii_lowercase())
                                 .map(|c| String::from_utf8_lossy(&c.name).to_string())
                                 .unwrap_or_else(|| {
@@ -5879,6 +5889,9 @@ pub fn reflection_method_docall(vm: &mut Vm, method: &[u8], args: &[Value]) -> O
                         let mut arr = PhpArray::new();
                         for a in &invoke_args {
                             arr.push(a.clone());
+                        }
+                        for (n, v) in invoke_named {
+                            arr.set(ArrayKey::String(PhpString::from_vec(n)), v);
                         }
                         if let Some(r) = invoke_user_method(
                             vm,
@@ -7225,6 +7238,37 @@ pub fn reflection_function_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
         drop(ob);
 
         let closure_obj = obj.borrow().get_property(b"__reflection_closure_obj");
+        // Named arguments (invoke()'s extra named ones, invokeArgs()'s string
+        // keys) are bound by the call like call_user_func_array() does.
+        if matches!(method, b"invoke" | b"invokeargs") {
+            let mut arr = if method == b"invoke" {
+                let mut a = PhpArray::new();
+                for v in args.iter().skip(1) {
+                    a.push(v.clone());
+                }
+                a
+            } else {
+                match args.get(1) {
+                    Some(Value::Array(a)) => a.borrow().clone(),
+                    _ => PhpArray::new(),
+                }
+            };
+            if method == b"invoke" {
+                for (n, v) in std::mem::take(&mut vm.pending_named_args) {
+                    arr.set(ArrayKey::String(PhpString::from_vec(n)), v);
+                }
+            }
+            if arr.iter().any(|(k, _)| matches!(k, ArrayKey::String(_))) {
+                let callable = if closure_obj.is_closure_obj() {
+                    closure_obj
+                } else {
+                    Value::String(PhpString::from_vec(func_lower.clone()))
+                };
+                let f = vm.functions.get(b"call_user_func_array".as_slice()).copied()?;
+                let r = f(vm, &[callable, Value::Array(Rc::new(RefCell::new(arr)))]);
+                return Some(r.unwrap_or(Value::Null));
+            }
+        }
         if closure_obj.is_closure_obj() {
             match method {
                 b"invoke" | b"invokeargs" => {

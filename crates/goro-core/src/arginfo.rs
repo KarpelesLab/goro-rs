@@ -723,6 +723,18 @@ impl Vm {
             }
         };
         if let Some((class, method)) = this_call {
+            if name_lower == b"__closure_call" {
+                // Closure::call(object $newThis, mixed ...$args): extra named
+                // arguments are the closure's (Z_PARAM_VARIADIC_WITH_NAMED).
+                let (mine, extra): (Vec<_>, Vec<_>) =
+                    std::mem::take(named).into_iter().partition(|(n, _)| n == b"newThis");
+                *named = mine;
+                let failed = self
+                    .zpp_method_call(class, method, args, 1, named, Some(true), strict, line)
+                    .is_err();
+                *named = extra;
+                return failed;
+            }
             return self
                 .zpp_method_call(class, method, args, 1, named, Some(true), strict, line)
                 .is_err();

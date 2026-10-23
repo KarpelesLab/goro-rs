@@ -28902,7 +28902,7 @@ impl Vm {
                                 self.pending_calls.push(PendingCall {
                                     name,
                                     args: values,
-                                    named_args: Vec::new(),
+                                    named_args: std::mem::take(&mut call.named_args),
                                     target: CallTarget::NONE,
                                 });
                                 ip -= 1;
@@ -28914,7 +28914,7 @@ impl Vm {
                             self.pending_calls.push(PendingCall {
                                 name: name.clone(),
                                 args,
-                                named_args: Vec::new(),
+                                named_args: std::mem::take(&mut call.named_args),
                                 target: CallTarget::NONE,
                             });
                             ip -= 1;
