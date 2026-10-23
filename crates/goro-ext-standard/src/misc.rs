@@ -2983,8 +2983,8 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     require_array_arg(vm, first, "array_unique", "array", 1)?;
     if let Some(Value::Array(arr)) = args.first() {
         let flags = args.get(1).map(|v| v.to_long()).unwrap_or(2); // SORT_STRING = 2 default
-        if flags & !8 == 2 {
-            // SORT_STRING (| SORT_FLAG_CASE): keep the first element of each string value
+        if flags == SORT_STRING {
+            // SORT_STRING: keep the first element of each string value
             // (zval_get_tmp_string(): "Array to string conversion",
             // __toString(), or an Error for unconvertible objects).
             let entries: Vec<(ArrayKey, Value)> = arr
@@ -3006,59 +3006,57 @@ fn array_unique(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 if vm.current_exception.is_some() {
                     return Ok(Value::Null);
                 }
-                let s = if flags & 8 != 0 {
-                    s.to_ascii_lowercase()
-                } else {
-                    s
-                };
                 if seen.insert(s) {
                     result.set(key, unwrap_rc1_ref(&val));
                 }
             }
             return Ok(Value::Array(Rc::new(RefCell::new(result))));
         }
-        let arr = arr.borrow();
-        let mut result = PhpArray::new();
-        let mut seen: Vec<Vec<u8>> = Vec::new();
-        for (key, val) in arr.iter() {
-            // Reference elements compare by their value.
-            let dv = val.deref();
-            let s = match &dv {
-                Value::Object(obj) => {
-                    // For objects (including enums), use class name + identity-based key
-                    let obj_ref = obj.borrow();
-                    if obj_ref.has_property(b"__enum_case") {
-                        // Enum: use class_name::case_name as unique key
-                        let mut k = obj_ref.class_name.clone();
-                        k.extend_from_slice(b"::");
-                        let case_name = obj_ref.get_property(b"name");
-                        k.extend_from_slice(case_name.to_php_string().as_bytes());
-                        k
-                    } else {
-                        // Regular objects: use pointer as unique key
-                        let ptr = Rc::as_ptr(obj) as usize;
-                        format!("__obj_{}", ptr).into_bytes()
-                    }
-                }
-                _ => {
-                    if flags == 1 {
-                        // SORT_NUMERIC
-                        let n = dv.to_double();
-                        format!("{}", n).into_bytes()
-                    } else {
-                        dv.to_php_string().as_bytes().to_vec()
-                    }
-                }
-            };
-            if !seen.contains(&s) {
-                seen.push(s);
-                result.set(key.clone(), unwrap_rc1_ref(val));
-            }
-        }
-        Ok(Value::Array(Rc::new(RefCell::new(result))))
+        return array_unique_sorted(vm, arr, flags);
     } else {
         Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))))
     }
+}
+
+/// array_unique() for the non-SORT_STRING flags: zend_sort() the buckets
+/// with the unstable data comparator, then drop each run of equal
+/// neighbours but the earliest one (ext/standard/array.c).
+fn array_unique_sorted(
+    vm: &mut Vm,
+    arr: &Rc<RefCell<PhpArray>>,
+    flags: i64,
+) -> Result<Value, VmError> {
+    let mut result = arr.borrow().clone();
+    let mut tmp: Vec<(usize, ArrayKey, Value)> = arr
+        .borrow()
+        .iter()
+        .enumerate()
+        .map(|(i, (k, v))| (i, k.clone(), v.clone()))
+        .collect();
+    if tmp.len() <= 1 {
+        return Ok(Value::Array(Rc::new(RefCell::new(result))));
+    }
+    crate::zsort::zend_sort(&mut tmp, &mut |a, b| php_data_cmp(vm, &a.2, &b.2, flags));
+    if vm.current_exception.is_some() {
+        return Ok(Value::Null);
+    }
+    let mut lastkept = 0usize;
+    for c in 1..tmp.len() {
+        if php_data_cmp(vm, &tmp[lastkept].2, &tmp[c].2, flags) != 0 {
+            lastkept = c;
+        } else {
+            let del = if tmp[lastkept].0 > tmp[c].0 {
+                std::mem::replace(&mut lastkept, c)
+            } else {
+                c
+            };
+            result.remove(&tmp[del].1);
+        }
+    }
+    for (_, v) in result.iter_mut() {
+        *v = unwrap_rc1_ref(v);
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
 fn array_slice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
