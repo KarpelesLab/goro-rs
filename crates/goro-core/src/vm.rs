@@ -18092,9 +18092,13 @@ impl Vm {
                 return Err(self.stack_size_error(size));
             }
         }
+        // (diagnostics the builtin raises after the user code returns report
+        // the builtin's line, as EG(current_execute_data) is the caller's again)
+        let saved_line = self.current_line;
         let r = crate::stack::with_room(|| self.execute_op_array_frame(op_array, cvs));
         if !vm_call {
             crate::stack::leave_reentry();
+            self.current_line = saved_line;
         }
         match r {
             Ok(r) => r,
