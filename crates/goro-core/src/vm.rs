@@ -40969,23 +40969,44 @@ impl Vm {
                             // compile time but record the references in constants_meta to
                             // replay those deprecations here.
                             // (only the references to constants with attributes)
+                            let mut all_declared = true;
+                            let mut had_refs = false;
                             let refs: Vec<(Vec<u8>, Vec<u8>)> = self
                                 .classes
                                 .get(&class_lower)
                                 .and_then(|c| c.constants_meta.get(prop_name.as_bytes()))
                                 .map(|meta| {
+                                    had_refs = !meta.referenced_constants.is_empty();
                                     meta.referenced_constants
                                         .iter()
-                                        .filter(|(rc, rn)| {
-                                            self.classes
-                                                .get(rc)
-                                                .and_then(|c| c.constants_meta.get(rn.as_slice()))
-                                                .is_some_and(|m| !m.attributes.is_empty())
+                                        .filter(|(rc, rn)| match self.classes.get(rc) {
+                                            Some(c) => c
+                                                .constants_meta
+                                                .get(rn.as_slice())
+                                                .is_some_and(|m| !m.attributes.is_empty()),
+                                            None => {
+                                                all_declared = false;
+                                                true
+                                            }
                                         })
                                         .cloned()
                                         .collect()
                                 })
                                 .unwrap_or_default();
+                            // Once the referenced classes are all declared (their
+                            // constants' attributes cannot change), keep only the
+                            // references that matter for the next fetches.
+                            if had_refs && all_declared {
+                                if let Some(meta) = self
+                                    .classes
+                                    .get_mut(&class_lower)
+                                    .and_then(|c| c.constants_meta.get_mut(prop_name.as_bytes()))
+                                {
+                                    if meta.referenced_constants.len() != refs.len() {
+                                        meta.referenced_constants = refs.clone();
+                                    }
+                                }
+                            }
                             for (ref_class_lower, ref_const_name) in &refs {
                                 // Skip self-reference (would be circular).
                                 if ref_class_lower == &class_lower

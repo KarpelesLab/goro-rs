@@ -1059,19 +1059,28 @@ impl crate::vm::Vm {
         if !self.property_hook_stack.is_empty() {
             return Fast::No;
         }
-        let OperandType::Cv(ci) = op.op1 else {
-            return Fast::No;
-        };
-        // (a variable bound to a symbol table holds a reference)
-        let obj = match cvs.get(ci as usize) {
-            Some(Value::Object(obj)) => obj.clone(),
-            Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
-                Ok(Value::Object(obj)) => obj.clone(),
+        let write = op.opcode == OpCode::PropertySet;
+        let obj = match op.op1 {
+            // (a variable bound to a symbol table holds a reference)
+            OperandType::Cv(ci) => match cvs.get(ci as usize) {
+                Some(Value::Object(obj)) => obj.clone(),
+                Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+                    Ok(Value::Object(obj)) => obj.clone(),
+                    _ => return Fast::No,
+                },
                 _ => return Fast::No,
             },
+            // `$a->b->c`, `f()->p`: a read of an object held by a temporary
+            // (one held elsewhere too: releasing the temporary then destroys
+            // nothing)
+            OperandType::Tmp(ti) if op.opcode == OpCode::PropertyGet => {
+                match tmps.get(ti as usize) {
+                    Some(Value::Object(obj)) if Rc::strong_count(obj) > 1 => obj.clone(),
+                    _ => return Fast::No,
+                }
+            }
             _ => return Fast::No,
         };
-        let write = op.opcode == OpCode::PropertySet;
         // `$o->p[k] = v` / `$o->p[] = v` (see prop_dim_write)
         let w_fetch = op.opcode == OpCode::PropertyGetW;
         let name_op = if write { &op.result } else { &op.op2 };
