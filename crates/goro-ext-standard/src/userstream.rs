@@ -5205,6 +5205,7 @@ fn include_php_filter(vm: &mut Vm, path: &str, kind: u8) -> Result<Vec<u8>, VmEr
         }
         None => path.to_string(),
     };
+    let mut filter_failed = false;
     if let Some(read) = vm.functions.get(b"file_get_contents".as_slice()).copied() {
         let saved = vm.warning_capture.replace(Vec::new());
         let r = read(
@@ -5213,18 +5214,28 @@ fn include_php_filter(vm: &mut Vm, path: &str, kind: u8) -> Result<Vec<u8>, VmEr
                 url,
             ))],
         );
-        vm.warning_capture = saved;
+        let captured = std::mem::replace(&mut vm.warning_capture, saved).unwrap_or_default();
+        // A filter that failed (PSFS_ERR_FATAL): the read fails, and the
+        // file cannot be opened for inclusion (zend_stream_fixup()).
+        const UNPROCESSED: &str = "Unprocessed filter buckets remaining on input brigade";
+        filter_failed = captured.iter().any(|w| w.contains(UNPROCESSED));
+        if filter_failed {
+            vm.emit_warning(&format!("{}(): {}", name, UNPROCESSED));
+        }
         match r {
+            Ok(Value::String(_)) if filter_failed => {}
             Ok(Value::String(s)) => return Ok(s.as_bytes().to_vec()),
             Err(e) => return Err(e),
             Ok(_) if vm.current_exception.is_some() => return Err(exc_err(vm)),
             Ok(_) => {}
         }
     }
-    vm.emit_warning(&format!(
-        "{}({}): Failed to open stream: operation failed",
-        name, path
-    ));
+    if !filter_failed {
+        vm.emit_warning(&format!(
+            "{}({}): Failed to open stream: operation failed",
+            name, path
+        ));
+    }
     if vm.current_exception.is_some() {
         return Err(exc_err(vm));
     }
