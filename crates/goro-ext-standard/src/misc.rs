@@ -12599,18 +12599,33 @@ fn fread_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     match result {
         Ok(v) => Ok(v),
         Err(errno) => {
-            if is_write_only {
-                // PHP emits a Notice on fread of write-only stream. PHP uses
-                // its internal 8192-byte buffer size for the reported count,
-                // not the user-requested length.
+            // php_stdiop_read(): a failed read() is reported (with the
+            // 8192-byte buffer size PHP reads in, not the requested length);
+            // anything but EBADF also marks the stream at EOF (a directory
+            // opened as a file: EISDIR).
+            if is_write_only || (errno != 9 && errno > 0) {
+                if errno != 9 {
+                    FILE_HANDLES.with(|h| {
+                        if let Some(fh) = h.borrow_mut().get_mut(&fid) {
+                            fh.eof = true;
+                        }
+                    });
+                }
+                let fname = vm.current_builtin_name().unwrap_or_else(|| "fread".to_string());
                 let line = vm.current_line;
                 vm.emit_notice_at(
                     &format!(
-                        "fread(): Read of 8192 bytes failed with errno={} {}",
+                        "{}(): Read of 8192 bytes failed with errno={} {}",
+                        fname,
                         errno,
                         match errno {
-                            9 => "Bad file descriptor",
-                            _ => "Unknown error",
+                            9 => "Bad file descriptor".to_string(),
+                            e => std::io::Error::from_raw_os_error(e)
+                                .to_string()
+                                .split(" (os error")
+                                .next()
+                                .unwrap_or("Unknown error")
+                                .to_string(),
                         }
                     ),
                     line,
@@ -12854,6 +12869,10 @@ fn fwrite_fn_impl(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     };
     let to_write = &bytes[..length];
     let original_len = to_write.len();
+    // PHP_FUNCTION(fwrite): nothing to write is not a write.
+    if original_len == 0 {
+        return Ok(Value::Long(0));
+    }
 
     // Check if the underlying stream allows writing.
     let (stream_mode, is_special) = FILE_HANDLES.with(|h| {
@@ -13179,6 +13198,11 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 }
             }
             let terminator = if fh.eol == EOL_MAC { b'\r' } else { b'\n' };
+            // _php_stream_get_line(): a stream already at EOF with nothing
+            // buffered is not read again (fread()/fgetc() would read).
+            if fh.eof && fh.filter_read_ready.is_empty() && fh.sock.is_none() {
+                return Ok(Value::False);
+            }
             for _ in 0..limit {
                 match fh.read_raw(&mut byte, false) {
                     Ok(0) => {
@@ -13552,10 +13576,21 @@ fn mkdir_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let path = path_v.to_string_lossy().to_string();
     let path = strip_file_scheme(&path).unwrap_or(path);
     let recursive = args.get(2).map(|v| v.is_truthy()).unwrap_or(false);
-    let result = if recursive {
-        std::fs::create_dir_all(&path)
-    } else {
-        std::fs::create_dir(&path)
+    // php_plain_files_mkdir(): a recursive mkdir of an existing path fails
+    // like a plain one ("File exists").
+    // mkdir(2) with the requested mode (the umask applies), for each missing
+    // component when recursive.
+    let mode = args
+        .get(1)
+        .filter(|v| !matches!(v, Value::Null | Value::Undef))
+        .map(|v| v.to_long())
+        .unwrap_or(0o777) as u32;
+    let result = {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(recursive && !std::path::Path::new(&path).exists())
+            .mode(mode & 0o7777)
+            .create(&path)
     };
     match result {
         Ok(_) => Ok(Value::True),
@@ -13659,6 +13694,13 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     continue;
                 }
             }
+            // (php_glob(): GLOB_MARK does not add a second slash to a
+            // match that already ends in one, as glibc's glob() does)
+            let path = if libc_flags & libc::GLOB_MARK != 0 && path.ends_with("//") {
+                path[..path.len() - 1].to_string()
+            } else {
+                path
+            };
             arr.push(Value::String(PhpString::from_string(path)));
         }
     }
@@ -15505,6 +15547,32 @@ fn symlink_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     let target_s = target.to_string_lossy();
     let link_s = link.to_string_lossy();
+    // expand_filepath_ex() of the target, relative to the link's directory
+    // (CWD_FILEPATH): a leading component that exists but is not a
+    // directory makes it fail.
+    {
+        let base = std::path::Path::new(&*link_s)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        let full = base.join(&*target_s);
+        let comps: Vec<_> = full.components().collect();
+        let mut cur = std::path::PathBuf::new();
+        for (i, c) in comps.iter().enumerate() {
+            cur.push(c);
+            if i + 1 == comps.len() {
+                break;
+            }
+            match std::fs::metadata(if cur.as_os_str().is_empty() { std::path::Path::new(".") } else { &cur }) {
+                Ok(m) if !m.is_dir() => {
+                    vm.emit_warning("symlink(): No such file or directory");
+                    return Ok(Value::False);
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    }
     #[cfg(unix)]
     {
         match std::os::unix::fs::symlink(&*target_s, &*link_s) {
@@ -16128,6 +16196,16 @@ fn readfile_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(res);
     }
     let resolved = resolve_with_include_path(vm, &path_str, use_include_path);
+    // A directory opens as a plain-file stream whose first read fails.
+    if std::path::Path::new(&resolved).is_dir() {
+        goro_core::value::alloc_resource_id();
+        let line = vm.current_line;
+        vm.emit_notice_at(
+            "readfile(): Read of 8192 bytes failed with errno=21 Is a directory",
+            line,
+        );
+        return Ok(Value::Long(-1));
+    }
     match read_path_with_wrappers(&resolved) {
         Ok(data) => {
             let len = data.len();
@@ -16200,6 +16278,16 @@ fn file_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let use_inc = flags & 1 != 0; // FILE_USE_INCLUDE_PATH
     let path_str = path.to_string_lossy();
     let path_str = resolve_with_include_path(vm, &path_str, use_inc);
+    // A directory opens as a plain-file stream whose first read fails.
+    if !path_str.contains("://") && std::path::Path::new(&*path_str).is_dir() {
+        goro_core::value::alloc_resource_id();
+        let line = vm.current_line;
+        vm.emit_notice_at(
+            "file(): Read of 8192 bytes failed with errno=21 Is a directory",
+            line,
+        );
+        return Ok(Value::Array(Rc::new(RefCell::new(PhpArray::new()))));
+    }
     // php:// streams (php://filter, php://memory, ...) go through the
     // stream layer.
     let content = if (path_str.len() > 6 && path_str[..6].eq_ignore_ascii_case("php://"))
