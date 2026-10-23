@@ -511,7 +511,8 @@ pub fn from_srgb(cs: Colorspace, c: V3) -> Option<V3> {
             ]
         }
         Colorspace::Jzazbz => {
-            let j = jzazbz(c);
+            // ImageMagick reads the samples as R, B, G
+            let j = jzazbz([c[0], c[2], c[1]]);
             [j[0], j[1] + 0.5, j[2] + 0.5]
         }
         Colorspace::DisplayP3 => {
@@ -653,7 +654,10 @@ pub fn to_srgb(cs: Colorspace, c: V3) -> Option<V3> {
         }
         Colorspace::Oklab => oklab_inv([c[0], c[1] - 0.5, c[2] - 0.5]),
         Colorspace::Oklch => oklab_inv([c[0], c[1] * c[2].cos(), c[1] * c[2].sin()]),
-        Colorspace::Jzazbz => jzazbz_inv([c[0], c[1] - 0.5, c[2] - 0.5]),
+        Colorspace::Jzazbz => {
+            let v = jzazbz_inv([c[0], c[1] - 0.5, c[2] - 0.5]);
+            [v[0], v[2], v[1]]
+        }
         Colorspace::DisplayP3 => from_xyz(mul(&inv(&P3_M), lin(c))),
         Colorspace::Adobe98 => from_xyz(mul(&inv(&ADOBE_M), lin(c))),
         Colorspace::ProPhoto => from_xyz(mul(&inv(&PROPHOTO_M), lin(c))),
