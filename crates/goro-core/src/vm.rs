@@ -34794,8 +34794,15 @@ impl Vm {
                                                     frame_args,
                                                     true,
                                                 ));
-                                                self.called_class_stack
-                                                    .push(class_part.to_vec());
+                                                // (__call() runs on $this: its class is
+                                                // the called scope)
+                                                let called = match cvs.first() {
+                                                    Some(Value::Object(o)) => {
+                                                        o.borrow().class_name.clone()
+                                                    }
+                                                    _ => class_part.to_vec(),
+                                                };
+                                                self.called_class_stack.push(called);
                                                 self.class_scope_stack.push(declaring_class);
                                                 let result =
                                                     self.execute_op_array_vm(&call_op, fn_cvs);
