@@ -649,6 +649,7 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::PropertyGetW
             | OpCode::PropertyGetIncDec
             | OpCode::PropertyIsset
+            | OpCode::PropertyIssetFetch
             | OpCode::ArrayIsset
             | OpCode::ArrayGet
             | OpCode::ArraySet
@@ -725,7 +726,8 @@ impl crate::vm::Vm {
                 | OpCode::PropertySet
                 | OpCode::PropertyGetW
                 | OpCode::PropertyGetIncDec
-                | OpCode::PropertyIsset => {
+                | OpCode::PropertyIsset
+                | OpCode::PropertyIssetFetch => {
                     if self.isset_get_cache.is_some() {
                         break 'run ip;
                     }
@@ -1241,6 +1243,12 @@ impl crate::vm::Vm {
             return Fast::No;
         }
         let write = op.opcode == OpCode::PropertySet;
+        // (the fetch of `isset($o->p[k])` / `isset($o->p->q)` answers the
+        // same for a plain slot)
+        let isset = matches!(
+            op.opcode,
+            OpCode::PropertyIsset | OpCode::PropertyIssetFetch
+        );
         let obj = match op.op1 {
             // (a variable bound to a symbol table holds a reference)
             OperandType::Cv(ci) => match cvs.get(ci as usize) {
@@ -1255,7 +1263,10 @@ impl crate::vm::Vm {
             // (one held elsewhere too: releasing the temporary then destroys
             // nothing)
             OperandType::Tmp(ti)
-                if matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertyIsset) =>
+                if matches!(
+                    op.opcode,
+                    OpCode::PropertyGet | OpCode::PropertyIsset | OpCode::PropertyIssetFetch
+                ) =>
             {
                 match tmps.get(ti as usize) {
                     Some(Value::Object(obj)) if Rc::strong_count(obj) > 1 => obj.clone(),
@@ -1355,7 +1366,7 @@ impl crate::vm::Vm {
         let Some((idx, cur)) = slot else {
             // isset() of a property a stdClass object does not have (it has
             // no magic methods).
-            if op.opcode == OpCode::PropertyIsset && ob.class_name == b"stdClass" {
+            if isset && ob.class_name == b"stdClass" {
                 drop(ob);
                 return if store_tmp(&op.result, Value::False, tmps) {
                     Fast::Done
@@ -1460,7 +1471,7 @@ impl crate::vm::Vm {
             drop(old);
             return Fast::Done;
         }
-        if op.opcode == OpCode::PropertyIsset {
+        if isset {
             // (an accessible initialized slot: set unless null)
             let set = match cur {
                 Value::Reference(r) => !matches!(*r.borrow(), Value::Null),
