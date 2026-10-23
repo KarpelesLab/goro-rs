@@ -2341,15 +2341,18 @@ fn paint_common(
     invert: bool,
     mut set: impl FnMut(&mut [u16]),
 ) {
+    // the mean squared channel difference against the fuzz (at least
+    // sqrt(1/2)), as ImageMagick's fuzzy colour match measures it
     let t = target.to_rgba16();
-    let f2 = fuzz * fuzz;
+    let f = fuzz.max(std::f64::consts::FRAC_1_SQRT_2);
+    let f2 = f * f;
     for p in i.pixels.chunks_exact_mut(4) {
         let mut dist = 0.0;
         for c in 0..3 {
             let d = p[c] as f64 - t[c] as f64;
             dist += d * d;
         }
-        let matches = dist <= f2.max(0.0);
+        let matches = dist / 3.0 <= f2;
         if matches != invert {
             set(p);
         }

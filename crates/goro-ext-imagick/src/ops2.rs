@@ -318,14 +318,15 @@ fn floodfill_paint_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value])
             border.to_rgba16()
         };
         let fill_q = fill.to_rgba16();
-        let f2 = fuzz * fuzz;
+        let f = fuzz.max(std::f64::consts::FRAC_1_SQRT_2);
+        let f2 = f * f;
         let matches = |p: [u16; 4]| {
             let mut d = 0.0;
             for c in 0..3 {
                 let x = p[c] as f64 - target[c] as f64;
                 d += x * x;
             }
-            (d <= f2.max(0.0)) != invert
+            (d / 3.0 <= f2) != invert
         };
         let (w, h) = (i.columns, i.rows);
         let mut seen = vec![false; w * h];
@@ -1046,7 +1047,8 @@ fn levelize_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     );
     image_op(vm, &d_(o), "Unable to levelizeImage", |i| {
         goro_imagick::filters::map_channels(i, channel::DEFAULT, |v| {
-            let x = (v / 65535.0).powf(1.0 / g.max(1e-9));
+            // LevelizeImage() raises to the gamma itself (not its inverse)
+            let x = (v / 65535.0).powf(g);
             b + x * (w - b)
         });
         Ok(())
