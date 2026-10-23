@@ -18111,6 +18111,9 @@ impl Vm {
     /// it is the calling method's own $this: `$this->m()` holds none).
     #[inline]
     fn root_internal_call_this(op: &crate::opcode::Op, op_array: &OpArray, this: &Value) {
+        let Value::Object(o) = this else {
+            return;
+        };
         if let OperandType::Cv(i) = op.op1 {
             if op_array
                 .cv_names
@@ -18120,7 +18123,7 @@ impl Vm {
                 return;
             }
         }
-        crate::gc::possible_root(this);
+        crate::gc::possible_root_call_this(o);
     }
 
     /// Whether the constructor of a class (lowercase name) without a user

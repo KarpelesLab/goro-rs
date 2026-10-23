@@ -296,6 +296,16 @@ pub fn possible_root(v: &Value) {
     }
 }
 
+/// An object a call holds as its $this, released when the call returns
+/// (rooted when the call is set up): a possible root unless it already is
+/// one, or nothing else holds it.
+#[inline]
+pub fn possible_root_call_this(o: &Rc<RefCell<PhpObject>>) {
+    if Rc::strong_count(o) > 1 && o.try_borrow().is_ok_and(|b| !b.gc_buffered.get()) {
+        buffer_object(o);
+    }
+}
+
 /// possible_root() of an object.
 #[inline]
 pub fn possible_root_object(o: &Rc<RefCell<PhpObject>>) {
