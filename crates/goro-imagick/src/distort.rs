@@ -1,6 +1,6 @@
 //! DistortImage(): the distortion methods of ImageMagick's documentation
 //! ("Distorting Images"), as inverse mappings from destination to source
-//! pixels, sampled bilinearly with the image's virtual pixel method.
+//! pixels, resampled by EWA (ewa.rs) with the image's virtual pixel method.
 
 use crate::error::{MResult, MagickError, severity};
 use crate::geometry::Rect;
@@ -269,6 +269,23 @@ enum Map {
 }
 
 impl Map {
+    /// The reverse map's partial derivatives at (x, y).
+    fn jacobian(&self, x: f64, y: f64) -> [[f64; 2]; 2] {
+        if let Map::Affine(a) = self {
+            let m = &a.0;
+            return [[m[0], m[1]], [m[3], m[4]]];
+        }
+        const H: f64 = 1e-4;
+        let (ax, ay) = self.apply(x + H, y);
+        let (bx, by) = self.apply(x - H, y);
+        let (cx, cy) = self.apply(x, y + H);
+        let (dx, dy) = self.apply(x, y - H);
+        [
+            [(ax - bx) / (2.0 * H), (cx - dx) / (2.0 * H)],
+            [(ay - by) / (2.0 * H), (cy - dy) / (2.0 * H)],
+        ]
+    }
+
     fn apply(&self, x: f64, y: f64) -> (f64, f64) {
         match self {
             Map::Affine(a) => a.apply(x, y),
@@ -691,6 +708,8 @@ fn render(img: &Image, map: &Map, r: Rect, own_coords: bool) -> MResult<Image> {
     if transparent_vp || src.alpha {
         out.alpha = true;
     }
+    let ewa = crate::ewa::Ewa::new();
+    let vp = src.virtual_pixel;
     for y in 0..r.height {
         for x in 0..r.width {
             let (dx, dy) = if own_coords {
@@ -700,7 +719,8 @@ fn render(img: &Image, map: &Map, r: Rect, own_coords: bool) -> MResult<Image> {
             };
             let (u, v) = map.apply(dx, dy);
             let p = if u.is_finite() && v.is_finite() {
-                let s = src.sample_bilinear(u, v);
+                let j = map.jacobian(dx, dy);
+                let s = ewa.sample(&src, u, v, j, vp);
                 [
                     crate::color::to_q16(s[0]),
                     crate::color::to_q16(s[1]),

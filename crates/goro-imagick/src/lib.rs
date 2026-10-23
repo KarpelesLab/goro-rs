@@ -30,6 +30,7 @@ pub mod dither;
 pub mod draw;
 pub mod enhance;
 pub mod error;
+pub mod ewa;
 pub mod filters;
 pub mod fonts;
 pub mod fourier;
