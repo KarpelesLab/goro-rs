@@ -2613,6 +2613,24 @@ fn sqlite_child_env(filename: &str) {
 }
 
 /// Run all .phpt files in a directory (recursively)
+/// The sapi/fpm directory of the php-src checkout a test path is in (or
+/// that a directory being run contains).
+fn fpm_sapi_dir(dir: &Path) -> Option<std::path::PathBuf> {
+    let dir = std::fs::canonicalize(dir).ok()?;
+    for a in dir.ancestors() {
+        if a.file_name().is_some_and(|n| n == "fpm")
+            && a.parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|n| n == "sapi")
+        {
+            return Some(a.to_path_buf());
+        }
+    }
+    [dir.join("sapi/fpm"), dir.join("fpm")]
+        .into_iter()
+        .find(|cand| cand.join("tests/tester.inc").is_file())
+}
+
 pub fn run_test_dir(dir: &Path) -> TestCounts {
     // Each test runs with its own directory as cwd, so a relative test path
     // would no longer name the script (or its includes) from there.
@@ -2669,30 +2687,26 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
             }
         }
     }
-    // sapi/fpm/tests look for php-fpm in the sbin directory next to the bin
-    // directory of TEST_PHP_EXECUTABLE (an installation layout): goro is
-    // php-fpm when run under that name.
-    if std::env::var_os("TEST_FPM_EXECUTABLE").is_none() {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(root) = exe.parent().and_then(|d| d.parent()) {
-                let sbin = root.join("sbin");
-                let _ = std::fs::create_dir_all(&sbin);
-                let fpm = sbin.join("php-fpm");
-                if std::fs::symlink_metadata(&fpm).is_err() {
-                    let _ = std::os::unix::fs::symlink(&exe, &fpm);
-                }
-                if fpm.exists() {
-                    unsafe {
-                        std::env::set_var("TEST_FPM_EXECUTABLE", &fpm);
-                        // the tester loads the extensions a test needs
-                        // with -dextension= from there
-                        if std::env::var_os("TEST_FPM_EXTENSION_DIR").is_none() {
-                            std::env::set_var(
-                                "TEST_FPM_EXTENSION_DIR",
-                                exe.with_file_name("extensions"),
-                            );
-                        }
-                    }
+    // sapi/fpm/tests (tester.inc) look for php-fpm in sapi/fpm of the
+    // checkout under test: goro is php-fpm when run under that name.
+    if let (Ok(exe), Some(fpm_dir)) = (std::env::current_exe(), fpm_sapi_dir(dir)) {
+        let fpm = fpm_dir.join("php-fpm");
+        // (a link left by another goro binary is pointed at this one)
+        let stale = std::fs::symlink_metadata(&fpm).is_ok_and(|m| m.file_type().is_symlink())
+            && std::fs::read_link(&fpm).is_ok_and(|t| t != exe);
+        if stale {
+            let _ = std::fs::remove_file(&fpm);
+        }
+        if std::fs::symlink_metadata(&fpm).is_err() {
+            let _ = std::os::unix::fs::symlink(&exe, &fpm);
+        }
+        if fpm.exists() {
+            unsafe {
+                std::env::set_var("TEST_FPM_EXECUTABLE", &fpm);
+                // the tester loads the extensions a test needs with
+                // -dextension= from there
+                if std::env::var_os("TEST_FPM_EXTENSION_DIR").is_none() {
+                    std::env::set_var("TEST_FPM_EXTENSION_DIR", exe.with_file_name("extensions"));
                 }
             }
         }
