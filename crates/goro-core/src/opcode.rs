@@ -709,7 +709,8 @@ impl OpArray {
     /// 1: op2, bit 2: result): Zend frees a TMP operand as the op consuming
     /// it runs, so the VM releases an object or array such an op leaves in
     /// its temporary right after it (instead of at the statement's end).
-    /// Empty when `ops` changed since it was computed.
+    /// Empty when no opcode releases one, or `ops` changed since it was
+    /// computed.
     pub(crate) fn free_mask(&self) -> &[u8] {
         let m = &self.free_mask.get_or_init(|| compute_free_mask(self)).mask;
         if m.len() == self.ops.len() { m } else { &[] }
@@ -998,7 +999,7 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
     let tc = oa.temp_count as usize;
     if tc == 0 || n == 0 {
         return FreeInfo {
-            mask: vec![0u8; n].into_boxed_slice(),
+            mask: Box::new([]),
             call_frees: Box::new([]),
         };
     }
@@ -1141,6 +1142,10 @@ fn compute_free_mask(oa: &OpArray) -> FreeInfo {
                 call_frees.push((d, t));
             }
         }
+    }
+    // (none: no mask, whose lookups the dispatch loop then skips at once)
+    if mask.iter().all(|&m| m == 0) {
+        mask = Vec::new();
     }
     FreeInfo {
         mask: mask.into_boxed_slice(),

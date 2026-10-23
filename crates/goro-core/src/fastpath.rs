@@ -979,7 +979,27 @@ fn cv_operands_bound(op: &Op, cvs: &[Value], globals: Option<u32>) -> bool {
     ok(op.op1) && ok(op.op2) && ok(op.result)
 }
 
-/// The temporaries whose foreach iteration state (snapshot, object or
+/// OpArray::free_mask() of the code run_fast_ops() runs, looked up once
+/// it is needed.
+struct LazyFreeMask<'a> {
+    op_array: &'a crate::opcode::OpArray,
+    mask: Option<&'a [u8]>,
+}
+
+impl<'a> LazyFreeMask<'a> {
+    #[inline(always)]
+    fn get(&mut self) -> &'a [u8] {
+        match self.mask {
+            Some(m) => m,
+            None => {
+                let m = self.op_array.free_mask();
+                self.mask = Some(m);
+                m
+            }
+        }
+    }
+}
+
 /// Whether an op1/op2 temporary the opcode at `ip` is the last user of
 /// holds an object or an array.
 #[inline]
@@ -995,6 +1015,7 @@ fn consumes_heap_tmp(free_mask: &[u8], ip: usize, op: &Op, tmps: &[Value]) -> bo
             })
 }
 
+/// The temporaries whose foreach iteration state (snapshot, object or
 /// iterator handle) a frame holds, for FreeTmps (a few; more count as all).
 #[derive(Clone, Copy)]
 pub(crate) struct FeTmps {
@@ -1229,8 +1250,12 @@ impl crate::vm::Vm {
         // An opcode consuming a temporary object or array is left to the
         // dispatch loop, which releases it after the opcode (see
         // OpArray::free_mask()). (Only the property and dimension opcodes
-        // here take such operands.)
-        let free_mask = op_array.free_mask();
+        // here take such operands.) (Looked up by the first such opcode:
+        // the runs of most calls have none.)
+        let mut free_mask = LazyFreeMask {
+            op_array,
+            mask: None,
+        };
         // (the line of the last opcode run: the dispatch loop's current line
         // once control goes back to it; nothing here reads it)
         let mut line = None;
@@ -1319,27 +1344,28 @@ impl crate::vm::Vm {
                 | OpCode::PropertyGetIncDec
                 | OpCode::PropertyIsset
                 | OpCode::PropertyIssetFetch => {
-                    if self.isset_get_cache.is_some() || consumes_heap_tmp(free_mask, ip, op, tmps)
+                    if self.isset_get_cache.is_some()
+                        || consumes_heap_tmp(free_mask.get(), ip, op, tmps)
                     {
                         break 'run ip;
                     }
                     self.fast_prop_op(op_array, ip, cvs, tmps)
                 }
                 OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
-                    if consumes_heap_tmp(free_mask, ip, op, tmps) {
+                    if consumes_heap_tmp(free_mask.get(), ip, op, tmps) {
                         break 'run ip;
                     }
                     self.fast_dim_op(op, cvs, tmps, literals)
                 }
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
                 OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
-                    if consumes_heap_tmp(free_mask, ip, op, tmps) {
+                    if consumes_heap_tmp(free_mask.get(), ip, op, tmps) {
                         break 'run ip;
                     }
                     self.fast_dim_isset(op, cvs, tmps, literals)
                 }
                 OpCode::IssetCheck => {
-                    if consumes_heap_tmp(free_mask, ip, op, tmps) {
+                    if consumes_heap_tmp(free_mask.get(), ip, op, tmps) {
                         break 'run ip;
                     }
                     fast_isset_check(op, cvs, tmps, literals)
