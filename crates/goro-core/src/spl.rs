@@ -219,6 +219,21 @@ impl Vm {
             None => std::borrow::Cow::Owned(self.builtin_canonical_name(&decl)),
         };
         let method_disp = String::from_utf8_lossy(method_orig);
+        // SplHeap::compare() (and the Min/Max overrides) is protected.
+        if method_lower == b"compare" && &*decl != b"splpriorityqueue" {
+            let scope = self.current_class_scope();
+            if let Some(msg) = self.check_visibility(
+                crate::object::Visibility::Protected,
+                &decl,
+                decl_disp.as_bytes(),
+                "compare",
+                false,
+                scope.as_deref(),
+            ) {
+                self.spl_throw(b"Error", &msg);
+                return Value::Null;
+            }
+        }
         let mut call_args: Vec<Value> = self.take_values(0);
         call_args.extend_from_slice(args);
         // Generic zpp (verified stub arginfo of the method)
