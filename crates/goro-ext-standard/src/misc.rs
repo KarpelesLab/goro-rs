@@ -15755,7 +15755,20 @@ fn array_key_exists_fn2(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // and wrap, fractional ones are deprecated.
     let float_key = if let Value::Double(f) = key_deref {
         let line = vm.current_line;
-        Some(vm.double_offset_to_long(f, line))
+        let holders = match arr {
+            Value::Array(a) => std::rc::Rc::strong_count(a),
+            _ => 0,
+        };
+        let n = vm.double_offset_to_long(f, line);
+        // ZEND_ARRAY_KEY_EXISTS: an array released by the warning's error
+        // handler (only this call still holds it) reports false.
+        if let Value::Array(a) = arr {
+            let now = std::rc::Rc::strong_count(a);
+            if now < holders && now == 1 {
+                return Ok(Value::False);
+            }
+        }
+        Some(n)
     } else {
         None
     };

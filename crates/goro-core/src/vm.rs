@@ -25432,7 +25432,13 @@ impl Vm {
                     );
 
                     let method_val = self.read_operand(&op.op2, &cvs, &tmps, &op_array.literals);
-                    let method_name = method_val.to_php_string();
+                    let mut method_name = method_val.to_php_string();
+                    // No method is named with a NUL byte: the lookup fails, and
+                    // the __callStatic() trampoline (zend_get_call_trampoline_func())
+                    // and the errors see the name up to it.
+                    if let Some(p) = method_name.as_bytes().iter().position(|&b| b == 0) {
+                        method_name = PhpString::from_vec(method_name.as_bytes()[..p].to_vec());
+                    }
 
                     // Resolve the class name from the value
                     let class_name = match &class_val {
