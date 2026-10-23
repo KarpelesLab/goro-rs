@@ -839,10 +839,7 @@ impl Vm {
                     if self.current_exception.is_some() {
                         break;
                     }
-                    let v = matches!(
-                        self.mit_sub_call(&it, b"valid"),
-                        Some(Value::True)
-                    );
+                    let v = matches!(self.mit_sub_call(&it, b"valid"), Some(Value::True));
                     if v != expect {
                         return Some(bv(!expect));
                     }
@@ -863,10 +860,7 @@ impl Vm {
                     if self.current_exception.is_some() {
                         break;
                     }
-                    let valid = matches!(
-                        self.mit_sub_call(&it, b"valid"),
-                        Some(Value::True)
-                    );
+                    let valid = matches!(self.mit_sub_call(&it, b"valid"), Some(Value::True));
                     let v = if valid {
                         match self.mit_sub_call(&it, method) {
                             Some(v) => v,

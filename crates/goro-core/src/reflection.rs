@@ -7908,8 +7908,7 @@ pub fn reflection_property_docall(vm: &mut Vm, method: &[u8], args: &[Value]) ->
                     if let Value::Object(o) = target {
                         // SensitiveParameterValue keeps $value natively.
                         if prop_name == "value"
-                            && o
-                                .borrow()
+                            && o.borrow()
                                 .class_name
                                 .eq_ignore_ascii_case(b"SensitiveParameterValue")
                         {

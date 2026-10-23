@@ -816,7 +816,6 @@ impl Node {
     }
 }
 
-
 /// How a garbage array counts in gc_collect_cycles()'s result: like Zend
 /// (an empty one is usually the immutable zend_empty_array), never (VM
 /// bookkeeping), or always (a refcounted array even when empty).
@@ -1833,7 +1832,9 @@ pub fn collect_cycles<H: GcHost>(host: &mut H, limit: Option<usize>) -> i64 {
                             // An empty array is almost always Zend's
                             // immutable zend_empty_array, which is not
                             // refcounted and so never counted.
-                            if *uncounted == COUNT_ALWAYS || (*uncounted == COUNT_NORMAL && !b.is_empty()) {
+                            if *uncounted == COUNT_ALWAYS
+                                || (*uncounted == COUNT_NORMAL && !b.is_empty())
+                            {
                                 count += 1;
                             }
                             dead_arrays.push(std::mem::take(&mut *b));

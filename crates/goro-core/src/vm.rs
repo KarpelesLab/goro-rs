@@ -10800,10 +10800,12 @@ impl Vm {
                 ),
             ));
         }
-        let arg = args
-            .get(1)
-            .cloned()
-            .or_else(|| named.iter().find(|(n, _)| n == b"flags").map(|(_, v)| v.clone()));
+        let arg = args.get(1).cloned().or_else(|| {
+            named
+                .iter()
+                .find(|(n, _)| n == b"flags")
+                .map(|(_, v)| v.clone())
+        });
         let Some(arg) = arg.map(|a| a.deref()) else {
             return Ok(Value::Long(127));
         };
@@ -10843,7 +10845,11 @@ impl Vm {
     /// properties_info lookup: the property `name` as class `class_lower`
     /// sees it (its own, or an ancestor's non-private one; an extension
     /// class entry may not list what it inherits from an internal parent).
-    pub fn class_view_prop(&self, class_lower: &[u8], name: &[u8]) -> Option<&crate::object::PropertyDef> {
+    pub fn class_view_prop(
+        &self,
+        class_lower: &[u8],
+        name: &[u8],
+    ) -> Option<&crate::object::PropertyDef> {
         let mut cur = class_lower.to_vec();
         for depth in 0..64 {
             let ce = self.class_view(&cur)?;
