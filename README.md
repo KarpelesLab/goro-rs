@@ -65,6 +65,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | sapi/cli (incl. `php -S` and `php -a`) | 101 | 102 | 99.0% |
 | PECL uuid 1.3 (`tests/pecl/uuid`) | 14 | 14 | 100% |
 | PECL mailparse 3.2 (`tests/pecl/mailparse`, 1 upstream XFAIL) | 38 | 39 | 97.4% |
+| PECL imagick 3.8 (`tests/pecl/imagick`, ImageMagick 7.1 semantics; 13 skips) | 315 | 338 | 93.2% |
 
 
 *The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
@@ -110,8 +111,12 @@ Highlights beyond the core language:
   cache's entries; no optimizer or JIT, the directives are reported as php-src does),
   sqlite3 and pdo_sqlite (on goro-sqlite, a pure-Rust port of SQLite 3.54.1 incl. WAL, JSON and virtual tables),
   zend_test; and the PECL extensions uuid (RFC 9562 UUIDs v1/v3/v4/v5/v6/v7, the API of
-  util-linux libuuid) and mailparse (RFC 822 address parsing, an incremental MIME parser with
-  part extraction and transfer decoding, uuencoded attachments).
+  util-linux libuuid), mailparse (RFC 822 address parsing, an incremental MIME parser with
+  part extraction and transfer decoding, uuencoded attachments) and imagick (Imagick,
+  ImagickDraw, ImagickPixel, ImagickPixelIterator, ImagickKernel with ImageMagick 7 Q16
+  semantics: PNG/JPEG/GIF/WebP/BMP/TIFF/ICO/TGA/QOI/PNM and raw formats on the OxideAV codecs,
+  pseudo images, geometry, compositing, distortions, filters, drawing and text on
+  oxideav-raster and skrifa; no SVG input, Fourier transforms or ICC colour management yet).
 
 ### Not Yet Implemented
 - ffi, odbc, snmp, enchant (out of scope for now)
@@ -198,6 +203,8 @@ Workspace crates:
 - `goro-ext-ldap` - ext/ldap (LDAP\Connection, LDAP\Result, LDAP\ResultEntry) on `goro-ldap`
 - `goro-ext-uuid` - PECL uuid (uuid_create() & co., libuuid semantics)
 - `goro-ext-mailparse` - PECL mailparse (mailparse_msg_*(), mailparse_rfc822_parse_addresses(), mimemessage)
+- `goro-imagick` - a pure-Rust image engine with ImageMagick 7 MagickWand semantics, on the OxideAV crates
+- `goro-ext-imagick` - PECL imagick (Imagick, ImagickDraw, ImagickPixel, ImagickPixelIterator, ImagickKernel) on `goro-imagick`
 - `goro-ext-{bz2,calendar,curl,ftp,gettext,gmp,mbstring,mysqli,openssl,pcntl,posix,session,sockets,sodium,xml,zlib}` - misc extensions
 - `goro-phpt` - PHPT test file runner
 
