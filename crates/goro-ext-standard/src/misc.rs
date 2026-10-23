@@ -5285,7 +5285,10 @@ fn range_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             let size = crate::math::php_math_round(calc, 0, 1) as u64;
             let mut i = 0u64;
             loop {
-                let element = if dec {
+                // (the first element is start itself: -0.0 stays -0.0)
+                let element = if i == 0 {
+                    start_double
+                } else if dec {
                     start_double - (i as f64 * step_double)
                 } else {
                     start_double + (i as f64 * step_double)
