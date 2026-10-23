@@ -222,6 +222,14 @@ fn table_rows<'a>(
 }
 
 /// The value of a simple stub default (`""`, `0`, `null`, `[]`, ...).
+/// The value a slot the object stores nothing for has when it moves to its
+/// mangled key: an internal slot's default, else unset.
+fn slot_unset_value(slot: &PropSlot) -> Value {
+    slot.internal_default
+        .and_then(stub_default_value)
+        .unwrap_or(Value::Undef)
+}
+
 fn stub_default_value(src: &str) -> Option<Value> {
     let src = src.trim();
     Some(match src {
@@ -417,7 +425,10 @@ impl Vm {
                     s.storage_key = mangle(&s.name, Visibility::Private, &s.decl_name);
                 } else if s.vis == Visibility::Private
                     && s.decl.as_slice() != cl
-                    && self.classes.contains_key(&s.decl)
+                    && (self.classes.contains_key(&s.decl)
+                        // Exception's / Error's privates (see
+                        // PhpObject::throwable_get)
+                        || matches!(s.decl.as_slice(), b"exception" | b"error"))
                 {
                     s.moved_key = Some(mangle(&s.name, Visibility::Private, &s.decl_name));
                 }
@@ -661,7 +672,9 @@ impl Vm {
             if !moved {
                 match b.properties.iter_mut().find(|(k, _)| k.as_slice() == name) {
                     Some(e) => e.0 = mk.clone(),
-                    None => b.properties.push((mk.clone(), Value::Undef)),
+                    // (an internal slot the object kept no value for has
+                    // its default: Exception::$string)
+                    None => b.properties.push((mk.clone(), slot_unset_value(slot))),
                 }
             }
             return None;
@@ -688,7 +701,7 @@ impl Vm {
                     }
                     match b.properties.iter_mut().find(|(k, _)| k.as_slice() == name) {
                         Some(e) => e.0 = mk.clone(),
-                        None => b.properties.push((mk.clone(), Value::Undef)),
+                        None => b.properties.push((mk.clone(), slot_unset_value(s))),
                     }
                 }
                 None

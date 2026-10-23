@@ -173,7 +173,7 @@ impl Vm {
             let t = Value::String(PhpString::from_string(trace.clone()));
             self.observe_internal_end(&name, Some(&t));
             let next = match &cur {
-                Value::Object(o) => o.borrow().get_property(b"previous"),
+                Value::Object(o) => o.borrow().throwable_get(b"previous"),
                 _ => Value::Null,
             };
             cur = next;
@@ -298,7 +298,7 @@ impl Vm {
                         }
                         self.current_exception = None;
                     }
-                    let next = o.borrow().get_property(b"previous");
+                    let next = o.borrow().throwable_get(b"previous");
                     cur = next;
                 }
             }
@@ -341,11 +341,11 @@ impl Vm {
                     } else {
                         e.line
                     };
-                    let exc_trace = obj_ref.get_property(b"trace");
+                    let exc_trace = obj_ref.throwable_get(b"trace");
                     let trace_str =
                         Self::format_exception_trace_value(&exc_trace, &stack_trace, max_len);
                     chain.push((class, msg_str, file_str, line_num, trace_str));
-                    let mut prev = obj_ref.get_property(b"previous").clone();
+                    let mut prev = obj_ref.throwable_get(b"previous").clone();
                     for _ in 0..100 {
                         let next_prev;
                         if let Value::Object(prev_obj) = &prev {
@@ -365,11 +365,11 @@ impl Vm {
                                 pf
                             };
                             let pl_num = if pl > 0 { pl as u32 } else { 0 };
-                            let pt = prev_ref.get_property(b"trace");
+                            let pt = prev_ref.throwable_get(b"trace");
                             let pt_str =
                                 Self::format_exception_trace_value(&pt, &stack_trace, max_len);
                             chain.push((pc, pm, pf_str, pl_num, pt_str));
-                            next_prev = prev_ref.get_property(b"previous").clone();
+                            next_prev = prev_ref.throwable_get(b"previous").clone();
                         } else {
                             break;
                         }

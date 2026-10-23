@@ -50,7 +50,7 @@ pub fn random_bytes(buf: &mut [u8]) {
 /// exception's trace gets an empty "args".
 pub(crate) fn strip_trace_args(exc: &Value) {
     let Value::Object(o) = exc else { return };
-    let trace = o.borrow().get_property(b"trace");
+    let trace = o.borrow().throwable_get(b"trace");
     let Value::Array(t) = trace else { return };
     let frames: Vec<Value> = t.borrow().iter().map(|(_, v)| v.clone()).collect();
     for f in frames {
@@ -75,7 +75,7 @@ pub(crate) fn throw_class(vm: &mut Vm, class: &[u8], msg: &str, strip: bool) {
     }
     if let Some(prev) = vm.current_exception.take() {
         if let Value::Object(o) = &e {
-            o.borrow_mut().set_property(b"previous".to_vec(), prev);
+            o.borrow_mut().throwable_set(b"previous", prev);
         }
     }
     vm.current_exception = Some(e);

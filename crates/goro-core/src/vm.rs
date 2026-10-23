@@ -6100,8 +6100,8 @@ impl Vm {
         err_obj.set_property(b"line".to_vec(), Value::Long(line as i64));
         // Capture stack trace
         let trace = self.build_exception_trace();
-        err_obj.set_property(b"trace".to_vec(), trace);
-        err_obj.set_property(b"previous".to_vec(), Value::Null);
+        err_obj.throwable_set(b"trace", trace);
+        err_obj.throwable_set(b"previous", Value::Null);
         Value::Object(Rc::new(RefCell::new(err_obj)))
     }
 
@@ -8086,8 +8086,8 @@ impl Vm {
         {
             if let Value::Object(new_obj) = exc_val {
                 let mut new_borrow = new_obj.borrow_mut();
-                if matches!(new_borrow.get_property(b"previous"), Value::Null) {
-                    new_borrow.set_property(b"previous".to_vec(), prev_exc);
+                if matches!(new_borrow.throwable_get(b"previous"), Value::Null) {
+                    new_borrow.throwable_set(b"previous", prev_exc);
                 }
             }
         }
@@ -16573,8 +16573,8 @@ impl Vm {
             b"getcode" => prop(b"code"),
             b"getfile" => prop(b"file"),
             b"getline" => prop(b"line"),
-            b"gettrace" => prop(b"trace"),
-            b"getprevious" => prop(b"previous"),
+            b"gettrace" => obj.borrow().throwable_get(b"trace"),
+            b"getprevious" => obj.borrow().throwable_get(b"previous"),
             b"getseverity" => {
                 if !(class_lower == b"errorexception"
                     || self.class_extends(class_lower, b"errorexception"))
@@ -16587,7 +16587,7 @@ impl Vm {
                 }
             }
             b"gettraceasstring" => {
-                let trace = prop(b"trace");
+                let trace = obj.borrow().throwable_get(b"trace");
                 let max_len = self.exception_string_param_max_len;
                 Value::String(PhpString::from_string(
                     self.trace_to_string(&trace, true, max_len),
@@ -16595,8 +16595,8 @@ impl Vm {
             }
             _ => {
                 let result = self.throwable_chain_string(obj);
-                obj.borrow_mut().set_property(
-                    b"string".to_vec(),
+                obj.borrow_mut().throwable_set(
+                    b"string",
                     Value::String(PhpString::from_string(result.clone())),
                 );
                 Value::String(PhpString::from_string(result))
@@ -34067,8 +34067,8 @@ impl Vm {
                                                     );
                                                 }
                                                 if call.args.len() > 6 {
-                                                    obj_mut.set_property(
-                                                        b"previous".to_vec(),
+                                                    obj_mut.throwable_set(
+                                                        b"previous",
                                                         call.args[6].clone(),
                                                     );
                                                 }
@@ -34077,7 +34077,7 @@ impl Vm {
                                                 // created (zend_default_exception_new); the
                                                 // constructor only fills it in when missing.
                                                 if !matches!(
-                                                    obj_mut.get_property(b"trace"),
+                                                    obj_mut.throwable_get(b"trace"),
                                                     Value::Array(_)
                                                 ) {
                                                     let trace = self.build_exception_trace();
@@ -34085,10 +34085,10 @@ impl Vm {
                                                         &class_lower,
                                                         &trace,
                                                     );
-                                                    obj_mut.set_property(b"trace".to_vec(), trace);
+                                                    obj_mut.throwable_set(b"trace", trace);
                                                 }
-                                                obj_mut.set_property(
-                                                    b"previous".to_vec(),
+                                                obj_mut.throwable_set(
+                                                    b"previous",
                                                     Value::Null,
                                                 );
                                                 // Default exception/error constructor: ($message, $code, $previous)
@@ -34206,8 +34206,8 @@ impl Vm {
                                                     );
                                                 }
                                                 if call.args.len() > 3 {
-                                                    obj_mut.set_property(
-                                                        b"previous".to_vec(),
+                                                    obj_mut.throwable_set(
+                                                        b"previous",
                                                         call.args[3].clone(),
                                                     );
                                                 }
@@ -52884,10 +52884,10 @@ impl Vm {
                             Value::String(PhpString::from_string(self.current_file.to_string())),
                         );
                         obj.set_property(b"line".to_vec(), Value::Long(op.line as i64));
-                        obj.set_property(b"previous".to_vec(), Value::Null);
+                        obj.throwable_set(b"previous", Value::Null);
                         let trace = self.build_exception_trace();
                         self.filter_new_exception_trace(&name_lower, &trace);
-                        obj.set_property(b"trace".to_vec(), trace);
+                        obj.throwable_set(b"trace", trace);
                         // ErrorException::$severity = E_ERROR
                         if name_lower == b"errorexception"
                             || self.class_extends(&name_lower, b"errorexception")
@@ -56768,7 +56768,7 @@ impl Vm {
                         let throwable_string = if is_throwable && !has_user_method {
                             match method_name_lower.as_slice() {
                                 b"gettraceasstring" => {
-                                    let trace = obj.borrow().get_property(b"trace");
+                                    let trace = obj.borrow().throwable_get(b"trace");
                                     let max_len = self.exception_string_param_max_len;
                                     Some(self.trace_to_string(&trace, true, max_len))
                                 }
@@ -56787,9 +56787,9 @@ impl Vm {
                                 b"getcode" => Some(obj_borrow.get_property(b"code")),
                                 b"getfile" => Some(obj_borrow.get_property(b"file")),
                                 b"getline" => Some(obj_borrow.get_property(b"line")),
-                                b"gettrace" => Some(obj_borrow.get_property(b"trace")),
+                                b"gettrace" => Some(obj_borrow.throwable_get(b"trace")),
                                 b"gettraceasstring" | b"__tostring" => None,
-                                b"getprevious" => Some(obj_borrow.get_property(b"previous")),
+                                b"getprevious" => Some(obj_borrow.throwable_get(b"previous")),
                                 b"getseverity" => {
                                     let severity = obj_borrow.get_property(b"severity");
                                     Some(if matches!(severity, Value::Undef | Value::Null) {
@@ -57698,8 +57698,8 @@ impl Vm {
             if is_throwable {
                 let result = self.throwable_chain_string(obj);
                 // Exception::__toString() keeps the result in $string.
-                obj.borrow_mut().set_property(
-                    b"string".to_vec(),
+                obj.borrow_mut().throwable_set(
+                    b"string",
                     Value::String(PhpString::from_string(result.clone())),
                 );
                 return PhpString::from_string(result);
@@ -57820,7 +57820,7 @@ impl Vm {
         } else {
             file
         };
-        let trace = obj_borrow.get_property(b"trace");
+        let trace = obj_borrow.throwable_get(b"trace");
         let trace_str =
             Self::trace_text(&trace, true, self.exception_string_param_max_len, warnings);
         if message.is_empty() {
@@ -57863,7 +57863,7 @@ impl Vm {
             } else {
                 format!("{}\n\nNext {}", part, out)
             };
-            cur = match o.borrow().get_property(b"previous") {
+            cur = match o.borrow().throwable_get(b"previous") {
                 Value::Object(p) => Some(p),
                 _ => None,
             };
@@ -59039,7 +59039,7 @@ impl Vm {
                             obj_mut.set_property(b"code".to_vec(), call.args[2].clone());
                         }
                         if call.args.len() > 3 {
-                            obj_mut.set_property(b"previous".to_vec(), call.args[3].clone());
+                            obj_mut.throwable_set(b"previous", call.args[3].clone());
                         }
                     }
                 }
@@ -60314,7 +60314,7 @@ impl Vm {
         if Rc::ptr_eq(head, prev_rc) {
             return;
         }
-        let previous_of = |o: &Rc<RefCell<PhpObject>>| match o.borrow().get_property(b"previous") {
+        let previous_of = |o: &Rc<RefCell<PhpObject>>| match o.borrow().throwable_get(b"previous") {
             Value::Object(n) => Some(n),
             _ => None,
         };
@@ -60335,7 +60335,7 @@ impl Vm {
             }
             match previous_of(&ex) {
                 None => {
-                    ex.borrow_mut().set_property(b"previous".to_vec(), prev);
+                    ex.borrow_mut().throwable_set(b"previous", prev);
                     return;
                 }
                 Some(n) => {

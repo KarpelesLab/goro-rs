@@ -509,6 +509,47 @@ impl PhpObject {
             .unwrap_or(Value::Null)
     }
 
+    /// The storage key of Exception's / Error's private property `name`
+    /// (`string`, `trace`, `previous`): its bare name, unless a dynamic
+    /// property of that name made it move to its mangled key
+    /// (`Vm::prop_access_key`).
+    pub fn throwable_private_key(&self, name: &[u8]) -> Option<usize> {
+        self.properties.iter().position(|(k, _)| {
+            k.len() > name.len() + 2
+                && k[0] == 0
+                && k.ends_with(name)
+                && k[k.len() - name.len() - 1] == 0
+                && matches!(&k[1..k.len() - name.len() - 1], b"Exception" | b"Error")
+        })
+    }
+
+    /// get_property() of Exception's / Error's private property `name`.
+    pub fn throwable_get(&self, name: &[u8]) -> Value {
+        match self.throwable_private_key(name) {
+            Some(i) => match self.properties[i].1.deref() {
+                Value::Undef => Value::Null,
+                v => v,
+            },
+            None => self.get_property(name),
+        }
+    }
+
+    /// set_property() of Exception's / Error's private property `name`.
+    pub fn throwable_set(&mut self, name: &[u8], value: Value) {
+        match self.throwable_private_key(name) {
+            Some(i) => self.properties[i].1 = value,
+            None => self.set_property_slice(name, value),
+        }
+    }
+
+    /// has_property() of Exception's / Error's private property `name`.
+    pub fn throwable_has(&self, name: &[u8]) -> bool {
+        match self.throwable_private_key(name) {
+            Some(i) => !matches!(self.properties[i].1, Value::Undef),
+            None => self.has_property(name),
+        }
+    }
+
     pub fn set_property(&mut self, name: Vec<u8>, value: Value) {
         if let Some(value) = self.set_existing_property(&name, value) {
             self.properties.push((name, value));

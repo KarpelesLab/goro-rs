@@ -366,7 +366,15 @@ pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
             if user_override {
                 continue;
             }
-            let value = if obj.has_property(name) {
+            // (a private one moved to its mangled key by a dynamic property)
+            let moved = if private {
+                obj.throwable_private_key(name)
+            } else {
+                None
+            };
+            let value = if let Some(i) = moved {
+                obj.properties[i].1.clone()
+            } else if obj.has_property(name) {
                 obj.get_property(name)
             } else if name == b"string" {
                 Value::String(PhpString::empty())
@@ -382,7 +390,10 @@ pub(crate) fn mangled_props(vm: &Vm, obj: &PhpObject) -> Vec<PropEntry> {
             };
             out.push(PropEntry {
                 php_key,
-                storage_key: name.to_vec(),
+                storage_key: match moved {
+                    Some(i) => obj.properties[i].0.clone(),
+                    None => name.to_vec(),
+                },
                 value,
             });
         }
