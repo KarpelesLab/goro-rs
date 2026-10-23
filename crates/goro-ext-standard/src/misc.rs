@@ -18449,6 +18449,16 @@ fn startup_load_extension(vm: &mut Vm, filename: &str) {
     {
         return;
     }
+    // A module goro has built in but loads on request.
+    let lower = base.to_ascii_lowercase();
+    if let Some(&(_, minit)) = vm
+        .loadable_modules
+        .iter()
+        .find(|(m, _)| *m == lower.as_bytes())
+    {
+        minit(vm);
+        return;
+    }
     let ini_s = |vm: &Vm, k: &[u8]| {
         vm.constants
             .get(k)
@@ -22159,12 +22169,43 @@ fn dl_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         );
         return Ok(Value::False);
     }
-    // goro cannot load shared extensions.
     let dir = vm
         .constants
         .get(b"extension_dir".as_slice())
         .map(|v| v.to_php_string().to_string_lossy())
         .unwrap_or_default();
+    // A module goro has built in but loads on request: found in
+    // extension_dir as the file name or as the extension name.
+    if !dir.is_empty() {
+        let sep = if dir.ends_with('/') { "" } else { "/" };
+        for f in [name.to_string(), format!("{}.so", name)] {
+            if !std::path::Path::new(&format!("{}{}{}", dir, sep, f)).is_file() {
+                continue;
+            }
+            let stem = f.strip_prefix("php_").unwrap_or(&f);
+            let stem = stem.split('.').next().unwrap_or(stem).to_ascii_lowercase();
+            let Some(&(module, minit)) = vm
+                .loadable_modules
+                .iter()
+                .find(|(m, _)| *m == stem.as_bytes())
+            else {
+                break;
+            };
+            if vm.loaded_extensions.contains(module) {
+                // zend_error(E_CORE_WARNING)
+                vm.display_error(
+                    "Warning",
+                    &format!("Module \"{}\" is already loaded", stem),
+                    "Unknown",
+                    0,
+                );
+                return Ok(Value::False);
+            }
+            minit(vm);
+            return Ok(Value::True);
+        }
+    }
+    // goro cannot load other shared extensions.
     let tried = |f: &str| {
         let p = format!("{}/{}", dir, f);
         let err = if std::path::Path::new(&p).exists() {

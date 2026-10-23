@@ -26,6 +26,28 @@ mod support;
 /// The extension name (`extension_loaded('zend_test')`).
 pub const NAME: &[u8] = b"zend_test";
 
+pub mod dl_test;
+
+/// The modules php-src builds shared for its tests, which dl() and the
+/// `extension` INI entry can load (`Vm::loadable_modules`).
+pub fn register_loadables(vm: &mut Vm) {
+    vm.loadable_modules.push((NAME, register));
+    vm.loadable_modules.push((dl_test::NAME, dl_test::register));
+}
+
+/// Whether INI settings ask for dl_test (`extension=dl_test`).
+pub fn dl_test_requested<'a>(ini: impl IntoIterator<Item = (&'a str, &'a str)>) -> bool {
+    ini.into_iter().any(|(k, v)| {
+        k == "extension" && {
+            let v = v.trim();
+            let base = v.rsplit(['/', '\\']).next().unwrap_or(v);
+            let base = base.strip_prefix("php_").unwrap_or(base);
+            let stem = base.split('.').next().unwrap_or(base);
+            stem.eq_ignore_ascii_case("dl_test")
+        }
+    })
+}
+
 /// Whether INI settings ask for the extension (`extension=zend_test`,
 /// possibly as a file name like `zend_test.so`).
 pub fn requested<'a>(ini: impl IntoIterator<Item = (&'a str, &'a str)>) -> bool {

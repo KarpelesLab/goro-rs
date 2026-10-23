@@ -343,11 +343,14 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
     let mut ini_settings = parse_ini_settings(test.ini_section());
     // run-tests.php loads the extensions a test lists that are built shared
     // with `-d extension=...` (zend_test is only loaded on request).
-    if test.sections.get("EXTENSIONS").is_some_and(|e| {
-        e.lines()
-            .any(|x| x.trim().eq_ignore_ascii_case("zend_test"))
-    }) {
-        ini_settings.insert(0, ("extension".to_string(), "zend_test".to_string()));
+    for shared in ["dl_test", "zend_test"] {
+        if test
+            .sections
+            .get("EXTENSIONS")
+            .is_some_and(|e| e.lines().any(|x| x.trim().eq_ignore_ascii_case(shared)))
+        {
+            ini_settings.insert(0, ("extension".to_string(), shared.to_string()));
+        }
     }
     // run-tests.php placeholders: {PWD}, {TMP}, {MAIL:path}
     for (_, v) in ini_settings.iter_mut() {
@@ -451,6 +454,7 @@ fn run_test_inner(test: &PhptTest, test_dir: Option<&Path>, filename: &str) -> T
                 goro_ext_imagick::register(&mut vm);
                 // Loadable on request (see run_test_inner).
                 vm.register_extension(goro_ext_zend_test::NAME);
+                vm.register_extension(goro_ext_zend_test::dl_test::NAME);
                 vm.register_extension(b"simplexml");
                 vm.register_extension(b"tokenizer");
                 vm.register_extension(b"pcre");
@@ -1671,6 +1675,7 @@ fn execute_php_inner_impl(
     goro_ext_uuid::register(&mut vm);
     goro_ext_mailparse::register(&mut vm);
     goro_ext_imagick::register(&mut vm);
+    goro_ext_zend_test::register_loadables(&mut vm);
     if goro_ext_zend_test::requested(ini_settings.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }
@@ -2631,6 +2636,17 @@ pub fn run_test_dir(dir: &Path) -> TestCounts {
                     std::env::set_var("TEST_PHP_CGI_EXECUTABLE", &cgi);
                 }
             }
+        }
+    }
+    // The shared modules of a php-src build that its tests dl(): goro has
+    // them built in and loads them when extension_dir (PHP_EXTENSION_DIR,
+    // "extensions" next to the binary) holds a file of that name.
+    if let Ok(exe) = std::env::current_exe() {
+        let dir = exe.with_file_name("extensions");
+        let _ = std::fs::create_dir_all(&dir);
+        let so = dir.join("dl_test.so");
+        if std::fs::symlink_metadata(&so).is_err() {
+            let _ = std::os::unix::fs::symlink(&exe, &so);
         }
     }
     if std::env::var("TEST_PHP_EXECUTABLE").is_err() {

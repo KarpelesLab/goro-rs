@@ -1044,6 +1044,15 @@ impl PendingCall {
     }
 }
 
+/// PHP_EXTENSION_DIR: `extensions` next to the running binary.
+pub fn default_extension_dir() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("extensions")))
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// The virtual machine / executor
 pub struct Vm {
     /// Output buffer
@@ -1614,6 +1623,10 @@ pub struct Vm {
     /// Module shutdown (MSHUTDOWN) handlers, run by the SAPI once the
     /// request is over and its output sent.
     pub module_shutdown_hooks: Vec<fn(&mut Vm)>,
+    /// Modules built in but loaded only on request, by dl() or an
+    /// `extension` INI entry naming them (php-src builds them shared):
+    /// (module name, its MINIT).
+    pub loadable_modules: Vec<(&'static [u8], fn(&mut Vm))>,
     /// Whether the current caller has strict_types=1 (set before calling builtins)
     pub caller_strict_types: bool,
     pub stored_attr_op_arrays: Vec<OpArray>,
@@ -1936,10 +1949,19 @@ impl Vm {
                     b"PHP_SYSCONFDIR".to_vec(),
                     Value::String(PhpString::from_bytes(b"/etc")),
                 );
-                c.insert(
-                    b"PHP_EXTENSION_DIR".to_vec(),
-                    Value::String(PhpString::from_bytes(b"")),
-                );
+                // PHP_EXTENSION_DIR, the extension_dir default: the
+                // "extensions" directory next to the goro binary.
+                {
+                    let dir = default_extension_dir();
+                    c.insert(
+                        b"PHP_EXTENSION_DIR".to_vec(),
+                        Value::String(PhpString::from_bytes(dir.as_bytes())),
+                    );
+                    c.insert(
+                        b"extension_dir".to_vec(),
+                        Value::String(PhpString::from_bytes(dir.as_bytes())),
+                    );
+                }
                 {
                     // Prefer TEST_PHP_EXECUTABLE / PHP_BINARY env var if set
                     // (the test harness sets this to the goro binary), then
@@ -2821,6 +2843,7 @@ impl Vm {
             include_resolve_hook: None,
             resource_shutdown_hooks: Vec::new(),
             module_shutdown_hooks: Vec::new(),
+            loadable_modules: Vec::new(),
             shutdown_hooks: Vec::new(),
             caller_strict_types: false,
             stored_attr_op_arrays: Vec::new(),

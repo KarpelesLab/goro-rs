@@ -16,9 +16,32 @@ use goro_core::vm::Vm;
 
 const PRELUDE: &[u8] = include_bytes!("prelude.php");
 
+/// Declare the classes of `src` (PHP source) and make them internal.
+pub(crate) fn declare_internal_classes(vm: &mut Vm, src: &[u8]) {
+    let Some((op_array, classes)) = compile_prelude(src) else {
+        return;
+    };
+    let names: Vec<Vec<u8>> = classes
+        .iter()
+        .map(|c| c.name.to_ascii_lowercase())
+        .collect();
+    let saved_file = std::mem::take(&mut vm.current_file);
+    let saved_line = vm.current_line;
+    // (an extension's MINIT: no observer sees it run)
+    let observer = vm.observer.take();
+    let _ = vm.run_compiled(&op_array, classes);
+    vm.observer = observer;
+    vm.current_file = saved_file;
+    vm.current_line = saved_line;
+    vm.current_exception = None;
+    for lower in &names {
+        make_internal(vm, lower);
+    }
+}
+
 pub(crate) fn register(vm: &mut Vm) {
     let Some((op_array, classes)) =
-        goro_core::compiler::without_internal_attributes(compile_prelude)
+        goro_core::compiler::without_internal_attributes(|| compile_prelude(PRELUDE))
     else {
         return;
     };
@@ -120,14 +143,12 @@ fn validate_zend_test_attribute(target: u32) -> Option<String> {
     (target != 1).then(|| "Only classes can be marked with #[ZendTestAttribute]".to_string())
 }
 
-fn compile_prelude() -> Option<(OpArray, Vec<ClassEntry>)> {
-    let mut lexer = goro_parser::Lexer::new(PRELUDE);
+fn compile_prelude(src: &[u8]) -> Option<(OpArray, Vec<ClassEntry>)> {
+    let mut lexer = goro_parser::Lexer::new(src);
     let tokens = lexer.tokenize();
     let _ = goro_parser::take_lexer_deprecations();
     let _ = goro_parser::take_lexer_warnings();
-    let mut parser = goro_parser::Parser::new(tokens)
-        .with_source(PRELUDE)
-        .trusted();
+    let mut parser = goro_parser::Parser::new(tokens).with_source(src).trusted();
     let program = parser.parse().ok()?;
     let compiler = goro_core::compiler::Compiler::new();
     let (mut op_array, mut classes, _) = compiler.compile(&program).ok()?;

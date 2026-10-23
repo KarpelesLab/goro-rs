@@ -125,7 +125,8 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
 
     let mut vm = Vm::new();
     register_extensions(&mut vm);
-    // Extensions only loaded on request (`-d extension=zend_test`).
+    // Extensions only loaded on request (`-d extension=zend_test`, dl()).
+    goro_ext_zend_test::register_loadables(&mut vm);
     if goro_ext_zend_test::requested(ini.iter().map(|(k, v)| (k.as_str(), v.as_str()))) {
         goro_ext_zend_test::register(&mut vm);
     }
