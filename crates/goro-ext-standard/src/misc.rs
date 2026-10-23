@@ -6517,37 +6517,9 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     })
 }
 fn is_object(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let val = args.first().unwrap_or(&Value::Null);
-    Ok(match val {
-        Value::Object(_) | Value::Generator(_) => Value::True,
-        Value::String(s) => {
-            let b = s.as_bytes();
-            if b.starts_with(b"__closure_")
-                || b.starts_with(b"__arrow_")
-                || b.starts_with(b"__bound_closure_")
-                || b.starts_with(b"__closure_fcc_")
-            {
-                Value::True
-            } else {
-                Value::False
-            }
-        }
-        Value::Array(arr) => {
-            let arr = arr.borrow();
-            if let Some(first) = arr.values().next() {
-                if let Value::String(s) = first {
-                    let b = s.as_bytes();
-                    if b.starts_with(b"__closure_")
-                        || b.starts_with(b"__arrow_")
-                        || b.starts_with(b"__bound_closure_")
-                        || b.starts_with(b"__closure_fcc_")
-                    {
-                        return Ok(Value::True);
-                    }
-                }
-            }
-            Value::False
-        }
+    // (closures are Closure objects: a string or array never is one)
+    Ok(match args.first().map(|v| v.deref()) {
+        Some(Value::Object(_) | Value::Generator(_)) => Value::True,
         _ => Value::False,
     })
 }

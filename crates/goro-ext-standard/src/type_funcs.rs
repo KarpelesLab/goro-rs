@@ -2,33 +2,6 @@ use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
 
-/// Check if a Value is an internal closure representation (string or array starting with __closure_/__arrow_/__bound_closure_/__closure_fcc_)
-fn is_closure_value(val: &Value) -> bool {
-    match val {
-        Value::String(s) => {
-            let bytes = s.as_bytes();
-            bytes.starts_with(b"__closure_")
-                || bytes.starts_with(b"__arrow_")
-                || bytes.starts_with(b"__bound_closure_")
-                || bytes.starts_with(b"__closure_fcc_")
-        }
-        Value::Array(arr) => {
-            let arr = arr.borrow();
-            if let Some(first) = arr.values().next() {
-                if let Value::String(s) = first {
-                    let bytes = s.as_bytes();
-                    return bytes.starts_with(b"__closure_")
-                        || bytes.starts_with(b"__arrow_")
-                        || bytes.starts_with(b"__bound_closure_")
-                        || bytes.starts_with(b"__closure_fcc_");
-                }
-            }
-            false
-        }
-        _ => false,
-    }
-}
-
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"gettype", gettype);
     vm.register_function(b"is_null", is_null);
@@ -69,9 +42,7 @@ fn gettype(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         Value::True | Value::False => "boolean",
         Value::Long(_) => "integer",
         Value::Double(_) => "double",
-        Value::String(_) if is_closure_value(val) => "object",
         Value::String(_) => "string",
-        Value::Array(_) if is_closure_value(val) => "object",
         Value::Array(_) => "array",
         Value::Object(_) | Value::Generator(_) => "object",
         Value::Reference(r) => return gettype(_vm, &[r.borrow().clone()]),
@@ -111,12 +82,10 @@ fn is_float(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn is_string(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     Ok(match val {
-        Value::String(_) if is_closure_value(val) => Value::False,
         Value::String(_) => Value::True,
         Value::Reference(r) => {
             let inner = r.borrow();
             match &*inner {
-                Value::String(_) if is_closure_value(&inner) => Value::False,
                 Value::String(_) => Value::True,
                 _ => Value::False,
             }
@@ -577,14 +546,12 @@ fn count_recursive(
 fn is_scalar(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
     Ok(match val {
-        Value::String(_) if is_closure_value(val) => Value::False,
         Value::Long(_) | Value::Double(_) | Value::String(_) | Value::True | Value::False => {
             Value::True
         }
         Value::Reference(r) => {
             let inner = r.borrow();
             match &*inner {
-                Value::String(_) if is_closure_value(&inner) => Value::False,
                 Value::Long(_)
                 | Value::Double(_)
                 | Value::String(_)

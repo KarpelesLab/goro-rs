@@ -7490,11 +7490,13 @@ impl Vm {
                         // Special case: Closure type - in goro-rs closures are strings/arrays, not objects
                         if class_name_lower == b"closure" {
                             return match value {
+                                // (a string naming a compiled closure is the
+                                // closure's internal form)
                                 Value::String(s) => {
                                     let bytes = s.as_bytes();
-                                    bytes.starts_with(b"__closure_")
-                                        || bytes.starts_with(b"__arrow_")
-                                        || self.user_functions.contains_key(bytes)
+                                    (bytes.starts_with(b"__closure_")
+                                        || bytes.starts_with(b"__arrow_"))
+                                        && self.user_functions.contains_key(bytes)
                                 }
                                 Value::Array(arr) => {
                                     // Closure with captured vars: [name, val1, val2, ...]
@@ -41067,39 +41069,9 @@ impl Vm {
                     };
 
                     let result = if class_lower == b"closure" {
-                        // Special case: closures in goro-rs may be strings/arrays, not objects
+                        // (a Closure object; a string or array is never an
+                        // instance of anything, whatever it holds)
                         match &val {
-                            Value::String(s) => {
-                                let bytes = s.as_bytes();
-                                if bytes.starts_with(b"__closure_")
-                                    || bytes.starts_with(b"__arrow_")
-                                    || bytes.starts_with(b"__bound_closure_")
-                                {
-                                    Value::True
-                                } else {
-                                    Value::False
-                                }
-                            }
-                            Value::Array(arr) => {
-                                let arr_borrow = arr.borrow();
-                                if let Some(first) = arr_borrow.values().next() {
-                                    if let Value::String(s) = first {
-                                        let bytes = s.as_bytes();
-                                        if bytes.starts_with(b"__closure_")
-                                            || bytes.starts_with(b"__arrow_")
-                                            || bytes.starts_with(b"__bound_closure_")
-                                        {
-                                            Value::True
-                                        } else {
-                                            Value::False
-                                        }
-                                    } else {
-                                        Value::False
-                                    }
-                                } else {
-                                    Value::False
-                                }
-                            }
                             Value::Object(obj) => {
                                 let obj_borrow = obj.borrow();
                                 if obj_borrow.class_name.eq_ignore_ascii_case(b"Closure") {

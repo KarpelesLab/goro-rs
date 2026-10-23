@@ -422,10 +422,13 @@ fn var_dump_value_inner(vm: &mut Vm, val: &Value, indent: usize, seen: &mut Hash
         }
         Value::String(s) => {
             let b = s.as_bytes();
-            if b.starts_with(b"__closure_")
+            // (an internal closure name; a user string that merely looks
+            // like one is a string)
+            if (b.starts_with(b"__closure_")
                 || b.starts_with(b"__arrow_")
                 || b.starts_with(b"__bound_closure_")
-                || b.starts_with(b"__closure_fcc_")
+                || b.starts_with(b"__closure_fcc_"))
+                && vm.user_functions.contains_key(&b.to_ascii_lowercase())
             {
                 // Closures should be displayed as Closure objects
                 // Look up the closure function to get name, file, line info
@@ -2084,9 +2087,10 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
         }
         Value::String(s) => {
             let b = s.as_bytes();
-            if b.starts_with(b"__closure_")
+            if (b.starts_with(b"__closure_")
                 || b.starts_with(b"__arrow_")
-                || b.starts_with(b"__bound_closure_")
+                || b.starts_with(b"__bound_closure_"))
+                && vm.user_functions.contains_key(&b.to_ascii_lowercase())
             {
                 // Closures are objects without __set_state support.
                 buf.extend_from_slice(b"\\Closure::__set_state(array(\n");

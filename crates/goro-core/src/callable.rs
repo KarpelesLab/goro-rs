@@ -408,7 +408,9 @@ impl Vm {
             {
                 return true;
             }
-            if is_closure_bytes(callable) {
+            // (an internal closure's name; not a string that merely looks
+            // like one)
+            if is_closure_bytes(callable) && self.user_functions.contains_key(&l) {
                 return true;
             }
         }
