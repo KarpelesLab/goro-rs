@@ -3161,10 +3161,9 @@ fn substr_compare(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         (sub[..prefix_len].to_vec(), s2_bytes[..prefix_len].to_vec())
     };
-    let cmp = crate::misc::php_strcmp(&a_prefix, &b_prefix);
-    if cmp != 0 {
-        // PHP returns -1, 0, 1 (normalized)
-        return Ok(Value::Long(cmp.signum()));
+    // (the first differing bytes' difference, as memcmp()/tolower() give it)
+    if let Some((x, y)) = a_prefix.iter().zip(&b_prefix).find(|(x, y)| x != y) {
+        return Ok(Value::Long(*x as i64 - *y as i64));
     }
     let l1 = cmp_len.min(len1) as i64;
     let l2 = cmp_len.min(len2) as i64;
@@ -3922,14 +3921,26 @@ fn strnatcasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     )))
 }
 
+/// zend_binary_strncmp() (zend_binary_strcmp() with `length` = usize::MAX):
+/// memcmp()'s difference of the first differing bytes (as glibc returns it),
+/// else the three-way comparison of the compared lengths.
+fn zend_binary_strncmp(a: &[u8], b: &[u8], length: usize) -> i64 {
+    let (la, lb) = (a.len().min(length), b.len().min(length));
+    let n = la.min(lb);
+    match a[..n].iter().zip(&b[..n]).find(|(x, y)| x != y) {
+        Some((x, y)) => *x as i64 - *y as i64,
+        None => (la as i64 - lb as i64).signum(),
+    }
+}
+
 fn strcmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let b = vm.value_to_string(args.get(1).unwrap_or(&Value::Null));
-    Ok(Value::Long(match a.as_bytes().cmp(b.as_bytes()) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
-    }))
+    Ok(Value::Long(zend_binary_strncmp(
+        a.as_bytes(),
+        b.as_bytes(),
+        usize::MAX,
+    )))
 }
 
 fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -3948,27 +3959,11 @@ fn strncmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line: vm.current_line,
         });
     }
-    let len = len_raw as usize;
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    let a_sub_len = len.min(a_bytes.len());
-    let b_sub_len = len.min(b_bytes.len());
-    // Compare byte-by-byte (returns -1, 0, 1 like PHP 8+)
-    let compare_len = a_sub_len.min(b_sub_len);
-    for i in 0..compare_len {
-        if a_bytes[i] != b_bytes[i] {
-            let d = a_bytes[i] as i64 - b_bytes[i] as i64;
-            return Ok(Value::Long(if d < 0 { -1 } else { 1 }));
-        }
-    }
-    let d = a_sub_len as i64 - b_sub_len as i64;
-    Ok(Value::Long(if d < 0 {
-        -1
-    } else if d > 0 {
-        1
-    } else {
-        0
-    }))
+    Ok(Value::Long(zend_binary_strncmp(
+        a.as_bytes(),
+        b.as_bytes(),
+        len_raw as usize,
+    )))
 }
 
 fn strcasecmp_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
