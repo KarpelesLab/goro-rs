@@ -1255,6 +1255,49 @@ fn polynomial_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R
     Ok(new_imagick(vm, nw))
 }
 
+/// The image cropped to its pixels with any alpha, the page keeping the
+/// original size and the crop offset (as TrimImage() on transparency).
+fn alpha_trim(img: &Image) -> Image {
+    let (w, h) = (img.columns, img.rows);
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for y in 0..h {
+        for x in 0..w {
+            if img.px(x, y)[3] > 0 {
+                x0 = x0.min(x);
+                y0 = y0.min(y);
+                x1 = x1.max(x);
+                y1 = y1.max(y);
+            }
+        }
+    }
+    if x0 > x1 {
+        return img.clone();
+    }
+    let mut p = img.clone();
+    let (pw, ph, px, py) = (
+        if img.page.width > 0 {
+            img.page.width
+        } else {
+            w
+        },
+        if img.page.height > 0 {
+            img.page.height
+        } else {
+            h
+        },
+        img.page.x,
+        img.page.y,
+    );
+    p.page = Rect::new(w, h, 0, 0);
+    let mut out = transform::crop(
+        &p,
+        Rect::new(x1 - x0 + 1, y1 - y0 + 1, x0 as i64, y0 as i64),
+    )
+    .0;
+    out.page = Rect::new(pw, ph, px + x0 as i64, py + y0 as i64);
+    out
+}
+
 fn polaroid_of(i: &Image, angle: f64) -> MResult<Image> {
     // PolaroidImage(), black-box: a #DFDFDF border of max(10, max(w,h)/25),
     // the picture curled by a wave across it (on the image turned a
@@ -1268,22 +1311,53 @@ fn polaroid_of(i: &Image, angle: f64) -> MResult<Image> {
     let amp = 0.01 * turned.rows as f64;
     let len = 2.0 * turned.columns as f64;
     let waved = goro_imagick::warp::wave(&turned, amp, len, PixelInterpolateMethod::Undefined);
-    let mut pic = transform::rotate(&waved, 270.0, &PixelInfo::transparent());
+    let pic = transform::rotate(&waved, 270.0, &PixelInfo::transparent());
+    // the curled picture loses trunc(amp/2) columns on its left
+    let s = (amp / 2.0) as usize;
+    let mut pic = if s > 0 && s < pic.columns {
+        let mut p = pic.clone();
+        p.page = Rect::new(p.columns, p.rows, 0, 0);
+        transform::crop(&p, Rect::new(p.columns - s, p.rows, s as i64, 0)).0
+    } else {
+        pic
+    };
     pic.page = Rect::new(pic.columns, pic.rows, 0, 0);
-    let shadow = shadow_of(&flat, 80.0, 2.0, 0, 0);
-    let pad = 4;
+    // the shadow is cast by the waved picture turned the other way (a
+    // half turn from the picture itself), uncropped
+    let mut caster = transform::rotate(&waved, 90.0, &PixelInfo::transparent());
+    caster.background_color = i.background_color.clone();
+    let shadow = shadow_of(&caster, 80.0, 2.0, 0, 0);
+    // composed on a roomy transparent canvas, then trimmed; a rotation
+    // is RotateImage() followed by another trim (exact against pecl given
+    // the unrotated result); the page keeps ImageMagick's one-off quirk
+    let pad = 8;
     let mut canvas = i.clone_attributes(pic.columns + 2 * pad, pic.rows + 2 * pad);
     canvas.enable_alpha();
     canvas.fill(&PixelInfo::transparent());
     let ca = goro_imagick::composite::ComposeArgs::default();
     goro_imagick::composite::composite_image(&mut canvas, &shadow, CompositeOp::Over, 0, 0, &ca);
     goro_imagick::composite::composite_image(&mut canvas, &pic, CompositeOp::Over, 0, 0, &ca);
-    canvas.page = Rect::new(canvas.columns, canvas.rows, 0, 0);
-    canvas.background_color = i.background_color.clone();
-    if angle == 0.0 {
-        return Ok(canvas);
+    canvas.page = Rect::new(0, 0, 0, 0);
+    let mut out = alpha_trim(&canvas);
+    out.page = Rect::new(
+        out.columns.saturating_sub(1),
+        out.rows.saturating_sub(1),
+        0,
+        -1,
+    );
+    if angle != 0.0 {
+        out.page = Rect::new(out.columns, out.rows, 0, 0);
+        let r = transform::rotate(&out, angle, &PixelInfo::transparent());
+        let t = alpha_trim(&r);
+        let pg = t.page;
+        out = t;
+        out.page = Rect::new(
+            pg.width.saturating_sub(1),
+            pg.height.saturating_sub(1),
+            pg.x,
+            pg.y - 1,
+        );
     }
-    let mut out = transform::rotate(&canvas, angle, &PixelInfo::transparent());
     out.background_color = i.background_color.clone();
     Ok(out)
 }
