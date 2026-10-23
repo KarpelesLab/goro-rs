@@ -9,14 +9,14 @@ closures, generators, fibers, property hooks, lazy objects, typed properties and
 match, readonly, asymmetric visibility, pipe operator) and a large part of the standard
 extensions run the official php-src test suite.
 
-**php-src 8.5.4 test suite** (full run, master `73ce7152`, 2026-10-23):
+**php-src 8.5.4 test suite** (full run, master `81f84f02`, 2026-10-23):
 
 | Metric | Count |
 |---|---|
-| Total tests | 21582 (the generic PDO tests run once per driver) |
-| Pass | 20007 (92.7% of all, **98.9% of runnable**) |
-| Fail / Error | 230 |
-| Skip / XFail | 1345 (mostly extensions not implemented: ffi, odbc, snmp, enchant (out of scope), …; plus Windows-only, root-only and huge-memory tests) |
+| Total tests | 21696 (the generic PDO tests run once per driver) |
+| Pass | 20171 (93.0% of all, **99.4% of runnable**) |
+| Fail / Error | 127 |
+| Skip / XFail | 1398 (870 skip on real PHP on Linux too: Windows-only, 32-bit, online, …; 320 out-of-scope extensions: ffi, odbc, snmp, enchant, pdo_firebird/dblib/odbc; 213 php-fpm and phpdbg) |
 
 CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n`), plus
 `cargo fmt --check` and `cargo clippy -D warnings`.
@@ -25,10 +25,10 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 
 | Area | Pass | Run | Rate |
 |---|---|---|---|
-| Zend/tests | 5157 | 5253 | 98.2% |
-| tests/ (lang, classes, basic, …) | 822 | 829 | 99.2% |
-| ext/standard | 3345 | 3358 | 99.6% |
-| ext/spl | 776 | 779 | 99.6% |
+| Zend/tests | 5246 | 5255 | 99.8% |
+| tests/ (lang, classes, basic, …) | 824 | 832 | 99.0% |
+| ext/standard | 3371 | 3378 | 99.8% |
+| ext/spl | 779 | 779 | 100% |
 | ext/date | 677 | 677 | 100% |
 | ext/reflection | 488 | 493 | 99.0% |
 | ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 849 | 850 | 99.9% |
@@ -47,8 +47,8 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/pdo_mysql / pdo_pgsql | 219 | 219 | 100% |
 | ext/pgsql (libpq port, embedded PostgreSQL fixture) | 96 | 96 | 100% |
 | ext/ldap (pure-Rust libldap port, in-process LDAP server fixture) | 131 | 131 | 100% |
-| ext/session | 256 | 256 | 100% |
-| ext/pcre (PCRE2 port) | 155 | 155 | 100% |
+| ext/session | 257 | 258 | 99.6% |
+| ext/pcre (PCRE2 port, JIT stack-limit emulation) | 161 | 161 | 100% |
 | ext/hash / random / zlib / bz2 | 305 | 306 | 99.7% |
 | ext/phar (phar, tar, zip formats) | 540 | 542 | 99.6% |
 | ext/zip (libzip port) / exif / fileinfo (libmagic port) | 265 | 265 | 100% |
@@ -62,7 +62,8 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/zend_test (engine test hooks) | 145 | 148 | 98.0% |
 | ext/dba (cdb, cdb_make, inifile, flatfile) / readline | 53 | 53 | 100% |
 | ext/tidy (tidy-html5 5.8.0 port) | 50 | 50 | 100% |
-| sapi/cli (incl. `php -S` and `php -a`) | 101 | 102 | 99.0% |
+| sapi/cli (incl. `php -S` and `php -a`) | 102 | 103 | 99.0% |
+| sapi/cgi (goro runs as php-cgi under a `*cgi*` name) | 22 | 23 | 95.7% |
 | PECL uuid 1.3 (`tests/pecl/uuid`) | 14 | 14 | 100% |
 | PECL mailparse 3.2 (`tests/pecl/mailparse`, 1 upstream XFAIL) | 38 | 39 | 97.4% |
 | PECL imagick 3.8 (`tests/pecl/imagick`, ImageMagick 7.1 semantics; 13 skips) | 315 | 338 | 93.2% |
