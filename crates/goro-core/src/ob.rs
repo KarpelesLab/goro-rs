@@ -157,7 +157,10 @@ impl Vm {
         }
         match self.call_stack.last() {
             Some((name, _, _, _, _)) if !name.is_empty() => name.clone(),
-            _ => "Unknown".to_string(),
+            // get_active_function_name(): the main script, or none at all
+            // while the request shuts down
+            _ if self.ob_final_flush => "PHP Request Shutdown".to_string(),
+            _ => "main".to_string(),
         }
     }
 
@@ -301,15 +304,17 @@ impl Vm {
                 // flush) is fatal (zend_throw_exception_internal): its
                 // report, raised inside the handler, is lost and the flush
                 // bails out, dropping the buffer.
+                // php_output_end_all() is abandoned with it: the remaining
+                // buffers are discarded (php_output_deactivate()) and the
+                // request ends with status 255.
                 if no_frame && self.current_exception.is_some() {
                     self.current_exception = None;
-                    if let Some(i) = self.ob_index_of(id) {
-                        self.ob_handlers[i].flags |= OBH_DISABLED;
-                        self.ob_stack[i].clear();
-                    }
                     ctx.reset();
                     self.ob_running = None;
                     ctx.op = original_op;
+                    // (the uncaught exception's fatal error)
+                    self.fatal_emitted = true;
+                    self.ob_deactivate();
                     return ObStatus::NoData;
                 }
                 match r {
@@ -322,13 +327,29 @@ impl Vm {
                                     String::from_utf8_lossy(&self.ob_handlers[i].name).to_string();
                                 let origin = self.ob_origin();
                                 self.current_line = call_line;
-                                self.emit_deprecated_at(
-                                    &format!(
-                                        "{}(): Producing output from user output handler {} is deprecated",
-                                        origin, name
-                                    ),
-                                    call_line,
-                                );
+                                if origin == "PHP Request Shutdown" {
+                                    // (no executing frame: "in Unknown on line 0")
+                                    let saved = std::mem::replace(
+                                        &mut self.current_file,
+                                        crate::rcstr::RcStr::from("Unknown"),
+                                    );
+                                    self.emit_deprecated_at(
+                                        &format!(
+                                            "{}: Producing output from user output handler {} is deprecated",
+                                            origin, name
+                                        ),
+                                        0,
+                                    );
+                                    self.current_file = saved;
+                                } else {
+                                    self.emit_deprecated_at(
+                                        &format!(
+                                            "{}(): Producing output from user output handler {} is deprecated",
+                                            origin, name
+                                        ),
+                                        call_line,
+                                    );
+                                }
                                 still_have_handler = false;
                                 if let Some(j) = self.ob_index_of(id) {
                                     self.ob_handlers[j].flags &= !OBH_DISABLED;
