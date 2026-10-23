@@ -27127,8 +27127,13 @@ impl Vm {
                         // loads of just stored narrow fields, which wait for
                         // them.
                         let line = op.line;
+                        // (a closure bound without an object is shown as
+                        // called statically: Test::{closure}())
+                        let frame_this = has_this
+                            && (captures.is_none()
+                                || matches!(call.args.first(), Some(Value::Object(_))));
                         self.call_stack.extend(std::iter::once_with(move || {
-                            (display, RcStr::new(), line, Vec::new(), has_this)
+                            (display, RcStr::new(), line, Vec::new(), frame_this)
                         }));
                         if let Some(frame) = self.call_stack.last_mut() {
                             frame.1 = self.current_file.clone();
