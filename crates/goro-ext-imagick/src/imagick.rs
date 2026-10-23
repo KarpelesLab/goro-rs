@@ -2588,17 +2588,37 @@ fn set_image_depth(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R 
     })
 }
 
-/// SetImageDepth(): quantize the samples to the depth.
+/// SetImageDepth(): quantize the samples to the depth (black-box: the
+/// scale down to the depth truncates, the scale back up rounds).
 fn set_depth_of(i: &mut Image, depth: u32) {
-    if depth < 16 {
-        let levels = ((1u64 << depth) - 1) as f64;
-        for v in i.pixels.iter_mut() {
-            let q = ((*v as f64 / 65535.0 * levels).round() / levels * 65535.0).round();
-            *v = q as u16;
-        }
-        i.colors = None;
-    }
+    quantize_depth(i, depth, [true; 5]);
     i.depth = depth.min(16);
+}
+
+/// Quantize the samples of the channels `mask` selects (red, green,
+/// blue, alpha, black) to `depth` bits.
+fn quantize_depth(i: &mut Image, depth: u32, mask: [bool; 5]) {
+    if depth >= 16 {
+        return;
+    }
+    let levels = (1u64 << depth) - 1;
+    let quantize = |v: &mut u16| {
+        let q = *v as u64 * levels / 65535;
+        *v = ((q * 65535 * 2 + levels) / (2 * levels)) as u16;
+    };
+    for p in i.pixels.chunks_exact_mut(4) {
+        for c in 0..4 {
+            if mask[c] {
+                quantize(&mut p[c]);
+            }
+        }
+    }
+    if mask[4] {
+        if let Some(k) = i.black.as_mut() {
+            k.iter_mut().for_each(quantize);
+        }
+    }
+    i.colors = None;
 }
 
 fn set_depth(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
@@ -2610,8 +2630,24 @@ fn set_depth(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 fn set_image_channel_depth(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "ll", args)?;
     let v = a[1].long_or(0).clamp(1, 64) as u32;
+    let ch = a[0].long_or(0);
     image_op(vm, &this(o), "Unable to set image channel depth", |i| {
-        set_depth_of(i, v);
+        // only the channels named change, the image depth follows
+        let all = ch == goro_imagick::types::channel::ALL || ch == 0x7fffffff;
+        let bit = |b: i64| all || ch & b != 0;
+        use goro_imagick::types::channel as c;
+        quantize_depth(
+            i,
+            v,
+            [
+                bit(c::RED),
+                bit(c::GREEN),
+                bit(c::BLUE),
+                bit(c::ALPHA),
+                bit(c::BLACK),
+            ],
+        );
+        i.depth = v.min(16);
         Ok(())
     })
 }

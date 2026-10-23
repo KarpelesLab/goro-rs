@@ -671,7 +671,8 @@ impl Wand {
         let mut img = Image::new(w, h, color);
         img.background_color = PixelInfo::white();
         img.page = Rect::new(w, h, 0, 0);
-        img.depth = 16;
+        // NewImage() makes an 8-bit image, whatever the colour
+        img.depth = 8;
         img.format = self.settings.format.clone();
         self.apply_read_settings(&mut img);
         self.insert_images(vec![img]);
