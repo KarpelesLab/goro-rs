@@ -131,6 +131,7 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
     // Registered last: its startup (preloading) runs after the other
     // extensions' (as accel_post_startup() does).
     goro_ext_opcache::register(&mut vm);
+    goro_core::compiler::set_sapi_name(sapi.as_bytes());
     vm.constants.insert(
         b"PHP_SAPI".to_vec(),
         Value::String(PhpString::from_string(sapi.to_string())),

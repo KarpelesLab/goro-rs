@@ -1480,8 +1480,11 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
     REQUEST.with(|r| *r.borrow_mut() = Some(req.clone()));
     RAW_INPUT.with(|r| *r.borrow_mut() = Default::default());
     crate::info::set_web_sapi(req.cgi);
-    if req.cgi {
-        // Requests (--POST--, --GET--, ...) are served by the CGI SAPI.
+    let cli = matches!(vm.constants.get(b"PHP_SAPI".as_slice()), Some(Value::String(s)) if s.as_bytes() == b"cli");
+    if req.cgi && cli {
+        // Requests (--POST--, --GET--, ...) are served by the CGI SAPI
+        // (the web server SAPIs have a name of their own).
+        goro_core::compiler::set_sapi_name(b"cgi-fcgi");
         vm.constants.insert(
             b"PHP_SAPI".to_vec(),
             Value::String(PhpString::from_bytes(b"cgi-fcgi")),

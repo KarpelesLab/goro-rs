@@ -1111,7 +1111,7 @@ impl Compiler {
             b"php_maxpathlen" => Value::Long(4096),
             b"php_os" => Value::String(PhpString::from_bytes(b"Linux")),
             b"php_os_family" => Value::String(PhpString::from_bytes(b"Linux")),
-            b"php_sapi" => Value::String(PhpString::from_bytes(b"cli")),
+            b"php_sapi" => sapi_name_value(),
             b"php_float_dig" => Value::Long(15),
             b"php_float_epsilon" => Value::Double(f64::EPSILON),
             b"php_float_max" => Value::Double(f64::MAX),
@@ -1806,6 +1806,30 @@ impl Compiler {
             // Prefix with namespace (VM will fall back to global)
             self.prefix_with_namespace(name)
         }
+    }
+
+    /// An unqualified call in a namespace falls back to the global function
+    /// (INIT_NS_FCALL_BY_NAME): the arguments of a builtin reached that way
+    /// are sent like those of a call by its global name (by-reference
+    /// output parameters such as preg_match()'s $matches). Not when this
+    /// file declares the namespaced function.
+    #[inline(never)]
+    fn ns_fallback_builtin_name(&self, name: &[u8], resolved: &[u8]) -> Option<Vec<u8>> {
+        if name.contains(&b'\\') || !resolved.contains(&b'\\') {
+            return None;
+        }
+        if self
+            .use_function_map
+            .contains_key(&name.to_ascii_lowercase())
+        {
+            return None;
+        }
+        let declared = self
+            .op_array
+            .child_functions
+            .iter()
+            .any(|f| f.name.eq_ignore_ascii_case(resolved));
+        (!declared).then(|| name.to_vec())
     }
 
     /// INIT_FCALL's result operand for a call of function `name` (as
@@ -14430,7 +14454,13 @@ impl Compiler {
                 });
 
                 // Send arguments (pass function name for by-ref detection)
-                let func_name_for_ref = if let Some(ref r) = resolved_name {
+                let fallback_name = match (&name.kind, &resolved_name) {
+                    (ExprKind::Identifier(n), Some(r)) => self.ns_fallback_builtin_name(n, r),
+                    _ => None,
+                };
+                let func_name_for_ref = if let Some(ref f) = fallback_name {
+                    Some(f.as_slice())
+                } else if let Some(ref r) = resolved_name {
                     Some(r.as_slice())
                 } else if let ExprKind::Identifier(ref n) = name.kind {
                     Some(n.as_slice())
@@ -15429,7 +15459,7 @@ impl Compiler {
                     b"php_maxpathlen" => Value::Long(4096),
                     b"php_os" => Value::String(PhpString::from_bytes(b"Linux")),
                     b"php_os_family" => Value::String(PhpString::from_bytes(b"Linux")),
-                    b"php_sapi" => Value::String(PhpString::from_bytes(b"cli")),
+                    b"php_sapi" => sapi_name_value(),
                     b"php_version" => Value::String(PhpString::from_bytes(b"8.5.4")),
                     b"php_major_version" => Value::Long(8),
                     b"php_minor_version" => Value::Long(5),
@@ -16639,13 +16669,10 @@ impl Compiler {
                         .get_or_create_cv(&use_var.variable);
                 }
                 // Count required params and set param_count
-                closure_compiler.op_array.param_count = params.len() as u32
-                    + use_vars.len() as u32
-                    + if !*is_static && self.current_class.is_some() {
-                        1
-                    } else {
-                        0
-                    };
+                // (the $this slot is only there when the enclosing code has one:
+                // not in a static method)
+                closure_compiler.op_array.param_count =
+                    params.len() as u32 + use_vars.len() as u32 + u32::from(has_this);
                 closure_compiler.op_array.required_param_count = {
                     let mut last_req: i64 = -1;
                     for (i, p) in params.iter().enumerate() {
@@ -20073,7 +20100,7 @@ impl Compiler {
                     b"php_prefix" => Some(Value::String(PhpString::from_bytes(b"/usr"))),
                     b"php_os" => Some(Value::String(PhpString::from_bytes(b"Linux"))),
                     b"php_os_family" => Some(Value::String(PhpString::from_bytes(b"Linux"))),
-                    b"php_sapi" => Some(Value::String(PhpString::from_bytes(b"cli"))),
+                    b"php_sapi" => Some(sapi_name_value()),
                     b"php_version" => Some(Value::String(PhpString::from_bytes(b"8.5.0-goro"))),
                     b"php_version_id" => Some(Value::Long(80500)),
                     b"php_release_version" => Some(Value::Long(0)),
@@ -21280,6 +21307,21 @@ fn stmt_contains_yield(stmt: &Statement) -> bool {
     }
 }
 
+thread_local! {
+    /// PHP_SAPI, which the compiler substitutes like php-src does with
+    /// persistent constants.
+    static SAPI_NAME: std::cell::RefCell<Vec<u8>> = std::cell::RefCell::new(b"cli".to_vec());
+}
+
+/// Set PHP_SAPI for the code compiled on this thread (the SAPI's name).
+pub fn set_sapi_name(name: &[u8]) {
+    SAPI_NAME.with(|s| *s.borrow_mut() = name.to_vec());
+}
+
+fn sapi_name_value() -> Value {
+    SAPI_NAME.with(|s| Value::String(PhpString::from_bytes(&s.borrow())))
+}
+
 /// Collect all variable names referenced in an expression (for arrow function capture)
 fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
     match &expr.kind {
@@ -21308,13 +21350,20 @@ fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
                 collect_expr_variables(&a.value, vars);
             }
         }
-        ExprKind::MethodCall { object, args, .. } => {
+        ExprKind::MethodCall {
+            object,
+            method,
+            args,
+            ..
+        } => {
             collect_expr_variables(object, vars);
+            collect_expr_variables(method, vars);
             for a in args {
                 collect_expr_variables(&a.value, vars);
             }
         }
-        ExprKind::StaticMethodCall { args, .. } => {
+        ExprKind::StaticMethodCall { class, args, .. } => {
+            collect_expr_variables(class, vars);
             for a in args {
                 collect_expr_variables(&a.value, vars);
             }
@@ -21355,10 +21404,87 @@ fn collect_expr_variables(expr: &Expr, vars: &mut Vec<Vec<u8>>) {
         | ExprKind::ThrowExpr(e) => {
             collect_expr_variables(e, vars);
         }
-        ExprKind::PropertyAccess { object, .. } => {
+        ExprKind::PropertyAccess {
+            object, property, ..
+        } => {
             collect_expr_variables(object, vars);
+            collect_expr_variables(property, vars);
         }
-        ExprKind::Instanceof { expr, .. } => collect_expr_variables(expr, vars),
+        ExprKind::Instanceof { expr, class } => {
+            collect_expr_variables(expr, vars);
+            collect_expr_variables(class, vars);
+        }
+        ExprKind::AssignRef { target, value } => {
+            collect_expr_variables(target, vars);
+            collect_expr_variables(value, vars);
+        }
+        ExprKind::Empty(e)
+        | ExprKind::Eval(e)
+        | ExprKind::YieldFrom(e)
+        | ExprKind::Suppress(e)
+        | ExprKind::ShellExec(e)
+        | ExprKind::Include { path: e, .. }
+        | ExprKind::StaticPropertyAccess { class: e, .. }
+        | ExprKind::ClassConstAccess { class: e, .. } => collect_expr_variables(e, vars),
+        ExprKind::Isset(list) => {
+            for e in list {
+                collect_expr_variables(e, vars);
+            }
+        }
+        ExprKind::Exit(e) => {
+            if let Some(e) = e {
+                collect_expr_variables(e, vars);
+            }
+        }
+        ExprKind::Yield(k, v) => {
+            for e in [k, v].into_iter().flatten() {
+                collect_expr_variables(e, vars);
+            }
+        }
+        ExprKind::DynamicStaticPropertyAccess { class, property } => {
+            collect_expr_variables(class, vars);
+            collect_expr_variables(property, vars);
+        }
+        ExprKind::DynamicClassConstAccess { class, constant } => {
+            collect_expr_variables(class, vars);
+            collect_expr_variables(constant, vars);
+        }
+        ExprKind::Pipe { value, callable } => {
+            collect_expr_variables(value, vars);
+            collect_expr_variables(callable, vars);
+        }
+        ExprKind::New { class, args } => {
+            collect_expr_variables(class, vars);
+            for a in args {
+                collect_expr_variables(&a.value, vars);
+            }
+        }
+        ExprKind::DynamicStaticMethodCall {
+            class,
+            method,
+            args,
+        } => {
+            collect_expr_variables(class, vars);
+            collect_expr_variables(method, vars);
+            for a in args {
+                collect_expr_variables(&a.value, vars);
+            }
+        }
+        ExprKind::InterpolatedString(parts) => {
+            for p in parts {
+                if let StringPart::Expr(e) = p {
+                    collect_expr_variables(e, vars);
+                }
+            }
+        }
+        ExprKind::FirstClassCallable(t) => match t {
+            CallableTarget::Function(e) => collect_expr_variables(e, vars),
+            CallableTarget::Method { object, method, .. } => {
+                collect_expr_variables(object, vars);
+                collect_expr_variables(method, vars);
+            }
+            CallableTarget::StaticMethod { class, .. } => collect_expr_variables(class, vars),
+        },
         ExprKind::ArrowFunction { body, .. } => collect_expr_variables(body, vars),
         ExprKind::Closure { use_vars, .. } => {
             // Don't recurse into closures body, but DO collect use vars
