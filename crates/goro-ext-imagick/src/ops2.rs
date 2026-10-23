@@ -857,12 +857,14 @@ fn color_decision_list_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Val
     let sat = triple("Saturation", 1.0)[0];
     image_op(vm, &d_(o), "Unable to colorDecisionListImage", |i| {
         for p in i.pixels.chunks_exact_mut(4) {
+            // the saturation pivots on the luma of the original pixel, the
+            // slope/offset/power result clamped to [0, 1]
+            let luma = Image::intensity(p) / 65535.0;
             let mut v = [0f64; 3];
             for c in 0..3 {
                 let x = p[c] as f64 / 65535.0 * slope[c] + offset[c];
-                v[c] = x.max(0.0).powf(power[c]);
+                v[c] = x.clamp(0.0, 1.0).powf(power[c]);
             }
-            let luma = 0.21267 * v[0] + 0.71516 * v[1] + 0.07217 * v[2];
             for c in 0..3 {
                 p[c] = to_q16((luma + sat * (v[c] - luma)) * 65535.0);
             }
