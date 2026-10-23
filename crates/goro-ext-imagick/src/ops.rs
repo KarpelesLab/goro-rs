@@ -2607,22 +2607,25 @@ fn compare_of(
         let w = d.wand.borrow();
         let img = w.image().unwrap();
         let dist = distortion_ch(img, &b, metric, ch.unwrap_or(channel::DEFAULT));
-        // the difference image: red where pixels differ, a faded copy elsewhere
+        // the difference image: the image under the highlight colour
+        // #F1001E at 80% where pixels differ, under white at 80% elsewhere
         let mut diff = img.clone();
+        diff.enable_alpha();
         for y in 0..diff.rows {
             for x in 0..diff.columns {
                 let p = img.px(x, y);
                 let same = x < b.columns && y < b.rows && b.px(x, y)[..3] == p[..3];
-                let np = if same {
-                    [
-                        (p[0] as f64 * 0.2 + 52428.0) as u16,
-                        (p[1] as f64 * 0.2 + 52428.0) as u16,
-                        (p[2] as f64 * 0.2 + 52428.0) as u16,
-                        65535,
-                    ]
+                let over = if same {
+                    [65535.0, 65535.0, 65535.0]
                 } else {
-                    [61166, 0, 0, 65535]
+                    [241.0 * 257.0, 0.0, 30.0 * 257.0]
                 };
+                let np = [
+                    to_q16(0.8 * over[0] + 0.2 * p[0] as f64),
+                    to_q16(0.8 * over[1] + 0.2 * p[1] as f64),
+                    to_q16(0.8 * over[2] + 0.2 * p[2] as f64),
+                    65535,
+                ];
                 diff.set_px(x, y, np);
             }
         }
