@@ -976,6 +976,11 @@ impl Vm {
         method: &[u8],
         args: &[Value],
     ) -> Option<Value> {
+        if let Value::Object(o) = obj_val {
+            if !self.heap_iter_check(o, method) {
+                return Some(Value::Null);
+            }
+        }
         let internal = self.spl_caller_is_internal();
         self.spl_call_method_at(obj_val, method, args, internal)
     }

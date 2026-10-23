@@ -73,6 +73,40 @@ impl Vm {
             .set_property_slice(name, if on { Value::True } else { Value::False });
     }
 
+    /// The heap's get_iterator handlers (foreach, iterator_to_array(),
+    /// IteratorIterator...): reading the current element or moving forward
+    /// over a corrupted heap throws, unlike the current()/next() methods.
+    /// Returns false with the exception set.
+    pub(crate) fn heap_iter_check(&mut self, obj: &Rc<RefCell<PhpObject>>, method: &[u8]) -> bool {
+        if !(method.eq_ignore_ascii_case(b"current") || method.eq_ignore_ascii_case(b"next"))
+            || !Self::heap_flag(obj, HEAP_CORRUPTED)
+        {
+            return true;
+        }
+        let cl = obj_class_lower(obj);
+        if self
+            .spl_find_base(&cl, &[b"splpriorityqueue", b"splheap"])
+            .is_none()
+        {
+            return true;
+        }
+        // A class overriding an Iterator method iterates through
+        // zend_user_it_get_iterator() (the methods).
+        let overridden = self.classes.get(&cl).is_some_and(|c| {
+            [&b"rewind"[..], b"valid", b"current", b"key", b"next"]
+                .iter()
+                .any(|m| c.get_method(m).is_some())
+        });
+        if overridden {
+            return true;
+        }
+        self.spl_throw(
+            b"RuntimeException",
+            "Heap is corrupted, heap properties are no longer ensured.",
+        );
+        false
+    }
+
     /// Whether the object's class overrides compare() in userland.
     fn heap_user_compare(&self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         let cl = obj_class_lower(obj);
@@ -101,7 +135,7 @@ impl Vm {
         };
         if user_cmp {
             let this = Value::Object(obj.clone());
-            let r = self.spl_call_method_at(&this, b"compare", &[x.clone(), y.clone()], true);
+            let r = self.spl_call_method(&this, b"compare", &[x.clone(), y.clone()]);
             if self.current_exception.is_some() {
                 return 0;
             }
