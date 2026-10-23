@@ -373,22 +373,27 @@ fn sample_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     })
 }
 
-/// MagickThumbnailImage(): a LanczosSharp resize (through a Box resize
-/// to twice the size when shrinking by more than ten times in area),
-/// colour profiles kept and the other profiles removed, 8 bits deep,
-/// with the freedesktop.org thumbnail properties.
+/// MagickThumbnailImage(): measured against ImageMagick 7.1.2, a target
+/// that fits five times into the image is first point-sampled to four
+/// times its size, one that fits three times is then Box-resized to twice
+/// its size, and a LanczosSharp resize finishes. Colour profiles are kept
+/// and the other profiles removed, 8 bits deep, with the freedesktop.org
+/// thumbnail properties.
 fn thumbnail_of(i: &Image, w: i64, h: i64) -> MResult<Image> {
     if w <= 0 || h <= 0 {
         return Err(zero_size());
     }
     let (w, h) = (w as usize, h as usize);
-    let area = (w as f64 / i.columns as f64) * (h as f64 / i.rows as f64);
-    let mut n = if area > 0.1 {
-        transform::resize(i, w, h, FilterType::LanczosSharp)?
-    } else {
-        let pre = transform::resize(i, 2 * w, 2 * h, FilterType::Box)?;
-        transform::resize(&pre, w, h, FilterType::LanczosSharp)?
-    };
+    let fits = |k: usize| k * w <= i.columns && k * h <= i.rows;
+    let mut cur: Option<Image> = None;
+    if fits(5) {
+        cur = Some(transform::sample(i, 4 * w, 4 * h));
+    }
+    if fits(3) {
+        let src = cur.as_ref().unwrap_or(i);
+        cur = Some(transform::resize(src, 2 * w, 2 * h, FilterType::Box)?);
+    }
+    let mut n = transform::resize(cur.as_ref().unwrap_or(i), w, h, FilterType::LanczosSharp)?;
     n.profiles
         .retain(|(k, _)| k.eq_ignore_ascii_case("icc") || k.eq_ignore_ascii_case("icm"));
     n.properties.set("software", "https://imagemagick.org");
