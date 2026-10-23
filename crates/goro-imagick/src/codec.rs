@@ -1932,7 +1932,13 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
         .filter(|(k, _)| !k.to_ascii_lowercase().starts_with("png:"))
         .collect();
     props.sort_by_key(|(k, _)| k.to_ascii_lowercase());
-    if props.iter().any(|(k, _)| k.starts_with("date:")) {
+    // tIME for an image that is dated (read, or made by a coder)
+    if img
+        .properties
+        .0
+        .iter()
+        .any(|(k, _)| k.starts_with("date:") || k == "png:tIME")
+    {
         let (y, mo, d, hh, mm, ss) = crate::properties::civil_utc(crate::properties::now_secs());
         pm.time = Some(oxideav_png::Time::new(y as u16, mo, d, hh, mm, ss));
     }
