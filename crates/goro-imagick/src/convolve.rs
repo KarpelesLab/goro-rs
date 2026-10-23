@@ -386,3 +386,98 @@ pub fn charcoal(img: &mut Image, radius: f64, sigma: f64) {
     }
     crate::enhance::grayscale(img);
 }
+
+/// StatisticImage(): each selected channel replaced by a statistic of
+/// its `w`×`h` neighbourhood (virtual pixels outside), in Q16. `kind` is
+/// the StatisticType: gradient (max - min), maximum, mean, median,
+/// minimum, mode, nonpeak, root mean square, standard deviation; any
+/// other kind gives black, as ImageMagick 7.1.2's Contrast does.
+pub fn statistic(img: &mut Image, kind: i64, w: usize, h: usize, ch: i64) {
+    if img.columns == 0 || img.rows == 0 {
+        return;
+    }
+    let mask = channel_mask(ch, img.alpha);
+    let (ox, oy) = (w / 2, h / 2);
+    let (src, pw) = padded(img, w, h);
+    let (iw, ih) = (img.columns, img.rows);
+    let n = w * h;
+    let mut buf: Vec<u16> = Vec::with_capacity(n);
+    for y in 0..ih {
+        for x in 0..iw {
+            let idx = (y * iw + x) * 4;
+            for c in 0..4 {
+                if !mask[c] {
+                    continue;
+                }
+                buf.clear();
+                for j in 0..h {
+                    let row = (y + h + j - oy) * pw + x + w - ox;
+                    for i in 0..w {
+                        buf.push(src[(row + i) * 4 + c] as u16);
+                    }
+                }
+                let v = stat_of(&mut buf, kind);
+                img.pixels[idx + c] = clamp_to_quantum(v) as u16;
+            }
+        }
+    }
+    img.colors = None;
+}
+
+fn stat_of(buf: &mut [u16], kind: i64) -> f64 {
+    let n = buf.len() as f64;
+    match kind {
+        1 | 2 | 5 | 4 | 6 | 7 => {
+            buf.sort_unstable();
+            let (lo, hi) = (buf[0] as f64, buf[buf.len() - 1] as f64);
+            let median = buf[buf.len() / 2] as f64;
+            match kind {
+                1 => hi - lo,
+                2 => hi,
+                5 => lo,
+                6 => {
+                    // the most frequent value (the lowest of a tie)
+                    let (mut best, mut best_n, mut k) = (buf[0], 0usize, 0usize);
+                    while k < buf.len() {
+                        let mut e = k;
+                        while e < buf.len() && buf[e] == buf[k] {
+                            e += 1;
+                        }
+                        if e - k > best_n {
+                            best_n = e - k;
+                            best = buf[k];
+                        }
+                        k = e;
+                    }
+                    best as f64
+                }
+                7 => {
+                    // the median, stepped off the window's extremes
+                    if median == hi {
+                        buf.iter()
+                            .rev()
+                            .map(|&v| v as f64)
+                            .find(|&v| v < hi)
+                            .unwrap_or(median)
+                    } else if median == lo {
+                        buf.iter()
+                            .map(|&v| v as f64)
+                            .find(|&v| v > lo)
+                            .unwrap_or(median)
+                    } else {
+                        median
+                    }
+                }
+                _ => median,
+            }
+        }
+        3 => buf.iter().map(|&v| v as f64).sum::<f64>() / n,
+        8 => (buf.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / n).sqrt(),
+        9 => {
+            let m = buf.iter().map(|&v| v as f64).sum::<f64>() / n;
+            let sq = buf.iter().map(|&v| (v as f64) * (v as f64)).sum::<f64>() / n;
+            (sq - m * m).max(0.0).sqrt()
+        }
+        _ => 0.0,
+    }
+}

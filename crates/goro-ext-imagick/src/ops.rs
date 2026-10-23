@@ -2021,21 +2021,22 @@ fn median_filter_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -
     let r = a[0].double_or(1.0).max(0.0).round() as u32;
     let n = 2 * r.max(1) + 1;
     image_op(vm, &d_(o), "Unable to median filter image", |i| {
-        apply_oxideav(i, &of::Statistic::new(of::StatisticOp::Median, n, n))
+        goro_imagick::convolve::statistic(i, 4, n as usize, n as usize, channel::DEFAULT);
+        Ok(())
     })
 }
 
 fn statistic_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "lll|l", args)?;
-    let op = match a[0].long_or(0) {
-        2 => of::StatisticOp::Max,
-        3 => of::StatisticOp::Mean,
-        5 => of::StatisticOp::Min,
-        _ => of::StatisticOp::Median,
-    };
-    let (w, h) = (a[1].long_or(1).max(1) as u32, a[2].long_or(1).max(1) as u32);
+    let kind = a[0].long_or(0);
+    let (w, h) = (
+        a[1].long_or(1).max(1) as usize,
+        a[2].long_or(1).max(1) as usize,
+    );
+    let ch = a[3].long_or(channel::DEFAULT);
     image_op(vm, &d_(o), "Unable to statisticImage", |i| {
-        apply_oxideav(i, &of::Statistic::new(op, w, h))
+        goro_imagick::convolve::statistic(i, kind, w, h, ch);
+        Ok(())
     })
 }
 
