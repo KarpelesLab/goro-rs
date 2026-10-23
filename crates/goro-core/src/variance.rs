@@ -220,6 +220,37 @@ pub(crate) fn is_linking(name_lower: &[u8]) -> bool {
     LINKING.with(|s| s.borrow().iter().any(|(c, _)| lower(&c.name) == name_lower))
 }
 
+thread_local! {
+    /// Classes used by a variance check while they were being linked
+    /// (CG(unlinked_uses)): one of them that then fails to link cannot be
+    /// removed again, the failure is fatal.
+    static UNLINKED_USES: RefCell<Vec<Vec<u8>>> = const { RefCell::new(Vec::new()) };
+}
+
+fn note_unlinked_use(name_lower: &[u8]) {
+    UNLINKED_USES.with(|u| {
+        let mut u = u.borrow_mut();
+        if !u.iter().any(|n| n.as_slice() == name_lower) {
+            u.push(name_lower.to_vec());
+        }
+    });
+}
+
+/// Forget class `name_lower`'s unlinked uses (it linked, or failed);
+/// whether it had any.
+pub(crate) fn take_unlinked_use(name_lower: &[u8]) -> bool {
+    UNLINKED_USES.with(|u| {
+        let mut u = u.borrow_mut();
+        match u.iter().position(|n| n.as_slice() == name_lower) {
+            Some(i) => {
+                u.remove(i);
+                true
+            }
+            None => false,
+        }
+    })
+}
+
 pub(crate) fn push_linking(ce: &ClassEntry) {
     push_linking_ex(ce, true);
 }
@@ -311,6 +342,7 @@ impl<'a> Ctx<'a> {
                 .map(|(c, _)| LinkClass::from_entry(c))
         });
         if linking.is_some() {
+            note_unlinked_use(&l);
             return linking;
         }
         if let Some(ce) = self.vm.classes.get(&l) {

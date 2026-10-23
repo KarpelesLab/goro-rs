@@ -4276,8 +4276,12 @@ impl Vm {
             (a, b) => a.to_php_string() == b.to_php_string(),
         };
         let mut i = 0;
+        // (each autoloader is called from the lookup's position)
+        let (site_file, site_line) = (self.current_file.clone(), self.current_line);
         while let Some(callback) = self.autoload_functions.get(i).cloned() {
             let fatal_before = self.fatal_emitted;
+            self.current_file = site_file.clone();
+            self.current_line = site_line;
             let r = self.spl_call_autoloader(&callback, &class_str);
             // A fatal error raised in the autoloader (a compile error of
             // code it evaluated, ...) ends the script (zend_bailout()): the
@@ -19582,6 +19586,34 @@ impl Vm {
         t.fn_gen = fn_gen;
         t.ns_global = c.ns_global;
         true
+    }
+
+    /// check_unrecoverable_load_failure(): class `name`, used by a variance
+    /// check while it was being linked, failed to load its parent /
+    /// interface `dep_lower` (an exception is pending): that is fatal.
+    #[inline(never)]
+    fn unrecoverable_load_failure(
+        &mut self,
+        name: &[u8],
+        dep_lower: &[u8],
+        line: u32,
+    ) -> Option<VmError> {
+        let failed = self.current_exception.is_some() && !self.classes.contains_key(dep_lower);
+        if !variance::take_unlinked_use(&name.to_ascii_lowercase()) || !failed {
+            return None;
+        }
+        // zend_exception_uncaught_error()
+        let exc = self.current_exception.take()?;
+        let s = self.value_to_string(&exc).to_string_lossy();
+        self.current_exception = None;
+        Some(VmError {
+            message: format!(
+                "During inheritance of {} with variance dependencies: Uncaught {}",
+                crate::value::display_class_name(name),
+                s
+            ),
+            line,
+        })
     }
 
     /// Whether the call / callable site `site` of `op_array` resolved the
@@ -47821,6 +47853,11 @@ impl Vm {
                                 if let Some(e) = variance::take_autoload_fatal() {
                                     return Err(e);
                                 }
+                                if let Some(e) =
+                                    self.unrecoverable_load_failure(&class.name, &parent_lower, op.line)
+                                {
+                                    return Err(e);
+                                }
                                 // An exception thrown by the autoloader propagates.
                                 if self.current_exception.is_some() {
                                     if let Some((catch_target, _, _, _, eh_pc_depth)) =
@@ -49067,6 +49104,11 @@ impl Vm {
                                 self.try_autoload_class(iface_name);
                                 variance::pop_linking();
                                 if let Some(e) = variance::take_autoload_fatal() {
+                                    return Err(e);
+                                }
+                                if let Some(e) =
+                                    self.unrecoverable_load_failure(&class.name, &iface_lower, op.line)
+                                {
                                     return Err(e);
                                 }
                                 // An exception thrown by the autoloader propagates:
