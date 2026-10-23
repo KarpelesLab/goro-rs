@@ -227,9 +227,8 @@ impl Vm {
                             let decl_lower: Vec<u8> =
                                 decl.iter().map(|b| b.to_ascii_lowercase()).collect();
                             let disp = self
-                                .classes
-                                .get(&decl_lower)
-                                .map(|c| crate::value::display_class_name(&c.name))
+                                .class_name_for_display(&decl_lower)
+                                .map(|n| crate::value::display_class_name(&n))
                                 .unwrap_or_else(|| crate::value::display_class_name(&class_name));
                             return Err(format!(
                                 "Cannot acquire reference to readonly property {}::${}",
@@ -384,9 +383,7 @@ impl Vm {
                                 "Cannot acquire reference to readonly property {}::${}",
                                 crate::value::display_class_name(
                                     &self
-                                        .classes
-                                        .get(&decl_lower)
-                                        .map(|c| c.name.clone())
+                                        .class_name_for_display(&decl_lower)
                                         .unwrap_or_else(|| d.declaring_class.clone())
                                 ),
                                 String::from_utf8_lossy(&d.name)

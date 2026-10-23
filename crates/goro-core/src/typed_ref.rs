@@ -232,9 +232,8 @@ impl Vm {
         let ty = ty?;
         let decl_lower = declaring.to_ascii_lowercase();
         let class = self
-            .classes
-            .get(&decl_lower)
-            .map(|c| crate::value::display_class_name(&c.name))
+            .class_name_for_display(&decl_lower)
+            .map(|n| crate::value::display_class_name(&n))
             .unwrap_or_else(|| crate::value::display_class_name(&declaring));
         Some(RefSource {
             owner: Rc::downgrade(obj),
@@ -590,9 +589,8 @@ impl Vm {
                 };
                 let decl_lower = declaring.to_ascii_lowercase();
                 let class = self
-                    .classes
-                    .get(&decl_lower)
-                    .map(|c| crate::value::display_class_name(&c.name))
+                    .class_name_for_display(&decl_lower)
+                    .map(|n| crate::value::display_class_name(&n))
                     .unwrap_or_else(|| crate::value::display_class_name(&declaring));
                 Err(format!(
                     "Value of type {} returned from {}::__get() must be compatible with unset property {}::${} of type {}",

@@ -1080,9 +1080,7 @@ impl Vm {
             return Ok(());
         }
         let decl_disp = self
-            .classes
-            .get(&decl.to_ascii_lowercase())
-            .map(|c| c.name.clone())
+            .class_name_for_display(&decl.to_ascii_lowercase())
             .unwrap_or(decl);
         let msg = format!(
             "Cannot assign {} to property {}::${} of type {}",

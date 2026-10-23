@@ -692,9 +692,8 @@ impl Vm {
         };
         let decl_lower = declaring_class.to_ascii_lowercase();
         let class_display = self
-            .classes
-            .get(&decl_lower)
-            .map(|c| crate::value::display_class_name(&c.name))
+            .class_name_for_display(&decl_lower)
+            .map(|n| crate::value::display_class_name(&n))
             .unwrap_or_else(|| crate::value::display_class_name(declaring_class));
         let scope_str = match caller_scope.as_deref() {
             Some(cs) => format!(
@@ -1115,9 +1114,7 @@ impl Vm {
                 });
             if let Some((decl, pname)) = m {
                 let decl = self
-                    .classes
-                    .get(&decl.to_ascii_lowercase())
-                    .map(|c| c.name.clone())
+                    .class_name_for_display(&decl.to_ascii_lowercase())
                     .unwrap_or(decl);
                 let msg = format!(
                     "{}::offsetGet(): Argument #1 (${}) not passed",

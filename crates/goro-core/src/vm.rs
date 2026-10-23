@@ -3073,11 +3073,8 @@ impl Vm {
                     } else {
                         // PHP reports the declaring class in private method errors, not the runtime class
                         // Look up the original-case class name from ClassEntry
-                        let display_class = self
-                            .classes
-                            .get(&declaring_lower)
-                            .map(|ce| ce.name.as_slice())
-                            .unwrap_or(declaring_class);
+                        let display_class = self.class_name_for_display(&declaring_lower);
+                        let display_class = display_class.as_deref().unwrap_or(declaring_class);
                         Some(Self::format_access_error(
                             "private",
                             display_class,
@@ -3091,11 +3088,8 @@ impl Vm {
                         .iter()
                         .map(|b| b.to_ascii_lowercase())
                         .collect();
-                    let display_class = self
-                        .classes
-                        .get(&declaring_lower)
-                        .map(|ce| ce.name.as_slice())
-                        .unwrap_or(declaring_class);
+                    let display_class = self.class_name_for_display(&declaring_lower);
+                    let display_class = display_class.as_deref().unwrap_or(declaring_class);
                     Some(Self::format_access_error(
                         "private",
                         display_class,
@@ -3105,6 +3099,14 @@ impl Vm {
                     ))
                 }
             }
+        }
+    }
+
+    /// A class's name as declared (user or internal class), by lowercase name.
+    pub(crate) fn class_name_for_display(&self, lower: &[u8]) -> Option<Vec<u8>> {
+        match self.classes.get(lower) {
+            Some(c) => Some(c.name.clone()),
+            None => crate::stubs::find_class_lower(lower).map(|c| c.name.as_bytes().to_vec()),
         }
     }
 
@@ -3337,7 +3339,7 @@ impl Vm {
             Option<Visibility>,
         )> = None;
         for _ in 0..50 {
-            if let Some(class) = self.classes.get(&current) {
+            if let Some(class) = self.prop_view_class(&current) {
                 // Pass 1: scope-private match
                 if let Some(scope) = caller_scope {
                     for prop in &class.properties {
@@ -3407,6 +3409,17 @@ impl Vm {
             }
         }
         last_private
+    }
+
+    /// The class whose `properties` declare the instance properties of
+    /// class `lower`: its entry, or for an internal class (also one an
+    /// extension registers as a bare entry) the stub's view of it.
+    #[inline]
+    pub(crate) fn prop_view_class(&self, lower: &[u8]) -> Option<&ClassEntry> {
+        match self.classes.get(lower) {
+            Some(c) if c.filename.is_some() || !c.properties.is_empty() => Some(c),
+            c => crate::stubs::class_entry(self, lower).or(c),
+        }
     }
 
     /// Look up the non-static `PropertyDef` for a bare-named property on an
@@ -5927,9 +5940,8 @@ impl Vm {
             return None;
         }
         let decl_name = self
-            .classes
-            .get(&decl.to_ascii_lowercase())
-            .map(|c| crate::value::display_class_name(&c.name))
+            .class_name_for_display(&decl.to_ascii_lowercase())
+            .map(|n| crate::value::display_class_name(&n))
             .unwrap_or_else(|| crate::value::display_class_name(&decl));
         Some(format!(
             "Cannot modify readonly property {}::${}",
@@ -45212,9 +45224,8 @@ impl Vm {
                                 .map(|b| b.to_ascii_lowercase())
                                 .collect();
                             let class_display = self
-                                .classes
-                                .get(&declaring_lower)
-                                .map(|c| crate::value::display_class_name(&c.name))
+                                .class_name_for_display(&declaring_lower)
+                                .map(|n| crate::value::display_class_name(&n))
                                 .unwrap_or_else(|| {
                                     crate::value::display_class_name(&declaring_class)
                                 });
@@ -53607,9 +53618,8 @@ impl Vm {
                                             .map(|b| b.to_ascii_lowercase())
                                             .collect();
                                         let class_display = self
-                                            .classes
-                                            .get(&declaring_lower)
-                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .class_name_for_display(&declaring_lower)
+                                            .map(|n| crate::value::display_class_name(&n))
                                             .unwrap_or_else(|| {
                                                 crate::value::display_class_name(&declaring_class)
                                             });
@@ -53637,9 +53647,8 @@ impl Vm {
                                             let declaring_lower =
                                                 declaring_class.to_ascii_lowercase();
                                             let class_display = self
-                                                .classes
-                                                .get(&declaring_lower)
-                                                .map(|c| crate::value::display_class_name(&c.name))
+                                                .class_name_for_display(&declaring_lower)
+                                                .map(|n| crate::value::display_class_name(&n))
                                                 .unwrap_or_else(|| {
                                                     crate::value::display_class_name(
                                                         &declaring_class,
@@ -54654,9 +54663,8 @@ impl Vm {
                                                 .map(|b| b.to_ascii_lowercase())
                                                 .collect();
                                             let class_display = self
-                                                .classes
-                                                .get(&declaring_lower)
-                                                .map(|c| crate::value::display_class_name(&c.name))
+                                                .class_name_for_display(&declaring_lower)
+                                                .map(|n| crate::value::display_class_name(&n))
                                                 .unwrap_or_else(|| {
                                                     crate::value::display_class_name(
                                                         &declaring_class,
@@ -54752,7 +54760,8 @@ impl Vm {
                         if class_lower == b"closure"
                             || class_lower == b"weakreference"
                             || class_lower == b"weakmap"
-                            || class_lower == b"sensitiveparametervalue"
+                            || (class_lower == b"sensitiveparametervalue"
+                                && prop_name.as_bytes() != b"value")
                         {
                             let prop_str =
                                 String::from_utf8_lossy(prop_name.as_bytes()).to_string();
@@ -54926,9 +54935,8 @@ impl Vm {
                                             .map(|b| b.to_ascii_lowercase())
                                             .collect();
                                         let class_display = self
-                                            .classes
-                                            .get(&declaring_lower)
-                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .class_name_for_display(&declaring_lower)
+                                            .map(|n| crate::value::display_class_name(&n))
                                             .unwrap_or_else(|| {
                                                 crate::value::display_class_name(&declaring_class)
                                             });
@@ -54977,9 +54985,8 @@ impl Vm {
                                             .map(|b| b.to_ascii_lowercase())
                                             .collect();
                                         let class_display = self
-                                            .classes
-                                            .get(&declaring_lower)
-                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .class_name_for_display(&declaring_lower)
+                                            .map(|n| crate::value::display_class_name(&n))
                                             .unwrap_or_else(|| {
                                                 crate::value::display_class_name(&declaring_class)
                                             });
@@ -55083,9 +55090,8 @@ impl Vm {
                                     {
                                         let declaring_lower = declaring_class.to_ascii_lowercase();
                                         let class_display = self
-                                            .classes
-                                            .get(&declaring_lower)
-                                            .map(|c| crate::value::display_class_name(&c.name))
+                                            .class_name_for_display(&declaring_lower)
+                                            .map(|n| crate::value::display_class_name(&n))
                                             .unwrap_or_else(|| {
                                                 crate::value::display_class_name(&class_name_orig)
                                             });
@@ -59248,9 +59254,7 @@ impl Vm {
     pub(crate) fn push_hook_frame(&mut self, hook: &OpArray, cvs: &[Value]) {
         let decl = self.scope_top().cloned().unwrap_or_default();
         let class_name = self
-            .classes
-            .get(&decl.to_ascii_lowercase())
-            .map(|c| c.name.clone())
+            .class_name_for_display(&decl.to_ascii_lowercase())
             .unwrap_or(decl);
         let name = format!(
             "{}::{}",

@@ -429,9 +429,13 @@ impl Vm {
     /// Whether property `name` of an object of class `cl` may be accessed
     /// from the current scope (a dynamic property always may).
     pub(crate) fn prop_visible_from_scope(&self, cl: &[u8], name: &[u8]) -> bool {
-        let Some(ce) = self.classes.get(cl) else {
+        let Some(ce) = self.prop_view_class(cl) else {
             return true;
         };
+        if ce.parent.is_some() && !ce.properties.iter().any(|p| p.name == name) {
+            // (maybe an internal ancestor's property)
+            return self.internal_prop_visible(cl, name);
+        }
         let scope = self.class_scope_ref();
         let in_scope = |d: &[u8]| scope.is_some_and(|s| s.eq_ignore_ascii_case(d));
         let mut non_private = None;
@@ -456,6 +460,19 @@ impl Vm {
             // An ancestor's private property: the name is a dynamic one.
             None => private.is_none_or(|p| !p.declaring_class.eq_ignore_ascii_case(cl)),
         }
+    }
+
+    /// prop_visible_from_scope() of a property the class entry does not
+    /// list: one declared by an internal ancestor, or a dynamic one.
+    #[inline(never)]
+    fn internal_prop_visible(&self, cl: &[u8], name: &[u8]) -> bool {
+        let scope = self.current_class_scope().map(|s| lower(&s));
+        let Some((vis, decl, ..)) = self.find_property_def_for_scope(cl, name, scope.as_deref())
+        else {
+            return true;
+        };
+        self.check_visibility(vis, &decl, cl, "", true, scope.as_deref())
+            .is_none()
     }
 
     /// zend_std_has_property(ZEND_PROPERTY_EXISTS) from the current scope:
@@ -705,7 +722,19 @@ impl Vm {
                     value: Value::Undef,
                     slot: Some(slot.clone()),
                 }),
-                (Some(_), None) => {}
+                // A slot of an internal class the object keeps no value
+                // for has its default (Exception::$string).
+                (Some(slot), None) => {
+                    if let Some(v) = slot.internal_default.and_then(stub_default_value) {
+                        if !self.classes.contains_key(&slot.decl) {
+                            out.push(PropEntry {
+                                key: slot.mangled(),
+                                value: v,
+                                slot: Some(slot.clone()),
+                            });
+                        }
+                    }
+                }
                 (None, Some(i)) => out.push(PropEntry {
                     key: props[i].0.clone(),
                     value: props[i].1.clone(),
