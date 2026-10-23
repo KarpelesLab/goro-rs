@@ -925,10 +925,10 @@ fn canny_edge_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R
 
 fn wavelet_denoise_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "dd", args)?;
-    let t = a[0].double_or(0.0);
+    let (t, soft) = (a[0].double_or(0.0), a[1].double_or(0.0));
     image_op(vm, &d_(o), "Unable to waveletDenoiseImage", |i| {
-        let range = (t / 65535.0 * 255.0).clamp(1.0, 255.0) as f32;
-        apply_oxideav(i, &of::BilateralBlur::new(2, 1.5, range))
+        goro_imagick::effects::wavelet_denoise(i, t, soft);
+        Ok(())
     })
 }
 

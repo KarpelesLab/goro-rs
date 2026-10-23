@@ -378,3 +378,65 @@ pub fn rotational_blur(img: &mut Image, angle: f64, ch: i64) {
     }
     img.colors = None;
 }
+
+/// WaveletDenoiseImage(): five levels of the à-trous "hat" transform
+/// (1-2-1 with holes, mirrored at the edges) per colour channel; detail
+/// coefficients are shrunk by threshold·noise[level]·(1 - softness) above
+/// the threshold and scaled by softness below it.
+pub fn wavelet_denoise(img: &mut Image, threshold: f64, softness: f64) {
+    const NOISE: [f64; 5] = [0.8002, 0.2735, 0.1202, 0.0585, 0.0291];
+    let (w, h) = (img.columns, img.rows);
+    if w == 0 || h == 0 {
+        return;
+    }
+    let mirror = |i: i64, n: usize| -> usize {
+        let n = n as i64;
+        let mut i = i;
+        if i < 0 {
+            i = -i;
+        }
+        if i >= n {
+            i = 2 * (n - 1) - i;
+        }
+        i.clamp(0, n - 1) as usize
+    };
+    for ch in 0..3 {
+        let mut cur: Vec<f64> = img.pixels.chunks_exact(4).map(|p| p[ch] as f64).collect();
+        let mut out = vec![0f64; w * h];
+        let mut tmp = vec![0f64; w * h];
+        let mut nxt = vec![0f64; w * h];
+        for (lev, noise) in NOISE.iter().enumerate() {
+            let sc = 1i64 << lev;
+            for y in 0..h {
+                for x in 0..w {
+                    let l = mirror(x as i64 - sc, w);
+                    let r = mirror(x as i64 + sc, w);
+                    tmp[y * w + x] = (2.0 * cur[y * w + x] + cur[y * w + l] + cur[y * w + r]) / 4.0;
+                }
+            }
+            for y in 0..h {
+                let u = mirror(y as i64 - sc, h);
+                let d = mirror(y as i64 + sc, h);
+                for x in 0..w {
+                    nxt[y * w + x] = (2.0 * tmp[y * w + x] + tmp[u * w + x] + tmp[d * w + x]) / 4.0;
+                }
+            }
+            let t = threshold * noise;
+            for i in 0..w * h {
+                let d = cur[i] - nxt[i];
+                out[i] += if d < -t {
+                    d + t * (1.0 - softness)
+                } else if d > t {
+                    d - t * (1.0 - softness)
+                } else {
+                    d * softness
+                };
+            }
+            std::mem::swap(&mut cur, &mut nxt);
+        }
+        for (p, (o, c)) in img.pixels.chunks_exact_mut(4).zip(out.iter().zip(&cur)) {
+            p[ch] = clamp_to_quantum(o + c) as u16;
+        }
+    }
+    img.colors = None;
+}
