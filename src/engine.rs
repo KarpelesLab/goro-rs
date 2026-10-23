@@ -52,6 +52,7 @@ pub fn register_extensions(vm: &mut Vm) {
     goro_ext_ldap::register(vm);
     goro_ext_uuid::register(vm);
     goro_ext_mailparse::register(vm);
+    goro_ext_imagick::register(vm);
     goro_ext_xsl::register(vm);
     goro_ext_gd::register(vm);
     goro_ext_dba::register(vm);

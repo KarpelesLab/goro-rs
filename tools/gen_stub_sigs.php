@@ -80,6 +80,22 @@ $dirs = [
 // CLDR 48, ICU 78).
 const ICU_VERSION_MAJOR = 78;
 
+// MagickLibVersion goro-ext-imagick reports (ImageMagick 7.1.2).
+const IMAGICK_LIB_VERSION = 0x712;
+
+/** The #if conditions of pecl imagick's stubs, for ImageMagick 7.1.2. */
+function imagick_cond(string $dir): bool {
+    $c = preg_replace('/^#\s*if(def)?\s+/', '', $dir);
+    // deprecated methods are built; the IM_HAVE_* features all exist in 7.1.2
+    $c = preg_replace('/!defined\(MAGICKCORE_EXCLUDE_DEPRECATED\)/', 'true', $c);
+    $c = preg_replace('/\b(IM_HAVE_\w+|PHP_IMAGICK_HAVE_\w+|IMAGICK_WITH_KERNEL)\b/', 'true', $c);
+    $c = preg_replace('/\bMagickLibVersion\b/', (string)IMAGICK_LIB_VERSION, $c);
+    $c = preg_replace('/\bPHP_VERSION_ID\b/', '80500', $c);
+    $c = preg_replace_callback('/0x[0-9a-fA-F]+/', fn($m) => (string)hexdec($m[0]), $c);
+    if (!preg_match('/^[\s\d<>=!|&()truefals]+$/', $c)) return true;
+    return (bool)eval("return ($c);");
+}
+
 const F_PUBLIC = 1;
 const F_PROTECTED = 2;
 const F_PRIVATE = 4;
@@ -122,6 +138,7 @@ foreach ($dirs as $dir => $ext) {
 $pecl = [
     'crates/goro-ext-uuid' => 'uuid',
     'crates/goro-ext-mailparse' => 'mailparse',
+    'crates/goro-ext-imagick' => 'imagick',
 ];
 foreach ($pecl as $dir => $ext) {
     $files = glob(dirname(__DIR__) . "/$dir/*.stub.php");
@@ -153,6 +170,7 @@ function parse_file(string $path, string $ext): void {
                 elseif (preg_match('/^#\s*ifdef\s+HAVE_ORALDAP\b/', $dir)) $cond = false;
                 elseif (preg_match('/^#\s*if\s+defined\(HAVE_ORALDAP\)/', $dir)) $cond = false;
                 elseif (preg_match('/^#\s*ifdef\s+STR_TRANSLATION\b/', $dir)) $cond = false;
+                elseif (preg_match('/MagickLibVersion|MAGICKCORE_|IM_HAVE_|PHP_IMAGICK_HAVE_|IMAGICK_WITH_KERNEL|PHP_VERSION_ID/', $dir)) $cond = imagick_cond($dir);
                 $stack[] = [$keep, $cond];
                 $keep = $keep && $cond;
             } elseif (preg_match('/^#\s*else/', $dir) && $stack) {

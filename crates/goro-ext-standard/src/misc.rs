@@ -18022,6 +18022,9 @@ fn phpversion_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 "mailparse" if _vm.loaded_extensions.contains(b"mailparse".as_slice()) => {
                     return Ok(Value::String(PhpString::from_bytes(b"3.2.1-dev")));
                 }
+                "imagick" if _vm.loaded_extensions.contains(b"imagick".as_slice()) => {
+                    return Ok(Value::String(PhpString::from_bytes(b"3.8.1")));
+                }
                 _ => return Ok(Value::False),
             }
         }

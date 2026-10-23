@@ -1,0 +1,12 @@
+[package]
+name = "goro-ext-imagick"
+version = "0.1.0"
+edition = "2024"
+description = "PECL imagick 3.8 (Imagick, ImagickPixel, ImagickPixelIterator, ImagickDraw, ImagickKernel) for goro-rs, on goro-imagick"
+
+[lints]
+workspace = true
+
+[dependencies]
+goro-core = { path = "../goro-core" }
+goro-imagick = { path = "../goro-imagick" }

@@ -57,6 +57,8 @@ members = [
     "crates/goro-ext-ldap",
     "crates/goro-ext-uuid",
     "crates/goro-ext-mailparse",
+    "crates/goro-imagick",
+    "crates/goro-ext-imagick",
 ]
 resolver = "2"
 
@@ -130,6 +132,7 @@ goro-ldap = { path = "crates/goro-ldap" }
 goro-ext-ldap = { path = "crates/goro-ext-ldap" }
 goro-ext-uuid = { path = "crates/goro-ext-uuid" }
 goro-ext-mailparse = { path = "crates/goro-ext-mailparse" }
+goro-ext-imagick = { path = "crates/goro-ext-imagick" }
 goro-ext-xsl = { path = "crates/goro-ext-xsl" }
 goro-ext-dba = { path = "crates/goro-ext-dba" }
 goro-ext-readline = { path = "crates/goro-ext-readline" }
