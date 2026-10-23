@@ -533,6 +533,9 @@ impl Compiler {
                     // array_walk(&$array, ...): the walk reloads the variable
                     // after each callback, so it needs the variable itself.
                     (b"array_walk", 0) | (b"array_walk_recursive", 0) => true,
+                    // usort(&$array, ...): the sorted copy replaces whatever
+                    // the variable holds once the callbacks ran (php_usort).
+                    (b"usort", 0) | (b"uasort", 0) | (b"uksort", 0) => true,
                     // getopt($short, $long, &$rest_index)
                     (b"getopt", 2) => true,
                     // parse_str($string, &$result)

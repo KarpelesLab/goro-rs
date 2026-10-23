@@ -14532,8 +14532,14 @@ fn php_user_sort(
     renumber: bool,
 ) -> Result<Value, VmError> {
     let first = args.first().unwrap_or(&Value::Null);
-    require_array_arg(vm, first, fname, "array", 1)?;
-    if let (Some(Value::Array(arr)), Some(callback)) = (args.first(), args.get(1)) {
+    // (by reference: the variable gets the sorted copy, php_usort())
+    let holder = match first {
+        Value::Reference(r) => Some(r.clone()),
+        _ => None,
+    };
+    let first = first.deref();
+    require_array_arg(vm, &first, fname, "array", 1)?;
+    if let (Value::Array(arr), Some(callback)) = (&first, args.get(1)) {
         let cb = callback.clone();
         let entries: Vec<(ArrayKey, Value)> = arr
             .borrow()
@@ -14543,6 +14549,12 @@ fn php_user_sort(
         if entries.is_empty() {
             return Ok(Value::True);
         }
+        // The callbacks see the array as it was (they sort a copy).
+        let arr = match holder {
+            Some(_) => None,
+            None => Some(arr.clone()),
+        };
+        drop(first);
         let mut warned = false;
         let sorted = if entries.len() > 1 {
             crate::zsort::zend_sort_stable(entries, |x, y| {
@@ -14570,7 +14582,17 @@ fn php_user_sort(
                 new_arr.set(k, v);
             }
         }
-        *arr.borrow_mut() = new_arr;
+        match (holder, arr) {
+            (Some(r), _) => {
+                let old = std::mem::replace(
+                    &mut *r.borrow_mut(),
+                    Value::Array(Rc::new(RefCell::new(new_arr))),
+                );
+                drop(old);
+            }
+            (None, Some(arr)) => *arr.borrow_mut() = new_arr,
+            (None, None) => {}
+        }
     }
     Ok(Value::True)
 }
