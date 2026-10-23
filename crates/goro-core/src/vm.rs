@@ -1343,6 +1343,9 @@ pub struct Vm {
     /// caller cannot propagate it (the user error handler): every frame
     /// unwinds, like zend_bailout(); cleared before shutdown functions run.
     pub fatal_bailout: bool,
+    /// The shutdown destructors are running (shutdown_destructors()): with
+    /// no frame on the call stack, EG(current_execute_data) is NULL.
+    pub in_shutdown_dtors: bool,
     /// User exception handler callback (from set_exception_handler)
     pub exception_handler: Option<Value>,
     /// Stack of previous exception handlers (for restore_exception_handler)
@@ -1859,6 +1862,7 @@ impl Vm {
             closure_pending_calls: Vec::new(),
             error_handler_threw: false,
             fatal_bailout: false,
+            in_shutdown_dtors: false,
             exception_handler: None,
             exception_handler_stack: Vec::new(),
             next_bound_closure_id: 0,
@@ -8756,7 +8760,8 @@ impl Vm {
                         crate::value::display_class_name(&class_name_orig)
                     );
                     self.sync_builtin_frames();
-                    let (file, fline) = if self.in_builtin_frame() {
+                    let frameless = self.no_execute_data();
+                    let (file, fline) = if frameless || self.in_builtin_frame() {
                         (RcStr::new(), 0)
                     } else {
                         (self.current_file.clone(), self.current_line)
@@ -8780,6 +8785,10 @@ impl Vm {
                     self.call_stack.pop();
                     if r.is_err() && !fatal_before && self.fatal_emitted {
                         self.destructor_fatal();
+                        return;
+                    }
+                    if frameless && self.current_exception.is_some() {
+                        self.frameless_dtor_exception(old_exc);
                         return;
                     }
                 }
@@ -17891,9 +17900,11 @@ impl Vm {
     /// uncaught fatal error has been emitted so that destructor output (e.g. `echo`
     /// inside `__destruct`) appears AFTER the "Fatal error: ..." message, matching PHP.
     pub fn run_shutdown_destructors(&mut self) {
+        let was = std::mem::replace(&mut self.in_shutdown_dtors, true);
         if self.shutdown_symbol_table_destructors() {
             self.shutdown_object_store_destructors();
         }
+        self.in_shutdown_dtors = was;
         for hook in self.shutdown_hooks.clone() {
             hook(self);
         }
@@ -18213,6 +18224,35 @@ impl Vm {
                 }
             }
         }
+    }
+
+    /// No user code is executing (EG(current_execute_data) == NULL): an
+    /// object released while a shutdown destructor's frame is left.
+    fn no_execute_data(&self) -> bool {
+        self.in_shutdown_dtors && self.call_stack.is_empty()
+    }
+
+    /// A destructor called without an executing frame threw
+    /// (zend_call_function() -> zend_throw_exception_internal()): the user
+    /// exception handler gets it, or it is fatal right away and the script
+    /// bails out, so it is never chained to the exception in flight.
+    #[cold]
+    #[inline(never)]
+    fn frameless_dtor_exception(&mut self, old_exc: Option<Value>) {
+        if self.exception_handler.is_some() && !self.shutdown_exception_check() {
+            // (handled: the exception set aside comes back)
+            if self.current_exception.is_none() {
+                self.current_exception = old_exc;
+            }
+            return;
+        }
+        if self.current_exception.is_some() {
+            self.shutdown_exception_check();
+        }
+        drop(old_exc);
+        self.fatal_bailout = true;
+        self.current_exception = None;
+        self.destructor_fatal();
     }
 
     /// A fatal error in a destructor: the script ends (zend_bailout()) and no
