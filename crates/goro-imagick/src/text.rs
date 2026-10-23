@@ -133,6 +133,30 @@ impl OutlinePen for Pen<'_> {
     }
 }
 
+/// The legacy 'kern' table's horizontal kerning (font units) between two
+/// glyphs, as FreeType's FT_Get_Kerning reads it.
+fn kern_units(font: &FontRef, left: skrifa::GlyphId, right: skrifa::GlyphId) -> i32 {
+    use skrifa::raw::TableProvider;
+    use skrifa::raw::tables::kern::SubtableKind;
+    let Ok(kern) = font.kern() else {
+        return 0;
+    };
+    let mut total = 0;
+    for st in kern.subtables().flatten() {
+        if !st.is_horizontal() || st.is_cross_stream() || st.is_variable() {
+            continue;
+        }
+        let v = match st.kind() {
+            Ok(SubtableKind::Format0(t)) => t.kerning(left, right),
+            Ok(SubtableKind::Format2(t)) => t.kerning(left, right),
+            Ok(SubtableKind::Format3(t)) => t.kerning(left, right),
+            _ => None,
+        };
+        total += v.unwrap_or(0);
+    }
+    total
+}
+
 /// Text laid out with a font: the glyph outlines (baseline of the first
 /// line at y = 0, the text starting at x = 0) and the metrics.
 /// `res` is the (x, y) resolution: sizes are points at that density.
@@ -157,8 +181,11 @@ pub fn layout(
     let gm = font.glyph_metrics(size, loc);
     let cmap = font.charmap();
     let outlines = font.outline_glyphs();
-    let ascent = m.ascent as f64;
-    let descent = m.descent as f64;
+    // ImageMagick reads FreeType's grid-fitted size metrics: the ascender
+    // rounded up, the descender down, advances to whole pixels
+    let height = (m.ascent - m.descent + m.leading) as f64;
+    let ascent = (m.ascent as f64).ceil();
+    let descent = (m.descent as f64).floor();
     let line_h = ascent - descent + interline;
     let mut cmds = Vec::new();
     let mut max_w: f64 = 0.0;
@@ -167,8 +194,17 @@ pub fn layout(
     for (li, line) in lines.iter().enumerate() {
         let mut x = 0f64;
         let y = li as f64 * line_h;
+        let mut prev: Option<skrifa::GlyphId> = None;
+        let upem = font.metrics(Size::unscaled(), loc).units_per_em.max(1) as f64;
         for ch in line.chars() {
             let gid = cmap.map(ch).unwrap_or_default();
+            if let Some(p) = prev {
+                let k = kern_units(&font, p, gid);
+                if k != 0 {
+                    x += (k as f64 * px_y as f64 / upem * sx as f64).round();
+                }
+            }
+            prev = Some(gid);
             if let Some(g) = outlines.get(gid) {
                 let mut pen = Pen {
                     out: &mut cmds,
@@ -178,7 +214,7 @@ pub fn layout(
                 };
                 let _ = g.draw(DrawSettings::unhinted(size, loc), &mut pen);
             }
-            let adv = gm.advance_width(gid).unwrap_or(px_y * 0.5) as f64 * sx as f64;
+            let adv = (gm.advance_width(gid).unwrap_or(px_y * 0.5) as f64 * sx as f64).round();
             max_adv = max_adv.max(adv);
             x += adv + kerning;
         }
@@ -191,8 +227,9 @@ pub fn layout(
         ascender: ascent,
         descender: descent,
         text_width: max_w,
-        text_height: line_h * n - if n > 1.0 { 0.0 } else { interline },
-        max_horizontal_advance: m.max_width.map(|w| w as f64).unwrap_or(max_adv),
+        // one line: the font's height, rounded; several: whole lines
+        text_height: if n > 1.0 { line_h * n } else { height.round() },
+        max_horizontal_advance: m.max_width.map(|w| (w as f64).round()).unwrap_or(max_adv),
         bounds: (0.0, descent, max_w, ascent),
         origin: (max_w, 0.0),
     };
