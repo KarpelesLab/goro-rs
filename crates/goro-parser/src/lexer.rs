@@ -35,6 +35,9 @@ pub struct Lexer<'a> {
     /// Closing delimiter of the interpolated string being scanned (`"`, or
     /// `` ` `` for a shell-exec string).
     dq_term: u8,
+    /// The token just scanned is a heredoc / nowdoc without interpolation:
+    /// its line is the body's (the T_ENCAPSED_AND_WHITESPACE zval's).
+    const_heredoc: bool,
 }
 
 impl<'a> Lexer<'a> {
@@ -51,6 +54,7 @@ impl<'a> Lexer<'a> {
             preserve_trivia: false,
             trivia_buffer: Vec::new(),
             dq_term: b'"',
+            const_heredoc: false,
         }
     }
 
@@ -1207,10 +1211,8 @@ impl<'a> Lexer<'a> {
                         self.advance(); // <
                         self.advance(); // <
                         let tok = self.scan_heredoc_start();
-                        return Token::new(
-                            tok,
-                            Span::new(start as u32, self.pos as u32, start_line),
-                        );
+                        let line = start_line + std::mem::take(&mut self.const_heredoc) as u32;
+                        return Token::new(tok, Span::new(start as u32, self.pos as u32, line));
                     }
                 }
 
@@ -1614,7 +1616,8 @@ impl<'a> Lexer<'a> {
             }
         };
 
-        Token::new(kind, Span::new(start as u32, self.pos as u32, start_line))
+        let line = start_line + std::mem::take(&mut self.const_heredoc) as u32;
+        Token::new(kind, Span::new(start as u32, self.pos as u32, line))
     }
 
     fn scan_heredoc_start(&mut self) -> TokenKind {
@@ -1814,11 +1817,13 @@ impl<'a> Lexer<'a> {
             content = stripped;
         }
 
-        if is_nowdoc {
+        let kind = if is_nowdoc {
             TokenKind::ConstantString(content)
         } else {
             self.process_heredoc_interpolation(content)
-        }
+        };
+        self.const_heredoc = matches!(kind, TokenKind::ConstantString(_)) && !self.preserve_trivia;
+        kind
     }
 
     /// Process heredoc content for variable interpolation and escape sequences,

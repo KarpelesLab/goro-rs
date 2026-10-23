@@ -15640,12 +15640,13 @@ impl Compiler {
             ExprKind::Eval(inner) => {
                 let code_op = self.compile_expr(inner)?;
                 let result = OperandType::Tmp(self.op_array.alloc_temp());
+                // (ZEND_AST_INCLUDE_OR_EVAL: the line of its operand)
                 self.op_array.emit(Op {
                     opcode: OpCode::Eval,
                     op1: code_op,
                     op2: OperandType::Unused,
                     result,
-                    line: expr.span.line,
+                    line: inner.span.line.max(expr.span.line),
                 });
                 Ok(result)
             }

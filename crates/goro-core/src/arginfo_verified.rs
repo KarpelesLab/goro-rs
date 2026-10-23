@@ -149,6 +149,8 @@ pub static VERIFIED: &[(&str, u8)] = &[
     ("fpow", 3),
     ("fstat", 3),
     ("fsync", 3),
+    ("func_get_args", 3),
+    ("func_num_args", 3),
     ("function_exists", 3),
     ("gc_collect_cycles", 3),
     ("gc_enabled", 3),
