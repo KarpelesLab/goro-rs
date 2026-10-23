@@ -1394,13 +1394,7 @@ impl Value {
             (Value::Generator(_), Value::Generator(_)) => true,
             (Value::String(a), Value::String(b)) => smart_streq(a.as_bytes(), b.as_bytes()),
             (Value::String(s), Value::Long(n)) | (Value::Long(n), Value::String(s)) => {
-                // PHP 8: if string is numeric, compare numerically; otherwise false
-                let s_bytes = s.as_bytes();
-                if let Some(num) = parse_numeric_string(s_bytes) {
-                    num == *n as f64
-                } else {
-                    false
-                }
+                compare_long_to_string(*n, s.as_bytes()) == 0
             }
             (Value::String(s), Value::Double(f)) | (Value::Double(f), Value::String(s)) => {
                 let s_bytes = s.as_bytes();
@@ -1850,49 +1844,8 @@ impl Value {
             }
             (Value::String(a), Value::String(b)) => smart_strcmp(a.as_bytes(), b.as_bytes()),
             // PHP 8: int vs string - compare numerically if string is numeric, else string > int
-            (Value::Long(n), Value::String(s)) | (Value::String(s), Value::Long(n)) => {
-                let is_left_long = matches!(self, Value::Long(_));
-                if let Some(num) = parse_numeric_string(s.as_bytes()) {
-                    let n_f = *n as f64;
-                    if is_left_long {
-                        if n_f < num {
-                            -1
-                        } else if n_f > num {
-                            1
-                        } else {
-                            0
-                        }
-                    } else {
-                        if num < n_f {
-                            -1
-                        } else if num > n_f {
-                            1
-                        } else {
-                            0
-                        }
-                    }
-                } else {
-                    // PHP 8: non-numeric string always > int in comparison
-                    // Actually: cast both to their natural comparison type
-                    // In PHP 8, comparing int with non-numeric string:
-                    // the int is cast to string and then compared as strings
-                    let n_str = format!("{}", n);
-                    let s_str = std::str::from_utf8(s.as_bytes()).unwrap_or("");
-                    if is_left_long {
-                        match n_str.as_bytes().cmp(s_str.as_bytes()) {
-                            std::cmp::Ordering::Less => -1,
-                            std::cmp::Ordering::Equal => 0,
-                            std::cmp::Ordering::Greater => 1,
-                        }
-                    } else {
-                        match s_str.as_bytes().cmp(n_str.as_bytes()) {
-                            std::cmp::Ordering::Less => -1,
-                            std::cmp::Ordering::Equal => 0,
-                            std::cmp::Ordering::Greater => 1,
-                        }
-                    }
-                }
-            }
+            (Value::Long(n), Value::String(s)) => compare_long_to_string(*n, s.as_bytes()),
+            (Value::String(s), Value::Long(n)) => -compare_long_to_string(*n, s.as_bytes()),
             // PHP 8: float vs string - compare numerically if string is numeric, else cast float to string
             (Value::Double(f), Value::String(s)) | (Value::String(s), Value::Double(f)) => {
                 if f.is_nan() {
@@ -2693,6 +2646,25 @@ pub fn smart_strcmp(a: &[u8], b: &[u8]) -> i64 {
 pub enum NumStr {
     Long(i64),
     Double(f64),
+}
+
+/// compare_longs_to_string(): an int against a numeric string compares as
+/// numbers (exactly, for an integer string), against any other string as
+/// the int's decimal form; -1, 0 or 1.
+pub fn compare_long_to_string(n: i64, s: &[u8]) -> i64 {
+    let ord = match parse_numeric_str(s, false) {
+        Some((NumStr::Long(l), _)) => n.cmp(&l),
+        Some((NumStr::Double(d), _)) => match (n as f64).partial_cmp(&d) {
+            Some(o) => o,
+            None => return 1,
+        },
+        None => n.to_string().as_bytes().cmp(s),
+    };
+    match ord {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
 }
 
 /// Port of zend_operators.c `_is_numeric_string_ex`: leading whitespace, an
