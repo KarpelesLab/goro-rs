@@ -12422,7 +12422,7 @@ impl Compiler {
             ) {
                 // (never folded by zend_compile: ZEND_CAST / QM_ASSIGN)
                 2
-            } else if Self::eval_const_expr(e).is_some() {
+            } else if Self::eval_const_expr(e).is_some() || Self::ct_folded(e) {
                 1
             } else if matches!(o, OperandType::Cv(_)) {
                 8
@@ -12485,6 +12485,62 @@ impl Compiler {
             line,
         });
         OperandType::Tmp(t)
+    }
+
+    /// Whether zend_compile folds `e` into a constant: comparisons and
+    /// concatenations of scalar literals, short-circuits decided by a
+    /// literal (beyond what eval_const_expr() computes).
+    #[inline(never)]
+    fn ct_folded(e: &Expr) -> bool {
+        fn scalar(e: &Expr) -> Option<bool> {
+            // the literal's truthiness
+            match &e.kind {
+                ExprKind::Int(n) => Some(*n != 0),
+                ExprKind::Float(f) => Some(*f != 0.0),
+                ExprKind::String(s) => Some(!(s.is_empty() || s.as_slice() == b"0")),
+                ExprKind::True => Some(true),
+                ExprKind::False | ExprKind::Null => Some(false),
+                _ => None,
+            }
+        }
+        match &e.kind {
+            ExprKind::BinaryOp { left, op, right } => match op {
+                BinaryOp::Equal
+                | BinaryOp::NotEqual
+                | BinaryOp::Identical
+                | BinaryOp::NotIdentical
+                | BinaryOp::Less
+                | BinaryOp::Greater
+                | BinaryOp::LessEqual
+                | BinaryOp::GreaterEqual
+                | BinaryOp::Spaceship
+                | BinaryOp::Concat
+                | BinaryOp::LogicalXor => scalar(left).is_some() && scalar(right).is_some(),
+                BinaryOp::BooleanAnd | BinaryOp::LogicalAnd => match scalar(left) {
+                    Some(false) => true,
+                    Some(true) => scalar(right).is_some(),
+                    None => false,
+                },
+                BinaryOp::BooleanOr | BinaryOp::LogicalOr => match scalar(left) {
+                    Some(true) => true,
+                    Some(false) => scalar(right).is_some(),
+                    None => false,
+                },
+                _ => false,
+            },
+            // (zend_try_ct_eval_unary_op(): ~ of a string, ! of a scalar)
+            ExprKind::UnaryOp {
+                op: UnaryOp::BitwiseNot,
+                operand,
+                ..
+            } => matches!(operand.kind, ExprKind::String(_) | ExprKind::Int(_)),
+            ExprKind::UnaryOp {
+                op: UnaryOp::BooleanNot,
+                operand,
+                ..
+            } => scalar(operand).is_some(),
+            _ => false,
+        }
     }
 
     /// The operand type of a function call's result: the functions

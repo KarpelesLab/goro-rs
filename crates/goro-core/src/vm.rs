@@ -4721,11 +4721,13 @@ impl Vm {
         if fails(a) || !fails(b) {
             return;
         }
+        // (zendi_try_get_long(): "A non-numeric value" first, then the
+        // float-string deprecation)
+        self.check_leading_numeric_warning(a, line);
         let saved = self.current_line;
         self.current_line = line;
         let _ = self.op_to_long(a);
         self.current_line = saved;
-        self.check_leading_numeric_warning(a, line);
     }
 
     /// Release the TMP operands of an instruction that hold objects; true
