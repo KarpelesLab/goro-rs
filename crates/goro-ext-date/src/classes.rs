@@ -1838,13 +1838,13 @@ pub fn tz_offset_for(z: &TzObj, t: &Time) -> i64 {
     }
 }
 
-pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
+pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> R<Value> {
     if z.ztype != ZONETYPE_ID {
-        return Value::False;
+        return Ok(Value::False);
     }
     let tz = match &z.tz {
         Some(t) => t.clone(),
-        None => return Value::False,
+        None => return Ok(Value::False),
     };
     let mut out = new_arr();
     let fmt = b"x-m-d\\TH:i:sP";
@@ -1940,7 +1940,7 @@ pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
             if tz.trans[i] < end {
                 add_idx(vm, &mut out, i, tz.trans[i]);
             } else {
-                return arr_val(out);
+                return Ok(arr_val(out));
             }
         }
     }
@@ -1960,7 +1960,7 @@ pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
                     continue;
                 }
                 if time > end {
-                    return arr_val(out);
+                    return Ok(arr_val(out));
                 }
                 let t = ty(typ);
                 add_el(
@@ -1971,11 +1971,18 @@ pub fn transitions(vm: &mut Vm, z: &TzObj, begin: i64, end: i64) -> Value {
                     t.isdst != 0,
                     tz.abbr_at(t.abbr_idx),
                 );
+                // An open-ended range runs into memory_limit.
+                if goro_core::value::memory_exhausted() != 0 {
+                    let e = vm.memory_limit_fatal();
+                    // (a method's caller cannot propagate it: bail out)
+                    vm.fatal_bailout = true;
+                    return Err(e);
+                }
             }
             y += 1;
         }
     }
-    arr_val(out)
+    Ok(arr_val(out))
 }
 
 pub fn location(z: &TzObj) -> Value {
@@ -2025,7 +2032,7 @@ fn timezone_method(vm: &mut Vm, method: &[u8], o: &Obj, args: &[Value]) -> R<Val
             let b = long_arg(vm, f, args, 0, "timestampBegin", false)?.unwrap_or(i64::MIN);
             let e = long_arg(vm, f, args, 1, "timestampEnd", false)?.unwrap_or(i32::MAX as i64);
             let z = need_tz(vm, o)?;
-            Ok(transitions(vm, &z, b, e))
+            transitions(vm, &z, b, e)
         }
         b"getlocation" => {
             check_count(vm, "DateTimeZone::getLocation", args, 0, 0)?;
@@ -3050,7 +3057,7 @@ pub fn timezone_transitions_get_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     let b = long_arg(vm, f, args, 1, "timestampBegin", false)?.unwrap_or(i64::MIN);
     let e = long_arg(vm, f, args, 2, "timestampEnd", false)?.unwrap_or(i32::MAX as i64);
     let z = need_tz(vm, &o)?;
-    Ok(transitions(vm, &z, b, e))
+    transitions(vm, &z, b, e)
 }
 
 pub fn timezone_location_get_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
