@@ -1046,6 +1046,19 @@ impl Vm {
         mode: DimFetch,
         line: u32,
     ) -> Option<Value> {
+        self.fetch_dim_from_object_ex(obj_val, key, mode, line, false)
+    }
+
+    /// fetch_dim_from_object(); `want_ref` hands out the reference a
+    /// by-reference offsetGet() returned (`$x = &$obj[k]`, `[&$x] = $obj`).
+    pub(crate) fn fetch_dim_from_object_ex(
+        &mut self,
+        obj_val: &Value,
+        key: Option<Value>,
+        mode: DimFetch,
+        line: u32,
+        want_ref: bool,
+    ) -> Option<Value> {
         let Value::Object(obj) = obj_val else {
             return Some(Value::Null);
         };
@@ -1185,6 +1198,9 @@ impl Vm {
         };
         if let Some(Value::Reference(r)) = &result {
             self.last_call_by_ref = true;
+            if want_ref {
+                return Some(Value::Reference(r.clone()));
+            }
             let cur = r.borrow().clone();
             return Some(match cur {
                 Value::Null | Value::Undef if matches!(mode, DimFetch::W | DimFetch::Rw) => {

@@ -45370,11 +45370,12 @@ impl Vm {
                             let obj = obj.clone();
                             self.ao_fetch_dim_ref(&obj, &key_val)
                         } else {
-                            self.fetch_dim_from_object(
+                            self.fetch_dim_from_object_ex(
                                 &arr_val,
                                 Some(key_val),
                                 crate::fetch_w::DimFetch::W,
                                 op.line,
+                                true,
                             )
                         };
                         if self.current_exception.is_some() {
