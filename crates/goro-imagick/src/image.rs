@@ -603,6 +603,11 @@ impl Image {
         self.properties
             .0
             .retain(|(k, _)| !k.to_ascii_lowercase().starts_with("date:"));
+        // what the PNG writer then leaves out
+        self.artifacts.set(
+            "png:exclude-chunk",
+            "bKGD,caNv,cHRM,eXIf,gAMA,iCCP,iTXt,pHYs,sRGB,tEXt,zCCP,zTXt,date",
+        );
     }
 
     /// SetImageAlphaChannel(Set/Activate...): ensure an alpha channel.

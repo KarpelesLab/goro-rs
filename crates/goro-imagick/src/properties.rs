@@ -5,6 +5,96 @@ use crate::color::fmt_g;
 use crate::image::Image;
 use crate::types::{Colorspace, OrientationType};
 
+/// Seconds since the epoch as a UTC civil date and time.
+pub fn civil_utc(secs: i64) -> (i64, u8, u8, u8, u8, u8) {
+    let (days, rem) = (secs.div_euclid(86400), secs.rem_euclid(86400));
+    // days to civil (Howard Hinnant's algorithm)
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + (m <= 2) as i64;
+    (
+        y,
+        m as u8,
+        d as u8,
+        (rem / 3600) as u8,
+        (rem / 60 % 60) as u8,
+        (rem % 60) as u8,
+    )
+}
+
+/// Now, in seconds since the epoch.
+pub fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
+/// A date property value, as ImageMagick writes them ("2026-10-23T17:21:01+00:00").
+pub fn iso_date(secs: i64) -> String {
+    let (y, m, d, hh, mm, ss) = civil_utc(secs);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}+00:00")
+}
+
+/// The date:* properties ImageMagick gives what it reads: the file's
+/// change and modification times (kept when the file named its own),
+/// and the time of reading.
+pub fn set_read_dates(img: &mut Image, file: Option<&std::fs::Metadata>) {
+    let now = now_secs();
+    let (create, modify) = match file {
+        Some(md) => {
+            let mtime = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(now, |d| d.as_secs() as i64);
+            #[cfg(unix)]
+            let ctime = {
+                use std::os::unix::fs::MetadataExt;
+                md.ctime()
+            };
+            #[cfg(not(unix))]
+            let ctime = mtime;
+            (ctime, mtime)
+        }
+        None => (now, now),
+    };
+    if img.properties.get("date:create").is_none() {
+        img.properties.set("date:create", &iso_date(create));
+    }
+    if img.properties.get("date:modify").is_none() {
+        img.properties.set("date:modify", &iso_date(modify));
+    }
+    img.properties.set("date:timestamp", &iso_date(now));
+}
+
+/// The chromaticity and gamma SetImageColorspace() leaves: linear and
+/// gray spaces have no primaries (and linear ones a gamma of 1); sRGB
+/// gets its own back.
+pub fn colorspace_attributes(img: &mut Image, cs: Colorspace) {
+    match cs {
+        Colorspace::Gray => img.chromaticity = Default::default(),
+        Colorspace::RGB
+        | Colorspace::scRGB
+        | Colorspace::XyY
+        | Colorspace::XYZ
+        | Colorspace::LinearGray => {
+            img.chromaticity = Default::default();
+            img.gamma = 1.0;
+        }
+        Colorspace::SRGB => {
+            img.chromaticity = crate::image::Chromaticity::srgb();
+            img.gamma = 1.0 / 2.2;
+        }
+        _ => {}
+    }
+}
+
 /// EXIF tag names (EXIF 2.32 / TIFF 6.0).
 fn exif_tag_name(tag: u16) -> Option<&'static str> {
     Some(match tag {

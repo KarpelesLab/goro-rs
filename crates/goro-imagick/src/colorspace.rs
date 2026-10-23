@@ -685,6 +685,7 @@ pub fn to_srgb(cs: Colorspace, c: V3) -> Option<V3> {
 
 /// TransformImageColorspace(): convert the pixels (through sRGB).
 pub fn transform(i: &mut Image, cs: Colorspace) {
+    crate::properties::colorspace_attributes(i, cs);
     let cs = if cs == Colorspace::Undefined || cs == Colorspace::Transparent {
         Colorspace::SRGB
     } else {

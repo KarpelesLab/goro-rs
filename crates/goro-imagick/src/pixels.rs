@@ -154,8 +154,12 @@ pub fn import_q16(
     }
     let has_alpha = map.iter().any(|&c| c == b'A' || c == b'O');
     let cmyk = map.iter().any(|c| b"CMYK".contains(c));
-    if has_alpha {
-        img.enable_alpha();
+    if has_alpha && !img.alpha {
+        // the alpha channel an import adds starts out transparent
+        img.alpha = true;
+        for p in img.pixels.chunks_exact_mut(4) {
+            p[3] = 0;
+        }
     }
     if cmyk {
         if img.black.is_none() {
@@ -166,6 +170,7 @@ pub fn import_q16(
     if map.contains(&b'I') && img.colorspace != Colorspace::Gray {
         // the image turns gray: its first channel is the gray
         img.colorspace = Colorspace::Gray;
+        crate::properties::colorspace_attributes(img, Colorspace::Gray);
         for p in img.pixels.chunks_exact_mut(4) {
             p[1] = p[0];
             p[2] = p[0];

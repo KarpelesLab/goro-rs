@@ -398,6 +398,9 @@ impl Wand {
             if pseudo::is_pseudo(m) {
                 let mut img =
                     pseudo::read_with(m, &spec.path, self.settings.size, &self.settings.options)?;
+                // a pseudo image's background is the wand's, not its colour
+                img.background_color = self.settings.background_color.clone();
+                crate::properties::set_read_dates(&mut img, None);
                 self.apply_read_settings(&mut img);
                 return Ok(vec![img]);
             }
@@ -463,9 +466,11 @@ impl Wand {
                 }
             }
         }
+        let file_md = std::fs::metadata(&path).ok();
         for img in images.iter_mut() {
             img.filename = filename.to_string();
             img.ping = ping;
+            crate::properties::set_read_dates(img, file_md.as_ref());
             self.apply_read_settings(img);
             // -extract: a region (or a size) of what is read
             if let Some(g) = Geometry::parse(&self.settings.extract) {

@@ -2745,6 +2745,7 @@ fn set_image_colorspace(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) 
             i.black = None;
         }
         i.colorspace = cs;
+        goro_imagick::properties::colorspace_attributes(i, cs);
         Ok(())
     })
 }
