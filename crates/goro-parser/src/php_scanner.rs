@@ -311,18 +311,23 @@ impl<'a> Scanner<'a> {
     fn tok(&mut self, id: i32, start: usize, end: usize) -> Option<ScanToken> {
         // Advance the line counter to `start`.
         let mut line = self.line;
-        for &c in &self.s[self.line_pos.min(start)..start] {
-            if c == b'\n' {
-                line += 1;
-            }
-        }
-        // Count bare "\r" line endings too.
         if self.line_pos < start {
             let seg = &self.s[self.line_pos..start];
-            for (k, &c) in seg.iter().enumerate() {
-                if c == b'\r' && seg.get(k + 1).copied().unwrap_or_else(|| self.at(start)) != b'\n'
-                {
-                    line += 1;
+            // (one pass the compiler vectorizes; "\r" are rare)
+            let (mut lf, mut cr) = (0u32, 0u32);
+            for &c in seg {
+                lf += u32::from(c == b'\n');
+                cr += u32::from(c == b'\r');
+            }
+            line += lf;
+            // Count bare "\r" line endings too.
+            if cr > 0 {
+                for (k, &c) in seg.iter().enumerate() {
+                    if c == b'\r'
+                        && seg.get(k + 1).copied().unwrap_or_else(|| self.at(start)) != b'\n'
+                    {
+                        line += 1;
+                    }
                 }
             }
         }

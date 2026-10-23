@@ -541,6 +541,15 @@ fn lex_tstring(src: &[u8], toks: &[PTok], idx: usize, line: u32) -> Option<Synta
 
 fn newlines(text: &[u8]) -> u32 {
     // HANDLE_NEWLINES: "\n", "\r\n" and a bare "\r" each count once.
+    // (without a "\r", the count of "\n": a loop the compiler vectorizes)
+    let (mut lf, mut cr) = (0u32, 0u32);
+    for &c in text {
+        lf += u32::from(c == b'\n');
+        cr += u32::from(c == b'\r');
+    }
+    if cr == 0 {
+        return lf;
+    }
     let mut n = 0;
     let mut i = 0;
     while i < text.len() {
