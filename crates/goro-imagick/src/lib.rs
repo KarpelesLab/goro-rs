@@ -35,6 +35,7 @@ pub mod error;
 pub mod ewa;
 pub mod filters;
 pub mod fonts;
+pub mod formats;
 pub mod fourier;
 pub mod fx;
 pub mod geometry;

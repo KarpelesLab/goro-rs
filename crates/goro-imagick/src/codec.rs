@@ -112,6 +112,14 @@ pub static FORMATS: &[FormatInfo] = &[
         true,
     ),
     f(
+        "DDS",
+        "Microsoft DirectDraw Surface",
+        "image/x-dds",
+        true,
+        false,
+        true,
+    ),
+    f(
         "FARBFELD",
         "Farbfeld",
         "image/x-farbfeld",
@@ -167,6 +175,14 @@ pub static FORMATS: &[FormatInfo] = &[
         true,
         false,
     ),
+    f(
+        "HDR",
+        "Radiance RGBE image format",
+        "image/vnd.radiance",
+        true,
+        false,
+        false,
+    ),
     f("ICO", "Microsoft icon", "image/x-ico", true, true, true),
     f(
         "JPEG",
@@ -185,6 +201,14 @@ pub static FORMATS: &[FormatInfo] = &[
         false,
     ),
     f(
+        "JXL",
+        "JPEG XL (ISO/IEC 18181)",
+        "image/jxl",
+        true,
+        false,
+        true,
+    ),
+    f(
         "LOGO",
         "ImageMagick Logo",
         "image/x-logo",
@@ -199,6 +223,14 @@ pub static FORMATS: &[FormatInfo] = &[
         true,
         false,
         false,
+    ),
+    f(
+        "MIFF",
+        "Magick Image File Format",
+        "image/x-miff",
+        true,
+        true,
+        true,
     ),
     f(
         "MSVG",
@@ -239,6 +271,14 @@ pub static FORMATS: &[FormatInfo] = &[
         true,
         true,
         true,
+    ),
+    f(
+        "PCX",
+        "ZSoft IBM PC Paintbrush",
+        "image/x-pcx",
+        true,
+        false,
+        false,
     ),
     f(
         "PGM",
@@ -329,6 +369,14 @@ pub static FORMATS: &[FormatInfo] = &[
         true,
     ),
     f(
+        "PSD",
+        "Adobe Photoshop bitmap",
+        "image/vnd.adobe.photoshop",
+        true,
+        false,
+        true,
+    ),
+    f(
         "QOI",
         "Quite OK image format",
         "image/x-qoi",
@@ -376,6 +424,7 @@ pub static FORMATS: &[FormatInfo] = &[
         false,
         false,
     ),
+    f("SGI", "Irix RGB image", "image/x-sgi", true, false, true),
     f(
         "SVG",
         "Scalable Vector Graphics",
@@ -434,6 +483,14 @@ pub static FORMATS: &[FormatInfo] = &[
         false,
         false,
     ),
+    f(
+        "XPM",
+        "X Windows system pixmap (color)",
+        "image/x-xpixmap",
+        true,
+        false,
+        false,
+    ),
 ];
 
 pub fn format_info(name: &str) -> Option<&'static FormatInfo> {
@@ -481,6 +538,30 @@ pub fn sniff(data: &[u8]) -> Option<&'static str> {
     if data.starts_with(b"farbfeld") {
         return Some("FARBFELD");
     }
+    if data.starts_with(b"DDS ") {
+        return Some("DDS");
+    }
+    if data.starts_with(b"#?RADIANCE") || data.starts_with(b"#?RGBE") {
+        return Some("HDR");
+    }
+    if data.starts_with(&[0xff, 0x0a]) || data.starts_with(b"\0\0\0\x0cJXL \r\n\x87\n") {
+        return Some("JXL");
+    }
+    if data.starts_with(b"id=ImageMagick") {
+        return Some("MIFF");
+    }
+    if data.starts_with(b"8BPS") {
+        return Some("PSD");
+    }
+    if data.starts_with(&[0x01, 0xda]) {
+        return Some("SGI");
+    }
+    if data.starts_with(b"/* XPM */") {
+        return Some("XPM");
+    }
+    if data.len() > 128 && data[0] == 0x0a && data[1] <= 5 && data[2] <= 1 {
+        return Some("PCX");
+    }
     if data.len() > 2 && data[0] == b'P' && (b'1'..=b'7').contains(&data[1]) {
         return Some(match data[1] {
             b'1' | b'4' => "PBM",
@@ -506,7 +587,7 @@ pub fn sniff(data: &[u8]) -> Option<&'static str> {
     None
 }
 
-fn corrupt<E: std::fmt::Display>(magick: &str, e: E) -> MagickError {
+pub(crate) fn corrupt<E: std::fmt::Display>(magick: &str, e: E) -> MagickError {
     MagickError::with_desc(
         severity::CORRUPT_IMAGE_ERROR,
         &format!("{}", e),
@@ -561,6 +642,10 @@ pub fn decode(data: &[u8], magick: &str, opts: &ReadOptions) -> MResult<Vec<Imag
         "QOI" => decode_qoi(data)?,
         "PNM" | "PPM" | "PGM" | "PBM" | "PAM" => decode_pnm(data)?,
         "FARBFELD" => decode_farbfeld(data)?,
+        "PCX" => crate::formats::decode_pcx(data)?,
+        "DDS" => crate::formats::decode_dds(data)?,
+        "JXL" => crate::formats::decode_jxl(data)?,
+        "HDR" => crate::formats::decode_hdr(data)?,
         "SVG" | "SVGZ" | "MSVG" | "RSVG" => {
             crate::svg::decode(data, opts.density, &opts.background)?
         }
