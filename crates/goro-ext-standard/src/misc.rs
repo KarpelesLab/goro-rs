@@ -312,6 +312,9 @@ final class StreamBucket {
     vm.register_function(b"current", current);
     vm.register_function(b"pos", current);
     vm.register_function(b"getrusage", getrusage_fn);
+    vm.register_function(b"strptime", strptime_fn);
+    vm.register_function(b"proc_nice", proc_nice_fn);
+    vm.register_function(b"net_get_interfaces", net_get_interfaces_fn);
     vm.register_function(b"sys_getloadavg", sys_getloadavg_fn);
     vm.register_function(b"next", next_fn);
     vm.register_function(b"prev", prev_fn);
@@ -3403,6 +3406,168 @@ fn getrusage_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Array(Rc::new(RefCell::new(arr))))
 }
 
+fn assoc(pairs: Vec<(&str, Value)>) -> PhpArray {
+    let mut arr = PhpArray::new();
+    for (k, v) in pairs {
+        arr.set(ArrayKey::String(PhpString::from_bytes(k.as_bytes())), v);
+    }
+    arr
+}
+
+/// PHP_FUNCTION(strptime) (ext/standard/datetime.c)
+fn strptime_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    vm.emit_deprecated(
+        "Function strptime() is deprecated since 8.2, use date_parse_from_format() (for locale-independent parsing), or IntlDateFormatter::parse() (for locale-dependent parsing) instead",
+    );
+    let ts = args
+        .first()
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
+    let format = args
+        .get(1)
+        .map(|v| v.to_php_string().as_bytes().to_vec())
+        .unwrap_or_default();
+    let cstr = |b: &[u8]| {
+        let end = b.iter().position(|&c| c == 0).unwrap_or(b.len());
+        std::ffi::CString::new(&b[..end]).unwrap_or_default()
+    };
+    let (ts, format) = (cstr(&ts), cstr(&format));
+    // SAFETY: both strings are NUL-terminated; strptime() fills the zeroed
+    // tm and returns a pointer into `ts` (or NULL).
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    let rest = unsafe { libc::strptime(ts.as_ptr(), format.as_ptr(), &mut tm) };
+    if rest.is_null() {
+        return Ok(Value::False);
+    }
+    let unparsed = unsafe { std::ffi::CStr::from_ptr(rest) }
+        .to_bytes()
+        .to_vec();
+    let arr = assoc(vec![
+        ("tm_sec", Value::Long(tm.tm_sec as i64)),
+        ("tm_min", Value::Long(tm.tm_min as i64)),
+        ("tm_hour", Value::Long(tm.tm_hour as i64)),
+        ("tm_mday", Value::Long(tm.tm_mday as i64)),
+        ("tm_mon", Value::Long(tm.tm_mon as i64)),
+        ("tm_year", Value::Long(tm.tm_year as i64)),
+        ("tm_wday", Value::Long(tm.tm_wday as i64)),
+        ("tm_yday", Value::Long(tm.tm_yday as i64)),
+        ("unparsed", Value::String(PhpString::from_vec(unparsed))),
+    ]);
+    Ok(Value::Array(Rc::new(RefCell::new(arr))))
+}
+
+/// PHP_FUNCTION(proc_nice) (ext/standard/exec.c)
+fn proc_nice_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    let pri = args.first().map(|v| v.to_long()).unwrap_or(0);
+    let pri = pri.clamp(i32::MIN as i64, i32::MAX as i64) as i32;
+    // SAFETY: nice() only changes this process' priority; errno tells a
+    // failure apart from a -1 result.
+    let failed = unsafe {
+        *libc::__errno_location() = 0;
+        libc::nice(pri);
+        *libc::__errno_location() != 0
+    };
+    if failed {
+        vm.emit_warning(
+            "proc_nice(): Only a super user may attempt to increase the priority of a process",
+        );
+        return Ok(Value::False);
+    }
+    Ok(Value::True)
+}
+
+/// php_inet_ntop()
+fn sockaddr_to_string(addr: *const libc::sockaddr) -> Option<String> {
+    if addr.is_null() {
+        return None;
+    }
+    // SAFETY: getifaddrs() hands out sockaddrs of the size their family
+    // implies.
+    unsafe {
+        match (*addr).sa_family as i32 {
+            libc::AF_INET => {
+                let a = &*(addr as *const libc::sockaddr_in);
+                Some(std::net::Ipv4Addr::from(u32::from_be(a.sin_addr.s_addr)).to_string())
+            }
+            libc::AF_INET6 => {
+                let a = &*(addr as *const libc::sockaddr_in6);
+                Some(std::net::Ipv6Addr::from(a.sin6_addr.s6_addr).to_string())
+            }
+            _ => None,
+        }
+    }
+}
+
+/// PHP_FUNCTION(net_get_interfaces) (ext/standard/net.c, getifaddrs())
+fn net_get_interfaces_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
+    let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: the list getifaddrs() allocates is walked, then freed.
+    if unsafe { libc::getifaddrs(&mut addrs) } != 0 {
+        let e = std::io::Error::last_os_error();
+        vm.emit_warning(&format!(
+            "getifaddrs() failed {}: {}",
+            e.raw_os_error().unwrap_or(0),
+            e
+        ));
+        return Ok(Value::False);
+    }
+    type Iface = (Vec<u8>, Vec<PhpArray>, bool);
+    let mut ifaces: Vec<Iface> = Vec::new();
+    let mut p = addrs;
+    while !p.is_null() {
+        let ifa = unsafe { &*p };
+        let name = unsafe { std::ffi::CStr::from_ptr(ifa.ifa_name) }
+            .to_bytes()
+            .to_vec();
+        let flags = ifa.ifa_flags;
+        let mut u: Vec<(&str, Value)> = vec![("flags", Value::Long(flags as i64))];
+        if !ifa.ifa_addr.is_null() {
+            let family = unsafe { (*ifa.ifa_addr).sa_family } as i64;
+            u.push(("family", Value::Long(family)));
+            if let Some(h) = sockaddr_to_string(ifa.ifa_addr) {
+                u.push(("address", Value::String(PhpString::from_string(h))));
+            }
+        }
+        if let Some(h) = sockaddr_to_string(ifa.ifa_netmask) {
+            u.push(("netmask", Value::String(PhpString::from_string(h))));
+        }
+        // (ifa_broadaddr / ifa_dstaddr share a union)
+        if flags & libc::IFF_BROADCAST as u32 != 0 {
+            if let Some(h) = sockaddr_to_string(ifa.ifa_ifu) {
+                u.push(("broadcast", Value::String(PhpString::from_string(h))));
+            }
+        }
+        if flags & libc::IFF_POINTOPOINT as u32 != 0 {
+            if let Some(h) = sockaddr_to_string(ifa.ifa_ifu) {
+                u.push(("ptp", Value::String(PhpString::from_string(h))));
+            }
+        }
+        let u = assoc(u);
+        match ifaces.iter_mut().find(|(n, _, _)| *n == name) {
+            Some((_, list, _)) => list.push(u),
+            None => ifaces.push((name, vec![u], flags & libc::IFF_UP as u32 != 0)),
+        }
+        p = ifa.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(addrs) };
+    let mut out = PhpArray::new();
+    for (name, list, up) in ifaces {
+        let mut uni = PhpArray::new();
+        for u in list {
+            uni.push(Value::Array(Rc::new(RefCell::new(u))));
+        }
+        let iface = assoc(vec![
+            ("unicast", Value::Array(Rc::new(RefCell::new(uni)))),
+            ("up", if up { Value::True } else { Value::False }),
+        ]);
+        out.set(
+            ArrayKey::String(PhpString::from_vec(name)),
+            Value::Array(Rc::new(RefCell::new(iface))),
+        );
+    }
+    Ok(Value::Array(Rc::new(RefCell::new(out))))
+}
+
 /// PHP_FUNCTION(sys_getloadavg)
 fn sys_getloadavg_fn(_vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     let mut load = [0f64; 3];
@@ -6396,6 +6561,17 @@ fn method_exists(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             return Ok(Value::True);
         }
     }
+    // An internal class declared by php-src's stubs (e.g. ReflectionClass,
+    // whose methods are dispatched natively).
+    if vm.is_known_builtin_class(&current) {
+        if let Some((decl, m)) = goro_core::stubs::find_method(&current, &method_lower) {
+            // An inherited private method is not found by class name.
+            let private = m.flags & goro_core::stubs::F_PRIVATE != 0;
+            if is_object || !private || decl.name.as_bytes().eq_ignore_ascii_case(&class_lower) {
+                return Ok(Value::True);
+            }
+        }
+    }
 
     // Check built-in class methods
     let has_builtin_method = match class_lower.as_slice() {
@@ -8779,9 +8955,16 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         return Ok(Value::String(PhpString::from_vec(body)));
     }
     // http:// and https:// (http_fopen_wrapper.c)
-    let lower_scheme = path_str.get(..8).unwrap_or("").to_ascii_lowercase();
+    let lower_scheme =
+        String::from_utf8_lossy(&path_str.as_bytes()[..path_str.len().min(8)]).to_ascii_lowercase();
     if lower_scheme.starts_with("http://") || lower_scheme.starts_with("https://") {
         let body = http_wrapper::http_open(vm, "file_get_contents", &path_str, context);
+        if vm.current_exception.is_some() {
+            return Err(VmError {
+                message: "Uncaught exception".into(),
+                line: vm.current_line,
+            });
+        }
         return Ok(match body {
             Some(b) => {
                 let start = if offset >= 0 {
@@ -11820,6 +12003,12 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let caller = fopen_caller.clone();
         let body = match http_wrapper::http_open(vm, &caller, &filename, args.get(3)) {
             Some(b) => b,
+            None if vm.current_exception.is_some() => {
+                return Err(VmError {
+                    message: "Uncaught exception".into(),
+                    line: vm.current_line,
+                });
+            }
             None => return Ok(Value::False),
         };
         // Write to a temp file
@@ -18160,10 +18349,6 @@ pub fn apply_startup_ini(vm: &mut Vm, ini: &[(String, String)]) -> Vec<u8> {
                 }
                 continue;
             }
-            // Directives of extension features goro does not build (PCRE
-            // JIT): PHP ignores unknown directives, so ini_get() keeps
-            // returning false.
-            "pcre.jit" => continue,
             "hard_timeout" => {
                 if let Ok(n) = value.trim().parse::<i64>() {
                     goro_core::value::HARD_TIMEOUT.store(n, std::sync::atomic::Ordering::Relaxed);

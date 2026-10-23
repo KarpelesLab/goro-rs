@@ -651,6 +651,50 @@ pub(super) fn http_open_ex(
     r.map(|b| (b, headers.unwrap_or_default()))
 }
 
+/// php_stream_context_get_uri_parser("http") + php_uri_parse_to_struct():
+/// the URL must be valid for the context's "uri_parser_class" (false after
+/// the ValueError for an unknown parser, or the "operation failed" warning).
+fn uri_parser_accepts(vm: &mut Vm, func: &str, http: &PhpArray, path: &str) -> bool {
+    let parser = match opt(http, "uri_parser_class").map(|v| v.deref()) {
+        None | Some(Value::Null) => goro_core::uri::get_parser(None),
+        Some(Value::String(s)) => goro_core::uri::get_parser(Some(s.as_bytes())),
+        Some(_) => None,
+    };
+    let Some(parser) = parser else {
+        let msg = format!(
+            "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
+            func
+        );
+        let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
+        vm.current_exception = Some(exc);
+        return false;
+    };
+    let ok = if parser == goro_core::uri::Parser::PhpParseUrl {
+        let parsed = match vm.functions.get(b"parse_url".as_slice()).copied() {
+            Some(f) => f(vm, &[Value::String(PhpString::from_bytes(path.as_bytes()))])
+                .unwrap_or(Value::False),
+            None => Value::False,
+        };
+        matches!(parsed, Value::Array(_))
+    } else {
+        goro_core::uri::parse_components(
+            vm,
+            parser,
+            path.as_bytes(),
+            goro_core::uri::ReadMode::Raw,
+            true,
+        )
+        .is_some()
+    };
+    if !ok {
+        vm.emit_warning(&format!(
+            "{}({}): Failed to open stream: operation failed",
+            func, path
+        ));
+    }
+    ok
+}
+
 /// php_stream_url_wrap_http_ex(), redirects included.
 fn http_wrap_ex(
     vm: &mut Vm,
@@ -669,6 +713,9 @@ fn http_wrap_ex(
     loop {
         if redirect_max < 1 {
             fail(vm, func, orig_url, "Redirection limit reached, aborting");
+            return None;
+        }
+        if !uri_parser_accepts(vm, func, &http, &path) {
             return None;
         }
         let Some(url) = parse_url(&path) else {
