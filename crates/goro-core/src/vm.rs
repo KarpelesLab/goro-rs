@@ -30985,34 +30985,6 @@ impl Vm {
                                     });
                                 }
                             }
-                            // An exception whose class has hooked properties: the
-                            // constructor writes through the write handler.
-                            if let Some(Value::Object(o)) = call.args.first() {
-                                let o = o.clone();
-                                if let Some(ok) = self.exception_ctor_via_hooks(&o, &call.args) {
-                                    if !ok {
-                                        if let Some((catch_target, _, _, _, saved_pc)) =
-                                            exception_handlers.pop()
-                                        {
-                                            pending_calls_catch_depth = Some(saved_pc);
-                                            ip = catch_target as usize;
-                                            return Ok(Flow::Continue);
-                                        }
-                                        return Err(VmError {
-                                            message: self.uncaught_exception_message(),
-                                            line: op.line,
-                                        });
-                                    }
-                                    self.write_operand(
-                                        &op.result,
-                                        Value::Null,
-                                        &mut cvs,
-                                        &mut tmps,
-                                        &static_cv_keys,
-                                    );
-                                    return Ok(Flow::Continue);
-                                }
-                            }
                             // For Exception-like classes, set message/code from args
                             if !call.args.is_empty() {
                                 // For constructors, args[0] is always $this
@@ -33916,6 +33888,38 @@ impl Vm {
                                                 || self
                                                     .class_extends(&class_lower, b"exception")
                                                 || self.class_extends(&class_lower, b"error");
+                                            // A class with hooked properties: the
+                                            // constructor writes through the write handler.
+                                            if is_exc {
+                                                drop(obj_mut);
+                                                let o = obj.clone();
+                                                if let Some(ok) =
+                                                    self.exception_ctor_via_hooks(&o, &call.args)
+                                                {
+                                                    if !ok {
+                                                        if let Some((catch_target, _, _, _, saved_pc)) =
+                                                            exception_handlers.pop()
+                                                        {
+                                                            pending_calls_catch_depth = Some(saved_pc);
+                                                            ip = catch_target as usize;
+                                                            return Ok(Flow::Continue);
+                                                        }
+                                                        return Err(VmError {
+                                                            message: self.uncaught_exception_message(),
+                                                            line: op.line,
+                                                        });
+                                                    }
+                                                    self.write_operand(
+                                                        &op.result,
+                                                        Value::Null,
+                                                        &mut cvs,
+                                                        &mut tmps,
+                                                        &static_cv_keys,
+                                                    );
+                                                    return Ok(Flow::Continue);
+                                                }
+                                                obj_mut = obj.borrow_mut();
+                                            }
                                             if is_exc
                                                 && class_lower.as_slice() == b"errorexception"
                                             {
