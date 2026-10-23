@@ -883,6 +883,22 @@ impl Compiler {
     /// - `Class::method()` when compiling inside a class method.
     /// - `function_name()` when compiling inside a global/namespaced function.
     /// - The source file path otherwise (top-level script).
+    /// The line of the opcodes compiled right after object expression
+    /// `object` (CG(zend_lineno)): a closure leaves it at its closing line
+    /// (zend_compile_func_decl() sets decl->end_lineno and does not restore
+    /// it), so `(function () {\n})->bindTo($x)` reports $x there.
+    #[inline(never)]
+    fn line_after_object(object: &Expr, line: u32) -> u32 {
+        match &object.kind {
+            ExprKind::Closure { end_line, .. } | ExprKind::ArrowFunction { end_line, .. }
+                if *end_line > line =>
+            {
+                *end_line
+            }
+            _ => line,
+        }
+    }
+
     fn closure_display_name(&self, line: u32) -> Vec<u8> {
         let mut name = b"{closure:".to_vec();
         // Nested closure: parent already has a display_name like `{closure:...}`.
@@ -18121,12 +18137,13 @@ impl Compiler {
                         }
                     };
 
+                let init_line = Self::line_after_object(object, expr.span.line);
                 self.op_array.emit(Op {
                     opcode: OpCode::InitMethodCall,
                     op1: obj,
                     op2: method_operand,
                     result: OperandType::Unused,
-                    line: expr.span.line,
+                    line: init_line,
                 });
 
                 // Pass method name through so by-ref args of known builtin methods
@@ -18134,7 +18151,7 @@ impl Compiler {
                 let bridge_name: Option<Vec<u8>> = method_name_for_ref
                     .as_ref()
                     .and_then(|m| Self::builtin_method_to_bridge_func(m));
-                self.compile_send_args_with_name(args, expr.span.line, bridge_name.as_deref())?;
+                self.compile_send_args_with_name(args, init_line, bridge_name.as_deref())?;
 
                 // The call is on the method name's line (GH-8810).
                 let call_line = if method.span.line > 0 {
