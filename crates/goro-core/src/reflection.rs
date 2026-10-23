@@ -10618,12 +10618,196 @@ pub fn reflection_extension_method(
         }
         b"ispersistent" => Some(Value::True),
         b"istemporary" => Some(Value::False),
-        b"__tostring" => Some(Value::String(PhpString::from_string(format!(
-            "Extension [ <persistent> extension #0 {} version <{}> ] {{\n}}\n",
-            name, "8.5.4"
+        b"__tostring" => Some(Value::String(PhpString::from_string(extension_string(
+            vm, &name, &ext_lower,
         )))),
         _ => None,
     }
+}
+
+/// The order a module registers its constants and functions in (its stub's
+/// declaration order), for the modules where it is known.
+fn extension_declaration_order(ext: &str) -> (&'static [&'static str], &'static [&'static str]) {
+    match ext {
+        "pcre" => (
+            &[
+                "PREG_PATTERN_ORDER",
+                "PREG_SET_ORDER",
+                "PREG_OFFSET_CAPTURE",
+                "PREG_UNMATCHED_AS_NULL",
+                "PREG_SPLIT_NO_EMPTY",
+                "PREG_SPLIT_DELIM_CAPTURE",
+                "PREG_SPLIT_OFFSET_CAPTURE",
+                "PREG_GREP_INVERT",
+                "PREG_NO_ERROR",
+                "PREG_INTERNAL_ERROR",
+                "PREG_BACKTRACK_LIMIT_ERROR",
+                "PREG_RECURSION_LIMIT_ERROR",
+                "PREG_BAD_UTF8_ERROR",
+                "PREG_BAD_UTF8_OFFSET_ERROR",
+                "PREG_JIT_STACKLIMIT_ERROR",
+                "PCRE_VERSION",
+                "PCRE_VERSION_MAJOR",
+                "PCRE_VERSION_MINOR",
+                "PCRE_JIT_SUPPORT",
+            ],
+            &[
+                "preg_match",
+                "preg_match_all",
+                "preg_replace",
+                "preg_filter",
+                "preg_replace_callback",
+                "preg_replace_callback_array",
+                "preg_split",
+                "preg_quote",
+                "preg_grep",
+                "preg_last_error",
+                "preg_last_error_msg",
+            ],
+        ),
+        _ => (&[], &[]),
+    }
+}
+
+/// _extension_string(): the module's INI entries, constants, functions and
+/// classes (as php-src's stubs declare them).
+#[inline(never)]
+fn extension_string(vm: &mut Vm, name: &str, ext_lower: &str) -> String {
+    let number = vm
+        .loaded_extensions
+        .iter()
+        .position(|e| e.eq_ignore_ascii_case(ext_lower.as_bytes()))
+        .map_or(0, |i| i + 1);
+    let mut s = format!(
+        "Extension [ <persistent> extension #{} {} version {} ] {{\n",
+        number, name, "8.5.4"
+    );
+    let ini = get_extension_ini_entries(ext_lower);
+    if !ini.is_empty() {
+        s.push_str("\n  - INI {\n");
+        for entry in ini {
+            let access = ini_access(entry);
+            let mut mods: Vec<&str> = Vec::new();
+            if access == 7 {
+                mods.push("ALL");
+            } else {
+                if access & 1 != 0 {
+                    mods.push("USER");
+                }
+                if access & 2 != 0 {
+                    mods.push("PERDIR");
+                }
+                if access & 4 != 0 {
+                    mods.push("SYSTEM");
+                }
+            }
+            let cur = vm
+                .constants
+                .get(entry.as_bytes())
+                .map(|v| v.to_php_string().to_string_lossy())
+                .unwrap_or_default();
+            s.push_str(&format!(
+                "    Entry [ {} <{}> ]\n      Current = '{}'\n",
+                entry,
+                mods.join(","),
+                cur
+            ));
+            if let Some(Some(orig)) = vm.ini_originals.get(entry.as_bytes()) {
+                s.push_str(&format!(
+                    "      Default = '{}'\n",
+                    orig.to_php_string().to_string_lossy()
+                ));
+            }
+            s.push_str("    }\n");
+        }
+        s.push_str("  }\n");
+    }
+    // (the stubs are sorted by name: the declaration order where known)
+    let (const_order, func_order) = extension_declaration_order(ext_lower);
+    let rank = |order: &[&str], n: &str| order.iter().position(|o| *o == n).unwrap_or(usize::MAX);
+    let mut stub_consts: Vec<&crate::stubs::StubConst> = crate::stub_sigs::CONSTANTS
+        .iter()
+        .filter(|c| c.ext.eq_ignore_ascii_case(ext_lower))
+        .collect();
+    stub_consts.sort_by_key(|c| rank(const_order, c.name));
+    let mut consts = String::new();
+    let mut nconsts = 0;
+    for c in stub_consts {
+        let Some(v) = vm.constants.get(c.name.as_bytes()) else {
+            continue;
+        };
+        let shown = match v {
+            Value::Array(_) => "Array".to_string(),
+            v => v.to_php_string().to_string_lossy(),
+        };
+        let ty = match v {
+            Value::True | Value::False => "bool".to_string(),
+            v => Vm::value_type_name(v),
+        };
+        consts.push_str(&format!(
+            "    Constant [ <persistent> {} {} ] {{ {} }}\n",
+            ty, c.name, shown
+        ));
+        nconsts += 1;
+    }
+    if nconsts > 0 {
+        s.push_str(&format!(
+            "\n  - Constants [{}] {{\n{}  }}\n",
+            nconsts, consts
+        ));
+    }
+    let mut funcs: Vec<&str> = crate::stub_sigs::FUNCTIONS
+        .iter()
+        .filter(|f| {
+            f.ext.eq_ignore_ascii_case(ext_lower)
+                && vm
+                    .functions
+                    .contains_key(f.name.to_ascii_lowercase().as_bytes())
+        })
+        .map(|f| f.name)
+        .collect();
+    funcs.sort_by_key(|f| rank(func_order, f));
+    if !funcs.is_empty() {
+        s.push_str("\n  - Functions {\n");
+        for f in funcs {
+            let rf = create_reflection_function(vm, f);
+            if let Some(Value::String(t)) = vm.call_object_method(&rf, b"__toString", &[]) {
+                for line in t.to_string_lossy().split_inclusive('\n') {
+                    if line != "\n" {
+                        s.push_str("    ");
+                    }
+                    s.push_str(line);
+                }
+            }
+        }
+        s.push_str("  }\n");
+    }
+    let classes: Vec<&str> = crate::stub_sigs::CLASSES
+        .iter()
+        .filter(|c| {
+            c.ext.eq_ignore_ascii_case(ext_lower)
+                && internal_class_known(vm, c.name.to_ascii_lowercase().as_bytes())
+        })
+        .map(|c| c.name)
+        .collect();
+    if !classes.is_empty() {
+        s.push_str(&format!("\n  - Classes [{}] {{", classes.len()));
+        for c in classes {
+            let rc = create_reflection_class(vm, c);
+            if let Some(Value::String(t)) = vm.call_object_method(&rc, b"__toString", &[]) {
+                s.push('\n');
+                for line in t.to_string_lossy().split_inclusive('\n') {
+                    if line != "\n" {
+                        s.push_str("    ");
+                    }
+                    s.push_str(line);
+                }
+            }
+        }
+        s.push_str("  }\n");
+    }
+    s.push_str("}\n");
+    s
 }
 
 fn get_extension_classes(ext: &str) -> &'static [&'static str] {

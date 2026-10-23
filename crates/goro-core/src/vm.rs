@@ -1044,6 +1044,21 @@ impl PendingCall {
     }
 }
 
+impl Vm {
+    /// ReflectionExtension::__construct(): the error for a module that is
+    /// not loaded.
+    #[cold]
+    #[inline(never)]
+    fn reflection_extension_missing(&self, name: &Value) -> Option<String> {
+        let n = name.to_php_string();
+        let loaded = self
+            .loaded_extensions
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(n.as_bytes()));
+        (!loaded).then(|| format!("Extension \"{}\" does not exist", n.to_string_lossy()))
+    }
+}
+
 /// PHP_EXTENSION_DIR: `extensions` next to the running binary.
 pub fn default_extension_dir() -> String {
     std::env::current_exe()
@@ -33076,6 +33091,31 @@ impl Vm {
                                                         line: op.line,
                                                     });
                                                 }
+                                            }
+                                            if let Some(msg) =
+                                                self.reflection_extension_missing(&actual_value)
+                                            {
+                                                drop(obj_mut);
+                                                let exc = self.create_exception(
+                                                    b"ReflectionException",
+                                                    &msg,
+                                                    op.line,
+                                                );
+                                                self.current_exception = Some(exc);
+                                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                                    exception_handlers.pop()
+                                                {
+                                                    pending_calls_catch_depth = Some(saved_pc);
+                                                    ip = catch_target as usize;
+                                                    return Ok(Flow::Continue);
+                                                }
+                                                return Err(VmError {
+                                                    message: format!(
+                                                        "Uncaught ReflectionException: {}",
+                                                        msg
+                                                    ),
+                                                    line: op.line,
+                                                });
                                             }
                                             if call.args.len() > 1 {
                                                 let raw = call.args[1]
