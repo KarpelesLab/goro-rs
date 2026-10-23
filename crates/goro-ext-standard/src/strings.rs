@@ -2285,8 +2285,9 @@ fn stripcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                         oct.push(bytes[j]);
                         j += 1;
                     }
-                    let s_oct: String = oct.iter().map(|&b| b as char).collect();
-                    result.push(u8::from_str_radix(&s_oct, 8).unwrap_or(0));
+                    // (char)strtol(numtmp, NULL, 8): \777 wraps to 0xFF
+                    let v = oct.iter().fold(0u32, |v, &d| v * 8 + u32::from(d - b'0'));
+                    result.push(v as u8);
                     i = j;
                 }
                 b'x' => {
@@ -2300,6 +2301,9 @@ fn stripcslashes(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     if !hex.is_empty() {
                         let s_hex: String = hex.iter().map(|&b| b as char).collect();
                         result.push(u8::from_str_radix(&s_hex, 16).unwrap_or(0));
+                    } else {
+                        // no hex digit: falls through to the literal 'x'
+                        result.push(b'x');
                     }
                     i = j;
                 }
