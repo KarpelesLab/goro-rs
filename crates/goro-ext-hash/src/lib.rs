@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 mod algos;
+mod mhash;
 mod ops;
 mod tables;
 
@@ -52,6 +53,7 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"hash_pbkdf2", hash_pbkdf2_fn);
     vm.register_function(b"hash_equals", hash_equals_fn);
     vm.register_function(b"hash_hkdf", hash_hkdf_fn);
+    mhash::register(vm);
 
     // Register parameter types for strict_types enforcement + null-deprecation
     use goro_core::opcode::ParamType;
