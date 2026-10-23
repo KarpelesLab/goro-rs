@@ -4145,6 +4145,52 @@ impl Vm {
         r
     }
 
+    /// FE_RESET_RW on a variable: SEPARATE_ARRAY() of the array it holds
+    /// when another holder (a property or element it was assigned from)
+    /// shares it, so what the loop writes through its references does not
+    /// show through that holder. `arr_val` is the variable's fetched value
+    /// (its reference cell, or a copy of its array handle); the running
+    /// by-reference loops over the same array do not count as holders.
+    #[inline(never)]
+    fn foreach_ref_separate_cv(arr_val: &mut Value, slot: &mut Value) {
+        match arr_val {
+            Value::Reference(r) => {
+                let Ok(mut inner) = r.try_borrow_mut() else {
+                    return;
+                };
+                let copy = match &*inner {
+                    Value::Array(a) if crate::array::shared_beyond(a, 1) => match a.try_borrow() {
+                        Ok(b) => b.clone(),
+                        Err(_) => return,
+                    },
+                    _ => return,
+                };
+                *inner = Value::Array(Rc::new(RefCell::new(copy)));
+            }
+            Value::Array(a) => {
+                if !crate::array::shared_beyond(a, 2) {
+                    return;
+                }
+                let Ok(copy) = a.try_borrow().map(|b| b.clone()) else {
+                    return;
+                };
+                let rc = Rc::new(RefCell::new(copy));
+                match slot {
+                    Value::Reference(r) => {
+                        if !matches!(&*r.borrow(), Value::Array(b) if Rc::ptr_eq(a, b)) {
+                            return;
+                        }
+                        *r.borrow_mut() = Value::Array(rc.clone());
+                    }
+                    Value::Array(b) if Rc::ptr_eq(a, b) => *slot = Value::Array(rc.clone()),
+                    _ => return,
+                }
+                *arr_val = Value::Array(rc);
+            }
+            _ => {}
+        }
+    }
+
     /// FE_FETCH_RW of a by-reference foreach over a reference (a property,
     /// an element, a static property): another array assigned to it
     /// meanwhile is iterated from its internal pointer; anything else but
@@ -40582,6 +40628,9 @@ impl Vm {
                             crate::array::separate_shared(&mut inner);
                         }
                     }
+                    if let OperandType::Cv(ci) = op.op1 {
+                        Self::foreach_ref_separate_cv(&mut arr_val, &mut cvs[ci as usize]);
+                    }
                     // For by-ref foreach, we need to work on the original array
                     // If the source is a CV, get the actual Rc from it
                     let arr_rc = match &arr_val {
@@ -41154,19 +41203,10 @@ impl Vm {
                                     it.set(next_pos + 1);
                                     arr_rc.borrow_mut().iterator_attach(it);
                                 }
-                                // The previous element's reference is now held by the
-                                // array alone (refcount 1): it is a plain value again.
-                                if let Some(prev) = prev.and_then(|w| w.upgrade()) {
-                                    if Rc::strong_count(&prev) == 2 && next_pos > 0 {
-                                        let mut ab = arr_rc.borrow_mut();
-                                        if let Some(slot) = ab.value_at_mut(next_pos - 1) {
-                                            if matches!(slot, Value::Reference(r) if Rc::ptr_eq(r, &prev))
-                                            {
-                                                *slot = prev.borrow().clone();
-                                            }
-                                        }
-                                    }
-                                }
+                                // (the previous element stays a reference, held
+                                // by the array alone: a copy of the array
+                                // copies its value, zend_array_dup)
+                                drop(prev);
                                 false
                             }
                             None => true,
