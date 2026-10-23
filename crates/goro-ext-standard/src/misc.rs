@@ -629,7 +629,6 @@ final class StreamBucket {
     vm.register_function(b"pathinfo", pathinfo_fn);
     // class_implements, class_parents, class_uses moved to goro-ext-spl
     vm.register_function(b"str_increment", str_increment_fn);
-    vm.register_function(b"str_decrement", str_decrement_fn);
     vm.register_function(b"get_included_files", get_included_files_fn);
     vm.register_function(b"get_required_files", get_included_files_fn);
     // iterator_apply moved to goro-ext-spl
@@ -18660,115 +18659,6 @@ fn str_increment_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         let mut new_result = vec![prefix];
         new_result.extend_from_slice(&result);
         result = new_result;
-    }
-    Ok(Value::String(PhpString::from_vec(result)))
-}
-
-fn str_decrement_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let s = args.first().unwrap_or(&Value::Null).to_php_string();
-    let bytes = s.as_bytes();
-    if bytes.is_empty() {
-        let msg = "str_decrement(): Argument #1 ($string) must not be empty";
-        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg.to_string(),
-            line: vm.current_line,
-        });
-    }
-    // Validate all characters are alphanumeric first
-    if !bytes.iter().all(|b| b.is_ascii_alphanumeric()) {
-        let msg = "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
-        let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
-        vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg.to_string(),
-            line: vm.current_line,
-        });
-    }
-    // Check if string is out of decrement range:
-    // - Single char: 'a', 'A', '0' are out of range (can't go lower)
-    // - Multi-char starting with '0': if all chars are minimums (a/A/0), out of range
-    //   because the numeric leading zero removal would produce an invalid result
-    // - Multi-char starting with 'a'/'A': even if all chars are minimums,
-    //   the leading char is just removed (underflow is allowed)
-    {
-        let all_min = bytes.iter().all(|&b| b == b'a' || b == b'A' || b == b'0');
-        if all_min {
-            let first = bytes[0];
-            if bytes.len() == 1 || first == b'0' {
-                let msg = format!(
-                    "str_decrement(): Argument #1 ($string) \"{}\" is out of decrement range",
-                    String::from_utf8_lossy(bytes)
-                );
-                let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: vm.current_line,
-                });
-            }
-        }
-    }
-    let mut result: Vec<u8> = bytes.to_vec();
-    let mut borrow = true;
-    for i in (0..result.len()).rev() {
-        if !borrow {
-            break;
-        }
-        match result[i] {
-            b'a' => {
-                result[i] = b'z';
-                borrow = true;
-            }
-            b'A' => {
-                result[i] = b'Z';
-                borrow = true;
-            }
-            b'0' => {
-                result[i] = b'9';
-                borrow = true;
-            }
-            b'b'..=b'z' => {
-                result[i] -= 1;
-                borrow = false;
-            }
-            b'B'..=b'Z' => {
-                result[i] -= 1;
-                borrow = false;
-            }
-            b'1'..=b'9' => {
-                result[i] -= 1;
-                borrow = false;
-            }
-            _ => {
-                let msg = "str_decrement(): Argument #1 ($string) must be composed only of alphanumeric ASCII characters";
-                let exc = vm.create_exception(b"ValueError", msg, vm.current_line);
-                vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg.to_string(),
-                    line: vm.current_line,
-                });
-            }
-        }
-    }
-    // If borrow propagated past the first character, remove the leading character
-    if borrow && result.len() > 1 {
-        result.remove(0);
-    } else if !borrow && result.len() > 1 {
-        // After decrementing, strip the leading character if it became the minimum
-        // for its type and the original first char was NOT this minimum.
-        // E.g., "10" -> "09" -> strip '0' -> "9"
-        // E.g., "1A" -> "0Z" -> strip '0' -> "Z"  (wait, '1' decrements to '0')
-        // Actually for "1A": i=1 'A' -> borrow, result='Z', then i=0 '1' -> '0', no borrow
-        // For "Ba": i=1 'a' -> borrow, result='z', then i=0 'B' -> 'A', no borrow
-        // For "bA": i=1 'A' -> borrow, result='Z', then i=0 'b' -> 'a', no borrow
-        // So when first char decremented to its minimum AND it wasn't already that minimum:
-        let new_first = result[0];
-        let old_first = bytes[0];
-        if new_first != old_first && (new_first == b'0' || new_first == b'a' || new_first == b'A') {
-            result.remove(0);
-        }
     }
     Ok(Value::String(PhpString::from_vec(result)))
 }

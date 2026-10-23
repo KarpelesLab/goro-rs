@@ -5042,326 +5042,286 @@ fn pack_long(vm: &mut Vm, v: Option<&Value>) -> i64 {
     v.to_long()
 }
 
-fn pack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+fn pack_value_error(vm: &mut Vm, msg: String) -> VmError {
+    let exc = vm.create_exception(b"ValueError", &msg, 0);
+    vm.current_exception = Some(exc);
+    VmError {
+        message: msg,
+        line: vm.current_line,
+    }
+}
+
+/// pack(): a port of ext/standard/pack.c.
+fn pack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let format = args.first().unwrap_or(&Value::Null).to_php_string();
-    let fmt = format.as_bytes();
-    let mut result = Vec::new();
-    let mut arg_idx = 1;
-    let mut i = 0;
+    let format = format.as_bytes();
+    let argv = args.get(1..).unwrap_or(&[]);
+    let num_args = argv.len() as i64;
+    let int_size = std::mem::size_of::<std::ffi::c_int>() as i64;
 
-    while i < fmt.len() {
-        let code = fmt[i];
+    // Preprocess the format into (code, arg) pairs, converting the string
+    // arguments of '*' codes up front like try_convert_to_string().
+    let mut codes: Vec<(u8, i64)> = Vec::new();
+    let mut strs: Vec<Option<PhpString>> = vec![None; argv.len()];
+    let mut currentarg: i64 = 0;
+    let mut i = 0usize;
+    while i < format.len() {
+        let code = format[i];
         i += 1;
-
-        // Parse optional repeat count
-        let mut count = 0u32;
-        let mut has_count = false;
-        if code == b'a' || code == b'A' || code == b'H' || code == b'h' || code == b'Z' {
-            // For string codes, count means padding length; * means full string
-            if i < fmt.len() && fmt[i] == b'*' {
-                count = u32::MAX;
+        let mut arg: i64 = 1;
+        if i < format.len() {
+            let c = format[i];
+            if c == b'*' {
+                arg = -1;
                 i += 1;
-            } else {
-                while i < fmt.len() && fmt[i].is_ascii_digit() {
-                    count = count * 10 + (fmt[i] - b'0') as u32;
-                    has_count = true;
+            } else if c.is_ascii_digit() {
+                // atoi()
+                let mut n: i64 = 0;
+                while i < format.len() && format[i].is_ascii_digit() {
+                    n = (n * 10 + (format[i] - b'0') as i64) & 0xffff_ffff;
                     i += 1;
                 }
-                if !has_count {
-                    count = 1;
-                }
-            }
-        } else if i < fmt.len() && fmt[i] == b'*' {
-            count = u32::MAX; // Repeat for all remaining args
-            i += 1;
-        } else {
-            while i < fmt.len() && fmt[i].is_ascii_digit() {
-                count = count * 10 + (fmt[i] - b'0') as u32;
-                has_count = true;
-                i += 1;
-            }
-            if !has_count {
-                count = 1;
+                arg = n as u32 as i32 as i64;
             }
         }
-
-        let repeat = if count == u32::MAX {
-            args.len() - arg_idx
-        } else {
-            count as usize
-        };
-
-        // For numeric types (one arg per repeat), reject upfront if too few args
-        // to avoid huge allocations before the check (see bug78833).
-        let is_numeric_type = matches!(
-            code,
-            b'C' | b'c'
-                | b'S'
-                | b'v'
-                | b'n'
-                | b's'
-                | b'L'
-                | b'V'
-                | b'l'
-                | b'i'
-                | b'I'
-                | b'N'
-                | b'q'
-                | b'Q'
-                | b'P'
-                | b'J'
-                | b'f'
-                | b'g'
-                | b'G'
-                | b'd'
-                | b'e'
-                | b'E'
-        );
-        if is_numeric_type && arg_idx + repeat > args.len() {
-            let msg = format!("Type {}: too few arguments", code as char);
-            let exc = _vm.create_exception(b"ValueError", &msg, 0);
-            _vm.current_exception = Some(exc);
-            return Err(VmError {
-                message: msg,
-                line: _vm.current_line,
-            });
-        }
-
         match code {
-            b'C' | b'c' => {
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx));
-                    result.push(v as u8);
-                    arg_idx += 1;
+            b'x' | b'X' | b'@' => {
+                if arg < 0 {
+                    let line = vm.current_line;
+                    vm.emit_warning_at(
+                        &format!("pack(): Type {}: '*' ignored", code as char),
+                        line,
+                    );
+                    arg = 1;
                 }
             }
-            b'S' | b'v' => {
-                // unsigned short (16-bit LE)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as u16;
-                    result.extend_from_slice(&v.to_le_bytes());
-                    arg_idx += 1;
+            b'a' | b'A' | b'Z' | b'h' | b'H' => {
+                if currentarg >= num_args {
+                    return Err(pack_value_error(
+                        vm,
+                        format!("Type {}: not enough arguments", code as char),
+                    ));
                 }
-            }
-            b'n' => {
-                // unsigned short (16-bit BE)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as u16;
-                    result.extend_from_slice(&v.to_be_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'L' | b'V' => {
-                // unsigned long (32-bit LE)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as u32;
-                    result.extend_from_slice(&v.to_le_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'l' => {
-                // signed long (32-bit, native byte order — LE on x86)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as i32;
-                    result.extend_from_slice(&v.to_ne_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'i' => {
-                // signed int (machine-dependent size and byte order — 4 bytes on x86_64)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as std::ffi::c_int;
-                    result.extend_from_slice(&v.to_ne_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'I' => {
-                // unsigned int (machine-dependent — 4 bytes on x86_64)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as std::ffi::c_uint;
-                    result.extend_from_slice(&v.to_ne_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b's' => {
-                // signed short (16-bit, native byte order)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as i16;
-                    result.extend_from_slice(&v.to_ne_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'q' => {
-                // signed long long (64-bit, native byte order)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx));
-                    result.extend_from_slice(&v.to_ne_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'N' => {
-                // unsigned long (32-bit BE)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as u32;
-                    result.extend_from_slice(&v.to_be_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'Q' | b'P' => {
-                // unsigned long long (64-bit LE)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as u64;
-                    result.extend_from_slice(&v.to_le_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'J' => {
-                // unsigned long long (64-bit BE)
-                for _ in 0..repeat {
-                    let v = pack_long(_vm, args.get(arg_idx)) as u64;
-                    result.extend_from_slice(&v.to_be_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'f' | b'g' => {
-                // float - f is native, g is forced little-endian (x86 native is LE).
-                for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0) as f32;
-                    result.extend_from_slice(&v.to_le_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'G' => {
-                // float - forced big-endian
-                for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0) as f32;
-                    result.extend_from_slice(&v.to_be_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'd' | b'e' => {
-                // double - d is native, e is forced little-endian (x86 native is LE).
-                for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0);
-                    result.extend_from_slice(&v.to_le_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'E' => {
-                // double - forced big-endian
-                for _ in 0..repeat {
-                    let v = args.get(arg_idx).map(|v| v.to_double()).unwrap_or(0.0);
-                    result.extend_from_slice(&v.to_be_bytes());
-                    arg_idx += 1;
-                }
-            }
-            b'a' | b'A' => {
-                // NUL-padded / space-padded string
-                let s = args
-                    .get(arg_idx)
-                    .map(|v| v.to_php_string())
-                    .unwrap_or_else(PhpString::empty);
-                arg_idx += 1;
-                let pad = if code == b'A' { b' ' } else { b'\0' };
-                if count == u32::MAX {
-                    // a*/A* = full string length
-                    result.extend_from_slice(s.as_bytes());
-                } else {
-                    let len = count as usize;
-                    if s.len() >= len {
-                        result.extend_from_slice(&s.as_bytes()[..len]);
-                    } else {
-                        result.extend_from_slice(s.as_bytes());
-                        for _ in 0..(len - s.len()) {
-                            result.push(pad);
-                        }
+                let idx = currentarg as usize;
+                let s = vm.value_to_string_checked(&argv[idx])?;
+                if arg < 0 {
+                    arg = s.len() as i64;
+                    if code == b'Z' {
+                        arg += 1;
                     }
                 }
+                strs[idx] = Some(s);
+                currentarg += 1;
             }
-            b'H' | b'h' => {
-                // Hex string
-                let s = args
-                    .get(arg_idx)
-                    .map(|v| v.to_php_string())
-                    .unwrap_or_else(PhpString::empty);
-                arg_idx += 1;
-                let hex = s.as_bytes();
-                let want_nibbles = if count == u32::MAX {
-                    hex.len()
-                } else {
-                    count as usize
-                };
-                if want_nibbles > hex.len() {
-                    _vm.emit_warning_at(
+            b'q' | b'Q' | b'J' | b'P' | b'c' | b'C' | b's' | b'S' | b'i' | b'I' | b'l' | b'L'
+            | b'n' | b'N' | b'v' | b'V' | b'f' | b'g' | b'G' | b'd' | b'e' | b'E' => {
+                if arg < 0 {
+                    arg = num_args - currentarg;
+                }
+                if currentarg > i32::MAX as i64 - arg || currentarg + arg > num_args {
+                    return Err(pack_value_error(
+                        vm,
+                        format!("Type {}: too few arguments", code as char),
+                    ));
+                }
+                currentarg += arg;
+            }
+            _ => {
+                return Err(pack_value_error(
+                    vm,
+                    format!("Type {}: unknown format code", code as char),
+                ));
+            }
+        }
+        codes.push((code, arg));
+    }
+    if currentarg < num_args {
+        let line = vm.current_line;
+        vm.emit_warning_at(
+            &format!("pack(): {} arguments unused", num_args - currentarg),
+            line,
+        );
+    }
+
+    // Size the output (and emit the 'X' warnings) like the C sizing pass.
+    let mut outputpos: i64 = 0;
+    let mut outputsize: i64 = 0;
+    for &(code, arg) in &codes {
+        let mut cnt = arg;
+        let unit = match code {
+            b'h' | b'H' => {
+                cnt = arg / 2 + arg % 2;
+                1
+            }
+            b'a' | b'A' | b'Z' | b'c' | b'C' | b'x' => 1,
+            b's' | b'S' | b'n' | b'v' => 2,
+            b'i' | b'I' => int_size,
+            b'l' | b'L' | b'N' | b'V' | b'f' | b'g' | b'G' => 4,
+            b'q' | b'Q' | b'J' | b'P' | b'd' | b'e' | b'E' => 8,
+            b'X' => {
+                outputpos -= arg;
+                if outputpos < 0 {
+                    let line = vm.current_line;
+                    vm.emit_warning_at(
+                        &format!("pack(): Type {}: outside of string", code as char),
+                        line,
+                    );
+                    outputpos = 0;
+                }
+                0
+            }
+            b'@' => {
+                outputpos = arg;
+                0
+            }
+            _ => 0,
+        };
+        if unit > 0 {
+            if cnt < 0 || (i32::MAX as i64 - outputpos) / unit < cnt {
+                return Err(pack_value_error(
+                    vm,
+                    format!("Type {}: integer overflow in format string", code as char),
+                ));
+            }
+            outputpos += cnt * unit;
+        }
+        outputsize = outputsize.max(outputpos);
+    }
+
+    let mut out = vec![0u8; outputsize.max(0) as usize + 1];
+    let mut pos: usize = 0;
+    let mut currentarg = 0usize;
+    for &(code, arg) in &codes {
+        let n = arg.max(0) as usize;
+        match code {
+            b'a' | b'A' | b'Z' => {
+                let arg_cp = if code != b'Z' { n } else { n.saturating_sub(1) };
+                let s = strs[currentarg].take().unwrap_or_else(PhpString::empty);
+                currentarg += 1;
+                let fill = if code == b'A' { b' ' } else { 0 };
+                out[pos..pos + n].fill(fill);
+                let cp = s.len().min(arg_cp);
+                out[pos..pos + cp].copy_from_slice(&s.as_bytes()[..cp]);
+                pos += n;
+            }
+            b'h' | b'H' => {
+                let mut nibbleshift = if code == b'h' { 0 } else { 4 };
+                let mut first = true;
+                let s = strs[currentarg].take().unwrap_or_else(PhpString::empty);
+                currentarg += 1;
+                let mut cnt = n;
+                if cnt > s.len() {
+                    let line = vm.current_line;
+                    vm.emit_warning_at(
                         &format!(
                             "pack(): Type {}: not enough characters in string",
                             code as char
                         ),
-                        _vm.current_line,
+                        line,
                     );
+                    cnt = s.len();
                 }
-                let nibbles = want_nibbles.min(hex.len());
-                if code == b'H' {
-                    // High nibble first
-                    for j in (0..nibbles).step_by(2) {
-                        let hi = hex_val(hex.get(j).copied().unwrap_or(b'0'));
-                        let lo = hex_val(hex.get(j + 1).copied().unwrap_or(b'0'));
-                        result.push(hi * 16 + lo);
+                // `outputpos--` then pre-increment on each first nibble.
+                let mut opos = pos as isize - 1;
+                for &c in &s.as_bytes()[..cnt] {
+                    let nib = match c {
+                        b'0'..=b'9' => c - b'0',
+                        b'A'..=b'F' => c - b'A' + 10,
+                        b'a'..=b'f' => c - b'a' + 10,
+                        _ => {
+                            let line = vm.current_line;
+                            vm.emit_warning_at(
+                                &format!(
+                                    "pack(): Type {}: illegal hex digit {}",
+                                    code as char, c as char
+                                ),
+                                line,
+                            );
+                            0
+                        }
+                    };
+                    if first {
+                        opos += 1;
+                        out[opos as usize] = 0;
+                        first = false;
+                    } else {
+                        first = true;
                     }
-                } else {
-                    // Low nibble first
-                    for j in (0..nibbles).step_by(2) {
-                        let lo = hex_val(hex.get(j).copied().unwrap_or(b'0'));
-                        let hi = hex_val(hex.get(j + 1).copied().unwrap_or(b'0'));
-                        result.push(hi * 16 + lo);
+                    out[opos as usize] |= nib << nibbleshift;
+                    nibbleshift = (nibbleshift + 4) & 7;
+                }
+                pos = (opos + 1) as usize;
+            }
+            b'c' | b'C' | b's' | b'S' | b'n' | b'v' | b'i' | b'I' | b'l' | b'L' | b'N' | b'V'
+            | b'q' | b'Q' | b'J' | b'P' => {
+                let (size, big) = match code {
+                    b'c' | b'C' => (1, false),
+                    b'n' => (2, true),
+                    b's' | b'S' | b'v' => (2, false),
+                    b'i' | b'I' => (int_size as usize, false),
+                    b'N' => (4, true),
+                    b'l' | b'L' | b'V' => (4, false),
+                    b'J' => (8, true),
+                    _ => (8, false),
+                };
+                for _ in 0..n {
+                    let v = pack_long(vm, argv.get(currentarg)) as u64;
+                    currentarg += 1;
+                    let le = v.to_le_bytes();
+                    for k in 0..size {
+                        out[pos + k] = if big { le[size - 1 - k] } else { le[k] };
                     }
+                    pos += size;
+                }
+            }
+            b'f' | b'g' | b'G' => {
+                for _ in 0..n {
+                    let v = argv.get(currentarg).map(|v| v.to_double()).unwrap_or(0.0) as f32;
+                    currentarg += 1;
+                    let b = if code == b'G' {
+                        v.to_be_bytes()
+                    } else {
+                        v.to_le_bytes()
+                    };
+                    out[pos..pos + 4].copy_from_slice(&b);
+                    pos += 4;
+                }
+            }
+            b'd' | b'e' | b'E' => {
+                for _ in 0..n {
+                    let v = argv.get(currentarg).map(|v| v.to_double()).unwrap_or(0.0);
+                    currentarg += 1;
+                    let b = if code == b'E' {
+                        v.to_be_bytes()
+                    } else {
+                        v.to_le_bytes()
+                    };
+                    out[pos..pos + 8].copy_from_slice(&b);
+                    pos += 8;
                 }
             }
             b'x' => {
-                // NUL byte
-                result.extend(std::iter::repeat_n(0, repeat));
+                out[pos..pos + n].fill(0);
+                pos += n;
             }
-            b'Z' => {
-                // NUL-padded string (NUL terminated)
-                let s = args
-                    .get(arg_idx)
-                    .map(|v| v.to_php_string())
-                    .unwrap_or_else(PhpString::empty);
-                arg_idx += 1;
-                if count == u32::MAX {
-                    // Z* = full string + NUL terminator
-                    result.extend_from_slice(s.as_bytes());
-                    result.push(0);
-                } else {
-                    let len = count as usize;
-                    if len == 0 {
-                        // Z0 = empty (no output)
-                    } else if s.len() >= len {
-                        result.extend_from_slice(&s.as_bytes()[..len - 1]);
-                        result.push(0);
-                    } else {
-                        result.extend_from_slice(s.as_bytes());
-                        result.extend(std::iter::repeat_n(0, len - s.len()));
-                    }
+            b'X' => {
+                pos = pos.saturating_sub(n);
+            }
+            b'@' => {
+                if n > pos {
+                    out[pos..n].fill(0);
                 }
+                pos = n;
             }
             _ => {}
         }
     }
-
-    Ok(Value::String(PhpString::from_vec(result)))
+    out.truncate(pos);
+    Ok(Value::String(PhpString::from_vec(out)))
 }
 
-fn hex_val(c: u8) -> u8 {
-    match c {
-        b'0'..=b'9' => c - b'0',
-        b'a'..=b'f' => c - b'a' + 10,
-        b'A'..=b'F' => c - b'A' + 10,
-        _ => 0,
-    }
-}
-
-fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// unpack(): a port of ext/standard/pack.c.
+fn unpack_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use goro_core::array::{ArrayKey, PhpArray};
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -5369,767 +5329,354 @@ fn unpack_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let format = args.first().unwrap_or(&Value::Null).to_php_string();
     let data = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let raw_offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    // PHP: offset must be in [0, strlen($data)]; out-of-range raises
-    // ValueError "Argument #3 ($offset) must be contained in argument #2 ($data)".
     if raw_offset < 0 || raw_offset as usize > data.len() {
-        let msg = "unpack(): Argument #3 ($offset) must be contained in argument #2 ($data)";
-        let exc = _vm.create_exception(b"ValueError", msg, 0);
-        _vm.current_exception = Some(exc);
-        return Err(VmError {
-            message: msg.into(),
-            line: _vm.current_line,
-        });
+        return Err(pack_value_error(
+            vm,
+            "unpack(): Argument #3 ($offset) must be contained in argument #2 ($data)".into(),
+        ));
     }
-    let offset = raw_offset as usize;
-    let bytes = &data.as_bytes()[offset..];
+    let input = &data.as_bytes()[raw_offset as usize..];
+    let inputlen = input.len() as i64;
     let fmt = format.as_bytes();
+    let int_size = std::mem::size_of::<std::ffi::c_int>() as i64;
     let mut result = PhpArray::new();
-    let mut pos = 0;
-    let mut i = 0;
-    let mut field_num = 1u32;
+    let mut inputpos: i64 = 0;
+    let mut f = 0usize;
 
-    while i < fmt.len() {
-        let code = fmt[i];
-        i += 1;
-
-        // Parse count
-        let mut count = 1u32;
-        let mut overflow = false;
-        if i < fmt.len() && fmt[i] == b'*' {
-            count = u32::MAX;
-            i += 1;
-        } else {
-            let mut has_digits = false;
-            let mut n = 0u64;
-            while i < fmt.len() && fmt[i].is_ascii_digit() {
-                n = n.saturating_mul(10).saturating_add((fmt[i] - b'0') as u64);
-                has_digits = true;
-                i += 1;
-            }
-            if has_digits {
-                if n > i32::MAX as u64 {
-                    overflow = true;
-                }
-                count = n as u32;
-            }
-        }
-        if overflow {
-            _vm.emit_warning(&format!(
-                "unpack(): Type {}: integer overflow",
-                code as char
-            ));
-            return Ok(Value::False);
-        }
-
-        // Parse optional name
-        let name = if i < fmt.len() && fmt[i] != b'/' {
-            let start = i;
-            while i < fmt.len() && fmt[i] != b'/' {
-                i += 1;
-            }
-            Some(String::from_utf8_lossy(&fmt[start..i]).to_string())
-        } else {
-            None
-        };
-        if i < fmt.len() && fmt[i] == b'/' {
-            i += 1;
-        }
-
-        match code {
-            b'C' | b'c' => {
-                let repeat = if count == u32::MAX {
-                    bytes.len() - pos
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos < bytes.len() {
-                        let v = if code == b'c' {
-                            bytes[pos] as i8 as i64
-                        } else {
-                            bytes[pos] as i64
-                        };
-                        let k = if let Some(ref n) = name {
-                            if count > 1 || count == u32::MAX {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 1;
+    while f < fmt.len() {
+        let typ = fmt[f];
+        f += 1;
+        let mut repetitions: i64 = 1;
+        if f < fmt.len() {
+            let c = fmt[f];
+            if c.is_ascii_digit() {
+                let mut n: i64 = 0;
+                let mut overflow = false;
+                while f < fmt.len() && fmt[f].is_ascii_digit() {
+                    n = n.saturating_mul(10).saturating_add((fmt[f] - b'0') as i64);
+                    if n > i32::MAX as i64 {
+                        overflow = true;
                     }
+                    f += 1;
                 }
-            }
-            b'n' => {
-                for j in 0..count.min((bytes.len() - pos) as u32 / 2) {
-                    if pos + 2 <= bytes.len() {
-                        let v = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as i64;
-                        let k = name
-                            .as_ref()
-                            .map(|n| {
-                                ArrayKey::String(PhpString::from_string(if count > 1 {
-                                    format!("{}{}", n, j + 1)
-                                } else {
-                                    n.clone()
-                                }))
-                            })
-                            .unwrap_or(ArrayKey::Int(field_num as i64));
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 2;
-                    }
-                }
-            }
-            b'N' => {
-                for j in 0..count.min((bytes.len() - pos) as u32 / 4) {
-                    if pos + 4 <= bytes.len() {
-                        let v = u32::from_be_bytes([
-                            bytes[pos],
-                            bytes[pos + 1],
-                            bytes[pos + 2],
-                            bytes[pos + 3],
-                        ]) as i64;
-                        let k = name
-                            .as_ref()
-                            .map(|n| {
-                                ArrayKey::String(PhpString::from_string(if count > 1 {
-                                    format!("{}{}", n, j + 1)
-                                } else {
-                                    n.clone()
-                                }))
-                            })
-                            .unwrap_or(ArrayKey::Int(field_num as i64));
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 4;
-                    }
-                }
-            }
-            b'a' | b'A' => {
-                let len = if count == u32::MAX {
-                    bytes.len() - pos
-                } else {
-                    count as usize
-                };
-                // PHP: explicit length larger than available -> warning + false.
-                if count != u32::MAX && len > bytes.len() - pos {
-                    let avail = bytes.len() - pos;
-                    _vm.emit_warning_at(
-                        &format!(
-                            "unpack(): Type {}: not enough input values, need {} values but only {} {} provided",
-                            code as char, len, avail,
-                            if avail == 1 { "was" } else { "were" }
-                        ),
-                        _vm.current_line,
+                if overflow {
+                    let line = vm.current_line;
+                    vm.emit_warning_at(
+                        &format!("unpack(): Type {}: integer overflow", typ as char),
+                        line,
                     );
                     return Ok(Value::False);
                 }
-                let end = (pos + len).min(bytes.len());
-                let mut s = bytes[pos..end].to_vec();
-                if code == b'A' {
-                    // PHP strips trailing NUL, space, tab, CR, newline.
-                    while matches!(s.last(), Some(&b' ' | &0 | &b'\t' | &b'\r' | &b'\n')) {
-                        s.pop();
-                    }
-                } else if code == b'Z' {
-                    // Z (in unpack) is identical to a NUL-terminated read: strip
-                    // everything from the first NUL onward.
-                    if let Some(p) = s.iter().position(|&b| b == 0) {
-                        s.truncate(p);
-                    }
-                }
-                let k = name
-                    .as_ref()
-                    .map(|n| ArrayKey::String(PhpString::from_string(n.clone())))
-                    .unwrap_or(ArrayKey::Int(field_num as i64));
-                result.set(k, Value::String(PhpString::from_vec(s)));
-                field_num += 1;
-                pos = end;
+                repetitions = n;
+            } else if c == b'*' {
+                repetitions = -1;
+                f += 1;
             }
-            b'S' | b'v' => {
-                // S = unsigned 16-bit machine byte order, v = unsigned 16-bit little-endian
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 2
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 2 <= bytes.len() {
-                        let v = if code == b'v' {
-                            u16::from_le_bytes([bytes[pos], bytes[pos + 1]]) as i64
-                        } else {
-                            u16::from_ne_bytes([bytes[pos], bytes[pos + 1]]) as i64
-                        };
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 2;
-                    }
-                }
-            }
-            b'l' | b'i' => {
-                // l = signed 32-bit machine byte order, i = signed 32-bit machine byte order
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 4
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 4 <= bytes.len() {
-                        let v = i32::from_ne_bytes([
-                            bytes[pos],
-                            bytes[pos + 1],
-                            bytes[pos + 2],
-                            bytes[pos + 3],
-                        ]) as i64;
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 4;
-                    }
-                }
-            }
-            b's' => {
-                // s = signed 16-bit machine byte order
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 2
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 2 <= bytes.len() {
-                        let v = i16::from_ne_bytes([bytes[pos], bytes[pos + 1]]) as i64;
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 2;
-                    }
-                }
-            }
-            b'L' | b'I' => {
-                // L = unsigned 32-bit machine byte order, I = unsigned 32-bit machine byte order
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 4
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 4 <= bytes.len() {
-                        let v = u32::from_ne_bytes([
-                            bytes[pos],
-                            bytes[pos + 1],
-                            bytes[pos + 2],
-                            bytes[pos + 3],
-                        ]) as i64;
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 4;
-                    }
-                }
-            }
-            b'V' => {
-                // V = unsigned 32-bit little-endian
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 4
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 4 <= bytes.len() {
-                        let v = u32::from_le_bytes([
-                            bytes[pos],
-                            bytes[pos + 1],
-                            bytes[pos + 2],
-                            bytes[pos + 3],
-                        ]) as i64;
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 4;
-                    }
-                }
-            }
-            b'Q' | b'q' => {
-                // Q = unsigned 64-bit machine, q = signed 64-bit machine
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 8
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 8 <= bytes.len() {
-                        let v = if code == b'q' {
-                            i64::from_ne_bytes([
-                                bytes[pos],
-                                bytes[pos + 1],
-                                bytes[pos + 2],
-                                bytes[pos + 3],
-                                bytes[pos + 4],
-                                bytes[pos + 5],
-                                bytes[pos + 6],
-                                bytes[pos + 7],
-                            ])
-                        } else {
-                            u64::from_ne_bytes([
-                                bytes[pos],
-                                bytes[pos + 1],
-                                bytes[pos + 2],
-                                bytes[pos + 3],
-                                bytes[pos + 4],
-                                bytes[pos + 5],
-                                bytes[pos + 6],
-                                bytes[pos + 7],
-                            ]) as i64
-                        };
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 8;
-                    }
-                }
-            }
-            b'P' => {
-                // P = unsigned 64-bit little-endian
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 8
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 8 <= bytes.len() {
-                        let v = u64::from_le_bytes([
-                            bytes[pos],
-                            bytes[pos + 1],
-                            bytes[pos + 2],
-                            bytes[pos + 3],
-                            bytes[pos + 4],
-                            bytes[pos + 5],
-                            bytes[pos + 6],
-                            bytes[pos + 7],
-                        ]) as i64;
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 8;
-                    }
-                }
-            }
-            b'J' => {
-                // J = unsigned 64-bit big-endian
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 8
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 8 <= bytes.len() {
-                        let v = u64::from_be_bytes([
-                            bytes[pos],
-                            bytes[pos + 1],
-                            bytes[pos + 2],
-                            bytes[pos + 3],
-                            bytes[pos + 4],
-                            bytes[pos + 5],
-                            bytes[pos + 6],
-                            bytes[pos + 7],
-                        ]) as i64;
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Long(v));
-                        field_num += 1;
-                        pos += 8;
-                    }
-                }
-            }
-            b'f' | b'g' | b'G' => {
-                // f = float machine byte order, g = float little-endian, G = float big-endian
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 4
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 4 <= bytes.len() {
-                        let v = match code {
-                            b'g' => f32::from_le_bytes([
-                                bytes[pos],
-                                bytes[pos + 1],
-                                bytes[pos + 2],
-                                bytes[pos + 3],
-                            ]) as f64,
-                            b'G' => f32::from_be_bytes([
-                                bytes[pos],
-                                bytes[pos + 1],
-                                bytes[pos + 2],
-                                bytes[pos + 3],
-                            ]) as f64,
-                            _ => f32::from_ne_bytes([
-                                bytes[pos],
-                                bytes[pos + 1],
-                                bytes[pos + 2],
-                                bytes[pos + 3],
-                            ]) as f64,
-                        };
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Double(v));
-                        field_num += 1;
-                        pos += 4;
-                    }
-                }
-            }
-            b'd' | b'e' | b'E' => {
-                // d = double machine, e = double little-endian, E = double big-endian
-                let repeat = if count == u32::MAX {
-                    (bytes.len() - pos) / 8
-                } else {
-                    count as usize
-                };
-                for j in 0..repeat {
-                    if pos + 8 <= bytes.len() {
-                        let v = match code {
-                            b'e' => f64::from_le_bytes([
-                                bytes[pos],
-                                bytes[pos + 1],
-                                bytes[pos + 2],
-                                bytes[pos + 3],
-                                bytes[pos + 4],
-                                bytes[pos + 5],
-                                bytes[pos + 6],
-                                bytes[pos + 7],
-                            ]),
-                            b'E' => f64::from_be_bytes([
-                                bytes[pos],
-                                bytes[pos + 1],
-                                bytes[pos + 2],
-                                bytes[pos + 3],
-                                bytes[pos + 4],
-                                bytes[pos + 5],
-                                bytes[pos + 6],
-                                bytes[pos + 7],
-                            ]),
-                            _ => f64::from_ne_bytes([
-                                bytes[pos],
-                                bytes[pos + 1],
-                                bytes[pos + 2],
-                                bytes[pos + 3],
-                                bytes[pos + 4],
-                                bytes[pos + 5],
-                                bytes[pos + 6],
-                                bytes[pos + 7],
-                            ]),
-                        };
-                        let k = if let Some(ref n) = name {
-                            if repeat > 1 {
-                                ArrayKey::String(PhpString::from_string(format!("{}{}", n, j + 1)))
-                            } else {
-                                ArrayKey::String(PhpString::from_string(n.clone()))
-                            }
-                        } else {
-                            ArrayKey::Int(field_num as i64)
-                        };
-                        result.set(k, Value::Double(v));
-                        field_num += 1;
-                        pos += 8;
-                    }
-                }
-            }
-            b'H' | b'h' => {
-                // H = hex string, high nibble first; h = hex string, low nibble first
-                // PHP: size = (arg + (arg > 0)) / 2 bytes must be available
-                // before the repeater limit is checked.
-                if count != u32::MAX {
-                    let size = ((count as i64) + (count > 0) as i64) / 2;
-                    let avail = bytes.len() as i64 - pos as i64;
-                    if size > avail {
-                        _vm.emit_warning(&format!(
-                            "unpack(): Type {}: not enough input values, need {} values but only {} {} provided",
-                            code as char, size as i32, avail, if avail == 1 { "was" } else { "were" }
-                        ));
-                        return Ok(Value::False);
-                    }
-                }
-                if count != u32::MAX && count > (i32::MAX as u32) / 2 {
-                    let msg = format!(
-                        "unpack(): Argument #1 ($format) repeater must be less than or equal to {}",
-                        i32::MAX / 2
-                    );
-                    let exc = _vm.create_exception(b"ValueError", &msg, 0);
-                    _vm.current_exception = Some(exc);
-                    return Err(VmError {
-                        message: msg,
-                        line: _vm.current_line,
-                    });
-                }
-                let len = if count == u32::MAX {
-                    (bytes.len() - pos) * 2
-                } else {
-                    count as usize
-                };
-                let bytes_needed = len.div_ceil(2);
-                let end = (pos + bytes_needed).min(bytes.len());
-                let actual_capacity = ((end - pos) * 2).min(len);
-                if bytes_needed > bytes.len().saturating_sub(pos) {
-                    _vm.emit_warning(&format!(
-                        "unpack(): Type {}: not enough input values, need {} values but only {} were provided",
-                        code as char, bytes_needed, bytes.len()
-                    ));
-                }
-                let mut hex = String::with_capacity(actual_capacity);
-                for &byte in &bytes[pos..end] {
-                    if code == b'H' {
-                        hex.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
-                        if hex.len() < len {
-                            hex.push(char::from(b"0123456789abcdef"[(byte & 0xf) as usize]));
-                        }
-                    } else {
-                        hex.push(char::from(b"0123456789abcdef"[(byte & 0xf) as usize]));
-                        if hex.len() < len {
-                            hex.push(char::from(b"0123456789abcdef"[(byte >> 4) as usize]));
-                        }
-                    }
-                }
-                let k = name
-                    .as_ref()
-                    .map(|n| ArrayKey::String(PhpString::from_string(n.clone())))
-                    .unwrap_or(ArrayKey::Int(field_num as i64));
-                result.set(k, Value::String(PhpString::from_string(hex)));
-                field_num += 1;
-                pos = end;
-            }
-            b'Z' => {
-                // Z = NUL-padded string
-                let len = if count == u32::MAX {
-                    bytes.len() - pos
-                } else {
-                    count as usize
-                };
-                if count != u32::MAX && len > bytes.len() - pos {
-                    let avail = bytes.len() - pos;
-                    _vm.emit_warning_at(
-                        &format!(
-                            "unpack(): Type Z: not enough input values, need {} values but only {} {} provided",
-                            len, avail,
-                            if avail == 1 { "was" } else { "were" }
-                        ),
-                        _vm.current_line,
-                    );
-                    return Ok(Value::False);
-                }
-                let end = (pos + len).min(bytes.len());
-                let mut s = bytes[pos..end].to_vec();
-                // Truncate at first NUL
-                if let Some(nul_pos) = s.iter().position(|&b| b == 0) {
-                    s.truncate(nul_pos);
-                }
-                let k = name
-                    .as_ref()
-                    .map(|n| ArrayKey::String(PhpString::from_string(n.clone())))
-                    .unwrap_or(ArrayKey::Int(field_num as i64));
-                result.set(k, Value::String(PhpString::from_vec(s)));
-                field_num += 1;
-                pos = end;
-            }
-            b'x' => {
-                // x = NUL byte (skip forward)
-                let repeat = if count == u32::MAX {
-                    bytes.len() - pos
-                } else {
-                    count as usize
-                };
-                pos = (pos + repeat).min(bytes.len());
-            }
+        }
+        let name_start = f;
+        let argb = repetitions;
+        while f < fmt.len() && fmt[f] != b'/' {
+            f += 1;
+        }
+        let name = &fmt[name_start..f.min(name_start + 200)];
+
+        let mut size: i64 = match typ {
             b'X' => {
-                // X = back up one byte
-                if count == u32::MAX {
-                    _vm.emit_warning("unpack(): Type X: '*' ignored");
-                    // Don't move position
-                } else {
-                    pos = pos.saturating_sub(count as usize);
+                if repetitions < 0 {
+                    let line = vm.current_line;
+                    vm.emit_warning_at(
+                        &format!("unpack(): Type {}: '*' ignored", typ as char),
+                        line,
+                    );
+                    repetitions = 1;
                 }
+                -1
             }
-            b'@' => {
-                // @ = NUL-fill to absolute position
-                if count == u32::MAX {
-                    pos = bytes.len();
+            b'@' => 0,
+            b'a' | b'A' | b'Z' => {
+                let s = repetitions;
+                repetitions = 1;
+                s
+            }
+            b'h' | b'H' => {
+                let s = if repetitions > 0 {
+                    (repetitions + 1) / 2
                 } else {
-                    pos = (count as usize).min(bytes.len());
-                }
+                    repetitions
+                };
+                repetitions = 1;
+                s
             }
+            b'c' | b'C' | b'x' => 1,
+            b's' | b'S' | b'n' | b'v' => 2,
+            b'i' | b'I' => int_size,
+            b'l' | b'L' | b'N' | b'V' | b'f' | b'g' | b'G' => 4,
+            b'q' | b'Q' | b'J' | b'P' | b'd' | b'e' | b'E' => 8,
             _ => {
-                // Unknown format code: PHP throws ValueError "Invalid format type X".
-                let msg = format!("Invalid format type {}", code as char);
-                let exc = _vm.create_exception(b"ValueError", &msg, 0);
-                _vm.current_exception = Some(exc);
-                return Err(VmError {
-                    message: msg,
-                    line: _vm.current_line,
-                });
+                return Err(pack_value_error(
+                    vm,
+                    format!("Invalid format type {}", typ as char),
+                ));
             }
+        };
+
+        let mut i: i64 = 0;
+        while i != repetitions {
+            if size != 0 && size != -1 && i32::MAX as i64 - size + 1 < inputpos {
+                let line = vm.current_line;
+                vm.emit_warning_at(
+                    &format!("unpack(): Type {}: integer overflow", typ as char),
+                    line,
+                );
+                return Ok(Value::False);
+            }
+            if inputpos + size <= inputlen {
+                let key = if name.is_empty() {
+                    ArrayKey::Int(i + 1)
+                } else if repetitions == 1 {
+                    Vm::value_to_array_key(Value::String(PhpString::from_vec(name.to_vec())))
+                } else {
+                    let mut k = name.to_vec();
+                    k.extend_from_slice((i + 1).to_string().as_bytes());
+                    Vm::value_to_array_key(Value::String(PhpString::from_vec(k)))
+                };
+                let p = inputpos as usize;
+                let rd = |n: usize| -> [u8; 8] {
+                    let mut b = [0u8; 8];
+                    b[..n].copy_from_slice(&input[p..p + n]);
+                    b
+                };
+                let val: Option<Value> = match typ {
+                    b'a' | b'A' | b'Z' => {
+                        let mut len = inputlen - inputpos;
+                        if size >= 0 && len > size {
+                            len = size;
+                        }
+                        size = len;
+                        let mut s = &input[p..p + len as usize];
+                        if typ == b'A' {
+                            while let Some(&c) = s.last() {
+                                if !matches!(c, 0 | b' ' | b'\t' | b'\r' | b'\n') {
+                                    break;
+                                }
+                                s = &s[..s.len() - 1];
+                            }
+                        } else if typ == b'Z' {
+                            if let Some(z) = s.iter().position(|&c| c == 0) {
+                                s = &s[..z];
+                            }
+                        }
+                        Some(Value::String(PhpString::from_vec(s.to_vec())))
+                    }
+                    b'h' | b'H' => {
+                        let mut len = (inputlen - inputpos) * 2;
+                        if size > i32::MAX as i64 / 2 {
+                            return Err(pack_value_error(
+                                vm,
+                                format!(
+                                    "unpack(): Argument #1 ($format) repeater must be less than or equal to {}",
+                                    i32::MAX / 2
+                                ),
+                            ));
+                        }
+                        if size >= 0 && len > size * 2 {
+                            len = size * 2;
+                        }
+                        if len > 0 && argb > 0 {
+                            len -= argb % 2;
+                        }
+                        let mut nibbleshift = if typ == b'h' { 0 } else { 4 };
+                        let mut first = true;
+                        let mut ipos = 0usize;
+                        let mut buf = Vec::with_capacity(len.max(0) as usize);
+                        for _ in 0..len.max(0) {
+                            let cc = (input[p + ipos] >> nibbleshift) & 0xf;
+                            buf.push(if cc < 10 { cc + b'0' } else { cc - 10 + b'a' });
+                            nibbleshift = (nibbleshift + 4) & 7;
+                            if first {
+                                first = false;
+                            } else {
+                                ipos += 1;
+                                first = true;
+                            }
+                        }
+                        Some(Value::String(PhpString::from_vec(buf)))
+                    }
+                    b'c' => Some(Value::Long(input[p] as i8 as i64)),
+                    b'C' => Some(Value::Long(input[p] as i64)),
+                    b's' => Some(Value::Long(
+                        i16::from_le_bytes([input[p], input[p + 1]]) as i64
+                    )),
+                    b'S' | b'v' => Some(Value::Long(
+                        u16::from_le_bytes([input[p], input[p + 1]]) as i64
+                    )),
+                    b'n' => Some(Value::Long(
+                        u16::from_be_bytes([input[p], input[p + 1]]) as i64
+                    )),
+                    b'i' | b'l' => {
+                        let b = rd(4);
+                        Some(Value::Long(
+                            i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64
+                        ))
+                    }
+                    b'I' | b'L' | b'V' => {
+                        let b = rd(4);
+                        Some(Value::Long(
+                            u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as i64
+                        ))
+                    }
+                    b'N' => {
+                        let b = rd(4);
+                        Some(Value::Long(
+                            u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as i64
+                        ))
+                    }
+                    b'q' | b'Q' | b'P' => Some(Value::Long(i64::from_le_bytes(rd(8)))),
+                    b'J' => Some(Value::Long(i64::from_be_bytes(rd(8)))),
+                    b'f' | b'g' | b'G' => {
+                        let b = rd(4);
+                        let b = [b[0], b[1], b[2], b[3]];
+                        let v = if typ == b'G' {
+                            f32::from_be_bytes(b)
+                        } else {
+                            f32::from_le_bytes(b)
+                        };
+                        Some(Value::Double(v as f64))
+                    }
+                    b'd' | b'e' | b'E' => {
+                        let b = rd(8);
+                        let v = if typ == b'E' {
+                            f64::from_be_bytes(b)
+                        } else {
+                            f64::from_le_bytes(b)
+                        };
+                        Some(Value::Double(v))
+                    }
+                    b'x' => None,
+                    b'X' => {
+                        if inputpos < size {
+                            inputpos = -size;
+                            i = repetitions - 1;
+                            if repetitions >= 0 {
+                                let line = vm.current_line;
+                                vm.emit_warning_at(
+                                    &format!("unpack(): Type {}: outside of string", typ as char),
+                                    line,
+                                );
+                            }
+                        }
+                        None
+                    }
+                    b'@' => {
+                        if repetitions <= inputlen {
+                            inputpos = repetitions;
+                        } else {
+                            let line = vm.current_line;
+                            vm.emit_warning_at(
+                                &format!("unpack(): Type {}: outside of string", typ as char),
+                                line,
+                            );
+                        }
+                        i = repetitions - 1;
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(v) = val {
+                    result.set(key, v);
+                }
+                inputpos += size;
+                if inputpos < 0 {
+                    if size != -1 {
+                        let line = vm.current_line;
+                        vm.emit_warning_at(
+                            &format!("unpack(): Type {}: outside of string", typ as char),
+                            line,
+                        );
+                    }
+                    inputpos = 0;
+                }
+            } else if repetitions < 0 {
+                break;
+            } else {
+                let avail = inputlen - inputpos;
+                let line = vm.current_line;
+                vm.emit_warning_at(
+                    &format!(
+                        "unpack(): Type {}: not enough input values, need {} values but only {} {} provided",
+                        typ as char,
+                        size,
+                        avail,
+                        if avail == 1 { "was" } else { "were" }
+                    ),
+                    line,
+                );
+                return Ok(Value::False);
+            }
+            i += 1;
+        }
+        if f < fmt.len() {
+            f += 1; // skip the '/' separator
         }
     }
-
     Ok(Value::Array(Rc::new(RefCell::new(result))))
 }
 
-fn str_decrement(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+/// PHP_FUNCTION(str_decrement) (ext/standard/string.c).
+fn str_decrement(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let bytes = s.as_bytes();
+    let fail = |vm: &mut Vm, msg: String| -> Result<Value, VmError> {
+        let msg = format!("str_decrement(): Argument #1 ($string) {}", msg);
+        let exc = vm.create_exception(b"ValueError", &msg, 0);
+        vm.current_exception = Some(exc);
+        Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        })
+    };
     if bytes.is_empty() {
-        return Err(VmError {
-            message: "str_decrement(): Argument #1 ($string) must not be empty".into(),
-            line: 0,
-        });
+        return fail(vm, "must not be empty".into());
     }
-    if bytes == b"a" || bytes == b"A" || bytes == b"0" {
-        return Err(VmError {
-            message: format!(
-                "str_decrement(): Argument #1 ($string) \"{}\" is out of decrement range",
-                s.to_string_lossy()
-            ),
-            line: 0,
-        });
+    if !bytes.iter().all(|c| c.is_ascii_alphanumeric()) {
+        return fail(
+            vm,
+            "must be composed only of alphanumeric ASCII characters".into(),
+        );
     }
-    let mut result = bytes.to_vec();
-    let mut i = result.len() - 1;
+    let range_err = |vm: &mut Vm| {
+        fail(
+            vm,
+            format!("\"{}\" is out of decrement range", s.to_string_lossy()),
+        )
+    };
+    if bytes[0] == b'0' {
+        return range_err(vm);
+    }
+    let mut dec = bytes.to_vec();
+    let mut position = dec.len() - 1;
+    let mut carry;
     loop {
-        let ch = result[i];
-        match ch {
-            b'1'..=b'9' => {
-                result[i] -= 1;
-                break;
-            }
-            b'0' => {
-                if i == 0 {
-                    if result.len() > 1 {
-                        result.remove(0);
-                    }
-                    break;
-                }
-                result[i] = b'9';
-                i -= 1;
-            }
-            b'b'..=b'z' => {
-                result[i] -= 1;
-                break;
-            }
-            b'a' => {
-                if i == 0 {
-                    // Underflow at position 0 - remove this char
-                    if result.len() > 1 {
-                        result.remove(0);
-                    }
-                    break;
-                }
-                result[i] = b'z';
-                i -= 1;
-            }
-            b'B'..=b'Z' => {
-                result[i] -= 1;
-                break;
-            }
-            b'A' => {
-                if i == 0 {
-                    if result.len() > 1 {
-                        result.remove(0);
-                    }
-                    break;
-                }
-                result[i] = b'Z';
-                i -= 1;
-            }
-            _ => break,
+        let c = dec[position];
+        if c != b'a' && c != b'A' && c != b'0' {
+            carry = false;
+            dec[position] -= 1;
+        } else {
+            carry = true;
+            dec[position] = if c == b'0' { b'9' } else { c + 25 };
         }
-    }
-    // Remove leading char when it became the "zero" value through borrow
-    // e.g. "10" -> "09" -> "9", "aa" -> "az" -> "z" (first 'a' is min for alpha)
-    if result.len() > 1 && result.len() == bytes.len() {
-        let first = result[0];
-        let orig_first = bytes[0];
-        // If the first char wrapped around to min value, remove it
-        if (first == b'0' && orig_first == b'1')
-            || (first == b'a' && orig_first == b'a')
-            || (first == b'A' && orig_first == b'A')
-        {
-            result.remove(0);
+        if !carry || position == 0 {
+            break;
         }
+        position -= 1;
     }
-    Ok(Value::String(PhpString::from_vec(result)))
+    if carry || (dec[0] == b'0' && dec.len() > 1) {
+        if dec.len() == 1 {
+            return range_err(vm);
+        }
+        dec.remove(0);
+    }
+    Ok(Value::String(PhpString::from_vec(dec)))
 }
 
 fn quotemeta_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
