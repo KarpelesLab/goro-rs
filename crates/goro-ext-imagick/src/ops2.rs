@@ -458,43 +458,47 @@ fn segment_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     })
 }
 
+/// ShadowImage(): the alpha shape in the background colour at `op`
+/// percent, blurred, with a border for the blur.
+fn shadow_of(i: &Image, op: f64, sigma: f64, dx: i64, dy: i64) -> Image {
+    let pad = (2.0 * sigma).ceil() as usize;
+    let (w, h) = (i.columns + 2 * pad, i.rows + 2 * pad);
+    let mut s = i.clone_attributes(w, h);
+    s.enable_alpha();
+    let bg = i.background_color.to_rgba16();
+    for y in 0..h {
+        for x in 0..w {
+            let a = if x >= pad && y >= pad && x - pad < i.columns && y - pad < i.rows {
+                let p = i.px(x - pad, y - pad);
+                if i.alpha { p[3] } else { 65535 }
+            } else {
+                0
+            };
+            let a = (a as f64 * op / 100.0).round() as u16;
+            s.set_px(x, y, [bg[0], bg[1], bg[2], a]);
+        }
+    }
+    if sigma > 0.0 {
+        goro_imagick::convolve::blur(&mut s, 0.0, sigma, channel::ALPHA);
+    }
+    // (ImageMagick grows the page by the offset too)
+    let (px, py) = (dx - pad as i64, dy - pad as i64);
+    s.page = Rect::new(
+        (w as i64 + px).max(0) as usize,
+        (h as i64 + py).max(0) as usize,
+        px,
+        py,
+    );
+    s.colors = None;
+    s
+}
+
 fn shadow_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "ddll", args)?;
     let (op, sigma) = (a[0].double_or(80.0), a[1].double_or(1.0));
     let (dx, dy) = (a[2].long_or(0), a[3].long_or(0));
     replace_op(vm, &d_(o), "Unable to shadow image", |i| {
-        // ShadowImage(): the alpha shape in the background colour,
-        // blurred, with a border for the blur
-        let pad = (2.0 * sigma).ceil() as usize;
-        let (w, h) = (i.columns + 2 * pad, i.rows + 2 * pad);
-        let mut s = i.clone_attributes(w, h);
-        s.enable_alpha();
-        let bg = i.background_color.to_rgba16();
-        for y in 0..h {
-            for x in 0..w {
-                let a = if x >= pad && y >= pad && x - pad < i.columns && y - pad < i.rows {
-                    let p = i.px(x - pad, y - pad);
-                    if i.alpha { p[3] } else { 65535 }
-                } else {
-                    0
-                };
-                let a = (a as f64 * op / 100.0).round() as u16;
-                s.set_px(x, y, [bg[0], bg[1], bg[2], a]);
-            }
-        }
-        if sigma > 0.0 {
-            goro_imagick::convolve::blur(&mut s, 0.0, sigma, channel::ALPHA);
-        }
-        // (ImageMagick grows the page by the offset too)
-        let (px, py) = (dx - pad as i64, dy - pad as i64);
-        s.page = Rect::new(
-            (w as i64 + px).max(0) as usize,
-            (h as i64 + py).max(0) as usize,
-            px,
-            py,
-        );
-        s.colors = None;
-        Ok(s)
+        Ok(shadow_of(i, op, sigma, dx, dy))
     })
 }
 
@@ -1200,21 +1204,37 @@ fn polynomial_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R
 }
 
 fn polaroid_of(i: &Image, angle: f64) -> MResult<Image> {
-    // a white border, a thicker bottom, a soft shadow and a rotation
-    let b = (i.columns.min(i.rows) / 20).max(2);
-    let mut framed = transform::border(i, b, b, &PixelInfo::white(), CompositeOp::Over);
-    framed = transform::splice(
-        &framed,
-        Rect::new(0, b * 3, 0, framed.rows as i64),
-        Gravity::NorthWest,
-    );
-    let mut bg = framed.clone();
-    bg.background_color = PixelInfo::transparent();
-    let mut out = transform::rotate(&framed, angle, &PixelInfo::transparent());
-    out.background_color = bg.background_color;
+    // PolaroidImage(), black-box: a #DFDFDF border of max(10, max(w,h)/25),
+    // the picture curled by a wave across it (on the image turned a
+    // quarter: amplitude 1% of its width, wavelength twice its height), an
+    // 80% sigma-2 shadow of the flat bordered picture under it, rotated
+    let q = (i.columns.max(i.rows) / 25).max(10);
+    let border_color = PixelInfo::parse("#DFDFDF").unwrap_or_else(PixelInfo::white);
+    let flat = transform::border(i, q, q, &border_color, CompositeOp::Over);
+    let mut turned = transform::rotate(&flat, 90.0, &PixelInfo::transparent());
+    turned.background_color = PixelInfo::transparent();
+    let amp = 0.01 * turned.rows as f64;
+    let len = 2.0 * turned.columns as f64;
+    let waved = goro_imagick::warp::wave(&turned, amp, len, PixelInterpolateMethod::Undefined);
+    let mut pic = transform::rotate(&waved, 270.0, &PixelInfo::transparent());
+    pic.page = Rect::new(pic.columns, pic.rows, 0, 0);
+    let shadow = shadow_of(&flat, 80.0, 2.0, 0, 0);
+    let pad = 4;
+    let mut canvas = i.clone_attributes(pic.columns + 2 * pad, pic.rows + 2 * pad);
+    canvas.enable_alpha();
+    canvas.fill(&PixelInfo::transparent());
+    let ca = goro_imagick::composite::ComposeArgs::default();
+    goro_imagick::composite::composite_image(&mut canvas, &shadow, CompositeOp::Over, 0, 0, &ca);
+    goro_imagick::composite::composite_image(&mut canvas, &pic, CompositeOp::Over, 0, 0, &ca);
+    canvas.page = Rect::new(canvas.columns, canvas.rows, 0, 0);
+    canvas.background_color = i.background_color.clone();
+    if angle == 0.0 {
+        return Ok(canvas);
+    }
+    let mut out = transform::rotate(&canvas, angle, &PixelInfo::transparent());
+    out.background_color = i.background_color.clone();
     Ok(out)
 }
-
 fn polaroid_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "zd", args)?;
     let _ = crate::draw::wand_of(&crate::arg_obj(
