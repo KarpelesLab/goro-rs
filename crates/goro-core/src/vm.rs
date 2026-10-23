@@ -39912,6 +39912,11 @@ impl Vm {
                                 &mut tmps,
                                 &static_cv_keys,
                             );
+                            // (spl_fixedarray_get_iterator()'s handle)
+                            if let (true, OperandType::Tmp(t)) = (is_fixed, op.result) {
+                                let h = self.foreach_iterator_handle();
+                                foreach_iter_handles.insert(t, h);
+                            }
                         } else if self
                             .class_implements_interface(&class_lower, b"iteratoraggregate")
                         {
