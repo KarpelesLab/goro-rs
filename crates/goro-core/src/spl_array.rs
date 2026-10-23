@@ -938,8 +938,22 @@ impl Vm {
         name: &str,
         v: &Value,
     ) -> Option<PhpString> {
+        let conv;
         let s = match v.deref() {
             Value::String(s) => s,
+            // zend_parse_arg_class(): try_convert_to_string()
+            ref o @ Value::Object(ref ob)
+                if self
+                    .classes
+                    .get(&ob.borrow().class_name.to_ascii_lowercase())
+                    .is_some_and(|c| c.get_method(b"__tostring").is_some()) =>
+            {
+                conv = self.value_to_string(o);
+                if self.current_exception.is_some() {
+                    return None;
+                }
+                conv
+            }
             other => {
                 let msg = format!(
                     "{}(): Argument #{} (${}) must be a class name derived from ArrayIterator, {} given",
