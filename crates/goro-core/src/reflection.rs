@@ -194,6 +194,86 @@ pub(crate) fn stub_backed_class(vm: &Vm, lower: &[u8]) -> bool {
     }
 }
 
+fn lower_name(n: &[u8]) -> Vec<u8> {
+    n.strip_prefix(b"\\").unwrap_or(n).to_ascii_lowercase()
+}
+
+/// The interfaces `ce` implements, each followed by the ones it extends
+/// (zend_do_implement_interfaces()), without duplicates; lowercase.
+fn flat_interfaces(vm: &Vm, ce: &crate::object::ClassEntry, out: &mut Vec<Vec<u8>>, depth: u32) {
+    if depth > 64 {
+        return;
+    }
+    for i in &ce.interfaces {
+        let l = lower_name(i);
+        if out.contains(&l) {
+            continue;
+        }
+        out.push(l.clone());
+        if let Some(ice) = rcls(vm, &l) {
+            flat_interfaces(vm, ice, out, depth + 1);
+        }
+    }
+}
+
+/// zend_function.common.prototype of method `m` (lowercase) of class
+/// `class_lower`, as inheritance sets it (do_inheritance_check_on_method()
+/// for the parent's methods, then for each newly implemented interface's):
+/// the lowercase name of the prototype's class.
+fn linked_method_prototype(vm: &Vm, class_lower: &[u8], m: &[u8], depth: u32) -> Option<Vec<u8>> {
+    if depth > 64 {
+        return None;
+    }
+    let ce = rcls(vm, class_lower)?;
+    let meth = ce.get_method(m)?;
+    // (interface methods have none, redeclared or inherited)
+    if ce.is_interface {
+        return None;
+    }
+    let decl = lower_name(&meth.declaring_class);
+    let own = decl.as_slice() == class_lower;
+    let parent = ce.parent.as_deref().map(lower_name);
+    let pce = parent.as_deref().and_then(|p| rcls(vm, p));
+    let pm = pce.and_then(|p| p.get_method(m));
+    // The scope of `parent->common.prototype ?: parent`.
+    let proto_of = |owner: &[u8], f: &crate::object::MethodDef| {
+        linked_method_prototype(vm, owner, m, depth + 1).unwrap_or_else(|| lower_name(&f.declaring_class))
+    };
+    let mut proto = match (parent.as_deref(), pm) {
+        // An inherited method is the parent's function, with its prototype.
+        (Some(p), Some(_)) if !own => linked_method_prototype(vm, p, m, depth + 1),
+        (Some(p), Some(pm)) if pm.visibility != crate::object::Visibility::Private => {
+            let pr = proto_of(p, pm);
+            // Constructors only have an abstract (or interface) prototype.
+            if m == b"__construct" {
+                let abs = rcls(vm, &pr)
+                    .map(|c| c.is_interface || c.get_method(m).is_some_and(|f| f.is_abstract))
+                    .unwrap_or(false);
+                abs.then_some(pr)
+            } else {
+                Some(pr)
+            }
+        }
+        _ => None,
+    };
+    let mut inherited_ifaces = Vec::new();
+    if let Some(pce) = pce {
+        flat_interfaces(vm, pce, &mut inherited_ifaces, 0);
+    }
+    let mut ifaces = Vec::new();
+    flat_interfaces(vm, ce, &mut ifaces, 0);
+    for i in ifaces.iter().filter(|i| !inherited_ifaces.contains(i)) {
+        let Some(im) = rcls(vm, i).and_then(|ice| ice.get_method(m)) else {
+            continue;
+        };
+        let ip = proto_of(i, im);
+        if proto.as_ref() != Some(&ip) {
+            proto = Some(ip);
+        }
+    }
+    proto
+}
+
 pub(crate) fn rcls<'a>(vm: &'a Vm, lower: &[u8]) -> Option<&'a crate::object::ClassEntry> {
     // A bare extension entry: the stub declares the class.
     let bare = bare_entry;
@@ -5492,34 +5572,12 @@ pub fn reflection_method_method(
             })
         }
         b"hasprototype" => {
-            let method_lower_bytes = method_lower.as_bytes();
-            let proto_exists = rcls(vm, &class_lower)
-                .map(|ce| {
-                    let mut check = ce.parent.clone();
-                    while let Some(ref p) = check {
-                        let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if let Some(pce) = rcls(vm, &p_lower) {
-                            if pce.get_method(method_lower_bytes).is_some() {
-                                return true;
-                            }
-                            check = pce.parent.clone();
-                        } else {
-                            break;
-                        }
-                    }
-                    for iface in &ce.interfaces {
-                        let iface_lower: Vec<u8> =
-                            iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                        if let Some(ice) = rcls(vm, &iface_lower) {
-                            if ice.get_method(method_lower_bytes).is_some() {
-                                return true;
-                            }
-                        }
-                    }
-                    false
-                })
-                .unwrap_or(false);
-            Some(if proto_exists {
+            let lookup = match obj.borrow().get_property(b"__reflection_lookup_class") {
+                Value::String(s) => s.as_bytes().to_ascii_lowercase(),
+                _ => class_lower.clone(),
+            };
+            let proto = linked_method_prototype(vm, &lookup, method_lower.as_bytes(), 0);
+            Some(if proto.is_some() {
                 Value::True
             } else {
                 Value::False
@@ -5532,33 +5590,17 @@ pub fn reflection_method_method(
             Some(if is_gen { Value::True } else { Value::False })
         }
         b"getprototype" => {
-            // Look for the method in parent classes/interfaces
             let method_lower_bytes = method_lower.as_bytes();
-            let proto_class = rcls(vm, &class_lower).and_then(|ce| {
-                // Walk parent chain
-                let mut check = ce.parent.clone();
-                while let Some(ref p) = check {
-                    let p_lower: Vec<u8> = p.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if let Some(pce) = rcls(vm, &p_lower) {
-                        if pce.get_method(method_lower_bytes).is_some() {
-                            return Some(String::from_utf8_lossy(&pce.name).to_string());
-                        }
-                        check = pce.parent.clone();
-                    } else {
-                        break;
-                    }
-                }
-                // Check interfaces
-                for iface in &ce.interfaces {
-                    let iface_lower: Vec<u8> =
-                        iface.iter().map(|b| b.to_ascii_lowercase()).collect();
-                    if let Some(ice) = rcls(vm, &iface_lower) {
-                        if ice.get_method(method_lower_bytes).is_some() {
-                            return Some(String::from_utf8_lossy(&ice.name).to_string());
-                        }
-                    }
-                }
-                None
+            // (the method as the class it was looked up in has it: an
+            // inherited method may have been given a new prototype there)
+            let lookup = match obj.borrow().get_property(b"__reflection_lookup_class") {
+                Value::String(s) => s.as_bytes().to_ascii_lowercase(),
+                _ => class_lower.clone(),
+            };
+            let proto_class = linked_method_prototype(vm, &lookup, method_lower_bytes, 0).map(|p| {
+                rcls(vm, &p)
+                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                    .unwrap_or_else(|| String::from_utf8_lossy(&p).to_string())
             });
             if let Some(proto) = proto_class {
                 let method_name = rcls(vm, &class_lower)
@@ -5573,9 +5615,12 @@ pub fn reflection_method_method(
                 let ob2 = obj.borrow();
                 let method_display = ob2.get_property(b"name").to_php_string().to_msg_string();
                 drop(ob2);
+                let shown = rcls(vm, &lookup)
+                    .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                    .unwrap_or_else(|| class_name.to_string());
                 let err_msg = format!(
                     "Method {}::{} does not have a prototype",
-                    class_name, method_display
+                    shown, method_display
                 );
                 let exc = vm.create_exception(b"ReflectionException", &err_msg, vm.current_line);
                 vm.current_exception = Some(exc);
