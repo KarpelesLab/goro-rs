@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use intl::number::{
-    CurrencyDisplay, NumberFormatOptions, NumberPart, NumberPartType as P, NumberStyle,
-    SignDisplay, UseGrouping, format_to_parts,
+    CurrencyDisplay, CurrencyUsage, NumberFormatOptions, NumberPart, NumberPartType as P,
+    NumberStyle, SignDisplay, UseGrouping, format_to_parts,
 };
 
 pub use crate::numdata_tables::{ACCOUNTING, AVAILABLE, REGION_CURRENCY};
@@ -535,8 +535,9 @@ pub fn currency_name(tag: &str, code: &str, v: f64) -> String {
     part_value(&parts(tag, v, &o), P::Currency).unwrap_or_else(|| code.to_string())
 }
 
-/// The default fraction digits of currency `code`.
-pub fn currency_digits(code: &str) -> i32 {
+/// The fraction digits of currency `code`: its standard digits, or its CLDR
+/// cash digits with `cash` (NumberFormatter::CASH_CURRENCY).
+pub fn currency_digits(code: &str, cash: bool) -> i32 {
     if code == "XXX" || code.len() != 3 {
         return 2;
     }
@@ -544,6 +545,9 @@ pub fn currency_digits(code: &str) -> i32 {
     let mut o = opts();
     o.style = NumberStyle::Currency;
     o.currency = Some(code_s);
+    if cash {
+        o.currency_usage = CurrencyUsage::Cash;
+    }
     part_value(&parts("en", 1.5, &o), P::Fraction)
         .map(|f| f.chars().count() as i32)
         .unwrap_or(0)

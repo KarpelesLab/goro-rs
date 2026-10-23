@@ -1219,7 +1219,7 @@ pub fn map_props(p: &Props, locale_currency: Option<&str>) -> Macros {
     let explicit_frac = min_frac != -1 || max_frac != -1;
     let explicit_sig = min_sig != -1 || max_sig != -1;
     if use_currency && (min_frac == -1 || max_frac == -1) {
-        let digits = numdata::currency_digits(currency.as_deref().unwrap_or("XXX"));
+        let digits = numdata::currency_digits(currency.as_deref().unwrap_or("XXX"), p.cash);
         if min_frac == -1 && max_frac == -1 {
             min_frac = digits;
             max_frac = digits;
@@ -1535,7 +1535,7 @@ impl DecimalFormat {
         let prec = if let (Some(code), true) = (cur_override, currency_fmt) {
             // a currency amount: the currency's digits when the pattern did not fix them
             if self.props.min_frac == -1 && self.props.max_frac == -1 && self.props.max_sig == -1 {
-                let d = numdata::currency_digits(code);
+                let d = numdata::currency_digits(code, self.props.cash);
                 Prec::Fraction(d, d)
             } else {
                 m.prec.clone()

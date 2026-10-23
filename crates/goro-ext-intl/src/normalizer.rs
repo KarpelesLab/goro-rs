@@ -3,7 +3,6 @@
 
 use goro_core::value::Value;
 use goro_core::vm::Vm;
-use icu_normalizer::properties::{CanonicalDecompositionBorrowed, Decomposed};
 use intl::unicode as un;
 
 use crate::error::{self, U_ILLEGAL_ARGUMENT_ERROR};
@@ -151,24 +150,15 @@ fn u8_next(s: &[u8]) -> (i32, usize) {
     (c as i32, n)
 }
 
-/// The Decomposition_Mapping of `ch` (one level), for the canonical or the
-/// compatibility forms.
+/// The Decomposition_Mapping of `ch` (one level, UnicodeData.txt field 5),
+/// for the canonical or the compatibility forms.
 fn raw_decomposition(ch: char, compat: bool) -> Option<String> {
-    let cd = CanonicalDecompositionBorrowed::new();
-    match cd.decompose(ch) {
-        Decomposed::Default => {}
-        Decomposed::Singleton(a) => return Some(a.to_string()),
-        Decomposed::Expansion(a, b) => return Some(format!("{}{}", a, b)),
-    }
-    if !compat {
-        return None;
-    }
-    let one = ch.to_string();
-    let k: String = un::nfkd(one.chars()).collect();
-    if k == one {
-        return None;
-    }
-    Some(un::nfc(k.chars()).collect())
+    let form = if compat {
+        un::NormalizationForm::Nfkd
+    } else {
+        un::NormalizationForm::Nfd
+    };
+    un::raw_decomposition(ch, form).map(|d| d.as_slice().iter().collect())
 }
 
 /// normalizer_get_raw_decomposition()

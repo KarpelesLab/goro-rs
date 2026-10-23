@@ -14,7 +14,7 @@ goro-ext-date = { path = "../goro-ext-date" }
 goro-ext-iconv = { path = "../goro-ext-iconv" }
 goro-ext-mbstring = { path = "../goro-ext-mbstring" }
 # The ICU analog everything is built on (KarpelesLab/intlrs).
-intl = { version = "=0.6.4", default-features = false, features = [
+intl = { version = "=0.6.5", default-features = false, features = [
     "full", "alloc", "names", "normalization", "segmentation", "bidi", "case", "identifiers",
     "confusables", "iana-tz", "number", "number-numsys", "currency", "datetime", "calendars-extra",
     "displaynames", "list", "relative", "spellout", "transliterate", "locale",
