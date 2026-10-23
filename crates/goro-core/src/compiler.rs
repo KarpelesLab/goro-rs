@@ -14756,7 +14756,10 @@ impl Compiler {
                             continue;
                         }
                         let val = self.compile_expr(&elem.value)?;
-                        if let OperandType::Cv(cv) = val {
+                        // ([&$this] holds a reference to a copy of $this,
+                        // which nothing else shares)
+                        let is_this = matches!(&elem.value.kind, ExprKind::Variable(n) if n == b"this");
+                        if let (OperandType::Cv(cv), false) = (val, is_this) {
                             self.op_array.emit(Op {
                                 opcode: OpCode::MakeRef,
                                 op1: OperandType::Cv(cv),
@@ -19357,7 +19360,7 @@ impl Compiler {
 
     /// Builtins whose first parameter is `array &$array` (goro passes the
     /// array by shared handle instead of by reference).
-    fn is_array_ref_builtin(func_name: Option<&[u8]>) -> bool {
+    pub(crate) fn is_array_ref_builtin(func_name: Option<&[u8]>) -> bool {
         let Some(fname) = func_name else {
             return false;
         };

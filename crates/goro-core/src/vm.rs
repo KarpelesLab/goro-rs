@@ -19536,6 +19536,9 @@ impl Vm {
             OperandType::Tmp(i) => match tmps.get_mut(i as usize) {
                 Some(Value::Reference(_)) => return false,
                 Some(Value::Array(a)) if Rc::ptr_eq(a, &self.globals) => return false,
+                // (a call's array result sent where a reference may be
+                // taken: the general handler separates it)
+                Some(Value::Array(_)) if matches!(op.result, OperandType::Const(_)) => return false,
                 Some(slot) => match std::mem::replace(slot, Value::Undef) {
                     Value::Undef => Value::Null,
                     v => v,
@@ -25742,6 +25745,9 @@ impl Vm {
                                 .pending_calls
                                 .last()
                                 .is_some_and(|call| self.builtin_arg_must_be_ref(call, arg_index));
+                        // A by-value call result passed to a by-reference
+                        // builtin parameter is a temporary (separated).
+                        let mut separate = false;
                         if (callee_expects_ref || builtin_ref)
                             && matches!(op.opcode, OpCode::SendValChecked)
                         {
@@ -25752,6 +25758,7 @@ impl Vm {
                             let returned_ref = self.last_call_by_ref
                                 || matches!(&op.op1, OperandType::Tmp(t) if matches!(tmps.get(*t as usize), Some(Value::Reference(_))));
                             if is_call_result {
+                                separate = builtin_ref && !returned_ref;
                                 if !returned_ref {
                                     self.emit_notice_at(
                                         "Only variables should be passed by reference",
@@ -25840,6 +25847,14 @@ impl Vm {
                                 }
                             }
                         } else {
+                            // A by-value call result for a builtin's
+                            // `array &$array`: a temporary, separated from
+                            // where it was read.
+                            let separate = separate
+                                || (!self.last_call_by_ref
+                                    && !matches!(&op.op1, OperandType::Tmp(t)
+                                        if matches!(tmps.get(*t as usize), Some(Value::Reference(_))))
+                                    && self.builtin_array_ref_call_arg(&op.op1, &op.result, arg_index));
                             let val = self.read_operand_warn(
                                 &op.op1,
                                 &cvs,
@@ -25856,6 +25871,19 @@ impl Vm {
                                 val.deref()
                             } else {
                                 self.globals_by_value(val)
+                            };
+                            let val = match val {
+                                Value::Array(a) if separate => {
+                                    // (holders besides this value and its tmp)
+                                    let in_tmp = matches!(&op.op1, OperandType::Tmp(t)
+                                        if matches!(tmps.get(*t as usize), Some(Value::Array(b)) if Rc::ptr_eq(b, &a)));
+                                    if Rc::strong_count(&a) > 1 + in_tmp as usize {
+                                        Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                                    } else {
+                                        Value::Array(a)
+                                    }
+                                }
+                                v => v,
                             };
                             if let Some(call) = self.pending_calls.last_mut() {
                                 call.args.push(val);
@@ -26034,6 +26062,12 @@ impl Vm {
                         // Keep the Reference wrapper produced by ArrayGetRef & co.
                         match tmps.get(*t as usize) {
                             Some(v @ Value::Reference(_)) => v.clone(),
+                            // A by-value result still shared with where it came
+                            // from (`f(self::$a)` returned): the callee writes
+                            // to a separated copy.
+                            Some(Value::Array(a)) if Rc::strong_count(a) > 1 => {
+                                Value::Array(Rc::new(RefCell::new(a.borrow().clone())))
+                            }
                             _ => self.read_operand(&op.op1, &cvs, &tmps, &op_array.literals),
                         }
                     } else {
@@ -39170,7 +39204,12 @@ impl Vm {
                         if let Some(&src) = foreach_ref_src.get(&iter_idx) {
                             if let Some(Value::Object(o2)) = cvs.get(src as usize).map(|v| v.deref())
                             {
-                                if !std::ptr::eq(Rc::as_ptr(&o2), weak.as_ptr()) {
+                                if !std::ptr::eq(Rc::as_ptr(&o2), weak.as_ptr())
+                                    && !std::ptr::eq(
+                                        Rc::as_ptr(&self.proxy_redirect(&o2)),
+                                        weak.as_ptr(),
+                                    )
+                                {
                                     self.maybe_run_lazy_init(&o2);
                                     native_exc_check!(
                                         self,
@@ -60002,6 +60041,25 @@ impl Vm {
             }
             _ => false,
         }
+    }
+
+    /// A call result (SendVal with a result operand) sent as the array
+    /// argument of a builtin taking `array &$array`: a temporary, which the
+    /// builtin must not modify in its source's place.
+    fn builtin_array_ref_call_arg(
+        &self,
+        op1: &OperandType,
+        result: &OperandType,
+        arg_index: usize,
+    ) -> bool {
+        arg_index == 0
+            && matches!(op1, OperandType::Tmp(_))
+            && matches!(result, OperandType::Const(_))
+            && self.pending_calls.last().is_some_and(|c| {
+                self.pending_builtin_name(c).is_some_and(|n| {
+                    crate::compiler::Compiler::is_array_ref_builtin(Some(&n))
+                })
+            })
     }
 
     /// FETCH_OBJ_IS of an undefined property whose __isset() is absent or

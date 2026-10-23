@@ -410,7 +410,7 @@ impl Vm {
 
     /// The (lowercase) internal function a pending call goes to, if any:
     /// an unqualified call in a namespace falls back to the global one.
-    fn pending_builtin_name(&self, call: &crate::vm::PendingCall) -> Option<Vec<u8>> {
+    pub(crate) fn pending_builtin_name(&self, call: &crate::vm::PendingCall) -> Option<Vec<u8>> {
         let name = call.name.as_bytes();
         // A call resolved to a user function of its name when it was set up
         // (the name it looked up: no leading backslash).
