@@ -605,12 +605,11 @@ impl Vm {
                 break;
             };
             if c.filename.is_none() {
-                // (a throwable registered as a bare entry of a stub class has
-                // the stub's slots, like any exception)
-                storage_order = !(c.start_line == 0
-                    && c.properties.is_empty()
-                    && crate::stubs::find_class(&cur).is_some()
-                    && self.class_extends_any(&cur, &[b"exception", b"error"]));
+                // (an internal throwable, registered as a bare entry of a
+                // stub class or declared by an extension's prelude, has the
+                // slots of any exception: Exception's, then its own)
+                storage_order =
+                    !(c.start_line == 0 && self.class_extends_any(&cur, &[b"exception", b"error"]));
                 break;
             }
             match &c.parent {
