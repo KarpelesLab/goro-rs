@@ -13,6 +13,10 @@
 
 mod handler;
 
+// (freed small blocks are kept per thread for the next allocations)
+#[global_allocator]
+static GLOBAL: goro_core::smalloc::SmallCache = goro_core::smalloc::SmallCache;
+
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::ffi::OsStrExt;

@@ -7,6 +7,10 @@ use std::process;
 
 use goro_core::vm::Vm;
 
+// (freed small blocks are kept per thread for the next allocations)
+#[global_allocator]
+static GLOBAL: goro_core::smalloc::SmallCache = goro_core::smalloc::SmallCache;
+
 mod cgi;
 mod cli_server;
 mod fpm;

@@ -37,6 +37,7 @@ pub mod reflection;
 pub mod rfc1867;
 pub mod sapi_headers;
 pub mod script_cache;
+pub mod smalloc;
 pub mod spl;
 pub mod spl_array;
 pub mod spl_dir;

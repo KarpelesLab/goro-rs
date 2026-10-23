@@ -165,6 +165,19 @@ fn arg_cv_bound(f: &OpArray, ncvs: usize) -> usize {
     }
 }
 
+/// `*slot = v` for a slot holding a vector that never allocated (a new
+/// call's or frame's, filled with a recycled buffer): nothing to drop, and
+/// no call of the vector's drop glue.
+#[inline(always)]
+fn fill_empty<T>(slot: &mut Vec<T>, v: Vec<T>) {
+    let old = std::mem::replace(slot, v);
+    if old.capacity() == 0 {
+        std::mem::forget(old);
+    } else {
+        drop(old);
+    }
+}
+
 /// Bind the first `n` arguments of a call to the callee's (Undef) CVs:
 /// the first `keep` ones ($this) are shared, the others move (the CVs are
 /// then their holders, released in declaration order).
@@ -20361,7 +20374,7 @@ impl Vm {
         };
         // (take_values(0))
         if let Some(buf) = self.value_pool.pop() {
-            call.args = buf;
+            fill_empty(&mut call.args, buf);
         }
         if !Self::cached_call_target(op_array, ip, call.name.as_bytes(), fn_gen, &mut call.target) {
             let name = call.name.clone();
@@ -27918,7 +27931,7 @@ impl Vm {
                         if let Some(frame) = self.call_stack.last_mut() {
                             frame.1 = self.current_file.clone();
                             if let Some(v) = self.value_pool.pop() {
-                                frame.3 = v;
+                                fill_empty(&mut frame.3, v);
                             }
                             frame.3.extend_from_slice(&call.args[skip..]);
                         }

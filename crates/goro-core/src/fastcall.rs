@@ -661,7 +661,7 @@ impl Vm {
             return;
         };
         if let Some(buf) = self.value_pool.pop() {
-            call.args = buf;
+            super::fill_empty(&mut call.args, buf);
         }
         call.args
             .extend(std::iter::once_with(move || Value::Object(obj)));
@@ -727,7 +727,7 @@ impl Vm {
             return;
         };
         if let Some(buf) = self.value_pool.pop() {
-            call.args = buf;
+            super::fill_empty(&mut call.args, buf);
         }
         // INIT_METHOD_CALL consumes a temporary object operand (`new` keeps
         // its result for the constructor call; a static method's is
