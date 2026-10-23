@@ -94,14 +94,16 @@ enum Charset {
     Cp866,
     Koi8r,
     MacRoman,
-    Big5,      // partial: ASCII only
-    Big5HkScs, // partial: ASCII only
-    Gb2312,    // partial: ASCII only
-    Sjis,      // partial: ASCII only
-    EucJp,     // partial: ASCII only
+    Big5,
+    Big5HkScs,
+    Gb2312,
+    Sjis,
+    EucJp,
 }
 
 impl Charset {
+    /// CHARSET_PARTIAL_SUPPORT(): the multi-byte charsets without Unicode
+    /// mappings (only the ASCII range is known).
     fn is_partial(self) -> bool {
         matches!(
             self,
@@ -109,20 +111,75 @@ impl Charset {
         )
     }
 
-    fn is_single_byte(self) -> bool {
-        matches!(
-            self,
-            Charset::Iso88591
-                | Charset::Iso885915
-                | Charset::Iso88595
-                | Charset::Cp1252
-                | Charset::Cp1251
-                | Charset::Cp866
-                | Charset::Koi8r
-                | Charset::MacRoman
-        )
+    /// CHARSET_UNICODE_COMPAT(): code units are Unicode code points.
+    fn is_unicode_compat(self) -> bool {
+        matches!(self, Charset::Utf8 | Charset::Iso88591)
+    }
+
+    /// enc_to_uni_index[]: the single-byte charset's byte -> Unicode table
+    /// (0 marks an unmapped byte, see to_unicode()).
+    fn to_uni_table(self) -> Option<&'static [u32; 256]> {
+        Some(match self {
+            Charset::Iso88591 => &CHARSET_ISO_8859_1,
+            Charset::Iso885915 => &CHARSET_ISO_8859_15,
+            Charset::Iso88595 => &CHARSET_ISO_8859_5,
+            Charset::Cp1252 => &CHARSET_CP1252,
+            Charset::Cp1251 => &CHARSET_CP1251,
+            Charset::Cp866 => &CHARSET_CP866,
+            Charset::Koi8r => &CHARSET_KOI8R,
+            Charset::MacRoman => &CHARSET_MACROMAN,
+            _ => return None,
+        })
+    }
+
+    /// map_to_unicode(): 0xFFFF when the byte has no mapping.
+    fn to_unicode(self, table: &[u32; 256], byte: u32) -> u32 {
+        let v = table[(byte & 0xFF) as usize];
+        // (MacRoman leaves 0x00 unmapped as well)
+        if v == 0 && (byte != 0 || self == Charset::MacRoman) {
+            0xFFFF
+        } else {
+            v
+        }
     }
 }
+
+/// html_tables.h charset_map[] (matched case-insensitively, whole name).
+static CHARSET_MAP: &[(&str, Charset)] = &[
+    ("ISO-8859-1", Charset::Iso88591),
+    ("ISO8859-1", Charset::Iso88591),
+    ("ISO-8859-15", Charset::Iso885915),
+    ("ISO8859-15", Charset::Iso885915),
+    ("utf-8", Charset::Utf8),
+    ("cp1252", Charset::Cp1252),
+    ("Windows-1252", Charset::Cp1252),
+    ("1252", Charset::Cp1252),
+    ("BIG5", Charset::Big5),
+    ("950", Charset::Big5),
+    ("GB2312", Charset::Gb2312),
+    ("936", Charset::Gb2312),
+    ("BIG5-HKSCS", Charset::Big5HkScs),
+    ("Shift_JIS", Charset::Sjis),
+    ("SJIS", Charset::Sjis),
+    ("932", Charset::Sjis),
+    ("SJIS-win", Charset::Sjis),
+    ("CP932", Charset::Sjis),
+    ("EUCJP", Charset::EucJp),
+    ("EUC-JP", Charset::EucJp),
+    ("eucJP-win", Charset::EucJp),
+    ("KOI8-R", Charset::Koi8r),
+    ("koi8-ru", Charset::Koi8r),
+    ("koi8r", Charset::Koi8r),
+    ("cp1251", Charset::Cp1251),
+    ("Windows-1251", Charset::Cp1251),
+    ("win-1251", Charset::Cp1251),
+    ("iso8859-5", Charset::Iso88595),
+    ("iso-8859-5", Charset::Iso88595),
+    ("cp866", Charset::Cp866),
+    ("866", Charset::Cp866),
+    ("ibm866", Charset::Cp866),
+    ("MacRoman", Charset::MacRoman),
+];
 
 pub fn register(vm: &mut Vm) {
     vm.register_function(b"htmlspecialchars", htmlspecialchars_fn);
@@ -132,330 +189,334 @@ pub fn register(vm: &mut Vm) {
     vm.register_function(b"get_html_translation_table", get_html_translation_table_fn);
 }
 
-/// Resolve PHP's encoding string to our Charset enum.
-/// Returns (charset, was_supported). When unsupported, defaults to UTF-8.
-fn determine_charset(encoding: &str) -> (Charset, bool) {
-    // PHP's determine_charset (html.c) is case-insensitive.
-    let n = encoding.to_ascii_lowercase();
-    let n = n.as_str();
-    match n {
-        "" | "utf-8" | "utf8" => (Charset::Utf8, true),
-        "iso-8859-1" | "iso8859-1" | "iso_8859-1" | "iso_8859_1" | "latin1" => {
-            (Charset::Iso88591, true)
-        }
-        "iso-8859-5" | "iso8859-5" | "iso_8859-5" | "iso_8859_5" => (Charset::Iso88595, true),
-        "iso-8859-15" | "iso8859-15" | "iso_8859-15" | "iso_8859_15" | "latin9" => {
-            (Charset::Iso885915, true)
-        }
-        "cp1252" | "windows-1252" | "1252" => (Charset::Cp1252, true),
-        "cp1251" | "windows-1251" | "win-1251" | "1251" => (Charset::Cp1251, true),
-        "cp866" | "ibm866" | "866" => (Charset::Cp866, true),
-        "koi8-r" | "koi8r" | "koi8-ru" => (Charset::Koi8r, true),
-        "macroman" => (Charset::MacRoman, true),
-        "big5" | "950" => (Charset::Big5, true),
-        "big5-hkscs" => (Charset::Big5HkScs, true),
-        "gb2312" | "936" => (Charset::Gb2312, true),
-        "shift_jis" | "sjis" | "sjis-win" | "cp932" | "932" => (Charset::Sjis, true),
-        "eucjp" | "euc-jp" | "eucjp-win" => (Charset::EucJp, true),
-        _ => (Charset::Utf8, false),
-    }
+/// The charset_map[] entry named `encoding`, if any.
+fn determine_charset(encoding: &[u8]) -> Option<Charset> {
+    CHARSET_MAP
+        .iter()
+        .find(|(name, _)| name.as_bytes().eq_ignore_ascii_case(encoding))
+        .map(|&(_, cs)| cs)
 }
 
 /// Look up the effective default charset from INI settings, mirroring PHP's
 /// get_default_charset(): `internal_encoding` first, then `default_charset`.
 /// Returns the raw string when set and non-empty.
-fn ini_default_charset(vm: &Vm) -> Option<String> {
+fn ini_default_charset(vm: &Vm) -> Option<Vec<u8>> {
     for key in [b"internal_encoding".as_ref(), b"default_charset".as_ref()] {
         if let Some(val) = vm.constants.get(key) {
             let s = val.to_php_string();
-            let raw = s.to_string_lossy();
-            if !raw.is_empty() {
-                return Some(raw);
+            if !s.as_bytes().is_empty() {
+                return Some(s.as_bytes().to_vec());
             }
         }
     }
     None
 }
 
+/// determine_charset(): the explicit charset (empty / null fall back to
+/// get_default_charset()), warning about and replacing an unknown one with
+/// UTF-8.
 fn resolve_charset(vm: &mut Vm, args: &[Value], fn_name: &str, arg_idx: usize) -> Charset {
-    // Determine the raw charset string. Empty / null / missing all fall back
-    // to PHP's get_default_charset() (internal_encoding → default_charset).
-    let raw_owned: Option<String> = match args.get(arg_idx) {
+    let raw: Option<Vec<u8>> = match args.get(arg_idx).map(|v| v.deref()) {
         None | Some(Value::Null) => ini_default_charset(vm),
         Some(v) => {
             let s = v.to_php_string();
-            let r = s.to_string_lossy();
-            if r.is_empty() {
+            if s.as_bytes().is_empty() {
                 ini_default_charset(vm)
             } else {
-                Some(r)
+                Some(s.as_bytes().to_vec())
             }
         }
     };
-    let raw = match raw_owned {
-        Some(r) if !r.is_empty() => r,
-        _ => return Charset::Utf8,
+    let Some(raw) = raw else {
+        return Charset::Utf8;
     };
-    let (cs, supported) = determine_charset(&raw);
-    if !supported {
-        vm.emit_warning(&format!(
-            "{}(): Charset \"{}\" is not supported, assuming UTF-8",
-            fn_name, raw
-        ));
+    match determine_charset(&raw) {
+        Some(cs) => cs,
+        None => {
+            vm.emit_warning(&format!(
+                "{}(): Charset \"{}\" is not supported, assuming UTF-8",
+                fn_name,
+                String::from_utf8_lossy(&raw)
+            ));
+            Charset::Utf8
+        }
     }
-    cs
 }
 
-/// Decode the next character at `bytes[i..]` as a Unicode codepoint.
-/// Returns (codepoint, bytes_consumed). On invalid sequences returns
-/// (None, 1) — the caller decides whether to skip, substitute, or pass through.
-#[allow(clippy::if_same_then_else)] // branches mirror php-src
-fn next_codepoint(bytes: &[u8], i: usize, cs: Charset) -> (Option<u32>, usize) {
-    if i >= bytes.len() {
-        return (None, 0);
+/// valid as single byte character or leading byte
+fn utf8_lead(c: u8) -> bool {
+    c < 0x80 || (0xC2..=0xF4).contains(&c)
+}
+
+fn utf8_trail(c: u8) -> bool {
+    (0x80..=0xBF).contains(&c)
+}
+
+/// get_next_char(): the code unit sequence at `*pos` (a Unicode code point
+/// for UTF-8, the raw byte for single-byte charsets, the bytes packed
+/// big-endian for the other multi-byte ones). On an invalid sequence, None
+/// with `*pos` advanced past the bytes to report as illegal (UTR #36, 3.6.1,
+/// strategy 2: no non-initial byte that is a valid character or lead).
+fn get_next_char(cs: Charset, s: &[u8], pos: &mut usize) -> Option<u32> {
+    let p = *pos;
+    let avail = s.len().saturating_sub(p);
+    macro_rules! fail {
+        ($adv:expr) => {{
+            *pos = p + $adv;
+            return None;
+        }};
     }
-    let b = bytes[i];
+    if avail < 1 {
+        fail!(1);
+    }
+    let c = s[p];
+    let this_char: u32;
     match cs {
-        Charset::Utf8 => decode_utf8(bytes, i),
-        Charset::Iso88591 => (Some(CHARSET_ISO_8859_1[b as usize]), 1),
-        Charset::Iso885915 => (Some(CHARSET_ISO_8859_15[b as usize]), 1),
-        Charset::Iso88595 => (Some(CHARSET_ISO_8859_5[b as usize]), 1),
-        Charset::Cp1252 => {
-            let cp = CHARSET_CP1252[b as usize];
-            if cp == 0 && b != 0 {
-                (None, 1)
-            } else {
-                (Some(cp), 1)
-            }
-        }
-        Charset::Cp1251 => {
-            let cp = CHARSET_CP1251[b as usize];
-            if cp == 0 && b != 0 {
-                (None, 1)
-            } else {
-                (Some(cp), 1)
-            }
-        }
-        Charset::Cp866 => {
-            let cp = CHARSET_CP866[b as usize];
-            if cp == 0 && b != 0 {
-                (None, 1)
-            } else {
-                (Some(cp), 1)
-            }
-        }
-        Charset::Koi8r => {
-            let cp = CHARSET_KOI8R[b as usize];
-            if cp == 0 && b != 0 {
-                (None, 1)
-            } else {
-                (Some(cp), 1)
-            }
-        }
-        Charset::MacRoman => {
-            let cp = CHARSET_MACROMAN[b as usize];
-            // PHP rejects 0x7F for MacRoman
-            if b == 0x7F {
-                (None, 1)
-            } else if cp == 0 && b != 0 {
-                (None, 1)
-            } else {
-                (Some(cp), 1)
-            }
-        }
-        Charset::Big5 => {
-            // ASCII (or any byte < 0x81): single byte, pass through.
-            // Lead 0x81-0xFE: requires trail (0x40-0x7E or 0xA1-0xFE).
-            if (0x81..=0xFE).contains(&b) {
-                if i + 1 >= bytes.len() {
-                    return (None, 1);
+        Charset::Utf8 => {
+            if c < 0x80 {
+                this_char = c as u32;
+                *pos = p + 1;
+            } else if c < 0xC2 {
+                fail!(1);
+            } else if c < 0xE0 {
+                if avail < 2 {
+                    fail!(1);
                 }
-                let n = bytes[i + 1];
-                if (0x40..=0x7E).contains(&n) || (0xA1..=0xFE).contains(&n) {
-                    (Some(((b as u32) << 8) | n as u32), 2)
+                if !utf8_trail(s[p + 1]) {
+                    fail!(if utf8_lead(s[p + 1]) { 1 } else { 2 });
+                }
+                this_char = ((c as u32 & 0x1F) << 6) | (s[p + 1] as u32 & 0x3F);
+                if this_char < 0x80 {
+                    fail!(2);
+                }
+                *pos = p + 2;
+            } else if c < 0xF0 {
+                if avail < 3 || !utf8_trail(s[p + 1]) || !utf8_trail(s[p + 2]) {
+                    if avail < 2 || utf8_lead(s[p + 1]) {
+                        fail!(1);
+                    } else if avail < 3 || utf8_lead(s[p + 2]) {
+                        fail!(2);
+                    } else {
+                        fail!(3);
+                    }
+                }
+                this_char = ((c as u32 & 0x0F) << 12)
+                    | ((s[p + 1] as u32 & 0x3F) << 6)
+                    | (s[p + 2] as u32 & 0x3F);
+                if this_char < 0x800 || (0xD800..=0xDFFF).contains(&this_char) {
+                    fail!(3);
+                }
+                *pos = p + 3;
+            } else if c < 0xF5 {
+                if avail < 4
+                    || !utf8_trail(s[p + 1])
+                    || !utf8_trail(s[p + 2])
+                    || !utf8_trail(s[p + 3])
+                {
+                    if avail < 2 || utf8_lead(s[p + 1]) {
+                        fail!(1);
+                    } else if avail < 3 || utf8_lead(s[p + 2]) {
+                        fail!(2);
+                    } else if avail < 4 || utf8_lead(s[p + 3]) {
+                        fail!(3);
+                    } else {
+                        fail!(4);
+                    }
+                }
+                this_char = ((c as u32 & 0x07) << 18)
+                    | ((s[p + 1] as u32 & 0x3F) << 12)
+                    | ((s[p + 2] as u32 & 0x3F) << 6)
+                    | (s[p + 3] as u32 & 0x3F);
+                if !(0x10000..=0x10FFFF).contains(&this_char) {
+                    fail!(4);
+                }
+                *pos = p + 4;
+            } else {
+                fail!(1);
+            }
+        }
+        Charset::Big5 | Charset::Big5HkScs => {
+            if (0x81..=0xFE).contains(&c) {
+                if avail < 2 {
+                    fail!(1);
+                }
+                let next = s[p + 1];
+                if (0x40..=0x7E).contains(&next) || (0xA1..=0xFE).contains(&next) {
+                    this_char = ((c as u32) << 8) | next as u32;
+                } else if cs == Charset::Big5 || (next != 0x80 && next != 0xFF) {
+                    fail!(1);
                 } else {
-                    (None, 1)
+                    fail!(2);
                 }
+                *pos = p + 2;
             } else {
-                (Some(b as u32), 1)
-            }
-        }
-        Charset::Big5HkScs => {
-            if (0x81..=0xFE).contains(&b) {
-                if i + 1 >= bytes.len() {
-                    return (None, 1);
-                }
-                let n = bytes[i + 1];
-                if (0x40..=0x7E).contains(&n) || (0xA1..=0xFE).contains(&n) {
-                    (Some(((b as u32) << 8) | n as u32), 2)
-                } else if n != 0x80 && n != 0xFF {
-                    (None, 1)
-                } else {
-                    (None, 2)
-                }
-            } else {
-                (Some(b as u32), 1)
+                this_char = c as u32;
+                *pos = p + 1;
             }
         }
         Charset::Gb2312 => {
-            // gb2312_lead = c != 0x8E, 0x8F, 0xA0, 0xFF
-            // gb2312_trail = 0xA1..=0xFE
             let lead = |c: u8| c != 0x8E && c != 0x8F && c != 0xA0 && c != 0xFF;
             let trail = |c: u8| (0xA1..=0xFE).contains(&c);
-            if (0xA1..=0xFE).contains(&b) {
-                if i + 1 >= bytes.len() {
-                    return (None, 1);
+            if (0xA1..=0xFE).contains(&c) {
+                if avail < 2 {
+                    fail!(1);
                 }
-                let n = bytes[i + 1];
-                if trail(n) {
-                    (Some(((b as u32) << 8) | n as u32), 2)
-                } else if lead(n) {
-                    (None, 1)
+                let next = s[p + 1];
+                if trail(next) {
+                    this_char = ((c as u32) << 8) | next as u32;
+                } else if lead(next) {
+                    fail!(1);
                 } else {
-                    (None, 2)
+                    fail!(2);
                 }
-            } else if lead(b) {
-                (Some(b as u32), 1)
+                *pos = p + 2;
+            } else if lead(c) {
+                this_char = c as u32;
+                *pos = p + 1;
             } else {
-                (None, 1)
+                fail!(1);
             }
         }
         Charset::Sjis => {
-            // sjis_lead = c != 0x80 && c != 0xA0 && c < 0xFD
-            // sjis_trail = c >= 0x40 && c != 0x7F && c < 0xFD
             let lead = |c: u8| c != 0x80 && c != 0xA0 && c < 0xFD;
             let trail = |c: u8| c >= 0x40 && c != 0x7F && c < 0xFD;
-            if (0x81..=0x9F).contains(&b) || (0xE0..=0xFC).contains(&b) {
-                if i + 1 >= bytes.len() {
-                    return (None, 1);
+            if (0x81..=0x9F).contains(&c) || (0xE0..=0xFC).contains(&c) {
+                if avail < 2 {
+                    fail!(1);
                 }
-                let n = bytes[i + 1];
-                if trail(n) {
-                    (Some(((b as u32) << 8) | n as u32), 2)
-                } else if lead(n) {
-                    (None, 1)
+                let next = s[p + 1];
+                if trail(next) {
+                    this_char = ((c as u32) << 8) | next as u32;
+                } else if lead(next) {
+                    fail!(1);
                 } else {
-                    (None, 2)
+                    fail!(2);
                 }
-            } else if b < 0x80 || (0xA1..=0xDF).contains(&b) {
-                (Some(b as u32), 1)
+                *pos = p + 2;
+            } else if c < 0x80 || (0xA1..=0xDF).contains(&c) {
+                this_char = c as u32;
+                *pos = p + 1;
             } else {
-                (None, 1)
+                fail!(1);
             }
         }
         Charset::EucJp => {
-            // PHP's "non-consume if potentially valid lead" rule: when failing
-            // on a multi-byte EUC-JP sequence, advance just 1 if the next byte
-            // could start a new character (i.e. not 0xA0/0xFF). Advance further
-            // only when subsequent bytes are 0xA0/0xFF, which can't start anything.
-            let avail = bytes.len() - i;
-            if (0xA1..=0xFE).contains(&b) {
+            if (0xA1..=0xFE).contains(&c) || c == 0x8E {
                 if avail < 2 {
-                    return (None, 1);
+                    fail!(1);
                 }
-                let n = bytes[i + 1];
-                if (0xA1..=0xFE).contains(&n) {
-                    (Some(((b as u32) << 8) | n as u32), 2)
+                let next = s[p + 1];
+                let ok = if c == 0x8E {
+                    (0xA1..=0xDF).contains(&next)
                 } else {
-                    let adv = if n != 0xA0 && n != 0xFF { 1 } else { 2 };
-                    (None, adv)
-                }
-            } else if b == 0x8E {
-                if avail < 2 {
-                    return (None, 1);
-                }
-                let n = bytes[i + 1];
-                if (0xA1..=0xDF).contains(&n) {
-                    (Some(((b as u32) << 8) | n as u32), 2)
+                    (0xA1..=0xFE).contains(&next)
+                };
+                if ok {
+                    this_char = ((c as u32) << 8) | next as u32;
                 } else {
-                    let adv = if n != 0xA0 && n != 0xFF { 1 } else { 2 };
-                    (None, adv)
+                    fail!(if next != 0xA0 && next != 0xFF { 1 } else { 2 });
                 }
-            } else if b == 0x8F {
-                if avail < 3
-                    || !(bytes[i + 1] >= 0xA1 && bytes[i + 1] <= 0xFE)
-                    || !(bytes[i + 2] >= 0xA1 && bytes[i + 2] <= 0xFE)
-                {
-                    // Determine how many bytes to consume on failure
-                    if avail < 2 || (bytes[i + 1] != 0xA0 && bytes[i + 1] != 0xFF) {
-                        (None, 1)
-                    } else if avail < 3 || (bytes[i + 2] != 0xA0 && bytes[i + 2] != 0xFF) {
-                        (None, 2)
+                *pos = p + 2;
+            } else if c == 0x8F {
+                let hi = |b: u8| (0xA1..=0xFE).contains(&b);
+                if avail < 3 || !hi(s[p + 1]) || !hi(s[p + 2]) {
+                    if avail < 2 || (s[p + 1] != 0xA0 && s[p + 1] != 0xFF) {
+                        fail!(1);
+                    } else if avail < 3 || (s[p + 2] != 0xA0 && s[p + 2] != 0xFF) {
+                        fail!(2);
                     } else {
-                        (None, 3)
+                        fail!(3);
                     }
-                } else {
-                    let n1 = bytes[i + 1];
-                    let n2 = bytes[i + 2];
-                    (Some(((b as u32) << 16) | ((n1 as u32) << 8) | n2 as u32), 3)
                 }
-            } else if b != 0xA0 && b != 0xFF {
-                (Some(b as u32), 1)
+                this_char = ((c as u32) << 16) | ((s[p + 1] as u32) << 8) | s[p + 2] as u32;
+                *pos = p + 3;
+            } else if c != 0xA0 && c != 0xFF {
+                this_char = c as u32;
+                *pos = p + 1;
             } else {
-                (None, 1)
+                fail!(1);
             }
+        }
+        // single-byte charsets
+        _ => {
+            this_char = c as u32;
+            *pos = p + 1;
+        }
+    }
+    Some(this_char)
+}
+
+/// map_from_unicode(): the code unit for Unicode `code` in `cs`.
+fn map_from_unicode(code: u32, cs: Charset) -> Option<u32> {
+    // unimap_bsearch() over the charset's table (byte >= `from`)
+    let search = |table: &[u32; 256], from: usize| -> Option<u32> {
+        if code > 0xFFFF {
+            return None;
+        }
+        (from..256)
+            .find(|&b| table[b] == code && code != 0)
+            .map(|b| b as u32)
+    };
+    match cs {
+        Charset::Utf8 => Some(code),
+        Charset::Iso88591 => (code <= 0xFF).then_some(code),
+        Charset::Iso88595 => {
+            if code <= 0xA0 || code == 0xAD {
+                Some(code)
+            } else if code == 0x2116 {
+                Some(0xF0)
+            } else if code == 0xA7 {
+                Some(0xFD)
+            } else if (0x0401..=0x045F).contains(&code) {
+                if code == 0x040D || code == 0x0450 || code == 0x045D {
+                    None
+                } else {
+                    Some(code - 0x360)
+                }
+            } else {
+                None
+            }
+        }
+        Charset::Iso885915 => {
+            if code < 0xA4 || (code > 0xBE && code <= 0xFF) {
+                Some(code)
+            } else {
+                search(&CHARSET_ISO_8859_15, 0xA4)
+            }
+        }
+        Charset::Cp1252 => {
+            if code <= 0x7F || (0xA0..=0xFF).contains(&code) {
+                Some(code)
+            } else {
+                search(&CHARSET_CP1252, 0x80)
+            }
+        }
+        Charset::MacRoman | Charset::Cp1251 | Charset::Koi8r | Charset::Cp866 => {
+            if cs == Charset::MacRoman && code == 0x7F {
+                None
+            } else if code <= 0x7F {
+                Some(code)
+            } else {
+                search(cs.to_uni_table()?, 0x80)
+            }
+        }
+        // Only the ASCII range is known; 0x5C is the Yen sign in SJIS/EUC-JP.
+        Charset::Sjis | Charset::EucJp => {
+            ((0x20..=0x7D).contains(&code) && code != 0x5C).then_some(code)
+        }
+        Charset::Big5 | Charset::Big5HkScs | Charset::Gb2312 => {
+            (0x20..=0x7D).contains(&code).then_some(code)
         }
     }
 }
 
-/// Decode one UTF-8 codepoint at `bytes[i..]`. Returns (codepoint, byte_len).
-/// On invalid sequences returns (None, consumed) where consumed reflects how
-/// many bytes of the broken sequence to skip — Unicode TR #36 "do not consume
-/// valid successor bytes": we advance over the lead and any valid continuation
-/// bytes, but stop at the first byte that could legitimately start a new
-/// character (any byte that's not a continuation byte, or end of string).
-fn decode_utf8(bytes: &[u8], i: usize) -> (Option<u32>, usize) {
-    if i >= bytes.len() {
-        return (None, 0);
-    }
-    let b0 = bytes[i];
-    if b0 < 0x80 {
-        return (Some(b0 as u32), 1);
-    }
-    if b0 < 0xC2 {
-        // continuation byte without lead, or overlong (0xC0/0xC1)
-        return (None, 1);
-    }
-    let (need, mut cp): (usize, u32) = if b0 < 0xE0 {
-        (1, (b0 & 0x1F) as u32)
-    } else if b0 < 0xF0 {
-        (2, (b0 & 0x0F) as u32)
-    } else if b0 < 0xF5 {
-        (3, (b0 & 0x07) as u32)
+/// write_octet_sequence()
+fn write_octet_sequence(out: &mut Vec<u8>, cs: Charset, code: u32) {
+    if cs == Charset::Utf8 {
+        append_utf8(out, code);
     } else {
-        return (None, 1);
-    };
-    // Count how many valid continuation bytes follow, up to `need`.
-    let mut k = 1;
-    while k <= need {
-        if i + k >= bytes.len() {
-            // End of input mid-sequence: consume what we've validated so far.
-            return (None, k);
-        }
-        let bc = bytes[i + k];
-        if bc & 0xC0 != 0x80 {
-            // Not a continuation byte. Don't consume it.
-            return (None, k);
-        }
-        cp = (cp << 6) | (bc & 0x3F) as u32;
-        k += 1;
+        out.push(code as u8);
     }
-    // Validate ranges
-    let len = need + 1;
-    let min = match len {
-        2 => 0x80,
-        3 => 0x800,
-        4 => 0x10000,
-        _ => 0,
-    };
-    if cp < min {
-        return (None, len);
-    }
-    // Surrogates and out-of-range
-    if (0xD800..=0xDFFF).contains(&cp) || cp > 0x10FFFF {
-        return (None, len);
-    }
-    (Some(cp), len)
 }
 
 /// Append a Unicode codepoint to `out` encoded as UTF-8.
@@ -475,24 +536,6 @@ fn lookup_entity_encode(cp: u32, table: &'static [(u32, &'static str)]) -> Optio
     }
 }
 
-/// Look up a multi-codepoint entity (cp1, cp2) -> entity name.
-fn lookup_multi_cp(
-    cp1: u32,
-    cp2: u32,
-    table: &'static [(u32, u32, &'static str)],
-) -> Option<&'static str> {
-    // Linear scan within the cp1 range — multi-cp table has at most ~80 entries.
-    for &(a, b, n) in table {
-        if a == cp1 && b == cp2 {
-            return Some(n);
-        }
-        if a > cp1 {
-            break;
-        }
-    }
-    None
-}
-
 /// Look up an entity name in the decode table. Returns (cp1, cp2) — cp2=0 if single.
 fn lookup_entity_decode(name: &[u8], table: &[(&str, u32, u32)]) -> Option<(u32, u32)> {
     let s = std::str::from_utf8(name).ok()?;
@@ -502,22 +545,19 @@ fn lookup_entity_decode(name: &[u8], table: &[(&str, u32, u32)]) -> Option<(u32,
     }
 }
 
-/// Return the encode table appropriate for the given doctype + all-entities flag.
-/// Mirrors PHP's determine_entity_table: HTML5 → html5, everything else → html4
-/// (with XML 1.0 forcibly downgraded to htmlspecialchars before reaching here).
+/// Return the encode table appropriate for the given doctype + all-entities flag
+/// (determine_entity_table(); XML 1.0 never reaches here with `all`).
 fn pick_encode_table(doctype: i64, all_entities: bool) -> &'static [(u32, &'static str)] {
     if !all_entities {
         // htmlspecialchars: only the basic 5 (with or without apos depending on doctype)
         match doctype {
-            ENT_HTML_DOC_XHTML | ENT_HTML_DOC_XML1 | ENT_HTML_DOC_HTML5 => BASIC_ENTS_APOS_ENCODE,
-            _ => BASIC_ENTS_ENCODE,
+            ENT_HTML_DOC_HTML401 => BASIC_ENTS_ENCODE,
+            _ => BASIC_ENTS_APOS_ENCODE,
         }
     } else {
         match doctype {
             ENT_HTML_DOC_HTML5 => ENT_HTML5_ENCODE,
-            // XML 1.0 has only the 5 basic entities (with apos)
             ENT_HTML_DOC_XML1 => BASIC_ENTS_APOS_ENCODE,
-            // HTML 4.01 and XHTML both use the HTML 4.01 entity set for encoding
             _ => ENT_HTML4_ENCODE,
         }
     }
@@ -535,21 +575,44 @@ fn pick_multi_cp_table(doctype: i64, all_entities: bool) -> &'static [(u32, u32,
     }
 }
 
-/// Return the decode table appropriate for the given doctype.
-fn pick_decode_table(doctype: i64) -> &'static [(&'static str, u32, u32)] {
-    match doctype {
-        ENT_HTML_DOC_HTML5 => DEC_HTML5,
-        ENT_HTML_DOC_XHTML => DEC_XHTML,
-        // XML 1.0 has only the 5 basic entities (with apos)
-        ENT_HTML_DOC_XML1 => DEC_BASIC_APOS,
-        _ => DEC_HTML4,
+/// unescape_inverse_map(): the named entities recognized when decoding
+/// (XHTML uses the HTML 4.01 map plus the `&apos;` special case).
+fn unescape_inverse_map(all: bool, doctype: i64) -> &'static [(&'static str, u32, u32)] {
+    if all {
+        match doctype {
+            ENT_HTML_DOC_HTML401 | ENT_HTML_DOC_XHTML => DEC_HTML4,
+            ENT_HTML_DOC_HTML5 => DEC_HTML5,
+            _ => DEC_BASIC_APOS,
+        }
+    } else {
+        match doctype {
+            ENT_HTML_DOC_HTML401 => DEC_BASIC_NOAPOS,
+            _ => DEC_BASIC_APOS,
+        }
     }
 }
 
-// XML 1.0 decode table: only the 5 basic entities (with apos).
+/// resolve_named_entity_html() with the XHTML `&apos;` hack.
+fn resolve_named_entity(
+    name: &[u8],
+    inv_map: &[(&str, u32, u32)],
+    doctype: i64,
+) -> Option<(u32, u32)> {
+    lookup_entity_decode(name, inv_map).or_else(|| {
+        (doctype == ENT_HTML_DOC_XHTML && name == b"apos").then_some((u32::from(b'\''), 0))
+    })
+}
+
 static DEC_BASIC_APOS: &[(&str, u32, u32)] = &[
     ("amp", 0x26, 0),
     ("apos", 0x27, 0),
+    ("gt", 0x3E, 0),
+    ("lt", 0x3C, 0),
+    ("quot", 0x22, 0),
+];
+
+static DEC_BASIC_NOAPOS: &[(&str, u32, u32)] = &[
+    ("amp", 0x26, 0),
     ("gt", 0x3E, 0),
     ("lt", 0x3C, 0),
     ("quot", 0x22, 0),
@@ -572,297 +635,209 @@ static BASIC_ENTS_APOS_ENCODE: &[(u32, &str)] = &[
     (0x3E, "gt"),
 ];
 
-/// Map a single byte in `cs` to its Unicode codepoint. Used by htmlentities
-/// on non-unicode-compat single-byte charsets (everything except UTF-8 and
-/// ISO-8859-1) to look up entities and apply doctype rules in Unicode space.
-/// Returns `None` if the byte is undefined in this charset.
-fn map_byte_to_unicode(cp_raw: u32, cs: Charset) -> Option<u32> {
-    if cp_raw > 0xFF {
-        return Some(cp_raw);
+/// process_numeric_entity(): `*p` is just after the `#`; on success the
+/// code point, with `*p` on the terminating `;`.
+fn process_numeric_entity(s: &[u8], p: &mut usize) -> Option<u32> {
+    let hex = matches!(s.get(*p), Some(b'x' | b'X'));
+    if hex {
+        *p += 1;
     }
-    let table = match cs {
-        Charset::Iso885915 => &CHARSET_ISO_8859_15,
-        Charset::Iso88595 => &CHARSET_ISO_8859_5,
-        Charset::Cp1252 => &CHARSET_CP1252,
-        Charset::Cp1251 => &CHARSET_CP1251,
-        Charset::Cp866 => &CHARSET_CP866,
-        Charset::Koi8r => &CHARSET_KOI8R,
-        Charset::MacRoman => &CHARSET_MACROMAN,
-        _ => return None,
+    let is_digit = |b: Option<&u8>| match b {
+        Some(b) if hex => b.is_ascii_hexdigit(),
+        Some(b) => b.is_ascii_digit(),
+        None => false,
     };
-    let mapped = table[cp_raw as usize];
-    if mapped == 0 && cp_raw != 0 {
-        None
-    } else {
-        Some(mapped)
+    if !is_digit(s.get(*p)) {
+        return None;
     }
+    // ZEND_STRTOL(): base 16 also takes a "0x" prefix; saturates on overflow
+    if hex
+        && s[*p] == b'0'
+        && matches!(s.get(*p + 1), Some(b'x' | b'X'))
+        && s.get(*p + 2).is_some_and(|b| b.is_ascii_hexdigit())
+    {
+        *p += 2;
+    }
+    let radix = if hex { 16 } else { 10 };
+    let mut code: i64 = 0;
+    while let Some(d) = s.get(*p).and_then(|&b| (b as char).to_digit(radix)) {
+        code = code.saturating_mul(radix as i64).saturating_add(d as i64);
+        *p += 1;
+    }
+    if s.get(*p) != Some(&b';') || code > 0x10FFFF {
+        return None;
+    }
+    Some(code as u32)
 }
 
-/// Map a Unicode codepoint to its single-byte encoding in `cs` (if any).
-/// Used by htmlentities to keep characters in their original byte form when
-/// re-emitting (the htmlspecialchars path) but more importantly to verify a
-/// codepoint is even representable.
-fn map_unicode_to_byte(cp: u32, cs: Charset) -> Option<u8> {
-    let table = match cs {
-        Charset::Iso88591 => &CHARSET_ISO_8859_1,
-        Charset::Iso885915 => &CHARSET_ISO_8859_15,
-        Charset::Iso88595 => &CHARSET_ISO_8859_5,
-        Charset::Cp1252 => &CHARSET_CP1252,
-        Charset::Cp1251 => &CHARSET_CP1251,
-        Charset::Cp866 => &CHARSET_CP866,
-        Charset::Koi8r => &CHARSET_KOI8R,
-        Charset::MacRoman => &CHARSET_MACROMAN,
-        _ => return None,
-    };
-    // Linear scan — these are 256-entry tables. cp can match position 0 (NUL),
-    // skip entries where the table has 0 unless looking for 0.
-    if cp == 0 {
-        return Some(0);
-    }
-    for (b, &mapped) in table.iter().enumerate() {
-        if mapped == cp && b != 0 {
-            return Some(b as u8);
-        }
-    }
-    None
-}
-
-/// Common encoder: walks the input character by character and replaces
-/// per the policy. Output is always UTF-8 unless the input charset is single
-/// byte AND no entity replacement happens (we emit original bytes).
-#[allow(clippy::if_same_then_else)] // branches mirror php-src
-fn encode_html(
-    input: &[u8],
-    cs: Charset,
-    flags: i64,
-    double_encode: bool,
-    all_entities: bool,
-) -> Vec<u8> {
+/// php_escape_html_entities_ex()
+fn encode_html(input: &[u8], cs: Charset, flags: i64, double_encode: bool, all: bool) -> Vec<u8> {
     let doctype = flags & ENT_HTML_DOC_TYPE_MASK;
-    let quote_double = flags & ENT_HTML_QUOTE_DOUBLE != 0;
-    let quote_single = flags & ENT_HTML_QUOTE_SINGLE != 0;
-    let ignore_errors = flags & ENT_HTML_IGNORE_ERRORS != 0;
-    let substitute_errors = flags & ENT_HTML_SUBSTITUTE_ERRORS != 0;
-    let substitute_disallowed = flags & ENT_HTML_SUBSTITUTE_DISALLOWED_CHARS != 0;
-
-    // LIMIT_ALL: htmlentities downgrades to htmlspecialchars for
-    // partial-support charsets and for XML 1.0.
-    let all_entities = all_entities && !cs.is_partial() && doctype != ENT_HTML_DOC_XML1;
-
-    let encode_table = pick_encode_table(doctype, all_entities);
-    let multi_cp_table = pick_multi_cp_table(doctype, all_entities);
-
-    // Replacement sequence for SUBSTITUTE_ERRORS / SUBSTITUTE_DISALLOWED.
-    // UTF-8: the encoded U+FFFD bytes. Otherwise: the literal "&#xFFFD;" string.
+    // LIMIT_ALL
+    let all = all && !cs.is_partial() && doctype != ENT_HTML_DOC_XML1;
+    let entity_table = pick_encode_table(doctype, all);
+    let multi_cp_table = pick_multi_cp_table(doctype, all);
+    let to_uni_table = if all && !cs.is_unicode_compat() {
+        cs.to_uni_table()
+    } else {
+        None
+    };
+    // (only consulted for !double_encode)
+    let inv_map = unescape_inverse_map(true, doctype);
     let replacement: &[u8] = if cs == Charset::Utf8 {
         b"\xEF\xBF\xBD"
     } else {
         b"&#xFFFD;"
     };
 
-    // PHP sets up `to_uni_table` only when `all && !CHARSET_UNICODE_COMPAT(charset)`.
-    // CHARSET_UNICODE_COMPAT is true for UTF-8 and ISO-8859-1 only (both expose
-    // codepoint values directly). For htmlentities on other single-byte
-    // charsets, the byte must be mapped to Unicode before entity lookup and
-    // disallowed-char checks.
-    let uses_uni_table = all_entities && !matches!(cs, Charset::Utf8 | Charset::Iso88591);
-
     let mut out: Vec<u8> = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        let (cp_opt, consumed) = next_codepoint(input, i, cs);
-        let cp_raw = match cp_opt {
-            Some(c) => c,
-            None => {
-                if ignore_errors {
-                    // drop the byte
-                } else if substitute_errors {
-                    out.extend_from_slice(replacement);
-                } else {
-                    // Default for both htmlspecialchars and htmlentities: invalid -> empty result.
-                    return Vec::new();
-                }
-                i += consumed.max(1);
+    let mut cursor = 0;
+    while cursor < input.len() {
+        let cursor_before = cursor;
+        let Some(mut this_char) = get_next_char(cs, input, &mut cursor) else {
+            // invalid MB sequence
+            if flags & ENT_HTML_IGNORE_ERRORS != 0 {
+                continue;
+            } else if flags & ENT_HTML_SUBSTITUTE_ERRORS != 0 {
+                out.extend_from_slice(replacement);
                 continue;
             }
+            return Vec::new();
         };
+        let mut mbsequence: &[u8] = &input[cursor_before..cursor];
 
-        // Map raw byte to Unicode if needed (htmlentities + non-unicode-compat single-byte).
-        let cp = if uses_uni_table {
-            map_byte_to_unicode(cp_raw, cs).unwrap_or(cp_raw)
-        } else {
-            cp_raw
-        };
-
-        // Pre-existing entity handling for !double_encode mode. When the cursor
-        // sits on `&` followed by a valid entity (named or numeric), PHP's
-        // traverse_for_entities passes the WHOLE entity through verbatim and
-        // advances past it. Detect that here before anything else so we don't
-        // accidentally encode the inner `#` / `;` / digits.
-        if cp == 0x26 && !double_encode {
-            if let Some(ent_len) = existing_entity_len(input, i, cs, doctype, substitute_disallowed)
+        if this_char != u32::from(b'&') {
+            if (this_char == u32::from(b'\'') && flags & ENT_HTML_QUOTE_SINGLE == 0)
+                || (this_char == u32::from(b'"') && flags & ENT_HTML_QUOTE_DOUBLE == 0)
             {
-                out.extend_from_slice(&input[i..i + ent_len]);
-                i += ent_len;
+                out.extend_from_slice(mbsequence);
                 continue;
             }
-        }
-
-        // Multi-codepoint lookahead (HTML5 only). Look at the next codepoint
-        // and, if (cp, next_cp) maps to an entity, emit it and consume both.
-        // Skip this branch for quote characters that the caller wants left raw.
-        let try_multi = !multi_cp_table.is_empty()
-            && !(cp == 0x22 && !quote_double)
-            && !(cp == 0x27 && !quote_single);
-        if try_multi {
-            let (next_cp_opt, next_consumed) = next_codepoint(input, i + consumed, cs);
-            if let Some(next_cp_raw) = next_cp_opt {
-                let next_cp = if uses_uni_table {
-                    map_byte_to_unicode(next_cp_raw, cs).unwrap_or(next_cp_raw)
+            let rep = if all {
+                if let Some(table) = to_uni_table {
+                    this_char = cs.to_unicode(table, this_char);
+                    if this_char == 0xFFFF {
+                        // no mapping; pass through
+                        out.extend_from_slice(mbsequence);
+                        continue;
+                    }
+                }
+                find_entity_for_char(
+                    this_char,
+                    cs,
+                    entity_table,
+                    multi_cp_table,
+                    input,
+                    &mut cursor,
+                )
+            } else if this_char < 64 {
+                lookup_entity_encode(this_char, entity_table)
+            } else {
+                None
+            };
+            if let Some(name) = rep {
+                out.push(b'&');
+                out.extend_from_slice(name.as_bytes());
+                out.push(b';');
+                continue;
+            }
+            // No entity: check its validity, else pass it unchanged.
+            if flags & ENT_HTML_SUBSTITUTE_DISALLOWED_CHARS != 0 {
+                let disallowed = if cs.is_unicode_compat() || to_uni_table.is_some() {
+                    !unicode_cp_is_allowed(this_char, doctype)
                 } else {
-                    next_cp_raw
+                    // Not a Unicode code point unless in 0x20..0x7D; assume
+                    // C0 controls map to themselves.
+                    this_char <= 0x7D && !unicode_cp_is_allowed(this_char, doctype)
                 };
-                if let Some(name) = lookup_multi_cp(cp, next_cp, multi_cp_table) {
-                    out.push(b'&');
-                    out.extend_from_slice(name.as_bytes());
-                    out.push(b';');
-                    i += consumed + next_consumed;
-                    continue;
+                if disallowed {
+                    mbsequence = replacement;
                 }
             }
-        }
-
-        // Apply quote-style filters: skip entity for unwanted quote chars.
-        let entity = if cp == 0x22 && !quote_double {
-            None
-        } else if cp == 0x27 && !quote_single {
-            None
+            out.extend_from_slice(mbsequence);
+        } else if double_encode {
+            out.extend_from_slice(b"&amp;");
         } else {
-            lookup_entity_encode(cp, encode_table)
-        };
-
-        // Determine if the codepoint is disallowed by doctype. The rule depends
-        // on what value we know:
-        //   UTF-8 or ISO-8859-1 (unicode-compat): cp is the real Unicode value.
-        //   non-unicode-compat with all_entities: cp was mapped via uni table.
-        //   otherwise (partial multi-byte, or htmlspecialchars on non-unicode-compat
-        //   single-byte): we only trust values <= 0x7D as Unicode codepoints.
-        let unicode_known = matches!(cs, Charset::Utf8 | Charset::Iso88591) || uses_uni_table;
-        let is_disallowed = substitute_disallowed
-            && (unicode_known || cp <= 0x7D)
-            && !unicode_cp_is_allowed(cp, doctype);
-
-        if let Some(name) = entity {
-            out.push(b'&');
-            out.extend_from_slice(name.as_bytes());
-            out.push(b';');
-        } else if is_disallowed {
-            out.extend_from_slice(replacement);
-        } else if cs == Charset::Utf8 {
-            // Pass through original UTF-8 bytes
-            out.extend_from_slice(&input[i..i + consumed]);
-        } else if cs.is_single_byte() {
-            // Pass through original single byte
-            out.push(input[i]);
-        } else {
-            // Partial-support multi-byte charset (sjis/eucjp/big5/gb2312):
-            // pass through the entire consumed byte sequence.
-            out.extend_from_slice(&input[i..i + consumed]);
+            match existing_entity_len(input, cursor, doctype, inv_map, flags) {
+                Some(ent_len) => {
+                    out.push(b'&');
+                    out.extend_from_slice(&input[cursor..cursor + ent_len]);
+                    out.push(b';');
+                    cursor += ent_len + 1;
+                }
+                None => out.extend_from_slice(b"&amp;"),
+            }
         }
-        i += consumed;
     }
-
     out
 }
 
-/// Check whether `input[i..]` begins with `&` followed by a valid entity reference
-/// (named or numeric) terminated by `;`. Returns the length INCLUDING the leading
-/// `&` and trailing `;` when a valid entity is found, or `None` otherwise.
-///
-/// When `substitute_disallowed` is set, also rejects entities whose codepoint(s)
-/// would be disallowed by the doctype's numeric_entity_is_allowed rules — those
-/// entities must be re-encoded as `&amp;` to make the disallowed escape visible.
-fn existing_entity_len(
+/// find_entity_for_char(): the entity for `k`; for the leading code point
+/// of HTML5 two-code-point entities, peeks at the next character (advancing
+/// `cursor` past it when it completes one).
+fn find_entity_for_char(
+    k: u32,
+    cs: Charset,
+    table: &'static [(u32, &'static str)],
+    multi: &'static [(u32, u32, &'static str)],
     input: &[u8],
-    i: usize,
-    _cs: Charset,
-    doctype: i64,
-    substitute_disallowed: bool,
-) -> Option<usize> {
-    // Already at `&`. Look ahead.
-    let rest = &input[i + 1..];
-    if rest.is_empty() {
-        return None;
-    }
-    // Numeric: &#... or &#x...
-    if rest[0] == b'#' {
-        let mut k = 1;
-        let hex = rest
-            .get(1)
-            .map(|&b| b == b'x' || b == b'X')
-            .unwrap_or(false);
-        if hex {
-            k = 2;
-        }
-        let start = k;
-        while k < rest.len() && {
-            let b = rest[k];
-            if hex {
-                b.is_ascii_hexdigit()
-            } else {
-                b.is_ascii_digit()
-            }
-        } {
-            k += 1;
-        }
-        if k == start || rest.get(k) != Some(&b';') {
-            return None;
-        }
-        // Parse the numeric value and apply PHP's process_numeric_entity rule.
-        let digits = std::str::from_utf8(&rest[start..k]).unwrap_or("");
-        let code: u64 = if hex {
-            u64::from_str_radix(digits, 16).unwrap_or(u64::MAX)
-        } else {
-            digits.parse::<u64>().unwrap_or(u64::MAX)
-        };
-        if code > 0x10FFFF {
-            return None;
-        }
-        if substitute_disallowed && !numeric_entity_is_allowed(code as u32, doctype) {
-            return None;
-        }
-        // total length = 1 (`&`) + k (digits region) + 1 (`;`)
-        return Some(k + 2);
-    }
-    // Named: alphanumeric run, terminated by `;`
-    let mut k = 0;
-    while k < rest.len() && rest[k].is_ascii_alphanumeric() {
-        k += 1;
-    }
-    if k == 0 || rest.get(k) != Some(&b';') {
-        return None;
-    }
-    let name = &rest[..k];
-    match lookup_entity_decode(name, pick_decode_table(doctype)) {
-        Some((cp1, cp2)) => {
-            if substitute_disallowed
-                && !numeric_entity_is_allowed(cp1, doctype)
-                && (cp2 == 0 || !numeric_entity_is_allowed(cp2, doctype))
+    cursor: &mut usize,
+) -> Option<&'static str> {
+    if multi.iter().any(|&(c1, _, _)| c1 == k) && *cursor < input.len() {
+        let mut next_cursor = *cursor;
+        if let Some(next_char) = get_next_char(cs, input, &mut next_cursor) {
+            if let Some(&(_, _, name)) = multi
+                .iter()
+                .find(|&&(c1, c2, _)| c1 == k && c2 == next_char)
             {
-                None
-            } else {
-                Some(k + 2)
+                *cursor = next_cursor;
+                return Some(name);
             }
         }
-        None => None,
     }
+    lookup_entity_encode(k, table)
 }
 
+/// The !double_encode check of php_escape_html_entities_ex(): `cursor` is
+/// just after an `&`; the length of the valid entity there (without the `&`
+/// and `;`), if any.
+fn existing_entity_len(
+    input: &[u8],
+    cursor: usize,
+    doctype: i64,
+    inv_map: &[(&str, u32, u32)],
+    flags: i64,
+) -> Option<usize> {
+    if input.get(cursor) == Some(&b'#') {
+        let mut pos = cursor + 1;
+        let code_point = process_numeric_entity(input, &mut pos)?;
+        if flags & ENT_HTML_SUBSTITUTE_DISALLOWED_CHARS != 0
+            && !numeric_entity_is_allowed(code_point, doctype)
+        {
+            return None;
+        }
+        return Some(pos - cursor);
+    }
+    // process_named_entity_html()
+    let mut end = cursor;
+    while end < input.len() && input[end].is_ascii_alphanumeric() {
+        end += 1;
+    }
+    if input.get(end) != Some(&b';') || end == cursor {
+        return None;
+    }
+    resolve_named_entity(&input[cursor..end], inv_map, doctype)?;
+    Some(end - cursor)
+}
+
+/// The arguments of htmlspecialchars() / htmlentities(): the string, the
+/// flags and double_encode (the charset is determined later, and only for
+/// a non-empty string).
 fn parse_html_args(
     vm: &mut Vm,
     args: &[Value],
     fn_name: &str,
-) -> Result<(Vec<u8>, i64, Charset, bool), VmError> {
+) -> Result<(Vec<u8>, i64, bool), VmError> {
     // Z_PARAM_STR: arrays and objects without __toString() are rejected.
     let first = args.first().map_or(Value::Null, |v| v.deref());
     let bytes = match &first {
@@ -889,12 +864,11 @@ fn parse_html_args(
         .get(1)
         .map(|v| v.to_long())
         .unwrap_or(ENT_HTML_QUOTE_SINGLE | ENT_HTML_QUOTE_DOUBLE | ENT_HTML_SUBSTITUTE_ERRORS);
-    let cs = resolve_charset(vm, args, fn_name, 2);
     let double_encode = match args.get(3) {
         None | Some(Value::Null) => true,
         Some(v) => v.is_truthy(),
     };
-    Ok((bytes, flags, cs, double_encode))
+    Ok((bytes, flags, double_encode))
 }
 
 fn html_string_type_error(vm: &mut Vm, fn_name: &str, given: &str) -> VmError {
@@ -910,22 +884,19 @@ fn html_string_type_error(vm: &mut Vm, fn_name: &str, given: &str) -> VmError {
     }
 }
 
-fn htmlspecialchars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let (bytes, flags, cs, double_encode) = parse_html_args(vm, args, "htmlspecialchars")?;
-    let out = encode_html(&bytes, cs, flags, double_encode, false);
-    Ok(Value::String(PhpString::from_vec(out)))
-}
-
-fn htmlentities_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
-    let (bytes, flags, cs, double_encode) = parse_html_args(vm, args, "htmlentities")?;
-    let doctype = flags & ENT_HTML_DOC_TYPE_MASK;
-    // PHP fires this notice once when htmlentities is asked to use the full
-    // table but the charset can't support it (partial-support multi-byte) or
-    // the doctype is XML 1.0 (only 5 basic entities).
-    // PHP fires this notice only for partial-support multi-byte charsets
-    // (big5/big5hkscs/gb2312/sjis/eucjp). XML 1.0 is still downgraded to the
-    // basic entity set but does not produce the notice.
-    if cs.is_partial() {
+/// php_html_entities()
+fn php_html_entities(
+    vm: &mut Vm,
+    args: &[Value],
+    fn_name: &str,
+    all: bool,
+) -> Result<Value, VmError> {
+    let (bytes, flags, double_encode) = parse_html_args(vm, args, fn_name)?;
+    if bytes.is_empty() {
+        return Ok(Value::String(PhpString::empty()));
+    }
+    let cs = resolve_charset(vm, args, fn_name, 2);
+    if all && cs.is_partial() {
         let line = vm.current_line;
         vm.emit_notice_at(
             "htmlentities(): Only basic entities substitution is supported for \
@@ -934,163 +905,117 @@ fn htmlentities_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             line,
         );
     }
-    let _ = doctype;
-    let out = encode_html(&bytes, cs, flags, double_encode, true);
+    let out = encode_html(&bytes, cs, flags, double_encode, all);
     Ok(Value::String(PhpString::from_vec(out)))
 }
 
-/// Common decoder. Walks input and replaces `&...;` references with their
-/// expansion, encoded back into the input charset. For non-UTF-8 charsets,
-/// values that don't fit in the charset are left as the original `&...;` text.
-fn decode_html(input: &[u8], cs: Charset, flags: i64, all_entities: bool) -> Vec<u8> {
+fn htmlspecialchars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_html_entities(vm, args, "htmlspecialchars", false)
+}
+
+fn htmlentities_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    php_html_entities(vm, args, "htmlentities", true)
+}
+
+/// traverse_for_entities(): replaces the `&...;` references with their
+/// expansion in `cs`; references that are not representable there are left
+/// as they are.
+fn decode_html(input: &[u8], cs: Charset, flags: i64, all: bool) -> Vec<u8> {
     let doctype = flags & ENT_HTML_DOC_TYPE_MASK;
-    let quote_double = flags & ENT_HTML_QUOTE_DOUBLE != 0;
-    let quote_single = flags & ENT_HTML_QUOTE_SINGLE != 0;
-    let decode_table = pick_decode_table(doctype);
+    let inv_map = unescape_inverse_map(all, doctype);
+    let end = input.len();
 
     let mut out = Vec::with_capacity(input.len());
-    let mut i = 0;
-    while i < input.len() {
-        if input[i] != b'&' {
-            out.push(input[i]);
-            i += 1;
-            continue;
-        }
-        // Look for terminating `;` within a reasonable distance.
-        // LONGEST_ENTITY_LENGTH = 31 (e.g. &CounterClockwiseContourIntegral;).
-        // Allow extra room for numeric entities (&#1234567;).
-        let max_len = 32usize;
-        let end_search = input.len().min(i + 1 + max_len);
-        let semi = (i + 1..end_search).find(|&k| input[k] == b';');
-        let semi = match semi {
-            Some(s) => s,
-            None => {
-                out.push(input[i]);
-                i += 1;
-                continue;
-            }
+    let mut cur = 0;
+    while cur < end {
+        let Some(off) = input[cur..].iter().position(|&b| b == b'&') else {
+            out.extend_from_slice(&input[cur..]);
+            break;
         };
-        let body = &input[i + 1..semi];
-        if body.is_empty() {
-            out.push(input[i]);
-            i += 1;
-            continue;
+        out.extend_from_slice(&input[cur..cur + off]);
+        cur += off;
+        // Fewer than 4 bytes left: not enough for an entity.
+        if end - cur < 4 {
+            out.extend_from_slice(&input[cur..]);
+            break;
         }
 
-        // Numeric entity
-        let mut cp_opt: Option<u32> = None;
-        if body[0] == b'#' {
-            if body.len() < 2 {
-                // skip
-            } else if body[1] == b'x' || body[1] == b'X' {
-                if body.len() > 2 && body[2..].iter().all(|b| b.is_ascii_hexdigit()) {
-                    if let Ok(s) = std::str::from_utf8(&body[2..]) {
-                        cp_opt = u32::from_str_radix(s, 16).ok();
-                    }
-                }
-            } else if body[1..].iter().all(|b| b.is_ascii_digit()) {
-                if let Ok(s) = std::str::from_utf8(&body[1..]) {
-                    cp_opt = s.parse::<u32>().ok();
-                }
-            }
-            // Numeric entities are only decoded if the codepoint is allowed in
-            // the chosen doctype. HTML5 has the additional quirk that U+000D
-            // is allowed literally but not via numeric entity.
-            if let Some(c) = cp_opt {
-                if !unicode_cp_is_allowed(c, doctype)
-                    || (doctype == ENT_HTML_DOC_HTML5 && c == 0x0D)
-                {
-                    cp_opt = None;
-                }
-            }
-            // For htmlspecialchars_decode (!all_entities), only the basic
-            // entities are decoded — that is, codepoints {34, 38, 39, 60, 62}
-            // (`"`, `&`, `'`, `<`, `>`). PHP's check is `code > 63 ||
-            // stage3_table_be_apos_00000[code].ent == NULL` — applied
-            // regardless of doctype; doctype filtering kicks in for the apos
-            // case later via quote-style filter.
-            if !all_entities {
-                if let Some(c) = cp_opt {
-                    if !matches!(c, 34 | 38 | 39 | 60 | 62) {
-                        cp_opt = None;
+        let mut code2 = 0;
+        // Ok((code, index of the ';')), or Err(()) for an incomplete entity
+        let parsed: Result<(u32, usize), ()> = if input[cur + 1] == b'#' {
+            let mut p = cur + 2;
+            match process_numeric_entity(input, &mut p) {
+                None => Err(()),
+                Some(code) => {
+                    if !all && !matches!(code, 0x22 | 0x26 | 0x27 | 0x3C | 0x3E) {
+                        // htmlspecialchars_decode(): only &, <, >, " and '
+                        Err(())
+                    } else if !unicode_cp_is_allowed(code, doctype)
+                        || (doctype == ENT_HTML_DOC_HTML5 && code == 0x0D)
+                    {
+                        Err(())
+                    } else {
+                        Ok((code, p))
                     }
                 }
             }
-        }
-
-        let mut cp2: u32 = 0;
-        if cp_opt.is_none() && all_entities {
-            // Named lookup
-            if let Some((cp1, cp2x)) = lookup_entity_decode(body, decode_table) {
-                cp_opt = Some(cp1);
-                cp2 = cp2x;
-            }
-        } else if cp_opt.is_none() {
-            // For htmlspecialchars_decode the recognized named entities are
-            // doctype-dependent:
-            //   HTML 4.01 : amp, lt, gt, quot (no apos)
-            //   XHTML / HTML5 / XML1 : amp, lt, gt, quot, apos
-            cp_opt = match body {
-                b"amp" => Some(0x26),
-                b"lt" => Some(0x3C),
-                b"gt" => Some(0x3E),
-                b"quot" => Some(0x22),
-                b"apos" if doctype != ENT_HTML_DOC_HTML401 => Some(0x27),
-                _ => None,
-            };
-        }
-
-        let cp = match cp_opt {
-            Some(c) => c,
-            None => {
-                out.push(input[i]);
-                i += 1;
-                continue;
-            }
-        };
-
-        // Quote-style filter
-        if (cp == 0x22 && !quote_double) || (cp == 0x27 && !quote_single) {
-            out.push(input[i]);
-            i += 1;
-            continue;
-        }
-
-        // Try to emit. UTF-8 always works; single-byte tries to map back.
-        let emit_cp = |out: &mut Vec<u8>, cp: u32, cs: Charset| -> bool {
-            if cs == Charset::Utf8 {
-                append_utf8(out, cp);
-                true
-            } else if let Some(b) = map_unicode_to_byte(cp, cs) {
-                out.push(b);
-                true
-            } else {
-                false
-            }
-        };
-
-        let ok = emit_cp(&mut out, cp, cs);
-        let ok2 = if cp2 != 0 {
-            emit_cp(&mut out, cp2, cs)
         } else {
-            true
-        };
-        if !ok || !ok2 {
-            // Couldn't represent — bail and leave the original `&...;` literal.
-            // Roll back any partial emission of cp1.
-            if ok && cp2 != 0 && !ok2 {
-                // Remove what we appended for cp.
-                let _ = out.pop();
+            let name_start = cur + 1;
+            let max_search = (LONGEST_ENTITY_LENGTH + 1).min(end - name_start);
+            match input[name_start..name_start + max_search]
+                .iter()
+                .position(|&b| b == b';')
+            {
+                None | Some(0) => Err(()),
+                Some(name_len) => {
+                    let name = &input[name_start..name_start + name_len];
+                    match resolve_named_entity(name, inv_map, doctype) {
+                        Some((c1, c2)) => {
+                            code2 = c2;
+                            Ok((c1, name_start + name_len))
+                        }
+                        None => Err(()),
+                    }
+                }
             }
-            out.push(input[i]);
-            i += 1;
+        };
+        let Ok((mut code, semi)) = parsed else {
+            // invalid_incomplete_entity: copy the '&' as a normal character
+            out.push(b'&');
+            cur += 1;
             continue;
-        }
+        };
 
-        i = semi + 1;
+        let quote_blocked = (code == u32::from(b'\'') && flags & ENT_HTML_QUOTE_SINGLE == 0)
+            || (code == u32::from(b'"') && flags & ENT_HTML_QUOTE_DOUBLE == 0);
+        let mapped = if quote_blocked {
+            None
+        } else if cs != Charset::Utf8 {
+            map_from_unicode(code, cs).filter(|_| code2 == 0)
+        } else {
+            Some(code)
+        };
+        match mapped {
+            Some(c) => {
+                code = c;
+                write_octet_sequence(&mut out, cs, code);
+                if code2 != 0 {
+                    write_octet_sequence(&mut out, cs, code2);
+                }
+                cur = semi + 1;
+            }
+            None => {
+                // invalid_complete_entity: copy up to (not including) the ';'
+                out.extend_from_slice(&input[cur..semi]);
+                cur = semi;
+            }
+        }
     }
     out
 }
+
+/// LONGEST_ENTITY_LENGTH: longest entity name, excluding & and ;
+const LONGEST_ENTITY_LENGTH: usize = 31;
 
 fn htmlspecialchars_decode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
@@ -1100,9 +1025,11 @@ fn htmlspecialchars_decode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmEr
         .map(|v| v.to_long())
         .unwrap_or(ENT_HTML_QUOTE_SINGLE | ENT_HTML_QUOTE_DOUBLE | ENT_HTML_SUBSTITUTE_ERRORS);
     let _ = vm;
-    // htmlspecialchars_decode doesn't take a charset arg — output is UTF-8
-    // pass-through (the basic 5 are ASCII).
-    let out = decode_html(s.as_bytes(), Charset::Utf8, flags, false);
+    if !s.as_bytes().contains(&b'&') {
+        return Ok(Value::String(s));
+    }
+    // (the charset does not matter: ISO-8859-1)
+    let out = decode_html(s.as_bytes(), Charset::Iso88591, flags, false);
     Ok(Value::String(PhpString::from_vec(out)))
 }
 
@@ -1168,8 +1095,8 @@ fn get_html_translation_table_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
             match cs {
                 Charset::Utf8 => append_utf8(&mut key, c2),
                 Charset::Iso88591 => key.push(c2 as u8),
-                _ => match map_unicode_to_byte(c2, cs) {
-                    Some(b) => key.push(b),
+                _ => match map_from_unicode(c2, cs) {
+                    Some(b) => key.push(b as u8),
                     None => continue,
                 },
             }
@@ -1205,10 +1132,13 @@ fn get_html_translation_table_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, V
             if !quote_ok(byte) {
                 continue;
             }
-            let Some(uni) = map_byte_to_unicode(byte, cs) else {
+            let Some(table) = cs.to_uni_table() else {
                 continue;
             };
-            row(&mut result, vec![byte as u8], uni);
+            let uni = cs.to_unicode(table, byte);
+            if uni != 0xFFFF {
+                row(&mut result, vec![byte as u8], uni);
+            }
         }
     }
 
