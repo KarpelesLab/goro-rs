@@ -294,6 +294,33 @@ impl Vm {
         self.classes[ci].properties.get(pi)?.property_type.clone()
     }
 
+    /// `pt` with self / parent replaced by the declaring class / its parent
+    /// (an unresolvable parent by a type nothing satisfies).
+    fn sp_resolve_relative_type(&self, pt: ParamType, slot: &StaticPropSlot) -> ParamType {
+        fn walk(pt: ParamType, selfn: &[u8], parent: Option<&[u8]>) -> ParamType {
+            match pt {
+                ParamType::Simple(n) if n.eq_ignore_ascii_case(b"self") => {
+                    ParamType::Simple(selfn.to_vec())
+                }
+                ParamType::Simple(n) if n.eq_ignore_ascii_case(b"parent") => ParamType::Simple(
+                    parent.map(|p| p.to_vec()).unwrap_or_else(|| b"\0never".to_vec()),
+                ),
+                ParamType::Nullable(i) => ParamType::Nullable(Box::new(walk(*i, selfn, parent))),
+                ParamType::Union(v) => {
+                    ParamType::Union(v.into_iter().map(|t| walk(t, selfn, parent)).collect())
+                }
+                ParamType::Intersection(v) => ParamType::Intersection(
+                    v.into_iter().map(|t| walk(t, selfn, parent)).collect(),
+                ),
+                other => other,
+            }
+        }
+        let Some((_, ce)) = self.classes.get_index(slot.decl) else {
+            return pt;
+        };
+        walk(pt, &ce.name, ce.parent.as_deref())
+    }
+
     /// Lowercase key of the declaring class.
     fn sp_decl_key(&self, slot: &StaticPropSlot) -> &[u8] {
         self.classes
@@ -623,13 +650,12 @@ impl Vm {
                 match cur {
                     Value::Null | Value::Undef => {
                         if let Some(pt) = &ptype {
+                            // (zend_handle_fetch_obj_flags(): an uninitialized
+                            // property is auto-initialized too)
                             if !param_type_accepts_array(pt) {
-                                if matches!(cur, Value::Undef) {
-                                    return Err(self.sp_uninit_error(&slot, name));
-                                }
                                 let td = self.param_type_name(pt);
                                 return Err(SpErr::Throw(
-                                    b"Error",
+                                    b"TypeError",
                                     format!(
                                         "Cannot auto-initialize an array inside property {}::${} of type {}",
                                         self.sp_decl_display(&slot),
@@ -707,6 +733,10 @@ impl Vm {
         let Some(pt) = self.sp_ptype(slot) else {
             return Ok(());
         };
+        // self / parent name the declaring class (a trait's own, accessed on
+        // the trait), whatever the calling scope.
+        let declared = pt.clone();
+        let pt = self.sp_resolve_relative_type(pt, slot);
         if !strict {
             self.emit_implicit_float_to_int_if_needed(value, &pt, line);
         }
@@ -716,7 +746,7 @@ impl Vm {
         }
         let cd = self.sp_decl_display(slot);
         let pd = String::from_utf8_lossy(name);
-        let td = self.param_type_name(&pt);
+        let td = self.param_type_name(&declared);
         let msg = match overflow {
             Some(true) => format!(
                 "Cannot increment property {}::${} of type {} past its maximal value",
