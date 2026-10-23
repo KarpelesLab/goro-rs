@@ -121,14 +121,19 @@ impl Vm {
                 }
             }
             Value::Double(d) => {
-                if d.is_finite() && d.fract() != 0.0 {
+                // zend_dval_to_lval_safe()
+                let line = self.current_line;
+                let l = self.float_to_int_cast(d, line);
+                let fits =
+                    !(d >= 9.223_372_036_854_775_808e18 || d < -9.223_372_036_854_775_808e18);
+                if l as f64 != d && fits {
                     let msg = format!(
                         "Implicit conversion from float {} to int loses precision",
                         crate::value::format_php_float_repr(d)
                     );
                     self.emit_deprecated(&msg);
                 }
-                Some(if d.is_finite() { d as i64 } else { 0 })
+                Some(l)
             }
             Value::False => Some(0),
             Value::True => Some(1),
