@@ -513,9 +513,10 @@ impl Vm {
                 Self::dll_set_obj_cursor(obj, c);
                 Value::Null
             }
+            // (traverse_pointer != NULL: a popped/shifted current node
+            // stays current, without data)
             b"valid" => {
-                let c = Self::dll_obj_cursor(obj);
-                if c.cur.is_some() && Self::dll_cursor_value(obj, c).is_some() {
+                if Self::dll_obj_cursor(obj).cur.is_some() {
                     Value::True
                 } else {
                     Value::False
