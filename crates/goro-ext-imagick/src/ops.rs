@@ -157,6 +157,7 @@ pub(crate) const OPS: &[(&str, Impl, bool)] = &[
         false,
     ),
     ("compareImages", compare_images, false),
+    ("compareImageChannels", compare_image_channels, false),
     ("getImageDistortion", get_image_distortion, false),
     (
         "getImageChannelDistortion",
@@ -2485,6 +2486,13 @@ fn get_image_channel_statistics(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[
 
 /// A distortion metric between two images (quantum-scale samples).
 fn distortion(a: &Image, b: &Image, metric: i64) -> f64 {
+    distortion_ch(a, b, metric, channel::DEFAULT)
+}
+
+/// A metric over the colour channels `ch` selects.
+fn distortion_ch(a: &Image, b: &Image, metric: i64, ch: i64) -> f64 {
+    let mask = channel_mask(ch, false);
+    let nch = (0..3).filter(|&c| mask[c]).count().max(1) as f64;
     let (w, h) = (a.columns.min(b.columns), a.rows.min(b.rows));
     let n = (w * h).max(1) as f64;
     let mut abs_err = 0usize;
@@ -2496,7 +2504,7 @@ fn distortion(a: &Image, b: &Image, metric: i64) -> f64 {
             let (p, q) = (a.px(x, y), b.px(x, y));
             let mut diff_any = false;
             let mut pix_sq = 0.0;
-            for c in 0..3 {
+            for c in (0..3).filter(|&c| mask[c]) {
                 let d = (p[c] as f64 - q[c] as f64) / 65535.0;
                 if d != 0.0 {
                     diff_any = true;
@@ -2511,11 +2519,11 @@ fn distortion(a: &Image, b: &Image, metric: i64) -> f64 {
             }
         }
     }
-    let mse = sum_sq / (n * 3.0);
+    let mse = sum_sq / (n * nch);
     match metric {
         1 => abs_err as f64,
-        3 => sum_abs / (n * 3.0),
-        4 => sum_abs / 3.0 * 65535.0 / n,
+        3 => sum_abs / (n * nch),
+        4 => sum_abs / nch * 65535.0 / n,
         5 => mse,
         7 => peak,
         8 => {
@@ -2533,15 +2541,30 @@ fn distortion(a: &Image, b: &Image, metric: i64) -> f64 {
 
 fn compare_images(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "zl", args)?;
+    compare_of(vm, f, o, &a[0], None, a[1].long_or(0))
+}
+
+fn compare_image_channels(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    let a = zpp::parse(vm, f, "zll", args)?;
+    compare_of(vm, f, o, &a[0], Some(a[1].long_or(0)), a[2].long_or(0))
+}
+
+fn compare_of(
+    vm: &mut Vm,
+    f: &Func,
+    o: Option<&Obj>,
+    other: &Arg,
+    ch: Option<i64>,
+    metric: i64,
+) -> R {
     let d = d_(o);
     not_empty(vm, &d)?;
-    let other = other_imagick(vm, f, 1, &a[0])?;
+    let other = other_imagick(vm, f, 1, other)?;
     let b = other.wand.borrow().image().unwrap().clone();
-    let metric = a[1].long_or(0);
     let (dist, diff) = {
         let w = d.wand.borrow();
         let img = w.image().unwrap();
-        let dist = distortion(img, &b, metric);
+        let dist = distortion_ch(img, &b, metric, ch.unwrap_or(channel::DEFAULT));
         // the difference image: red where pixels differ, a faded copy elsewhere
         let mut diff = img.clone();
         for y in 0..diff.rows {
@@ -2589,7 +2612,7 @@ fn get_image_channel_distortion(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[
     let other = other_imagick(vm, f, 1, &a[0])?;
     let b = other.wand.borrow().image().unwrap().clone();
     let m = a[2].long_or(0);
-    let v = with_image(vm, &d, |i| distortion(i, &b, m))?;
+    let v = with_image(vm, &d, |i| distortion_ch(i, &b, m, a[1].long_or(0)))?;
     Ok(Value::Double(v))
 }
 

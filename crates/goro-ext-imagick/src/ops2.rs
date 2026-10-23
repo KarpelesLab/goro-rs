@@ -41,6 +41,15 @@ pub(crate) const OPS2: &[(&str, Impl, bool)] = &[
     ("shearImage", shear_image, false),
     ("sparseColorImage", sparse_color_image, false),
     ("subimageMatch", subimage_match, false),
+    ("similarityImage", subimage_match, false),
+    ("remapImage", remap_image, false),
+    ("liquidRescaleImage", liquid_rescale_image, false),
+    ("displayImage", display_image, false),
+    ("displayImages", display_image, false),
+    ("animateImages", animate_images, false),
+    ("clipImage", clip_image, false),
+    ("clipPathImage", clip_path_image, false),
+    ("clipImagePath", clip_path_image, false),
     ("textureImage", texture_image, false),
     ("localContrastImage", local_contrast_image, false),
     ("colorDecisionListImage", color_decision_list_image, false),
@@ -634,6 +643,113 @@ fn subimage_match(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     }
     let nw = new_wand_from(&d, vec![out]);
     Ok(new_imagick(vm, nw))
+}
+
+/// What a build without a delegate library (LQR, X11) or without the
+/// image's clip path reports.
+fn unsupported(
+    vm: &mut Vm,
+    f: &Func,
+    o: Option<&Obj>,
+    args: &[Value],
+    spec: &str,
+    e: MagickError,
+    msg: &str,
+) -> R {
+    zpp::parse(vm, f, spec, args)?;
+    let d = d_(o);
+    not_empty(vm, &d)?;
+    convert_exception(vm, Some(e), crate::Cls::Imagick, msg)
+}
+
+fn no_delegate(lib: &str, at: &str) -> MagickError {
+    MagickError::new(
+        goro_imagick::error::severity::MISSING_DELEGATE_ERROR,
+        format!("delegate library support not built-in '' ({lib}) @ {at}"),
+    )
+}
+
+fn no_clip_path() -> MagickError {
+    MagickError::new(
+        goro_imagick::error::severity::OPTION_ERROR,
+        "no clip path defined '': No such file or directory @ error/image.c/ClipImagePath/725",
+    )
+}
+
+fn liquid_rescale_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    let e = no_delegate("LQR", "error/resize.c/LiquidRescaleImage/2079");
+    unsupported(vm, f, o, args, "lldd", e, "Unable to liquid rescale image")
+}
+
+fn display_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    let e = no_delegate("X11", "error/display.c/DisplayImages/16261");
+    unsupported(vm, f, o, args, "s", e, "Unable to display image")
+}
+
+fn animate_images(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    let e = no_delegate("X11", "error/animate.c/AnimateImages/1590");
+    unsupported(vm, f, o, args, "s", e, "Unable to animate images")
+}
+
+fn clip_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    unsupported(vm, f, o, args, "", no_clip_path(), "Unable to clip image")
+}
+
+fn clip_path_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    unsupported(
+        vm,
+        f,
+        o,
+        args,
+        "sb",
+        no_clip_path(),
+        "Unable to clip path image",
+    )
+}
+
+/// RemapImage(): every pixel takes the nearest colour of the reference
+/// image's palette (no dithering yet).
+fn remap_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
+    let a = zpp::parse(vm, f, "zl", args)?;
+    let d = d_(o);
+    not_empty(vm, &d)?;
+    let other = other_imagick(vm, f, 1, &a[0])?;
+    let mut palette: Vec<[u16; 3]> = {
+        let w = other.wand.borrow();
+        let r = w.image().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        r.pixels
+            .chunks_exact(4)
+            .map(|p| [p[0], p[1], p[2]])
+            .filter(|p| seen.insert(*p))
+            .take(65536)
+            .collect()
+    };
+    if palette.is_empty() {
+        palette.push([0, 0, 0]);
+    }
+    image_op(vm, &d, "Unable to remap image", |i| {
+        let mut cache = std::collections::HashMap::new();
+        for p in i.pixels.chunks_exact_mut(4) {
+            let key = [p[0], p[1], p[2]];
+            let best = *cache.entry(key).or_insert_with(|| {
+                *palette
+                    .iter()
+                    .min_by_key(|q| {
+                        (0..3)
+                            .map(|c| {
+                                let x = q[c] as i64 - key[c] as i64;
+                                (x * x) as u64
+                            })
+                            .sum::<u64>()
+                    })
+                    .unwrap()
+            });
+            p[..3].copy_from_slice(&best);
+        }
+        i.colors = None;
+        Ok(())
+    })
 }
 
 fn texture_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
