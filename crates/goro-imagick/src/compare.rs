@@ -164,7 +164,7 @@ fn pixel_metric(a: &Image, b: &Image, metric: MetricType, chans: &[usize]) -> f6
                 fuzz_sq / fuzz_n as f64
             }
         }
-        MetricType::RootMeanSquaredError => mse.sqrt(),
+        MetricType::RootMeanSquaredError | MetricType::Undefined => mse.sqrt(),
         _ => mse,
     }
 }
