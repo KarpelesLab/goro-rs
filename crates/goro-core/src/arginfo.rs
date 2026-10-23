@@ -980,6 +980,32 @@ impl Vm {
             if m & T_MIXED != 0 || (p.by_ref != 0 && m == 0) {
                 continue;
             }
+            // A typed by-reference parameter (Z_PARAM_ARRAY_EX(.., 0, 1),
+            // `array &$array`): the referenced value is checked, never
+            // coerced; a scalar-typed one is left to the function.
+            if p.by_ref != 0 && m & (T_BOOL | T_INT | T_FLOAT | T_STRING | T_CALLABLE) == 0 {
+                let v = args[i].deref();
+                if m & value_type_bit(&v) != 0
+                    || matches!(v, Value::Object(_) | Value::Generator(_))
+                        && m & (T_OBJECT | T_CLASS) != 0
+                {
+                    continue;
+                }
+                let ty = if m == T_ARRAY | T_OBJECT {
+                    "array"
+                } else {
+                    arg_type_display(p)
+                };
+                return Err(ZppError::Throw(
+                    b"TypeError",
+                    format!(
+                        "{} must be of type {}, {} given",
+                        info.arg_prefix(i),
+                        ty,
+                        value_name(&v)
+                    ),
+                ));
+            }
             // (Closure::fromCallable() takes its callable as a plain zval.)
             if p.by_ref == 0
                 && m & T_CALLABLE != 0
