@@ -3072,6 +3072,9 @@ impl Compiler {
             let base = warnings_base.min(w.len());
             warnings.extend(w.drain(base..));
         });
+        // php-src compiles a file top to bottom, function bodies in place;
+        // goro compiles the hoisted declarations first.
+        warnings.sort_by_key(|w| w.1);
         Ok((self.op_array, self.compiled_classes, warnings))
     }
 
@@ -12421,7 +12424,18 @@ impl Compiler {
         r: OperandType,
         line: u32,
     ) -> OperandType {
+        if let Some(v) = self.ct_eval_arith(opcode, &l, &r) {
+            return OperandType::Const(self.op_array.add_literal(v));
+        }
         let tmp = self.op_array.alloc_temp();
+        let (l, r) = if opcode == OpCode::Concat {
+            (
+                self.concat_const_operand(l, line),
+                self.concat_const_operand(r, line),
+            )
+        } else {
+            (l, r)
+        };
         let (l, r) = Self::commutative_operands(opcode, left, right, l, r);
         self.op_array.emit(Op {
             opcode,
@@ -12431,6 +12445,54 @@ impl Compiler {
             line,
         });
         OperandType::Tmp(tmp)
+    }
+
+    /// zend_try_ct_eval_binary_op() for arithmetic on int / float literals
+    /// (`-NAN`, `NAN + 1`, `2 * 3.5` are constants): None when the
+    /// operation would throw or warn (zend_binary_op_produces_error).
+    #[inline(never)]
+    fn ct_eval_arith(&self, opcode: OpCode, l: &OperandType, r: &OperandType) -> Option<Value> {
+        let (OperandType::Const(a), OperandType::Const(b)) = (l, r) else {
+            return None;
+        };
+        let lits = &self.op_array.literals;
+        let (a, b) = (lits.get(*a as usize)?, lits.get(*b as usize)?);
+        if !matches!(a, Value::Long(_) | Value::Double(_))
+            || !matches!(b, Value::Long(_) | Value::Double(_))
+        {
+            return None;
+        }
+        match opcode {
+            OpCode::Add => Some(a.add(b)),
+            OpCode::Sub => Some(a.sub(b)),
+            OpCode::Mul => Some(a.mul(b)),
+            OpCode::Div if b.to_double() != 0.0 => a.div(b).ok(),
+            OpCode::Pow if !(a.to_double() == 0.0 && b.to_double() < 0.0) => Some(a.pow(b)),
+            _ => None,
+        }
+    }
+
+    /// zend_compile_binary_op(): the constant operands of a concatenation
+    /// are converted to strings at compile time (a NAN warns then, and a
+    /// float is formatted with the precision in effect while compiling).
+    #[inline(never)]
+    fn concat_const_operand(&mut self, o: OperandType, line: u32) -> OperandType {
+        let OperandType::Const(idx) = o else {
+            return o;
+        };
+        let s = match self.op_array.literals.get(idx as usize) {
+            Some(v @ (Value::Null | Value::False | Value::True | Value::Long(_))) => {
+                v.to_php_string()
+            }
+            Some(Value::Double(f)) => {
+                if f.is_nan() {
+                    push_compile_warning("unexpected NAN value was coerced to string".into(), line);
+                }
+                Value::Double(*f).to_php_string()
+            }
+            _ => return o,
+        };
+        OperandType::Const(self.op_array.add_literal(Value::String(s)))
     }
 
     /// zend_vm_set_opcode_handler(): the operands of a commutative opcode
@@ -14289,6 +14351,12 @@ impl Compiler {
                             } else {
                                 -1
                             }));
+                    // (zend_try_ct_eval_unary_pm() on a number literal)
+                    if let Some(v) =
+                        self.ct_eval_arith(OpCode::Mul, &val, &OperandType::Const(factor))
+                    {
+                        return Ok(OperandType::Const(self.op_array.add_literal(v)));
+                    }
                     let tmp = self.op_array.alloc_temp();
                     self.op_array.emit(Op {
                         opcode: OpCode::Mul,
@@ -15696,8 +15764,12 @@ impl Compiler {
                 // constant, so only magic and special constants fold.
                 let special = matches!(lower.as_slice(), b"true" | b"false" | b"null")
                     || (lower.starts_with(b"__") && lower.ends_with(b"__"));
+                // (other constants are case-sensitive: the internal ones are
+                // all upper case)
                 let fold_key: &[u8] = if !special
-                    && (!self.current_namespace.is_empty() || self.use_const_map.contains_key(name))
+                    && (!self.current_namespace.is_empty()
+                        || self.use_const_map.contains_key(name)
+                        || name.iter().any(|b| b.is_ascii_lowercase()))
                 {
                     b""
                 } else {
@@ -15811,6 +15883,8 @@ impl Compiler {
                     b"php_int_max" => Value::Long(i64::MAX),
                     b"php_int_min" => Value::Long(i64::MIN),
                     b"php_int_size" => Value::Long(8),
+                    b"nan" => Value::Double(f64::NAN),
+                    b"inf" => Value::Double(f64::INFINITY),
                     b"php_float_max" => Value::Double(f64::MAX),
                     b"php_float_min" => Value::Double(f64::MIN_POSITIVE),
                     b"php_float_epsilon" => Value::Double(f64::EPSILON),
