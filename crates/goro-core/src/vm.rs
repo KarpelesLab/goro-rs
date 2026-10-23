@@ -756,7 +756,35 @@ impl ForeachState {
     /// each map in its iteration order). A map that was used is replaced by
     /// a new one: the next frame's maps start out as fresh ones (their
     /// iteration orders depend on their capacities).
+    #[inline]
     pub(crate) fn clear(&mut self) {
+        // (most frames run no foreach loop: one test)
+        macro_rules! used {
+            ($($f:ident),*) => {
+                0 $(| self.$f.capacity())* != 0
+            };
+        }
+        if used!(
+            positions,
+            iter_handles,
+            snap,
+            cur_key,
+            cur_ref,
+            obj,
+            obj_cur,
+            gen_keys,
+            weakmap_iter_keys,
+            ref_arrays,
+            ref_src,
+            ref_iters,
+            ref_cells
+        ) {
+            self.clear_used();
+        }
+    }
+
+    #[inline(never)]
+    fn clear_used(&mut self) {
         macro_rules! clear {
             ($($f:ident),*) => {
                 $(if self.$f.capacity() != 0 {
