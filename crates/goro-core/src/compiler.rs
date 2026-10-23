@@ -12416,14 +12416,21 @@ impl Compiler {
             return (l, r);
         }
         let rank = |e: &Expr, o: &OperandType| {
-            if Self::eval_const_expr(e).is_some() {
+            if matches!(
+                e.kind,
+                ExprKind::Cast(..) | ExprKind::Ternary { .. } | ExprKind::NullCoalesce { .. }
+            ) {
+                // (never folded by zend_compile: ZEND_CAST / QM_ASSIGN)
+                2
+            } else if Self::eval_const_expr(e).is_some() {
                 1
             } else if matches!(o, OperandType::Cv(_)) {
                 8
+            } else if let ExprKind::FunctionCall { name, args } = &e.kind {
+                Self::call_result_rank(name, args)
             } else if matches!(
                 e.kind,
                 ExprKind::New { .. }
-                    | ExprKind::FunctionCall { .. }
                     | ExprKind::MethodCall { .. }
                     | ExprKind::StaticMethodCall { .. }
                     | ExprKind::DynamicStaticMethodCall { .. }
@@ -12438,6 +12445,45 @@ impl Compiler {
         } else {
             (l, r)
         }
+    }
+
+    /// The operand type of a function call's result: the functions
+    /// zend_try_compile_special_func() compiles to an opcode, and frameless
+    /// internal calls (ZEND_FRAMELESS_ICALL_n), leave a TMP_VAR; other
+    /// calls a VAR.
+    #[inline(never)]
+    fn call_result_rank(name: &Expr, args: &[goro_parser::ast::Argument]) -> u8 {
+        let n = match &name.kind {
+            ExprKind::Identifier(n) => n,
+            ExprKind::String(n) if n.first() == Some(&b'\\') => n,
+            _ => return 4,
+        };
+        if args.iter().any(|a| a.unpack || a.name.is_some()) {
+            return 4;
+        }
+        let lower = n.to_ascii_lowercase();
+        let f = lower.strip_prefix(b"\\").unwrap_or(&lower);
+        let argc = args.len();
+        let special = match f {
+            b"strlen" | b"is_null" | b"is_bool" | b"is_long" | b"is_int" | b"is_integer"
+            | b"is_float" | b"is_double" | b"is_string" | b"is_array" | b"is_object"
+            | b"is_resource" | b"is_scalar" | b"boolval" | b"intval" | b"floatval"
+            | b"doubleval" | b"strval" | b"gettype" | b"count" | b"sizeof" => argc == 1,
+            b"get_class" => argc <= 1,
+            b"get_called_class" | b"func_num_args" | b"func_get_args" => argc == 0,
+            b"array_key_exists" => argc == 2,
+            _ => false,
+        };
+        let frameless = match f {
+            b"dechex" | b"is_numeric" => argc == 1,
+            b"class_exists" | b"dirname" | b"implode" | b"trim" => argc == 1 || argc == 2,
+            b"in_array" | b"strpos" | b"strstr" | b"strtr" | b"substr" => argc == 2 || argc == 3,
+            b"max" | b"min" | b"preg_match" | b"property_exists" | b"str_contains"
+            | b"str_starts_with" => argc == 2,
+            b"preg_replace" | b"str_replace" => argc == 3,
+            _ => false,
+        };
+        if special || frameless { 2 } else { 4 }
     }
 
     /// `$a[]++` / `--$a[]`: FETCH_DIM_RW appends a null element, which is
