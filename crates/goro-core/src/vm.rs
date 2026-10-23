@@ -1407,6 +1407,10 @@ pub struct Vm {
     pub(crate) pending_callable_deprecations: RefCell<Vec<String>>,
     /// Line of a direct call_user_func() call, for its callee's frame.
     pub ucf_call_line: Option<u32>,
+    /// A resource destructor runs at a release point of user code (call
+    /// stack depth, line): the user methods it calls directly are called
+    /// from that line, not from "[internal function]".
+    pub(crate) release_call_at: Option<(usize, u32)>,
     /// The next user function call is made by Closure::__invoke()
     /// (`[$closure, '__invoke']`): its errors name that method.
     pub closure_invoke_call: bool,
@@ -2652,6 +2656,7 @@ impl Vm {
             gc_call_args: std::ptr::null(),
             pending_callable_deprecations: RefCell::new(Vec::new()),
             ucf_call_line: None,
+            release_call_at: None,
             closure_invoke_call: false,
             pending_call_via_invoke: false,
             return_discarded_exc: None,
@@ -6243,7 +6248,7 @@ impl Vm {
     /// the argument-less frame of a function called by the include opline
     /// itself (error handler, stream wrapper methods). `frames` is innermost
     /// first; returns the frame's args.
-    pub fn trace_frame_args_at(frames: &[CallFrame], idx: usize) -> &[Value] {
+    pub fn trace_frame_args_at(frames: &[CallFrame], idx: usize) -> std::borrow::Cow<'_, [Value]> {
         let f = &frames[idx];
         let is_include = matches!(
             f.0.as_str(),
@@ -6257,9 +6262,15 @@ impl Vm {
                     inner.1.is_empty() || inner.1 == "[internal function]" || inner.2 == 0
                 })
         {
-            return &[];
+            return std::borrow::Cow::Borrowed(&[]);
         }
-        &f.3
+        // (a builtin's by-reference arguments stay references in its frame,
+        // so the frame does not hold a copy of their values: the trace gets
+        // the values, like debug_backtrace_get_args())
+        if f.3.iter().any(|v| matches!(v, Value::Reference(_))) {
+            return std::borrow::Cow::Owned(f.3.iter().map(|v| v.deref()).collect());
+        }
+        std::borrow::Cow::Borrowed(&f.3)
     }
 
     /// Whether named argument `name` of a call to `call_name` (a pending
@@ -6506,7 +6517,8 @@ impl Vm {
             self.frame_named_args()
         };
         for (idx, (func_name, file, line, _, is_method)) in frame_list.iter().enumerate() {
-            let args: &[Value] = Self::trace_frame_args_at(&frame_list, idx);
+            let args_cow = Self::trace_frame_args_at(&frame_list, idx);
+            let args: &[Value] = &args_cow;
             let wrapped;
             let args: &[Value] = if sensitive
                 || (!args.is_empty() && self.internal_sensitive_param_flags(func_name).is_some())
@@ -6578,7 +6590,7 @@ impl Vm {
                         .filter(|n| n.0 == at)
                         .map(|n| (n.1.clone(), n.2.clone()))
                         .collect();
-                    let raw = Self::trace_frame_args_at(&frame_list, idx).to_vec();
+                    let raw = Self::trace_frame_args_at(&frame_list, idx).into_owned();
                     self.frame_args_array(func_name, &raw, named)
                 } else {
                     let mut args_arr = PhpArray::new();
@@ -7999,21 +8011,28 @@ impl Vm {
     /// destructor runs and becomes the previous of one it throws.
     #[inline(never)]
     fn free_released_resources(&mut self) {
+        // (released by user code: the destructor runs at its line, as
+        // php-src's runs in the user frame; or under a builtin's frame)
+        let at = (!self.in_builtin_frame()).then(|| (self.call_stack.len(), self.current_line));
+        let prev_at = std::mem::replace(&mut self.release_call_at, at);
         while crate::value::has_freed_resources() {
             for (id, dtor) in crate::value::take_freed_resources() {
-                let old_exc = self.current_exception.take();
+                // (unlike an object's destructor, the exception in flight
+                // stays: user code the destructor calls is not run then)
+                let old_exc = self.current_exception.clone();
                 dtor(self, id);
                 if let Some(old) = old_exc {
                     match self.current_exception.take() {
-                        Some(new) => {
+                        Some(new) if !new.identical(&old) => {
                             Self::exception_set_previous(&new, old);
                             self.current_exception = Some(new);
                         }
-                        None => self.current_exception = Some(old),
+                        _ => self.current_exception = Some(old),
                     }
                 }
             }
         }
+        self.release_call_at = prev_at;
     }
 
     /// zend_close_rsrc_list(): at shutdown, the resources still alive are
@@ -8754,7 +8773,12 @@ impl Vm {
             // callee is located at the call site instead of "[internal function]".
             let (file, line) = match self.ucf_call_line.take() {
                 Some(l) => (self.current_file.clone(), l),
-                None => (RcStr::new(), 0),
+                None => match self.release_call_at {
+                    Some((depth, l)) if depth == self.call_stack.len() => {
+                        (self.current_file.clone(), l)
+                    }
+                    _ => (RcStr::new(), 0),
+                },
             };
             self.call_stack
                 .push((frame_display, file, line, frame_args, is_instance));
@@ -10489,7 +10513,7 @@ impl Vm {
                 file
             };
             let args_str = format_trace_args_with_limit(
-                Self::trace_frame_args_at(&frames, i),
+                &Self::trace_frame_args_at(&frames, i),
                 self.exception_string_param_max_len,
             );
             // For instance methods, replace `::` with `->`. Skip the rewrite for

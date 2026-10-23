@@ -643,6 +643,7 @@ final class StreamBucket {
     vm.register_function(b"umask", umask_fn);
     vm.register_function(b"getopt", getopt_fn);
     vm.register_function(b"proc_open", proc_open::proc_open);
+    goro_core::value::register_resource_type_dtor(b"process", proc_open::proc_rsrc_dtor);
     vm.register_function(b"proc_close", proc_open::proc_close);
     vm.register_function(b"proc_get_status", proc_open::proc_get_status);
     vm.register_function(b"proc_terminate", proc_open::proc_terminate);
@@ -3188,6 +3189,15 @@ fn array_splice(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
+    // (a destructor run below gives this call a backtrace frame holding its
+    // arguments: count its holders once that frame exists)
+    if !used_ret
+        && entries
+            .iter()
+            .any(|(_, v)| matches!(v.deref(), Value::Object(_) | Value::Array(_)))
+    {
+        vm.sync_builtin_frames();
+    }
     let strong_before = Rc::strong_count(&arr);
 
     // Integer keys are renumbered, string keys kept.
@@ -12293,6 +12303,7 @@ pub(crate) fn fclose_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     // Mark the resource as closed rather than removing it, so gettype()
     // still reports "resource (closed)" while is_resource() returns false.
     goro_core::value::close_resource(fid);
+    xp_socket::release_stream_ctx(fid);
     Ok(Value::True)
 }
 

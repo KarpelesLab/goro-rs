@@ -1943,7 +1943,17 @@ fn getimagesize_from_any(vm: &mut Vm, args: &[Value], from_path: bool) -> Result
     let info_ref = if args.len() >= 2 {
         match &args[1] {
             Value::Reference(r) => {
-                *r.borrow_mut() = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                // zend_try_array_init(): the old value is released (its
+                // destructor sees NULL there) before the array is stored.
+                let empty = Value::Array(Rc::new(RefCell::new(PhpArray::new())));
+                // (a destructor that threw: the stream is not opened, as
+                // php_stream_display_wrapper_errors() stays silent then)
+                if vm.try_assign_ref(r, empty).is_err() || vm.current_exception.is_some() {
+                    return Err(VmError {
+                        message: String::new(),
+                        line: vm.current_line,
+                    });
+                }
                 Some(r.clone())
             }
             _ => None,

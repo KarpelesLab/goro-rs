@@ -111,7 +111,9 @@ impl Vm {
                     Some(info) => info.name.to_string(),
                     None => String::from_utf8_lossy(name).into_owned(),
                 };
-                let args: Vec<Value> = args.iter().map(|v| v.deref()).collect();
+                // (by-reference arguments are kept as references: the frame
+                // must not hold a copy of the value the builtin works on)
+                let args: Vec<Value> = args.to_vec();
                 (display, args, f.line, f.depth)
             };
             let at = depth.min(self.call_stack.len());
@@ -986,7 +988,7 @@ impl Vm {
                         .filter(|n| n.0 == at)
                         .map(|n| (n.1.clone(), n.2.clone()))
                         .collect();
-                    let args_arr = vm.frame_args_array(func_name, raw, named);
+                    let args_arr = vm.frame_args_array(func_name, &raw, named);
                     frame.set(key(b"args"), Value::Array(Rc::new(RefCell::new(args_arr))));
                 }
             }

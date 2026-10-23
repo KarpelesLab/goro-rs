@@ -10,6 +10,9 @@ pub(crate) struct ProcHandle {
     pub command: Vec<u8>,
     /// Stream resources of the parent ends ($pipes).
     pub pipes: Vec<i64>,
+    /// The references the handle holds on its pipes (GC_ADDREF in
+    /// proc_open()): they stay open while the process resource lives.
+    pub pipe_refs: Vec<Value>,
     pub cached_status: Option<i32>,
 }
 
@@ -768,6 +771,8 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             DescType::Socket => xp_socket::stream_from_socket(vm, d.parentend),
             DescType::Std => continue,
         };
+        // (the pipe is freed when its last reference goes away)
+        goro_core::value::adopt_new_resource(fid);
         pipes_arr.set(ArrayKey::Int(d.index as i64), Value::resource(fid));
         pipe_ids.push(fid);
     }
@@ -781,6 +786,7 @@ pub(crate) fn proc_open(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             ProcHandle {
                 pid,
                 command,
+                pipe_refs: pipe_ids.iter().map(Value::resource).collect(),
                 pipes: pipe_ids,
                 cached_status: None,
             },
@@ -874,6 +880,15 @@ fn proc_dtor(vm: &mut Vm, id: i64, wait: bool) -> i64 {
             st = libc::WEXITSTATUS(st);
         }
         st as i64
+    }
+}
+
+/// proc_open_rsrc_dtor() when the process resource's last reference goes
+/// away: the pipes are closed and the child is reaped if it exited already
+/// (FG(pclose_wait) is only set by proc_close()).
+pub(crate) fn proc_rsrc_dtor(vm: &mut Vm, id: i64) {
+    if goro_core::value::is_open_resource(id) && PROCS.with(|p| p.borrow().contains_key(&id)) {
+        proc_dtor(vm, id, false);
     }
 }
 

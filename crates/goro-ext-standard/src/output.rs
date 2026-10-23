@@ -205,10 +205,15 @@ fn zval_dump_value(vm: &mut Vm, val: &Value, indent: usize, seen: &mut HashSet<u
             } else {
                 "Unknown".to_string()
             };
-            // Resources are plain handles in goro: the variable and the
-            // argument, as for a dumped variable.
+            // (the holders of the resource: the variable and the argument
+            // for a dumped variable, like PHP)
+            let rc = id.refcount().saturating_sub(bias);
             vm.write_output(
-                format!("{}resource({}) of type ({}) refcount(2)\n", prefix, id, t).as_bytes(),
+                format!(
+                    "{}resource({}) of type ({}) refcount({})\n",
+                    prefix, id, t, rc
+                )
+                .as_bytes(),
             );
         }
         Value::Reference(r) => {

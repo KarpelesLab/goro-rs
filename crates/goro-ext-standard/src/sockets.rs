@@ -739,10 +739,24 @@ fn alloc_socket_stream(fd: i32, sd: SockData, uri: Option<&[u8]>, ctx: Option<i6
         let c = STREAM_CONTEXTS.with(|c| c.borrow().get(&cid).cloned());
         if let Some(c) = c {
             STREAM_CONTEXTS.with(|m| m.borrow_mut().insert(fid, c));
+            // php_stream_context_set(): the stream holds a reference to
+            // its context resource.
+            STREAM_CTX_REFS.with(|m| m.borrow_mut().insert(fid, Value::resource(cid)));
         }
     }
     goro_core::value::register_resource(fid, b"stream");
     fid
+}
+
+thread_local! {
+    /// The context resource each socket stream holds (stream->ctx).
+    static STREAM_CTX_REFS: RefCell<StdHashMap<i64, Value>> = RefCell::new(StdHashMap::new());
+}
+
+/// The stream `fid` is freed: it releases its context.
+pub(crate) fn release_stream_ctx(fid: i64) {
+    let held = STREAM_CTX_REFS.with(|m| m.borrow_mut().remove(&fid));
+    drop(held);
 }
 
 /// A stream that was neither connected nor bound has no socket
