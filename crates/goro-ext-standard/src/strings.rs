@@ -2268,18 +2268,19 @@ fn ucwords(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let delimiters = args.get(1).map(|v| v.to_php_string());
     let mut bytes = s.as_bytes().to_vec();
-    let mut capitalize_next = true;
     let delim_bytes: Vec<u8> = if let Some(ref d) = delimiters {
         d.as_bytes().to_vec()
     } else {
         b" \t\r\n\x0B\x0C".to_vec()
     };
-    for b in &mut bytes {
-        if delim_bytes.contains(b) {
-            capitalize_next = true;
-        } else if capitalize_next {
-            *b = b.to_ascii_uppercase();
-            capitalize_next = false;
+    // PHP_FUNCTION(ucwords): the first byte is uppercased, then every byte
+    // following a delimiter (tested after its own uppercasing).
+    if let Some(first) = bytes.first_mut() {
+        *first = first.to_ascii_uppercase();
+    }
+    for r in 1..bytes.len() {
+        if delim_bytes.contains(&bytes[r - 1]) {
+            bytes[r] = bytes[r].to_ascii_uppercase();
         }
     }
     Ok(Value::String(PhpString::from_vec(bytes)))
@@ -2918,6 +2919,40 @@ fn convert_uudecode(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 }
 
 fn strtr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    // ZEND_PARSE_PARAMETERS_START(2, 2) / (3, 3) by argument count.
+    let arity = if args.len() < 2 {
+        Some(format!(
+            "strtr() expects at least 2 arguments, {} given",
+            args.len()
+        ))
+    } else if args.len() > 3 {
+        Some(format!(
+            "strtr() expects at most 3 arguments, {} given",
+            args.len()
+        ))
+    } else {
+        None
+    };
+    if let Some(msg) = arity {
+        let exc = vm.create_exception(b"ArgumentCountError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
+    }
+    if args.len() == 2 && !matches!(args[1].deref(), Value::Array(_)) {
+        let msg = format!(
+            "strtr(): Argument #2 ($from) must be of type array, {} given",
+            Vm::value_type_name(&args[1].deref())
+        );
+        let exc = vm.create_exception(b"TypeError", &msg, 0);
+        vm.current_exception = Some(exc);
+        return Err(VmError {
+            message: msg,
+            line: vm.current_line,
+        });
+    }
     let subject = args.first().unwrap_or(&Value::Null).to_php_string();
 
     // PHP shortcuts an empty subject before doing any work — no warnings
@@ -4266,7 +4301,11 @@ fn strspn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let chars = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    let length = args.get(3).map(|v| v.to_long());
+    // ?int $length = null: null is no limit.
+    let length = args
+        .get(3)
+        .filter(|v| !matches!(v.deref(), Value::Null | Value::Undef))
+        .map(|v| v.to_long());
     let s_bytes = s.as_bytes();
     let chars_bytes = chars.as_bytes();
     let (start, end) = compute_substr_range(s_bytes.len(), offset, length);
@@ -4284,7 +4323,11 @@ fn strcspn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let s = args.first().unwrap_or(&Value::Null).to_php_string();
     let chars = args.get(1).unwrap_or(&Value::Null).to_php_string();
     let offset = args.get(2).map(|v| v.to_long()).unwrap_or(0);
-    let length = args.get(3).map(|v| v.to_long());
+    // ?int $length = null: null is no limit.
+    let length = args
+        .get(3)
+        .filter(|v| !matches!(v.deref(), Value::Null | Value::Undef))
+        .map(|v| v.to_long());
     let s_bytes = s.as_bytes();
     let chars_bytes = chars.as_bytes();
     let (start, end) = compute_substr_range(s_bytes.len(), offset, length);

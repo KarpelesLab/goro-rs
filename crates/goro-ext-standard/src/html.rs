@@ -1077,6 +1077,11 @@ fn html_entity_decode_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
         .get(1)
         .map(|v| v.to_long())
         .unwrap_or(ENT_HTML_QUOTE_SINGLE | ENT_HTML_QUOTE_DOUBLE | ENT_HTML_SUBSTITUTE_ERRORS);
+    // php_unescape_html_entities(): nothing to decode without an '&' (the
+    // charset is not even looked up).
+    if !s.as_bytes().contains(&b'&') {
+        return Ok(Value::String(s));
+    }
     let cs = resolve_charset(vm, args, "html_entity_decode", 2);
     let out = decode_html(s.as_bytes(), cs, flags, true);
     Ok(Value::String(PhpString::from_vec(out)))
