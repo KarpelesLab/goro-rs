@@ -403,7 +403,14 @@ fn date_sub_impl(
     }))
 }
 
-fn date_timezone_set_impl(t: &mut Time, z: &TzObj) {
+/// php_date_timezone_set: an uninitialised DateTimeZone (type 0) leaves the
+/// zone alone but still recomputes the local fields.
+fn date_timezone_set_impl(t: &mut Time, z: Option<&TzObj>) {
+    let Some(z) = z else {
+        let sse = t.sse;
+        unixtime2local(t, sse);
+        return;
+    };
     match z.ztype {
         ZONETYPE_OFFSET => set_timezone_from_offset(t, z.utc_offset),
         ZONETYPE_ABBR => set_timezone_from_abbr(t, &z.abbr, z.utc_offset, z.dst),
@@ -1431,8 +1438,8 @@ fn datetime_method(
                 o.clone()
             };
             let mut t = need_date(vm, &target)?;
-            let z = need_tz(vm, &tz)?;
-            date_timezone_set_impl(&mut t, &z);
+            let z = tz_get(&tz);
+            date_timezone_set_impl(&mut t, z.as_ref());
             date_set(&target, &t);
             Ok(ret_obj(&target))
         }
@@ -2865,8 +2872,8 @@ pub fn date_timezone_set_fn(vm: &mut Vm, args: &[Value]) -> R<Value> {
     )?
     .unwrap();
     let mut t = need_date(vm, &o)?;
-    let z = need_tz(vm, &tz)?;
-    date_timezone_set_impl(&mut t, &z);
+    let z = tz_get(&tz);
+    date_timezone_set_impl(&mut t, z.as_ref());
     date_set(&o, &t);
     Ok(ret_obj(&o))
 }
