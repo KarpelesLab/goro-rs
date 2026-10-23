@@ -2083,7 +2083,12 @@ pub fn new_iterator(vm: &mut Vm, o: &Obj) -> Option<Value> {
         throw(vm, b"Error", &m);
         return None;
     }
-    // the iterator takes its object handle before the first fetch
+    // the iterator takes its object handle before the first fetch; under
+    // foreach (ce->get_iterator) it is the zend_object_iterator itself, so
+    // the VM must not take a second handle for it
+    if vm.foreach_native_iter == 1 {
+        vm.foreach_native_iter = 2;
+    }
     let id = vm.alloc_object_id();
     let it = StmtIter {
         stmt_obj: o.clone(),
