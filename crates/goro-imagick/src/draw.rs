@@ -1470,7 +1470,6 @@ impl DrawingWand {
             || gc.fill_pattern.is_some()
             || gc.stroke_pattern.is_some()
             || gc.clip_path.is_some()
-            || gc.dash.iter().any(|d| *d > 0.0)
         {
             return false;
         }
@@ -1488,7 +1487,7 @@ impl DrawingWand {
             })
             .collect();
         let col = |c: &PixelInfo, mult: f64| -> [f64; 4] {
-            let al = if c.alpha_trait { c.alpha } else { 65535.0 };
+            let al = c.alpha;
             [c.red, c.green, c.blue, (al * mult).clamp(0.0, 65535.0)]
         };
         let fill = col(&gc.fill, gc.fill_opacity * gc.opacity);
@@ -1502,7 +1501,19 @@ impl DrawingWand {
             cap: gc.line_cap,
             miter_limit: gc.miter_limit,
         });
-        mvg::draw(img, &subs, Some((fill, gc.fill_rule == 2)), stroke, width);
+        let dash: Vec<f64> = gc.dash.iter().map(|d| d * expand).collect();
+        let dash = dash
+            .iter()
+            .any(|d| *d > 0.0)
+            .then_some((dash.as_slice(), gc.dash_offset * expand));
+        mvg::draw_dashed(
+            img,
+            &subs,
+            Some((fill, gc.fill_rule == 2)),
+            stroke,
+            width,
+            dash,
+        );
         true
     }
 
@@ -1519,12 +1530,7 @@ impl DrawingWand {
     ) -> bool {
         let gc = &p.gc;
         let stroked = gc.stroke_width > 0.0 && gc.stroke.alpha > 0.0;
-        if gc.clip_path.is_some()
-            || gc.fill_pattern.is_some()
-            || gc.under_color.alpha > 0.0
-            || gc.decoration > 1
-            || stroked
-        {
+        if gc.clip_path.is_some() || gc.fill_pattern.is_some() || stroked {
             return false;
         }
         let Some((cmds, m, ox, oy)) = self.text_place(p, x, y, text, img.columns, img.rows) else {
@@ -1635,13 +1641,62 @@ impl DrawingWand {
         );
         let cov = mvg::area_coverage(&segs, gx0, gy0, gw, gh);
         let c = &gc.fill;
-        let al = if c.alpha_trait { c.alpha } else { 65535.0 };
+        let al = c.alpha;
         let color = [
             c.red,
             c.green,
             c.blue,
             (al * gc.fill_opacity * gc.opacity).clamp(0.0, 65535.0),
         ];
+        let tw = m.text_width;
+        let place = |px: f64, py: f64| (a.sx * px + a.ry * py + a.tx, a.rx * px + a.sy * py + a.ty);
+        // the under colour: a rectangle over the ascender-descender box
+        if gc.under_color.alpha > 0.0 {
+            let u = &gc.under_color;
+            let uc = [u.red, u.green, u.blue, u.alpha];
+            let (y0, y1) = (oy - m.ascender, oy - m.descender);
+            let pts = vec![
+                place(ox, y0),
+                place(ox, y1),
+                place(ox + tw, y1),
+                place(ox + tw, y0),
+                place(ox, y0),
+            ];
+            mvg::draw(
+                img,
+                &[mvg::Sub { pts, closed: true }],
+                Some((uc, false)),
+                None,
+                1.0,
+            );
+        }
+        // decorations: a line of the underline thickness in the fill
+        // colour (black box: under at -position, over at the ascender
+        // less the descender plus the position, through halfway)
+        let deco_y = match gc.decoration {
+            2 => Some(oy - m.underline_position),
+            3 => Some(oy - m.ascender - m.descender + m.underline_position),
+            4 => Some(oy - (m.ascender + m.descender + m.underline_position) / 2.0),
+            _ => None,
+        };
+        if let Some(dy) = deco_y {
+            let w = m.underline_thickness;
+            let pts = vec![place(ox, dy), place(ox + tw, dy)];
+            let st = mvg::StrokeStyle {
+                color,
+                width: w,
+                join: gc.line_join,
+                cap: gc.line_cap,
+                miter_limit: gc.miter_limit,
+            };
+            mvg::draw(
+                img,
+                &[mvg::Sub { pts, closed: false }],
+                Some((color, false)),
+                Some(st),
+                w,
+            );
+        }
         mvg::composite_coverage(img, &cov, gx0, gy0, gw, &color);
         true
     }
@@ -1802,19 +1857,26 @@ impl DrawingWand {
             gc.interline,
             gc.kerning,
         )?;
-        let (tw, th) = (m.text_width, m.text_height);
+        let tw = m.text_width;
         let (cw, ch) = (w as f64, h as f64);
-        // the baseline origin of the first line
-        let (mut ox, mut oy) = match gc.gravity {
-            Gravity::NorthWest => (x, y + m.ascender),
-            Gravity::North => ((cw - tw) / 2.0 + x, y + m.ascender),
-            Gravity::NorthEast => (cw - tw - x, y + m.ascender),
-            Gravity::West => (x, (ch - th) / 2.0 + m.ascender + y),
-            Gravity::Center => ((cw - tw) / 2.0 + x, (ch - th) / 2.0 + m.ascender + y),
-            Gravity::East => (cw - tw - x, (ch - th) / 2.0 + m.ascender + y),
-            Gravity::SouthWest => (x, ch - th + m.ascender - y),
-            Gravity::South => ((cw - tw) / 2.0 + x, ch - th + m.ascender - y),
-            Gravity::SouthEast => (cw - tw - x, ch - th + m.ascender - y),
+        // the baseline origin of the first line (black box, ImageMagick
+        // 7.1.2): the top row puts the ink top at y, the middle centres the
+        // ascender-descender box, the bottom row puts the descender at y;
+        // the right column ends one pixel short of the edge
+        let by2 = m.bounds.3;
+        let mid_y = (ch - (m.ascender - m.descender)) / 2.0 + m.ascender + y;
+        let (left, centre, right) = (x, (cw - tw) / 2.0 + x, cw - tw - x - 1.0);
+        let (top, bottom) = (y + by2, ch - y + m.descender);
+        let (mut ox, oy) = match gc.gravity {
+            Gravity::NorthWest => (left, top),
+            Gravity::North => (centre, top),
+            Gravity::NorthEast => (right, top),
+            Gravity::West => (left, mid_y),
+            Gravity::Center => (centre, mid_y),
+            Gravity::East => (right, mid_y),
+            Gravity::SouthWest => (left, bottom),
+            Gravity::South => (centre, bottom),
+            Gravity::SouthEast => (right, bottom),
             _ => (x, y),
         };
         if gc.gravity == Gravity::Undefined {
@@ -1824,7 +1886,6 @@ impl DrawingWand {
                 _ => {}
             }
         }
-        oy -= 0.0;
         Some((cmds, m, ox, oy))
     }
 

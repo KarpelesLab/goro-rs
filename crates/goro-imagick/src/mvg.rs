@@ -184,6 +184,82 @@ pub struct StrokeStyle {
     pub miter_limit: f64,
 }
 
+/// Split subpaths into their dashes (device-space lengths).
+pub fn dash_subs(subs: &[Sub], pattern: &[f64], offset: f64) -> Vec<Sub> {
+    let pat: Vec<f64> = if pattern.len() % 2 == 1 {
+        pattern.iter().chain(pattern.iter()).copied().collect()
+    } else {
+        pattern.to_vec()
+    };
+    let total: f64 = pat.iter().sum();
+    let mut out = Vec::new();
+    if total <= 0.0 {
+        return subs.to_vec();
+    }
+    for s in subs {
+        let mut pts = s.pts.clone();
+        if s.closed && pts.len() > 1 && pts[0] != pts[pts.len() - 1] {
+            pts.push(pts[0]);
+        }
+        // where in the pattern the subpath starts
+        let mut k = 0usize;
+        let mut left = pat[0];
+        let mut skip = offset.rem_euclid(total);
+        while skip > 0.0 {
+            if skip >= left {
+                skip -= left;
+                k = (k + 1) % pat.len();
+                left = pat[k];
+            } else {
+                left -= skip;
+                skip = 0.0;
+            }
+        }
+        let mut cur: Option<Vec<Pt>> = if k.is_multiple_of(2) {
+            Some(vec![pts[0]])
+        } else {
+            None
+        };
+        for w in pts.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let len = (b.0 - a.0).hypot(b.1 - a.1);
+            let mut t = 0.0;
+            while len - t > 1e-12 {
+                let step = left.min(len - t);
+                t += step;
+                left -= step;
+                let p = (a.0 + (b.0 - a.0) * t / len, a.1 + (b.1 - a.1) * t / len);
+                if let Some(c) = cur.as_mut() {
+                    c.push(p);
+                }
+                if left <= 1e-12 {
+                    // the dash or gap ends here
+                    if let Some(c) = cur.take() {
+                        out.push(Sub {
+                            pts: c,
+                            closed: false,
+                        });
+                    }
+                    k = (k + 1) % pat.len();
+                    left = pat[k];
+                    if k.is_multiple_of(2) {
+                        cur = Some(vec![p]);
+                    }
+                }
+            }
+        }
+        if let Some(c) = cur {
+            if c.len() > 1 {
+                out.push(Sub {
+                    pts: c,
+                    closed: false,
+                });
+            }
+        }
+    }
+    out
+}
+
 fn seg_dist(px: f64, py: f64, a: Pt, b: Pt) -> f64 {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let l = dx * dx + dy * dy;
@@ -334,6 +410,19 @@ pub fn draw(
     stroke: Option<StrokeStyle>,
     stroke_width: f64,
 ) {
+    draw_dashed(img, subs, fill, stroke, stroke_width, None)
+}
+
+/// [`draw`] with a dash pattern (device lengths, offset): every dash is
+/// stroked as its outline, whatever the width.
+pub fn draw_dashed(
+    img: &mut Image,
+    subs: &[Sub],
+    fill: Option<([f64; 4], bool)>,
+    stroke: Option<StrokeStyle>,
+    stroke_width: f64,
+    dash: Option<(&[f64], f64)>,
+) {
     let subs: Vec<Sub> = subs
         .iter()
         .map(|s| Sub {
@@ -382,7 +471,7 @@ pub fn draw(
             }
         }
     }
-    let thin = stroke.filter(|s| s.width / 2.0 <= 1.0 && s.color[3] > 0.0);
+    let thin = stroke.filter(|s| dash.is_none() && s.width / 2.0 <= 1.0 && s.color[3] > 0.0);
     let fill = fill.filter(|f| f.0[3] > 0.0);
     if fill.is_some() || thin.is_some() {
         let fa: Option<Vec<f64>> = fill.map(|(_, nonzero)| {
@@ -430,8 +519,13 @@ pub fn draw(
             }
         }
     }
-    if let Some(st) = stroke.filter(|s| s.width / 2.0 > 1.0 && s.color[3] > 0.0) {
-        stroke_outline(img, &subs, &st);
+    if let Some(st) = stroke.filter(|s| s.color[3] > 0.0) {
+        if let Some((pat, off)) = dash {
+            let dashes = dash_subs(&subs, pat, off);
+            stroke_outline(img, &dashes, &st);
+        } else if st.width / 2.0 > 1.0 {
+            stroke_outline(img, &subs, &st);
+        }
     }
     img.colors = None;
 }

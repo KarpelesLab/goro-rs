@@ -78,6 +78,10 @@ pub struct FontMetrics {
     pub max_horizontal_advance: f64,
     pub bounds: (f64, f64, f64, f64),
     pub origin: (f64, f64),
+    /// The post table's underline position and thickness at the rounded
+    /// ppem (pixels; the position is negative below the baseline).
+    pub underline_position: f64,
+    pub underline_thickness: f64,
 }
 
 struct Pen<'a> {
@@ -179,12 +183,51 @@ pub fn layout(
     let mut max_adv: f64 = 0.0;
     let (mut bx0, mut by0, mut bx1, mut by1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     let lines: Vec<&str> = text.split('\n').collect();
+    // FreeType's FT_Get_Kerning(): the 'kern' table, rounded to pixels
+    let kern_table = {
+        use skrifa::raw::TableProvider;
+        font.kern().ok()
+    };
+    let upem_k = {
+        use skrifa::raw::TableProvider;
+        font.head()
+            .map(|h| h.units_per_em() as f64)
+            .unwrap_or(1000.0)
+    };
+    let kern = |l: skrifa::GlyphId, r: skrifa::GlyphId| -> f64 {
+        let Some(k) = &kern_table else {
+            return 0.0;
+        };
+        let mut v = 0i32;
+        for st in k.subtables().flatten() {
+            if !st.is_horizontal() || st.is_cross_stream() || st.is_variable() {
+                continue;
+            }
+            if let Ok(skrifa::raw::tables::kern::SubtableKind::Format0(t)) = st.kind() {
+                v += t.kerning(l, r).unwrap_or(0);
+            }
+        }
+        // scaled, damped below 25 ppem, rounded to whole pixels
+        let ppem = (px_y as f64 + 0.5).floor();
+        let mut k = v as f64 * px_y as f64 / upem_k;
+        if ppem < 25.0 {
+            k = k * ppem / 25.0;
+        }
+        ((k * 64.0).round() / 64.0 + 0.5).floor()
+    };
     for (li, line) in lines.iter().enumerate() {
         let mut x = 0f64;
         let y = li as f64 * line_h;
+        let mut prev: Option<skrifa::GlyphId> = None;
+        let mut ink_right = f64::MIN;
         for ch in line.chars() {
             let gid = cmap.map(ch).unwrap_or_default();
+            if let Some(pg) = prev {
+                x += kern(pg, gid) * sx as f64;
+            }
+            prev = Some(gid);
             let mut adv = None;
+            let mut glyph_x2 = f64::MIN;
             if let Some(g) = outlines.get(gid) {
                 let start = cmds.len();
                 let mut pen = Pen {
@@ -211,6 +254,7 @@ pub fn layout(
                     };
                     for p in pts {
                         let (gx, gy) = (p.x as f64 - x, -(p.y as f64 - y));
+                        glyph_x2 = glyph_x2.max(gx / sx as f64);
                         bx0 = bx0.min(gx);
                         bx1 = bx1.max(gx);
                         by0 = by0.min(gy);
@@ -219,11 +263,14 @@ pub fn layout(
                 }
             }
             let linear = gm.advance_width(gid).unwrap_or(px_y * 0.5) as f64;
+            ink_right = ink_right.max((x + glyph_x2 * sx as f64).ceil());
             let adv = adv.unwrap_or(linear.round()) * sx as f64;
             max_adv = max_adv.max(adv);
             x += adv + kerning;
         }
-        max_w = max_w.max(x);
+        // the text ends at the last pen position, or past it where a
+        // glyph's ink reaches further (rounded up)
+        max_w = max_w.max(x).max(ink_right);
     }
     if bx0 > bx1 {
         (bx0, by0, bx1, by1) = (0.0, 0.0, 0.0, 0.0);
@@ -233,6 +280,26 @@ pub fn layout(
     let n = lines.len() as f64;
     let ppem_x = (pointsize * res.0 / 72.0 + 0.5).floor();
     let ppem_y = (pointsize * res.1 / 72.0 + 0.5).floor();
+    let (upos, uthick) = {
+        use skrifa::raw::TableProvider;
+        let upem = font
+            .head()
+            .map(|h| h.units_per_em() as f64)
+            .unwrap_or(1000.0);
+        font.post()
+            .map(|p| {
+                // FreeType moves the position to the bar's top
+                let (pos, thick) = (
+                    p.underline_position().to_i16() as i32,
+                    p.underline_thickness().to_i16() as i32,
+                );
+                (
+                    (pos - thick / 2) as f64 * ppem_y / upem,
+                    thick as f64 * ppem_y / upem,
+                )
+            })
+            .unwrap_or((0.0, 0.0))
+    };
     let metrics = FontMetrics {
         character_width: ppem_x,
         character_height: ppem_y,
@@ -243,6 +310,8 @@ pub fn layout(
         max_horizontal_advance: m.max_width.map(|w| (w as f64).round()).unwrap_or(max_adv),
         bounds: (bx0, by0, bx1, by1),
         origin: (max_w, 0.0),
+        underline_position: upos,
+        underline_thickness: uthick,
     };
     Some((cmds, metrics))
 }
