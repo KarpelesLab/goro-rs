@@ -25,24 +25,24 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 
 | Area | Pass | Run | Rate |
 |---|---|---|---|
-| Zend/tests | 5246 | 5255 | 99.8% |
-| tests/ (lang, classes, basic, …) | 824 | 832 | 99.0% |
-| ext/standard | 3371 | 3378 | 99.8% |
+| Zend/tests | 5254 | 5255 | 99.98% |
+| tests/ (lang, classes, basic, …) | 826 | 832 | 99.3% |
+| ext/standard | 3373 | 3376 | 99.9% |
 | ext/spl | 779 | 779 | 100% |
 | ext/date | 677 | 677 | 100% |
-| ext/reflection | 488 | 493 | 99.0% |
+| ext/reflection | 492 | 493 | 99.8% |
 | ext/dom (incl. HTML5 `Dom\HTMLDocument`) | 849 | 850 | 99.9% |
 | ext/simplexml / xml / xmlreader / xmlwriter / libxml | 339 | 344 | 98.5% |
 | ext/soap | 574 | 574 | 100% |
 | ext/gd (bundled libgd port; PNG/GIF/JPEG/WebP/AVIF/BMP/TGA/XBM/XPM/WBMP/GD2, FreeType) | 308 | 308 | 100% |
 | ext/xsl (libxslt + libexslt port) | 76 | 76 | 100% |
 | ext/mbstring | 415 | 415 | 100% |
-| ext/intl (on the `intl` crate) | 416 | 427 | 97.4% |
+| ext/intl (on the `intl` crate) | 426 | 428 | 99.5% |
 | ext/iconv (glibc iconv emulation) | 68 | 68 | 100% |
 | ext/openssl (incl. TLS streams, on purecrypto) | 208 | 213 | 97.7% |
 | ext/sodium (on purecrypto) | 30 | 30 | 100% |
 | ext/mysqli (embedded MySQL fixture) | 420 | 420 | 100% |
-| ext/pdo (generic tests, run against MySQL, PostgreSQL and SQLite) | 366 | 369 | 99.2% |
+| ext/pdo (generic tests, run against MySQL, PostgreSQL and SQLite) | 369 | 372 | 99.2% |
 | ext/sqlite3 / pdo_sqlite (goro-sqlite, a SQLite 3.54.1 port) | 174 | 175 | 99.4% |
 | ext/pdo_mysql / pdo_pgsql | 219 | 219 | 100% |
 | ext/pgsql (libpq port, embedded PostgreSQL fixture) | 96 | 96 | 100% |
@@ -50,7 +50,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/session | 257 | 258 | 99.6% |
 | ext/pcre (PCRE2 port, JIT stack-limit emulation) | 161 | 161 | 100% |
 | ext/hash / random / zlib / bz2 | 305 | 306 | 99.7% |
-| ext/phar (phar, tar, zip formats) | 540 | 542 | 99.6% |
+| ext/phar (phar, tar, zip formats) | 542 | 542 | 100% |
 | ext/zip (libzip port) / exif / fileinfo (libmagic port) | 265 | 265 | 100% |
 | ext/json | 88 | 88 | 100% |
 | ext/bcmath / filter / gmp (bcmath and gmp on puremp) | 379 | 379 | 100% |
@@ -58,7 +58,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | ext/uri (uriparser port + lexbor WHATWG URL parser port) | 309 | 309 | 100% |
 | ext/posix / pcntl / calendar / ftp / gettext / shmop / sysv* | 253 | 253 | 100% |
 | ext/curl (libcurl emulation) / sockets | 246 | 246 | 100% |
-| ext/opcache (script cache, preloading; 59 of the fails expect optimizer opcode dumps) | 806 | 879 | 91.7% |
+| ext/opcache (script cache, preloading; 59 of the fails expect optimizer opcode dumps) | 819 | 881 | 93.0% |
 | ext/zend_test (engine test hooks) | 145 | 148 | 98.0% |
 | ext/dba (cdb, cdb_make, inifile, flatfile) / readline | 53 | 53 | 100% |
 | ext/tidy (tidy-html5 5.8.0 port) | 50 | 50 | 100% |
