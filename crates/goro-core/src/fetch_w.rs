@@ -261,7 +261,9 @@ impl Vm {
                     None => self.throw_error_msg(b"Error", "[] operator not supported for strings"),
                     Some(k) => {
                         if self.check_string_offset_w(&k, mode, line) {
-                            let msg = if matches!(mode, DimFetch::Obj | DimFetch::ObjRw)
+                            let msg = if std::mem::take(&mut self.str_wb_ref_ctx) {
+                                "Cannot create references to/from string offsets"
+                            } else if matches!(mode, DimFetch::Obj | DimFetch::ObjRw)
                                 || self.str_wb_obj_ctx
                             {
                                 "Cannot use string offset as an object"

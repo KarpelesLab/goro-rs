@@ -965,6 +965,9 @@ pub struct Vm {
     /// The dimension fetch in progress is the container of a property
     /// access (zend_wrong_string_offset() names "an object" then).
     pub(crate) str_wb_obj_ctx: bool,
+    /// The dimension fetch in progress is bound by reference (FE_RESET_RW
+    /// & co.: "Cannot create references to/from string offsets").
+    pub(crate) str_wb_ref_ctx: bool,
     /// Registered built-in functions
     pub functions: crate::fxhash::FxHashMap<Vec<u8>, BuiltinFn>,
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
@@ -1536,6 +1539,7 @@ impl Vm {
             str_offset_wb: None,
             str_wb_pending: None,
             str_wb_obj_ctx: false,
+            str_wb_ref_ctx: false,
             functions: Default::default(),
             builtin_param_names: HashMap::new(),
             user_functions: Default::default(),
@@ -45160,6 +45164,10 @@ impl Vm {
                             op_array.ops.get(ip).map(|o| o.opcode),
                             Some(OpCode::PropertyUnset)
                         );
+                    self.str_wb_ref_ctx = matches!(
+                        op_array.ops.get(ip),
+                        Some(o) if o.opcode == OpCode::ForeachInitRef && o.op1 == op.result
+                    );
                     let abort_before = self.dim_rw_abort;
                     let fetched = match op.op1 {
                         OperandType::Cv(ci) => {

@@ -3992,7 +3992,28 @@ impl Compiler {
                 } else {
                     None
                 };
-                let arr = self.compile_expr(expr)?;
+                // foreach ($a[k] as &$v): the element is fetched for writing
+                // (FE_RESET_RW of a FETCH_DIM_W).
+                let arr = match &expr.kind {
+                    ExprKind::ArrayAccess {
+                        array,
+                        index: Some(index),
+                    } if *by_ref && !expr_is_in_nullsafe_chain(expr) => {
+                        let container = self
+                            .compile_dim_write_base_mode(array, crate::fetch_w::DimFetch::W)?;
+                        let key = self.compile_expr(index)?;
+                        let tmp = self.op_array.alloc_temp();
+                        self.op_array.emit(Op {
+                            opcode: OpCode::ArrayGetW,
+                            op1: container,
+                            op2: key,
+                            result: OperandType::Tmp(tmp),
+                            line: expr.span.line,
+                        });
+                        OperandType::Tmp(tmp)
+                    }
+                    _ => self.compile_expr(expr)?,
+                };
                 // foreach (f() as &$v): iterate f()'s returned reference, or a
                 // copy of a by-value result.
                 let call_src = *by_ref && Self::is_call_expr(expr);
