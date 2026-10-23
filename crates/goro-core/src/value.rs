@@ -159,6 +159,11 @@ pub static TIMED_OUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// timeout); the VM checks it between instructions and then runs
 /// `Vm::interrupt_hook` (zend_interrupt_function).
 pub static VM_INTERRUPT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// A signal that must not end a sleep (php-fpm's slowlog request, which
+/// php-fpm makes with ptrace()): sleep() runs `Vm::interrupt_hook` and
+/// sleeps on.
+pub static TRANSPARENT_INTERRUPT: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 /// EG(timeout_seconds): the limit the pending timer was armed with.
 pub static TIMEOUT_SECONDS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 /// EG(hard_timeout): grace period after a timeout before the process dies.

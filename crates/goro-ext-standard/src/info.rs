@@ -791,7 +791,9 @@ fn print_info(vm: &mut Vm, info: &mut Info, flag: i64, module_hooks: &[(String, 
             .get(b"PHP_SAPI".as_slice())
             .map(|v| v.to_php_string().to_string_lossy())
             .unwrap_or_default();
-        let sapi_name = if info.html {
+        let sapi_name = if sapi == "fpm-fcgi" {
+            "FPM/FastCGI"
+        } else if info.html {
             "CGI/FastCGI"
         } else if sapi == "cli-server" {
             "Built-in HTTP server"

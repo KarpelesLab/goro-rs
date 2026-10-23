@@ -25,6 +25,7 @@ const FUNCTIONS: &[(&str, BuiltinFn, u8)] = &[
     ("zend_test_nullable_array_return", ret_null, ALL),
     ("zend_test_void_return", ret_null, ALL),
     ("zend_test_compile_string", zend_test_compile_string, ALL),
+    ("zend_test_log_err_debug", zend_test_log_err_debug, ALL),
     ("zend_test_compile_to_ast", zend_test_compile_to_ast, ALL),
     ("zend_test_deprecated", zend_test_deprecated, ALL),
     ("zend_test_deprecated_attr", ret_null, ALL),
@@ -1131,6 +1132,13 @@ fn zend_test_compile_to_ast(vm: &mut Vm, args: &[Value]) -> R {
 }
 
 // ---------------------------------------------------------------------------
+// zend_test_log_err_debug(): php_log_err_with_severity(str, LOG_DEBUG)
+fn zend_test_log_err_debug(vm: &mut Vm, args: &[Value]) -> R {
+    let s = arg(args, 0).to_php_string().to_string_lossy();
+    vm.log_err(&s);
+    Ok(Value::Null)
+}
+
 // zend_test_compile_string()
 
 const ZEND_COMPILE_POSITION_AT_SHEBANG: i64 = 0;

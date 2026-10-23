@@ -56,6 +56,10 @@ pub fn register(vm: &mut Vm) {
     debug("DL TEST MINIT");
     vm.module_shutdown_hooks
         .push(|_| debug("DL TEST MSHUTDOWN"));
+    // PHP_RINIT_FUNCTION / PHP_RSHUTDOWN_FUNCTION
+    vm.request_startup_hooks.push(|_| debug("DL TEST RINIT"));
+    vm.request_shutdown_hooks
+        .push(|_| debug("DL TEST RSHUTDOWN"));
 }
 
 /// PHP_FUNCTION(dl_test_test1)

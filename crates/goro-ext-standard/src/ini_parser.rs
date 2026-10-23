@@ -773,6 +773,20 @@ struct Parser<'a, 'b> {
     process_sections: bool,
     root: PhpArray,
     section: Option<(ArrayKey, PhpArray)>,
+    /// zend_parse_ini_string() with a callback of its own: the parsed
+    /// entries are recorded instead of building an array.
+    events: Option<Vec<IniEvent>>,
+}
+
+/// One callback of zend_parse_ini_string() (ZEND_INI_PARSER_*).
+#[derive(Clone, Debug)]
+pub enum IniEvent {
+    /// ZEND_INI_PARSER_ENTRY: name = value
+    Entry(Vec<u8>, Vec<u8>),
+    /// ZEND_INI_PARSER_SECTION: [name]
+    Section(Vec<u8>),
+    /// ZEND_INI_PARSER_POP_ENTRY: name[offset] = value
+    PopEntry(Vec<u8>, Vec<u8>, Vec<u8>),
 }
 
 type PResult<T> = Result<T, ()>;
@@ -826,12 +840,16 @@ impl<'a, 'b> Parser<'a, 'b> {
             if n.eq_ignore_ascii_case(b"false") || n.eq_ignore_ascii_case(b"null") {
                 return Sv::empty();
             }
-            if let Some(c) = self.vm.constants.get(&n) {
-                let s = c.to_php_string();
-                return Sv {
-                    v: Value::String(s),
-                    is_number: false,
-                };
+            // (INI settings share goro's constant table; their names are
+            // lowercase, which constants are not)
+            if n.iter().any(|c| c.is_ascii_uppercase()) {
+                if let Some(c) = self.vm.constants.get(&n) {
+                    let s = c.to_php_string();
+                    return Sv {
+                        v: Value::String(s),
+                        is_number: false,
+                    };
+                }
             }
         }
         name
@@ -1096,10 +1114,27 @@ impl<'a, 'b> Parser<'a, 'b> {
     }
 
     fn entry(&mut self, key: &[u8], value: Value) {
+        if let Some(ev) = &mut self.events {
+            ev.push(IniEvent::Entry(
+                key.to_vec(),
+                value.to_php_string().as_bytes().to_vec(),
+            ));
+            return;
+        }
         self.active().set(symtable_key(key), value);
     }
 
     fn pop_entry(&mut self, key: &[u8], value: Value, offset: Option<Value>) {
+        if let Some(ev) = &mut self.events {
+            ev.push(IniEvent::PopEntry(
+                key.to_vec(),
+                offset
+                    .map(|o| o.to_php_string().as_bytes().to_vec())
+                    .unwrap_or_default(),
+                value.to_php_string().as_bytes().to_vec(),
+            ));
+            return;
+        }
         let k = if !(key.len() > 1 && key[0] == b'0') {
             match std::str::from_utf8(key)
                 .ok()
@@ -1153,7 +1188,9 @@ impl<'a, 'b> Parser<'a, 'b> {
                         return self.error(&[]);
                     }
                     self.next();
-                    if self.process_sections {
+                    if let Some(ev) = &mut self.events {
+                        ev.push(IniEvent::Section(name.bytes()));
+                    } else if self.process_sections {
                         self.flush_section();
                         self.section = Some((symtable_key(&name.bytes()), PhpArray::new()));
                     }
@@ -1218,10 +1255,42 @@ pub fn parse_ini(
         process_sections,
         root: PhpArray::new(),
         section: None,
+        events: None,
     };
     if p.parse().is_err() {
         return Value::False;
     }
     p.flush_section();
     Value::Array(Rc::new(RefCell::new(p.root)))
+}
+
+/// zend_parse_ini_string() with a parser callback (process_sections on):
+/// the callbacks it makes, in order, or Err on a syntax error (reported as
+/// a warning).
+pub fn parse_ini_events(
+    vm: &mut Vm,
+    data: &[u8],
+    mode: i64,
+    filename: &str,
+) -> Result<Vec<IniEvent>, Vec<IniEvent>> {
+    let mut p = Parser {
+        sc: Scanner {
+            d: data,
+            pos: 0,
+            st: St::Initial,
+            stack: Vec::new(),
+            lineno: 1,
+            mode,
+        },
+        la: None,
+        vm,
+        filename: filename.to_string(),
+        process_sections: true,
+        root: PhpArray::new(),
+        section: None,
+        events: Some(Vec::new()),
+    };
+    let r = p.parse();
+    let ev = p.events.take().unwrap_or_default();
+    if r.is_err() { Err(ev) } else { Ok(ev) }
 }

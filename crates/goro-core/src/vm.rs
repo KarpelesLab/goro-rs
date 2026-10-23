@@ -73,6 +73,7 @@ const CORE_INI_DEFAULTS: &[(&[u8], &[u8])] = &[
     (b"output_handler", b""),
     (b"post_max_size", b"8M"),
     (b"realpath_cache_size", b"4096K"),
+    (b"register_argc_argv", b"0"),
     (b"realpath_cache_ttl", b"120"),
     (b"report_zend_debug", b"0"),
     (b"request_order", b""),
@@ -1081,6 +1082,19 @@ pub struct Vm {
     /// sapi_module.send_headers: run when the headers get sent (the first
     /// output, or request shutdown), e.g. by the CGI SAPI.
     pub sapi_send_headers: Option<fn(&mut Vm)>,
+    /// sapi_module.ub_write: where output that reaches the SAPI goes
+    /// (stdout when unset), e.g. the FastCGI connection of php-fpm.
+    pub sapi_ub_write: Option<fn(&[u8])>,
+    /// sapi_module.flush (flush()), after the pending output was written.
+    pub sapi_flush: Option<fn(&mut Vm)>,
+    /// sapi_module.log_message: php_log_err() without an error_log file
+    /// (stderr when unset).
+    pub sapi_log_message: Option<fn(&str)>,
+    /// Run by finish_request() once the script, the user exception handler
+    /// and the report of an uncaught error are done, before the shutdown
+    /// functions (where php-fpm's main() takes over after
+    /// php_execute_script()); the flag is set when it failed.
+    pub sapi_script_done: Option<fn(&mut Vm, bool)>,
     /// Output buffer stack for ob_start/ob_end_clean/ob_get_contents
     pub ob_stack: Vec<Vec<u8>>,
     /// Output handler metadata, index-aligned with `ob_stack` (see ob.rs)
@@ -1706,6 +1720,10 @@ impl Vm {
             cli_direct_output: false,
             cli_write_through: false,
             sapi_send_headers: None,
+            sapi_ub_write: None,
+            sapi_flush: None,
+            sapi_log_message: None,
+            sapi_script_done: None,
             ob_stack: Vec::new(),
             ob_handlers: Vec::new(),
             ob_running: None,
@@ -16436,12 +16454,9 @@ impl Vm {
             && self.ob_stack.is_empty()
             && self.output.len() + data.len() > Self::CLI_FLUSH_THRESHOLD
         {
-            use std::io::Write;
             let out = std::mem::take(&mut self.output);
-            let mut so = std::io::stdout().lock();
-            let _ = so.write_all(&out);
-            let _ = so.write_all(data);
-            let _ = so.flush();
+            self.sapi_write(&out);
+            self.sapi_write(data);
             return;
         }
         if self.output.len() + data.len() <= Self::MAX_OUTPUT_SIZE {
@@ -16512,11 +16527,8 @@ impl Vm {
     pub fn write_stdout_stream(&mut self, data: &[u8]) {
         self.push_top_output(data);
         if self.cli_direct_output && !self.output.is_empty() {
-            use std::io::Write;
             let out = std::mem::take(&mut self.output);
-            let mut so = std::io::stdout().lock();
-            let _ = so.write_all(&out);
-            let _ = so.flush();
+            self.sapi_write(&out);
         }
     }
 
@@ -16524,12 +16536,21 @@ impl Vm {
     /// now (before blocking on I/O or spawning a process).
     pub fn flush_cli_output(&mut self) {
         if self.cli_direct_output && self.ob_stack.is_empty() && !self.output.is_empty() {
-            use std::io::Write;
             let out = std::mem::take(&mut self.output);
-            let mut so = std::io::stdout().lock();
-            let _ = so.write_all(&out);
-            let _ = so.flush();
+            self.sapi_write(&out);
         }
+    }
+
+    /// sapi_module.ub_write(): output that reached the SAPI.
+    pub fn sapi_write(&self, data: &[u8]) {
+        if let Some(w) = self.sapi_ub_write {
+            w(data);
+            return;
+        }
+        use std::io::Write;
+        let mut so = std::io::stdout().lock();
+        let _ = so.write_all(data);
+        let _ = so.flush();
     }
 
     /// Compare two PHP values (for sorting)
@@ -17612,6 +17633,9 @@ impl Vm {
             real_fatal = self.current_exception.is_none();
             let e2 = e.clone();
             self.report_uncaught(&e2);
+        }
+        if let Some(done) = self.sapi_script_done {
+            done(self, result.is_err());
         }
 
         // Call shutdown functions (before destructors, like PHP does).

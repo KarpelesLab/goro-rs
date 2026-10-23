@@ -1229,6 +1229,9 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn flush_fn(vm: &mut Vm, _args: &[Value]) -> Result<Value, VmError> {
     // sapi_flush(): the CLI hands pending output to stdout.
     vm.flush_cli_output();
+    if let Some(f) = vm.sapi_flush {
+        f(vm);
+    }
     Ok(Value::Null)
 }
 
@@ -10036,11 +10039,7 @@ fn sleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             tv_sec: secs as libc::time_t,
             tv_nsec: 0,
         };
-        let mut rem = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        if unsafe { libc::nanosleep(&req, &mut rem) } != 0 {
+        if let Some(rem) = nanosleep_interruptible(_vm, req) {
             left = rem.tv_sec + if rem.tv_nsec >= 500_000_000 { 1 } else { 0 };
         }
     }
@@ -10065,9 +10064,34 @@ fn usleep_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             tv_sec: (actual / 1_000_000) as libc::time_t,
             tv_nsec: ((actual % 1_000_000) * 1000) as libc::c_long,
         };
-        unsafe { libc::nanosleep(&req, std::ptr::null_mut()) };
+        let _ = nanosleep_interruptible(_vm, req);
     }
     Ok(Value::Null)
+}
+
+/// nanosleep(): None when the whole time was slept, else what is left
+/// (a signal ended it). A transparent interrupt (see
+/// goro_core::value::TRANSPARENT_INTERRUPT) runs the interrupt hook and
+/// the sleep goes on.
+fn nanosleep_interruptible(vm: &mut Vm, mut req: libc::timespec) -> Option<libc::timespec> {
+    use std::sync::atomic::Ordering;
+    loop {
+        let mut rem = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        if unsafe { libc::nanosleep(&req, &mut rem) } == 0 {
+            return None;
+        }
+        if goro_core::value::TRANSPARENT_INTERRUPT.swap(false, Ordering::Relaxed) {
+            if let Some(h) = vm.interrupt_hook {
+                h(vm);
+            }
+            req = rem;
+            continue;
+        }
+        return Some(rem);
+    }
 }
 fn uniqid_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     use std::time::SystemTime;

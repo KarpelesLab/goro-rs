@@ -459,7 +459,9 @@ impl Vm {
                 return;
             }
         }
-        {
+        if let Some(log) = self.sapi_log_message {
+            log(msg);
+        } else {
             use std::io::Write;
             let _ = std::io::stderr().write_all(&raw_error_bytes(&format!("{}\n", msg)));
         }
