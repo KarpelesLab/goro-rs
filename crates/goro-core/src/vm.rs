@@ -17618,7 +17618,11 @@ impl Vm {
         // buffers are flushed first (php_request_shutdown step 3).
         self.exit_requested = false;
         let hooks = std::mem::take(&mut self.request_shutdown_hooks);
-        if !hooks.is_empty() {
+        // An output handler throwing while the buffers are flushed at
+        // shutdown: the user exception handler gets the exception (GH-10695).
+        if !self.ob_stack.is_empty() && self.exception_handler.is_some() {
+            self.shutdown_flush_with_handler();
+        } else if !hooks.is_empty() {
             self.ob_end_all();
         }
         for hook in hooks {
@@ -17632,6 +17636,24 @@ impl Vm {
         self.exit_requested = exited || self.exit_requested;
 
         result
+    }
+
+    #[inline(never)]
+    fn shutdown_flush_with_handler(&mut self) {
+        let had_exc = self.current_exception.is_some();
+        self.ob_end_all();
+        if had_exc {
+            return;
+        }
+        if let (Some(exc), Some(handler)) =
+            (self.current_exception.take(), self.exception_handler.clone())
+        {
+            if self.call_callback(&handler, std::slice::from_ref(&exc)).is_err() {
+                if let Some(e) = self.current_exception.clone() {
+                    let _ = e;
+                }
+            }
+        }
     }
 
     /// php_output_header(): the first output reaching the SAPI marks the
@@ -36744,6 +36766,17 @@ impl Vm {
                             message: format!("Uncaught TypeError: {}", msg),
                             line: op.line,
                         });
+                    }
+                    // An output handler that threw on the message: the
+                    // exception propagates instead (exit() is a function).
+                    if self.current_exception.is_some() {
+                        native_exc_check!(
+                            self,
+                            exception_handlers,
+                            pending_calls_catch_depth,
+                            ip,
+                            op.line
+                        );
                     }
                     self.exit_code = code;
                     self.exit_requested = true;
