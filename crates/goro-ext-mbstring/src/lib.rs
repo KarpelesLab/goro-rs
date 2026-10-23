@@ -12,6 +12,7 @@ pub mod mbstring;
 pub mod mime;
 pub mod misc;
 pub mod onig;
+pub mod oniguruma;
 pub mod state;
 pub mod strfuncs;
 pub mod unicode;
