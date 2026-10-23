@@ -1275,6 +1275,38 @@ impl Compiler {
             .collect()
     }
 
+    /// zend_compile_assert() of `assert(name: expr)`: the generated
+    /// message is added as the named argument `description`.
+    #[inline(never)]
+    fn compile_named_assert(
+        &mut self,
+        expr: &Expr,
+        name: &Expr,
+        arg: &goro_parser::ast::Argument,
+    ) -> CompileResult<OperandType> {
+        let shown = format!(
+            "assert({}: {})",
+            String::from_utf8_lossy(arg.name.as_deref().unwrap_or_default()),
+            crate::ast_export::export_expr(&arg.value)
+        );
+        let desc = goro_parser::ast::Argument {
+            name: Some(b"description".to_vec()),
+            value: Expr {
+                kind: ExprKind::String(shown.into_bytes()),
+                span: arg.value.span,
+            },
+            unpack: false,
+        };
+        let call = Expr {
+            kind: ExprKind::FunctionCall {
+                name: Box::new(name.clone()),
+                args: vec![arg.clone(), desc],
+            },
+            span: expr.span,
+        };
+        self.compile_expr(&call)
+    }
+
     /// A compile error ends the file's compilation: the implicitly
     /// nullable parameters of the functions compiled before it were
     /// reported at compile time.
@@ -14200,6 +14232,10 @@ impl Compiler {
                         .strip_prefix(b"\\")
                         .map(|r| r.to_vec())
                         .unwrap_or(func_lower);
+                    // (a named argument gets a named `description:` added)
+                    if func_lower == b"assert" && args.len() == 1 && args[0].name.is_some() {
+                        return self.compile_named_assert(expr, name, &args[0]);
+                    }
                     if func_lower == b"assert"
                         && args.len() == 1
                         && args[0].name.is_none()
