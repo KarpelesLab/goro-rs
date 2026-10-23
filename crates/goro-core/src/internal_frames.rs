@@ -748,6 +748,18 @@ impl Vm {
         if nfixed == 0 && !has_this && variadic == 0 {
             return false;
         }
+        // The frame holds no copies of its parameters' values (see
+        // sync_frame_args()): the CVs are their only holders, so they are
+        // released with them, in declaration order
+        // (i_free_compiled_variables), or when a parameter is reassigned.
+        let args = &mut self.call_stack[depth].3;
+        let n = (nfixed as usize).min(args.len());
+        for a in &mut args[..n] {
+            if matches!(a, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
+                *a = Value::Null;
+            }
+        }
+        let frame = &self.call_stack[depth];
         self.cv_frames.push(CvFrame {
             depth,
             name: frame.0.as_ptr(),
@@ -795,31 +807,6 @@ impl Vm {
                         v => v.clone(),
                     };
                 }
-            }
-        }
-    }
-
-    /// The frame registered last holds no copies of its parameters' values
-    /// (sync_frame_args() reads them from the CVs): the CVs are their only
-    /// holders, so they are released with them, in declaration order
-    /// (i_free_compiled_variables), or when a parameter is reassigned.
-    #[inline(never)]
-    pub(crate) fn release_cv_frame_arg_copies(&mut self) {
-        let Some(f) = self.cv_frames.last() else {
-            return;
-        };
-        let nfixed = f.nfixed as usize;
-        if nfixed == 0 {
-            return;
-        }
-        let Some(at) = self.cv_frame_index(f) else {
-            return;
-        };
-        let args = &mut self.call_stack[at].3;
-        let n = args.len().min(nfixed);
-        for a in args.iter_mut().take(n) {
-            if matches!(a, Value::Object(_) | Value::Array(_) | Value::Reference(_)) {
-                *a = Value::Null;
             }
         }
     }

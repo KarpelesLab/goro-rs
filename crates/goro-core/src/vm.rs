@@ -165,6 +165,21 @@ fn arg_cv_bound(f: &OpArray, ncvs: usize) -> usize {
     }
 }
 
+/// Bind the first `n` arguments of a call to the callee's (Undef) CVs:
+/// the first `keep` ones ($this) are shared, the others move (the CVs are
+/// then their holders, released in declaration order).
+#[inline(always)]
+fn move_args(cvs: &mut [Value], args: &mut [Value], n: usize, keep: usize) {
+    let n = n.min(cvs.len()).min(args.len());
+    let k = keep.min(n);
+    for (d, s) in cvs[..k].iter_mut().zip(args[..k].iter()) {
+        *d = s.clone();
+    }
+    for (d, s) in cvs[k..n].iter_mut().zip(args[k..n].iter_mut()) {
+        std::mem::swap(d, s);
+    }
+}
+
 /// Is the argument at `index` (counted like the CVs: $this and closure
 /// captures first) of a call to `f` passed by reference? Arguments past
 /// the declared parameters go to the variadic one.
@@ -20439,9 +20454,6 @@ impl Vm {
         let outer_exec = std::mem::replace(&mut self.exec_frame_len, self.call_stack.len());
         // Backtraces show the current values of the parameters.
         let cv_frame = self.register_cv_frame(op_array);
-        if cv_frame {
-            self.release_cv_frame_arg_copies();
-        }
         let prev_global = self.is_global_scope;
         self.is_global_scope = std::mem::take(&mut self.bind_next_frame);
         // The caller fetches the result of this by-ref function for writing.
@@ -27493,36 +27505,13 @@ impl Vm {
                         // and so do the extra arguments a variadic parameter
                         // collects (freed after the CVs, zend_free_extra_args).
                         let keep = usize::from(has_this);
-                        let take = |i: usize, arg: &mut Value| {
-                            if i < keep {
-                                arg.clone()
-                            } else {
-                                std::mem::replace(arg, Value::Undef)
-                            }
-                        };
                         match user_fn.variadic_param.filter(|_| captures.is_none()) {
-                            None => {
-                                for (i, (slot, arg)) in func_cvs
-                                    .iter_mut()
-                                    .zip(call.args.iter_mut())
-                                    .take(bound)
-                                    .enumerate()
-                                {
-                                    *slot = take(i, arg);
-                                }
-                            }
+                            None => move_args(&mut func_cvs, &mut call.args, bound, keep),
                             Some(vi) => {
                                 // The arguments from the variadic parameter's
                                 // position on make its array.
                                 let vi = vi as usize;
-                                for (i, (slot, arg)) in func_cvs
-                                    .iter_mut()
-                                    .zip(call.args.iter_mut())
-                                    .take(vi)
-                                    .enumerate()
-                                {
-                                    *slot = take(i, arg);
-                                }
+                                move_args(&mut func_cvs, &mut call.args, vi, keep);
                                 let mut rest = crate::array::PhpArray::new();
                                 for arg in call.args.iter().skip(vi) {
                                     rest.push(arg.clone());
