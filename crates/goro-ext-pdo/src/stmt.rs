@@ -931,6 +931,10 @@ pub fn do_fetch(
         if relative && vm.error_reporting == saved_er & !8192 {
             vm.error_reporting = saved_er;
         }
+        // A callback that threw ends the fetch (do_fetch() returns false)
+        if vm.current_exception.is_some() {
+            fail!();
+        }
         result = r.unwrap_or(Value::Null);
     }
     stmt.borrow_mut().in_fetch = false;
