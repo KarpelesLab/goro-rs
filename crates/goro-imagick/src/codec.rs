@@ -725,7 +725,8 @@ fn decode_jpeg(data: &[u8]) -> MResult<Vec<Image>> {
         }
         img.black = Some(k);
     } else {
-        img = from_rgba8(w, h, &jpg.to_rgba8(), false);
+        let rgba = jpeg_ycc_to_rgba(&jpg).unwrap_or_else(|| jpg.to_rgba8());
+        img = from_rgba8(w, h, &rgba, false);
         if matches!(
             jpg.format,
             P::Gray8 | P::Gray10Le | P::Gray12Le | P::Gray16Le
@@ -1812,4 +1813,106 @@ fn encode_raw(img: &Image, m: &str) -> MResult<Vec<u8>> {
     } else {
         Ok(samples.into_iter().map(q_to_u8).collect())
     }
+}
+
+/// 8-bit planar YCbCr (4:4:4, 4:2:2 or 4:2:0) to packed RGBA the way
+/// libjpeg does it by default (and so ImageMagick): "fancy" triangle-
+/// filter chroma upsampling, then the fixed-point (16-bit fraction)
+/// YCbCr → RGB tables. oxideav-mjpeg's own conversion replicates chroma
+/// samples (nearest neighbour) and rounds in exact arithmetic.
+fn jpeg_ycc_to_rgba(jpg: &oxideav_mjpeg::JpegImage) -> Option<Vec<u8>> {
+    use oxideav_mjpeg::PixelFormat as P;
+    let (dh, dv) = match jpg.format {
+        P::Yuv444P | P::YuvJ444P => (1, 1),
+        P::Yuv422P | P::YuvJ422P => (2, 1),
+        P::Yuv420P | P::YuvJ420P => (2, 2),
+        _ => return None,
+    };
+    let (w, h) = (jpg.width as usize, jpg.height as usize);
+    if jpg.planes.len() < 3 {
+        return None;
+    }
+    let (cw, ch) = jpg.format.plane_dimensions(jpg.width, jpg.height, 1);
+    // upsample one chroma plane to w × h
+    let up = |p: &oxideav_mjpeg::Plane| -> Vec<u8> {
+        let at = |x: usize, y: usize| p.data[y * p.stride + x] as i32;
+        // vertical: (3·nearer + further) row sums (×4 scale) for 4:2:0
+        let mut out = vec![0u8; w * h];
+        for oy in 0..h {
+            let row: Vec<i32> = if dv == 2 {
+                let cy = oy / 2;
+                let far = if oy % 2 == 0 {
+                    cy.saturating_sub(1)
+                } else {
+                    (cy + 1).min(ch - 1)
+                };
+                (0..cw).map(|x| 3 * at(x, cy) + at(x, far)).collect()
+            } else {
+                (0..cw).map(|x| at(x, oy.min(ch - 1))).collect()
+            };
+            for ox in 0..w {
+                let v = if dh == 1 {
+                    row[ox.min(cw - 1)] * if dv == 2 { 4 } else { 16 }
+                } else {
+                    let cx = ox / 2;
+                    let c = row[cx];
+                    if dv == 2 {
+                        // ×16 scale
+                        if cw == 1 {
+                            c * 4
+                        } else if ox % 2 == 0 {
+                            if cx == 0 {
+                                c * 4 + 8
+                            } else {
+                                3 * c + row[cx - 1] + 8
+                            }
+                        } else if cx + 1 >= cw {
+                            c * 4 + 7
+                        } else {
+                            3 * c + row[cx + 1] + 7
+                        }
+                    } else if cw == 1 {
+                        c * 16
+                    } else if ox % 2 == 0 {
+                        if cx == 0 {
+                            c * 16
+                        } else {
+                            (3 * c + row[cx - 1] + 1) * 4
+                        }
+                    } else if cx + 1 >= cw {
+                        c * 16
+                    } else {
+                        (3 * c + row[cx + 1] + 2) * 4
+                    }
+                };
+                out[oy * w + ox] = if dh == 1 && dv == 1 {
+                    (v >> 4) as u8
+                } else {
+                    (v >> 4).clamp(0, 255) as u8
+                };
+            }
+        }
+        out
+    };
+    let cb = up(&jpg.planes[1]);
+    let cr = up(&jpg.planes[2]);
+    let fix = |x: f64| (x * 65536.0 + 0.5) as i32;
+    let half = 1 << 15;
+    let yp = &jpg.planes[0];
+    let mut out = vec![255u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let yy = yp.data[y * yp.stride + x] as i32;
+            let b = cb[y * w + x] as i32 - 128;
+            let r = cr[y * w + x] as i32 - 128;
+            let rr = yy + ((fix(1.40200) * r + half) >> 16);
+            let gg = yy + ((-fix(0.34414) * b - fix(0.71414) * r + half) >> 16);
+            let bb = yy + ((fix(1.77200) * b + half) >> 16);
+            let o = &mut out[(y * w + x) * 4..];
+            o[0] = rr.clamp(0, 255) as u8;
+            o[1] = gg.clamp(0, 255) as u8;
+            o[2] = bb.clamp(0, 255) as u8;
+        }
+    }
+    Some(out)
 }
