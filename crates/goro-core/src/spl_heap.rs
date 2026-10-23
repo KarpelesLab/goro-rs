@@ -460,9 +460,9 @@ impl Vm {
                 if !self.heap_check(obj, true) {
                     return Some(Value::Null);
                 }
-                let d = args.first().cloned().unwrap_or(Value::Null).deref();
+                let d = args.first().map_or(Value::Null, Value::deref_for_storage);
                 let p = if pq {
-                    args.get(1).cloned().unwrap_or(Value::Null).deref()
+                    args.get(1).map_or(Value::Null, Value::deref_for_storage)
                 } else {
                     Value::Null
                 };

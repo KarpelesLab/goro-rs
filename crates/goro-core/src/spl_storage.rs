@@ -347,7 +347,7 @@ impl Vm {
                     "SplObjectStorage::offsetSet"
                 };
                 let o = self.sos_obj_arg(func, a.first())?;
-                let inf = a.get(1).cloned().unwrap_or(Value::Null).deref();
+                let inf = a.get(1).map_or(Value::Null, Value::deref_for_storage);
                 self.sos_attach(obj, &o, inf);
                 Value::Null
             }
@@ -453,7 +453,7 @@ impl Vm {
             b"getinfo" => inf_at(obj, lprop(obj, b"__spl_pos")),
             b"setinfo" => {
                 if let Some(k) = key_at(obj, lprop(obj, b"__spl_pos")) {
-                    let v = a.first().cloned().unwrap_or(Value::Null).deref();
+                    let v = a.first().map_or(Value::Null, Value::deref_for_storage);
                     let old = set_inf(obj, k, v);
                     if let Some(old) = &old {
                         crate::gc::on_child_released(old);

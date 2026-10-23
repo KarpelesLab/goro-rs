@@ -348,7 +348,7 @@ impl Vm {
                 if !self.fa_bounds(obj, idx) {
                     return Some(Value::Null);
                 }
-                let v = a.get(1).cloned().unwrap_or(Value::Null).deref();
+                let v = a.get(1).map_or(Value::Null, Value::deref_for_storage);
                 let old = storage(obj)
                     .borrow_mut()
                     .get_mut(&ArrayKey::Int(idx))

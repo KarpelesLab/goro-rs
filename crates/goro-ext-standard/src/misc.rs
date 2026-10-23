@@ -2500,7 +2500,7 @@ fn array_push(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     if let Some(Value::Array(arr)) = args.first() {
         let mut arr = arr.borrow_mut();
         for val in &args[1..] {
-            if let Err(msg) = arr.try_push(val.clone()) {
+            if let Err(msg) = arr.try_push(val.deref_for_storage()) {
                 drop(arr);
                 let exc = vm.create_exception(b"Error", msg, 0);
                 vm.current_exception = Some(exc);
@@ -4308,7 +4308,7 @@ fn array_chunk(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn array_pad(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let input = args.first().unwrap_or(&Value::Null);
     let pad_size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
-    let pad_value = args.get(2).cloned().unwrap_or(Value::Null);
+    let pad_value = args.get(2).map_or(Value::Null, Value::deref_for_storage);
 
     // PHP caps the target length at HT_MAX_SIZE (2^30 by default). Throw a
     // ValueError rather than trying to allocate a huge array.
@@ -4434,7 +4434,7 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         goro_core::value::memory_alloc(bytes);
         return Err(vm.memory_limit_fatal());
     }
-    let val = args.get(2).cloned().unwrap_or(Value::Null);
+    let val = args.get(2).map_or(Value::Null, Value::deref_for_storage);
     let mut result = PhpArray::new();
     for i in 0..num {
         result.set(goro_core::array::ArrayKey::Int(start + i), val.clone());
@@ -4445,7 +4445,7 @@ fn array_fill(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn array_fill_keys(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let keys = args.first().unwrap_or(&Value::Null);
     require_array_arg(vm, keys, "array_fill_keys", "keys", 1)?;
-    let fill_val = args.get(1).cloned().unwrap_or(Value::Null);
+    let fill_val = args.get(1).map_or(Value::Null, Value::deref_for_storage);
     let mut result = PhpArray::new();
     if let Value::Array(arr) = keys {
         // Clone iterator so we can call vm methods inside the loop (for __toString).

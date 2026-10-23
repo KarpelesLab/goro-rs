@@ -1210,7 +1210,7 @@ impl Vm {
             b"offsetget" => self.ao_offset_get(obj, a.first().unwrap_or(&Value::Null)),
             b"offsetset" => {
                 let k = a.first().cloned().unwrap_or(Value::Null);
-                let v = a.get(1).cloned().unwrap_or(Value::Null);
+                let v = a.get(1).map_or(Value::Null, Value::deref_for_storage);
                 self.ao_offset_set(obj, &k, v);
                 Value::Null
             }
@@ -1226,7 +1226,7 @@ impl Vm {
                     );
                     return self.spl_throw(b"Error", &msg);
                 }
-                let v = a.first().cloned().unwrap_or(Value::Null);
+                let v = a.first().map_or(Value::Null, Value::deref_for_storage);
                 self.ao_offset_set(obj, &Value::Null, v);
                 Value::Null
             }

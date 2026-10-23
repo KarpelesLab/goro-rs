@@ -790,6 +790,21 @@ impl Value {
         }
     }
 
+    /// The dereferenced value for a container to keep (an argument stored
+    /// by value: array_push(), SplDoublyLinkedList::push()...). Arrays are
+    /// copied on assignment rather than separated on write, so an array
+    /// still shared with the caller's variable is copied: a later write
+    /// to the variable must not show through the stored element.
+    pub fn deref_for_storage(&self) -> Value {
+        match self.deref() {
+            Value::Array(a) if Rc::strong_count(&a) > 1 => {
+                let copy = a.borrow().clone();
+                Value::Array(Rc::new(RefCell::new(copy)))
+            }
+            v => v,
+        }
+    }
+
     /// If this is a `Closure` object, return its underlying callable
     /// (the legacy closure representation used for dispatch).
     pub fn closure_inner(&self) -> Option<Value> {

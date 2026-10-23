@@ -308,12 +308,12 @@ impl Vm {
         let a = args.unwrap_or(&[]);
         let r = match method {
             b"push" | b"enqueue" => {
-                let v = a.first().cloned().unwrap_or(Value::Null).deref();
+                let v = a.first().map_or(Value::Null, Value::deref_for_storage);
                 push_back(obj, v);
                 Value::Null
             }
             b"unshift" => {
-                let v = a.first().cloned().unwrap_or(Value::Null).deref();
+                let v = a.first().map_or(Value::Null, Value::deref_for_storage);
                 let l = list_mut(obj);
                 let id = new_id(obj);
                 l.borrow_mut().push_front(ArrayKey::Int(id), v);
@@ -431,7 +431,7 @@ impl Vm {
             }
             b"offsetset" => {
                 let func = "SplDoublyLinkedList::offsetSet";
-                let v = a.get(1).cloned().unwrap_or(Value::Null).deref();
+                let v = a.get(1).map_or(Value::Null, Value::deref_for_storage);
                 let idx_v = a.first().cloned().unwrap_or(Value::Null).deref();
                 if matches!(idx_v, Value::Null | Value::Undef) {
                     push_back(obj, v);
@@ -492,7 +492,7 @@ impl Vm {
                     Some(n) => n,
                     None => return Some(Value::Null),
                 };
-                let v = a.get(1).cloned().unwrap_or(Value::Null).deref();
+                let v = a.get(1).map_or(Value::Null, Value::deref_for_storage);
                 let n = len(obj);
                 if i < 0 || i as usize > n {
                     return self.dll_out_of_range(func);

@@ -5964,8 +5964,18 @@ impl Vm {
     pub fn new_generator(
         &mut self,
         op_array: impl Into<Rc<OpArray>>,
-        cvs: Vec<Value>,
+        mut cvs: Vec<Value>,
     ) -> crate::generator::PhpGenerator {
+        // By-value array parameters get their own copy (as RECV's assignment
+        // gives a called function's).
+        for slot in cvs.iter_mut() {
+            if let Value::Array(a) = slot {
+                if Rc::strong_count(a) > 1 {
+                    let copy = a.borrow().clone();
+                    *slot = Value::Array(Rc::new(RefCell::new(copy)));
+                }
+            }
+        }
         let mut g = crate::generator::PhpGenerator::new(op_array, cvs);
         g.object_id = self.alloc_object_id();
         g
