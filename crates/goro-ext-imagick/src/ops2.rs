@@ -712,13 +712,6 @@ fn no_delegate(lib: &str, at: &str) -> MagickError {
     )
 }
 
-fn no_clip_path() -> MagickError {
-    MagickError::new(
-        goro_imagick::error::severity::OPTION_ERROR,
-        "no clip path defined '': No such file or directory @ error/image.c/ClipImagePath/725",
-    )
-}
-
 fn liquid_rescale_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let e = no_delegate("LQR", "error/resize.c/LiquidRescaleImage/2079");
     unsupported(vm, f, o, args, "lldd", e, "Unable to liquid rescale image")
@@ -735,19 +728,19 @@ fn animate_images(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
 }
 
 fn clip_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
-    unsupported(vm, f, o, args, "", no_clip_path(), "Unable to clip image")
+    zpp::parse(vm, f, "", args)?;
+    image_op(vm, &d_(o), "Unable to clip image", |i| {
+        goro_imagick::clippath::clip_path(i, "#1", true, true)
+    })
 }
 
 fn clip_path_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
-    unsupported(
-        vm,
-        f,
-        o,
-        args,
-        "sb",
-        no_clip_path(),
-        "Unable to clip path image",
-    )
+    let a = zpp::parse(vm, f, "sb", args)?;
+    let name = String::from_utf8_lossy(a[0].str_or(b"")).into_owned();
+    let inside = a[1].bool_or(false);
+    image_op(vm, &d_(o), "Unable to clip path image", |i| {
+        goro_imagick::clippath::clip_path(i, &name, inside, false)
+    })
 }
 
 /// RemapImage(): every pixel takes the nearest colour of the reference

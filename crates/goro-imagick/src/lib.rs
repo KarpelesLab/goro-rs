@@ -17,6 +17,7 @@
 )]
 
 pub mod cipher;
+pub mod clippath;
 pub mod codec;
 pub mod color;
 mod color_names;

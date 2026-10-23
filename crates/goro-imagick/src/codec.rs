@@ -744,6 +744,12 @@ fn decode_jpeg(data: &[u8]) -> MResult<Vec<Image>> {
     if let Some(xmp) = &jpg.metadata.xmp {
         img.set_profile("xmp", xmp.clone());
     }
+    if let Some(ps) = jpeg_photoshop(data) {
+        if let Some(iptc) = photoshop_resource(&ps, 0x0404) {
+            img.set_profile("iptc", iptc);
+        }
+        img.set_profile("8bim", ps);
+    }
     if let Ok(info) = oxideav_mjpeg::inspect_jpeg(data) {
         if let Some(j) = &info.jfif {
             match j.units {
@@ -1921,4 +1927,51 @@ fn jpeg_ycc_to_rgba(jpg: &oxideav_mjpeg::JpegImage) -> Option<Vec<u8>> {
         }
     }
     Some(out)
+}
+
+/// The Photoshop (APP13 "Photoshop 3.0") resource data of a JPEG.
+fn jpeg_photoshop(data: &[u8]) -> Option<Vec<u8>> {
+    const SIG: &[u8] = b"Photoshop 3.0\0";
+    let mut out = Vec::new();
+    let mut i = 2;
+    while i + 4 <= data.len() && data[i] == 0xff {
+        let m = data[i + 1];
+        if m == 0xda || m == 0xd9 {
+            break;
+        }
+        if (0xd0..=0xd7).contains(&m) || m == 0x01 || m == 0xff {
+            i += if m == 0xff { 1 } else { 2 };
+            continue;
+        }
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        let seg = data.get(i + 4..i + 2 + len)?;
+        if m == 0xed && seg.starts_with(SIG) {
+            out.extend_from_slice(&seg[SIG.len()..]);
+        }
+        i += 2 + len;
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// One resource of Photoshop 8BIM resource data.
+pub fn photoshop_resource(p: &[u8], want: u16) -> Option<Vec<u8>> {
+    let mut i = 0;
+    while i + 12 <= p.len() {
+        if &p[i..i + 4] != b"8BIM" {
+            return None;
+        }
+        let id = u16::from_be_bytes([p[i + 4], p[i + 5]]);
+        let nlen = p[i + 6] as usize;
+        let mut j = i + 7 + nlen;
+        if (1 + nlen) % 2 != 0 {
+            j += 1;
+        }
+        let size = u32::from_be_bytes(p.get(j..j + 4)?.try_into().ok()?) as usize;
+        j += 4;
+        if id == want {
+            return p.get(j..j + size).map(|d| d.to_vec());
+        }
+        i = j + size + (size & 1);
+    }
+    None
 }
