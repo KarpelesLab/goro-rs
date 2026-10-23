@@ -1801,68 +1801,7 @@ fn print_r_value_inner(
             let prefix = " ".repeat(indent);
 
             // Check if this is an SPL class with __spl_array
-            let is_array_object_class = matches!(
-                class_lower.as_slice(),
-                b"arrayobject" | b"arrayiterator" | b"recursivearrayiterator"
-            );
             let is_spl_array_class = matches!(class_lower.as_slice(), b"splfixedarray");
-            let is_spl_dllist_class = matches!(
-                class_lower.as_slice(),
-                b"spldoublylinkedlist" | b"splstack" | b"splqueue"
-            );
-
-            if is_spl_dllist_class {
-                let spl_arr = goro_core::spl_dll::spl_storage_view(&obj_borrow);
-                let iter_mode = obj_borrow.get_property(b"__spl_iter_mode");
-                let flags_val = if let Value::Long(f) = iter_mode { f } else { 0 };
-                drop(obj_borrow);
-                buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
-                buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
-                buf.extend_from_slice(
-                    format!(
-                        "{}    [flags:{}:private] => {}\n",
-                        prefix, class_name, flags_val
-                    )
-                    .as_bytes(),
-                );
-                buf.extend_from_slice(
-                    format!("{}    [dllist:{}:private] => ", prefix, class_name).as_bytes(),
-                );
-                print_r_value(&spl_arr, buf, indent + 8, classes, closure_info_table);
-                buf.push(b'\n');
-                buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
-                return;
-            }
-
-            if is_array_object_class {
-                let spl_arr = obj_borrow.get_property(b"__spl_array");
-                // Show extra props first
-                let extra_props: Vec<_> = obj_borrow
-                    .properties
-                    .iter()
-                    .filter(|(name, val)| {
-                        !is_internal_property(name) && !matches!(val, Value::Undef)
-                    })
-                    .map(|(n, v)| (n.clone(), v.clone()))
-                    .collect();
-                drop(obj_borrow);
-                buf.extend_from_slice(format!("{} Object\n", class_name).as_bytes());
-                buf.extend_from_slice(format!("{}(\n", prefix).as_bytes());
-                for (name, value) in &extra_props {
-                    let name_str = String::from_utf8_lossy(name);
-                    buf.extend_from_slice(format!("{}    [{}] => ", prefix, name_str).as_bytes());
-                    print_r_value(value, buf, indent + 8, classes, closure_info_table);
-                    buf.push(b'\n');
-                }
-                buf.extend_from_slice(
-                    format!("{}    [storage:{}:private] => ", prefix, class_name).as_bytes(),
-                );
-                print_r_value(&spl_arr, buf, indent + 8, classes, closure_info_table);
-                buf.push(b'\n');
-                buf.extend_from_slice(format!("{})\n", prefix).as_bytes());
-                return;
-            }
-
             if is_spl_array_class {
                 let spl_arr = obj_borrow.get_property(b"__spl_array");
                 if let Value::Array(a) = spl_arr {
@@ -2605,16 +2544,7 @@ pub fn materialize_print_r(
                 let keep = b.closure.is_some()
                     || b.has_property(b"__enum_case")
                     || b.has_property(b"__lazy_state")
-                    || matches!(
-                        cl.as_slice(),
-                        b"arrayobject"
-                            | b"arrayiterator"
-                            | b"recursivearrayiterator"
-                            | b"splfixedarray"
-                            | b"spldoublylinkedlist"
-                            | b"splstack"
-                            | b"splqueue"
-                    );
+                    || matches!(cl.as_slice(), b"splfixedarray");
                 (cl, b.class_name.clone(), keep)
             };
             if keep {
