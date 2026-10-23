@@ -25617,9 +25617,17 @@ impl Vm {
                                 let method = a.get_int(1).cloned().unwrap_or(Value::Null).deref();
                                 drop(a);
                                 match (&target, &method) {
-                                    (_, m) if !matches!(m, Value::String(_)) => {
-                                        Some((b"Error", "Method name must be a string".to_string()))
+                                    (t, _) if !matches!(t, Value::String(_) | Value::Object(_)) => {
+                                        Some((
+                                            b"Error",
+                                            "First array member is not a valid class name or object"
+                                                .to_string(),
+                                        ))
                                     }
+                                    (_, m) if !matches!(m, Value::String(_)) => Some((
+                                        b"Error",
+                                        "Second array member is not a valid method".to_string(),
+                                    )),
                                     // zend_init_dynamic_call_array(): a missing method
                                     // of a user class without __call().
                                     (Value::Object(o), Value::String(m)) => {
