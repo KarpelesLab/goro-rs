@@ -680,6 +680,36 @@ fn decode_png(data: &[u8]) -> MResult<Vec<Image>> {
                 img.y_resolution = p.pixels_per_unit_y as f64;
             }
         }
+        // the page: ImageMagick's caNv, else oFFs (pixels) and vpAg
+        let (mut pw, mut ph, mut px, mut py) = (w as usize, h as usize, 0i64, 0i64);
+        let be32 = |b: &[u8], i: usize| u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        let mut canvas = false;
+        for u in &meta.unknowns {
+            let d = &u.data;
+            match &u.chunk_type {
+                b"caNv" if d.len() >= 16 => {
+                    pw = be32(d, 0) as usize;
+                    ph = be32(d, 4) as usize;
+                    px = be32(d, 8) as i32 as i64;
+                    py = be32(d, 12) as i32 as i64;
+                    canvas = true;
+                }
+                b"oFFs" if d.len() >= 9 && d[8] == 0 && !canvas => {
+                    px = be32(d, 0) as i32 as i64;
+                    py = be32(d, 4) as i32 as i64;
+                }
+                b"vpAg" if d.len() >= 9 && !canvas => {
+                    pw = be32(d, 0) as usize;
+                    ph = be32(d, 4) as usize;
+                }
+                _ => {}
+            }
+        }
+        if pw == 0 && ph == 0 {
+            // an offset alone: the canvas is the image's size
+            (pw, ph) = (w as usize, h as usize);
+        }
+        img.page = Rect::new(pw, ph, px, py);
         for t in &meta.texts {
             img.properties.set(&t.keyword, &t.text);
         }
@@ -1339,6 +1369,20 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
         if v.is_ascii() && !v.contains('\0') && !k.contains(':') && k.len() < 80 {
             pm.texts.push(oxideav_png::Text::new(k.clone(), v.clone()));
         }
+    }
+    // ImageMagick's private caNv chunk carries a page other than the
+    // image's own size at the origin: width, height (u32), x, y (i32)
+    let pg = img.page;
+    if (pg.width != 0 || pg.height != 0 || pg.x != 0 || pg.y != 0)
+        && !(pg.width == img.columns && pg.height == img.rows && pg.x == 0 && pg.y == 0)
+    {
+        let mut d = Vec::with_capacity(16);
+        d.extend_from_slice(&(pg.width as u32).to_be_bytes());
+        d.extend_from_slice(&(pg.height as u32).to_be_bytes());
+        d.extend_from_slice(&(pg.x as i32).to_be_bytes());
+        d.extend_from_slice(&(pg.y as i32).to_be_bytes());
+        pm.unknowns
+            .push(oxideav_png::UnknownChunk::new(*b"caNv", d, false));
     }
     eo = eo.with_metadata(pm);
     oxideav_png::encode(&png, &eo).map_err(|e| coder_err("PNG", e))
