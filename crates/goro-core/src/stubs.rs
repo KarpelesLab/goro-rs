@@ -173,6 +173,20 @@ pub fn find_class(name: &[u8]) -> Option<&'static StubClass> {
     class_index_of(name).map(|i| &crate::stub_sigs::CLASSES[i])
 }
 
+/// The instance and static properties the stub of class `lower` declares
+/// itself (for an extension registering the class's entry).
+pub fn own_properties(vm: &crate::vm::Vm, lower: &[u8]) -> Vec<PropertyDef> {
+    let lower = lower.to_ascii_lowercase();
+    let Some(c) = find_class(&lower).or_else(|| find_self_declared_class(&lower)) else {
+        return Vec::new();
+    };
+    build_entry(vm, c)
+        .properties
+        .into_iter()
+        .filter(|p| p.declaring_class == lower)
+        .collect()
+}
+
 /// The stub of a class an extension declares itself
 /// (`stub_sigs::SELF_DECLARED_CLASSES`).
 pub fn find_self_declared_class(name: &[u8]) -> Option<&'static StubClass> {
@@ -657,7 +671,7 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
     }
     // Properties in properties_info order: an internal class inherits its
     // parent's (non-private) properties when it is registered, before
-    // declaring its own; a redeclared one keeps the inherited position.
+    // declaring its own; a redeclared one moves to the end.
     let mut chain: Vec<&'static StubClass> = vec![c];
     let mut cur = c;
     while let Some(p) = cur.parent.and_then(|p| find_class(p.as_bytes())) {
@@ -715,10 +729,10 @@ fn build_entry(vm: &crate::vm::Vm, c: &'static StubClass) -> ClassEntry {
             if def.is_static {
                 ce.static_properties.insert(def.name.clone(), default);
             }
-            match ce.properties.iter_mut().find(|x| x.name == def.name) {
-                Some(slot) => *slot = def,
-                None => ce.properties.push(def),
-            }
+            // (zend_declare_typed_property(): a redeclared property's
+            // properties_info entry is replaced at the end of the table)
+            ce.properties.retain(|x| x.name != def.name);
+            ce.properties.push(def);
         }
     }
     // Constants: own, then parents', then interfaces'.

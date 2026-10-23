@@ -674,13 +674,17 @@ pub(crate) fn rprops<'a>(vm: &'a Vm, lower: &[u8]) -> Vec<&'a crate::object::Pro
             out.extend(ce.properties.iter());
             return out;
         }
-        if is_internal_class(vm, lower) && crate::stubs::find_class(lower).is_some() {
+        if is_internal_class(vm, lower) {
             // An extension's internal class: it inherits its parent's
             // properties when registered, then declares its own (a
-            // redeclared one keeps the inherited position).
+            // redeclared one moves to the end, zend_declare_typed_property()).
             if let Some(parent) = &ce.parent {
                 for pp in collect(vm, &parent.to_ascii_lowercase(), depth + 1) {
-                    if pp.visibility == Visibility::Private {
+                    if pp.visibility == Visibility::Private
+                        || ce.properties.iter().any(|x| {
+                            x.name == pp.name && x.declaring_class.eq_ignore_ascii_case(lower)
+                        })
+                    {
                         continue;
                     }
                     let mine = ce.properties.iter().find(|x| x.name == pp.name);

@@ -20,7 +20,7 @@ pub mod stmt;
 
 use std::cell::RefCell;
 
-use goro_core::object::{ClassEntry, PropertyDef, Visibility};
+use goro_core::object::ClassEntry;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{NativeClassHandler, Vm, VmError};
@@ -555,25 +555,6 @@ fn register_constants(vm: &mut Vm) {
     vm.ext_class_constants.insert(b"pdo\\mysql".to_vec(), my);
 }
 
-fn prop(name: &str, vis: Visibility, default: Value, class: &str) -> PropertyDef {
-    PropertyDef {
-        name: name.as_bytes().to_vec(),
-        default,
-        is_static: false,
-        is_readonly: false,
-        visibility: vis,
-        set_visibility: None,
-        declaring_class: class.as_bytes().to_vec(),
-        property_type: None,
-        has_get_hook: false,
-        has_set_hook: false,
-        is_virtual: false,
-        is_abstract: false,
-        is_final: false,
-        doc_comment: None,
-        attributes: Vec::new(),
-    }
-}
 
 /// pdo_drivers()
 fn w_pdo_drivers(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -607,18 +588,7 @@ pub fn register(vm: &mut Vm) {
 
     let mut pe = ClassEntry::new(b"PDOException".to_vec());
     pe.parent = Some(b"RuntimeException".to_vec());
-    pe.properties.push(prop(
-        "code",
-        Visibility::Protected,
-        Value::Long(0),
-        "PDOException",
-    ));
-    pe.properties.push(prop(
-        "errorInfo",
-        Visibility::Public,
-        Value::Null,
-        "PDOException",
-    ));
+    pe.properties = goro_core::stubs::own_properties(vm, b"pdoexception");
     vm.classes.insert(b"pdoexception".to_vec(), pe);
 
     let h = NativeClassHandler {

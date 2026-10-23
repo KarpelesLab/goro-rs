@@ -13,7 +13,7 @@ pub mod zpp;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use goro_core::object::{ClassEntry, PropertyDef, Visibility};
+use goro_core::object::ClassEntry;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{NativeClassHandler, Vm, VmError};
@@ -1187,25 +1187,6 @@ fn ini_set_hook(vm: &mut Vm, key: &[u8], value: &Value) -> bool {
     true
 }
 
-fn prop(name: &str, vis: Visibility, default: Value, class: &str) -> PropertyDef {
-    PropertyDef {
-        name: name.as_bytes().to_vec(),
-        default,
-        is_static: false,
-        is_readonly: false,
-        visibility: vis,
-        set_visibility: None,
-        declaring_class: class.as_bytes().to_vec(),
-        property_type: None,
-        has_get_hook: false,
-        has_set_hook: false,
-        is_virtual: false,
-        is_abstract: false,
-        is_final: false,
-        doc_comment: None,
-        attributes: Vec::new(),
-    }
-}
 
 pub fn register(vm: &mut Vm) {
     vm.register_extension(b"mysqlnd");
@@ -1247,12 +1228,7 @@ pub fn register(vm: &mut Vm) {
     let mut se = ClassEntry::new(b"mysqli_sql_exception".to_vec());
     se.parent = Some(b"RuntimeException".to_vec());
     se.is_final = true;
-    se.properties.push(prop(
-        "sqlstate",
-        Visibility::Protected,
-        Value::String(PhpString::from_bytes(b"00000")),
-        "mysqli_sql_exception",
-    ));
+    se.properties = goro_core::stubs::own_properties(vm, b"mysqli_sql_exception");
     vm.classes.insert(b"mysqli_sql_exception".to_vec(), se);
 
     let h = NativeClassHandler {

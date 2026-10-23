@@ -3,7 +3,7 @@
 
 use crate::parser::XmlError;
 use goro_core::array::PhpArray;
-use goro_core::object::{ClassEntry, PhpObject, PropertyDef, Visibility};
+use goro_core::object::{ClassEntry, PhpObject};
 use goro_core::string::PhpString;
 use goro_core::value::Value;
 use goro_core::vm::{Vm, VmError};
@@ -443,25 +443,6 @@ fn libxml_get_external_entity_loader(_vm: &mut Vm, _args: &[Value]) -> Result<Va
     Ok(entity_loader().unwrap_or(Value::Null))
 }
 
-fn prop(name: &str, default: Value) -> PropertyDef {
-    PropertyDef {
-        name: name.as_bytes().to_vec(),
-        default,
-        is_static: false,
-        is_readonly: false,
-        visibility: Visibility::Public,
-        set_visibility: None,
-        declaring_class: b"libxmlerror".to_vec(),
-        property_type: None,
-        has_get_hook: false,
-        has_set_hook: false,
-        is_virtual: false,
-        is_abstract: false,
-        is_final: false,
-        doc_comment: None,
-        attributes: Vec::new(),
-    }
-}
 
 pub fn register(vm: &mut Vm) {
     crate::image_svg::register(vm);
@@ -524,15 +505,6 @@ pub fn register(vm: &mut Vm) {
     vm.register_extension(b"libxml");
 
     let mut ce = ClassEntry::new(b"LibXMLError".to_vec());
-    for (n, d) in [
-        ("level", Value::Long(0)),
-        ("code", Value::Long(0)),
-        ("column", Value::Long(0)),
-        ("message", Value::String(PhpString::empty())),
-        ("file", Value::String(PhpString::empty())),
-        ("line", Value::Long(0)),
-    ] {
-        ce.properties.push(prop(n, d));
-    }
+    ce.properties = goro_core::stubs::own_properties(vm, b"libxmlerror");
     vm.classes.insert(b"libxmlerror".to_vec(), ce);
 }

@@ -196,6 +196,9 @@ final class StreamBucket {
             let compiler = goro_core::compiler::Compiler::new();
             if let Ok((_, classes, _)) = compiler.compile(&program) {
                 for mut cls in classes {
+                    // (internal classes: no declaring file or lines)
+                    cls.start_line = 0;
+                    cls.end_line = 0;
                     if cls.name.eq_ignore_ascii_case(b"php_user_filter") {
                         cls.filename = None;
                         vm.classes.insert(b"php_user_filter".to_vec(), cls);
