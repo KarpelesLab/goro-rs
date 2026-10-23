@@ -37470,6 +37470,45 @@ impl Vm {
                                 });
                             }
                         }
+                        // `$obj[k]++` (FETCH_DIM_RW) through a by-reference
+                        // offsetGet(): the element is incremented in place.
+                        if matches!(op.opcode, OpCode::ArrayGetIncDec)
+                            && self
+                                .classes
+                                .get(&class_lower)
+                                .and_then(|c| c.get_method(b"offsetget"))
+                                .is_some_and(|m| m.op_array.returns_by_ref)
+                        {
+                            if let Some((old, new)) = self.incdec_dim_by_ref(
+                                &arr_val,
+                                &key_val,
+                                op_array.ops.get(ip),
+                                op_array.strict_types,
+                                op.line,
+                            ) {
+                                if self.current_exception.is_some() {
+                                    if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                        exception_handlers.last()
+                                    {
+                                        pending_calls_catch_depth = Some(*eh_pc_depth);
+                                        ip = *catch_target as usize;
+                                        return Ok(Flow::Continue);
+                                    }
+                                    return Err(VmError {
+                                        message: self.uncaught_exception_message(),
+                                        line: op.line,
+                                    });
+                                }
+                                // (the increment op is done: it is skipped, and
+                                // the write-back too)
+                                let next = op_array.ops[ip].result;
+                                self.write_operand(&op.result, new, &mut cvs, &mut tmps, &static_cv_keys);
+                                self.write_operand(&next, old, &mut cvs, &mut tmps, &static_cv_keys);
+                                self.incdec_skip_set = true;
+                                ip += 1;
+                                return Ok(Flow::Continue);
+                            }
+                        }
                         let args = vec![arr_val.clone(), key_val.clone()];
                         self.last_call_by_ref = false;
                         let offsetget_result = self
@@ -57572,6 +57611,60 @@ impl Vm {
                 }
             }
         }
+    }
+
+    /// `$obj[k]++` / `--$obj[k]` (`next`: the increment op that follows)
+    /// on an ArrayAccess object whose offsetGet() returns by reference:
+    /// the reference it hands out is incremented (typed-reference checks
+    /// included). (old, new) values (an exception may be pending); None
+    /// when `next` is no increment op.
+    #[inline(never)]
+    fn incdec_dim_by_ref(
+        &mut self,
+        obj: &Value,
+        key: &Value,
+        next: Option<&crate::opcode::Op>,
+        strict: bool,
+        line: u32,
+    ) -> Option<(Value, Value)> {
+        let inc = match next.map(|o| o.opcode) {
+            Some(OpCode::PostIncrement) => true,
+            Some(OpCode::PostDecrement) => false,
+            _ => return None,
+        };
+        self.keep_ref_depth = Some(self.call_depth + 1);
+        let r = self.call_object_method(obj, b"offsetGet", std::slice::from_ref(key));
+        self.keep_ref_depth = None;
+        if self.current_exception.is_some() {
+            return Some((Value::Null, Value::Null));
+        }
+        let Some(Value::Reference(r)) = r else {
+            return Some(match r {
+                // (by-value after all: what the general path would do)
+                Some(v) => {
+                    let new = if inc { php_increment(&v) } else { php_decrement(&v) };
+                    (v, new)
+                }
+                None => (Value::Null, Value::Null),
+            });
+        };
+        let old = r.borrow().clone();
+        if let Some(err) = check_inc_dec_type(&old, inc) {
+            let exc = self.create_exception(b"TypeError", &err, line);
+            self.current_exception = Some(exc);
+            return Some((old, Value::Null));
+        }
+        emit_inc_dec_warnings(self, &old, inc, line);
+        if self.current_exception.is_some() {
+            return Some((old, Value::Null));
+        }
+        let new = if inc { php_increment(&old) } else { php_decrement(&old) };
+        *r.borrow_mut() = new;
+        if typed_ref::any() {
+            self.typed_ref_after_op(&r, old.clone(), Some(inc), strict, line);
+        }
+        let now = r.borrow().clone();
+        Some((old, now))
     }
 
     /// zend_dval_to_lval_safe for a float array offset: out-of-range floats
