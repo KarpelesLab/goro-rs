@@ -61226,7 +61226,7 @@ impl Vm {
     }
 
     /// True if the currently running fiber is being destroyed (force-closed).
-    fn current_fiber_force_closed(&self) -> bool {
+    pub(crate) fn current_fiber_force_closed(&self) -> bool {
         if self.fiber_force_closing {
             return true;
         }

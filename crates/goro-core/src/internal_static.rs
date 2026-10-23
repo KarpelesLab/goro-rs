@@ -81,6 +81,7 @@ impl Vm {
                 let known = matches!(
                     (cur.as_slice(), method),
                     (b"fiber", b"getcurrent")
+                        | (b"fiber", b"suspend")
                         | (b"weakreference", b"create")
                         | (b"closure", b"getcurrent")
                         | (b"closure", b"fromcallable")
@@ -94,6 +95,38 @@ impl Vm {
                     cur
                 })
             }
+        }
+    }
+
+    /// `Fiber::suspend()` called as a callback (call_user_func(), a
+    /// ReflectionMethod, ...): its frame is already on the call stack. A
+    /// FiberError, or an exception Fiber::throw() resumes it with, is left
+    /// in `current_exception`.
+    #[inline(never)]
+    fn fiber_suspend_callback(&mut self, args: &[Value], line: u32) -> Value {
+        let value = args.first().cloned().unwrap_or(Value::Null);
+        let outside = self.fiber_depth == 0 && !crate::fiber::in_fiber();
+        let msg = if self.current_fiber_force_closed() {
+            Some("Cannot suspend in a force-closed fiber")
+        } else if outside {
+            Some("Cannot suspend outside of a fiber")
+        } else if self.fiber_switch_blocking > 0 || !crate::fiber::in_fiber() {
+            Some("Cannot switch fibers in current execution context")
+        } else {
+            None
+        };
+        if let Some(msg) = msg {
+            let exc = self.create_exception(b"FiberError", msg, line);
+            self.current_exception = Some(exc);
+            return Value::Null;
+        }
+        match self.fiber_suspend_switch(value) {
+            Some(crate::fiber::FiberResume::Value(v)) => v,
+            Some(crate::fiber::FiberResume::Throw(exc)) => {
+                self.current_exception = Some(exc);
+                Value::Null
+            }
+            None => Value::Null,
         }
     }
 
@@ -112,6 +145,7 @@ impl Vm {
     ) -> Value {
         match name_lower {
             b"fiber::getcurrent" => self.current_fiber.clone().unwrap_or(Value::Null),
+            b"fiber::suspend" => self.fiber_suspend_callback(args, line),
             b"weakreference::create" => self.weakreference_create(args, line),
             b"closure::getcurrent" => {
                 // The Closure of the calling frame.

@@ -10425,9 +10425,21 @@ pub fn reflection_fiber_method(
             let pos = if is_running {
                 Some((vm.current_file.clone(), vm.current_line))
             } else {
-                vm.fiber_coroutines
-                    .get(&fiber_id)
-                    .and_then(|f| f.suspended_at.clone())
+                // The innermost user frame of the fiber (the frame of the
+                // last call made from user code): none when it suspended in
+                // internal code only (`new Fiber(Fiber::suspend(...))`).
+                vm.fiber_coroutines.get(&fiber_id).and_then(|f| {
+                    if f.saved_call_stack.is_empty() {
+                        return f.suspended_at.clone();
+                    }
+                    f.saved_call_stack
+                        .iter()
+                        .rev()
+                        .find(|fr| {
+                            !(fr.1.is_empty() || &*fr.1 == "[internal function]" || fr.2 == 0)
+                        })
+                        .map(|fr| (fr.1.clone(), fr.2))
+                })
             };
             Some(match (method, pos) {
                 (b"getexecutingfile", Some((f, _))) => {

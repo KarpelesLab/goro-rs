@@ -261,6 +261,9 @@ impl Vm {
     /// switched to since it was resumed are suspended with it: their frame
     /// stacks are put aside until it is resumed.
     pub(crate) fn fiber_suspend_switch(&mut self, value: Value) -> Option<FiberResume> {
+        // (the builtin calls in progress are frames of the suspended fiber,
+        // ReflectionFiber::getTrace() shows them)
+        self.sync_builtin_frames();
         let (mark, active_at_resume) = match self.fiber_custom_marks.last() {
             Some((m, a)) if self.custom_parked.len() > *m => (*m, a.clone()),
             _ => return crate::fiber::suspend_current(value),

@@ -925,6 +925,27 @@ impl Vm {
         }
     }
 
+    /// `C::m(...)` of an internal class `cl` (lowercase): a closure over the
+    /// method itself when the VM implements it (its frame is the method's,
+    /// as for zend_closure_from_frame()), else over the forwarding `wrapper`.
+    #[inline(never)]
+    fn fcc_internal_static(&mut self, cl: &[u8], m: &[u8], wrapper: Value) -> Value {
+        let mut name = cl.to_vec();
+        name.extend_from_slice(b"::");
+        name.extend_from_slice(&lower(m));
+        if !self.is_vm_static_builtin(&name) {
+            return self.make_closure_object(wrapper);
+        }
+        let mut n = self.builtin_canonical_name(cl).into_bytes();
+        n.extend_from_slice(b"::");
+        n.extend_from_slice(
+            crate::stubs::find_method(cl, &lower(m))
+                .map(|(_, md)| md.name.as_bytes())
+                .unwrap_or(m),
+        );
+        self.make_closure_object(str_val(&n))
+    }
+
     fn fcc_static(
         &mut self,
         cls: &[u8],
@@ -972,7 +993,7 @@ impl Vm {
                     ));
                 }
                 if self.is_known_builtin_class(&cl) {
-                    return Ok(self.make_closure_object(wrapper));
+                    return Ok(self.fcc_internal_static(&cl, m, wrapper));
                 }
                 return Err((
                     b"Error",
