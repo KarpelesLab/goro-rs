@@ -1074,7 +1074,12 @@ fn atan2_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null).to_double();
     let base = args.get(1).map(|v| v.to_double());
+    // PHP_FUNCTION(log): exact log2()/log10() for those bases, NAN for 1.
     match base {
+        None => Ok(Value::Double(val.ln())),
+        Some(2.0) => Ok(Value::Double(val.log2())),
+        Some(10.0) => Ok(Value::Double(val.log10())),
+        Some(1.0) => Ok(Value::Double(f64::NAN)),
         Some(b) if b <= 0.0 => {
             let msg = "log(): Argument #2 ($base) must be greater than 0";
             let exc = vm.create_exception(b"ValueError", msg, 0);
@@ -1084,13 +1089,7 @@ fn log_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 line: vm.current_line,
             })
         }
-        Some(1.0) => {
-            // Division by zero in log would return NaN/Inf, but PHP throws ValueError
-            vm.emit_warning("log(): Base must not be 1");
-            Ok(Value::Double(f64::NAN))
-        }
-        Some(b) => Ok(Value::Double(val.log(b))),
-        None => Ok(Value::Double(val.ln())),
+        Some(b) => Ok(Value::Double(val.ln() / b.ln())),
     }
 }
 fn log10_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {

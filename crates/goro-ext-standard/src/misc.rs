@@ -7219,6 +7219,7 @@ fn fprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     validate_stream_arg1(vm, "fprintf", &args[0])?;
     validate_fmt_arg2(vm, "fprintf", &args[1])?;
+    crate::strings::deprecate_null_format(vm, "fprintf", 2, args.get(1));
     let fid = args[0].to_long();
     let format_args = &args[1..]; // skip the handle, pass format + args
     let formatted = crate::strings::do_sprintf_vm_named(vm, "fprintf", format_args)?;
@@ -7249,6 +7250,7 @@ fn vfprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     validate_stream_arg1(vm, "vfprintf", &args[0])?;
     validate_fmt_arg2(vm, "vfprintf", &args[1])?;
+    crate::strings::deprecate_null_format(vm, "vfprintf", 2, args.get(1));
     validate_values_arg3(vm, "vfprintf", &args[2])?;
     let fid = args[0].to_long();
     let format = vm.value_to_string(&args[1]);

@@ -1162,6 +1162,21 @@ fn ord(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     Ok(Value::Long(code as i64))
 }
 
+/// The "Passing null to parameter #N ($format)" deprecation of the
+/// formatted-print functions the generic zpp layer does not handle.
+pub(crate) fn deprecate_null_format(vm: &mut Vm, func_name: &str, arg_num: u32, v: Option<&Value>) {
+    if matches!(v.map(|v| v.deref()), Some(Value::Null)) {
+        let line = vm.current_line;
+        vm.emit_deprecated_at(
+            &format!(
+                "{}(): Passing null to parameter #{} ($format) of type string is deprecated",
+                func_name, arg_num
+            ),
+            line,
+        );
+    }
+}
+
 /// Validate that the format argument to sprintf/printf is a string (not array/resource/non-Stringable object)
 fn validate_sprintf_format_arg(
     vm: &mut Vm,
@@ -4034,6 +4049,7 @@ fn vprintf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // Check format arg type
     validate_sprintf_format_arg(vm, "vprintf", args.first())?;
+    deprecate_null_format(vm, "vprintf", 1, args.first());
     let format = vm.value_to_string(args.first().unwrap_or(&Value::Null));
     let arr = args.get(1).unwrap_or(&Value::Null);
     validate_sprintf_values_arg(vm, "vprintf", arr)?;
@@ -4061,6 +4077,7 @@ fn printf_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     validate_sprintf_format_arg(vm, "printf", args.first())?;
+    deprecate_null_format(vm, "printf", 1, args.first());
     let result = do_sprintf_vm_named(vm, "printf", args)?;
     let len = result.len();
     vm.write_output(&result);
