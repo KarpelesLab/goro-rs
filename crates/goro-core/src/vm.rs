@@ -168,7 +168,7 @@ fn arg_cv_bound(f: &OpArray, ncvs: usize) -> usize {
 /// Is the argument at `index` (counted like the CVs: $this and closure
 /// captures first) of a call to `f` passed by reference? Arguments past
 /// the declared parameters go to the variadic one.
-fn arg_by_ref(f: &OpArray, index: usize) -> bool {
+pub(crate) fn arg_by_ref(f: &OpArray, index: usize) -> bool {
     match f.by_ref_params.get(index) {
         Some(b) => *b,
         None => f.variadic_param.is_some() && f.by_ref_params.last().copied().unwrap_or(false),
@@ -820,6 +820,10 @@ pub(crate) struct CallTarget {
     /// The call is made by Closure::__invoke() (`$closure->__invoke()`):
     /// its argument errors have no "called in" (the caller is internal).
     pub(crate) via_invoke: bool,
+    /// A dynamic call by a function name (`$f()`, INIT_DYNAMIC_CALL): the
+    /// arguments of an internal function's by-reference parameters are
+    /// only known to be sent by reference at run time.
+    pub(crate) dynamic: bool,
 }
 
 /// What the frame of a method call set up by INIT_METHOD_CALL's fast path
@@ -890,6 +894,7 @@ impl CallTarget {
         method_info: None,
         fn_gen: 0,
         via_invoke: false,
+        dynamic: false,
     };
 }
 
@@ -19316,6 +19321,7 @@ impl Vm {
                 method_info: None,
                 fn_gen: self.user_functions.len() + 1,
                 via_invoke: false,
+                dynamic: false,
             };
         }
         let builtin = match found {
@@ -19352,6 +19358,7 @@ impl Vm {
             method_info: None,
             fn_gen: self.user_functions.len() + 1,
             via_invoke: false,
+            dynamic: false,
         }
     }
 
@@ -25637,11 +25644,13 @@ impl Vm {
                     }
                     if matches!(&name_val, Value::Array(_)) && !is_closure_array {
                         // Dispatch through call_user_func (handles every array-callable form).
+                        let mut target = CallTarget::NONE;
+                        target.dynamic = true;
                         self.pending_calls.push(PendingCall {
                             name: PhpString::from_bytes(b"call_user_func"),
                             args: vec![name_val.clone()],
                             named_args: Vec::new(),
-                            target: CallTarget::NONE,
+                            target,
                         });
                         return Ok(Flow::Continue);
                     }
@@ -25791,6 +25800,7 @@ impl Vm {
                         let mut target = CallTarget::NONE;
                         target.no_ns_fallback = !matches!(op.op1, OperandType::Const(_))
                             || !matches!(op.result, OperandType::Unused);
+                        target.dynamic = !matches!(op.op1, OperandType::Const(_));
                         self.pending_calls.push(PendingCall {
                             name,
                             args: init_args,
@@ -25969,7 +25979,12 @@ impl Vm {
                                 .pending_calls
                                 .last()
                                 .map(|call| self.native_method_arg_by_ref(call, arg_index))
-                                .unwrap_or(false);
+                                .unwrap_or(false)
+                            || (matches!(op.op1, OperandType::Cv(_))
+                                && self
+                                    .pending_calls
+                                    .last()
+                                    .is_some_and(|call| self.dynamic_builtin_arg_by_ref(call, arg_index)));
 
                         // An internal function's by-reference parameter
                         // (SEND_VAL_EX / SEND_VAR_NO_REF_EX resolved at run time).
@@ -37889,7 +37904,9 @@ impl Vm {
                     );
                     let result = if let Value::Array(arr) = &arr_val {
                         let key = self.value_to_array_key_checked(&key_val, op.line);
-                        let found = arr.borrow().get(&key).cloned();
+                        // (an element that is a reference is destructured
+                        // by value: `[$a] = [&$x]` copies $x)
+                        let found = arr.borrow().get(&key).map(|v| v.deref());
                         match found {
                             Some(v) => v,
                             None => {
@@ -46147,6 +46164,7 @@ impl Vm {
                             // a by-reference parameter of an extension's method
                             || self.pending_calls.last().is_some_and(|call| {
                                 self.native_method_arg_by_ref(call, call.args.len())
+                                    || self.dynamic_builtin_arg_by_ref(call, call.args.len())
                             })
                     };
                     if by_ref {

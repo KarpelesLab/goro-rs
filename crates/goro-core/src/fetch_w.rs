@@ -479,6 +479,55 @@ impl Vm {
         })
     }
 
+    /// Whether argument `arg_index` of the dynamic call `call` (`$f(...)`)
+    /// goes to a by-reference parameter of an internal function (which
+    /// the compiler could not know of). The builtins taking `array
+    /// &$array` share the array handle instead (as their direct calls do).
+    pub(crate) fn dynamic_builtin_arg_by_ref(
+        &self,
+        call: &crate::vm::PendingCall,
+        arg_index: usize,
+    ) -> bool {
+        if !call.target.dynamic {
+            return false;
+        }
+        // `$f()` with $f an [object|class, method] array (dispatched by
+        // call_user_func, the callable first): the method's parameters.
+        if call.name.as_bytes() == b"call_user_func" {
+            // (an instance method's parameters follow its $this)
+            return arg_index > 0
+                && self
+                    .array_callable_method(&call.args[0])
+                    .is_some_and(|(f, this)| crate::vm::arg_by_ref(&f, arg_index - 1 + this));
+        }
+        self.builtin_arg_must_be_ref(call, arg_index)
+            && !crate::compiler::Compiler::is_array_ref_builtin(Some(call.name.as_bytes()))
+    }
+
+    /// The user method an `[object|class, method]` callable names.
+    fn array_callable_method(
+        &self,
+        callable: &Value,
+    ) -> Option<(std::rc::Rc<crate::opcode::OpArray>, usize)> {
+        let Value::Array(a) = callable else {
+            return None;
+        };
+        let a = a.borrow();
+        let (target, method) = (a.get_int(0)?.deref(), a.get_int(1)?.deref());
+        let Value::String(m) = method else {
+            return None;
+        };
+        let class = match &target {
+            Value::Object(o) => o.borrow().class_name.to_ascii_lowercase(),
+            Value::String(c) => c.as_bytes().to_ascii_lowercase(),
+            _ => return None,
+        };
+        let class = class.strip_prefix(b"\\").unwrap_or(&class);
+        let ce = self.classes.get(class)?;
+        let m = ce.get_method(&m.as_bytes().to_ascii_lowercase())?;
+        Some((m.op_array.clone(), usize::from(!m.is_static)))
+    }
+
     /// zend_cannot_pass_by_reference() message for argument `arg_index`
     /// (0-based) of the pending call.
     pub(crate) fn cannot_pass_by_ref_msg(&self, arg_index: usize) -> String {
