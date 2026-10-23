@@ -31,6 +31,7 @@ pub mod image;
 pub mod pixels;
 pub mod properties;
 pub mod pseudo;
+pub mod statistics;
 pub mod svg;
 pub mod text;
 pub mod transform;

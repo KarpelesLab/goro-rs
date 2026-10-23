@@ -6,7 +6,7 @@ use goro_core::value::Value;
 use goro_core::vm::Vm;
 use goro_imagick::color::{PixelInfo, to_q16};
 use goro_imagick::composite::{ComposeArgs, composite_image};
-use goro_imagick::filters::{apply_oxideav, channel_mask};
+use goro_imagick::filters::apply_oxideav;
 use goro_imagick::geometry::Rect;
 use goro_imagick::image::Image;
 use goro_imagick::oxideav_image_filter as of;
@@ -1123,30 +1123,12 @@ fn color_threshold_image(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value])
 fn get_image_kurtosis(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "|l", args)?;
     let ch = a[0].long_or(channel::DEFAULT);
-    let (k, s) = with_image(vm, &d_(o), |i| {
-        let mask = channel_mask(ch, i.alpha);
-        let mut v = Vec::new();
-        for p in i.pixels.chunks_exact(4) {
-            for c in 0..4 {
-                if mask[c] {
-                    v.push(p[c] as f64);
-                }
-            }
-        }
-        let n = v.len().max(1) as f64;
-        let mean = v.iter().sum::<f64>() / n;
-        let var = v.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
-        if var <= 0.0 {
-            return (0.0, 0.0);
-        }
-        let sd = var.sqrt();
-        let m3 = v.iter().map(|x| (x - mean).powi(3)).sum::<f64>() / n;
-        let m4 = v.iter().map(|x| (x - mean).powi(4)).sum::<f64>() / n;
-        (m4 / (var * var) - 3.0, m3 / (sd * sd * sd))
+    let s = with_image(vm, &d_(o), |i| {
+        goro_imagick::statistics::composite_statistics(i, ch)
     })?;
     let mut arr = PhpArray::new();
-    set(&mut arr, "kurtosis", Value::Double(k));
-    set(&mut arr, "skewness", Value::Double(s));
+    set(&mut arr, "kurtosis", Value::Double(s.kurtosis));
+    set(&mut arr, "skewness", Value::Double(s.skewness));
     Ok(arr_val(arr))
 }
 

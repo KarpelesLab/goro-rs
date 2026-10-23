@@ -190,6 +190,13 @@ fn mix(a: &PixelInfo, b: &PixelInfo, t: f64) -> [u16; 4] {
     let (ar, ag, ab) = a.rgb_q();
     let (br, bg, bb) = b.rgb_q();
     let l = |x: f64, y: f64| clamp_to_quantum(x + (y - x) * t) as u16;
+    let alpha = a.alpha + (b.alpha - a.alpha) * t;
+    if (a.alpha_trait || b.alpha_trait) && alpha > 0.0 {
+        // the colours blend premultiplied by their alpha
+        let (wa, wb) = (a.alpha * (1.0 - t), b.alpha * t);
+        let p = |x: f64, y: f64| clamp_to_quantum((x * wa + y * wb) / alpha) as u16;
+        return [p(ar, br), p(ag, bg), p(ab, bb), l(a.alpha, b.alpha)];
+    }
     [l(ar, br), l(ag, bg), l(ab, bb), l(a.alpha, b.alpha)]
 }
 

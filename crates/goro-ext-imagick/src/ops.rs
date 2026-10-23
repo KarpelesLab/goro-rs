@@ -10,6 +10,7 @@ use goro_imagick::filters::{apply_oxideav, channel_mask};
 use goro_imagick::geometry::Rect;
 use goro_imagick::image::Image;
 use goro_imagick::oxideav_image_filter as of;
+use goro_imagick::statistics::{ChannelStats, channel_statistics, composite_statistics};
 use goro_imagick::transform;
 use goro_imagick::types::*;
 use goro_imagick::{MResult, MagickError, Wand};
@@ -2372,115 +2373,72 @@ fn unique_image_colors(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -
 // ---------------------------------------------------------------------------
 // statistics, comparison
 
-struct Stats {
-    mean: f64,
-    sd: f64,
-    min: f64,
-    max: f64,
-    kurtosis: f64,
-    skewness: f64,
-}
-
-fn channel_values(i: &Image, ch: i64) -> Vec<f64> {
-    let mask = channel_mask(ch, i.alpha);
-    let mut v = Vec::new();
-    for p in i.pixels.chunks_exact(4) {
-        for c in 0..4 {
-            if mask[c] {
-                v.push(p[c] as f64);
-            }
-        }
-    }
-    v
-}
-
-fn stats(v: &[f64]) -> Stats {
-    let n = v.len().max(1) as f64;
-    let mean = v.iter().sum::<f64>() / n;
-    let var = v.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n;
-    let sd = var.sqrt();
-    let (m3, m4) = v.iter().fold((0.0, 0.0), |(a, b), x| {
-        let d = x - mean;
-        (a + d * d * d, b + d * d * d * d)
-    });
-    let (skewness, kurtosis) = if sd > 0.0 {
-        (m3 / n / (sd * sd * sd), m4 / n / (var * var) - 3.0)
-    } else {
-        (0.0, 0.0)
-    };
-    Stats {
-        mean,
-        sd,
-        min: v.iter().cloned().fold(f64::MAX, f64::min).min(f64::MAX),
-        max: v.iter().cloned().fold(0.0, f64::max),
-        kurtosis,
-        skewness,
-    }
-}
-
 fn get_image_channel_mean(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "l", args)?;
     let ch = a[0].long_or(channel::DEFAULT);
-    let s = with_image(vm, &d_(o), |i| stats(&channel_values(i, ch)))?;
+    let s = with_image(vm, &d_(o), |i| composite_statistics(i, ch))?;
     let mut arr = PhpArray::new();
     set(&mut arr, "mean", Value::Double(s.mean));
-    set(&mut arr, "standardDeviation", Value::Double(s.sd));
+    set(
+        &mut arr,
+        "standardDeviation",
+        Value::Double(s.standard_deviation),
+    );
     Ok(arr_val(arr))
 }
 
 fn get_image_mean(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
-    let s = with_image(vm, &d_(o), |i| stats(&channel_values(i, channel::DEFAULT)))?;
+    let s = with_image(vm, &d_(o), |i| composite_statistics(i, channel::DEFAULT))?;
     let mut arr = PhpArray::new();
     set(&mut arr, "mean", Value::Double(s.mean));
-    set(&mut arr, "standardDeviation", Value::Double(s.sd));
+    set(
+        &mut arr,
+        "standard_deviation",
+        Value::Double(s.standard_deviation),
+    );
     Ok(arr_val(arr))
 }
 
 fn get_image_channel_range(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     let a = zpp::parse(vm, f, "l", args)?;
     let ch = a[0].long_or(channel::DEFAULT);
-    let d = d_(o);
-    let s = with_image(vm, &d, |i| stats(&channel_values(i, ch)))?;
+    let s = with_image(vm, &d_(o), |i| composite_statistics(i, ch))?;
     let mut arr = PhpArray::new();
-    set(&mut arr, "minima", Value::Double(s.min));
-    set(&mut arr, "maxima", Value::Double(s.max));
+    set(&mut arr, "minima", Value::Double(s.minima));
+    set(&mut arr, "maxima", Value::Double(s.maxima));
     Ok(arr_val(arr))
 }
 
 fn get_image_range(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
-    let s = with_image(vm, &d_(o), |i| stats(&channel_values(i, channel::DEFAULT)))?;
+    let s = with_image(vm, &d_(o), |i| composite_statistics(i, channel::DEFAULT))?;
     let mut arr = PhpArray::new();
-    set(&mut arr, "minima", Value::Double(s.min));
-    set(&mut arr, "maxima", Value::Double(s.max));
+    set(&mut arr, "minima", Value::Double(s.minima));
+    set(&mut arr, "maxima", Value::Double(s.maxima));
     Ok(arr_val(arr))
 }
 
 fn get_image_channel_statistics(vm: &mut Vm, f: &Func, o: Option<&Obj>, args: &[Value]) -> R {
     zpp::parse(vm, f, "", args)?;
-    // the ChannelStatistics array indexed by PixelChannel (IM7):
-    // 0 red, 1 green, 2 blue, 3 black, 4 alpha, ... the composite last
-    let list = with_image(vm, &d_(o), |i| {
-        let chans: Vec<i64> = vec![channel::RED, channel::GREEN, channel::BLUE];
-        let mut v: Vec<(Stats, u32)> = chans
-            .iter()
-            .map(|&c| (stats(&channel_values(i, c)), i.depth))
-            .collect();
-        v.push((stats(&channel_values(i, channel::DEFAULT)), i.depth));
-        v
-    })?;
+    // indexed by PixelChannel (0 red, 1 green, 2 blue, 3 black, 4 alpha,
+    // 5 index...); channels the image lacks report empty statistics
+    let list = with_image(vm, &d_(o), |i| channel_statistics(i))?;
     let mut arr = PhpArray::new();
-    for (k, (s, depth)) in list.into_iter().enumerate() {
+    for (k, s) in list.into_iter().enumerate() {
+        let s = s.unwrap_or_else(ChannelStats::absent);
         let mut t = PhpArray::new();
         set(&mut t, "mean", Value::Double(s.mean));
-        set(&mut t, "minima", Value::Double(s.min));
-        set(&mut t, "maxima", Value::Double(s.max));
-        set(&mut t, "standardDeviation", Value::Double(s.sd));
-        set(&mut t, "depth", Value::Long(depth as i64));
+        set(&mut t, "minima", Value::Double(s.minima));
+        set(&mut t, "maxima", Value::Double(s.maxima));
+        set(
+            &mut t,
+            "standardDeviation",
+            Value::Double(s.standard_deviation),
+        );
+        set(&mut t, "depth", Value::Long(s.depth as i64));
         arr.set(goro_core::array::ArrayKey::Int(k as i64), arr_val(t));
     }
-    let _ = |s: Stats| (s.kurtosis, s.skewness);
     Ok(arr_val(arr))
 }
 
