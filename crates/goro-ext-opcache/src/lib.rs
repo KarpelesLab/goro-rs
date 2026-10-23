@@ -944,6 +944,9 @@ fn startup(vm: &mut Vm) {
         return;
     }
     script_cache::CONFIG.with(|c| c.borrow_mut().enabled = !file_cache_only);
+    if !file_cache_only {
+        script_cache::init_shared();
+    }
     // The main script is compiled through the cache.
     let main = vm.current_file.to_string();
     if !main.is_empty() && !main.contains("://") && main != "Standard input code" {

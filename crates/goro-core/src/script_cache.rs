@@ -266,7 +266,176 @@ fn insert(path: &str, compiled: Option<Rc<Compiled>>, timestamp: i64, size: i64)
     let fresh = SCRIPTS.with(|s| s.borrow_mut().insert(path.to_string(), script).is_none());
     if fresh {
         ORDER.with(|o| o.borrow_mut().push(path.to_string()));
+        shm::publish(path, timestamp, size);
     }
+}
+
+/// The scripts other processes sharing the cache (forked from the one
+/// that started it) cached meanwhile are known here too.
+fn import_shared() {
+    let records = shm::take_new();
+    if records.is_empty() {
+        return;
+    }
+    let cfg = CONFIG.with(|c| c.borrow().clone());
+    for (path, timestamp, size) in records {
+        let known = SCRIPTS.with(|s| s.borrow().contains_key(&path));
+        if known {
+            continue;
+        }
+        let script = Script {
+            full_path: path.clone(),
+            // (compiled again here when it is included)
+            compiled: None,
+            timestamp,
+            hits: 0,
+            memory_consumption: size,
+            last_used: now(),
+            revalidate: now() + cfg.revalidate_freq,
+            corrupted: false,
+        };
+        SCRIPTS.with(|s| s.borrow_mut().insert(path.clone(), script));
+        ORDER.with(|o| o.borrow_mut().push(path));
+    }
+}
+
+/// Opcache's shared memory segment, as far as goro shares it: the list of
+/// cached scripts (path, timestamp, size), visible to the processes forked
+/// after the cache started (pcntl_fork(), the built-in server's workers).
+mod shm {
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+    const SIZE: usize = 4 << 20;
+    const DATA: usize = 64;
+
+    thread_local! {
+        static BASE: Cell<usize> = const { Cell::new(0) };
+        /// The offset up to which this process has read the records.
+        static READ: Cell<usize> = const { Cell::new(DATA) };
+    }
+
+    fn lock(base: usize) -> &'static AtomicUsize {
+        // SAFETY: the segment is SIZE bytes, mapped for the process's
+        // lifetime; the header's words are only accessed atomically.
+        let l = unsafe { &*(base as *const AtomicU32) };
+        while l
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            std::hint::spin_loop();
+        }
+        unsafe { &*((base + 8) as *const AtomicUsize) }
+    }
+
+    fn unlock(base: usize) {
+        let l = unsafe { &*(base as *const AtomicU32) };
+        l.store(0, Ordering::Release);
+    }
+
+    /// accel_startup()'s shared memory allocation.
+    pub fn init() {
+        if BASE.with(|b| b.get()) != 0 {
+            return;
+        }
+        // SAFETY: an anonymous shared mapping; checked for failure.
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                SIZE,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_SHARED | libc::MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED {
+            return;
+        }
+        let base = p as usize;
+        unsafe { &*((base + 8) as *const AtomicUsize) }.store(DATA, Ordering::Relaxed);
+        BASE.with(|b| b.set(base));
+        READ.with(|r| r.set(DATA));
+    }
+
+    pub fn publish(path: &str, timestamp: i64, size: i64) {
+        let base = BASE.with(|b| b.get());
+        if base == 0 {
+            return;
+        }
+        let p = path.as_bytes();
+        let len = 4 + p.len() + 16;
+        let used = lock(base);
+        let at = used.load(Ordering::Relaxed);
+        if at + len <= SIZE {
+            // SAFETY: within the segment, under the lock.
+            unsafe {
+                let d = (base + at) as *mut u8;
+                std::ptr::copy_nonoverlapping((p.len() as u32).to_ne_bytes().as_ptr(), d, 4);
+                std::ptr::copy_nonoverlapping(p.as_ptr(), d.add(4), p.len());
+                std::ptr::copy_nonoverlapping(timestamp.to_ne_bytes().as_ptr(), d.add(4 + p.len()), 8);
+                std::ptr::copy_nonoverlapping(size.to_ne_bytes().as_ptr(), d.add(12 + p.len()), 8);
+            }
+            used.store(at + len, Ordering::Relaxed);
+            // (this process's own record)
+            if READ.with(|r| r.get()) == at {
+                READ.with(|r| r.set(at + len));
+            }
+        }
+        unlock(base);
+    }
+
+    /// The records published since the last call.
+    pub fn take_new() -> Vec<(String, i64, i64)> {
+        let base = BASE.with(|b| b.get());
+        if base == 0 {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        let used = lock(base);
+        let end = used.load(Ordering::Relaxed);
+        let mut at = READ.with(|r| r.get()).min(end);
+        while at + 4 <= end {
+            // SAFETY: records below `end` were completely written under the lock.
+            unsafe {
+                let d = (base + at) as *const u8;
+                let mut n = [0u8; 4];
+                std::ptr::copy_nonoverlapping(d, n.as_mut_ptr(), 4);
+                let n = u32::from_ne_bytes(n) as usize;
+                let path = std::slice::from_raw_parts(d.add(4), n);
+                let mut t = [0u8; 8];
+                std::ptr::copy_nonoverlapping(d.add(4 + n), t.as_mut_ptr(), 8);
+                let mut s = [0u8; 8];
+                std::ptr::copy_nonoverlapping(d.add(12 + n), s.as_mut_ptr(), 8);
+                out.push((
+                    String::from_utf8_lossy(path).into_owned(),
+                    i64::from_ne_bytes(t),
+                    i64::from_ne_bytes(s),
+                ));
+                at += 20 + n;
+            }
+        }
+        READ.with(|r| r.set(at));
+        unlock(base);
+        out
+    }
+
+    /// opcache_reset(): the shared list is emptied too.
+    pub fn clear() {
+        let base = BASE.with(|b| b.get());
+        if base == 0 {
+            return;
+        }
+        let used = lock(base);
+        used.store(DATA, Ordering::Relaxed);
+        READ.with(|r| r.set(DATA));
+        unlock(base);
+    }
+}
+
+/// accel_startup(): the cache's shared part is set up (before any fork).
+pub fn init_shared() {
+    shm::init();
 }
 
 /// A blacklist entry matched against the start of a path
@@ -433,6 +602,7 @@ fn estimate_size(op: &OpArray) -> i64 {
 
 /// filename_is_in_cache()
 pub fn is_cached(path: &str) -> bool {
+    import_shared();
     let cfg = CONFIG.with(|c| c.borrow().clone());
     SCRIPTS.with(|s| {
         let mut s = s.borrow_mut();
@@ -466,6 +636,7 @@ pub fn invalidate(path: &str, force: bool) -> bool {
 /// opcache_reset(): the cache is emptied (at the next request in PHP; the
 /// CLI has a single request, so the scripts are dropped for the rest of it).
 pub fn reset() {
+    shm::clear();
     SCRIPTS.with(|s| s.borrow_mut().clear());
     ORDER.with(|o| o.borrow_mut().clear());
     STATS.with(|s| {
@@ -478,6 +649,7 @@ pub fn reset() {
 /// The cached scripts, in insertion order:
 /// (full_path, hits, memory_consumption, last_used, timestamp, revalidate).
 pub fn scripts() -> Vec<(String, i64, i64, i64, i64, i64)> {
+    import_shared();
     let order = ORDER.with(|o| o.borrow().clone());
     SCRIPTS.with(|s| {
         let s = s.borrow();
@@ -499,10 +671,12 @@ pub fn scripts() -> Vec<(String, i64, i64, i64, i64, i64)> {
 }
 
 pub fn num_scripts() -> usize {
+    import_shared();
     SCRIPTS.with(|s| s.borrow().len())
 }
 
 pub fn used_memory() -> i64 {
+    import_shared();
     SCRIPTS.with(|s| s.borrow().values().map(|v| v.memory_consumption).sum())
 }
 
