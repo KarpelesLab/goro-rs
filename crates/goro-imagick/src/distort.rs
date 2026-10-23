@@ -25,6 +25,8 @@ pub const SHEPARDS: i64 = 16;
 pub const RESIZE: i64 = 17;
 pub const RIGID_AFFINE: i64 = 19;
 
+const MAGICK_EPSILON: f64 = 1.0e-12;
+
 fn bad_args(name: &str) -> MagickError {
     MagickError::with_desc(
         severity::OPTION_ERROR,
@@ -234,29 +236,14 @@ enum Map {
     Perspective([f64; 8]),
     Bilinear([f64; 8]),
     Poly(usize, Vec<f64>, Vec<f64>),
-    Arc {
-        cx: f64,
-        cy: f64,
-        start: f64,
-        span: f64,
-        r_top: f64,
-        r_bottom: f64,
-        w: f64,
-        h: f64,
-    },
-    Polar {
-        cx: f64,
-        cy: f64,
-        rmin: f64,
-        rmax: f64,
-        a0: f64,
-        a1: f64,
-        w: f64,
-        h: f64,
-        to_polar: bool,
-        ox: f64,
-        oy: f64,
-    },
+    /// ImageMagick's coefficients: c0 the centre angle, c1 columns per
+    /// turn, c2 the top radius, c3 rows per radius unit, c4 the centre
+    /// column.
+    Arc([f64; 5]),
+    /// rmax, rmin, centre x/y, start/end angle, then the column and row
+    /// scales (ImageMagick's c0..c7).
+    Polar([f64; 8]),
+    DePolar([f64; 8]),
     Barrel {
         a: [f64; 4],
         b: [f64; 4],
@@ -274,6 +261,29 @@ impl Map {
         if let Map::Affine(a) = self {
             let m = &a.0;
             return [[m[0], m[1]], [m[3], m[4]]];
+        }
+        if let Map::Polar(c) = self {
+            // ImageMagick scales the angular axis by c6/(2πr), a 2π
+            // short of the true derivative
+            let (ii, jj) = (x - c[2], y - c[3]);
+            let r2 = (ii * ii + jj * jj).max(1e-12);
+            let r = r2.sqrt();
+            let k = c[6] / (2.0 * std::f64::consts::PI);
+            return [[k * jj / r2, -k * ii / r2], [c[7] * ii / r, c[7] * jj / r]];
+        }
+        if let Map::DePolar(_) = self {
+            // no scaling: a unit-circle filter everywhere
+            return [[1.0, 0.0], [0.0, 1.0]];
+        }
+        if let Map::Arc(c) = self {
+            let (ii, jj) = (x, y);
+            let r2 = (ii * ii + jj * jj).max(1e-12);
+            let r = r2.sqrt();
+            let k = c[1] / (2.0 * std::f64::consts::PI);
+            return [
+                [-k * jj / r2, k * ii / r2],
+                [-c[3] * ii / r, -c[3] * jj / r],
+            ];
         }
         const H: f64 = 1e-4;
         let (ax, ay) = self.apply(x + H, y);
@@ -301,56 +311,28 @@ impl Map {
                     t.iter().zip(cy).map(|(a, b)| a * b).sum(),
                 )
             }
-            Map::Arc {
-                cx,
-                cy,
-                start,
-                span,
-                r_top,
-                r_bottom,
-                w,
-                h,
-            } => {
-                let (dx, dy) = (x - cx, y - cy);
-                let r = (dx * dx + dy * dy).sqrt();
-                let mut a = dy.atan2(dx) - start;
-                while a < 0.0 {
-                    a += 2.0 * std::f64::consts::PI;
-                }
-                let u = a / span * w;
-                let v = (r_top - r) / (r_top - r_bottom) * h;
-                (u, v)
+            Map::Arc(c) => {
+                // (c4 is the centre column as a pixel index; +0.5 makes it a
+                // coordinate)
+                let (ii, jj) = (x, y);
+                let mut xx = (jj.atan2(ii) - c[0]) / (2.0 * std::f64::consts::PI);
+                xx -= xx.round();
+                (xx * c[1] + c[4] + 0.5, (c[2] - ii.hypot(jj)) * c[3])
             }
-            Map::Polar {
-                cx,
-                cy,
-                rmin,
-                rmax,
-                a0,
-                a1,
-                w,
-                h,
-                to_polar,
-                ox,
-                oy,
-            } => {
-                if *to_polar {
-                    // destination polar picture of the source columns
-                    let (dx, dy) = (x - ox, y - oy);
-                    let r = (dx * dx + dy * dy).sqrt();
-                    let mut a = dx.atan2(-dy) - a0;
-                    while a < 0.0 {
-                        a += 2.0 * std::f64::consts::PI;
-                    }
-                    let u = a / (a1 - a0) * w;
-                    let v = (r - rmin) / (rmax - rmin) * h;
-                    (u, v)
-                } else {
-                    // depolar: the destination rectangle unrolls the circle
-                    let a = a0 + x / w * (a1 - a0);
-                    let r = rmin + y / h * (rmax - rmin);
-                    (cx + r * a.sin(), cy - r * a.cos())
-                }
+            Map::Polar(c) => {
+                let (ii, jj) = (x - c[2], y - c[3]);
+                let tau = 2.0 * std::f64::consts::PI;
+                let mut xx = (ii.atan2(jj) - (c[4] + c[5]) / 2.0) / tau;
+                xx -= xx.round();
+                (
+                    xx * tau * c[6] + c[6] * (c[5] - c[4]) / 2.0,
+                    (ii.hypot(jj) - c[1]) * c[7],
+                )
+            }
+            Map::DePolar(c) => {
+                let aa = x * c[6] + c[4];
+                let rr = y * c[7] + c[1];
+                (rr * aa.sin() + c[2], rr * aa.cos() + c[3])
             }
             Map::Barrel {
                 a,
@@ -514,76 +496,115 @@ pub fn distort(img: &Image, method: i64, args: &[f64], bestfit: bool) -> MResult
             if args.is_empty() {
                 return Err(bad_args("Arc"));
             }
-            let span = args[0].to_radians().abs().max(1e-6);
-            let rot = args.get(1).copied().unwrap_or(0.0).to_radians();
-            let r_top = args
-                .get(2)
-                .copied()
-                .unwrap_or(w / span * 0.5 + h / 2.0)
-                .max(1.0);
-            let r_bottom = args.get(3).copied().unwrap_or(r_top - h).max(0.0);
-            let start = -std::f64::consts::FRAC_PI_2 - span / 2.0 + rot;
-            let size = (2.0 * r_top).ceil() as usize + 2;
-            out_rect = Rect::new(size, size, -(size as i64) / 2, -(size as i64) / 2);
-            let c = size as f64 / 2.0;
-            let m = Map::Arc {
-                cx: c,
-                cy: c,
-                start,
-                span,
-                r_top,
-                r_bottom,
-                w,
-                h,
+            if args[0] < MAGICK_EPSILON {
+                return Err(MagickError::new(
+                    severity::OPTION_ERROR,
+                    "invalid argument for option Arc : 'Arc Angle Too Small' @ error/distort.c/GenerateCoefficients/1215",
+                ));
+            }
+            let span = args[0].to_radians();
+            let c0 =
+                -std::f64::consts::FRAC_PI_2 + args.get(1).copied().unwrap_or(0.0).to_radians();
+            // the default radii put the image's width on the arc through
+            // its middle row
+            let rt_def = w / span + h / 2.0 - 0.5;
+            let rb_def = w / span - h / 2.0 + 0.5;
+            let (r_top, r_bottom) = match (args.get(2), args.get(3)) {
+                (Some(&t), Some(&b)) => (t, b),
+                (Some(&t), None) => (t, t * rb_def / rt_def),
+                _ => (rt_def, rb_def),
             };
-            return render(img, &m, out_rect, true);
+            let c = [
+                c0,
+                w * 2.0 * std::f64::consts::PI / span,
+                r_top,
+                h / (r_top - r_bottom),
+                w / 2.0 - 0.5,
+            ];
+            // bounds: both radii at both ends, the top radius where the
+            // arc crosses an axis
+            let (a0, a1) = (c0 - span / 2.0, c0 + span / 2.0);
+            let mut pts = vec![];
+            for a in [a0, a1] {
+                for r in [r_top, r_bottom] {
+                    pts.push((r * a.cos(), r * a.sin()));
+                }
+            }
+            let q = std::f64::consts::FRAC_PI_2;
+            let mut k = (a0 / q).ceil();
+            while k * q <= a1 {
+                pts.push((r_top * (k * q).cos(), r_top * (k * q).sin()));
+                k += 1.0;
+            }
+            let x0 = pts.iter().map(|p| p.0).fold(f64::MAX, f64::min);
+            let x1 = pts.iter().map(|p| p.0).fold(f64::MIN, f64::max);
+            let y0 = pts.iter().map(|p| p.1).fold(f64::MAX, f64::min);
+            let y1 = pts.iter().map(|p| p.1).fold(f64::MIN, f64::max);
+            let (xa, ya) = ((x0 - 0.5).floor(), (y0 - 0.5).floor());
+            out_rect = Rect::new(
+                ((x1 + 0.5).ceil() - xa).max(1.0) as usize,
+                ((y1 + 0.5).ceil() - ya).max(1.0) as usize,
+                xa as i64,
+                ya as i64,
+            );
+            return render(img, &Map::Arc(c), out_rect, false);
         }
         POLAR | DEPOLAR => {
-            let rmax = args
-                .first()
-                .copied()
-                .filter(|v| *v > 0.0)
-                .unwrap_or((w.min(h)) / 2.0);
+            let mut cx = args.get(2).copied().unwrap_or(w / 2.0);
+            let mut cy = args.get(3).copied().unwrap_or(h / 2.0);
+            // rmax 0: to the nearest edge; negative: to the farthest corner
+            let rmax = match args.first().copied().unwrap_or(0.0) {
+                r if r > 0.0 => r,
+                r if r < 0.0 => (cx.max(w - cx)).hypot(cy.max(h - cy)),
+                _ => cx.min(cy).min(w - cx).min(h - cy),
+            };
             let rmin = args.get(1).copied().unwrap_or(0.0);
-            let cx = args.get(2).copied().unwrap_or(w / 2.0);
-            let cy = args.get(3).copied().unwrap_or(h / 2.0);
             let a0 = args.get(4).copied().unwrap_or(-180.0).to_radians();
-            let a1 = args.get(5).copied().unwrap_or(180.0).to_radians();
-            if method == POLAR {
-                let size = (2.0 * rmax).ceil().max(1.0) as usize;
-                out_rect = Rect::new(size, size, 0, 0);
-                let m = Map::Polar {
-                    cx,
-                    cy,
-                    rmin,
-                    rmax,
-                    a0,
-                    a1,
-                    w,
-                    h,
-                    to_polar: true,
-                    ox: size as f64 / 2.0,
-                    oy: size as f64 / 2.0,
-                };
-                return render(img, &m, out_rect, true);
+            let a1 = match args.get(5) {
+                Some(v) => v.to_radians(),
+                None => a0 + 2.0 * std::f64::consts::PI,
+            };
+            if rmax <= rmin || (a1 - a0).abs() < MAGICK_EPSILON {
+                return Err(bad_args(if method == POLAR { "Polar" } else { "DePolar" }));
             }
-            let ow = ((a1 - a0) * rmax).abs().ceil().max(1.0);
-            let oh = (rmax - rmin).abs().ceil().max(1.0);
+            if method == POLAR {
+                if bestfit {
+                    // the circle centres on the page origin unless placed
+                    if args.len() < 3 {
+                        cx = 0.0;
+                        cy = 0.0;
+                    }
+                    let (xa, ya) = ((cx - rmax - 0.5).floor(), (cy - rmax - 0.5).floor());
+                    out_rect = Rect::new(
+                        ((cx + rmax + 0.5).ceil() - xa) as usize,
+                        ((cy + rmax + 0.5).ceil() - ya) as usize,
+                        xa as i64,
+                        ya as i64,
+                    );
+                }
+                let c = [rmax, rmin, cx, cy, a0, a1, w / (a1 - a0), h / (rmax - rmin)];
+                return render(img, &Map::Polar(c), out_rect, false);
+            }
+            let (ow, oh) = if bestfit {
+                (
+                    ((a1 - a0) * (rmax - rmin) / 2.0).abs().ceil().max(1.0),
+                    (rmax - rmin).ceil().max(1.0),
+                )
+            } else {
+                (w, h)
+            };
             out_rect = Rect::new(ow as usize, oh as usize, 0, 0);
-            let m = Map::Polar {
+            let c = [
+                rmax,
+                rmin,
                 cx,
                 cy,
-                rmin,
-                rmax,
                 a0,
                 a1,
-                w: ow,
-                h: oh,
-                to_polar: false,
-                ox: 0.0,
-                oy: 0.0,
-            };
-            return render(img, &m, out_rect, true);
+                (a1 - a0) / ow,
+                (rmax - rmin) / oh,
+            ];
+            return render(img, &Map::DePolar(c), out_rect, false);
         }
         BARREL | BARREL_INVERSE => {
             if args.len() < 3 {

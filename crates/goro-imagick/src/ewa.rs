@@ -77,14 +77,14 @@ impl Ewa {
         let l1 = (tr * 0.5 + disc).max(1.0);
         let l2 = (tr * 0.5 - disc).max(1.0);
         // eigenvector of l1
-        let (e1x, e1y) = if b.abs() > 1e-300 {
-            let (x, y) = (tr * 0.5 + disc - c, b);
-            let n = (x * x + y * y).sqrt();
+        // (the better-conditioned of the two eigenvector forms)
+        let lam = tr * 0.5 + disc;
+        let (x, y) = if a >= c { (lam - c, b) } else { (b, lam - a) };
+        let n = (x * x + y * y).sqrt();
+        let (e1x, e1y) = if n > 1e-300 {
             (x / n, y / n)
-        } else if a >= c {
-            (1.0, 0.0)
         } else {
-            (0.0, 1.0)
+            (1.0, 0.0)
         };
         let (e2x, e2y) = (-e1y, e1x);
         // quadratic form Q(d) = (e1·d)²/l1 + (e2·d)²/l2
