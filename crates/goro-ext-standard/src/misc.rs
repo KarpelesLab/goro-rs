@@ -5512,6 +5512,7 @@ fn ini_set(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         || key == b"mail.mixed_lf_and_crlf"
         || key == b"mail.log"
         || key == b"mail.force_extra_parameters"
+        || goro_core::vm::CORE_INI_SYSTEM.contains(&key.as_slice())
     {
         return Ok(Value::False);
     }

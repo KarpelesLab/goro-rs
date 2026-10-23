@@ -31,6 +31,113 @@ pub type TreatDataHook = fn(&mut Vm, u8, &[u8], &Rc<RefCell<PhpArray>>) -> bool;
 
 pub const GRACEFUL_EXIT_CLASS: &[u8] = b"\0GracefulExit";
 
+/// Core INI directives (main/main.c, Zend/zend.c, ext/standard) not set
+/// up elsewhere, with their default values (ini_get() of them must not
+/// be false: wp_max_upload_size() reads upload_max_filesize ...).
+const CORE_INI_DEFAULTS: &[(&[u8], &[u8])] = &[
+    (b"SMTP", b"localhost"),
+    (b"smtp_port", b"25"),
+    (b"allow_url_fopen", b"1"),
+    (b"allow_url_include", b"0"),
+    (b"auto_append_file", b""),
+    (b"auto_prepend_file", b""),
+    (b"auto_detect_line_endings", b"0"),
+    (b"auto_globals_jit", b"1"),
+    (b"browscap", b""),
+    (b"default_mimetype", b"text/html"),
+    (b"default_socket_timeout", b"60"),
+    (b"disable_functions", b""),
+    (b"display_startup_errors", b"1"),
+    (b"doc_root", b""),
+    (b"docref_ext", b""),
+    (b"docref_root", b""),
+    (b"enable_dl", b"1"),
+    (b"enable_post_data_reading", b"1"),
+    (b"error_append_string", b""),
+    (b"error_prepend_string", b""),
+    (b"error_log", b""),
+    (b"error_log_mode", b"0644"),
+    (b"expose_php", b"1"),
+    (b"file_uploads", b"1"),
+    (b"from", b""),
+    (b"hard_timeout", b"2"),
+    (b"ignore_repeated_errors", b"0"),
+    (b"ignore_repeated_source", b"0"),
+    (b"ignore_user_abort", b"0"),
+    (b"log_errors", b"0"),
+    (b"max_file_uploads", b"20"),
+    (b"max_input_nesting_level", b"64"),
+    (b"max_input_vars", b"1000"),
+    (b"max_memory_limit", b"-1"),
+    (b"max_multipart_body_parts", b"-1"),
+    (b"output_handler", b""),
+    (b"post_max_size", b"8M"),
+    (b"realpath_cache_size", b"4096K"),
+    (b"realpath_cache_ttl", b"120"),
+    (b"report_zend_debug", b"0"),
+    (b"request_order", b""),
+    (b"sendmail_from", b""),
+    (b"sendmail_path", b"/usr/sbin/sendmail -t -i"),
+    (b"sys_temp_dir", b""),
+    (b"unserialize_callback_func", b""),
+    (b"unserialize_max_depth", b"4096"),
+    (b"upload_max_filesize", b"2M"),
+    (b"upload_tmp_dir", b""),
+    (b"user_agent", b""),
+    (b"user_dir", b""),
+    (b"user_ini.filename", b".user.ini"),
+    (b"user_ini.cache_ttl", b"300"),
+    (b"variables_order", b"EGPCS"),
+    (b"xmlrpc_error_number", b"0"),
+    (b"xmlrpc_errors", b"0"),
+    (b"zend.detect_unicode", b"1"),
+    (b"zend.multibyte", b"0"),
+    (b"zend.script_encoding", b""),
+    (b"zend.signal_check", b"0"),
+];
+
+/// The core INI directives that only php.ini (PHP_INI_SYSTEM, and
+/// PHP_INI_PERDIR: .htaccess / .user.ini) can change: ini_set() fails.
+pub const CORE_INI_SYSTEM: &[&[u8]] = &[
+    b"allow_url_fopen",
+    b"allow_url_include",
+    b"arg_separator.input",
+    b"auto_append_file",
+    b"auto_globals_jit",
+    b"auto_prepend_file",
+    b"browscap",
+    b"disable_functions",
+    b"doc_root",
+    b"enable_dl",
+    b"enable_post_data_reading",
+    b"expose_php",
+    b"extension_dir",
+    b"file_uploads",
+    b"hard_timeout",
+    b"max_file_uploads",
+    b"max_input_nesting_level",
+    b"max_input_time",
+    b"max_input_vars",
+    b"max_multipart_body_parts",
+    b"output_buffering",
+    b"output_handler",
+    b"post_max_size",
+    b"realpath_cache_size",
+    b"realpath_cache_ttl",
+    b"register_argc_argv",
+    b"request_order",
+    b"sendmail_path",
+    b"short_open_tag",
+    b"sys_temp_dir",
+    b"upload_max_filesize",
+    b"upload_tmp_dir",
+    b"user_dir",
+    b"user_ini.cache_ttl",
+    b"user_ini.filename",
+    b"variables_order",
+    b"xmlrpc_errors",
+];
+
 thread_local! {
     /// Pointer to the VM that "owns" the currently running fiber on
     /// this thread. Set immediately before each `PhpFiber::resume()`
@@ -1728,6 +1835,12 @@ impl Vm {
                     b"report_memleaks".to_vec(),
                     Value::String(PhpString::from_bytes(b"1")),
                 );
+                // The other core directives (main.c / zend.c ini_entries)
+                // with their default values.
+                for (k, v) in CORE_INI_DEFAULTS {
+                    c.entry(k.to_vec())
+                        .or_insert_with(|| Value::String(PhpString::from_bytes(v)));
+                }
                 // PHP constants
                 c.insert(
                     b"PHP_EOL".to_vec(),
