@@ -16322,6 +16322,12 @@ impl Vm {
         method_name: &[u8],
         args: &[Value],
     ) -> Option<Value> {
+        // A Generator's methods (an iterator held by SPL code).
+        if let Value::Generator(g) = obj_val {
+            let m = method_name.to_ascii_lowercase();
+            let line = self.current_line;
+            return self.generator_method(g, obj_val, &m, args, line).ok();
+        }
         if let Value::Object(obj) = obj_val {
             let class_lower: Vec<u8> = obj
                 .borrow()
