@@ -1583,7 +1583,88 @@ fn forward_static_call_array_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, Vm
     forward_static_call_fn(vm, &call_args)
 }
 
+/// A callback zend_is_callable_ex() accepts without any side effect or
+/// trampoline: a plain function name, a Closure, or `[$object, 'method']`
+/// naming a public method of the object's user class. (The checked
+/// call_user_func() variants then skip the full check.)
+fn plain_callable(vm: &Vm, cb: &Value) -> bool {
+    match cb {
+        Value::String(s) => {
+            let b = s.as_bytes();
+            if b.is_empty() || b.len() > 64 || b[0] == b'\\' || b.contains(&b':') {
+                return false;
+            }
+            let mut buf = [0u8; 64];
+            for (d, c) in buf.iter_mut().zip(b) {
+                *d = c.to_ascii_lowercase();
+            }
+            let lower = &buf[..b.len()];
+            !matches!(
+                lower,
+                b"extract"
+                    | b"compact"
+                    | b"get_defined_vars"
+                    | b"func_get_args"
+                    | b"func_get_arg"
+                    | b"func_num_args"
+            ) && (vm.user_functions.contains_key(lower) || vm.functions.contains_key(lower))
+        }
+        Value::Object(o) => o.borrow().closure.is_some(),
+        Value::Array(a) => {
+            let a = a.borrow();
+            if a.len() != 2 {
+                return false;
+            }
+            let (Some(target), Some(Value::String(m))) = (a.get_int(0), a.get_int(1)) else {
+                return false;
+            };
+            let m = m.as_bytes();
+            if m.is_empty() || m.contains(&b':') || m.starts_with(b"__") {
+                return false;
+            }
+            // `['Class', 'staticMethod']` of a declared user class
+            if let Value::String(c) = target {
+                let c = c.as_bytes().to_ascii_lowercase();
+                if matches!(c.as_slice(), b"self" | b"parent" | b"static")
+                    || c.first() == Some(&b'\\')
+                {
+                    return false;
+                }
+                return vm.classes.get(&c).is_some_and(|ce| {
+                    ce.filename.is_some()
+                        && !ce.is_trait
+                        && ce.get_method(&m.to_ascii_lowercase()).is_some_and(|md| {
+                            md.visibility == goro_core::object::Visibility::Public
+                                && md.is_static
+                                && !md.is_abstract
+                        })
+                });
+            }
+            let Value::Object(o) = target else {
+                return false;
+            };
+            let ob = o.borrow();
+            if ob.native.is_some() || ob.closure.is_some() {
+                return false;
+            }
+            vm.classes
+                .get(&ob.class_name.to_ascii_lowercase())
+                .is_some_and(|c| {
+                    c.filename.is_some()
+                        && c.get_method(&m.to_ascii_lowercase()).is_some_and(|md| {
+                            md.visibility == goro_core::object::Visibility::Public
+                                && !md.is_abstract
+                        })
+                })
+        }
+        _ => false,
+    }
+}
+
 fn call_user_func_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.first().is_some_and(|cb| plain_callable(vm, cb)) {
+        return call_user_func(vm, args);
+    }
     if let Some(cb) = args.first() {
         let r = validate_callback_arg_check(vm, "call_user_func", cb)?;
         if r.trampoline.is_some() && vm.pending_named_args.is_empty() {
@@ -1646,6 +1727,11 @@ fn callable_with_this(cb: &Value, r: &goro_core::callable::CallableCheck) -> Opt
 }
 
 fn call_user_func_array_checked(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
+    if args.first().is_some_and(|cb| plain_callable(vm, cb))
+        && matches!(args.get(1), Some(Value::Array(_)))
+    {
+        return call_user_func_array(vm, args);
+    }
     if let Some(cb) = args.first() {
         let r = validate_callback_arg_check(vm, "call_user_func_array", cb)?;
         // Z_PARAM_ARRAY($args)
@@ -1977,8 +2063,17 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             class_lower.clone()
                         };
 
-                        if let Some(class) = vm.classes.get(&resolved_class_lower).cloned() {
-                            if let Some(method) = class.methods.get(&method_lower) {
+                        let found = vm.classes.get(&resolved_class_lower).map(|class| {
+                            (
+                                class.name.clone(),
+                                class.methods.get(&method_lower).cloned(),
+                                class
+                                    .get_method(b"__callstatic")
+                                    .map(|m| m.op_array.clone()),
+                            )
+                        });
+                        if let Some((class_name, class_method, call_static)) = found {
+                            if let Some(method) = class_method.as_ref() {
                                 // Check visibility
                                 let accessible = match method.visibility {
                                     goro_core::object::Visibility::Public => true,
@@ -2022,7 +2117,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                     }
                                     let display_fallback = format!(
                                         "{}::{}",
-                                        String::from_utf8_lossy(&class.name),
+                                        String::from_utf8_lossy(&class_name),
                                         String::from_utf8_lossy(&method.name)
                                     );
                                     let line = vm.current_line;
@@ -2035,7 +2130,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                     if is_forwarding {
                                         // Forward: keep current called_class
                                     } else {
-                                        vm.called_class_stack.push(class.name.clone());
+                                        vm.called_class_stack.push(class_name.clone());
                                     }
                                     vm.push_class_scope(declaring);
                                     let result = vm.execute_fn_with_named_args(
@@ -2050,8 +2145,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 // Method not accessible - fall through to __callStatic
                             }
                             // Method not found or not accessible - check for __callStatic magic method
-                            if let Some(call_static) = class.get_method(b"__callstatic") {
-                                let op = call_static.op_array.clone();
+                            if let Some(op) = call_static {
                                 let mut args_array = goro_core::array::PhpArray::new();
                                 for arg in &call_args {
                                     args_array.push(arg.clone());
@@ -2104,7 +2198,15 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             .map(|b| b.to_ascii_lowercase())
                             .collect();
                     }
-                    if let Some(class) = vm.classes.get(&class_lower).cloned() {
+                    // (what the call needs of the class: not a copy of all of it)
+                    let found = vm.classes.get(&class_lower).map(|class| {
+                        (
+                            class.name.clone(),
+                            class.methods.get(&method_lower).cloned(),
+                            class.get_method(b"__call").cloned(),
+                        )
+                    });
+                    if let Some((class_name, class_method, call_magic)) = found {
                         // A private method of the calling scope shadows the one
                         // a subclass redeclared (ZEND_ACC_CHANGED).
                         let shadow = vm
@@ -2121,9 +2223,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                     })
                                     .cloned()
                             });
-                        if let Some(method) =
-                            shadow.as_ref().or_else(|| class.methods.get(&method_lower))
-                        {
+                        if let Some(method) = shadow.as_ref().or(class_method.as_ref()) {
                             // Check visibility before executing
                             let accessible = match method.visibility {
                                 goro_core::object::Visibility::Public => true,
@@ -2161,7 +2261,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 }
                                 let display_fallback = format!(
                                     "{}::{}",
-                                    String::from_utf8_lossy(&class.name),
+                                    String::from_utf8_lossy(&class_name),
                                     String::from_utf8_lossy(&method.name)
                                 );
                                 let line = vm.current_line;
@@ -2175,7 +2275,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 // The method runs in its declaring class's scope,
                                 // with the object's class as the called class.
                                 let scope = if method.declaring_class.is_empty() {
-                                    class.name.to_ascii_lowercase()
+                                    class_name.to_ascii_lowercase()
                                 } else {
                                     method.declaring_class.to_ascii_lowercase()
                                 };
@@ -2190,7 +2290,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                             // Method exists but not accessible - fall through to __call
                         }
                         // Method not found or not accessible - check for __call magic method
-                        if let Some(call_method) = class.get_method(b"__call") {
+                        if let Some(call_method) = call_magic.as_ref() {
                             let op = call_method.op_array.clone();
                             // __call($name, $arguments) - pack call_args into an array for the second param
                             let mut args_array = goro_core::array::PhpArray::new();
@@ -2202,7 +2302,7 @@ fn call_user_func_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                                 Value::Array(std::rc::Rc::new(std::cell::RefCell::new(args_array))),
                             ];
                             let scope = if call_method.declaring_class.is_empty() {
-                                class.name.to_ascii_lowercase()
+                                class_name.to_ascii_lowercase()
                             } else {
                                 call_method.declaring_class.to_ascii_lowercase()
                             };

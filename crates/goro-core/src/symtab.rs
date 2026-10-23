@@ -75,7 +75,7 @@ impl SymTab {
     /// Current value of a variable (dereferenced), None when undefined.
     pub fn lookup(&self, name: &[u8]) -> Option<Value> {
         let g = self.arr.borrow();
-        match g.get(&gkey(name))? {
+        match g.get_name(name)? {
             Value::Reference(r) => {
                 let v = r.borrow().clone();
                 if matches!(v, Value::Undef) {
@@ -91,7 +91,7 @@ impl SymTab {
 
     pub fn exists(&self, name: &[u8]) -> bool {
         let g = self.arr.borrow();
-        match g.get(&gkey(name)) {
+        match g.get_name(name) {
             None | Some(Value::Undef) => false,
             Some(Value::Reference(r)) => !matches!(*r.borrow(), Value::Undef),
             Some(_) => true,
@@ -101,9 +101,8 @@ impl SymTab {
     /// The reference cell of a variable, creating it (as NULL) when missing
     /// (FETCH_W).  Returns the cell and whether the variable was undefined.
     pub fn cell(&self, name: &[u8]) -> (Cell, bool) {
-        let key = gkey(name);
         let mut g = self.arr.borrow_mut();
-        if let Some(slot) = g.get_mut(&key) {
+        if let Some(slot) = g.get_name_mut(name) {
             return match slot {
                 Value::Reference(r) => {
                     let undef = matches!(*r.borrow(), Value::Undef);
@@ -125,7 +124,7 @@ impl SymTab {
             };
         }
         let r = Rc::new(RefCell::new(Value::Null));
-        g.set(key, Value::Reference(r.clone()));
+        g.set(gkey(name), Value::Reference(r.clone()));
         drop(g);
         self.bump();
         (r, true)
@@ -315,7 +314,7 @@ impl Vm {
     /// Current value of a global (dereferenced), None when unset.
     pub fn global_lookup(&self, name: &[u8]) -> Option<Value> {
         let g = self.globals.borrow();
-        match g.get(&gkey(name))? {
+        match g.get_name(name)? {
             Value::Reference(r) => {
                 let v = r.borrow().clone();
                 if matches!(v, Value::Undef) {
@@ -432,7 +431,7 @@ impl Vm {
         strict: bool,
     ) -> Result<(), String> {
         if crate::vm::typed_ref::any() {
-            let cell = match tab.arr.borrow().get(&gkey(name)) {
+            let cell = match tab.arr.borrow().get_name(name) {
                 Some(Value::Reference(r)) => Some(r.clone()),
                 _ => None,
             };
@@ -596,9 +595,8 @@ impl Vm {
                 if skip_name(name, false) {
                     continue;
                 }
-                let key = gkey(name);
-                if g.get(&key).is_none() {
-                    g.set(key, Value::Undef);
+                if g.get_name(name).is_none() {
+                    g.set(gkey(name), Value::Undef);
                 }
             }
         }
@@ -627,9 +625,8 @@ impl Vm {
                 continue;
             }
             if let Some(name) = names.get(i) {
-                let key = gkey(name);
                 let mut g = fs.tab.arr.borrow_mut();
-                if let Some(e) = g.get_mut(&key) {
+                if let Some(e) = g.get_name_mut(name) {
                     if matches!(e, Value::Reference(r) if Rc::ptr_eq(r, &c)) {
                         *e = Value::Undef;
                     }
@@ -657,7 +654,7 @@ impl Vm {
             }
             let entry = {
                 let g = fs.tab.arr.borrow();
-                match g.get(&gkey(&names[i])) {
+                match g.get_name(&names[i]) {
                     None | Some(Value::Undef) => None,
                     Some(Value::Reference(r)) => Some(Some(r.clone())),
                     Some(_) => Some(None),

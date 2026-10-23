@@ -1149,13 +1149,13 @@ pub struct Vm {
     /// Registered built-in functions
     pub functions: crate::fxhash::FxHashMap<Vec<u8>, BuiltinFn>,
     /// Parameter names for built-in functions (lowercase fn name -> list of param names)
-    pub builtin_param_names: HashMap<Vec<u8>, Vec<Vec<u8>>>,
+    pub builtin_param_names: crate::fxhash::FxHashMap<Vec<u8>, Vec<Vec<u8>>>,
     /// User-defined functions (compiled op arrays)
     pub user_functions: crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>,
     /// Stack of pending function calls (supports nested calls)
     pub(crate) pending_calls: Vec<PendingCall>,
     /// Static variable storage (keyed by "funcname::varname")
-    pub(crate) static_vars: HashMap<Vec<u8>, Value>,
+    pub(crate) static_vars: crate::fxhash::FxHashMap<Vec<u8>, Value>,
     /// The global symbol table (also the value of `$GLOBALS`, see symtab.rs)
     pub(crate) globals: Rc<RefCell<PhpArray>>,
     /// Class table (preserves insertion order)
@@ -1175,7 +1175,8 @@ pub struct Vm {
     /// User-defined constants (from define())
     pub constants: crate::fxhash::FxIndexMap<Vec<u8>, Value>,
     /// Attributes attached to user-defined constants
-    pub constant_attributes: HashMap<Vec<u8>, Vec<crate::object::RuntimeAttribute>>,
+    pub constant_attributes:
+        crate::fxhash::FxHashMap<Vec<u8>, Vec<crate::object::RuntimeAttribute>>,
     /// Keys currently being evaluated for #[\Deprecated] — used to break
     /// self-referential cycles where a constant's deprecation message
     /// references the same constant (GH-17711).
@@ -1313,7 +1314,7 @@ pub struct Vm {
     next_bound_closure_id: u64,
     /// Closure function (lowercase) declared without `$this` -> its variant
     /// bound to a `$this` taken from the creating frame (closure_inherit_this).
-    pub(crate) closure_this_variants: HashMap<Vec<u8>, Vec<u8>>,
+    pub(crate) closure_this_variants: crate::fxhash::FxHashMap<Vec<u8>, Vec<u8>>,
     /// JSON last error code (0 = no error)
     pub json_last_error: i64,
     /// Object pointers currently being serialized by json_encode via jsonSerialize.
@@ -1357,7 +1358,7 @@ pub struct Vm {
     /// Current executing line number (updated during execution for warning/error reporting)
     pub current_line: u32,
     /// Cached enum case singleton objects: key = "classname_lower::CaseName"
-    pub enum_case_cache: HashMap<Vec<u8>, Value>,
+    pub enum_case_cache: crate::fxhash::FxHashMap<Vec<u8>, Value>,
     /// Whether a fiber is currently suspended (set by Fiber::suspend())
     pub fiber_suspended: bool,
     /// The value passed to Fiber::suspend()
@@ -1429,7 +1430,7 @@ pub struct Vm {
     pub(crate) gen_call_this: Option<Value>,
     /// File each userland global constant was defined in (define() and
     /// `const`), keyed like `constants`.
-    pub constant_files: HashMap<Vec<u8>, String>,
+    pub constant_files: crate::fxhash::FxHashMap<Vec<u8>, String>,
     /// PG(open_basedir) once ini_set() tightened it: the entries resolved
     /// (the INI value keeps the string as set).
     pub open_basedir_resolved: Option<String>,
@@ -1533,7 +1534,7 @@ pub struct Vm {
     /// Set of loaded extension names (for extension_loaded() and PHPT EXTENSIONS section)
     pub loaded_extensions: std::collections::HashSet<Vec<u8>>,
     /// Parameter types for built-in functions (for strict_types enforcement)
-    pub builtin_param_types: HashMap<Vec<u8>, Vec<Option<ParamType>>>,
+    pub builtin_param_types: crate::fxhash::FxHashMap<Vec<u8>, Vec<Option<ParamType>>>,
     /// Builtins that emit their own null/float-to-int deprecations (the generic
     /// call-site check skips those notices for them to avoid duplicates).
     pub builtin_self_coercing: std::collections::HashSet<Vec<u8>>,
@@ -1547,7 +1548,7 @@ pub struct Vm {
     /// Builtins of extensions whose stub arginfo matches their zpp (the
     /// counterpart of arginfo_verified.rs for extensions not covered by it):
     /// lowercase name -> CHECK_* flags. Set at registration.
-    pub zpp_extension_verified: HashMap<Vec<u8>, u8>,
+    pub zpp_extension_verified: crate::fxhash::FxHashMap<Vec<u8>, u8>,
     /// Observer API hooks (zend_observer_fcall_register()), if an extension
     /// installed them: one check per call when there are none.
     pub observer: Option<ObserverHooks>,
@@ -1632,14 +1633,14 @@ pub struct Vm {
     /// are sent.
     pub header_callback: Option<Value>,
     /// Constants registered by extensions with CONST_DEPRECATED: name -> message.
-    pub internal_deprecated_constants: HashMap<Vec<u8>, String>,
+    pub internal_deprecated_constants: crate::fxhash::FxHashMap<Vec<u8>, String>,
     /// Classes (lowercase) registered by extensions whose objects cannot
     /// be cloned (clone_obj = NULL), subclasses included.
     pub uncloneable_classes: Vec<Vec<u8>>,
     /// Declarations of builtins carrying what their stub declares besides
     /// arginfo (attributes, parameter attributes, an exposed doc comment),
     /// for Reflection: lowercase name -> declaration.
-    pub internal_function_decls: HashMap<Vec<u8>, Rc<OpArray>>,
+    pub internal_function_decls: crate::fxhash::FxHashMap<Vec<u8>, Rc<OpArray>>,
     /// Constants extensions register, in registration order, by module
     /// (lowercase name): ReflectionExtension::getConstants(),
     /// get_defined_constants(true).
@@ -1689,7 +1690,7 @@ pub struct Vm {
     /// read already converted: (op array, op index).
     pub rw_dim_set: Option<(usize, usize)>,
     /// Class alias mappings: alias_lower -> original_lower (from class_alias())
-    pub class_aliases: HashMap<Vec<u8>, Vec<u8>>,
+    pub class_aliases: crate::fxhash::FxHashMap<Vec<u8>, Vec<u8>>,
     /// Set of disabled function names (lowercase) from the disable_functions ini
     /// directive. Used by SPL method dispatchers (ArrayObject::ksort, etc.) to
     /// throw the "Cannot call method X when function X is disabled" error.
@@ -1752,10 +1753,10 @@ impl Vm {
             str_wb_ref_ctx: false,
             uncaught_severity: None,
             functions: Default::default(),
-            builtin_param_names: HashMap::new(),
+            builtin_param_names: Default::default(),
             user_functions: Default::default(),
             pending_calls: Vec::new(),
-            static_vars: HashMap::new(),
+            static_vars: Default::default(),
             globals: Rc::new(RefCell::new({
                 // EG(symbol_table) is preallocated by the engine.
                 let mut t = PhpArray::new();
@@ -1770,7 +1771,7 @@ impl Vm {
             pending_classes: Rc::new(Vec::new()),
             is_global_scope: true,
             current_exception: None,
-            constant_attributes: HashMap::new(),
+            constant_attributes: Default::default(),
             deprecation_in_progress: std::collections::HashSet::new(),
             error_reporting: 30719, // E_ALL
             exception_string_param_max_len: 15,
@@ -1821,7 +1822,7 @@ impl Vm {
             exception_handler: None,
             exception_handler_stack: Vec::new(),
             next_bound_closure_id: 0,
-            closure_this_variants: HashMap::new(),
+            closure_this_variants: Default::default(),
             json_last_error: 0,
             json_encoding_objects: std::collections::HashSet::new(),
             preg_last_error: 0,
@@ -1836,7 +1837,7 @@ impl Vm {
             dim_rw_key: None,
             dim_rw_abort: None,
             current_line: 0,
-            enum_case_cache: HashMap::new(),
+            enum_case_cache: Default::default(),
             fiber_suspended: false,
             fiber_suspend_value: Value::Null,
             fiber_resume_value: Value::Null,
@@ -1865,7 +1866,7 @@ impl Vm {
             ini_originals: HashMap::new(),
             autoload_functions: Vec::new(),
             gen_call_this: None,
-            constant_files: HashMap::new(),
+            constant_files: Default::default(),
             open_basedir_resolved: None,
             user_constant_names: Vec::new(),
             forbid_dynamic_call_methods: Vec::new(),
@@ -2847,7 +2848,7 @@ impl Vm {
                 }
                 s
             },
-            builtin_param_types: HashMap::new(),
+            builtin_param_types: Default::default(),
             builtin_self_coercing: std::collections::HashSet::new(),
             builtin_named_skipped: Vec::new(),
             zpp_map: Default::default(),
@@ -2882,9 +2883,9 @@ impl Vm {
             headers_sent: false,
             header_callback: None,
             rfc1867_callback: None,
-            internal_deprecated_constants: HashMap::new(),
+            internal_deprecated_constants: Default::default(),
             uncloneable_classes: Vec::new(),
-            internal_function_decls: HashMap::new(),
+            internal_function_decls: Default::default(),
             module_constants: Vec::new(),
             output_start: None,
             include_stream_hook: None,
@@ -2903,7 +2904,7 @@ impl Vm {
             sensitive_cache: std::cell::Cell::new((usize::MAX, 0, false)),
             weak_map_entries: HashMap::new(),
             rw_dim_set: None,
-            class_aliases: HashMap::new(),
+            class_aliases: Default::default(),
             disabled_functions: std::collections::HashSet::new(),
             anon_pending: HashMap::new(),
             declaring_anon: false,
@@ -9186,6 +9187,16 @@ impl Vm {
     ///
     /// Returns true if initialization happened.
     pub fn maybe_run_lazy_init(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
+        // (most objects are not lazy: no `__lazy_state` slot)
+        if !obj
+            .borrow()
+            .properties
+            .iter()
+            .find(|(k, _)| k.as_slice() == b"__lazy_state")
+            .is_some_and(|(_, v)| matches!(v.deref(), Value::String(_)))
+        {
+            return false;
+        }
         let (state, initializer, already_real, class_name, object_id) = {
             let ob = obj.borrow();
             let s = ob.get_property(b"__lazy_state");
@@ -10832,7 +10843,7 @@ impl Vm {
         cell
     }
 
-    pub fn static_vars(&self) -> &HashMap<Vec<u8>, Value> {
+    pub fn static_vars(&self) -> &crate::fxhash::FxHashMap<Vec<u8>, Value> {
         &self.static_vars
     }
 
@@ -18328,6 +18339,11 @@ impl Vm {
         op_array: &OpArray,
         cvs: Vec<Value>,
     ) -> Result<Value, VmError> {
+        // (what execute_op_array() does for such a call when the stack has
+        // room, without its layers: one frame less on every PHP call)
+        if self.stack_configured && self.builtin_frames_synced() && crate::stack::has_room() {
+            return self.execute_op_array_frame(op_array, cvs);
+        }
         self.vm_call = true;
         self.execute_op_array(op_array, cvs)
     }
@@ -27195,13 +27211,23 @@ impl Vm {
                             }
                         }
                         // By-value array parameters get their own copy so writes in
-                        // the callee don't leak into the caller's array.
+                        // the callee don't leak into the caller's array. (An
+                        // argument's array held only by the call — its
+                        // argument list and its backtrace frame — is a
+                        // temporary nothing else sees: the parameter takes it.)
+                        let plain_args = user_fn.variadic_param.is_none() || captures.is_some();
+                        let nargs = call.args.len();
                         for (ci, slot) in func_cvs.iter_mut().enumerate() {
                             if user_fn.by_ref_params.get(ci).copied().unwrap_or(false) {
                                 continue;
                             }
                             if let Value::Array(a) = slot {
-                                if Rc::strong_count(a) > 1 {
+                                let held = if plain_args && ci >= skip && ci < bound.min(nargs) {
+                                    3
+                                } else {
+                                    1
+                                };
+                                if Rc::strong_count(a) > held {
                                     let copy = a.borrow().clone();
                                     *slot = Value::Array(Rc::new(RefCell::new(copy)));
                                 }
@@ -43299,7 +43325,7 @@ impl Vm {
                                             Some(prefixed(&name))
                                         } else if name != b"this"
                                             && (matches!(
-                                                tab.arr.borrow().get(&crate::symtab::gkey(&name)),
+                                                tab.arr.borrow().get_name(&name),
                                                 Some(Value::Undef)
                                             ) || op_array.cv_names.iter().any(|c| {
                                                 c.as_slice() == name.as_slice()
@@ -45110,7 +45136,7 @@ impl Vm {
                             .tab
                             .arr
                             .borrow()
-                            .get(&crate::symtab::gkey(&name))
+                            .get_name(&name)
                             .is_some(),
                         None => Self::varvar_cv_lookup(&cvs, &op_array.cv_names, &name).is_some(),
                     };

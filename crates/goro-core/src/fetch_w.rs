@@ -467,6 +467,16 @@ impl Vm {
         call: &crate::vm::PendingCall,
         arg_index: usize,
     ) -> bool {
+        // (the arginfo the call target resolved when the call was set up)
+        if call.target.fn_gen == self.user_functions.len() + 1 && call.target.user.is_none() {
+            if let Some((_, Some((fi, _)))) = &call.target.builtin {
+                let p = fi
+                    .params
+                    .get(arg_index)
+                    .or_else(|| fi.params.last().filter(|p| p.variadic));
+                return p.is_some_and(|p| p.by_ref == 1);
+            }
+        }
         let Some(lower) = self.pending_builtin_name(call) else {
             return false;
         };

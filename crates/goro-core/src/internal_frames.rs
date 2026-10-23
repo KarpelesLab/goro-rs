@@ -226,6 +226,12 @@ impl Vm {
         None
     }
 
+    /// Whether sync_builtin_frames() has nothing to do.
+    #[inline]
+    pub(crate) fn builtin_frames_synced(&self) -> bool {
+        !self.builtin_frames.last().is_some_and(|f| !f.materialized)
+    }
+
     /// Materialize pending builtin frames if there are any (cheap check).
     #[inline]
     pub fn sync_builtin_frames(&mut self) {

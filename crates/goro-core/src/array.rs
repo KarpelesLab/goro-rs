@@ -638,6 +638,25 @@ impl PhpArray {
         self.find_str(key).map(|p| &self.entries[p].1)
     }
 
+    /// Get a value by a variable name used as a key (a numeric name is an
+    /// integer key, as symtab::gkey() makes it), without building the key.
+    pub fn get_name(&self, name: &[u8]) -> Option<&Value> {
+        match crate::fastpath::canonical_int_key(name) {
+            Some(n) => self.get_int(n),
+            None => self.get_str(name),
+        }
+    }
+
+    /// get_mut() by a variable name (see get_name()).
+    pub fn get_name_mut(&mut self, name: &[u8]) -> Option<&mut Value> {
+        self.separate();
+        let p = match crate::fastpath::canonical_int_key(name) {
+            Some(n) => self.find_int(n),
+            None => self.find_str(name),
+        }?;
+        Some(&mut self.entries[p].1)
+    }
+
     /// Get a value by ArrayKey
     pub fn get(&self, key: &ArrayKey) -> Option<&Value> {
         match key {

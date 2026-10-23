@@ -203,6 +203,13 @@ pub fn leave_compile() {
 #[derive(Debug)]
 pub struct Exhausted;
 
+/// Whether the current stack segment has the room a call needs (with_room()
+/// then runs it in place).
+#[inline]
+pub fn has_room() -> bool {
+    sp().saturating_sub(current_limit()) >= RED_ZONE
+}
+
 /// Run `f`, on a fresh stack segment if the current one is nearly used up.
 #[inline]
 pub fn with_room<R>(f: impl FnOnce() -> R) -> Result<R, Exhausted> {

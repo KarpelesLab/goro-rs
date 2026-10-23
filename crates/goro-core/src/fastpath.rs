@@ -874,10 +874,29 @@ impl crate::vm::Vm {
                 // A non-variable argument of a user function's by-value
                 // parameter (SEND_VAL_EX / SEND_VAR_NO_REF_EX): sent as is.
                 OpCode::SendValChecked => {
-                    let user_target = self.pending_calls.last().is_some_and(|c| {
-                        c.target.user.is_some() && c.target.fn_gen == self.user_functions.len() + 1
+                    // (or of an internal function's by-value parameter, for
+                    // a value that is not an array: the general handler may
+                    // separate one passed to an `array &$array`)
+                    let fn_gen = self.user_functions.len() + 1;
+                    let by_value_target = self.pending_calls.last().is_some_and(|c| {
+                        c.target.fn_gen == fn_gen
+                            && match (&c.target.user, &c.target.builtin) {
+                                (Some(_), _) => true,
+                                (None, Some((_, Some((fi, _))))) => {
+                                    let idx = c.args.len();
+                                    fi.params
+                                        .get(idx)
+                                        .or_else(|| fi.params.last().filter(|p| p.variadic))
+                                        .is_none_or(|p| p.by_ref == 0)
+                                        && !matches!(
+                                            defined_operand(&op.op1, cvs, tmps, literals),
+                                            Some(Value::Array(_)) | None
+                                        )
+                                }
+                                _ => false,
+                            }
                     });
-                    if user_target && self.send_val_fast(op, cvs, tmps, literals) {
+                    if by_value_target && self.send_val_fast(op, cvs, tmps, literals) {
                         Fast::Done
                     } else {
                         break 'run ip;

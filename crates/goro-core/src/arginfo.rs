@@ -282,7 +282,7 @@ pub fn type_display(t: &str) -> String {
 
 /// Arginfo of the internal function `lname` (lowercase), from its stub.
 pub fn lookup(lname: &[u8]) -> Option<&'static FuncInfo> {
-    static MAP: std::sync::OnceLock<std::collections::HashMap<&'static str, FuncInfo>> =
+    static MAP: std::sync::OnceLock<crate::fxhash::FxHashMap<&'static str, FuncInfo>> =
         std::sync::OnceLock::new();
     let map = MAP.get_or_init(|| {
         crate::stub_sigs::FUNCTIONS
