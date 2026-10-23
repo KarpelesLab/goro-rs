@@ -14,6 +14,8 @@ use crate::value::Value;
 
 #[path = "fastcall.rs"]
 mod fastcall;
+#[path = "leancall.rs"]
+mod leancall;
 pub(crate) use fastcall::MethodSite;
 #[path = "internal_static.rs"]
 pub mod internal_static;
@@ -1366,6 +1368,17 @@ pub struct Vm {
     /// for, about to be run (see register_cv_frame()); taken by the next
     /// execute_op_array_frame().
     pub(crate) cv_frame_hint: *const OpArray,
+    /// Lean calls (see leancall.rs) handed over to the DO_FCALLs that made
+    /// them, innermost last.
+    lean_resume: Vec<leancall::LeanResume>,
+    /// What the next execute_op_array_inner() starts a resumed lean call's
+    /// frame with (set by DO_FCALL right before the call).
+    resume_frame: Option<leancall::ResumeFrame>,
+    /// The variables and frame start of the lean call DO_FCALL is resuming
+    /// (see Vm::resume_lean_call), until its frame is set up.
+    lean_resumed: Option<(Vec<Value>, leancall::ResumeFrame)>,
+    /// Lean calls running (their callees' opcodes in run_fast_ops()).
+    lean_depth: u32,
     /// Emptied buffers of finished calls (locals, temporaries, backtrace
     /// frames), reused by the next ones.
     value_pool: Vec<Vec<Value>>,
@@ -1937,6 +1950,10 @@ impl Vm {
             fast_fcall_captures: None,
             fast_fcall_forward: false,
             cv_frame_hint: std::ptr::null(),
+            lean_resume: Vec::new(),
+            resume_frame: None,
+            lean_resumed: None,
+            lean_depth: 0,
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),
             bytes_pool: Vec::new(),
@@ -18930,6 +18947,7 @@ impl Vm {
             if let Err(size) = crate::stack::enter_reentry() {
                 self.bind_next_frame = false;
                 self.bind_next_tab = None;
+                self.resume_frame = None;
                 return Err(self.stack_size_error(size));
             }
         }
@@ -18946,6 +18964,7 @@ impl Vm {
             Err(crate::stack::Exhausted) => {
                 self.bind_next_frame = false;
                 self.bind_next_tab = None;
+                self.resume_frame = None;
                 Err(self.stack_exhausted_error(vm_call))
             }
         }
@@ -19816,6 +19835,8 @@ impl Vm {
         }
     }
 
+    // (inlined in DO_FCALL's fast path, and in lean calls of methods)
+    #[inline(always)]
     fn push_fast_method_scopes(
         &mut self,
         call: &PendingCall,
@@ -20935,6 +20956,7 @@ impl Vm {
             Err(_) => {
                 self.bind_next_frame = false;
                 self.bind_next_tab = None;
+                self.resume_frame = None;
                 return Err(self.memory_limit_fatal());
             }
         };
@@ -21311,8 +21333,21 @@ impl Vm {
         mut cvs: Vec<Value>,
         cv_frame: bool,
     ) -> Result<Value, VmError> {
-        let temp_count = op_array.temp_count as usize;
-        let mut tmps: Vec<Value> = self.take_values(temp_count);
+        // (a resumed lean call's frame starts with what the call left)
+        let (mut tmps, mut fe, start) = match self.resume_frame.take() {
+            Some(r) => (r.tmps, r.fe, r.ip),
+            None => {
+                let temp_count = op_array.temp_count as usize;
+                let tmps: Vec<Value> = self.take_values(temp_count);
+                // (boxed, from the states of finished frames: kept off the
+                // native stack, and empty)
+                let fe = match self.foreach_pool.pop() {
+                    Some(fe) => fe,
+                    None => new_foreach_state(),
+                };
+                (tmps, fe, 0)
+            }
+        };
         let mut fin = Vec::new();
         let saved_file = self.enter_op_array_file(op_array);
         let has_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this");
@@ -21324,12 +21359,6 @@ impl Vm {
         };
         // The frame's symbol table, if it gets one.
         let mut sym = None;
-        // (boxed, from the states of finished frames: kept off the native
-        // stack, and empty)
-        let mut fe = match self.foreach_pool.pop() {
-            Some(fe) => fe,
-            None => new_foreach_state(),
-        };
         // (the argument list its caller keeps, see gc_call_args)
         let args = std::mem::replace(&mut self.gc_call_args, std::ptr::null());
         self.gc_frames.push(crate::gc::GcFrame::new(
@@ -21337,7 +21366,7 @@ impl Vm {
         ));
         let calls_base = self.pending_calls.len();
         let r = self.execute_frame(
-            op_array, &mut cvs, &mut tmps, None, cv_frame, &mut fin, &mut sym, &mut fe,
+            op_array, &mut cvs, &mut tmps, None, start, cv_frame, &mut fin, &mut sym, &mut fe,
         );
         // VERIFY_RETURN_TYPE runs in the function, before its frame is left.
         // (exit() unwinds the frame: nothing was returned)
@@ -21407,6 +21436,7 @@ impl Vm {
             cvs,
             tmps,
             Some(ip),
+            0,
             false,
             &mut Vec::new(),
             sym,
@@ -21440,6 +21470,8 @@ impl Vm {
         cvs: &mut Vec<Value>,
         tmps: &mut Vec<Value>,
         single_step: Option<usize>,
+        // The opcode to start at (a resumed lean call's).
+        start: usize,
         cv_frame: bool,
         // Running finally blocks: (exception handler depth at entry, the
         // exception that led into it).
@@ -21449,7 +21481,7 @@ impl Vm {
         // frame across single steps).
         fe: &mut ForeachState,
     ) -> Result<Value, VmError> {
-        let mut ip: usize = single_step.unwrap_or(0);
+        let mut ip: usize = single_step.unwrap_or(start);
         // call_stack depth of the frame's callees (relative to the running
         // fiber's bottom): an exception caught here drops the frames of the
         // calls it left.
@@ -21727,6 +21759,13 @@ impl Vm {
                     );
                     if next != ip {
                         ip = next;
+                        // (a lean call handed over to the DO_FCALL the run
+                        // stopped at: nothing runs before it takes it)
+                        if !self.lean_resume.is_empty() {
+                            if track {
+                                prev_op = Some(ip);
+                            }
+                        } else
                         // The opcode the run stopped at takes the general
                         // path at once: a run of fast opcodes sets none of
                         // the states checked above (exit, bailout, a
@@ -27852,7 +27891,12 @@ impl Vm {
                 // A plain call of a user function or method (see
                 // fast_fcall_target): the general handler below, without its
                 // special cases.
-                OpCode::DoFCall if self.fast_fcall_target() => {
+                // (or a lean call this DO_FCALL made, stopped in its callee:
+                // see leancall.rs)
+                OpCode::DoFCall
+                    if (!self.lean_resume.is_empty() && self.resume_lean_call(op_array, ip - 1))
+                        || self.fast_fcall_target() =>
+                {
                     match outlined(|| -> Result<Flow, VmError> {
                         let user_fn = self.fast_fcall_fn.take().expect("fast call target");
                         // Instance method: where "::" is in the name
@@ -27961,7 +28005,15 @@ impl Vm {
                             if let Some(v) = self.value_pool.pop() {
                                 fill_empty(&mut frame.3, v);
                             }
-                            frame.3.extend_from_slice(&call.args[skip..]);
+                            match &self.lean_resumed {
+                                // (a resumed lean call's arguments moved to
+                                // the parameters: what they hold now, as
+                                // backtraces show them)
+                                Some((cvs, _)) => {
+                                    frame.3.extend_from_slice(&cvs[skip..call.args.len()])
+                                }
+                                None => frame.3.extend_from_slice(&call.args[skip..]),
+                            }
                         }
                         // Check parameter types before executing
                         // (untyped parameters: nothing to check or coerce)
@@ -28058,9 +28110,19 @@ impl Vm {
                                 closure_called = true;
                             }
                         }
-                        let mut func_cvs = self.take_values(user_fn.cv_names.len());
+                        let mut func_cvs;
+                        let bound;
+                        if let Some((cvs, frame)) = self.lean_resumed.take() {
+                            // (the lean call moved the arguments; its frame
+                            // starts with what it left, see resume_frame: no
+                            // frame runs before the call's)
+                            func_cvs = cvs;
+                            bound = arg_cv_bound(&user_fn, func_cvs.len());
+                            self.resume_frame = Some(frame);
+                        } else {
+                        func_cvs = self.take_values(user_fn.cv_names.len());
                         // Extra arguments are only reachable through func_get_args().
-                        let bound = arg_cv_bound(&user_fn, func_cvs.len());
+                        bound = arg_cv_bound(&user_fn, func_cvs.len());
                         // The parameters move to the callee's CVs (which then
                         // release them in declaration order); `$this` stays,
                         // and so do the extra arguments a variadic parameter
@@ -28106,6 +28168,7 @@ impl Vm {
                                     *slot = Value::Array(Rc::new(RefCell::new(copy)));
                                 }
                             }
+                        }
                         }
                         let mut saved_pending_return = self.pending_return.take();
                         let saved_pending_jump = self.pending_finally_jump.take();

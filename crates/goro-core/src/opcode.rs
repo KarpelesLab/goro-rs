@@ -575,6 +575,19 @@ pub struct OpArray {
     cv_info: std::cell::OnceCell<CvNameInfo>,
     /// See OpArray::free_mask().
     free_mask: std::cell::OnceCell<FreeInfo>,
+    /// See OpArray::lean_kind().
+    lean_kind: FreshOnClone<u8>,
+}
+
+/// A value an OpArray computes from itself on first use, which a copy of
+/// it computes again (a copy is made to be changed: Rc::make_mut()).
+#[derive(Debug, Default)]
+pub(crate) struct FreshOnClone<T>(std::cell::OnceCell<T>);
+
+impl<T> Clone for FreshOnClone<T> {
+    fn clone(&self) -> Self {
+        FreshOnClone(std::cell::OnceCell::new())
+    }
 }
 
 /// The variables a frame binds as it starts: `$GLOBALS` and the auto
@@ -583,6 +596,12 @@ pub struct OpArray {
 pub(crate) struct CvNameInfo {
     pub(crate) globals: Option<u32>,
     pub(crate) auto_globals: Box<[u32]>,
+    /// No variable is `$GLOBALS` or an auto-global, nor `$this` but the
+    /// first (a frame needs none of them set up: see vm::leancall).
+    pub(crate) plain_cvs: bool,
+    /// How often lately a call of the function ran to its end without a
+    /// frame of its own (see vm::leancall): below 0, calls stop trying.
+    pub(crate) lean_score: std::cell::Cell<i16>,
 }
 
 thread_local! {
@@ -646,6 +665,34 @@ impl Default for SiteCaches {
 }
 
 impl OpArray {
+    /// Whether calls of this code may run without a frame of their own (see
+    /// vm::leancall): 1 for a function, 2 for an instance method (its first
+    /// variable is `$this`), 0 when its frame has to check or set up
+    /// something (typed parameters, a return type, a by-reference return, a
+    /// generator, variadics, attributes, static variables, `$GLOBALS` or
+    /// auto-globals, internal code, a closure).
+    #[inline]
+    pub(crate) fn lean_kind(&self) -> u8 {
+        *self.lean_kind.0.get_or_init(|| {
+            let plain = self.return_type.is_none()
+                && !self.returns_by_ref
+                && !self.is_generator
+                && self.variadic_param.is_none()
+                && self.attributes.is_empty()
+                && self.internal_sig.is_none()
+                && self.static_defaults.is_none()
+                && !self.name.is_empty()
+                && self.param_types.iter().all(|t| t.is_none())
+                && !crate::closure::is_closure_fn_name(&self.name)
+                && self.cv_name_info().plain_cvs;
+            match (plain, self.cv_names.first().map(|n| n.as_slice())) {
+                (false, _) => 0,
+                (true, Some(b"this")) => 2,
+                (true, _) => 1,
+            }
+        })
+    }
+
     /// Which of the CVs are `$GLOBALS` and the auto globals (`cv_names`
     /// is complete once the code runs).
     #[inline]
@@ -677,6 +724,12 @@ impl OpArray {
             auto_globals: (0..self.cv_names.len() as u32)
                 .filter(|&i| crate::vm::is_auto_global_name(&self.cv_names[i as usize]))
                 .collect(),
+            plain_cvs: !self.cv_names.iter().enumerate().any(|(i, n)| {
+                (i > 0 && n.as_slice() == b"this")
+                    || n.as_slice() == b"GLOBALS"
+                    || crate::vm::is_auto_global_name(n)
+            }),
+            lean_score: std::cell::Cell::new(0),
         })
     }
 
@@ -763,6 +816,7 @@ impl OpArray {
     /// `cv_names` was edited (see cv_name_info()).
     pub(crate) fn cv_names_changed(&mut self) {
         self.cv_info.take();
+        self.lean_kind = FreshOnClone::default();
     }
 
     /// What this code's call sites found in the current request.
@@ -836,6 +890,7 @@ impl OpArray {
             sites: Default::default(),
             cv_info: Default::default(),
             free_mask: Default::default(),
+            lean_kind: Default::default(),
         }
     }
 

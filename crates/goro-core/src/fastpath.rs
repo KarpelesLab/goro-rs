@@ -1260,7 +1260,15 @@ impl crate::vm::Vm {
                     };
                     match special {
                         Some(next) => Fast::Jump(next),
-                        None if self.init_fcall_fast(op_array, ip, cvs) => Fast::Done,
+                        None if self.init_fcall_fast(op_array, ip, cvs) => {
+                            // (a plain user function called with plain
+                            // arguments: the whole call, see leancall.rs)
+                            let lean = no_release && self.lean_candidate();
+                            match lean.then(|| self.lean_fused(op_array, ip, cvs, tmps)) {
+                                Some(Some(next)) => Fast::Jump(next),
+                                _ => Fast::Done,
+                            }
+                        }
                         None => break 'run ip,
                     }
                 }
@@ -1459,7 +1467,13 @@ impl crate::vm::Vm {
                     if matches!(op.op2, OperandType::Const(_))
                         && self.init_method_call_fast(op_array, ip, cvs, tmps)
                     {
-                        Fast::Done
+                        // (with plain arguments: the whole call, see
+                        // leancall.rs)
+                        let lean = no_release && self.lean_candidate();
+                        match lean.then(|| self.lean_fused(op_array, ip, cvs, tmps)) {
+                            Some(Some(next)) => Fast::Jump(next),
+                            _ => Fast::Done,
+                        }
                     } else {
                         break 'run ip;
                     }
@@ -1473,6 +1487,18 @@ impl crate::vm::Vm {
                 },
                 // (a frame bound to a symbol table rebinds itself: the general handler)
                 OpCode::BindGlobal if bound.is_none() => self.fast_bind_global(op, cvs, literals),
+                // A call of a plain user function: its callee's opcodes run
+                // here too, without a frame (see leancall.rs).
+                OpCode::DoFCall => {
+                    if !(no_release && self.lean_candidate()) {
+                        return ip;
+                    }
+                    if self.lean_call(op_array, ip, tmps) {
+                        Fast::Done
+                    } else {
+                        break 'run ip;
+                    }
+                }
                 // (whether the next argument of the call is sent by reference)
                 OpCode::JmpIfArgByRef => match (self.fast_arg_by_ref(op), op.op1) {
                     (Some(true), OperandType::JmpTarget(t)) => Fast::Jump(t as usize),
