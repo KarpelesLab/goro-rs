@@ -10,13 +10,14 @@
 //! Hidden state:
 //!   __spl_dit        dual iterator type (set by the constructor)
 //!   __spl_inner      inner iterator (Object or Generator)
+//!   __spl_inner_h    the handle of the inner zend_object_iterator
 //!   __spl_has_cur / __spl_cur_data / __spl_cur_key / __spl_pos
 //!   __spl_limit_offset / __spl_limit_count
 //!   __spl_cit_flags / __spl_cache / __spl_cit_str / __spl_cit_children
 //!   __spl_append_it  (ArrayIterator of appended iterators)
 //!   __spl_regex_pattern / __spl_regex_mode / __spl_regex_flags / __spl_regex_preg_flags
 //!   __spl_callback
-//!   __spl_rii_its / __spl_rii_st / __spl_rii_mode / __spl_rii_flags /
+//!   __spl_rii_its / __spl_rii_st / __spl_rii_hs (sub-iterator handles) / __spl_rii_mode / __spl_rii_flags /
 //!   __spl_rii_maxd / __spl_rii_initer / __spl_rii_hooks
 //!   __spl_rti_prefix / __spl_rti_postfix
 
@@ -694,6 +695,7 @@ impl Vm {
     fn append_next_iterator(&mut self, obj: &Rc<RefCell<PhpObject>>) -> bool {
         Self::dit_free(obj);
         set_prop(obj, b"__spl_inner", Value::Null);
+        set_prop(obj, b"__spl_inner_h", Value::Null);
         let ai = Self::append_it(obj);
         if self.it_valid(&ai) {
             let it = self.it_current(&ai);
@@ -705,6 +707,8 @@ impl Vm {
                 }
             }
             set_prop(obj, b"__spl_inner", it);
+            let h = self.spl_it_handle();
+            set_prop(obj, b"__spl_inner_h", h);
             self.dit_rewind(obj);
             true
         } else {
@@ -811,6 +815,9 @@ impl Vm {
                 ob.set_property_slice(b"__spl_flags", Value::Long(0));
             }
             set_prop(obj, b"__spl_append_it", Value::Object(ai));
+            // u.append.iterator = ArrayIterator's get_iterator()
+            let h = self.spl_it_handle();
+            set_prop(obj, b"__spl_append_h", h);
             set_prop(obj, b"__spl_dit", Value::Long(DIT_APPEND));
             set_prop(obj, b"__spl_pos", Value::Long(0));
             Self::dit_free(obj);
@@ -1032,6 +1039,9 @@ impl Vm {
             }
             _ => {}
         }
+        // inner.iterator = inner.ce->get_iterator()
+        let h = self.spl_it_handle();
+        set_prop(obj, b"__spl_inner_h", h);
         set_prop(obj, b"__spl_inner", inner);
         set_prop(obj, b"__spl_dit", Value::Long(dit));
         set_prop(obj, b"__spl_pos", Value::Long(0));
@@ -1717,6 +1727,17 @@ impl Vm {
     // RecursiveIteratorIterator / RecursiveTreeIterator
     // ------------------------------------------------------------------
 
+    /// zend_iterator_init(): the zend_object_iterator an SPL iterator gets
+    /// from its inner object's get_iterator() is in the objects store too,
+    /// and holds an object handle while it lives.
+    fn spl_it_handle(&mut self) -> Value {
+        let id = self.alloc_object_id();
+        Value::Object(Rc::new(RefCell::new(PhpObject::new(
+            b"\0iterator".to_vec(),
+            id,
+        ))))
+    }
+
     fn rii_its(obj: &Rc<RefCell<PhpObject>>) -> Option<Rc<RefCell<PhpArray>>> {
         match prop(obj, b"__spl_rii_its") {
             Value::Array(a) => Some(a),
@@ -1752,25 +1773,42 @@ impl Vm {
         }
     }
 
-    fn rii_push(obj: &Rc<RefCell<PhpObject>>, it: Value) {
+    fn rii_push(&mut self, obj: &Rc<RefCell<PhpObject>>, it: Value) {
         let lvl = Self::rii_level(obj) + 1;
+        // sub_iter = ce->get_iterator(): it takes a handle before the
+        // child is stored
+        let h = self.spl_it_handle();
+        if let Value::Array(a) = prop(obj, b"__spl_rii_hs") {
+            a.borrow_mut().set(ArrayKey::Int(lvl), h);
+        }
         if let Some(a) = Self::rii_its(obj) {
             a.borrow_mut().set(ArrayKey::Int(lvl), it);
         }
         Self::rii_set_state(obj, lvl, RS_START);
     }
 
-    fn rii_pop(obj: &Rc<RefCell<PhpObject>>) {
+    /// Drop the top sub-iterator. With `iter_first` (rewind), its iterator
+    /// goes first, then the child object; otherwise the child's iterator
+    /// handle is returned, to be dropped once the child is released.
+    fn rii_pop(obj: &Rc<RefCell<PhpObject>>, iter_first: bool) -> Option<Value> {
         let lvl = Self::rii_level(obj);
         if lvl <= 0 {
-            return;
+            return None;
         }
-        if let Some(a) = Self::rii_its(obj) {
-            a.borrow_mut().remove(&ArrayKey::Int(lvl));
+        let take_h = || match prop(obj, b"__spl_rii_hs") {
+            Value::Array(a) => a.borrow_mut().remove(&ArrayKey::Int(lvl)),
+            _ => None,
+        };
+        if iter_first {
+            drop(take_h());
         }
+        let child = Self::rii_its(obj).and_then(|a| a.borrow_mut().remove(&ArrayKey::Int(lvl)));
+        drop(child);
+        let h = take_h();
         if let Value::Array(a) = prop(obj, b"__spl_rii_st") {
             a.borrow_mut().remove(&ArrayKey::Int(lvl));
         }
+        h
     }
 
     fn rii_hook(obj: &Rc<RefCell<PhpObject>>, h: i64) -> bool {
@@ -1885,11 +1923,15 @@ impl Vm {
                 hooks |= bit;
             }
         }
+        // iterators[0].iterator = ce_iterator->get_iterator()
+        let mut hs = PhpArray::new();
+        hs.set(ArrayKey::Int(0), self.spl_it_handle());
         let mut its = PhpArray::new();
         its.set(ArrayKey::Int(0), iterator);
         let mut st = PhpArray::new();
         st.set(ArrayKey::Int(0), Value::Long(RS_START));
         let mut ob = obj.borrow_mut();
+        ob.set_property_slice(b"__spl_rii_hs", val_arr(hs));
         ob.set_property_slice(b"__spl_rii_its", val_arr(its));
         ob.set_property_slice(b"__spl_rii_st", val_arr(st));
         ob.set_property_slice(b"__spl_rii_mode", Value::Long(mode));
@@ -2005,9 +2047,11 @@ impl Vm {
                             }
                         }
                         if Self::rii_level(obj) > 0 {
-                            Self::rii_pop(obj);
-                            // The finished sub-iterator is destroyed now.
+                            let h = Self::rii_pop(obj, false);
+                            // The finished sub-iterator is destroyed now,
+                            // then its iterator.
                             drop(it);
+                            drop(h);
                             self.run_pending_destructors_pub();
                         }
                         continue 'outer;
@@ -2103,7 +2147,7 @@ impl Vm {
                     } else {
                         Self::rii_set_state(obj, level, RS_NEXT);
                     }
-                    Self::rii_push(obj, child.clone());
+                    self.rii_push(obj, child.clone());
                     self.it_rewind(&child);
                     if Self::rii_hook(obj, H_BEGIN_CH) {
                         self.rii_call_hook(obj, b"beginchildren");
@@ -2130,7 +2174,7 @@ impl Vm {
             return;
         }
         while Self::rii_level(obj) > 0 {
-            Self::rii_pop(obj);
+            Self::rii_pop(obj, true);
             self.run_pending_destructors_pub();
             if !self.exc() && Self::rii_hook(obj, H_END_CH) {
                 self.rii_call_hook(obj, b"endchildren");
