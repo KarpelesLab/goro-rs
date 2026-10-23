@@ -985,7 +985,50 @@ fn decode_jpeg(data: &[u8]) -> MResult<Vec<Image>> {
     img.compression = CompressionType::JPEG;
     img.quality = crate::properties::estimate_jpeg_quality(data).unwrap_or(0);
     img.interlace = InterlaceType::No;
+    jpeg_frame_properties(&mut img, data);
     Ok(vec![img])
+}
+
+/// jpeg:colorspace (libjpeg's J_COLOR_SPACE) and jpeg:sampling-factor of
+/// the frame, as ImageMagick's reader records them.
+fn jpeg_frame_properties(img: &mut Image, data: &[u8]) {
+    let mut i = 2;
+    let mut adobe: Option<u8> = None;
+    while i + 4 <= data.len() && data[i] == 0xff {
+        let m = data[i + 1];
+        if m == 0xd8 || (0xd0..=0xd7).contains(&m) || m == 0x01 {
+            i += 2;
+            continue;
+        }
+        let n = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        let seg = &data[(i + 4).min(data.len())..(i + 2 + n).min(data.len())];
+        if m == 0xee && seg.len() >= 12 && seg.starts_with(b"Adobe") {
+            adobe = Some(seg[11]);
+        }
+        if matches!(m, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf) && seg.len() >= 6 {
+            let nc = seg[5] as usize;
+            let factors: Vec<String> = (0..nc)
+                .filter_map(|k| seg.get(6 + 3 * k + 1))
+                .map(|f| format!("{}x{}", f >> 4, f & 15))
+                .collect();
+            let cs = match (nc, adobe) {
+                (1, _) => 1,
+                (3, Some(0)) => 3,
+                (3, _) => 2,
+                (4, Some(2)) => 5,
+                (4, _) => 4,
+                _ => 0,
+            };
+            img.properties.set("jpeg:colorspace", &cs.to_string());
+            img.properties
+                .set("jpeg:sampling-factor", &factors.join(","));
+            return;
+        }
+        if m == 0xda {
+            return;
+        }
+        i += 2 + n;
+    }
 }
 
 fn decode_gif(data: &[u8]) -> MResult<Vec<Image>> {
@@ -1379,7 +1422,7 @@ pub fn encode(images: &[&Image], magick: &str, opts: &WriteOptions) -> MResult<V
         "PNG" | "PNG8" | "PNG24" | "PNG32" | "PNG48" | "PNG64" | "PNG00" => {
             encode_png(first, &m, opts)
         }
-        "JPEG" | "JPG" => encode_jpeg(first),
+        "JPEG" | "JPG" => encode_jpeg(first, opts),
         "GIF" | "GIF87" => encode_gif(images, &m),
         "WEBP" => encode_webp(images, opts),
         "BMP" | "BMP2" | "BMP3" => encode_bmp(first),
@@ -1967,9 +2010,58 @@ fn encode_png(img: &Image, m: &str, opts: &WriteOptions) -> MResult<Vec<u8>> {
     oxideav_png::encode(&png, &eo).map_err(|e| coder_err("PNG", e))
 }
 
-fn encode_jpeg(img: &Image) -> MResult<Vec<u8>> {
-    use oxideav_mjpeg::{JpegImage, PixelFormat as P, Plane};
-    let mut img = img.clone();
+/// The chroma layout of a JPEG: the jpeg:sampling-factor define (its
+/// first component's HxV), else 4:2:0 below quality 90 and 4:4:4 from
+/// it, as ImageMagick picks.
+fn jpeg_chroma(quality: u32, opts: &WriteOptions) -> oxideav_mjpeg::ChromaSubsampling {
+    use oxideav_mjpeg::ChromaSubsampling as C;
+    if let Some(sf) = opts.get("jpeg:sampling-factor") {
+        let first = sf.split(',').next().unwrap_or("").trim();
+        let named = match first {
+            "4:4:4" => Some(C::Yuv444),
+            "4:2:2" => Some(C::Yuv422),
+            "4:2:0" => Some(C::Yuv420),
+            "4:1:1" => Some(C::Yuv411),
+            _ => None,
+        };
+        if let Some(c) = named {
+            return c;
+        }
+        let mut it = first.split(['x', 'X']);
+        let h: f64 = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(1.0);
+        let v: f64 = it.next().and_then(|v| v.trim().parse().ok()).unwrap_or(h);
+        return match (h as u32, v as u32) {
+            (2, 2) => C::Yuv420,
+            (2, 1) => C::Yuv422,
+            (4, 1) => C::Yuv411,
+            _ => C::Yuv444,
+        };
+    }
+    if quality < 90 { C::Yuv420 } else { C::Yuv444 }
+}
+
+/// Insert a COM segment (the image's comment) after the JFIF header.
+fn jpeg_with_comment(data: Vec<u8>, comment: &str) -> Vec<u8> {
+    if comment.is_empty() || data.len() < 4 || comment.len() > 65533 {
+        return data;
+    }
+    // after SOI and an APP0, where ImageMagick puts it
+    let mut at = 2;
+    if data[2] == 0xff && data[3] == 0xe0 && data.len() >= 6 {
+        at = 4 + u16::from_be_bytes([data[4], data[5]]) as usize;
+    }
+    let mut out = Vec::with_capacity(data.len() + comment.len() + 4);
+    out.extend_from_slice(&data[..at]);
+    out.extend_from_slice(&[0xff, 0xfe]);
+    out.extend_from_slice(&((comment.len() + 2) as u16).to_be_bytes());
+    out.extend_from_slice(comment.as_bytes());
+    out.extend_from_slice(&data[at..]);
+    out
+}
+
+fn encode_jpeg(img: &Image, wopts: &WriteOptions) -> MResult<Vec<u8>> {
+    use oxideav_mjpeg::{ColorSignalling, JpegImage, PixelFormat as P, Plane};
+    let img = img.clone();
     let quality = if img.quality == 0 {
         92
     } else {
@@ -1992,6 +2084,7 @@ fn encode_jpeg(img: &Image) -> MResult<Vec<u8>> {
     }
     opts = opts.with_metadata(md);
     let out = if img.colorspace == Colorspace::CMYK {
+        // Adobe CMYK: APP14 transform 0, the samples inverted on the wire
         let k = img
             .black
             .clone()
@@ -2002,21 +2095,26 @@ fn encode_jpeg(img: &Image) -> MResult<Vec<u8>> {
         }
         let ji = JpegImage::new(w, h, P::Cmyk, vec![Plane::new(w as usize * 4, data)])
             .map_err(|e| coder_err("JPEG", e))?;
+        let opts = opts.with_signalling(ColorSignalling::Cmyk {
+            adobe_transform: Some(0),
+        });
         oxideav_mjpeg::encode(&ji, &opts)
     } else if is_gray_image(&img) && img.is_gray() {
         let ji = JpegImage::new(w, h, P::Gray8, vec![Plane::new(w as usize, gray8(&img))])
             .map_err(|e| coder_err("JPEG", e))?;
         oxideav_mjpeg::encode(&ji, &opts)
     } else {
-        // alpha is flattened onto the background, as JPEG has none
-        if img.alpha {
-            crate::composite::flatten_alpha(&mut img);
-        }
-        let ji = JpegImage::from_rgb8(w, h, rgb8(&img)).map_err(|e| coder_err("JPEG", e))?;
-        oxideav_mjpeg::encode(&ji, &opts)
+        // JFIF YCbCr; an alpha channel is dropped (ImageMagick writes the
+        // colour samples as they are)
+        let opts = opts.with_chroma(jpeg_chroma(quality, wopts));
+        oxideav_mjpeg::encode_rgb8(w, h, &rgb8(&img), &opts)
     }
     .map_err(|e| coder_err("JPEG", e))?;
-    Ok(set_jfif_density(out, &img))
+    let out = set_jfif_density(out, &img);
+    Ok(match img.properties.get("comment") {
+        Some(c) if c.is_ascii() => jpeg_with_comment(out, c),
+        _ => out,
+    })
 }
 
 /// Patch the JFIF APP0 density of an encoded JPEG.

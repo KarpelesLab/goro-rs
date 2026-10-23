@@ -425,19 +425,16 @@ const STD_LUMA: [u16; 64] = [
     92, 49, 64, 78, 87, 103, 121, 120, 101, 72, 92, 95, 98, 112, 100, 103, 99,
 ];
 
-const ZIGZAG: [usize; 64] = [
-    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20,
-    13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59,
-    52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
-];
-
-/// Estimate the quality a JPEG was saved with, by inverting the IJG
-/// quality scaling of the standard luminance table.
+/// Estimate the quality a JPEG was saved with: the least IJG quality
+/// whose scaled standard tables sum to no more than the file's (exact
+/// for libjpeg-made files; ImageMagick's answer for the others).
 pub fn estimate_jpeg_quality(data: &[u8]) -> Option<u32> {
+    // the quantization tables (luma 0, chroma 1)
+    let mut tables: [Option<Vec<u32>>; 4] = Default::default();
     let mut i = 2;
     while i + 4 <= data.len() {
         if data[i] != 0xff {
-            return None;
+            break;
         }
         let marker = data[i + 1];
         if marker == 0xd8 || (0xd0..=0xd7).contains(&marker) {
@@ -446,36 +443,57 @@ pub fn estimate_jpeg_quality(data: &[u8]) -> Option<u32> {
         }
         let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
         if marker == 0xda {
-            return None;
+            break;
         }
         if marker == 0xdb {
             let seg = data.get(i + 4..i + 2 + len)?;
-            let pq = seg[0] >> 4;
-            let tq = seg[0] & 15;
-            if tq == 0 {
-                let mut sum = 0f64;
-                for k in 0..64 {
-                    let v = if pq == 0 {
-                        *seg.get(1 + k)? as f64
-                    } else {
-                        u16::from_be_bytes([*seg.get(1 + 2 * k)?, *seg.get(2 + 2 * k)?]) as f64
-                    };
-                    sum += v * 100.0 / STD_LUMA[ZIGZAG[k]] as f64;
-                }
-                let s = sum / 64.0;
-                let q = if s <= 0.0 {
-                    100.0
-                } else if s <= 100.0 {
-                    (200.0 - s) / 2.0
+            let mut j = 0;
+            while j < seg.len() {
+                let (pq, tq) = (seg[j] >> 4, (seg[j] & 3) as usize);
+                let n = if pq == 0 { 64 } else { 128 };
+                let body = seg.get(j + 1..j + 1 + n)?;
+                tables[tq] = Some(if pq == 0 {
+                    body.iter().map(|&v| v as u32).collect()
                 } else {
-                    5000.0 / s
-                };
-                return Some(q.round().clamp(1.0, 100.0) as u32);
+                    body.chunks_exact(2)
+                        .map(|c| u16::from_be_bytes([c[0], c[1]]) as u32)
+                        .collect()
+                });
+                j += 1 + n;
             }
         }
         i += 2 + len;
     }
-    None
+    let luma = tables[0].as_ref()?;
+    let chroma = tables[1].as_ref();
+    let sum: u32 = luma.iter().sum::<u32>() + chroma.map_or(0, |c| c.iter().sum());
+    // the least quality whose standard (Annex K, libjpeg-scaled) tables
+    // sum to no more than the file's
+    let scaled = |q: u32, base: &[u32; 64]| -> u32 {
+        let s = if q < 50 { 5000 / q } else { 200 - 2 * q };
+        base.iter()
+            .map(|&b| ((b * s + 50) / 100).clamp(1, 255))
+            .sum()
+    };
+    let std_chroma: [u32; 64] = {
+        let mut t = [99u32; 64];
+        let head = [
+            17, 18, 24, 47, 99, 99, 99, 99, 18, 21, 26, 66, 99, 99, 99, 99, 24, 26, 56, 99, 99, 99,
+            99, 99, 47, 66, 99, 99, 99, 99, 99, 99,
+        ];
+        t[..32].copy_from_slice(&head);
+        t
+    };
+    let std_luma: [u32; 64] = std::array::from_fn(|k| STD_LUMA[k] as u32);
+    (1..=100u32).find(|&q| {
+        scaled(q, &std_luma)
+            + if chroma.is_some() {
+                scaled(q, &std_chroma)
+            } else {
+                0
+            }
+            <= sum
+    })
 }
 
 /// The TXT format: "# ImageMagick pixel enumeration" and one line per pixel.

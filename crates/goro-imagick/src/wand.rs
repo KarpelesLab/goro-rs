@@ -561,6 +561,13 @@ impl Wand {
         for (k, v) in &img.artifacts.0 {
             defines.push((k.clone(), v.clone()));
         }
+        // setSamplingFactors(): the first component's factors
+        let sf = &self.settings.sampling_factors;
+        if !sf.is_empty() && !defines.iter().any(|(k, _)| k == "jpeg:sampling-factor") {
+            let h = sf[0].max(1.0);
+            let v = sf.get(1).copied().unwrap_or(h).max(1.0);
+            defines.push(("jpeg:sampling-factor".into(), format!("{h}x{v}")));
+        }
         WriteOptions { defines }
     }
 
@@ -611,9 +618,8 @@ impl Wand {
     }
 
     fn apply_write_settings(&self, img: &mut Image) {
-        if img.quality == 0 && self.settings.quality > 0 {
-            img.quality = self.settings.quality;
-        }
+        // (the wand's compression quality only reaches images made after
+        // it is set: ImageMagick writes with the image's own)
         if img.compression == CompressionType::Undefined {
             img.compression = self.settings.compression;
         }
