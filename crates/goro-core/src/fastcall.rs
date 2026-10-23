@@ -68,6 +68,24 @@ impl Vm {
     /// user code (none is, or derives from, an internal class): the special
     /// cases of NEW and INIT_METHOD_CALL for internal classes and their
     /// subclasses then do not apply.
+    /// Whether class `lower` is `ancestor` (any case) or extends it.
+    fn class_chain_has(&self, lower: &[u8], ancestor: &[u8]) -> bool {
+        let mut cur = self.classes.get(lower);
+        for _ in 0..64 {
+            let Some(ce) = cur else {
+                return false;
+            };
+            if ce.name.eq_ignore_ascii_case(ancestor) {
+                return true;
+            }
+            cur = ce
+                .parent
+                .as_deref()
+                .and_then(|p| self.classes.get(p.to_ascii_lowercase().as_slice()));
+        }
+        false
+    }
+
     pub(crate) fn user_class_chain(&self, lower: &[u8]) -> bool {
         let mut cur = match self.classes.get(lower) {
             Some(ce) => ce,
@@ -404,13 +422,19 @@ impl Vm {
             return false;
         };
         let method_lower: &[u8] = method_lower;
+        // (a long name: an anonymous class's)
         let mut cbuf = [0u8; 128];
+        let long;
         let (class_lower, class_name_orig) = {
             let ob = obj.borrow();
-            let Some(l) = lower_into(&ob.class_name, &mut cbuf) else {
-                return false;
+            let l = match lower_into(&ob.class_name, &mut cbuf) {
+                Some(l) => l as &[u8],
+                None => {
+                    long = ob.class_name.to_ascii_lowercase();
+                    long.as_slice()
+                }
             };
-            (l as &[u8], ob.class_name.clone())
+            (l, ob.class_name.clone())
         };
         let scope = self.class_scope_ref().map(|s| s.to_vec());
         // (what the call site remembers when the general handler is to run)
@@ -482,7 +506,20 @@ impl Vm {
                     .is_some_and(|cm| cm.visibility == Visibility::Private)
             }
         });
-        if method.visibility != Visibility::Public
+        // A private method called from its class, a protected one from a
+        // class of the object's (zend_check_protected(): the scope and the
+        // method's root class are then both its ancestors, one extends the
+        // other).
+        let visible = match method.visibility {
+            Visibility::Public => true,
+            Visibility::Private => scope
+                .as_deref()
+                .is_some_and(|s| s.eq_ignore_ascii_case(&method.declaring_class)),
+            Visibility::Protected => scope
+                .as_deref()
+                .is_some_and(|s| self.class_chain_has(class_lower, s)),
+        };
+        if !visible
             || !method.attributes.is_empty()
             || !method.op_array.attributes.is_empty()
             || scope_private

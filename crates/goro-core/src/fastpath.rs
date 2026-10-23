@@ -573,6 +573,12 @@ fn lower_into<'b>(s: &[u8], buf: &'b mut [u8]) -> Option<&'b [u8]> {
     Some(out)
 }
 
+/// plain_public_prop(): a plain slot under its bare name.
+const PLAIN: u8 = 1;
+/// plain_public_prop(): a plain slot under its bare name when the object
+/// holds no NUL-mangled key (see plain_ancestor_private).
+const PLAIN_UNMANGLED: u8 = 2;
+
 /// An int or string array key operand (through a CV's reference).  Other
 /// key types (null, float, bool, ...) may warn and take the general path.
 #[inline]
@@ -642,6 +648,8 @@ pub(crate) fn runs_fast(opc: OpCode) -> bool {
             | OpCode::PropertySet
             | OpCode::PropertyGetW
             | OpCode::PropertyGetIncDec
+            | OpCode::PropertyIsset
+            | OpCode::ArrayIsset
             | OpCode::ArrayGet
             | OpCode::ArraySet
             | OpCode::ArrayAppend
@@ -716,7 +724,8 @@ impl crate::vm::Vm {
                 OpCode::PropertyGet
                 | OpCode::PropertySet
                 | OpCode::PropertyGetW
-                | OpCode::PropertyGetIncDec => {
+                | OpCode::PropertyGetIncDec
+                | OpCode::PropertyIsset => {
                     if self.isset_get_cache.is_some() {
                         break 'run ip;
                     }
@@ -725,6 +734,7 @@ impl crate::vm::Vm {
                 OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
                     self.fast_dim_op(op, cvs, tmps, literals)
                 }
+                OpCode::ArrayIsset => self.fast_dim_isset(op, cvs, tmps, literals),
                 OpCode::Jmp => match op.op1 {
                     OperandType::JmpTarget(t) => Fast::Jump(t as usize),
                     _ => return ip,
@@ -829,6 +839,60 @@ impl crate::vm::Vm {
             true
         } else {
             false
+        }
+    }
+
+    /// `isset($a[k])` of a real array with an int / string key (the general
+    /// handler's array case: the element exists and is not null).
+    pub(crate) fn fast_dim_isset(
+        &self,
+        op: &Op,
+        cvs: &[Value],
+        tmps: &mut [Value],
+        literals: &[Value],
+    ) -> Fast {
+        let arr = match op.op1 {
+            OperandType::Cv(i) => match cvs.get(i as usize) {
+                Some(Value::Array(a)) => a.clone(),
+                Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+                    Ok(Value::Array(a)) => a.clone(),
+                    _ => return Fast::No,
+                },
+                _ => return Fast::No,
+            },
+            OperandType::Tmp(i) => match tmps.get(i as usize) {
+                Some(Value::Array(a)) => a.clone(),
+                _ => return Fast::No,
+            },
+            _ => return Fast::No,
+        };
+        if Rc::ptr_eq(&arr, &self.globals) || !tmp_writable(&op.result, tmps) {
+            return Fast::No;
+        }
+        let Some(key) = dim_key(&op.op2, cvs, tmps, literals) else {
+            return Fast::No;
+        };
+        let set = {
+            let Ok(a) = arr.try_borrow() else {
+                return Fast::No;
+            };
+            match a.get(&key) {
+                Some(Value::Reference(r)) => match r.try_borrow() {
+                    Ok(v) => !matches!(*v, Value::Null | Value::Undef),
+                    Err(_) => return Fast::No,
+                },
+                Some(v) => !matches!(v, Value::Null | Value::Undef),
+                None => false,
+            }
+        };
+        if store_tmp(
+            &op.result,
+            if set { Value::True } else { Value::False },
+            tmps,
+        ) {
+            Fast::Done
+        } else {
+            Fast::No
         }
     }
 
@@ -955,14 +1019,38 @@ impl crate::vm::Vm {
         prop: &[u8],
         write: bool,
         scope: Option<&[u8]>,
-    ) -> bool {
+    ) -> u8 {
+        // (a long name: an anonymous class's)
         let mut buf = [0u8; 128];
-        let Some(lower) = lower_into(class_name, &mut buf) else {
-            return false;
+        let long;
+        let lower = match lower_into(class_name, &mut buf) {
+            Some(l) => l,
+            None => {
+                long = class_name.to_ascii_lowercase();
+                &long
+            }
         };
         let Some(ce) = self.classes.get(lower) else {
-            return false;
+            // stdClass: only dynamic properties, no handlers of any kind.
+            return PLAIN * u8::from(lower == b"stdclass");
         };
+        if self.plain_declared_prop(ce, class_name, lower, prop, write, scope) {
+            PLAIN
+        } else {
+            self.plain_ancestor_private(ce, class_name, prop, write, scope)
+        }
+    }
+
+    /// plain_public_prop() of a class in the class table.
+    fn plain_declared_prop(
+        &self,
+        ce: &crate::object::ClassEntry,
+        class_name: &[u8],
+        lower: &[u8],
+        prop: &[u8],
+        write: bool,
+        scope: Option<&[u8]>,
+    ) -> bool {
         if ce.is_enum || ce.filename.is_none() || (write && ce.is_readonly) {
             return false;
         }
@@ -1040,6 +1128,99 @@ impl crate::vm::Vm {
         false
     }
 
+    /// A private property declared by an ancestor of the object's class,
+    /// read or written from that ancestor's methods: it is stored under its
+    /// bare name unless a same-named property of another scope moved it
+    /// away (which leaves a NUL-mangled key in the object): PLAIN_UNMANGLED
+    /// when it is otherwise a plain slot.
+    fn plain_ancestor_private(
+        &self,
+        ce: &crate::object::ClassEntry,
+        class_name: &[u8],
+        prop: &[u8],
+        write: bool,
+        scope: Option<&[u8]>,
+    ) -> u8 {
+        let Some(scope) = scope else {
+            return 0;
+        };
+        let mut decl = None;
+        for p in &ce.properties {
+            if p.name == prop {
+                if decl.is_some() {
+                    return 0;
+                }
+                decl = Some(p);
+            }
+        }
+        let Some(p) = decl else {
+            return 0;
+        };
+        if p.visibility != crate::object::Visibility::Private
+            || p.declaring_class.eq_ignore_ascii_case(class_name)
+            || !scope.eq_ignore_ascii_case(&p.declaring_class)
+            || p.is_static
+            || p.has_get_hook
+            || p.has_set_hook
+            || p.is_virtual
+            || (write && (p.is_readonly || p.property_type.is_some() || p.set_visibility.is_some()))
+        {
+            return 0;
+        }
+        // The declaring class (with its ancestors) and the classes down to
+        // the object's are plain user classes.
+        let dl = p.declaring_class.to_ascii_lowercase();
+        let dl = dl.as_slice();
+        let Some(dce) = self.classes.get(dl) else {
+            return 0;
+        };
+        if dce.is_readonly && write {
+            return 0;
+        }
+        if !self.plain_declared_prop(dce, &p.declaring_class, dl, prop, write, Some(scope)) {
+            return 0;
+        }
+        let mut cur = Some(ce);
+        for _ in 0..64 {
+            let Some(c) = cur else {
+                return 0;
+            };
+            if c.name.eq_ignore_ascii_case(&p.declaring_class) {
+                return PLAIN_UNMANGLED;
+            }
+            let cl = c.name.to_ascii_lowercase();
+            let cl = cl.as_slice();
+            if c.filename.is_none()
+                || c.is_enum
+                || (write && c.is_readonly)
+                || self.native_class_handlers.contains_key(cl)
+            {
+                return 0;
+            }
+            let mut hbuf = [0u8; 160];
+            let prefix: &[u8] = if write {
+                b"__property_set_"
+            } else {
+                b"__property_get_"
+            };
+            let Some(h) = hbuf.get_mut(..prefix.len() + prop.len()) else {
+                return 0;
+            };
+            h[..prefix.len()].copy_from_slice(prefix);
+            for (o, ch) in h[prefix.len()..].iter_mut().zip(prop) {
+                *o = ch.to_ascii_lowercase();
+            }
+            if c.methods.contains_key(&*h) {
+                return 0;
+            }
+            cur = c
+                .parent
+                .as_deref()
+                .and_then(|pn| self.classes.get(pn.to_ascii_lowercase().as_slice()));
+        }
+        0
+    }
+
     /// `$cv->name` read / `$cv->name = <scalar>` write of a plain declared
     /// public property (see plain_public_prop) on a user object that has
     /// no internal state markers (lazy, cloning, enum case, destructed... are
@@ -1073,7 +1254,9 @@ impl crate::vm::Vm {
             // `$a->b->c`, `f()->p`: a read of an object held by a temporary
             // (one held elsewhere too: releasing the temporary then destroys
             // nothing)
-            OperandType::Tmp(ti) if op.opcode == OpCode::PropertyGet => {
+            OperandType::Tmp(ti)
+                if matches!(op.opcode, OpCode::PropertyGet | OpCode::PropertyIsset) =>
+            {
                 match tmps.get(ti as usize) {
                     Some(Value::Object(obj)) if Rc::strong_count(obj) > 1 => obj.clone(),
                     _ => return Fast::No,
@@ -1084,13 +1267,34 @@ impl crate::vm::Vm {
         // `$o->p[k] = v` / `$o->p[] = v` (see prop_dim_write)
         let w_fetch = op.opcode == OpCode::PropertyGetW;
         let name_op = if write { &op.result } else { &op.op2 };
+        // (a dynamic name, `$o->$p`: the site does not remember the answer)
+        let dyn_name;
         let name = match name_op {
             OperandType::Const(i) => match literals.get(*i as usize) {
                 Some(Value::String(s)) => s.as_bytes(),
                 _ => return Fast::No,
             },
+            OperandType::Cv(i) => {
+                dyn_name = match cvs.get(*i as usize) {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Reference(r)) => match r.try_borrow().as_deref() {
+                        Ok(Value::String(s)) => s.clone(),
+                        _ => return Fast::No,
+                    },
+                    _ => return Fast::No,
+                };
+                dyn_name.as_bytes()
+            }
+            OperandType::Tmp(i) => match tmps.get(*i as usize) {
+                Some(Value::String(s)) => {
+                    dyn_name = s.clone();
+                    dyn_name.as_bytes()
+                }
+                _ => return Fast::No,
+            },
             _ => return Fast::No,
         };
+        let const_name = matches!(name_op, OperandType::Const(_));
         if name.is_empty() || name[0] == 0 || name.starts_with(b"__") {
             return Fast::No;
         }
@@ -1113,6 +1317,16 @@ impl crate::vm::Vm {
                         _ => return Fast::No,
                     }
                 }
+                // An object, or an array (a variable's or a literal's is
+                // copied, as the general handler's dup_stored_array()).
+                Some(Value::Object(o)) => Some(Value::Object(o.clone())),
+                Some(v @ Value::Array(a)) if !Rc::ptr_eq(a, &self.globals) => {
+                    if matches!(op.op2, OperandType::Tmp(_)) {
+                        Some(v.clone())
+                    } else {
+                        Some(self.dup_array_value(v.clone()))
+                    }
+                }
                 _ => return Fast::No,
             }
         } else {
@@ -1128,21 +1342,43 @@ impl crate::vm::Vm {
             return Fast::No;
         }
         let mut slot = None;
+        let mut mangled = false;
         for (i, (k, v)) in ob.properties.iter().enumerate() {
             if k.starts_with(b"__") {
                 return Fast::No;
             }
+            mangled |= k.first() == Some(&0);
             if k.as_slice() == name {
                 slot = Some((i, v));
             }
         }
         let Some((idx, cur)) = slot else {
+            // isset() of a property a stdClass object does not have (it has
+            // no magic methods).
+            if op.opcode == OpCode::PropertyIsset && ob.class_name == b"stdClass" {
+                drop(ob);
+                return if store_tmp(&op.result, Value::False, tmps) {
+                    Fast::Done
+                } else {
+                    Fast::No
+                };
+            }
             return Fast::No;
         };
         // An uninitialized slot, or (for a write) one that is a reference
-        // or holds something releasing / tracking could care about.
+        // or holds something releasing could care about (an object, which
+        // may be destroyed, also when the cycle collector's buffer holds
+        // it): only an array of a few plain values is overwritten.
         let ok = if write {
-            is_plain_scalar(cur) && !matches!(cur, Value::Undef)
+            match cur {
+                Value::Array(a) => {
+                    !Rc::ptr_eq(a, &self.globals)
+                        && a.try_borrow()
+                            .is_ok_and(|a| a.len() <= 8 && a.values().all(|v| is_plain_scalar(v)))
+                }
+                Value::Undef => false,
+                v => is_plain_scalar(v),
+            }
         } else if w_fetch {
             matches!(cur, Value::Array(_))
         } else if op.opcode == OpCode::PropertyGetIncDec && matches!(cur, Value::Object(_)) {
@@ -1162,41 +1398,47 @@ impl crate::vm::Vm {
         // (a function of the class and the property: classes do not change
         // once declared)
         let scope = self.class_scope_ref();
-        let cached = match op_array
-            .sites()
-            .borrow()
-            .as_ref()
-            .and_then(|s| s.prop_sites.get(&(ip as u32)))
-        {
-            Some((class, site_scope, plain))
-                if *class == ob.class_name
-                    && match (site_scope, scope) {
-                        (None, None) => true,
-                        (Some(a), Some(b)) => a.as_slice() == b,
-                        _ => false,
-                    } =>
+        let cached = if !const_name {
+            None
+        } else {
+            match op_array
+                .sites()
+                .borrow()
+                .as_ref()
+                .and_then(|s| s.prop_sites.get(&(ip as u32)))
             {
-                Some(*plain)
+                Some((class, site_scope, plain))
+                    if *class == ob.class_name
+                        && match (site_scope, scope) {
+                            (None, None) => true,
+                            (Some(a), Some(b)) => a.as_slice() == b,
+                            _ => false,
+                        } =>
+                {
+                    Some(*plain)
+                }
+                _ => None,
             }
-            _ => None,
         };
         let plain = match cached {
             Some(p) => p,
             None => {
                 let p = self.plain_public_prop(&ob.class_name, name, write || w_fetch, scope);
-                op_array
-                    .sites()
-                    .borrow_mut()
-                    .get_or_insert_with(Default::default)
-                    .prop_sites
-                    .insert(
-                        ip as u32,
-                        (ob.class_name.clone(), scope.map(|s| s.to_vec()), p),
-                    );
+                if const_name {
+                    op_array
+                        .sites()
+                        .borrow_mut()
+                        .get_or_insert_with(Default::default)
+                        .prop_sites
+                        .insert(
+                            ip as u32,
+                            (ob.class_name.clone(), scope.map(|s| s.to_vec()), p),
+                        );
+                }
                 p
             }
         };
-        if !plain {
+        if plain == 0 || (plain == PLAIN_UNMANGLED && mangled) {
             return Fast::No;
         }
         if w_fetch {
@@ -1208,8 +1450,29 @@ impl crate::vm::Vm {
             let Ok(mut obm) = obj.try_borrow_mut() else {
                 return Fast::No;
             };
-            obm.properties[idx].1 = v;
+            if let Value::Object(o) = &v {
+                crate::gc::track_object(o);
+            }
+            let old = std::mem::replace(&mut obm.properties[idx].1, v);
+            drop(obm);
+            // (the overwritten array / object loses a holder)
+            crate::gc::on_value_replaced(&old, &Value::Null);
+            drop(old);
             return Fast::Done;
+        }
+        if op.opcode == OpCode::PropertyIsset {
+            // (an accessible initialized slot: set unless null)
+            let set = match cur {
+                Value::Reference(r) => !matches!(*r.borrow(), Value::Null),
+                v => !matches!(v, Value::Null),
+            };
+            drop(ob);
+            let v = if set { Value::True } else { Value::False };
+            return if store_tmp(&op.result, v, tmps) {
+                Fast::Done
+            } else {
+                Fast::No
+            };
         }
         let v = cur.deref();
         drop(ob);

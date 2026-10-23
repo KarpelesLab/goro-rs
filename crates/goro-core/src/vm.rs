@@ -3156,17 +3156,19 @@ impl Vm {
         if self.class_scope_stack.last().is_some_and(|s| s.is_empty()) {
             return None;
         }
-        let scope_lower = self.scope_top().cloned().or_else(|| {
-            self.called_class_stack
-                .last()
-                .map(|n| n.iter().map(|b| b.to_ascii_lowercase()).collect())
-        });
-        scope_lower.map(|lower| {
-            // Look up canonical class name from class table
-            self.classes
-                .get(&lower)
-                .map(|c| c.name.clone())
-                .unwrap_or(lower)
+        // (the canonical name from the class table)
+        if let Some(lower) = self.scope_top() {
+            return Some(match self.classes.get(lower.as_slice()) {
+                Some(c) => c.name.clone(),
+                None => lower.clone(),
+            });
+        }
+        self.called_class_stack.last().map(|n| {
+            let lower = n.to_ascii_lowercase();
+            match self.classes.get(&lower) {
+                Some(c) => c.name.clone(),
+                None => lower,
+            }
         })
     }
 
@@ -19070,7 +19072,11 @@ impl Vm {
         f.attributes.is_empty()
             && !f.is_generator
             && (method || f.scope_class.is_none())
-            && f.variadic_param.is_none()
+            // (a variadic parameter taken by value: the extra arguments
+            // are packed into its array)
+            && f
+                .variadic_param
+                .is_none_or(|v| !f.by_ref_params.get(v as usize).copied().unwrap_or(false))
             && (f.cv_names.first().map(|n| n.as_slice()) == Some(b"this")) == has_this
             && !crate::closure::is_closure_fn_name(&f.name)
             && nargs >= implicit + required
@@ -27085,8 +27091,30 @@ impl Vm {
                         let mut func_cvs = self.take_values(user_fn.cv_names.len());
                         // Extra arguments are only reachable through func_get_args().
                         let bound = arg_cv_bound(&user_fn, func_cvs.len());
-                        for (slot, arg) in func_cvs.iter_mut().zip(call.args.iter()).take(bound) {
-                            *slot = arg.clone();
+                        match user_fn.variadic_param.filter(|_| captures.is_none()) {
+                            None => {
+                                for (slot, arg) in
+                                    func_cvs.iter_mut().zip(call.args.iter()).take(bound)
+                                {
+                                    *slot = arg.clone();
+                                }
+                            }
+                            Some(vi) => {
+                                // The arguments from the variadic parameter's
+                                // position on make its array.
+                                let vi = vi as usize;
+                                for (slot, arg) in func_cvs.iter_mut().zip(call.args.iter()).take(vi)
+                                {
+                                    *slot = arg.clone();
+                                }
+                                let mut rest = crate::array::PhpArray::new();
+                                for arg in call.args.iter().skip(vi) {
+                                    rest.push(arg.clone());
+                                }
+                                if let Some(slot) = func_cvs.get_mut(vi) {
+                                    *slot = Value::Array(Rc::new(RefCell::new(rest)));
+                                }
+                            }
                         }
                         // By-value array parameters get their own copy so writes in
                         // the callee don't leak into the caller's array.

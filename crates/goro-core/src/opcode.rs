@@ -604,7 +604,7 @@ pub(crate) struct SiteCaches {
     pub(crate) call_targets: crate::fxhash::FxHashMap<u32, crate::vm::CachedCallTarget>,
     /// The plain property accesses' last class and scope, and whether the
     /// property is a plain one of it there (see Vm::fast_prop_op).
-    pub(crate) prop_sites: crate::fxhash::FxHashMap<u32, (Vec<u8>, Option<Vec<u8>>, bool)>,
+    pub(crate) prop_sites: crate::fxhash::FxHashMap<u32, (Vec<u8>, Option<Vec<u8>>, u8)>,
     /// What the INIT_METHOD_CALLs found (see Vm::init_method_call_fast).
     pub(crate) method_sites: crate::fxhash::FxHashMap<u32, crate::vm::MethodSite>,
     /// What the forwarding calls (self::m(), ...) last resolved to (see
