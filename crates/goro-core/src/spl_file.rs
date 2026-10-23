@@ -521,13 +521,26 @@ impl Vm {
     }
 
     /// Coerce an argument to int (non-strict mode). None => TypeError set.
-    #[allow(clippy::if_same_then_else)] // branches mirror php-src
     pub(crate) fn spl_arg_long(
         &mut self,
         func: &str,
         argn: usize,
         name: &str,
         v: &Value,
+    ) -> Option<i64> {
+        self.spl_arg_long_as(func, argn, name, v, "int")
+    }
+
+    /// spl_arg_long() of a parameter declared as `tname` (int or ?int, for
+    /// the TypeError message; null is handled by the caller for ?int).
+    #[allow(clippy::if_same_then_else)] // branches mirror php-src
+    pub(crate) fn spl_arg_long_as(
+        &mut self,
+        func: &str,
+        argn: usize,
+        name: &str,
+        v: &Value,
+        tname: &str,
     ) -> Option<i64> {
         match v.deref() {
             Value::Long(n) => Some(n),
@@ -545,8 +558,8 @@ impl Vm {
                     Some(d as i64)
                 } else {
                     let msg = format!(
-                        "{}(): Argument #{} (${}) must be of type int, float given",
-                        func, argn, name
+                        "{}(): Argument #{} (${}) must be of type {}, float given",
+                        func, argn, name, tname
                     );
                     self.spl_throw(b"TypeError", &msg);
                     None
@@ -573,8 +586,8 @@ impl Vm {
                     }
                 } else {
                     let msg = format!(
-                        "{}(): Argument #{} (${}) must be of type int, string given",
-                        func, argn, name
+                        "{}(): Argument #{} (${}) must be of type {}, string given",
+                        func, argn, name, tname
                     );
                     self.spl_throw(b"TypeError", &msg);
                     None
@@ -582,10 +595,11 @@ impl Vm {
             }
             other => {
                 let msg = format!(
-                    "{}(): Argument #{} (${}) must be of type int, {} given",
+                    "{}(): Argument #{} (${}) must be of type {}, {} given",
                     func,
                     argn,
                     name,
+                    tname,
                     Self::value_type_name(&other)
                 );
                 self.spl_throw(b"TypeError", &msg);

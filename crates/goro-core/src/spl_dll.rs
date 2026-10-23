@@ -437,7 +437,7 @@ impl Vm {
                     push_back(obj, v);
                     return Some(Value::Null);
                 }
-                let i = match self.spl_arg_long(func, 1, "index", &idx_v) {
+                let i = match self.spl_arg_long_as(func, 1, "index", &idx_v, "?int") {
                     Some(n) => n,
                     None => return Some(Value::Null),
                 };
