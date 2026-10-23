@@ -1053,8 +1053,83 @@ impl Vm {
                 }
                 r
             }
-            None => self.call_object_method(obj_val, method, args),
+            None => {
+                if let Value::Object(o) = obj_val {
+                    match self.spl_iter_funcs(o, method) {
+                        // The class's own get_iterator handlers: no method
+                        // is called.
+                        Some(true) => {
+                            let cl = obj_class_lower(o);
+                            let ml = method.to_ascii_lowercase();
+                            let mut call_args = self.take_values(0);
+                            call_args.push(obj_val.clone());
+                            call_args.extend_from_slice(args);
+                            let r = self.spl_invoke_builtin(o, &cl, &ml, &call_args);
+                            crate::vm::clear_values(&mut call_args);
+                            self.recycle_values(call_args);
+                            return r;
+                        }
+                        // zend_user_it_*() calls the internal method from
+                        // the VM (foreach): its frame is at the current line.
+                        Some(false) if !internal => {
+                            let cl = obj_class_lower(o);
+                            let ml = method.to_ascii_lowercase();
+                            if let Some(name) = self.internal_method_frame_name(&cl, &ml) {
+                                let mut frame_args = self.take_values(0);
+                                frame_args.extend_from_slice(args);
+                                self.call_stack.push((
+                                    name,
+                                    self.current_file.clone(),
+                                    self.current_line,
+                                    frame_args,
+                                    true,
+                                ));
+                                let r = self.call_object_method(obj_val, method, args);
+                                if let Some(f) = self.call_stack.pop() {
+                                    self.recycle_frame(f);
+                                }
+                                return r;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                self.call_object_method(obj_val, method, args)
+            }
         }
+    }
+
+    /// How the engine runs Iterator method `method` of an SPL object for
+    /// foreach and the internal iterator users: Some(true) when the class
+    /// has its own get_iterator handlers (ArrayIterator, SplDoublyLinkedList,
+    /// SplHeap, ... unless a subclass overrides an Iterator method),
+    /// Some(false) for zend_user_it (the methods are called), None when not
+    /// an Iterator method of an SPL class.
+    fn spl_iter_funcs(&self, obj: &Rc<RefCell<PhpObject>>, method: &[u8]) -> Option<bool> {
+        const ITER_METHODS: [&[u8]; 5] = [b"rewind", b"valid", b"current", b"key", b"next"];
+        if !ITER_METHODS.iter().any(|m| m.eq_ignore_ascii_case(method)) {
+            return None;
+        }
+        let cl = obj_class_lower(obj);
+        self.spl_builtin_base(&cl)?;
+        let handlers = self
+            .spl_find_base(
+                &cl,
+                &[
+                    b"arrayiterator",
+                    b"spldoublylinkedlist",
+                    b"splheap",
+                    b"splpriorityqueue",
+                    b"directoryiterator",
+                    b"recursiveiteratoriterator",
+                ],
+            )
+            .is_some()
+            && !self
+                .classes
+                .get(&cl)
+                .is_some_and(|c| ITER_METHODS.iter().any(|m| c.get_method(m).is_some()));
+        Some(handlers)
     }
 
     /// get_iterator-time checks done by foreach. Returns false with an
