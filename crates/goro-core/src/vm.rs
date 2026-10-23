@@ -39820,6 +39820,13 @@ impl Vm {
                     if let Some(depth) = pending_calls_catch_depth.take() {
                         self.pending_calls.truncate(depth);
                     }
+                    // ZEND_HANDLE_EXCEPTION: what unwinding released (the
+                    // unfinished calls' arguments, the frames left) is
+                    // destroyed before the catch runs; an exception a
+                    // destructor throws takes the in-flight one as previous.
+                    if self.has_release_work() {
+                        self.run_pending_destructors();
+                    }
                     // Leave the silenced regions the exception was thrown from.
                     if let Some(&(_, depth)) =
                         try_er_depths.iter().find(|(t, _)| *t as usize == ip - 1)
