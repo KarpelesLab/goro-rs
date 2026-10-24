@@ -12436,7 +12436,7 @@ impl Compiler {
         } else {
             (l, r)
         };
-        let (l, r) = Self::commutative_operands(opcode, left, right, l, r);
+        let (l, r) = Self::commutative_operands(opcode, left, right, l, r, &self.op_array.literals);
         self.op_array.emit(Op {
             opcode,
             op1: l,
@@ -12547,6 +12547,7 @@ impl Compiler {
         right: &Expr,
         l: OperandType,
         r: OperandType,
+        literals: &[Value],
     ) -> (OperandType, OperandType) {
         if !matches!(
             opcode,
@@ -12565,7 +12566,8 @@ impl Compiler {
             ) {
                 // (never folded by zend_compile: ZEND_CAST / QM_ASSIGN)
                 2
-            } else if matches!(o, OperandType::Const(_))
+            } else if matches!(o, OperandType::Const(i)
+                    if !matches!(literals.get(*i as usize), Some(Value::Resource(_))))
                 || Self::eval_const_expr(e).is_some()
                 || Self::ct_folded(e)
             {
