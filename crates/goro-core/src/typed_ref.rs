@@ -854,6 +854,48 @@ impl Vm {
     /// takes the coerced UNDEF result like php-src's in-place assign-op
     /// handlers leave it (zend_binary_assign_op_typed_prop / _typed_ref);
     /// an undefined variable operand is left NULL (BP_VAR_RW fetch).
+    /// Record that the binary / assign-op opcode `op` threw: the catch
+    /// block (or the frame's exit) it lands in runs compound_op_failed().
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn compound_fail_note(&mut self, op: &crate::opcode::Op) {
+        self.compound_fail_at = op as *const crate::opcode::Op as usize;
+        self.compound_fail_exc = match &self.current_exception {
+            Some(Value::Object(o)) => Rc::as_ptr(o) as usize,
+            _ => 0,
+        };
+    }
+
+    /// compound_op_failed() for the op recorded in `compound_fail_at`,
+    /// when it is one of `op_array`'s.
+    #[inline(never)]
+    pub(crate) fn compound_op_failed_at(
+        &mut self,
+        op_array: &crate::opcode::OpArray,
+        cvs: &mut [Value],
+        tmps: &mut [Value],
+        static_cv_keys: &crate::fxhash::FxHashMap<u32, Vec<u8>>,
+    ) {
+        let at = std::mem::take(&mut self.compound_fail_at);
+        let exc = std::mem::take(&mut self.compound_fail_exc);
+        // (only for the exception that op threw)
+        let cur = match &self.current_exception {
+            Some(Value::Object(o)) => Rc::as_ptr(o) as usize,
+            _ => 0,
+        };
+        if exc != cur {
+            return;
+        }
+        let sz = std::mem::size_of::<crate::opcode::Op>().max(1);
+        let base = op_array.ops.as_ptr() as usize;
+        if at < base || (at - base) % sz != 0 {
+            return;
+        }
+        if let Some(op) = op_array.ops.get((at - base) / sz) {
+            self.compound_op_failed(op, op_array, cvs, tmps, static_cv_keys);
+        }
+    }
+
     #[inline(never)]
     pub(crate) fn compound_op_failed(
         &mut self,

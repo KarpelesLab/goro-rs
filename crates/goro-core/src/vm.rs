@@ -1262,6 +1262,11 @@ pub struct Vm {
     /// fetch (FETCH_DIM_W chain), not of the final assignment: a reference
     /// to false it reaches is converted to an array silently.
     pub(crate) dim_w_chain: bool,
+    /// The address of a binary / assign-op opcode that threw and jumped
+    /// to a catch or finally block of its frame (see compound_op_failed).
+    pub(crate) compound_fail_at: usize,
+    /// The exception that op threw (its object's address).
+    pub(crate) compound_fail_exc: usize,
     /// The variable the dimension fetch in progress starts from is a PHP
     /// reference (not just a global's binding cell).
     pub(crate) dim_w_cv_ref: bool,
@@ -1912,6 +1917,8 @@ impl Vm {
             str_wb_obj_ctx: false,
             str_wb_ref_ctx: false,
             dim_w_chain: false,
+            compound_fail_at: 0,
+            compound_fail_exc: 0,
             dim_w_cv_ref: false,
             uncaught_severity: None,
             functions: Default::default(),
@@ -21662,6 +21669,9 @@ impl Vm {
         } else {
             r
         };
+        if r.is_err() && self.compound_fail_at != 0 {
+            self.compound_op_failed_at(op_array, &mut cvs, &mut tmps, &Default::default());
+        }
         // (released as the temporary state of a frame used to be, right
         // after its execution)
         fe.clear();
@@ -22798,14 +22808,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -22891,14 +22903,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -22984,14 +22998,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -23110,14 +23126,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -23237,14 +23255,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -23339,14 +23359,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -23446,14 +23468,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -23714,14 +23738,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -23830,14 +23856,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -23940,14 +23968,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -24171,14 +24201,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -24291,14 +24323,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -25322,14 +25356,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -25416,14 +25452,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -25510,14 +25548,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -25621,14 +25661,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -25734,14 +25776,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -25836,14 +25880,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -25914,14 +25960,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -26015,14 +26063,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -26122,14 +26172,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -26223,14 +26275,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -26335,14 +26389,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -26451,14 +26507,16 @@ impl Vm {
                 }) {
                     Ok(Flow::Next) => {}
                     Ok(Flow::Continue) => {
+                        // (applied where the exception is caught)
                         if self.current_exception.is_some() {
-                            self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                            self.compound_fail_note(op);
                         }
                         continue 'exec;
                     }
                     Ok(Flow::Return(v)) => return Ok(v),
                     Err(e) => {
-                        self.compound_op_failed(op, op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                        // (applied by execute_op_array_inner())
+                        self.compound_fail_note(op);
                         return Err(e);
                     }
                 },
@@ -42116,6 +42174,9 @@ impl Vm {
                 }
 
                 OpCode::FinallyEnter => match outlined(|| -> Result<Flow, VmError> {
+                    if self.compound_fail_at != 0 {
+                        self.compound_op_failed_at(op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                    }
                     // Reaching the finally through a handler that the dispatch
                     // site left on the stack.
                     if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1 || h.1 as usize == ip - 1)
@@ -42150,6 +42211,9 @@ impl Vm {
                 },
 
                 OpCode::CatchException => match outlined(|| -> Result<Flow, VmError> {
+                    if self.compound_fail_at != 0 {
+                        self.compound_op_failed_at(op_array, &mut cvs, &mut tmps, &static_cv_keys);
+                    }
                     if matches!(exception_handlers.last(), Some(h) if h.0 as usize == ip - 1) {
                         exception_handlers.pop();
                     }
