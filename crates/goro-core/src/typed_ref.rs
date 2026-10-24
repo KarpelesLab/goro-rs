@@ -888,7 +888,7 @@ impl Vm {
         }
         let sz = std::mem::size_of::<crate::opcode::Op>().max(1);
         let base = op_array.ops.as_ptr() as usize;
-        if at < base || (at - base) % sz != 0 {
+        if at < base || !(at - base).is_multiple_of(sz) {
             return;
         }
         if let Some(op) = op_array.ops.get((at - base) / sz) {
