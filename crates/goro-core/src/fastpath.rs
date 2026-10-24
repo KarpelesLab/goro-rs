@@ -1000,19 +1000,69 @@ impl<'a> LazyFreeMask<'a> {
     }
 }
 
-/// Whether an op1/op2 temporary the opcode at `ip` is the last user of
-/// holds an object or an array.
+/// The op1 / op2 temporaries (bits 0 and 1) the opcode at `ip` is the last
+/// user of (see OpArray::free_mask()) that hold an object or an array, when
+/// the dispatch loop's release of them right after the opcode would only
+/// drop a holder: each is held elsewhere too, and no destructor is due
+/// (`no_release`: the release point that follows does nothing). The fast
+/// path then runs the opcode and releases them itself (release_consumed()).
+/// None: the opcode is left to the dispatch loop.
 #[inline]
-fn consumes_heap_tmp(free_mask: &[u8], ip: usize, op: &Op, tmps: &[Value]) -> bool {
+fn consumed_tmps(
+    free_mask: &[u8],
+    ip: usize,
+    op: &Op,
+    tmps: &[Value],
+    no_release: bool,
+) -> Option<u8> {
     let m = free_mask.get(ip).copied().unwrap_or(0);
+    if m & 11 == 0 {
+        return Some(0);
+    }
     // (bit 3: a compound assignment's operand, released after its write)
-    m & 8 != 0
-        || m & 3 != 0
-            && [(1u8, &op.op1), (2u8, &op.op2)].into_iter().any(|(b, o)| {
-                m & b != 0
-                    && matches!(o, OperandType::Tmp(i)
-                    if matches!(tmps.get(*i as usize), Some(Value::Object(_) | Value::Array(_))))
-            })
+    if m & 8 != 0 {
+        return None;
+    }
+    let mut rel = 0;
+    for (b, o) in [(1u8, &op.op1), (2u8, &op.op2)] {
+        if m & b == 0 {
+            continue;
+        }
+        let OperandType::Tmp(i) = o else {
+            continue;
+        };
+        let shared = match tmps.get(*i as usize) {
+            Some(Value::Object(x)) => Rc::strong_count(x) > 1,
+            Some(Value::Array(x)) => Rc::strong_count(x) > 1,
+            _ => continue,
+        };
+        if !shared || !no_release {
+            return None;
+        }
+        rel |= b;
+    }
+    Some(rel)
+}
+
+/// After the opcode `op` ran (`fast` is not Fast::No), the temporaries
+/// consumed_tmps() found (`rel`) are released, as the dispatch loop would
+/// right after it.
+#[inline]
+fn release_consumed(rel: u8, fast: Fast, op: &Op, tmps: &mut [Value]) -> Fast {
+    if rel != 0 && !matches!(fast, Fast::No) {
+        for (b, o) in [(1u8, &op.op1), (2u8, &op.op2)] {
+            if rel & b != 0 {
+                if let OperandType::Tmp(i) = o {
+                    if let Some(slot @ (Value::Object(_) | Value::Array(_))) =
+                        tmps.get_mut(*i as usize)
+                    {
+                        *slot = Value::Undef;
+                    }
+                }
+            }
+        }
+    }
+    fast
 }
 
 /// The temporaries whose foreach iteration state (snapshot, object or
@@ -1344,31 +1394,36 @@ impl crate::vm::Vm {
                 | OpCode::PropertyGetIncDec
                 | OpCode::PropertyIsset
                 | OpCode::PropertyIssetFetch => {
-                    if self.isset_get_cache.is_some()
-                        || consumes_heap_tmp(free_mask.get(), ip, op, tmps)
-                    {
+                    if self.isset_get_cache.is_some() {
                         break 'run ip;
                     }
-                    self.fast_prop_op(op_array, ip, cvs, tmps)
+                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
+                        break 'run ip;
+                    };
+                    let f = self.fast_prop_op(op_array, ip, cvs, tmps);
+                    release_consumed(rel, f, op, tmps)
                 }
                 OpCode::ArrayGet | OpCode::ArraySet | OpCode::ArrayAppend => {
-                    if consumes_heap_tmp(free_mask.get(), ip, op, tmps) {
+                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
                         break 'run ip;
-                    }
-                    self.fast_dim_op(op, cvs, tmps, literals)
+                    };
+                    let f = self.fast_dim_op(op, cvs, tmps, literals);
+                    release_consumed(rel, f, op, tmps)
                 }
                 // (on an array, FETCH_DIM_IS's isset answers as ISSET_ISEMPTY_DIM's)
                 OpCode::ArrayIsset | OpCode::ArrayIssetFetch => {
-                    if consumes_heap_tmp(free_mask.get(), ip, op, tmps) {
+                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
                         break 'run ip;
-                    }
-                    self.fast_dim_isset(op, cvs, tmps, literals)
+                    };
+                    let f = self.fast_dim_isset(op, cvs, tmps, literals);
+                    release_consumed(rel, f, op, tmps)
                 }
                 OpCode::IssetCheck => {
-                    if consumes_heap_tmp(free_mask.get(), ip, op, tmps) {
+                    let Some(rel) = consumed_tmps(free_mask.get(), ip, op, tmps, no_release) else {
                         break 'run ip;
-                    }
-                    fast_isset_check(op, cvs, tmps, literals)
+                    };
+                    let f = fast_isset_check(op, cvs, tmps, literals);
+                    release_consumed(rel, f, op, tmps)
                 }
                 // A class constant its site resolved (see fast_class_const).
                 OpCode::StaticPropGet => {
