@@ -67,7 +67,7 @@ CI runs the whole suite in 8 parallel shards on every push (`GORO_PHPT_SHARD=i/n
 | sapi/fpm (php-fpm; 7 skips need root, AppArmor or FreeBSD) | 133 | 133 | 100% |
 | PECL uuid 1.3 (`tests/pecl/uuid`) | 14 | 14 | 100% |
 | PECL mailparse 3.2 (`tests/pecl/mailparse`, 1 upstream XFAIL) | 38 | 39 | 97.4% |
-| PECL imagick 3.8 (`tests/pecl/imagick`, ImageMagick 7.1 semantics; 11 skips) | 322 | 338 | 95.3% |
+| PECL imagick 3.8 (`tests/pecl/imagick`, ImageMagick 7.1 semantics; 11 skips) | 323 | 338 | 95.6% |
 
 
 *The test runner supports recursive directories, single files, SKIPIF/INI/ENV/ARGS sections,
