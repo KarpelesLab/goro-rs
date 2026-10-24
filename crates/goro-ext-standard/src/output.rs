@@ -2272,10 +2272,10 @@ fn var_export_value(vm: &mut Vm, val: &Value, buf: &mut Vec<u8>, level: usize) {
                     })
                     .collect()
             } else {
-                crate::serialize::mangled_props(vm, obj)
+                vm.object_prop_table_info_order(obj)
                     .into_iter()
                     .filter(|e| !matches!(e.value, Value::Undef))
-                    .map(|e| (e.php_key, e.value))
+                    .map(|e| (e.key, e.value))
                     .collect()
             };
             VAR_EXPORT_STACK.with(|st| st.borrow_mut().push(ptr));
