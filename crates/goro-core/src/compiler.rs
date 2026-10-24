@@ -12457,17 +12457,57 @@ impl Compiler {
         };
         let lits = &self.op_array.literals;
         let (a, b) = (lits.get(*a as usize)?, lits.get(*b as usize)?);
-        if !matches!(a, Value::Long(_) | Value::Double(_))
-            || !matches!(b, Value::Long(_) | Value::Double(_))
-        {
+        let scalar = |v: &Value| {
+            matches!(
+                v,
+                Value::Long(_) | Value::Double(_) | Value::True | Value::False | Value::Null
+            )
+        };
+        let is_cmp = matches!(
+            opcode,
+            OpCode::Equal
+                | OpCode::NotEqual
+                | OpCode::Identical
+                | OpCode::NotIdentical
+                | OpCode::Less
+                | OpCode::LessEqual
+                | OpCode::Greater
+                | OpCode::GreaterEqual
+                | OpCode::Spaceship
+        );
+        // (comparisons of strings fold too; arithmetic on them may warn)
+        let ok = |v: &Value| scalar(v) || (is_cmp && matches!(v, Value::String(_)));
+        if !ok(a) || !ok(b) {
             return None;
         }
+        let nan = |v: &Value| matches!(v, Value::Double(f) if f.is_nan());
+        let bool_v = |c: bool| if c { Value::True } else { Value::False };
         match opcode {
             OpCode::Add => Some(a.add(b)),
             OpCode::Sub => Some(a.sub(b)),
             OpCode::Mul => Some(a.mul(b)),
             OpCode::Div if b.to_double() != 0.0 => a.div(b).ok(),
             OpCode::Pow if !(a.to_double() == 0.0 && b.to_double() < 0.0) => Some(a.pow(b)),
+            // (integer operators only on ints: a float may not be
+            // int-compatible)
+            OpCode::BitwiseAnd | OpCode::BitwiseOr | OpCode::BitwiseXor => match (a, b) {
+                (Value::Long(x), Value::Long(y)) => Some(Value::Long(match opcode {
+                    OpCode::BitwiseAnd => x & y,
+                    OpCode::BitwiseOr => x | y,
+                    _ => x ^ y,
+                })),
+                _ => None,
+            },
+            OpCode::Identical => Some(bool_v(a.identical(b))),
+            OpCode::NotIdentical => Some(bool_v(!a.identical(b))),
+            _ if nan(a) || nan(b) => None,
+            OpCode::Equal => Some(bool_v(a.compare_zend(b) == 0)),
+            OpCode::NotEqual => Some(bool_v(a.compare_zend(b) != 0)),
+            OpCode::Less => Some(bool_v(a.compare_zend(b) < 0)),
+            OpCode::LessEqual => Some(bool_v(a.compare_zend(b) <= 0)),
+            OpCode::Greater => Some(bool_v(a.compare_zend(b) > 0)),
+            OpCode::GreaterEqual => Some(bool_v(a.compare_zend(b) >= 0)),
+            OpCode::Spaceship => Some(Value::Long(a.compare_zend(b).signum())),
             _ => None,
         }
     }
@@ -12525,7 +12565,10 @@ impl Compiler {
             ) {
                 // (never folded by zend_compile: ZEND_CAST / QM_ASSIGN)
                 2
-            } else if Self::eval_const_expr(e).is_some() || Self::ct_folded(e) {
+            } else if matches!(o, OperandType::Const(_))
+                || Self::eval_const_expr(e).is_some()
+                || Self::ct_folded(e)
+            {
                 1
             } else if matches!(o, OperandType::Cv(_)) {
                 8
