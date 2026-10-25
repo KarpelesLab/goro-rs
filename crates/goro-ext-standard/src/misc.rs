@@ -8786,6 +8786,9 @@ fn file_get_contents_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     }
     // php://input - request body for HTTP requests served by the built-in CLI server.
     if path_str == "php://input" {
+        // (the stream is allocated, read and freed)
+        input_body_stream_ids();
+        goro_core::value::alloc_resource_id();
         let body = get_request_body();
         return Ok(Value::String(PhpString::from_vec(body)));
     }
@@ -11197,6 +11200,13 @@ struct FileHandle {
     /// php://temp still held in memory: the size at which it moves to a
     /// temporary file (a new stream, which takes a resource id).
     pub temp_max: Option<u64>,
+    /// stream->chunk_size (stream_set_chunk_size()).
+    pub chunk_size: usize,
+    /// Socket streams: stream->readbuflen and stream->writepos (the read
+    /// buffer's size and where the data read into it ends), which size the
+    /// reads of php_stream_fill_read_buffer().
+    pub rb_cap: usize,
+    pub rb_writepos: usize,
 }
 
 impl FileHandle {
@@ -11258,12 +11268,16 @@ impl FileHandle {
         }
         // php_stream_fill_read_buffer(): descriptor-backed streams read a
         // whole chunk and keep what the caller did not ask for.
-        if self.sock.is_some() && buf.len() > STREAM_CHUNK_SIZE {
-            // (a socket read is at most one chunk)
-            return self.read_direct(&mut buf[..STREAM_CHUNK_SIZE], has_buffered);
+        let chunk_size = self.chunk_size.max(1);
+        if self.sock.is_some() && !buf.is_empty() {
+            let n = self.sock_fill(has_buffered)?;
+            let k = n.min(buf.len());
+            buf[..k].copy_from_slice(&self.filter_read_ready[..k]);
+            self.filter_read_ready.drain(..k);
+            return Ok(k);
         }
-        if self.is_buffered() && buf.len() < STREAM_CHUNK_SIZE {
-            let mut chunk = vec![0u8; STREAM_CHUNK_SIZE];
+        if self.is_buffered() && buf.len() < chunk_size {
+            let mut chunk = vec![0u8; chunk_size];
             let n = self.read_direct(&mut chunk, has_buffered)?;
             let k = n.min(buf.len());
             buf[..k].copy_from_slice(&chunk[..k]);
@@ -11273,6 +11287,29 @@ impl FileHandle {
             return Ok(k);
         }
         self.read_direct(buf, has_buffered)
+    }
+
+    /// php_stream_fill_read_buffer() of a socket stream: one read into the
+    /// free space of the read buffer (compacted, or grown by a chunk, when
+    /// less than a chunk is free), appended to what is buffered.
+    fn sock_fill(&mut self, has_buffered: bool) -> std::io::Result<usize> {
+        let chunk = self.chunk_size.max(1);
+        let buffered = self.filter_read_ready.len();
+        if self.rb_writepos < buffered {
+            self.rb_writepos = buffered;
+        }
+        if self.rb_cap.saturating_sub(self.rb_writepos) < chunk {
+            self.rb_writepos = buffered;
+        }
+        if self.rb_cap.saturating_sub(self.rb_writepos) < chunk {
+            self.rb_cap += chunk;
+        }
+        let room = self.rb_cap - self.rb_writepos;
+        let mut tmp = vec![0u8; room];
+        let n = self.read_direct(&mut tmp, has_buffered)?;
+        self.rb_writepos += n;
+        self.filter_read_ready.extend_from_slice(&tmp[..n]);
+        Ok(n)
     }
 
     /// ops->read() straight from the descriptor, bypassing the read buffer.
@@ -11474,6 +11511,9 @@ fn register_std_streams() {
                     eol: EOL_UNSET,
                     append_pos: None,
                     temp_max: None,
+                    chunk_size: STREAM_CHUNK_SIZE,
+                    rb_cap: 0,
+                    rb_writepos: 0,
                 },
             );
         }
@@ -11484,11 +11524,6 @@ fn register_std_streams() {
 /// no limit) up to and including a newline; None when nothing could be
 /// read.
 pub(crate) fn stream_get_line_raw(fid: i64, maxchars: usize) -> Option<Vec<u8>> {
-    let chunk = if STREAM_WILL_CAST.with(|c| c.get()) {
-        1
-    } else {
-        STREAM_CHUNK_SIZE
-    };
     FILE_HANDLES.with(|h| {
         let mut hb = h.borrow_mut();
         let fh = hb.get_mut(&fid)?;
@@ -11510,9 +11545,18 @@ pub(crate) fn stream_get_line_raw(fid: i64, maxchars: usize) -> Option<Vec<u8>> 
                     return Some(out);
                 }
             }
-            let mut buf = vec![0u8; chunk];
-            match fh.read_direct(&mut buf, false) {
-                Ok(n) if n > 0 => fh.filter_read_ready.extend_from_slice(&buf[..n]),
+            let r = if fh.sock.is_some() {
+                fh.sock_fill(false)
+            } else {
+                let mut buf = vec![0u8; fh.chunk_size.max(1)];
+                let r = fh.read_direct(&mut buf, false);
+                if let Ok(n) = r {
+                    fh.filter_read_ready.extend_from_slice(&buf[..n]);
+                }
+                r
+            };
+            match r {
+                Ok(n) if n > 0 => {}
                 _ => break,
             }
         }
@@ -11525,6 +11569,30 @@ thread_local! {
     /// descriptor (the http:// wrapper then reads the headers one byte at a
     /// time, leaving the body unread).
     pub(crate) static STREAM_WILL_CAST: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
+    /// SG(request_info).request_body exists (php://input was opened).
+    static INPUT_BODY_CREATED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The first php://input of a request creates the request body stream
+/// (php_stream_temp_create_ex(): a temp stream and its memory stream).
+fn input_body_stream_ids() {
+    if !INPUT_BODY_CREATED.with(|c| c.replace(true)) {
+        goro_core::value::alloc_resource_id();
+        goro_core::value::alloc_resource_id();
+    }
+}
+
+/// php_stream_set_chunk_size() of an open stream: the previous size.
+pub(crate) fn stream_swap_chunk_size(fid: i64, size: usize) -> usize {
+    FILE_HANDLES.with(|h| {
+        h.borrow_mut()
+            .get_mut(&fid)
+            .map(|fh| std::mem::replace(&mut fh.chunk_size, size))
+            .unwrap_or(STREAM_CHUNK_SIZE)
+    })
 }
 
 /// stream->position = 0 (ftell() counts from what is buffered now).
@@ -11868,6 +11936,9 @@ fn alloc_file_handle_special(file: std::fs::File, mode: &str, special: SpecialSt
                     eol: EOL_UNSET,
                     append_pos: None,
                     temp_max: None,
+                    chunk_size: STREAM_CHUNK_SIZE,
+                    rb_cap: 0,
+                    rb_writepos: 0,
                 },
             );
         });
@@ -12215,6 +12286,7 @@ pub(crate) fn fopen_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             match tempfile::tempfile() {
                 Ok(mut f) => {
                     if lower == "input" {
+                        input_body_stream_ids();
                         use std::io::{Seek, SeekFrom, Write};
                         let body = get_request_body();
                         let _ = f.write_all(&body);
@@ -13370,7 +13442,8 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                 .map(|fh| fh.eof && fh.filter_read_ready.is_empty())
                 .unwrap_or(true)
         });
-        if out.is_empty() && is_eof_now {
+        let _ = is_eof_now;
+        if out.is_empty() {
             return Ok(Value::False);
         }
         let _ = hit_newline;
@@ -13440,9 +13513,10 @@ fn fgets_fn_inner(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     }
                 }
             }
-            // A socket read that timed out (or failed) with nothing read
-            // makes fgets() fail.
-            if buf.is_empty() && fh.sock.is_some() && (failed || fh.eof) {
+            // _php_stream_get_line(): nothing read (a socket read that timed
+            // out, failed or found no data yet) makes fgets() fail.
+            let _ = failed;
+            if buf.is_empty() {
                 return Ok(Value::False);
             }
             // php://temp reads greedily from its inner memory stream, so the
@@ -21435,7 +21509,7 @@ fn stream_get_line_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn stream_set_chunk_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let arg = args.first().unwrap_or(&Value::Null);
-    let _fid = require_open_stream(vm, arg, "stream_set_chunk_size")?;
+    let fid = require_open_stream(vm, arg, "stream_set_chunk_size")?;
     let size = args.get(1).map(|v| v.to_long()).unwrap_or(0);
     if size <= 0 {
         let msg = "stream_set_chunk_size(): Argument #2 ($size) must be greater than 0".to_string();
@@ -21446,9 +21520,13 @@ fn stream_set_chunk_size_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             line: vm.current_line,
         });
     }
-    // We don't currently honour the chunk size internally. Return the default
-    // 8192 so callers see a sane previous value.
-    Ok(Value::Long(8192))
+    // php_stream_set_chunk_size(): the previous size.
+    let prev = FILE_HANDLES.with(|h| {
+        h.borrow_mut()
+            .get_mut(&fid)
+            .map(|fh| std::mem::replace(&mut fh.chunk_size, size.min(i32::MAX as i64) as usize))
+    });
+    Ok(Value::Long(prev.unwrap_or(STREAM_CHUNK_SIZE) as i64))
 }
 fn stream_socket_enable_crypto_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     xp_socket::stream_socket_enable_crypto(vm, args)

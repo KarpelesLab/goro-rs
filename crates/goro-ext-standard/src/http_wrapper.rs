@@ -702,6 +702,13 @@ fn http_wrap_ex(
                 return None;
             }
         }
+        // avoid buffering issues while reading header
+        let will_cast = crate::misc::STREAM_WILL_CAST.with(|c| c.get());
+        let chunk_size = if will_cast {
+            Some(crate::misc::stream_swap_chunk_size(fid, 1))
+        } else {
+            None
+        };
         xp_socket::flush_notifications(vm);
         notify(vm, ctx, NOTIFY_CONNECT, SEVERITY_INFO, None, 0, 0, 0);
         if header_init {
@@ -1022,6 +1029,10 @@ fn http_wrap_ex(
             info.error = None;
         }
         levels.push(info.file_size);
+        // Restore original chunk size now that we're done with headers
+        if let Some(c) = chunk_size {
+            crate::misc::stream_swap_chunk_size(fid, c);
+        }
 
         if !reqok || (info.location.is_some() && info.follow_location) {
             if !info.follow_location || ((headers_only || ignore_errors) && redirect_max <= 1) {
