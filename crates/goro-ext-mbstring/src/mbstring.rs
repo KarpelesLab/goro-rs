@@ -1220,8 +1220,11 @@ fn output_handler_start(vm: &mut Vm, enc: &'static Encoding) {
             line.extend_from_slice(&mimetype);
             line.extend_from_slice(b"; charset=");
             line.extend_from_slice(charset.as_bytes());
-            // sapi_add_header(p, len, 0)
-            goro_core::sapi_headers::add_header(&line, false);
+            // sapi_add_header(p, len, 0), not from inside a running
+            // output handler
+            if vm.ob_running.is_none() {
+                goro_core::sapi_headers::add_header_checked(vm, &line, false);
+            }
         }
         state::with(|st| st.outconv_enabled = true);
     }

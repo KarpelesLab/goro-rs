@@ -683,7 +683,7 @@ fn ob_handler_init(
 ) -> Option<goro_core::ob::ObHandler> {
     Some(Vm::ob_make_handler(
         name.to_vec(),
-        goro_core::ob::ObKind::Internal(ob_handler),
+        goro_core::ob::ObKind::InternalFallible(ob_handler),
         chunk_size,
         flags,
     ))
@@ -722,10 +722,47 @@ fn handler_conflict(vm: &mut Vm, new: &[u8], set: &[u8]) -> bool {
     false
 }
 
-/// php_iconv_output_handler()
-fn ob_handler(vm: &mut Vm, data: &[u8], _flags: i64) -> Option<Vec<u8>> {
+/// php_iconv_output_handler(): None is FAILURE (the handler is disabled
+/// and the output passes through).
+fn ob_handler(vm: &mut Vm, data: &[u8], op: i64) -> Option<Vec<u8>> {
+    const START: i64 = 1;
+    const CLEAN: i64 = 2;
+    const FINAL: i64 = 8;
+    if op & START != 0 {
+        // (once output was sent, the charset can no longer be declared)
+        if vm.headers_sent {
+            return None;
+        }
+        let mimetype = match goro_core::sapi_headers::mimetype() {
+            Some(m) if m.len() >= 5 && m[..5].eq_ignore_ascii_case(b"text/") => {
+                Some(m[..m.iter().position(|&c| c == b';').unwrap_or(m.len())].to_vec())
+            }
+            _ if goro_core::sapi_headers::send_default_content_type() => Some(
+                vm.constants
+                    .get(b"default_mimetype".as_slice())
+                    .map(|v| v.to_php_string().as_bytes().to_vec())
+                    .filter(|v| !v.is_empty())
+                    .unwrap_or_else(|| b"text/html".to_vec()),
+            ),
+            _ => None,
+        };
+        if let Some(mt) = mimetype {
+            if op & CLEAN == 0 || op & FINAL == 0 {
+                let enc = output_encoding(vm);
+                let cs = match enc.windows(2).position(|w| w == b"//") {
+                    Some(p) => &enc[..p],
+                    None => &enc[..],
+                };
+                let mut line = b"Content-Type:".to_vec();
+                line.extend_from_slice(&mt);
+                line.extend_from_slice(b"; charset=");
+                line.extend_from_slice(cs);
+                goro_core::sapi_headers::add_header_checked(vm, &line, false);
+            }
+        }
+    }
     if data.is_empty() {
-        return None;
+        return Some(Vec::new());
     }
     let out_cs = output_encoding(vm);
     let in_cs = internal_encoding(vm);

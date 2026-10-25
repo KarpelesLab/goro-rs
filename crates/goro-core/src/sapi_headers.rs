@@ -53,6 +53,24 @@ pub fn add_header(line: &[u8], replace: bool) {
     }
 }
 
+/// sapi_add_header() from an extension once the script may have produced
+/// output: fails with php's warning when the headers were already sent.
+pub fn add_header_checked(vm: &mut crate::vm::Vm, line: &[u8], replace: bool) -> bool {
+    if vm.headers_sent {
+        let msg = match vm.output_start.clone() {
+            Some((f, l)) => format!(
+                "Cannot modify header information - headers already sent by (output started at {}:{})",
+                f, l
+            ),
+            None => "Cannot modify header information - headers already sent".to_string(),
+        };
+        vm.emit_warning(&msg);
+        return false;
+    }
+    add_header(line, replace);
+    true
+}
+
 /// sapi_activate(): a new request starts with no headers.
 pub fn reset() {
     MIMETYPE.with(|m| *m.borrow_mut() = None);
