@@ -15055,26 +15055,43 @@ fn class_level_props<'a>(
 
 fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let class_name = args.first().unwrap_or(&Value::Null).to_php_string();
-    let name_lower: Vec<u8> = class_name
+    let bare = class_name
         .as_bytes()
-        .iter()
-        .map(|b| b.to_ascii_lowercase())
-        .collect();
+        .strip_prefix(b"\\")
+        .unwrap_or(class_name.as_bytes());
+    let mut name_lower: Vec<u8> = bare.to_ascii_lowercase();
+    // Z_PARAM_CLASS: zend_lookup_class() autoloads.
+    for attempt in 0..2 {
+        if let Some(canon) = vm.class_aliases.get(&name_lower) {
+            name_lower = canon.to_ascii_lowercase();
+        }
+        if attempt == 1
+            || vm.classes.contains_key(&name_lower)
+            || goro_core::stubs::class_entry(vm, &name_lower).is_some()
+        {
+            break;
+        }
+        let bare = bare.to_vec();
+        vm.try_autoload_class(&bare);
+        if vm.current_exception.is_some() {
+            return Ok(Value::Null);
+        }
+    }
     // Internal classes known by name only: their declared shape (stubs)
     let internal = if vm.classes.contains_key(&name_lower) {
         None
     } else {
         goro_core::stubs::class_entry(vm, &name_lower)
     };
-    // PHP throws an Error when the class is not declared; the message
-    // uses the original-case spelling supplied by the caller.
+    // Z_PARAM_CLASS throws a TypeError when the class is not declared;
+    // the message uses the original-case spelling supplied by the caller.
     if !vm.classes.contains_key(&name_lower) && internal.is_none() {
         let class_str = class_name.to_string_lossy().to_string();
         let msg = format!(
             "get_class_vars(): Argument #1 ($class) must be a valid class name, {} given",
             class_str
         );
-        let exc = vm.create_exception(b"Error", &msg, 0);
+        let exc = vm.create_exception(b"TypeError", &msg, 0);
         vm.current_exception = Some(exc);
         return Ok(Value::Null);
     }
@@ -15152,8 +15169,24 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         let class = vm.classes.get(&name_lower).unwrap();
-        // Non-static, walking child → parent
+        // The class's property table holds one entry per name: a name a
+        // descendant redeclares hides the ancestor's (private) one.
+        let declared_at = |lvl: &[u8]| -> Vec<Vec<u8>> {
+            class
+                .properties
+                .iter()
+                .filter(|p| p.declaring_class.eq_ignore_ascii_case(lvl))
+                .map(|p| p.name.clone())
+                .collect()
+        };
+        let mut hidden: Vec<Vec<Vec<u8>>> = Vec::with_capacity(chain.len());
+        let mut seen: Vec<Vec<u8>> = Vec::new();
         for cls_lower in &chain {
+            hidden.push(seen.clone());
+            seen.extend(declared_at(cls_lower));
+        }
+        // Non-static, walking child → parent
+        for (lvl, cls_lower) in chain.iter().enumerate() {
             for prop in class_level_props(vm, class, cls_lower) {
                 if prop.is_static || prop.is_virtual {
                     continue;
@@ -15163,7 +15196,7 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
-                if decl_lower != *cls_lower {
+                if decl_lower != *cls_lower || hidden[lvl].contains(&prop.name) {
                     continue;
                 }
                 if !can_see(prop) {
@@ -15200,7 +15233,7 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             }
         }
         // Static, walking child → parent
-        for cls_lower in &chain {
+        for (lvl, cls_lower) in chain.iter().enumerate() {
             for prop in class_level_props(vm, class, cls_lower) {
                 if !prop.is_static {
                     continue;
@@ -15210,7 +15243,7 @@ fn get_class_vars_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
-                if decl_lower != *cls_lower {
+                if decl_lower != *cls_lower || hidden[lvl].contains(&prop.name) {
                     continue;
                 }
                 if !can_see(prop) {
