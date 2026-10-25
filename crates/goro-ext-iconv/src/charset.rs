@@ -705,23 +705,52 @@ impl Decoder {
                     return Dec::Incomplete;
                 }
                 match mbfl_decode_char_glibc(no, &s[..n]) {
-                    Some(cp) if no_pua(no, cp) => Dec::Illegal(1),
-                    Some(cp) => Dec::Char(cp, n),
+                    Some(cp) if !no_pua(no, cp) => Dec::Char(cp, n),
                     // //IGNORE skips the lead byte, or the pair for some
                     // charsets when the trail byte is in range.
-                    None => {
+                    _ => {
                         let t = s.get(1).copied().unwrap_or(0);
                         let pair = n == 2
                             && match no {
-                                EncNo::EucKr | EncNo::Uhc => true,
-                                EncNo::Cp936 => (0x40..=0xFE).contains(&t) && t != 0x7F,
+                                EncNo::EucKr => true,
+                                // (UHC's KS X 1001 part only)
+                                EncNo::Uhc => c >= 0xA1 && t >= 0xA1,
+                                EncNo::Cp936 => {
+                                    (0x40..=0xFE).contains(&t) && !(c == 0xFE && t >= 0xA1)
+                                }
+                                EncNo::EucCn => {
+                                    matches!(c, 0x8E..=0x8F | 0xA1..=0xFE)
+                                        && (0xA1..=0xFE).contains(&t)
+                                }
+                                EncNo::Big5 | EncNo::Cp950 => {
+                                    c == 0xA3 && (0xC0..=0xFE).contains(&t)
+                                }
+                                EncNo::Sjis => (0x40..=0xFC).contains(&t),
+                                // (within the blocks of glibc's tables)
                                 EncNo::Cp932 => {
-                                    matches!(c, 0x81..=0x9F | 0xE0..=0xEF)
+                                    matches!(c, 0x81..=0x9F | 0xE0..=0xEE)
                                         && (0x40..=0xFC).contains(&t)
                                         && t != 0x7F
+                                        && !matches!(
+                                            (c, t),
+                                            (0x84, 0xBF..)
+                                                | (0x85..=0x86, _)
+                                                | (0x87, 0x9D..)
+                                                | (0x88, ..=0x9E)
+                                                | (0xEA, 0xA5..)
+                                                | (0xEB..=0xEC, _)
+                                        )
                                 }
                                 _ => false,
                             };
+                        // (EUC-JP-MS skips an unmapped character whole)
+                        if no == EncNo::EucJpWin
+                            && c != 0x8E
+                            && c != 0xA0
+                            && s[1..n].iter().all(|b| (0xA1..=0xFE).contains(b))
+                        {
+                            return Dec::Illegal(n);
+                        }
                         Dec::Illegal(if pair { 2 } else { 1 })
                     }
                 }
