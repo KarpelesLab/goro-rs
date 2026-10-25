@@ -379,7 +379,33 @@ pub(crate) fn drops_quietly_deep(
             *budget -= arr.len() as u32;
             arr.values().all(|v| drops_quietly_deep(v, budget, globals))
         }
-        Value::Object(o) => Rc::strong_count(o) > 1 || object_release_quiet(o),
+        Value::Object(o) => {
+            if Rc::strong_count(o) > 1 || object_release_quiet(o) {
+                return true;
+            }
+            // (object_release_quiet(), its properties released quietly in
+            // turn)
+            let Ok(ob) = o.try_borrow() else {
+                return false;
+            };
+            let gc_weak = ob.gc_tracked.get() as usize + ob.gc_buffered.get() as usize;
+            if Rc::weak_count(o) > gc_weak
+                || crate::gc::gc_pending()
+                || ob.dtor_listed.get()
+                || ob.weak_key.get()
+                || ob.native.is_some()
+                || ob.closure.is_some()
+                || ob.properties.has_internal()
+                || ob.class_name.eq_ignore_ascii_case(b"WeakMap")
+                || ob.properties.len() as u32 > *budget
+            {
+                return false;
+            }
+            *budget -= ob.properties.len() as u32;
+            ob.properties
+                .iter()
+                .all(|(_, v)| drops_quietly_deep(v, budget, globals))
+        }
         Value::Reference(r) => {
             Rc::strong_count(r) > 1
                 || r.try_borrow()
@@ -941,6 +967,58 @@ fn fetched_container(
                     .is_some_and(|(_, v)| is_it(v))
         }
         _ => false,
+    }
+}
+
+/// `$s[i]` of a string and an int offset within it (FETCH_DIM_R on a
+/// string): the one-byte string there; anything else (an offset outside
+/// it warns, other offset types convert or throw) takes the general path.
+#[inline(never)]
+fn fast_string_offset(op: &Op, cvs: &[Value], tmps: &mut [Value], literals: &[Value]) -> Fast {
+    if op.opcode != OpCode::ArrayGet || !tmp_writable(&op.result, tmps) {
+        return Fast::No;
+    }
+    let s = match op.op1 {
+        OperandType::Cv(i) => match cvs.get(i as usize) {
+            Some(Value::String(s)) => s,
+            _ => return Fast::No,
+        },
+        OperandType::Tmp(i) => match tmps.get(i as usize) {
+            Some(Value::String(s)) => s,
+            _ => return Fast::No,
+        },
+        OperandType::Const(i) => match literals.get(i as usize) {
+            Some(Value::String(s)) => s,
+            _ => return Fast::No,
+        },
+        _ => return Fast::No,
+    };
+    let idx = match op.op2 {
+        OperandType::Cv(i) => cvs.get(i as usize),
+        OperandType::Tmp(i) => tmps.get(i as usize),
+        OperandType::Const(i) => literals.get(i as usize),
+        _ => None,
+    };
+    let Some(Value::Long(idx)) = idx else {
+        return Fast::No;
+    };
+    let b = s.as_bytes();
+    let at = if *idx < 0 {
+        match b.len().checked_sub(idx.unsigned_abs() as usize) {
+            Some(at) => at,
+            None => return Fast::No,
+        }
+    } else {
+        *idx as usize
+    };
+    let Some(&c) = b.get(at) else {
+        return Fast::No;
+    };
+    let v = Value::String(crate::string::PhpString::one_char(c));
+    if store_tmp(&op.result, v, tmps) {
+        Fast::Done
+    } else {
+        Fast::No
     }
 }
 
@@ -2504,6 +2582,9 @@ impl crate::vm::Vm {
             _ => None,
         };
         let Some(arr) = arr else {
+            if !write {
+                return fast_string_offset(op, cvs, tmps, literals);
+            }
             return Fast::No;
         };
         // $GLOBALS (the symbol table) has its own bookkeeping.
@@ -2597,8 +2678,16 @@ impl crate::vm::Vm {
             let Ok(mut a) = arr.try_borrow_mut() else {
                 return Fast::No;
             };
-            if !a.get(&key).is_none_or(is_plain_scalar) {
-                return Fast::No;
+            // (an overwritten element: a plain value, or one whose release
+            // only frees memory when no destructor can be due; a reference
+            // is written through by the general handler)
+            match a.get(&key) {
+                None => {}
+                Some(v) if is_plain_scalar(v) => {}
+                Some(v @ (Value::Array(_) | Value::Object(_)))
+                    if !self.has_release_work()
+                        && drops_quietly_deep(v, &mut 256, &self.globals) => {}
+                _ => return Fast::No,
             }
             let val = if dup {
                 drop(a);
