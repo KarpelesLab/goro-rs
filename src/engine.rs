@@ -138,6 +138,11 @@ pub fn new_vm(ini: &IniSettings, sapi: &str) -> Vm {
         b"PHP_SAPI".to_vec(),
         Value::String(PhpString::from_string(sapi.to_string())),
     );
+    // (registered by sapi/cli's module startup)
+    if sapi != "cli" && sapi != "cli-server" {
+        vm.constants
+            .shift_remove(b"PHP_CLI_PROCESS_TITLE".as_slice());
+    }
     let startup_messages = goro_ext_standard::misc::apply_startup_ini(&mut vm, ini);
     // The compiler checks the (emulated) C stack too: sized from the start.
     {

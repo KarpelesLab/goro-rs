@@ -2185,8 +2185,6 @@ impl Vm {
                 c.insert(b"PHP_FLOAT_MIN".to_vec(), Value::Double(f64::MIN_POSITIVE));
                 c.insert(b"PHP_FLOAT_EPSILON".to_vec(), Value::Double(f64::EPSILON));
                 c.insert(b"PHP_FLOAT_DIG".to_vec(), Value::Long(15));
-                c.insert(b"PHP_FLOAT_INF".to_vec(), Value::Double(f64::INFINITY));
-                c.insert(b"PHP_FLOAT_NAN".to_vec(), Value::Double(f64::NAN));
                 c.insert(b"PHP_MAXPATHLEN".to_vec(), Value::Long(4096));
                 c.insert(
                     b"PHP_OS".to_vec(),
@@ -2216,11 +2214,11 @@ impl Vm {
                     b"PHP_BUILD_DATE".to_vec(),
                     Value::String(PhpString::from_string(crate::php_build_date())),
                 );
-                c.insert(b"PHP_DEBUG".to_vec(), Value::Long(0));
+                c.insert(b"PHP_DEBUG".to_vec(), Value::False);
                 // zend_constants.stub.php
                 c.insert(b"ZEND_THREAD_SAFE".to_vec(), Value::False);
                 c.insert(b"ZEND_DEBUG_BUILD".to_vec(), Value::False);
-                c.insert(b"PHP_ZTS".to_vec(), Value::Long(0));
+                c.insert(b"PHP_ZTS".to_vec(), Value::False);
                 c.insert(
                     b"PHP_PREFIX".to_vec(),
                     Value::String(PhpString::from_bytes(b"/usr")),
@@ -2241,12 +2239,28 @@ impl Vm {
                     b"PHP_SYSCONFDIR".to_vec(),
                     Value::String(PhpString::from_bytes(b"/etc")),
                 );
+                for (k, v) in [
+                    (&b"PHP_SBINDIR"[..], &b"/usr/sbin"[..]),
+                    (b"PHP_MANDIR", b"/usr/share/man"),
+                    (b"PHP_LOCALSTATEDIR", b"/var"),
+                    (b"DEFAULT_INCLUDE_PATH", b".:/usr/share/php"),
+                    (b"PEAR_INSTALL_DIR", b"/usr/share/php"),
+                    (b"ZEND_VM_KIND", b"ZEND_VM_KIND_HYBRID"),
+                ] {
+                    c.insert(k.to_vec(), Value::String(PhpString::from_bytes(v)));
+                }
+                // (the CLI SAPI's; other SAPIs drop it)
+                c.insert(b"PHP_CLI_PROCESS_TITLE".to_vec(), Value::True);
                 // PHP_EXTENSION_DIR, the extension_dir default: the
                 // "extensions" directory next to the goro binary.
                 {
                     let dir = default_extension_dir();
                     c.insert(
                         b"PHP_EXTENSION_DIR".to_vec(),
+                        Value::String(PhpString::from_bytes(dir.as_bytes())),
+                    );
+                    c.insert(
+                        b"PEAR_EXTENSION_DIR".to_vec(),
                         Value::String(PhpString::from_bytes(dir.as_bytes())),
                     );
                     c.insert(
@@ -2338,7 +2352,6 @@ impl Vm {
                 c.insert(b"PHP_ROUND_HALF_ODD".to_vec(), Value::Long(4));
                 c.insert(b"ARRAY_FILTER_USE_BOTH".to_vec(), Value::Long(1));
                 c.insert(b"ARRAY_FILTER_USE_KEY".to_vec(), Value::Long(2));
-                c.insert(b"ARRAY_UNIQUE_REGULAR".to_vec(), Value::Long(0));
                 c.insert(b"COUNT_NORMAL".to_vec(), Value::Long(0));
                 c.insert(b"COUNT_RECURSIVE".to_vec(), Value::Long(1));
                 // Pathinfo constants
@@ -2359,10 +2372,10 @@ impl Vm {
                 c.insert(b"SEEK_SET".to_vec(), Value::Long(0));
                 c.insert(b"SEEK_CUR".to_vec(), Value::Long(1));
                 c.insert(b"SEEK_END".to_vec(), Value::Long(2));
-                c.insert(b"GLOB_MARK".to_vec(), Value::Long(1));
-                c.insert(b"GLOB_NOSORT".to_vec(), Value::Long(2));
+                c.insert(b"GLOB_MARK".to_vec(), Value::Long(8));
+                c.insert(b"GLOB_NOSORT".to_vec(), Value::Long(32));
                 c.insert(b"GLOB_NOCHECK".to_vec(), Value::Long(16));
-                c.insert(b"GLOB_NOESCAPE".to_vec(), Value::Long(64));
+                c.insert(b"GLOB_NOESCAPE".to_vec(), Value::Long(4096));
                 c.insert(b"GLOB_BRACE".to_vec(), Value::Long(128));
                 c.insert(b"GLOB_ONLYDIR".to_vec(), Value::Long(1073741824));
                 // PREG constants
@@ -2515,10 +2528,6 @@ impl Vm {
                 c.insert(b"PHP_ROUND_HALF_DOWN".to_vec(), Value::Long(2));
                 c.insert(b"PHP_ROUND_HALF_EVEN".to_vec(), Value::Long(3));
                 c.insert(b"PHP_ROUND_HALF_ODD".to_vec(), Value::Long(4));
-                c.insert(b"PHP_ROUND_CEILING".to_vec(), Value::Long(5));
-                c.insert(b"PHP_ROUND_FLOOR".to_vec(), Value::Long(6));
-                c.insert(b"PHP_ROUND_TOWARD_ZERO".to_vec(), Value::Long(7));
-                c.insert(b"PHP_ROUND_AWAY_FROM_ZERO".to_vec(), Value::Long(8));
                 // INI constants
                 c.insert(b"INI_USER".to_vec(), Value::Long(1));
                 c.insert(b"INI_PERDIR".to_vec(), Value::Long(2));
@@ -2613,9 +2622,7 @@ impl Vm {
                 c.insert(b"UPLOAD_ERR_CANT_WRITE".to_vec(), Value::Long(7));
                 c.insert(b"UPLOAD_ERR_EXTENSION".to_vec(), Value::Long(8));
                 // Ctype constants
-                c.insert(b"CTYPE_ALPHA".to_vec(), Value::Long(1));
                 // Additional misc constants
-                c.insert(b"ARRAY_UNIQUE_REGULAR".to_vec(), Value::Long(0));
                 c.insert(b"LC_ALL".to_vec(), Value::Long(6));
                 c.insert(b"LC_COLLATE".to_vec(), Value::Long(3));
                 c.insert(b"LC_CTYPE".to_vec(), Value::Long(0));
@@ -2681,7 +2688,7 @@ impl Vm {
                 c.insert(b"CREDITS_DOCS".to_vec(), Value::Long(16));
                 c.insert(b"CREDITS_FULLPAGE".to_vec(), Value::Long(32));
                 c.insert(b"CREDITS_QA".to_vec(), Value::Long(64));
-                c.insert(b"CREDITS_ALL".to_vec(), Value::Long(0xFFFF));
+                c.insert(b"CREDITS_ALL".to_vec(), Value::Long(0xFFFF_FFFF));
                 c.insert(b"INFO_GENERAL".to_vec(), Value::Long(1));
                 c.insert(b"INFO_CREDITS".to_vec(), Value::Long(2));
                 c.insert(b"INFO_CONFIGURATION".to_vec(), Value::Long(4));
@@ -2689,7 +2696,7 @@ impl Vm {
                 c.insert(b"INFO_ENVIRONMENT".to_vec(), Value::Long(16));
                 c.insert(b"INFO_VARIABLES".to_vec(), Value::Long(32));
                 c.insert(b"INFO_LICENSE".to_vec(), Value::Long(64));
-                c.insert(b"INFO_ALL".to_vec(), Value::Long(0xFFFF));
+                c.insert(b"INFO_ALL".to_vec(), Value::Long(0xFFFF_FFFF));
                 // SCANDIR constants
                 c.insert(b"SCANDIR_SORT_ASCENDING".to_vec(), Value::Long(0));
                 c.insert(b"SCANDIR_SORT_DESCENDING".to_vec(), Value::Long(1));
@@ -2706,7 +2713,7 @@ impl Vm {
                 c.insert(b"PASSWORD_BCRYPT_DEFAULT_COST".to_vec(), Value::Long(10));
                 // GLOB constants
                 c.insert(b"GLOB_ERR".to_vec(), Value::Long(4));
-                c.insert(b"GLOB_AVAILABLE_FLAGS".to_vec(), Value::Long(1073741951));
+                c.insert(b"GLOB_AVAILABLE_FLAGS".to_vec(), Value::Long(1073746108));
                 // CRYPT constants
                 c.insert(b"CRYPT_STD_DES".to_vec(), Value::Long(1));
                 c.insert(b"CRYPT_EXT_DES".to_vec(), Value::Long(1));
@@ -2754,6 +2761,33 @@ impl Vm {
                 c.insert(b"LOG_NDELAY".to_vec(), Value::Long(8));
                 c.insert(b"LOG_ODELAY".to_vec(), Value::Long(4));
                 c.insert(b"LOG_PERROR".to_vec(), Value::Long(32));
+                for (k, v) in [
+                    (&b"LOG_MAIL"[..], 16),
+                    (b"LOG_DAEMON", 24),
+                    (b"LOG_AUTH", 32),
+                    (b"LOG_SYSLOG", 40),
+                    (b"LOG_LPR", 48),
+                    (b"LOG_NEWS", 56),
+                    (b"LOG_UUCP", 64),
+                    (b"LOG_CRON", 72),
+                    (b"LOG_AUTHPRIV", 80),
+                    (b"LOG_LOCAL1", 136),
+                    (b"LOG_LOCAL2", 144),
+                    (b"LOG_LOCAL3", 152),
+                    (b"LOG_LOCAL4", 160),
+                    (b"LOG_LOCAL5", 168),
+                    (b"LOG_LOCAL6", 176),
+                    (b"LOG_LOCAL7", 184),
+                    (b"LOG_NOWAIT", 16),
+                    (b"STREAM_PF_INET6", 10),
+                    (b"STREAM_SOCK_SEQPACKET", 5),
+                    (b"STREAM_SOCK_RDM", 4),
+                    (b"FILE_NO_DEFAULT_CONTEXT", 16),
+                    (b"STREAM_IGNORE_URL", 2),
+                    (b"STREAM_MUST_SEEK", 16),
+                ] {
+                    c.entry(k.to_vec()).or_insert(Value::Long(v));
+                }
                 // FILTER_VALIDATE_REGEXP
                 c.insert(b"FILTER_VALIDATE_REGEXP".to_vec(), Value::Long(272));
                 // GMP constants
@@ -2770,7 +2804,6 @@ impl Vm {
                     Value::String(PhpString::from_bytes(b"6.2.1")),
                 );
                 // Array constants
-                c.insert(b"ARRAY_FILTER_USE_VALUE".to_vec(), Value::Long(0));
                 // Stream constants
                 c.insert(b"STREAM_SERVER_BIND".to_vec(), Value::Long(4));
                 c.insert(b"STREAM_SERVER_LISTEN".to_vec(), Value::Long(8));
@@ -44408,7 +44441,11 @@ impl Vm {
                         .to_php_string();
                     let name_bytes = name.as_bytes();
                     // Look up in constants table
-                    let val = if let Some(v) = self.constants.get(name_bytes) {
+                    let val = if let Some(v) = self
+                        .constants
+                        .get(name_bytes)
+                        .filter(|_| !is_ini_entry_key(name_bytes))
+                    {
                         Some(v.clone())
                     } else if name_bytes.contains(&b'\\') {
                         // For namespaced constants, namespace prefix is case-insensitive
@@ -44433,7 +44470,10 @@ impl Vm {
                             // Namespace fallback: try the unqualified (global) name
                             if let Some(last_sep) = name_bytes.iter().rposition(|&b| b == b'\\') {
                                 let global_name = &name_bytes[last_sep + 1..];
-                                self.constants.get(global_name).cloned()
+                                self.constants
+                                    .get(global_name)
+                                    .filter(|_| !is_ini_entry_key(global_name))
+                                    .cloned()
                             } else {
                                 None
                             }
@@ -64241,6 +64281,93 @@ fn return_type_verifies_null(t: &ParamType) -> bool {
             .any(|t| matches!(t, ParamType::Simple(n) if n.eq_ignore_ascii_case(b"null"))),
         ParamType::Intersection(_) => false,
     }
+}
+
+/// INI entries share the constants table: those without a dot (dotted
+/// lowercase names are INI entries too, see [`is_ini_entry_key`]).
+const UNDOTTED_INI_ENTRIES: &[&[u8]] = &[
+    b"SMTP",
+    b"allow_url_fopen",
+    b"allow_url_include",
+    b"auto_append_file",
+    b"auto_detect_line_endings",
+    b"auto_globals_jit",
+    b"auto_prepend_file",
+    b"browscap",
+    b"default_charset",
+    b"default_mimetype",
+    b"default_socket_timeout",
+    b"disable_functions",
+    b"display_errors",
+    b"display_startup_errors",
+    b"doc_root",
+    b"docref_ext",
+    b"docref_root",
+    b"enable_dl",
+    b"enable_post_data_reading",
+    b"error_append_string",
+    b"error_log",
+    b"error_log_mode",
+    b"error_prepend_string",
+    b"error_reporting",
+    b"expose_php",
+    b"extension_dir",
+    b"fatal_error_backtraces",
+    b"file_uploads",
+    b"from",
+    b"hard_timeout",
+    b"html_errors",
+    b"ignore_repeated_errors",
+    b"ignore_repeated_source",
+    b"ignore_user_abort",
+    b"implicit_flush",
+    b"include_path",
+    b"input_encoding",
+    b"internal_encoding",
+    b"log_errors",
+    b"max_execution_time",
+    b"max_file_uploads",
+    b"max_input_nesting_level",
+    b"max_input_time",
+    b"max_input_vars",
+    b"max_memory_limit",
+    b"max_multipart_body_parts",
+    b"memory_limit",
+    b"open_basedir",
+    b"output_buffering",
+    b"output_encoding",
+    b"output_handler",
+    b"post_max_size",
+    b"precision",
+    b"realpath_cache_size",
+    b"realpath_cache_ttl",
+    b"register_argc_argv",
+    b"report_memleaks",
+    b"report_zend_debug",
+    b"request_order",
+    b"sendmail_from",
+    b"sendmail_path",
+    b"serialize_precision",
+    b"short_open_tag",
+    b"smtp_port",
+    b"sys_temp_dir",
+    b"unserialize_callback_func",
+    b"unserialize_max_depth",
+    b"upload_max_filesize",
+    b"upload_tmp_dir",
+    b"user_agent",
+    b"user_dir",
+    b"variables_order",
+    b"xmlrpc_error_number",
+    b"xmlrpc_errors",
+];
+
+/// Whether a key of the constants table is an INI entry, not a constant.
+pub fn is_ini_entry_key(name: &[u8]) -> bool {
+    if name.contains(&b'.') {
+        return !name.iter().any(|b| b.is_ascii_uppercase());
+    }
+    UNDOTTED_INI_ENTRIES.binary_search(&name).is_ok()
 }
 
 pub(crate) fn is_php_parse_message(msg: &str) -> bool {

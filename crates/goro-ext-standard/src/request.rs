@@ -1568,6 +1568,8 @@ pub fn startup(vm: &mut Vm, req: &RequestInfo, ini: Ini) {
             b"PHP_SAPI".to_vec(),
             Value::String(PhpString::from_bytes(b"cgi-fcgi")),
         );
+        vm.constants
+            .shift_remove(b"PHP_CLI_PROCESS_TITLE".as_slice());
     }
     // php_request_startup(): SAPI_PHP_VERSION_HEADER (the CLI SAPI has
     // no headers).

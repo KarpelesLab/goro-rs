@@ -1227,7 +1227,12 @@ fn constant(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     } else {
         name.as_bytes()
     };
-    if let Some(val) = vm.constants.get(lookup_name).cloned() {
+    if let Some(val) = vm
+        .constants
+        .get(lookup_name)
+        .filter(|_| !is_ini_entry_name(lookup_name))
+        .cloned()
+    {
         if let Some(m) = vm.internal_deprecated_constants.get(lookup_name).cloned() {
             vm.emit_deprecated_at(&m, vm.current_line);
         }
@@ -13667,6 +13672,28 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         });
     }
     let flags = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    // php_glob.h's flags (PHP's own glob implementation).
+    const G_ERR: i64 = 0x0004;
+    const G_MARK: i64 = 0x0008;
+    const G_NOCHECK: i64 = 0x0010;
+    const G_NOSORT: i64 = 0x0020;
+    const G_BRACE: i64 = 0x0080;
+    const G_NOESCAPE: i64 = 0x1000;
+    const G_ONLYDIR: i64 = 1 << 30;
+    const AVAILABLE: i64 = G_BRACE | G_MARK | G_NOSORT | G_NOCHECK | G_NOESCAPE | G_ERR | G_ONLYDIR;
+    if pattern.len() >= 4096 {
+        _vm.emit_warning(&format!(
+            "glob(): Pattern exceeds the maximum allowed length of {} characters",
+            4096
+        ));
+        return Ok(Value::False);
+    }
+    if AVAILABLE & flags != flags {
+        _vm.emit_warning(
+            "glob(): At least one of the passed flags is invalid or not supported on this platform",
+        );
+        return Ok(Value::False);
+    }
     let pattern_str = pattern.to_string_lossy();
 
     // Use libc glob
@@ -13674,22 +13701,22 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let c_pattern = std::ffi::CString::new(pattern_str.as_bytes()).unwrap_or_default();
 
     let mut libc_flags = 0i32;
-    // GLOB_MARK = 1 in PHP, adds trailing slash to directories
-    if flags & 1 != 0 {
-        libc_flags |= libc::GLOB_MARK;
+    for (php, c) in [
+        (G_ERR, libc::GLOB_ERR),
+        (G_MARK, libc::GLOB_MARK),
+        (G_NOSORT, libc::GLOB_NOSORT),
+        (G_NOESCAPE, libc::GLOB_NOESCAPE),
+    ] {
+        if flags & php != 0 {
+            libc_flags |= c;
+        }
     }
-    // GLOB_NOSORT = 2 in PHP
-    if flags & 2 != 0 {
-        libc_flags |= libc::GLOB_NOSORT;
-    }
-    // GLOB_BRACE = 128 in PHP
     #[cfg(target_os = "linux")]
-    if flags & 128 != 0 {
+    if flags & G_BRACE != 0 {
         libc_flags |= libc::GLOB_BRACE;
     }
-    // GLOB_ONLYDIR = 1073741824 (0x40000000) in PHP
     #[cfg(target_os = "linux")]
-    if flags & 1073741824 != 0 {
+    if flags & G_ONLYDIR != 0 {
         libc_flags |= libc::GLOB_ONLYDIR;
     }
 
@@ -13697,7 +13724,7 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
     // GLOB_ONLYDIR is a hint to the OS; on Linux it can still return
     // non-directories. PHP enforces it explicitly.
-    let only_dir = flags & 1073741824 != 0;
+    let only_dir = flags & G_ONLYDIR != 0;
 
     let mut arr = PhpArray::new();
     if ret == 0 {
@@ -13731,8 +13758,8 @@ fn glob_fn(_vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         libc::globfree(&mut glob_buf);
     }
 
-    // GLOB_NOCHECK = 16: if no matches, return the pattern itself
-    if ret != 0 && flags & 16 != 0 {
+    // GLOB_NOCHECK: if no matches, return the pattern itself
+    if ret != 0 && flags & G_NOCHECK != 0 {
         arr.push(Value::String(PhpString::from_string(
             pattern_str.to_string(),
         )));
@@ -14971,32 +14998,46 @@ fn get_parent_class_real(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> 
 /// INI settings share the constant table; their names ("mysqli.max_links")
 /// are lowercase and dotted, which no extension constant is.
 fn is_ini_entry_name(name: &[u8]) -> bool {
-    name.contains(&b'.') && !name.iter().any(|b| b.is_ascii_uppercase())
+    goro_core::vm::is_ini_entry_key(name)
 }
 
 fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let categorize = args.first().map(|v| v.is_truthy()).unwrap_or(false);
     let mut result = PhpArray::new();
     if categorize {
-        // Return categorized array. Constants do not record the module
-        // that registered them; the libxml ones are recognised by prefix.
-        let mut user = PhpArray::new();
-        let mut core = PhpArray::new();
-        let mut libxml = PhpArray::new();
-        let mut mysqli = PhpArray::new();
-        // Constants of extensions that list theirs (in module order).
-        let mut modules: Vec<(Vec<u8>, PhpArray)> = Vec::new();
-        for (module, names) in &vm.module_constants {
-            let mut arr = PhpArray::new();
-            for n in names {
-                if let Some(v) = vm.constants.get(n) {
-                    arr.set(
-                        goro_core::array::ArrayKey::String(PhpString::from_vec(n.clone())),
-                        v.clone(),
-                    );
+        // Return categorized array, by module in module order. Constants do
+        // not record the module that registered them: the extensions that
+        // list theirs, the stubs' and a few prefixes tell.
+        use goro_core::array::ArrayKey;
+        let key = |n: &[u8]| ArrayKey::String(PhpString::from_vec(n.to_vec()));
+        let mut buckets: Vec<(String, PhpArray)> = Vec::new();
+        fn bucket<'a>(b: &'a mut Vec<(String, PhpArray)>, m: &str) -> &'a mut PhpArray {
+            let i = match b.iter().position(|(n, _)| n.eq_ignore_ascii_case(m)) {
+                Some(i) => i,
+                None => {
+                    b.push((m.to_string(), PhpArray::new()));
+                    b.len() - 1
+                }
+            };
+            &mut b[i].1
+        }
+        // Core's own, in registration order.
+        {
+            let core = bucket(&mut buckets, "Core");
+            for n in goro_core::reflection::CORE_CONSTANT_ORDER {
+                if let Some(v) = vm.constants.get(n.as_bytes()) {
+                    core.set(key(n.as_bytes()), v.clone());
                 }
             }
-            modules.push((module.clone(), arr));
+        }
+        for (module, names) in &vm.module_constants {
+            let m = String::from_utf8_lossy(module).into_owned();
+            let arr = bucket(&mut buckets, &m);
+            for n in names {
+                if let Some(v) = vm.constants.get(n) {
+                    arr.set(key(n), v.clone());
+                }
+            }
         }
         for (name, val) in &vm.constants {
             if is_ini_entry_name(name) {
@@ -15008,43 +15049,61 @@ fn get_defined_constants_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmErro
             if vm.constant_files.contains_key(name) {
                 continue;
             }
-            // (other internal constants do not record their module)
+            let stub_ext = goro_core::stub_sigs::CONSTANTS
+                .binary_search_by(|c| c.name.as_bytes().cmp(name.as_slice()))
+                .ok()
+                .map(|i| goro_core::stub_sigs::CONSTANTS[i].ext);
             let target = if name.starts_with(b"LIBXML_") {
-                &mut libxml
+                "libxml"
             } else if name.starts_with(b"MYSQLI_") {
-                &mut mysqli
+                "mysqli"
+            } else if let Some(e) = stub_ext {
+                e
+            } else if name.starts_with(b"STREAM_")
+                || name.starts_with(b"IMAGETYPE_")
+                || name == b"YESEXPR"
+                || name == b"YESSTR"
+            {
+                "standard"
+            } else if name.starts_with(b"ZLIB_") {
+                "zlib"
+            } else if name.starts_with(b"Dom\\") || name.starts_with(b"dom\\") {
+                "dom"
+            } else if name.starts_with(b"MHASH_") {
+                "hash"
+            } else if name.starts_with(b"MB_") {
+                "mbstring"
             } else {
-                &mut core
+                "Core"
             };
-            target.set(
-                goro_core::array::ArrayKey::String(PhpString::from_vec(name.clone())),
-                val.clone(),
-            );
+            bucket(&mut buckets, target).set(key(name), val.clone());
         }
-        result.set(
-            goro_core::array::ArrayKey::String(PhpString::from_bytes(b"Core")),
-            Value::Array(Rc::new(RefCell::new(core))),
-        );
-        if !libxml.is_empty() {
-            result.set(
-                goro_core::array::ArrayKey::String(PhpString::from_bytes(b"libxml")),
-                Value::Array(Rc::new(RefCell::new(libxml))),
-            );
-        }
-        if !mysqli.is_empty() {
-            result.set(
-                goro_core::array::ArrayKey::String(PhpString::from_bytes(b"mysqli")),
-                Value::Array(Rc::new(RefCell::new(mysqli))),
-            );
-        }
-        for (module, arr) in modules {
-            if !arr.is_empty() {
+        // Core first, then the modules in module order.
+        let rank = |m: &str| -> usize {
+            if m.eq_ignore_ascii_case("Core") {
+                return 0;
+            }
+            MODULE_ORDER
+                .iter()
+                .position(|o| o.eq_ignore_ascii_case(m))
+                .map(|p| p + 1)
+                .unwrap_or(usize::MAX)
+        };
+        buckets.sort_by_key(|(m, _)| rank(m));
+        for (module, arr) in buckets {
+            if !arr.is_empty() || module == "Core" {
+                let name = MODULE_ORDER
+                    .iter()
+                    .find(|o| o.eq_ignore_ascii_case(&module))
+                    .map(|o| o.to_string())
+                    .unwrap_or(module);
                 result.set(
-                    goro_core::array::ArrayKey::String(PhpString::from_vec(module)),
+                    ArrayKey::String(PhpString::from_string(name)),
                     Value::Array(Rc::new(RefCell::new(arr))),
                 );
             }
         }
+        let mut user = PhpArray::new();
         for (key, name) in &vm.user_constant_names {
             if let Some(v) = vm.constants.get(key) {
                 user.set(
@@ -18162,6 +18221,9 @@ fn defined_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
             // a constant of a natively implemented internal class
             return Ok(Value::True);
         }
+        return Ok(Value::False);
+    }
+    if is_ini_entry_name(name_bytes) {
         return Ok(Value::False);
     }
     if vm.constants.contains_key(name_bytes) {

@@ -10616,6 +10616,16 @@ pub fn reflection_extension_method(
         }
         b"getconstants" => {
             let mut result = PhpArray::new();
+            if ext_lower == "core" {
+                for n in CORE_CONSTANT_ORDER {
+                    if let Some(v) = vm.constants.get(n.as_bytes()) {
+                        result.set(
+                            ArrayKey::String(PhpString::from_bytes(n.as_bytes())),
+                            v.clone(),
+                        );
+                    }
+                }
+            }
             if let Some((_, names)) = vm
                 .module_constants
                 .iter()
@@ -11271,6 +11281,99 @@ fn get_extension_ini_entries(ext: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
+
+/// The constants of the Core module in registration order (Zend's,
+/// main.c's, the output layer's, rfc1867's, then the SAPI's).
+pub const CORE_CONSTANT_ORDER: &[&str] = &[
+    "E_ERROR",
+    "E_WARNING",
+    "E_PARSE",
+    "E_NOTICE",
+    "E_CORE_ERROR",
+    "E_CORE_WARNING",
+    "E_COMPILE_ERROR",
+    "E_COMPILE_WARNING",
+    "E_USER_ERROR",
+    "E_USER_WARNING",
+    "E_USER_NOTICE",
+    "E_STRICT",
+    "E_RECOVERABLE_ERROR",
+    "E_DEPRECATED",
+    "E_USER_DEPRECATED",
+    "E_ALL",
+    "DEBUG_BACKTRACE_PROVIDE_OBJECT",
+    "DEBUG_BACKTRACE_IGNORE_ARGS",
+    "ZEND_THREAD_SAFE",
+    "ZEND_DEBUG_BUILD",
+    "ZEND_VM_KIND",
+    "TRUE",
+    "FALSE",
+    "NULL",
+    "PHP_VERSION",
+    "PHP_MAJOR_VERSION",
+    "PHP_MINOR_VERSION",
+    "PHP_RELEASE_VERSION",
+    "PHP_EXTRA_VERSION",
+    "PHP_VERSION_ID",
+    "PHP_BUILD_DATE",
+    "PHP_ZTS",
+    "PHP_DEBUG",
+    "PHP_OS",
+    "PHP_OS_FAMILY",
+    "DEFAULT_INCLUDE_PATH",
+    "PEAR_INSTALL_DIR",
+    "PEAR_EXTENSION_DIR",
+    "PHP_EXTENSION_DIR",
+    "PHP_PREFIX",
+    "PHP_BINDIR",
+    "PHP_SBINDIR",
+    "PHP_MANDIR",
+    "PHP_LIBDIR",
+    "PHP_DATADIR",
+    "PHP_SYSCONFDIR",
+    "PHP_LOCALSTATEDIR",
+    "PHP_CONFIG_FILE_PATH",
+    "PHP_CONFIG_FILE_SCAN_DIR",
+    "PHP_SHLIB_SUFFIX",
+    "PHP_EOL",
+    "PHP_MAXPATHLEN",
+    "PHP_INT_MAX",
+    "PHP_INT_MIN",
+    "PHP_INT_SIZE",
+    "PHP_FD_SETSIZE",
+    "PHP_FLOAT_DIG",
+    "PHP_FLOAT_EPSILON",
+    "PHP_FLOAT_MAX",
+    "PHP_FLOAT_MIN",
+    "PHP_OUTPUT_HANDLER_START",
+    "PHP_OUTPUT_HANDLER_WRITE",
+    "PHP_OUTPUT_HANDLER_FLUSH",
+    "PHP_OUTPUT_HANDLER_CLEAN",
+    "PHP_OUTPUT_HANDLER_FINAL",
+    "PHP_OUTPUT_HANDLER_CONT",
+    "PHP_OUTPUT_HANDLER_END",
+    "PHP_OUTPUT_HANDLER_CLEANABLE",
+    "PHP_OUTPUT_HANDLER_FLUSHABLE",
+    "PHP_OUTPUT_HANDLER_REMOVABLE",
+    "PHP_OUTPUT_HANDLER_STDFLAGS",
+    "PHP_OUTPUT_HANDLER_STARTED",
+    "PHP_OUTPUT_HANDLER_DISABLED",
+    "PHP_OUTPUT_HANDLER_PROCESSED",
+    "UPLOAD_ERR_OK",
+    "UPLOAD_ERR_INI_SIZE",
+    "UPLOAD_ERR_FORM_SIZE",
+    "UPLOAD_ERR_PARTIAL",
+    "UPLOAD_ERR_NO_FILE",
+    "UPLOAD_ERR_NO_TMP_DIR",
+    "UPLOAD_ERR_CANT_WRITE",
+    "UPLOAD_ERR_EXTENSION",
+    "PHP_SAPI",
+    "PHP_BINARY",
+    "PHP_CLI_PROCESS_TITLE",
+    "STDIN",
+    "STDOUT",
+    "STDERR",
+];
 
 fn get_extension_constants(ext: &str) -> Vec<(&'static str, Value)> {
     match ext {
