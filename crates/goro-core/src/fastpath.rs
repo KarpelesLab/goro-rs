@@ -1403,7 +1403,12 @@ pub(crate) struct FeView<'a> {
 impl FeView<'_> {
     /// The temporaries whose foreach state (snapshot, object or iterator
     /// handle) the frame holds.
+    #[inline]
     fn busy(&self) -> FeTmps {
+        // (no loop with such state: the common case, without walking the maps)
+        if self.snap.is_empty() && self.obj.is_empty() && self.iter_handles.is_empty() {
+            return FeTmps { n: 0, keys: [0; 6] };
+        }
         FeTmps::of(
             self.snap
                 .keys()
@@ -1773,23 +1778,39 @@ impl crate::vm::Vm {
                     // few plain values (nothing to destroy). (No object
                     // with a destructor exists: `no_release`; the cycle
                     // collector is not due.)
-                    let releasable = |v: &Value| match v {
-                        Value::Array(_) | Value::Object(_) => {
-                            drops_quietly_deep(v, &mut 256, &self.globals)
+                    // (one pass: scalars are emptied at once, the containers
+                    // checked; nothing is released unless all of them may be)
+                    let mut heap = false;
+                    for v in range.iter() {
+                        match v {
+                            Value::Undef
+                            | Value::Null
+                            | Value::False
+                            | Value::True
+                            | Value::Long(_)
+                            | Value::Double(_)
+                            | Value::String(_) => {}
+                            Value::Array(_) | Value::Object(_) => {
+                                if !drops_quietly_deep(v, &mut 256, &self.globals) {
+                                    break 'run ip;
+                                }
+                                heap = true;
+                            }
+                            _ => break 'run ip,
                         }
-                        Value::Reference(_) | Value::Resource(_) | Value::Generator(_) => false,
-                        _ => true,
-                    };
-                    if !range.iter().all(releasable)
-                        || (range
-                            .iter()
-                            .any(|v| matches!(v, Value::Array(_) | Value::Object(_)))
-                            && crate::gc::gc_pending())
-                    {
+                    }
+                    if heap && crate::gc::gc_pending() {
                         break 'run ip;
                     }
                     for slot in range {
-                        *slot = Value::Undef;
+                        match slot {
+                            Value::Undef => {}
+                            Value::Array(_) | Value::Object(_) | Value::String(_) => {
+                                *slot = Value::Undef
+                            }
+                            // (plain values: nothing to drop)
+                            v => std::mem::forget(std::mem::replace(v, Value::Undef)),
+                        }
                     }
                     Fast::Done
                 }
@@ -1819,7 +1840,8 @@ impl crate::vm::Vm {
                         // (a temporary no running loop holds)
                         let tmp_free = match op.op1 {
                             OperandType::Tmp(t) => {
-                                !fe.busy().any_in(t, t + 1) && !fe.positions.contains_key(&t)
+                                !fe.busy().any_in(t, t + 1)
+                                    && (fe.positions.is_empty() || !fe.positions.contains_key(&t))
                             }
                             _ => false,
                         };
