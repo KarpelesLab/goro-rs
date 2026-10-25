@@ -729,6 +729,37 @@ fn get_gmp_arg(
     arg_name: &str,
 ) -> Result<Int, VmError> {
     let val = args.get(idx).unwrap_or(&Value::Null);
+    // gmp_zend_parse_arg_into_mpz_ex(): in weak mode the other scalars go
+    // through zend_parse_arg_long_weak().
+    if args.len() > idx && !vm.caller_strict_types {
+        match val.deref() {
+            Value::Double(d)
+                if !d.is_nan()
+                    && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) =>
+            {
+                let l = d as i64;
+                if l as f64 != d {
+                    vm.emit_deprecated(&format!(
+                        "Implicit conversion from float {} to int loses precision",
+                        goro_core::value::format_php_float_repr(d)
+                    ));
+                }
+                return Ok(Int::from(l));
+            }
+            Value::True => return Ok(Int::ONE),
+            Value::False => return Ok(Int::ZERO),
+            Value::Null => {
+                vm.emit_deprecated(&format!(
+                    "{}(): Passing null to parameter #{} (${}) of type GMP|string|int is deprecated",
+                    func_name,
+                    idx + 1,
+                    arg_name
+                ));
+                return Ok(Int::ZERO);
+            }
+            _ => {}
+        }
+    }
     value_to_bigint_checked(val, func_name, (idx + 1) as u32, arg_name)
         .map_err(|e| throw_gmp_error(vm, e))
 }
@@ -1147,7 +1178,7 @@ fn gmp_div(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn gmp_div_q_with_name(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, func_name, "num1")?;
     let b = get_gmp_arg(vm, args, 1, func_name, "num2")?;
-    let round = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let round = int_arg_or(vm, args, 2, func_name, "rounding_mode", 0)?;
     validate_rounding_mode(vm, round, func_name)?;
 
     if b.is_zero() {
@@ -1168,7 +1199,7 @@ fn gmp_div_q_with_name(vm: &mut Vm, args: &[Value], func_name: &str) -> Result<V
 fn gmp_div_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_div_r", "num1")?;
     let b = get_gmp_arg(vm, args, 1, "gmp_div_r", "num2")?;
-    let round = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let round = int_arg_or(vm, args, 2, "gmp_div_r", "rounding_mode", 0)?;
     validate_rounding_mode(vm, round, "gmp_div_r")?;
 
     if b.is_zero() {
@@ -1190,7 +1221,7 @@ fn gmp_div_r(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn gmp_div_qr(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_div_qr", "num1")?;
     let b = get_gmp_arg(vm, args, 1, "gmp_div_qr", "num2")?;
-    let round = args.get(2).map(|v| v.to_long()).unwrap_or(0);
+    let round = int_arg_or(vm, args, 2, "gmp_div_qr", "rounding_mode", 0)?;
     validate_rounding_mode(vm, round, "gmp_div_qr")?;
 
     if b.is_zero() {
@@ -1230,8 +1261,7 @@ fn gmp_divexact(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
         ));
     }
 
-    // mpz_divexact (only meaningful when b divides a).
-    Ok(bigint_to_gmp_value(vm, a.div_trunc(&b)))
+    Ok(bigint_to_gmp_value(vm, mp::divexact(&a, &b)))
 }
 
 fn gmp_mod(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1297,14 +1327,40 @@ fn get_int_arg(
         Value::True => Ok(1),
         Value::False => Ok(0),
         Value::Null | Value::Undef => Ok(0),
-        Value::Double(d) => Ok(d as i64),
+        // zend_parse_arg_long_weak()
+        Value::Double(d)
+            if !d.is_nan() && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) =>
+        {
+            Ok(vm.dval_to_lval_safe(d))
+        }
+        Value::Double(_) => {
+            let msg = format!(
+                "{}(): Argument #{} (${}) must be of type int, float given",
+                func_name,
+                idx + 1,
+                arg_name
+            );
+            let exc = vm.create_exception(b"TypeError", &msg, vm.current_line);
+            vm.current_exception = Some(exc);
+            Err(VmError {
+                message: msg,
+                line: vm.current_line,
+            })
+        }
         Value::String(s) => {
-            let s_str = s.to_string_lossy();
-            // Accept simple integer string
-            let trimmed = s_str.trim();
-            match trimmed.parse::<i64>() {
-                Ok(n) => Ok(n),
-                Err(_) => {
+            let num = match goro_core::value::parse_numeric_str(s.as_bytes(), false) {
+                Some((goro_core::value::NumStr::Long(n), _)) => Some(n),
+                Some((goro_core::value::NumStr::Double(d), _))
+                    if !d.is_nan()
+                        && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) =>
+                {
+                    Some(vm.op_to_long(&Value::String(s.clone())))
+                }
+                _ => None,
+            };
+            match num {
+                Some(n) => Ok(n),
+                None => {
                     let msg = format!(
                         "{}(): Argument #{} (${}) must be of type int, string given",
                         func_name,
@@ -1365,6 +1421,21 @@ fn get_int_arg(
             })
         }
     }
+}
+
+/// An optional int parameter (Z_PARAM_LONG): `default` when not passed.
+fn int_arg_or(
+    vm: &mut Vm,
+    args: &[Value],
+    idx: usize,
+    func_name: &str,
+    arg_name: &str,
+    default: i64,
+) -> Result<i64, VmError> {
+    if args.len() <= idx {
+        return Ok(default);
+    }
+    get_int_arg(vm, args, idx, func_name, arg_name)
 }
 
 fn gmp_pow(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
@@ -1592,7 +1663,7 @@ fn gmp_prob_prime(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let n = get_gmp_arg(vm, args, 0, "gmp_prob_prime", "num")?;
     // The repetition count only adds random-base Miller-Rabin rounds after
     // Baillie-PSW (see mp::probab_prime), which cannot change the verdict.
-    let _reps = args.get(1).map(|v| v.to_long()).unwrap_or(10);
+    let _reps = int_arg_or(vm, args, 1, "gmp_prob_prime", "repetitions", 10)?;
     Ok(Value::Long(mp::probab_prime(&n)))
 }
 
@@ -1604,12 +1675,12 @@ fn gmp_nextprime(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn gmp_testbit(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_testbit", "num")?;
     let index = get_int_arg(vm, args, 1, "gmp_testbit", "index")?;
-    let max_index: i64 = (i32::MAX as i64).saturating_mul(8);
+    let max_index: i64 = (i32::MAX as i64).saturating_mul(64);
     if index < 0 || index >= max_index {
         let msg = format!(
             "gmp_testbit(): Argument #2 ($index) must be between 0 and {} * {}",
             i32::MAX,
-            8
+            64
         );
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
@@ -1632,7 +1703,6 @@ fn gmp_setbit_or_clrbit(
     bit_val: bool,
 ) -> Result<Value, VmError> {
     let val = args.first().unwrap_or(&Value::Null);
-    let index = args.get(1).map(|v| v.to_long()).unwrap_or(0);
 
     // Resolve target object id (must be GMP)
     let (obj_id, target_obj) = match val {
@@ -1703,14 +1773,15 @@ fn gmp_setbit_or_clrbit(
         }
     };
 
-    // Range check: 0 <= index < INT_MAX * CHAR_BIT
-    let max_index: i64 = (i32::MAX as i64).saturating_mul(8);
+    let index = int_arg_or(vm, args, 1, func_name, "index", 0)?;
+    // Range check: index / GMP_NUMB_BITS < INT_MAX
+    let max_index: i64 = (i32::MAX as i64).saturating_mul(64);
     if index < 0 || index >= max_index {
         let msg = format!(
             "{}(): Argument #2 ($index) must be between 0 and {} * {}",
             func_name,
             i32::MAX,
-            8
+            64
         );
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
@@ -1752,12 +1823,12 @@ fn gmp_hamdist(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn gmp_scan0(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_scan0", "num1")?;
     let start = get_int_arg(vm, args, 1, "gmp_scan0", "start")?;
-    let max_index: i64 = (i32::MAX as i64).saturating_mul(8);
+    let max_index: i64 = (i32::MAX as i64).saturating_mul(64);
     if start < 0 || start >= max_index {
         let msg = format!(
             "gmp_scan0(): Argument #2 ($start) must be between 0 and {} * {}",
             i32::MAX,
-            8
+            64
         );
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
@@ -1772,12 +1843,12 @@ fn gmp_scan0(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 fn gmp_scan1(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_scan1", "num1")?;
     let start = get_int_arg(vm, args, 1, "gmp_scan1", "start")?;
-    let max_index: i64 = (i32::MAX as i64).saturating_mul(8);
+    let max_index: i64 = (i32::MAX as i64).saturating_mul(64);
     if start < 0 || start >= max_index {
         let msg = format!(
             "gmp_scan1(): Argument #2 ($start) must be between 0 and {} * {}",
             i32::MAX,
-            8
+            64
         );
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
         vm.current_exception = Some(exc);
@@ -1835,7 +1906,7 @@ fn gmp_kronecker(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn gmp_binomial(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let n = get_gmp_arg(vm, args, 0, "gmp_binomial", "n")?;
-    let k = args.get(1).map(|v| v.to_long()).unwrap_or(0);
+    let k = int_arg_or(vm, args, 1, "gmp_binomial", "k", 0)?;
     if k < 0 {
         let msg = "gmp_binomial(): Argument #2 ($k) must be greater than or equal to 0".to_string();
         let exc = vm.create_exception(b"ValueError", &msg, vm.current_line);
@@ -1908,8 +1979,8 @@ fn validate_import_export_options(
 
 fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_export", "num")?;
-    let word_size = args.get(1).map(|v| v.to_long()).unwrap_or(1);
-    let options = args.get(2).map(|v| v.to_long()).unwrap_or(1 | 16); // GMP_MSW_FIRST | GMP_NATIVE_ENDIAN
+    let word_size = int_arg_or(vm, args, 1, "gmp_export", "word_size", 1)?;
+    let options = int_arg_or(vm, args, 2, "gmp_export", "flags", 1 | 16)?; // GMP_MSW_FIRST | GMP_NATIVE_ENDIAN
 
     let (order, endian) = match validate_import_export_options("gmp_export", word_size, options) {
         Ok(v) => v,
@@ -1996,8 +2067,8 @@ fn gmp_export_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
 
 fn gmp_import_fn(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let data = args.first().unwrap_or(&Value::Null).to_php_string();
-    let word_size = args.get(1).map(|v| v.to_long()).unwrap_or(1);
-    let options = args.get(2).map(|v| v.to_long()).unwrap_or(1 | 16);
+    let word_size = int_arg_or(vm, args, 1, "gmp_import", "word_size", 1)?;
+    let options = int_arg_or(vm, args, 2, "gmp_import", "flags", 1 | 16)?;
 
     let (order, endian) = match validate_import_export_options("gmp_import", word_size, options) {
         Ok(v) => v,

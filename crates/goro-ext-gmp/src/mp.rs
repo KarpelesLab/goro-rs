@@ -106,3 +106,30 @@ pub fn probab_prime(n: &Int) -> i64 {
     // on numbers BPSW already accepted).
     if m < Int::from(35u64 << 46) { 2 } else { 1 }
 }
+
+/// mpz_divexact(): exact for a divisible `n`; otherwise GMP's Hensel
+/// (2-adic) quotient, `(|n| >> z) * (|d| >> z)^-1 mod 2^(64 * qn)` with
+/// `z` the trailing zero bits of `d` and `qn = nn - dn + 1` limbs.
+pub fn divexact(n: &Int, d: &Int) -> Int {
+    let limbs = |x: &Int| (x.bit_len() as u64).div_ceil(64);
+    let (nn, dn) = (limbs(n), limbs(d));
+    if n.is_zero() || nn < dn {
+        return Int::ZERO;
+    }
+    let (q, r) = n.div_rem_trunc(d);
+    if r.is_zero() {
+        return q;
+    }
+    let bits = 64 * (nn - dn + 1);
+    let z = d.trailing_zeros() as u64;
+    let nz = n.abs().div_2k_trunc(z);
+    let dz = d.abs().div_2k_trunc(z);
+    let m = Int::ONE.mul_2k(bits);
+    let inv = dz.modinv(&m).unwrap_or(Int::ZERO);
+    let q = (nz * inv).mod_2k(bits);
+    if (n.sign() == Sign::Negative) != (d.sign() == Sign::Negative) {
+        -q
+    } else {
+        q
+    }
+}
