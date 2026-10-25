@@ -15,6 +15,85 @@ impl Vm {
     /// Clone `val` like php-src's clone_obj handler (copy the properties,
     /// then run `__clone()`). On failure `current_exception` is set and
     /// `Value::Null` is returned.
+    /// ZEND_CLONE: the error for a __clone() the calling scope cannot call
+    /// (checked before the object is copied).
+    #[inline(never)]
+    fn clone_access_error(&self, class_lower: &[u8], class_name_display: &str) -> Option<String> {
+        let class_def = self.classes.get(class_lower)?;
+        let clone_method = class_def.get_method(b"__clone")?;
+        let class_lower = class_lower.to_vec();
+        // Check __clone visibility
+        let current_scope = self.current_class_scope();
+        // Visibility is checked against the declaring class
+        // (private) / the root of the method's hierarchy (protected).
+        let declaring_lower: Vec<u8> = if clone_method.declaring_class.is_empty() {
+            class_lower.clone()
+        } else {
+            clone_method
+                .declaring_class
+                .iter()
+                .map(|b| b.to_ascii_lowercase())
+                .collect()
+        };
+        let mut root_lower = declaring_lower.clone();
+        while let Some(parent) = self.classes.get(&root_lower).and_then(|c| c.parent.clone()) {
+            let pl: Vec<u8> = parent.iter().map(|b| b.to_ascii_lowercase()).collect();
+            if self
+                .classes
+                .get(&pl)
+                .map(|c| c.get_method(b"__clone").is_some())
+                .unwrap_or(false)
+            {
+                root_lower = pl;
+            } else {
+                break;
+            }
+        }
+        let accessible = match clone_method.visibility {
+            crate::object::Visibility::Public => true,
+            crate::object::Visibility::Protected => {
+                if let Some(scope) = &current_scope {
+                    let scope_lower: Vec<u8> =
+                        scope.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    scope_lower == class_lower
+                        || self.class_extends(&scope_lower, &class_lower)
+                        || self.class_extends(&class_lower, &scope_lower)
+                        || scope_lower == root_lower
+                        || self.class_extends(&scope_lower, &root_lower)
+                        || self.class_extends(&root_lower, &scope_lower)
+                } else {
+                    false
+                }
+            }
+            crate::object::Visibility::Private => {
+                if let Some(scope) = &current_scope {
+                    let scope_lower: Vec<u8> =
+                        scope.iter().map(|b| b.to_ascii_lowercase()).collect();
+                    scope_lower == declaring_lower
+                } else {
+                    false
+                }
+            }
+        };
+        if !accessible {
+            let scope_str = current_scope
+                .map(|s| String::from_utf8_lossy(&s).to_string())
+                .unwrap_or_else(|| "global scope".to_string());
+            let vis_str = match clone_method.visibility {
+                crate::object::Visibility::Private => "private",
+                crate::object::Visibility::Protected => "protected",
+                _ => "public",
+            };
+            let msg = format!(
+                "Call to {} method {}::__clone() from {}",
+                vis_str, class_name_display, scope_str
+            );
+            return Some(msg);
+        }
+
+        None
+    }
+
     pub fn clone_value(&mut self, val: &Value, line: u32) -> Value {
         if val.is_closure_obj() {
             return self.clone_closure(val);
@@ -126,6 +205,15 @@ impl Vm {
                     let exc_val = self.create_exception(b"Error", &msg, line);
                     self.current_exception = Some(exc_val);
                     return Value::Null;
+                }
+                {
+                    let display = crate::value::display_class_name(&obj_borrow.class_name);
+                    if let Some(msg) = self.clone_access_error(&class_lower, &display) {
+                        drop(obj_borrow);
+                        let exc = self.create_exception(b"Error", &msg, line);
+                        self.current_exception = Some(exc);
+                        return Value::Null;
+                    }
                 }
                 let clone_id = self.alloc_object_id();
                 let mut new_obj = PhpObject::new(obj_borrow.class_name.clone(), clone_id);
@@ -332,7 +420,6 @@ impl Vm {
                     .iter()
                     .map(|b| b.to_ascii_lowercase())
                     .collect();
-                let class_name_display = crate::value::display_class_name(&obj_borrow.class_name);
                 drop(obj_borrow);
                 // The native clone handler copies the extension state
                 // first (PHP's clone_obj), so __clone() sees it.
@@ -343,81 +430,8 @@ impl Vm {
                 }
                 if self.current_exception.is_none() {
                     if let Some(class_def) = self.classes.get(&class_lower) {
-                        if let Some(clone_method) = class_def.get_method(b"__clone") {
-                            // Check __clone visibility
-                            let current_scope = self.current_class_scope();
-                            // Visibility is checked against the declaring class
-                            // (private) / the root of the method's hierarchy (protected).
-                            let declaring_lower: Vec<u8> =
-                                if clone_method.declaring_class.is_empty() {
-                                    class_lower.clone()
-                                } else {
-                                    clone_method
-                                        .declaring_class
-                                        .iter()
-                                        .map(|b| b.to_ascii_lowercase())
-                                        .collect()
-                                };
-                            let mut root_lower = declaring_lower.clone();
-                            while let Some(parent) =
-                                self.classes.get(&root_lower).and_then(|c| c.parent.clone())
-                            {
-                                let pl: Vec<u8> =
-                                    parent.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                if self
-                                    .classes
-                                    .get(&pl)
-                                    .map(|c| c.get_method(b"__clone").is_some())
-                                    .unwrap_or(false)
-                                {
-                                    root_lower = pl;
-                                } else {
-                                    break;
-                                }
-                            }
-                            let accessible = match clone_method.visibility {
-                                crate::object::Visibility::Public => true,
-                                crate::object::Visibility::Protected => {
-                                    if let Some(scope) = &current_scope {
-                                        let scope_lower: Vec<u8> =
-                                            scope.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        scope_lower == class_lower
-                                            || self.class_extends(&scope_lower, &class_lower)
-                                            || self.class_extends(&class_lower, &scope_lower)
-                                            || scope_lower == root_lower
-                                            || self.class_extends(&scope_lower, &root_lower)
-                                            || self.class_extends(&root_lower, &scope_lower)
-                                    } else {
-                                        false
-                                    }
-                                }
-                                crate::object::Visibility::Private => {
-                                    if let Some(scope) = &current_scope {
-                                        let scope_lower: Vec<u8> =
-                                            scope.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                        scope_lower == declaring_lower
-                                    } else {
-                                        false
-                                    }
-                                }
-                            };
-                            if !accessible {
-                                let scope_str = current_scope
-                                    .map(|s| String::from_utf8_lossy(&s).to_string())
-                                    .unwrap_or_else(|| "global scope".to_string());
-                                let vis_str = match clone_method.visibility {
-                                    crate::object::Visibility::Private => "private",
-                                    crate::object::Visibility::Protected => "protected",
-                                    _ => "public",
-                                };
-                                let msg = format!(
-                                    "Call to {} method {}::__clone() from {}",
-                                    vis_str, class_name_display, scope_str
-                                );
-                                let exc = self.create_exception(b"Error", &msg, line);
-                                self.current_exception = Some(exc);
-                                return Value::Null;
-                            }
+                        // (its visibility was checked before the copy)
+                        if class_def.get_method(b"__clone").is_some() {
                             if let Value::Object(ref rc) = new_obj_val {
                                 rc.borrow_mut()
                                     .set_property(b"__clone_window".to_vec(), Value::True);
