@@ -107,12 +107,13 @@ impl Iconv {
                         // glibc's ISO-2022-JP writes (and switches to) the
                         // escape sequence of a character that then has no
                         // room
-                        if self.enc.kind == charset::Kind::Iso2022Jp
-                            && tmp.len() > 3
-                            && tmp[0] == 0x1B
-                            && out.len() - start_len + 3 <= l
-                        {
-                            out.extend_from_slice(&tmp[..3]);
+                        let shift = match self.enc.kind {
+                            charset::Kind::Iso2022Jp if tmp.len() > 3 && tmp[0] == 0x1B => 3,
+                            charset::Kind::Iso2022Kr => tmp.len() - if cp < 0x80 { 1 } else { 2 },
+                            _ => 0,
+                        };
+                        if shift > 0 && out.len() - start_len + shift <= l {
+                            out.extend_from_slice(&tmp[..shift]);
                         } else {
                             self.enc = saved;
                         }
