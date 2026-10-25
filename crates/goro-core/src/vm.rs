@@ -258,6 +258,30 @@ macro_rules! native_exc_check {
     };
 }
 
+/// INIT_*: the pending call just set up names a function or method sure
+/// not to exist (see Vm::init_call_undefined): the call is dropped and the
+/// Error thrown, before any argument is evaluated.
+macro_rules! init_undefined_check {
+    ($self:ident, $handlers:ident, $pending:ident, $ip:ident, $line:expr) => {
+        if let Some(msg) = $self.init_call_undefined() {
+            if let Some(mut call) = $self.pending_calls.pop() {
+                $self.recycle_args(&mut call);
+            }
+            let exc = $self.create_exception(b"Error", &msg, $line);
+            $self.current_exception = Some(exc);
+            if let Some((catch_target, _, _, _, eh_pc_depth)) = $handlers.last() {
+                $pending = Some(*eh_pc_depth);
+                $ip = *catch_target as usize;
+                return Ok(Flow::Continue);
+            }
+            return Err(VmError {
+                message: format!("Uncaught Error: {}", msg),
+                line: $line,
+            });
+        }
+    };
+}
+
 /// Built-in function signature
 pub type BuiltinFn = fn(&mut Vm, &[Value]) -> Result<Value, VmError>;
 
@@ -20575,7 +20599,7 @@ impl Vm {
     /// A finished call's arguments are released (in order): keep the
     /// buffer for the next call's.
     #[inline]
-    fn recycle_args(&mut self, call: &mut PendingCall) {
+    pub(crate) fn recycle_args(&mut self, call: &mut PendingCall) {
         let mut args = std::mem::take(&mut call.args);
         clear_values(&mut args);
         self.recycle_values(args);
@@ -27216,15 +27240,29 @@ impl Vm {
                 // A call by a constant plain function name: what the general
                 // handler below does for one, with the function resolved once.
                 OpCode::InitFCall if plain_fcall_name(op, &op_array.literals).is_some() => {
-                    outlined(|| {
+                    match outlined(|| -> Result<Flow, VmError> {
                         let name = plain_fcall_name(op, &op_array.literals)
                             .cloned()
                             .unwrap_or_else(PhpString::empty);
                         self.push_plain_call(op_array, ip - 1, name);
-                    })
+                        if self.top_call_unresolved() {
+                            init_undefined_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
+                        }
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
+                    }
                 }
                 OpCode::InitFCall if forward_fcall_name(op, &op_array.literals).is_some() => {
-                    outlined(|| {
+                    match outlined(|| -> Result<Flow, VmError> {
                         let this = if op_array.cv_names.first().map(|n| n.as_slice())
                             == Some(b"this")
                         {
@@ -27237,8 +27275,22 @@ impl Vm {
                         };
                         if let Some(name) = forward_fcall_name(op, &op_array.literals) {
                             self.push_forward_call(op_array, ip - 1, name, this.as_ref());
+                            if self.top_call_unresolved() {
+                                init_undefined_check!(
+                                    self,
+                                    exception_handlers,
+                                    pending_calls_catch_depth,
+                                    ip,
+                                    op.line
+                                );
+                            }
                         }
-                    })
+                        Ok(Flow::Next)
+                    })? {
+                        Flow::Next => {}
+                        Flow::Continue => continue 'exec,
+                        Flow::Return(v) => return Ok(v),
+                    }
                 }
                 OpCode::InitFCall => match outlined(|| -> Result<Flow, VmError> {
                     // `$closure()` (see init_closure_call_fast)
@@ -27773,6 +27825,15 @@ impl Vm {
                             named_args: Vec::new(),
                             target,
                         });
+                        if !from_closure {
+                            init_undefined_check!(
+                                self,
+                                exception_handlers,
+                                pending_calls_catch_depth,
+                                ip,
+                                op.line
+                            );
+                        }
                     }
                     Ok(Flow::Next)
                 })? {
@@ -27918,6 +27979,13 @@ impl Vm {
                         named_args: Vec::new(),
                         target: CallTarget::NONE,
                     });
+                    init_undefined_check!(
+                        self,
+                        exception_handlers,
+                        pending_calls_catch_depth,
+                        ip,
+                        op.line
+                    );
                     Ok(Flow::Next)
                 })? {
                     Flow::Next => {}
@@ -58994,6 +59062,35 @@ impl Vm {
                         return Ok(Flow::Continue);
                     }
 
+                    // A user class without the method nor __call()
+                    // (INIT_METHOD_CALL's zend_undefined_method()).
+                    if let Value::Object(obj) = &obj_val {
+                        let missing = {
+                            let ob = obj.borrow();
+                            if ob.native.is_none() && ob.closure.is_none() {
+                                let cl = ob.class_name.to_ascii_lowercase();
+                                drop(ob);
+                                self.user_method_missing(&cl, method_name.as_bytes())
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(msg) = missing {
+                            let exc = self.create_exception(b"Error", &msg, op.line);
+                            self.current_exception = Some(exc);
+                            if let Some((catch_target, _, _, _, eh_pc_depth)) =
+                                exception_handlers.last()
+                            {
+                                pending_calls_catch_depth = Some(*eh_pc_depth);
+                                ip = *catch_target as usize;
+                                return Ok(Flow::Continue);
+                            }
+                            return Err(VmError {
+                                message: format!("Uncaught Error: {}", msg),
+                                line: op.line,
+                            });
+                        }
+                    }
                     if let Value::Object(obj) = &obj_val {
                         let class_name_orig;
                         let class_name_lower: Vec<u8>;

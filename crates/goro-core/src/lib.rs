@@ -24,6 +24,7 @@ pub mod generator;
 pub mod image_handlers;
 pub mod include_path;
 pub mod ini_quantity;
+pub mod initcheck;
 pub mod internal_frames;
 pub mod internal_iterator;
 pub mod ob;

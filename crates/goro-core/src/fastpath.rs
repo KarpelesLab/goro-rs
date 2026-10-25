@@ -1766,6 +1766,13 @@ impl crate::vm::Vm {
         let literals = &op_array.literals;
         if let Some(name) = crate::vm::plain_fcall_name(op, literals) {
             self.push_plain_call(op_array, ip, name.clone());
+            // (an undefined function: the dispatch loop's handler throws)
+            if self.top_call_unresolved() {
+                if let Some(mut call) = self.pending_calls.pop() {
+                    self.recycle_args(&mut call);
+                }
+                return false;
+            }
             true
         } else if let Some(name) = crate::vm::static_fcall_name(op, literals) {
             let frame_this = op_array.cv_names.first().map(|n| n.as_slice()) == Some(b"this")
@@ -1781,6 +1788,13 @@ impl crate::vm::Vm {
                 None
             };
             self.push_forward_call(op_array, ip, name, this.as_ref());
+            // (no such method: the dispatch loop's handler may throw)
+            if self.top_call_unresolved() {
+                if let Some(mut call) = self.pending_calls.pop() {
+                    self.recycle_args(&mut call);
+                }
+                return false;
+            }
             true
         } else {
             false
