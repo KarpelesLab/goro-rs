@@ -2432,6 +2432,18 @@ fn encode_unicode_escape(hex: &str, bad: bool, line: u32, out: &mut Vec<u8>) {
     }
 }
 
+/// Where a `//` or `#` comment starting before `p` ends: at the newline
+/// (not included) or at a `?>`, or at the end of `src`.
+fn line_comment_end(src: &[u8], mut p: usize) -> usize {
+    while let Some(&ch) = src.get(p) {
+        if ch == b'\n' || (ch == b'?' && src.get(p + 1) == Some(&b'>')) {
+            break;
+        }
+        p += 1;
+    }
+    p
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2503,16 +2515,4 @@ mod tests {
         assert_eq!(tokens[3].kind, TokenKind::LongNumber(10));
         assert_eq!(tokens[5].kind, TokenKind::LongNumber(63));
     }
-}
-
-/// Where a `//` or `#` comment starting before `p` ends: at the newline
-/// (not included) or at a `?>`, or at the end of `src`.
-fn line_comment_end(src: &[u8], mut p: usize) -> usize {
-    while let Some(&ch) = src.get(p) {
-        if ch == b'\n' || (ch == b'?' && src.get(p + 1) == Some(&b'>')) {
-            break;
-        }
-        p += 1;
-    }
-    p
 }

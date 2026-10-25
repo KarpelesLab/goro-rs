@@ -3838,6 +3838,18 @@ fn plain_internal_base(lower: &[u8], prop: &[u8]) -> bool {
     false
 }
 
+/// Whether `c` is a call of call_user_func() or call_user_func_array() by
+/// that plain name (not a dynamic call, not through a namespace fallback):
+/// its arguments are all sent by value.
+pub(crate) fn is_direct_ucf(c: &crate::vm::PendingCall) -> bool {
+    let t = &c.target;
+    if !t.has_builtin || t.method.is_some() || t.dynamic || t.closure {
+        return false;
+    }
+    let n = c.name.as_bytes();
+    n.eq_ignore_ascii_case(b"call_user_func") || n.eq_ignore_ascii_case(b"call_user_func_array")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3888,16 +3900,4 @@ mod tests {
         assert!(!s.append_in_place(b"ef"));
         assert_eq!(keep.as_bytes(), b"abcd");
     }
-}
-
-/// Whether `c` is a call of call_user_func() or call_user_func_array() by
-/// that plain name (not a dynamic call, not through a namespace fallback):
-/// its arguments are all sent by value.
-pub(crate) fn is_direct_ucf(c: &crate::vm::PendingCall) -> bool {
-    let t = &c.target;
-    if !t.has_builtin || t.method.is_some() || t.dynamic || t.closure {
-        return false;
-    }
-    let n = c.name.as_bytes();
-    n.eq_ignore_ascii_case(b"call_user_func") || n.eq_ignore_ascii_case(b"call_user_func_array")
 }
