@@ -1202,7 +1202,15 @@ fn rfc1867_handler(
                     value = (m.convert)(ctx.vm, &value, e);
                 }
                 count += 1;
-                if count <= cfg.max_input_vars {
+                // ext/filter's php_sapi_filter() registers the variable
+                // itself (so the upload protection does not apply) and
+                // returns 0: the code below treats it as filtered out.
+                let filtered_out =
+                    count <= cfg.max_input_vars && INPUT_FILTER.with(|c| c.get()).is_some();
+                if filtered_out {
+                    input_register(ctx, PARSE_POST, &param, value.clone(), post, false);
+                }
+                if count <= cfg.max_input_vars && !filtered_out {
                     if let Some(f) = cb {
                         let ev = Event::FormData {
                             post_bytes_processed: mb.src_pos as i64,
