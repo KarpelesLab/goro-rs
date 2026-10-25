@@ -6206,65 +6206,6 @@ impl Vm {
         crate::basedir::check_open_basedir_ex(self, "", path, false)
     }
 
-    /// Emit deprecation for optional parameters before required parameters.
-    fn emit_optional_before_required_deprecation(
-        &mut self,
-        op_array: &crate::opcode::OpArray,
-        func_display: &str,
-    ) {
-        let param_count = op_array.param_has_default.len();
-        if param_count == 0 {
-            return;
-        }
-        // Find the last required parameter index (no default, not variadic)
-        let variadic_idx = op_array.variadic_param.map(|v| v as usize);
-        // For each parameter, check if it's optional and there's a required param after it
-        for i in 0..param_count {
-            if variadic_idx == Some(i) {
-                continue;
-            }
-            let has_default = *op_array.param_has_default.get(i).unwrap_or(&false);
-            if !has_default {
-                continue;
-            }
-            // Check if this parameter is implicitly nullable (those are treated as required)
-            let is_implicitly_nullable = op_array
-                .param_types
-                .get(i)
-                .and_then(|pt| pt.as_ref())
-                .map(|pt| pt.implicitly_nullable)
-                .unwrap_or(false);
-            if is_implicitly_nullable {
-                continue;
-            }
-            // Check if there's a required parameter after this one
-            for j in (i + 1)..param_count {
-                if variadic_idx == Some(j) {
-                    continue;
-                }
-                let j_has_default = *op_array.param_has_default.get(j).unwrap_or(&false);
-                if !j_has_default {
-                    // Found a required parameter after an optional one
-                    let opt_name = op_array
-                        .cv_names
-                        .get(i)
-                        .map(|n| String::from_utf8_lossy(n).to_string())
-                        .unwrap_or_else(|| format!("param{}", i));
-                    let req_name = op_array
-                        .cv_names
-                        .get(j)
-                        .map(|n| String::from_utf8_lossy(n).to_string())
-                        .unwrap_or_else(|| format!("param{}", j));
-                    self.emit_deprecated_at(
-                        &format!("{}(): Optional parameter ${} declared before required parameter ${} is implicitly treated as a required parameter", func_display, opt_name, req_name),
-                        op_array.decl_line,
-                    );
-                    break; // Only warn once per optional param (about the first required after it)
-                }
-            }
-        }
-    }
-
     /// Return a type name string for error messages.
     /// For objects, this returns the class name (e.g. "stdClass") instead of just "object".
     /// For generators, this returns "Generator".
@@ -41997,35 +41938,7 @@ impl Vm {
                                 return Err(self.emit_fatal_typed_at(ty, &msg, op.line));
                             }
                         }
-                        // Emit deprecation for implicitly nullable parameters.
-                        // For closures, prefer the canonical PHP display name (e.g. {closure:file:line}).
-                        let func_display = if !func_op_array.display_name.is_empty() {
-                            crate::string::msg_str(&func_op_array.display_name).to_string()
-                        } else {
-                            crate::string::msg_str(&func_op_array.name).to_string()
-                        };
-                        for pt_info in func_op_array.param_types.iter().flatten() {
-                            if pt_info.implicitly_nullable {
-                                let param_name = String::from_utf8_lossy(&pt_info.param_name);
-                                self.emit_deprecated_at(
-                                    &format!("{}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead", func_display, param_name),
-                                    func_op_array.decl_line,
-                                );
-                            }
-                        }
-                        if func_op_array.returns_by_ref
-                            && matches!(&func_op_array.return_type, Some(ParamType::Simple(n)) if n.eq_ignore_ascii_case(b"void"))
-                        {
-                            self.emit_deprecated_at(
-                                &format!("{}(): Returning by reference from a void function is deprecated", func_display),
-                                func_op_array.decl_line,
-                            );
-                        }
-                        // Emit deprecation for optional parameters before required parameters
-                        self.emit_optional_before_required_deprecation(
-                            func_op_array,
-                            &func_display,
-                        );
+                        // (its signature deprecations were raised at compile time)
                         self.register_user_function(name.as_bytes(), func_op_array.clone());
                         // (a top-level declaration was bound at compile time:
                         // observed before its file runs)
@@ -54681,42 +54594,7 @@ impl Vm {
                         if class.filename.is_none() {
                             class.filename = Some(self.current_file.to_string());
                         }
-                        // Emit deprecation for implicitly nullable parameters in methods
-                        // and for optional parameters before required parameters
-                        // Only for methods declared in THIS class (not inherited)
-                        {
-                            let class_display = crate::value::display_class_name(&class.name);
-                            let class_lower_for_check: Vec<u8> =
-                                class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            for (method_key, method) in class.methods.iter() {
-                                // Skip inherited methods
-                                if method.declaring_class != class_lower_for_check {
-                                    continue;
-                                }
-                                // (a trait's method was reported with the trait)
-                                let from_trait = method_from_trait.contains_key(method_key);
-                                for pt_info in method.op_array.param_types.iter().flatten() {
-                                    if pt_info.implicitly_nullable && !from_trait {
-                                        let method_display = crate::string::msg_str(&method.name);
-                                        let param_name =
-                                            String::from_utf8_lossy(&pt_info.param_name);
-                                        self.emit_deprecated_at(
-                                            &format!("{}::{}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead", class_display, method_display, param_name),
-                                            method.op_array.decl_line,
-                                        );
-                                    }
-                                }
-                                let method_display_name = format!(
-                                    "{}::{}",
-                                    class_display,
-                                    crate::string::msg_str(&method.name)
-                                );
-                                self.emit_optional_before_required_deprecation(
-                                    &method.op_array,
-                                    &method_display_name,
-                                );
-                            }
-                        }
+                        // (methods' signature deprecations were raised at compile time)
                         // Validate: virtual hooked properties cannot have a default value.
                         // (After inheritance, is_virtual may have been adjusted to false if
                         // a parent provided a backing slot.)

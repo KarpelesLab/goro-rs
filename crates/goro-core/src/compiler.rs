@@ -203,6 +203,13 @@ fn push_pending_compile_deprecated(msg: String, line: u32) {
     PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow_mut().push(("Deprecated", msg, line)));
 }
 
+/// A deprecation raised while compiling a signature: reported with the
+/// compile warnings, or before the compile error that ends the file.
+fn push_signature_deprecated(msg: String, line: u32) {
+    push_pending_compile_deprecated(msg.clone(), line);
+    push_compile_deprecated(msg, line);
+}
+
 /// Get the next globally unique closure ID
 /// Does a folded constant value still contain a runtime-resolved marker
 /// (deferred constant / enum case placeholder)?
@@ -1392,26 +1399,63 @@ impl Compiler {
         self.compile_expr(&call)
     }
 
-    /// A compile error ends the file's compilation: the implicitly
-    /// nullable parameters of the functions compiled before it were
-    /// reported at compile time.
+    /// zend_compile_params()'s deprecations for function-like `func`
+    /// (compiled at `line`): a by-reference void function, then per
+    /// parameter an implicitly nullable type and an optional parameter
+    /// before the last required one.
     #[inline(never)]
-    fn push_prior_implicit_nullable(&self) {
-        for f in &self.op_array.child_functions {
-            let name = if !f.display_name.is_empty() {
-                String::from_utf8_lossy(&f.display_name).to_string()
-            } else {
-                String::from_utf8_lossy(&f.name).to_string()
-            };
-            for pt in f.param_types.iter().flatten() {
-                if pt.implicitly_nullable {
-                    push_pending_compile_deprecated(
+    fn push_signature_deprecations(
+        &self,
+        params: &[Param],
+        func: &[u8],
+        by_ref: bool,
+        ret: Option<&TypeHint>,
+        line: u32,
+    ) {
+        // (%s of a name holding a NUL, as an anonymous class's, stops there)
+        let func = func.split(|b| *b == 0).next().unwrap_or_default();
+        let func = crate::string::msg_str(func);
+        if by_ref && matches!(ret, Some(TypeHint::Simple(n)) if n.eq_ignore_ascii_case(b"void")) {
+            push_signature_deprecated(
+                format!(
+                    "{}(): Returning by reference from a void function is deprecated",
+                    func
+                ),
+                line,
+            );
+        }
+        let last_req = params
+            .iter()
+            .rposition(|p| !p.variadic && p.default.is_none());
+        for (i, p) in params.iter().enumerate() {
+            let promoted = p.visibility.is_some() || p.set_visibility.is_some() || p.readonly;
+            let forced = !promoted
+                && matches!(&p.default, Some(d) if matches!(d.kind, ExprKind::Null))
+                && p.type_hint.as_ref().is_some_and(|h| {
+                    let pt =
+                        type_hint_to_param_type_with_ns(h, &self.current_namespace, &self.use_map);
+                    !is_type_nullable_or_mixed(&pt)
+                });
+            if forced {
+                push_signature_deprecated(
+                    format!(
+                        "{}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead",
+                        func,
+                        crate::string::msg_str(&p.name)
+                    ),
+                    p.line,
+                );
+            }
+            if let Some(lr) = last_req {
+                if i < lr && p.default.is_some() && !forced {
+                    push_signature_deprecated(
                         format!(
-                            "{}(): Implicitly marking parameter ${} as nullable is deprecated, the explicit nullable type must be used instead",
-                            name,
-                            crate::string::msg_str(&pt.param_name)
+                            "{}(): Optional parameter ${} declared before required parameter ${} is implicitly treated as a required parameter",
+                            func,
+                            crate::string::msg_str(&p.name),
+                            crate::string::msg_str(&params[lr].name)
                         ),
-                        f.decl_line,
+                        p.line,
                     );
                 }
             }
@@ -2728,8 +2772,17 @@ impl Compiler {
     ) -> CompileResult<(OpArray, Vec<ClassEntry>, Vec<(String, u32)>)> {
         // Each file (and eval'd string) starts without declare(ticks).
         let saved_ticks = TICKS.with(|t| t.replace(0));
+        let pending_base = PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow().len());
         let r = self.compile_file(program);
         TICKS.with(|t| t.set(saved_ticks));
+        // (a compiled file reports its diagnostics with its warnings)
+        if r.is_ok() {
+            PENDING_COMPILE_DIAGNOSTICS.with(|w| {
+                let mut w = w.borrow_mut();
+                let base = pending_base.min(w.len());
+                w.truncate(base);
+            });
+        }
         r
     }
 
@@ -4995,6 +5048,13 @@ impl Compiler {
 
                 // Check for duplicate parameter names and reserved names
                 check_duplicate_params(params, func_compiler.op_array.decl_line)?;
+                self.push_signature_deprecations(
+                    params,
+                    &qualified_name,
+                    *func_returns_by_ref,
+                    return_type.as_ref(),
+                    stmt.span.line,
+                );
 
                 // Set up parameter CVs and default values
                 func_compiler.op_array.param_count = params.len() as u32;
@@ -5096,7 +5156,6 @@ impl Compiler {
                             {
                                 match Self::check_literal_default(&pti.param_type, default_expr) {
                                     Err((tn, _)) => {
-                                        self.push_prior_implicit_nullable();
                                         return Err(CompileError {
                                             message: format!(
                                                 "Cannot use {} as default value for parameter ${} of type {}",
@@ -7739,6 +7798,14 @@ impl Compiler {
                             returns_by_ref: method_returns_by_ref,
                         } => {
                             check_duplicate_params(params, *method_line)?;
+                            self.push_signature_deprecations(
+                                params,
+                                &[qualified_name.as_slice(), b"::", method_name.as_slice()]
+                                    .concat(),
+                                *method_returns_by_ref,
+                                method_return_type.as_ref(),
+                                *method_line,
+                            );
                             // Check: a method cannot be both abstract and final
                             if *is_abstract && *method_is_final {
                                 return Err(CompileError {
@@ -17025,6 +17092,13 @@ impl Compiler {
                 ..
             } => {
                 check_duplicate_params(params, expr.span.line)?;
+                self.push_signature_deprecations(
+                    params,
+                    &self.closure_display_name(expr.span.line),
+                    *closure_returns_by_ref,
+                    closure_return_type.as_ref(),
+                    expr.span.line,
+                );
                 // Compile closure body as a child function
                 let _closure_id = self.op_array.child_functions.len();
                 let global_id = next_closure_id();
@@ -17268,7 +17342,6 @@ impl Compiler {
                             {
                                 match Self::check_literal_default(&pti.param_type, default_expr) {
                                     Err((tn, _)) => {
-                                        self.push_prior_implicit_nullable();
                                         return Err(CompileError {
                                             message: format!(
                                                 "Cannot use {} as default value for parameter ${} of type {}",
@@ -17432,6 +17505,13 @@ impl Compiler {
                 ..
             } => {
                 check_duplicate_params(params, expr.span.line)?;
+                self.push_signature_deprecations(
+                    params,
+                    &self.closure_display_name(expr.span.line),
+                    *arrow_returns_by_ref,
+                    arrow_return_type.as_ref(),
+                    expr.span.line,
+                );
                 // Arrow function: fn($x) => $x * 2
                 // Arrow functions implicitly capture outer variables by value
 
@@ -17609,7 +17689,6 @@ impl Compiler {
                             {
                                 match Self::check_literal_default(&pti.param_type, default_expr) {
                                     Err((tn, _)) => {
-                                        self.push_prior_implicit_nullable();
                                         return Err(CompileError {
                                             message: format!(
                                                 "Cannot use {} as default value for parameter ${} of type {}",

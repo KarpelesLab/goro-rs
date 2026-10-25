@@ -170,6 +170,8 @@ pub struct CompileError {
     pub kind: &'static str,
     pub message: String,
     pub line: u32,
+    /// The diagnostics compiling raised before the error (kind, message, line).
+    pub prior: Vec<(&'static str, String, u32)>,
 }
 
 /// The output of a successful compilation.
@@ -293,6 +295,7 @@ pub fn compile(
                 kind,
                 message,
                 line: e.span.line,
+                prior: Vec::new(),
             });
         }
     };
@@ -317,14 +320,12 @@ pub fn compile(
                 compile_warnings,
             })
         }
-        Err(e) => {
-            let _ = goro_core::compiler::take_pending_compile_warnings();
-            Err(CompileError {
-                kind: "Fatal error",
-                message: e.message,
-                line: e.line,
-            })
-        }
+        Err(e) => Err(CompileError {
+            kind: "Fatal error",
+            message: e.message,
+            line: e.line,
+            prior: goro_core::compiler::take_pending_compile_warnings(),
+        }),
     }
 }
 
@@ -388,6 +389,9 @@ pub fn run_main_script(vm: &mut Vm, src: &[u8], name: &str) -> Result<Value, VmE
 /// Report a compile error through the engine's error display (display_errors,
 /// html_errors, log_errors), like php_error_cb.
 pub fn report_compile_error(vm: &mut Vm, e: &CompileError, filename: &str) {
+    for (kind, msg, line) in &e.prior {
+        vm.display_error(kind, msg, filename, *line);
+    }
     vm.display_error(e.kind, &e.message, filename, e.line);
 }
 
