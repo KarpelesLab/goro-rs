@@ -186,6 +186,26 @@ pub fn take_pending_compile_warnings() -> Vec<(&'static str, String, u32)> {
     PENDING_COMPILE_DIAGNOSTICS.with(|w| std::mem::take(&mut *w.borrow_mut()))
 }
 
+/// "Private methods cannot be final as they are never overridden by other
+/// classes" (a constructor may be).
+#[inline(never)]
+fn private_final_method_warning(
+    name: &[u8],
+    visibility: &goro_parser::ast::Visibility,
+    is_final: bool,
+    line: u32,
+) {
+    if is_final
+        && matches!(visibility, goro_parser::ast::Visibility::Private)
+        && !name.eq_ignore_ascii_case(b"__construct")
+    {
+        let msg = "Private methods cannot be final as they are never overridden by other classes"
+            .to_string();
+        push_compile_warning(msg.clone(), line);
+        push_pending_compile_warning(msg, line);
+    }
+}
+
 fn push_pending_compile_warning(msg: String, line: u32) {
     PENDING_COMPILE_DIAGNOSTICS.with(|w| w.borrow_mut().push(("Warning", msg, line)));
 }
@@ -6436,17 +6456,6 @@ impl Compiler {
                                     });
                                 }
                             }
-                            ClassMember::Method {
-                                name: mn,
-                                visibility: Visibility::Private,
-                                is_final: true,
-                                line,
-                                ..
-                            } if !mn.eq_ignore_ascii_case(b"__construct") => {
-                                let msg = "Private methods cannot be final as they are never overridden by other classes".to_string();
-                                push_compile_warning(msg.clone(), *line);
-                                push_pending_compile_warning(msg, *line);
-                            }
                             _ => {}
                         }
                     }
@@ -7797,6 +7806,21 @@ impl Compiler {
                             doc_comment: method_doc_comment,
                             returns_by_ref: method_returns_by_ref,
                         } => {
+                            // Check: a method cannot be both abstract and final
+                            if *is_abstract && *method_is_final {
+                                return Err(CompileError {
+                                    message: "Cannot use the final modifier on an abstract method"
+                                        .to_string(),
+                                    line: *method_line,
+                                });
+                            }
+                            // (zend_begin_method_decl(), before its parameters are compiled)
+                            private_final_method_warning(
+                                method_name,
+                                visibility,
+                                *method_is_final,
+                                *method_line,
+                            );
                             check_duplicate_params(params, *method_line)?;
                             self.push_signature_deprecations(
                                 params,
@@ -7806,14 +7830,6 @@ impl Compiler {
                                 method_return_type.as_ref(),
                                 *method_line,
                             );
-                            // Check: a method cannot be both abstract and final
-                            if *is_abstract && *method_is_final {
-                                return Err(CompileError {
-                                    message: "Cannot use the final modifier on an abstract method"
-                                        .to_string(),
-                                    line: *method_line,
-                                });
-                            }
                             // NoDiscard validation on special methods.
                             {
                                 let has_nodiscard = method_attributes.iter().any(|a| {

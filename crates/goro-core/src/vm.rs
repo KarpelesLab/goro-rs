@@ -3707,42 +3707,6 @@ impl Vm {
         None
     }
 
-    /// do_inheritance_check_on_method() for a trait method replacing an
-    /// inherited (non-private) one: it may not be less visible.
-    #[inline(never)]
-    fn trait_method_access_level_error(
-        &self,
-        class: &ClassEntry,
-        m: &crate::object::MethodDef,
-        pm: &crate::object::MethodDef,
-    ) -> Option<String> {
-        let level = |v: Visibility| match v {
-            Visibility::Public => 0,
-            Visibility::Protected => 1,
-            Visibility::Private => 2,
-        };
-        if level(m.visibility) <= level(pm.visibility) {
-            return None;
-        }
-        let pdecl = self
-            .classes
-            .get(&pm.declaring_class.to_ascii_lowercase())
-            .map(|c| c.name.clone())
-            .unwrap_or_else(|| pm.declaring_class.clone());
-        let (vis, suffix) = match pm.visibility {
-            Visibility::Public => ("public", ""),
-            _ => ("protected", " or weaker"),
-        };
-        Some(format!(
-            "Access level to {}::{}() must be {} (as in class {}){}",
-            crate::string::msg_str(&class.name),
-            crate::string::msg_str(&m.name),
-            vis,
-            crate::string::msg_str(&pdecl),
-            suffix
-        ))
-    }
-
     /// zend_do_link_class() binds a class's (concrete) trait methods before
     /// it inherits its parent's: the method table lists the class's own
     /// methods, then the trait ones (in binding order, each alias before its
@@ -50355,20 +50319,854 @@ impl Vm {
                         // Record own property names before parent inheritance
                         let own_prop_names_pre_inherit: std::collections::HashSet<Vec<u8>> =
                             class.properties.iter().map(|p| p.name.clone()).collect();
-                        // Trait properties are bound before the parent's are inherited.
-                        let prebound_trait_props = if class.traits.is_empty() {
-                            None
-                        } else {
-                            match self.prebind_trait_properties(&mut class) {
-                                Ok(m) => m,
-                                Err(message) => {
-                                    return Err(VmError {
-                                        message,
-                                        line: op.line,
-                                    })
+                        // Resolve traits: copy trait methods/properties/constants into the class
+                        // (zend_do_link_class() binds the concrete trait methods, then the
+                        // trait constants and properties, before inheriting the parent's: the
+                        // parent's are checked against them like against the class's own)
+                        let trait_names = class.traits.clone();
+                        let trait_adaptations = class.trait_adaptations.clone();
+                        let class_name_lower: Vec<u8> =
+                            class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
+
+                        // Use the pre-inheritance method/property names to determine which were directly defined
+                        let own_method_names = &own_method_names_pre_inherit;
+                        let own_prop_names = &own_prop_names_pre_inherit;
+
+                        // Check that trait names actually refer to traits
+                        for trait_name in &trait_names {
+                            let trait_lower: Vec<u8> =
+                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            // Check if it's "static" which is reserved
+                            if trait_lower == b"static" {
+                                return Err(VmError {
+                                    message: "Cannot use static as a trait".to_string(),
+                                    line: op.line,
+                                });
+                            }
+                            // Try autoloading if trait not found
+                            if !self.classes.contains_key(&trait_lower) {
+                                self.try_autoload_class(trait_name);
+                                if let Some(e) = variance::take_autoload_fatal() {
+                                    return Err(e);
                                 }
                             }
-                        };
+                            if let Some(trait_def) = self.classes.get(&trait_lower) {
+                                if !trait_def.is_trait {
+                                    let trait_display =
+                                        crate::string::msg_str(&trait_def.name).to_string();
+                                    let class_display =
+                                        crate::string::msg_str(&class.name).to_string();
+                                    // zend_do_link_class throws (catchable) Error
+                                    let err_msg = format!(
+                                        "{} cannot use {} - it is not a trait",
+                                        class_display, trait_display
+                                    );
+                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                    self.current_exception = Some(exc);
+                                    if let Some((catch_target, _, _, _, saved_pc)) =
+                                        exception_handlers.pop()
+                                    {
+                                        pending_calls_catch_depth = Some(saved_pc);
+                                        ip = catch_target as usize;
+                                        continue;
+                                    }
+                                    return Err(VmError {
+                                        message: format!("Uncaught Error: {}", err_msg),
+                                        line: op.line,
+                                    });
+                                }
+                                // Check for #[Deprecated] attribute on the trait — emit with
+                                // message/since suffix when present (handled via format_deprecated_message).
+                                let trait_attrs = trait_def.attributes.clone();
+                                let trait_display =
+                                    crate::string::msg_str(&trait_def.name).to_string();
+                                let class_display =
+                                    crate::string::msg_str(&class.name).to_string();
+                                if let Some(custom_msg) = self.get_deprecated_message(&trait_attrs)
+                                {
+                                    let prefix = format!(
+                                        "Trait {} used by {}",
+                                        trait_display, class_display
+                                    );
+                                    let msg = self.format_deprecated_message(&prefix, &custom_msg);
+                                    self.emit_user_deprecated_at(&msg, op.line);
+                                }
+                            } else {
+                                // PHP 8 raises an Error (catchable) with the format:
+                                // Uncaught Error: Trait "name" not found
+                                let trait_display = crate::string::msg_str(trait_name).to_string();
+                                let err_msg = format!("Trait \"{}\" not found", trait_display);
+                                let exc = self.create_exception(b"Error", &err_msg, op.line);
+                                self.current_exception = Some(exc);
+                                if let Some((catch_target, _, _, _, saved_pc)) =
+                                    exception_handlers.pop()
+                                {
+                                    pending_calls_catch_depth = Some(saved_pc);
+                                    ip = catch_target as usize;
+                                    continue;
+                                }
+                                return Err(VmError {
+                                    message: format!("Uncaught Error: {}", err_msg),
+                                    line: op.line,
+                                });
+                            }
+                        }
+
+                        // Validate trait adaptations (zend_traits_init_trait_structures)
+                        {
+                            let used_traits: Vec<Vec<u8>> = trait_names
+                                .iter()
+                                .map(|t| t.iter().map(|b| b.to_ascii_lowercase()).collect())
+                                .collect();
+                            // Resolve a trait referenced by an adaptation: exists, is a trait, is used.
+                            let check_trait_ref =
+                                |vm: &Self, name: &[u8]| -> Result<Vec<u8>, String> {
+                                    let lower: Vec<u8> =
+                                        name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                                    let t = match vm.classes.get(&lower) {
+                                        Some(t) => t,
+                                        None => {
+                                            return Err(format!(
+                                                "Could not find trait {}",
+                                                crate::string::msg_str(name)
+                                            ));
+                                        }
+                                    };
+                                    if !t.is_trait {
+                                        return Err(format!(
+                                            "Class {} is not a trait, Only traits may be used in 'as' and 'insteadof' statements",
+                                            crate::string::msg_str(&t.name)
+                                        ));
+                                    }
+                                    if !used_traits.contains(&lower) {
+                                        return Err(format!(
+                                            "Required Trait {} wasn't added to {}",
+                                            crate::string::msg_str(&t.name),
+                                            crate::string::msg_str(&class.name)
+                                        ));
+                                    }
+                                    Ok(lower)
+                                };
+                            let mut excluded_seen: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
+                            let mut adapt_err: Option<String> = None;
+                            'adapts: for adapt in &trait_adaptations {
+                                match adapt {
+                                    crate::object::TraitAdaptation::Precedence {
+                                        trait_name: prec_trait,
+                                        method: prec_method,
+                                        instead_of,
+                                    } => {
+                                        let tl = match check_trait_ref(self, prec_trait) {
+                                            Ok(t) => t,
+                                            Err(e) => {
+                                                adapt_err = Some(e);
+                                                break 'adapts;
+                                            }
+                                        };
+                                        let method_lower: Vec<u8> = prec_method
+                                            .iter()
+                                            .map(|b| b.to_ascii_lowercase())
+                                            .collect();
+                                        let tdef = self.classes.get(&tl).unwrap();
+                                        if !tdef.methods.contains_key(&method_lower) {
+                                            adapt_err = Some(format!(
+                                                "A precedence rule was defined for {}::{} but this method does not exist",
+                                                String::from_utf8_lossy(&tdef.name),
+                                                String::from_utf8_lossy(prec_method)
+                                            ));
+                                            break 'adapts;
+                                        }
+                                        let tdef_name = tdef.name.clone();
+                                        for io in instead_of {
+                                            let el = match check_trait_ref(self, io) {
+                                                Ok(t) => t,
+                                                Err(e) => {
+                                                    adapt_err = Some(e);
+                                                    break 'adapts;
+                                                }
+                                            };
+                                            let ex_name = self
+                                                .classes
+                                                .get(&el)
+                                                .map(|c| c.name.clone())
+                                                .unwrap_or_default();
+                                            if excluded_seen
+                                                .iter()
+                                                .any(|(t, m)| *t == el && *m == method_lower)
+                                            {
+                                                adapt_err = Some(format!(
+                                                    "Failed to evaluate a trait precedence ({}). Method of trait {} was defined to be excluded multiple times",
+                                                    String::from_utf8_lossy(prec_method),
+                                                    String::from_utf8_lossy(&ex_name)
+                                                ));
+                                                break 'adapts;
+                                            }
+                                            excluded_seen.push((el.clone(), method_lower.clone()));
+                                            if el == tl {
+                                                adapt_err = Some(format!(
+                                                    "Inconsistent insteadof definition. The method {} is to be used from {}, but {} is also on the exclude list",
+                                                    String::from_utf8_lossy(prec_method),
+                                                    String::from_utf8_lossy(&tdef_name),
+                                                    String::from_utf8_lossy(&tdef_name)
+                                                ));
+                                                break 'adapts;
+                                            }
+                                        }
+                                    }
+                                    crate::object::TraitAdaptation::Alias {
+                                        trait_name: alias_trait,
+                                        method: alias_method,
+                                        new_name,
+                                        new_visibility,
+                                        ..
+                                    } => {
+                                        let method_lower: Vec<u8> = alias_method
+                                            .iter()
+                                            .map(|b| b.to_ascii_lowercase())
+                                            .collect();
+                                        if let Some(tn) = alias_trait {
+                                            let tl = match check_trait_ref(self, tn) {
+                                                Ok(t) => t,
+                                                Err(e) => {
+                                                    adapt_err = Some(e);
+                                                    break 'adapts;
+                                                }
+                                            };
+                                            let tdef = self.classes.get(&tl).unwrap();
+                                            if !tdef.methods.contains_key(&method_lower) {
+                                                adapt_err = Some(format!(
+                                                    "An alias was defined for {}::{} but this method does not exist",
+                                                    String::from_utf8_lossy(&tdef.name),
+                                                    String::from_utf8_lossy(alias_method)
+                                                ));
+                                                break 'adapts;
+                                            }
+                                        } else {
+                                            let found: Vec<Vec<u8>> = used_traits
+                                                .iter()
+                                                .filter_map(|tl| self.classes.get(tl))
+                                                .filter(|t| t.methods.contains_key(&method_lower))
+                                                .map(|t| t.name.clone())
+                                                .collect();
+                                            if found.len() > 1 {
+                                                let m = String::from_utf8_lossy(alias_method);
+                                                let a0 = String::from_utf8_lossy(&found[0]);
+                                                let a1 = String::from_utf8_lossy(&found[1]);
+                                                adapt_err = Some(format!(
+                                                    "An alias was defined for method {}(), which exists in both {} and {}. Use {}::{} or {}::{} to resolve the ambiguity",
+                                                    m, a0, a1, a0, m, a1, m
+                                                ));
+                                                break 'adapts;
+                                            }
+                                            if found.is_empty() {
+                                                adapt_err = Some(if let Some(nn) = new_name {
+                                                    format!(
+                                                        "An alias ({}) was defined for method {}(), but this method does not exist",
+                                                        String::from_utf8_lossy(nn),
+                                                        String::from_utf8_lossy(alias_method)
+                                                    )
+                                                } else {
+                                                    let _ = new_visibility;
+                                                    format!(
+                                                        "The modifiers of the trait method {}() are changed, but this method does not exist. Error",
+                                                        String::from_utf8_lossy(alias_method)
+                                                    )
+                                                });
+                                                break 'adapts;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if let Some(msg) = adapt_err {
+                                return Err(VmError {
+                                    message: msg,
+                                    line: op.line,
+                                });
+                            }
+                        }
+
+                        // Helper closure to patch __CLASS__ references in a method's literals
+                        fn patch_class_literals(
+                            m: &mut crate::object::MethodDef,
+                            trait_name_original: &[u8],
+                            class_name: &[u8],
+                        ) {
+                            for &lit_idx in &m.op_array.class_const_literals.clone() {
+                                if let Some(Value::String(s)) =
+                                    m.op_array.literals.get(lit_idx as usize)
+                                {
+                                    if s.as_bytes() == trait_name_original {
+                                        std::rc::Rc::make_mut(&mut m.op_array).literals
+                                            [lit_idx as usize] =
+                                            Value::String(PhpString::from_vec(class_name.to_vec()));
+                                    } else if s.as_bytes().len() > trait_name_original.len() + 2
+                                        && s.as_bytes()[..trait_name_original.len()]
+                                            .eq_ignore_ascii_case(trait_name_original)
+                                        && &s.as_bytes()[trait_name_original.len()
+                                            ..trait_name_original.len() + 2]
+                                            == b"::"
+                                    {
+                                        // self::method() call literal inside a trait method
+                                        let mut nv = class_name.to_vec();
+                                        nv.extend_from_slice(
+                                            &s.as_bytes()[trait_name_original.len()..],
+                                        );
+                                        std::rc::Rc::make_mut(&mut m.op_array).literals
+                                            [lit_idx as usize] =
+                                            Value::String(PhpString::from_vec(nv));
+                                    }
+                                }
+                            }
+                        }
+
+                        // Track which trait contributed each method name so we can detect
+                        // composition collisions between two traits with the same method.
+                        let mut method_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                            std::collections::HashMap::new();
+                        // (the concrete trait methods, in binding order)
+                        let mut trait_bound_order: Vec<Vec<u8>> = Vec::new();
+                        let mut prop_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                            std::collections::HashMap::new();
+                        for trait_name in &trait_names {
+                            let trait_lower: Vec<u8> =
+                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
+                                // Copy trait methods
+                                // Trait methods override inherited parent methods, but NOT the class's own methods
+                                // (zend_traits_copy_functions / zend_add_trait_method)
+                                for (method_name, method) in &trait_def.methods {
+                                    // Abstract trait methods are bound in a second pass (after all
+                                    // concrete trait methods), like zend_do_traits_method_binding.
+                                    if method.is_abstract {
+                                        continue;
+                                    }
+                                    // Does an alias rule apply to this trait's method?
+                                    let mut final_warnings = 0usize;
+                                    let alias_applies = |alias_trait: &Option<Vec<u8>>| -> bool {
+                                        match alias_trait {
+                                            Some(t) => {
+                                                t.eq_ignore_ascii_case(&trait_def.name)
+                                                    || t.eq_ignore_ascii_case(&trait_lower)
+                                            }
+                                            None => {
+                                                // Unqualified alias: applies to the first used trait with the method.
+                                                let first = trait_names.iter().find(|tn| {
+                                                    let tl: Vec<u8> = tn
+                                                        .iter()
+                                                        .map(|b| b.to_ascii_lowercase())
+                                                        .collect();
+                                                    self.classes
+                                                        .get(&tl)
+                                                        .map(|t| {
+                                                            t.methods.contains_key(method_name)
+                                                        })
+                                                        .unwrap_or(false)
+                                                });
+                                                first
+                                                    .map(|f| f.eq_ignore_ascii_case(&trait_lower))
+                                                    .unwrap_or(false)
+                                            }
+                                        }
+                                    };
+                                    // Candidate copies: (key, display name, method copy)
+                                    let mut copies: Vec<(
+                                        Vec<u8>,
+                                        Vec<u8>,
+                                        crate::object::MethodDef,
+                                    )> = Vec::new();
+                                    for adapt in &trait_adaptations {
+                                        if let crate::object::TraitAdaptation::Alias {
+                                            trait_name: at,
+                                            method: am,
+                                            new_name: Some(nn),
+                                            new_visibility,
+                                            new_final,
+                                        } = adapt
+                                        {
+                                            if am.eq_ignore_ascii_case(method_name)
+                                                && alias_applies(at)
+                                            {
+                                                let mut m = method.clone();
+                                                if let Some(v) = new_visibility {
+                                                    m.visibility = *v;
+                                                }
+                                                if *new_final
+                                                    && Vm::trait_alias_make_final(&mut m, nn)
+                                                {
+                                                    final_warnings += 1;
+                                                }
+                                                copies.push((
+                                                    nn.iter()
+                                                        .map(|b| b.to_ascii_lowercase())
+                                                        .collect(),
+                                                    nn.clone(),
+                                                    m,
+                                                ));
+                                            }
+                                        }
+                                    }
+                                    // Check if this method is excluded by an insteadof rule
+                                    let mut excluded = false;
+                                    for adapt in &trait_adaptations {
+                                        if let crate::object::TraitAdaptation::Precedence {
+                                            trait_name: prec_trait,
+                                            method: prec_method,
+                                            instead_of,
+                                        } = adapt
+                                        {
+                                            let prec_method_lower: Vec<u8> = prec_method
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect();
+                                            let prec_trait_lower: Vec<u8> = prec_trait
+                                                .iter()
+                                                .map(|b| b.to_ascii_lowercase())
+                                                .collect();
+                                            if *method_name == prec_method_lower
+                                                && prec_trait_lower != trait_lower
+                                            {
+                                                // This trait's method is being overridden
+                                                let io_lower: Vec<Vec<u8>> = instead_of
+                                                    .iter()
+                                                    .map(|n| {
+                                                        n.iter()
+                                                            .map(|b| b.to_ascii_lowercase())
+                                                            .collect()
+                                                    })
+                                                    .collect();
+                                                if io_lower.contains(&trait_lower) {
+                                                    excluded = true;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if !excluded {
+                                        let mut m = method.clone();
+                                        for adapt in &trait_adaptations {
+                                            if let crate::object::TraitAdaptation::Alias {
+                                                trait_name: at,
+                                                method: am,
+                                                new_name: None,
+                                                new_visibility,
+                                                new_final,
+                                            } = adapt
+                                            {
+                                                if am.eq_ignore_ascii_case(method_name)
+                                                    && alias_applies(at)
+                                                {
+                                                    if let Some(v) = new_visibility {
+                                                        m.visibility = *v;
+                                                    }
+                                                    if *new_final {
+                                                        let n = m.name.clone();
+                                                        if Vm::trait_alias_make_final(&mut m, &n) {
+                                                            final_warnings += 1;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        copies.push((method_name.clone(), method.name.clone(), m));
+                                    }
+                                    for _ in 0..final_warnings {
+                                        let line = self.current_line;
+                                        self.emit_warning_at(
+                                            "Private methods cannot be final as they are never overridden by other classes",
+                                            line,
+                                        );
+                                    }
+                                    for (key, display, mut m) in copies {
+                                        if let Some(existing) = class.methods.get(&key) {
+                                            // Same function reached through different traits: no conflict.
+                                            let same_fn = existing.op_array.decl_line
+                                                == m.op_array.decl_line
+                                                && existing.op_array.end_line
+                                                    == m.op_array.end_line
+                                                && existing.op_array.filename
+                                                    == m.op_array.filename
+                                                && existing.name.eq_ignore_ascii_case(&m.name);
+                                            if same_fn
+                                                && existing.visibility == m.visibility
+                                                && method_from_trait.contains_key(&key)
+                                            {
+                                                continue;
+                                            }
+                                            // Members from the current class override trait methods
+                                            if own_method_names.contains(&key) {
+                                                continue;
+                                            }
+                                            if let Some(prev_trait) = method_from_trait.get(&key) {
+                                                if !existing.is_abstract {
+                                                    return Err(VmError {
+                                                        message: format!(
+                                                            "Trait method {}::{} has not been applied as {}::{}, because of collision with {}::{}",
+                                                            crate::string::msg_str(
+                                                                &trait_def.name
+                                                            ),
+                                                            crate::string::msg_str(&m.name),
+                                                            crate::string::msg_str(&class.name),
+                                                            crate::string::msg_str(&display),
+                                                            crate::string::msg_str(prev_trait),
+                                                            crate::string::msg_str(&existing.name)
+                                                        ),
+                                                        line: op.line,
+                                                    });
+                                                }
+                                            }
+                                        }
+                                        // Trait methods should have scope of the using class
+                                        m.declaring_class = class_name_lower.clone();
+                                        std::rc::Rc::make_mut(&mut m.op_array).scope_class =
+                                            Some(class_name_lower.clone());
+                                        // Patch __CLASS__ references in literals (only marked ones)
+                                        let trait_name_original = trait_def.name.clone();
+                                        patch_class_literals(
+                                            &mut m,
+                                            &trait_name_original,
+                                            &class.name,
+                                        );
+                                        // Each copy of the method (per class and alias)
+                                        // has its own static variables.
+                                        Self::rekey_trait_statics(
+                                            &mut m,
+                                            &class_name_lower,
+                                            &display.to_ascii_lowercase(),
+                                        );
+                                        m.name = display.clone();
+                                        // (bound before the parent's are inherited: the
+                                        // parent's are checked against it like against an
+                                        // own method)
+                                        class.methods.insert(key.clone(), m);
+                                        trait_bound_order.push(key.clone());
+                                        method_from_trait.insert(key, trait_def.name.clone());
+                                    }
+                                }
+                            }
+                        }
+                        // (zend_do_traits_constant_binding(): every trait's, after the methods)
+                        for trait_name in &trait_names {
+                            let trait_lower: Vec<u8> =
+                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
+                                // Copy trait constants (zend_do_traits_constant_binding /
+                                // do_trait_constant_check): a constant already declared by the
+                                // class or an earlier trait must be identical.
+                                let cur_trait_idx = trait_names
+                                    .iter()
+                                    .position(|t| t.eq_ignore_ascii_case(trait_name))
+                                    .unwrap_or(0);
+                                for (const_name, const_val) in &trait_def.constants {
+                                    let t_meta = trait_def.constants_meta.get(const_name).cloned();
+                                    let existing_meta =
+                                        class.constants_meta.get(const_name).cloned();
+                                    let existing_is_own = class.constants.contains_key(const_name)
+                                        && existing_meta
+                                            .as_ref()
+                                            .map(|m| m.declaring_class == class_name_lower)
+                                            .unwrap_or(true);
+                                    if existing_is_own {
+                                        let ev = class
+                                            .constants
+                                            .get(const_name)
+                                            .cloned()
+                                            .unwrap_or(Value::Null);
+                                        let flags_differ = match (&t_meta, &existing_meta) {
+                                            (Some(a), Some(b)) => {
+                                                a.visibility != b.visibility
+                                                    || a.is_final != b.is_final
+                                            }
+                                            _ => false,
+                                        };
+                                        let tt =
+                                            t_meta.as_ref().and_then(|m| m.declared_type.clone());
+                                        let et = existing_meta
+                                            .as_ref()
+                                            .and_then(|m| m.declared_type.clone());
+                                        let types_differ = match (&tt, &et) {
+                                            (None, None) => false,
+                                            (Some(a), Some(b)) => {
+                                                let tl = trait_def.name.clone();
+                                                !(self
+                                                    .variance_property_types(
+                                                        &class,
+                                                        &tl.iter()
+                                                            .map(|c| c.to_ascii_lowercase())
+                                                            .collect::<Vec<u8>>(),
+                                                        &Some(a.clone()),
+                                                        &Some(b.clone()),
+                                                        0,
+                                                    )
+                                                    .0
+                                                    != variance::Status::Error)
+                                            }
+                                            _ => true,
+                                        };
+                                        let resolve_binop = |vm: &Self, v: &Value, cl: &[u8], c: &ClassEntry| -> Option<Value> {
+                                            if let Value::String(sv) = v {
+                                                if sv.as_bytes().starts_with(b"__deferred_binop__::") {
+                                                    return vm.resolve_deferred_binop(sv.as_bytes(), cl, c);
+                                                }
+                                            }
+                                            None
+                                        };
+                                        // Constant expressions are evaluated (in the
+                                        // composing class's scope) and their values
+                                        // compared; if that fails, their sources are.
+                                        let thunk_op = |v: &Value, c: &ClassEntry| {
+                                            static_props::thunk_marker_name(v).and_then(|n| {
+                                                c.const_closures
+                                                    .iter()
+                                                    .find(|op| op.name == n)
+                                                    .cloned()
+                                            })
+                                        };
+                                        let t1 = thunk_op(const_val, &trait_def);
+                                        let t2 = thunk_op(&ev, &class);
+                                        let thunks_same = if t1.is_none() && t2.is_none() {
+                                            None
+                                        } else {
+                                            let eval = |vm: &mut Self,
+                                                            op: &Option<OpArray>,
+                                                            v: &Value|
+                                             -> Option<Value> {
+                                                match op {
+                                                    Some(op) => {
+                                                        let r = vm.eval_const_thunk_op(
+                                                            op,
+                                                            &class_name_lower,
+                                                            &class.name,
+                                                            "",
+                                                        );
+                                                        if r.is_err() {
+                                                            vm.current_exception = None;
+                                                        }
+                                                        r.ok()
+                                                    }
+                                                    None => Some(vm.resolve_deferred_value(v)),
+                                                }
+                                            };
+                                            let e1 = eval(self, &t1, const_val);
+                                            let e2 = eval(self, &t2, &ev);
+                                            Some(match (e1, e2) {
+                                                (Some(a), Some(b)) => a.identical(&b),
+                                                _ => {
+                                                    t1.map(|o| o.display_name)
+                                                        == t2.map(|o| o.display_name)
+                                                }
+                                            })
+                                        };
+                                        let values_differ = match thunks_same {
+                                            Some(same) => !same,
+                                            None => {
+                                                let v1 = match resolve_binop(
+                                                    self,
+                                                    const_val,
+                                                    &trait_lower,
+                                                    &trait_def,
+                                                ) {
+                                                    Some(v) => v,
+                                                    None => self.resolve_deferred_value(const_val),
+                                                };
+                                                let v2 = match resolve_binop(
+                                                    self,
+                                                    &ev,
+                                                    &class_name_lower,
+                                                    &class,
+                                                ) {
+                                                    Some(v) => v,
+                                                    None => self.resolve_deferred_value(&ev),
+                                                };
+                                                !v1.identical(&v2)
+                                            }
+                                        };
+                                        if flags_differ || types_differ || values_differ {
+                                            // First definition: an earlier trait declaring it, else the class.
+                                            let first_def = trait_names[..cur_trait_idx]
+                                                .iter()
+                                                .find_map(|tn| {
+                                                    let tl: Vec<u8> = tn
+                                                        .iter()
+                                                        .map(|b| b.to_ascii_lowercase())
+                                                        .collect();
+                                                    self.classes
+                                                        .get(&tl)
+                                                        .filter(|t| {
+                                                            t.constants.contains_key(const_name)
+                                                        })
+                                                        .map(|t| t.name.clone())
+                                                })
+                                                .unwrap_or_else(|| class.name.clone());
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "{} and {} define the same constant ({}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
+                                                    crate::string::msg_str(&first_def),
+                                                    crate::string::msg_str(&trait_def.name),
+                                                    crate::string::msg_str(const_name),
+                                                    crate::string::msg_str(&class.name)
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                        continue;
+                                    }
+                                    if let Some(pm) = existing_meta.as_ref() {
+                                        // Replaces an inherited constant: final parent constants cannot be overridden.
+                                        if pm.is_final {
+                                            let pdecl = self
+                                                .classes
+                                                .get(&pm.declaring_class)
+                                                .map(|c| c.name.clone())
+                                                .unwrap_or_else(|| pm.declaring_class.clone());
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "{}::{} cannot override final constant {}::{}",
+                                                    crate::string::msg_str(&class.name),
+                                                    crate::string::msg_str(const_name),
+                                                    crate::string::msg_str(&pdecl),
+                                                    crate::string::msg_str(const_name)
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                    class
+                                        .constants
+                                        .insert(const_name.clone(), const_val.clone());
+                                    if let Some(mut m) = t_meta {
+                                        m.declaring_class = class_name_lower.clone();
+                                        class.constants_meta.insert(const_name.clone(), m);
+                                    }
+                                }
+                            }
+                        }
+                        // (zend_do_traits_property_binding(): every trait's, after the constants)
+                        for trait_name in &trait_names {
+                            let trait_lower: Vec<u8> =
+                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
+                                // Copy trait properties (zend_do_traits_property_binding): a
+                                // property already declared by the class or an earlier trait must
+                                // be compatible; inherited private ones are shadowed, other
+                                // inherited ones replaced.
+                                for prop in &trait_def.properties {
+                                    let prev_trait = prop_from_trait.get(&prop.name).cloned();
+                                    if own_prop_names.contains(&prop.name) || prev_trait.is_some() {
+                                        let first_def = prev_trait
+                                            .clone()
+                                            .unwrap_or_else(|| class.name.clone());
+                                        if let Some(message) = self.trait_prop_composition_error(
+                                            &class,
+                                            &first_def,
+                                            &trait_def.name,
+                                            prop,
+                                        ) {
+                                            return Err(VmError {
+                                                message,
+                                                line: op.line,
+                                            });
+                                        }
+                                        continue;
+                                    }
+                                    if class.is_readonly && !prop.is_readonly {
+                                        return Err(VmError {
+                                            message: format!(
+                                                "Readonly class {} cannot use trait with a non-readonly property {}::${}",
+                                                crate::string::msg_str(&class.name),
+                                                crate::string::msg_str(&trait_def.name),
+                                                crate::string::msg_str(&prop.name)
+                                            ),
+                                            line: op.line,
+                                        });
+                                    }
+                                    // Check if enum - enums cannot include properties from traits
+                                    if class.is_enum {
+                                        let class_display =
+                                            crate::string::msg_str(&class.name).to_string();
+                                        return Err(VmError {
+                                            message: format!(
+                                                "Enum {} cannot include properties",
+                                                class_display
+                                            ),
+                                            line: op.line,
+                                        });
+                                    }
+                                    let mut p = prop.clone();
+                                    p.declaring_class = class_name_lower.clone();
+                                    match class
+                                        .properties
+                                        .iter()
+                                        .position(|cp| cp.name == prop.name)
+                                    {
+                                        Some(idx)
+                                            if class.properties[idx].visibility
+                                                != Visibility::Private =>
+                                        {
+                                            if let Some(msg) = self
+                                                .trait_property_inheritance_error(
+                                                    &class,
+                                                    &p,
+                                                    &class.properties[idx],
+                                                )
+                                            {
+                                                return Err(VmError {
+                                                    message: msg,
+                                                    line: op.line,
+                                                });
+                                            }
+                                            class.properties[idx] = p;
+                                        }
+                                        _ => class.properties.push(p),
+                                    }
+                                    prop_from_trait
+                                        .insert(prop.name.clone(), trait_def.name.clone());
+                                }
+                                // Copy trait static properties (class's own take precedence)
+                                for (prop_name, prop_val) in &trait_def.static_properties {
+                                    if !class.static_properties.contains_key(prop_name) {
+                                        class
+                                            .static_properties
+                                            .insert(prop_name.clone(), prop_val.clone());
+                                    }
+                                }
+
+                                // Check enum restrictions on trait methods
+                                if class.is_enum {
+                                    let forbidden_magic = [
+                                        b"__construct" as &[u8],
+                                        b"__destruct",
+                                        b"__clone",
+                                        b"__get",
+                                        b"__set",
+                                        b"__unset",
+                                        b"__isset",
+                                        b"__tostring",
+                                        b"__debuginfo",
+                                        b"__serialize",
+                                        b"__unserialize",
+                                        b"__sleep",
+                                        b"__wakeup",
+                                        b"__set_state",
+                                    ];
+                                    for (method_name, _) in &trait_def.methods {
+                                        if forbidden_magic.contains(&method_name.as_slice()) {
+                                            let class_display =
+                                                crate::string::msg_str(&class.name).to_string();
+                                            let method_display =
+                                                crate::string::msg_str(method_name).to_string();
+                                            return Err(VmError {
+                                                message: format!(
+                                                    "Enum {} cannot include magic method {}",
+                                                    class_display, method_display
+                                                ),
+                                                line: op.line,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
 
                         // Resolve inheritance: copy parent methods/properties
                         if let Some(parent_name) = &class.parent.clone() {
@@ -50667,9 +51465,11 @@ impl Vm {
                                 }
                                 // zend_do_inheritance_ex() checks the inherited properties and
                                 // constants before the methods: a method error waits for them.
+                                let mut checked_method: Option<&Vec<u8>>;
                                 let inherit_method_err: Option<VmError> = 'inh_methods: {
                                 // Inherit methods (child overrides take precedence)
                                 for (method_name, method) in &parent.methods {
+                                    checked_method = Some(method_name);
                                     // Check if parent method is final and child overrides it
                                     if let Some(child_method) = class.methods.get(method_name) {
                                         let _ = child_method;
@@ -50776,6 +51576,21 @@ impl Vm {
                                                     });
                                                 }
                                             }
+                                        }
+                                        // An inherited method cannot be made abstract.
+                                        if method.visibility != Visibility::Private
+                                            && child_method.is_abstract
+                                            && !method.is_abstract
+                                        {
+                                            break 'inh_methods Some(
+                                                self.inherited_made_abstract_error(
+                                                    &class,
+                                                    child_method,
+                                                    method,
+                                                    parent_name,
+                                                    op.line,
+                                                ),
+                                            );
                                         }
                                         // Check visibility: child must have same or weaker visibility
                                         let mn_lower = method_name.as_slice();
@@ -50940,6 +51755,7 @@ impl Vm {
                                         class.methods.insert(method_name.clone(), method.clone());
                                     }
                                 }
+                                checked_method = None;
                                 // A parent still linking (nearly linked): its own
                                 // checks are resolved now (OBLIGATION_DEPENDENCY).
                                 if !is_early_attempt
@@ -51615,6 +52431,33 @@ impl Vm {
                                         .map(|m| m.visibility == Visibility::Private)
                                         .unwrap_or(false);
                                     if class.constants.contains_key(const_name) {
+                                        // do_inherit_constant_check(): a final parent constant first
+                                        if let Some(meta) = parent_meta {
+                                            if meta.is_final {
+                                                let child_display =
+                                                    crate::string::msg_str(&class.name)
+                                                        .to_string();
+                                                let parent_display = crate::string::msg_str(
+                                                    &self.declaring_class_name(
+                                                        &meta.declaring_class,
+                                                        parent_name,
+                                                    ),
+                                                )
+                                                .to_string();
+                                                let const_display =
+                                                    crate::string::msg_str(const_name).to_string();
+                                                return Err(VmError {
+                                                    message: format!(
+                                                        "{}::{} cannot override final constant {}::{}",
+                                                        child_display,
+                                                        const_display,
+                                                        parent_display,
+                                                        const_display
+                                                    ),
+                                                    line: op.line,
+                                                });
+                                            }
+                                        }
                                         // Access level must not be weakened (do_inherit_constant_check)
                                         if let (Some(pm), Some(cm)) =
                                             (parent_meta, class.constants_meta.get(const_name))
@@ -51632,11 +52475,14 @@ impl Vm {
                                                 } else {
                                                     "protected"
                                                 };
-                                                let kind = if parent.is_interface {
-                                                    "interface"
-                                                } else {
-                                                    "class"
-                                                };
+                                                let decl_lower =
+                                                    pm.declaring_class.to_ascii_lowercase();
+                                                let decl_iface = self
+                                                    .classes
+                                                    .get(&decl_lower)
+                                                    .map_or(parent.is_interface, |c| c.is_interface);
+                                                let kind =
+                                                    if decl_iface { "interface" } else { "class" };
                                                 let tail = if pm.visibility == Visibility::Public {
                                                     ""
                                                 } else {
@@ -51652,32 +52498,12 @@ impl Vm {
                                                         vis_s,
                                                         kind,
                                                         crate::value::display_class_name(
-                                                            &parent.name
+                                                            &self.declaring_class_name(
+                                                                &pm.declaring_class,
+                                                                &parent.name
+                                                            )
                                                         ),
                                                         tail
-                                                    ),
-                                                    line: op.line,
-                                                });
-                                            }
-                                        }
-                                        // Child overrides parent constant - check if parent's is final
-                                        if let Some(meta) = parent_meta {
-                                            if meta.is_final {
-                                                let child_display =
-                                                    crate::string::msg_str(&class.name)
-                                                        .to_string();
-                                                let parent_display =
-                                                    crate::string::msg_str(parent_name)
-                                                        .to_string();
-                                                let const_display =
-                                                    crate::string::msg_str(const_name).to_string();
-                                                return Err(VmError {
-                                                    message: format!(
-                                                        "{}::{} cannot override final constant {}::{}",
-                                                        child_display,
-                                                        const_display,
-                                                        parent_display,
-                                                        const_display
                                                     ),
                                                     line: op.line,
                                                 });
@@ -51727,6 +52553,15 @@ impl Vm {
                                 // parent's slot unless it redeclares the property
                                 // (see static_props::locate_static_prop).
                                 if let Some(e) = inherit_method_err {
+                                    // (reported in the file of the method, e.g. a trait's)
+                                    if let Some(f) = checked_method
+                                        .and_then(|n| class.methods.get(n))
+                                        .map(|m| &m.op_array.filename)
+                                        .filter(|f| !f.is_empty())
+                                    {
+                                        self.current_file =
+                                            String::from_utf8_lossy(f).into_owned().into();
+                                    }
                                     return Err(e);
                                 }
                             } else if let Some(stub_parent) =
@@ -51750,6 +52585,62 @@ impl Vm {
                                 }
                             }
                         }
+                        // Second pass: bind abstract trait methods (zend_do_link_class()'s
+                        // second trait binding pass, after the parent and before the
+                        // interfaces). An existing method (own, inherited or from an earlier
+                        // trait) must satisfy the abstract one (zend_add_trait_method(): its
+                        // static-ness and signature, not its visibility); else it is added.
+                        let mut abstract_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> =
+                            std::collections::HashMap::new();
+                        for trait_name in &trait_names {
+                            let trait_lower: Vec<u8> =
+                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
+                            let Some(trait_def) = self.classes.get(&trait_lower).cloned() else {
+                                continue;
+                            };
+                            for (method_name, method) in &trait_def.methods {
+                                if !method.is_abstract {
+                                    continue;
+                                }
+                                // (no insteadof exclusions here: the first pass
+                                // consumed the exclude tables)
+                                if let Some(existing) = class.methods.get(method_name).cloned() {
+                                    // (an abstract method bound from an earlier trait is
+                                    // still that trait's)
+                                    let existing = match abstract_from_trait.get(method_name) {
+                                        Some(t) => {
+                                            let mut e = existing;
+                                            e.declaring_class = t.clone();
+                                            e
+                                        }
+                                        None => existing,
+                                    };
+                                    if let Some((message, line, unresolved)) = self
+                                        .abstract_trait_method_check(
+                                            &class,
+                                            &existing,
+                                            &trait_def.name,
+                                            method,
+                                            op.line,
+                                        )
+                                    {
+                                        if unresolved && is_early_attempt {
+                                            variance::defer(&class.name);
+                                            return Ok(Flow::Continue);
+                                        }
+                                        return Err(VmError { message, line });
+                                    }
+                                    continue;
+                                }
+                                let mut m = method.clone();
+                                m.declaring_class = class_name_lower.clone();
+                                std::rc::Rc::make_mut(&mut m.op_array).scope_class =
+                                    Some(class_name_lower.clone());
+                                class.methods.insert(method_name.clone(), m);
+                                abstract_from_trait.insert(method_name.clone(), trait_def.name.clone());
+                            }
+                        }
+
                         // Signature checks against interface methods run after trait
                         // binding (PHP binds traits before implementing interfaces).
                         let mut deferred_iface_checks: Vec<(Vec<u8>, crate::object::MethodDef)> =
@@ -52468,1006 +53359,6 @@ impl Vm {
                             }
                         }
 
-                        // Resolve traits: copy trait methods/properties/constants into the class
-                        let trait_names = class.traits.clone();
-                        let trait_adaptations = class.trait_adaptations.clone();
-                        let class_name_lower: Vec<u8> =
-                            class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
-
-                        // Use the pre-inheritance method/property names to determine which were directly defined
-                        let own_method_names = &own_method_names_pre_inherit;
-                        let own_prop_names = &own_prop_names_pre_inherit;
-
-                        // Check that trait names actually refer to traits
-                        for trait_name in &trait_names {
-                            let trait_lower: Vec<u8> =
-                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            // Check if it's "static" which is reserved
-                            if trait_lower == b"static" {
-                                return Err(VmError {
-                                    message: "Cannot use static as a trait".to_string(),
-                                    line: op.line,
-                                });
-                            }
-                            // Try autoloading if trait not found
-                            if !self.classes.contains_key(&trait_lower) {
-                                self.try_autoload_class(trait_name);
-                                if let Some(e) = variance::take_autoload_fatal() {
-                                    return Err(e);
-                                }
-                            }
-                            if let Some(trait_def) = self.classes.get(&trait_lower) {
-                                if !trait_def.is_trait {
-                                    let trait_display =
-                                        crate::string::msg_str(&trait_def.name).to_string();
-                                    let class_display =
-                                        crate::string::msg_str(&class.name).to_string();
-                                    // zend_do_link_class throws (catchable) Error
-                                    let err_msg = format!(
-                                        "{} cannot use {} - it is not a trait",
-                                        class_display, trait_display
-                                    );
-                                    let exc = self.create_exception(b"Error", &err_msg, op.line);
-                                    self.current_exception = Some(exc);
-                                    if let Some((catch_target, _, _, _, saved_pc)) =
-                                        exception_handlers.pop()
-                                    {
-                                        pending_calls_catch_depth = Some(saved_pc);
-                                        ip = catch_target as usize;
-                                        continue;
-                                    }
-                                    return Err(VmError {
-                                        message: format!("Uncaught Error: {}", err_msg),
-                                        line: op.line,
-                                    });
-                                }
-                                // Check for #[Deprecated] attribute on the trait — emit with
-                                // message/since suffix when present (handled via format_deprecated_message).
-                                let trait_attrs = trait_def.attributes.clone();
-                                let trait_display =
-                                    crate::string::msg_str(&trait_def.name).to_string();
-                                let class_display =
-                                    crate::string::msg_str(&class.name).to_string();
-                                if let Some(custom_msg) = self.get_deprecated_message(&trait_attrs)
-                                {
-                                    let prefix = format!(
-                                        "Trait {} used by {}",
-                                        trait_display, class_display
-                                    );
-                                    let msg = self.format_deprecated_message(&prefix, &custom_msg);
-                                    self.emit_user_deprecated_at(&msg, op.line);
-                                }
-                            } else {
-                                // PHP 8 raises an Error (catchable) with the format:
-                                // Uncaught Error: Trait "name" not found
-                                let trait_display = crate::string::msg_str(trait_name).to_string();
-                                let err_msg = format!("Trait \"{}\" not found", trait_display);
-                                let exc = self.create_exception(b"Error", &err_msg, op.line);
-                                self.current_exception = Some(exc);
-                                if let Some((catch_target, _, _, _, saved_pc)) =
-                                    exception_handlers.pop()
-                                {
-                                    pending_calls_catch_depth = Some(saved_pc);
-                                    ip = catch_target as usize;
-                                    continue;
-                                }
-                                return Err(VmError {
-                                    message: format!("Uncaught Error: {}", err_msg),
-                                    line: op.line,
-                                });
-                            }
-                        }
-
-                        // Validate trait adaptations (zend_traits_init_trait_structures)
-                        {
-                            let used_traits: Vec<Vec<u8>> = trait_names
-                                .iter()
-                                .map(|t| t.iter().map(|b| b.to_ascii_lowercase()).collect())
-                                .collect();
-                            // Resolve a trait referenced by an adaptation: exists, is a trait, is used.
-                            let check_trait_ref =
-                                |vm: &Self, name: &[u8]| -> Result<Vec<u8>, String> {
-                                    let lower: Vec<u8> =
-                                        name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                    let t = match vm.classes.get(&lower) {
-                                        Some(t) => t,
-                                        None => {
-                                            return Err(format!(
-                                                "Could not find trait {}",
-                                                crate::string::msg_str(name)
-                                            ));
-                                        }
-                                    };
-                                    if !t.is_trait {
-                                        return Err(format!(
-                                            "Class {} is not a trait, Only traits may be used in 'as' and 'insteadof' statements",
-                                            crate::string::msg_str(&t.name)
-                                        ));
-                                    }
-                                    if !used_traits.contains(&lower) {
-                                        return Err(format!(
-                                            "Required Trait {} wasn't added to {}",
-                                            crate::string::msg_str(&t.name),
-                                            crate::string::msg_str(&class.name)
-                                        ));
-                                    }
-                                    Ok(lower)
-                                };
-                            let mut excluded_seen: Vec<(Vec<u8>, Vec<u8>)> = Vec::new();
-                            let mut adapt_err: Option<String> = None;
-                            'adapts: for adapt in &trait_adaptations {
-                                match adapt {
-                                    crate::object::TraitAdaptation::Precedence {
-                                        trait_name: prec_trait,
-                                        method: prec_method,
-                                        instead_of,
-                                    } => {
-                                        let tl = match check_trait_ref(self, prec_trait) {
-                                            Ok(t) => t,
-                                            Err(e) => {
-                                                adapt_err = Some(e);
-                                                break 'adapts;
-                                            }
-                                        };
-                                        let method_lower: Vec<u8> = prec_method
-                                            .iter()
-                                            .map(|b| b.to_ascii_lowercase())
-                                            .collect();
-                                        let tdef = self.classes.get(&tl).unwrap();
-                                        if !tdef.methods.contains_key(&method_lower) {
-                                            adapt_err = Some(format!(
-                                                "A precedence rule was defined for {}::{} but this method does not exist",
-                                                String::from_utf8_lossy(&tdef.name),
-                                                String::from_utf8_lossy(prec_method)
-                                            ));
-                                            break 'adapts;
-                                        }
-                                        let tdef_name = tdef.name.clone();
-                                        for io in instead_of {
-                                            let el = match check_trait_ref(self, io) {
-                                                Ok(t) => t,
-                                                Err(e) => {
-                                                    adapt_err = Some(e);
-                                                    break 'adapts;
-                                                }
-                                            };
-                                            let ex_name = self
-                                                .classes
-                                                .get(&el)
-                                                .map(|c| c.name.clone())
-                                                .unwrap_or_default();
-                                            if excluded_seen
-                                                .iter()
-                                                .any(|(t, m)| *t == el && *m == method_lower)
-                                            {
-                                                adapt_err = Some(format!(
-                                                    "Failed to evaluate a trait precedence ({}). Method of trait {} was defined to be excluded multiple times",
-                                                    String::from_utf8_lossy(prec_method),
-                                                    String::from_utf8_lossy(&ex_name)
-                                                ));
-                                                break 'adapts;
-                                            }
-                                            excluded_seen.push((el.clone(), method_lower.clone()));
-                                            if el == tl {
-                                                adapt_err = Some(format!(
-                                                    "Inconsistent insteadof definition. The method {} is to be used from {}, but {} is also on the exclude list",
-                                                    String::from_utf8_lossy(prec_method),
-                                                    String::from_utf8_lossy(&tdef_name),
-                                                    String::from_utf8_lossy(&tdef_name)
-                                                ));
-                                                break 'adapts;
-                                            }
-                                        }
-                                    }
-                                    crate::object::TraitAdaptation::Alias {
-                                        trait_name: alias_trait,
-                                        method: alias_method,
-                                        new_name,
-                                        new_visibility,
-                                        ..
-                                    } => {
-                                        let method_lower: Vec<u8> = alias_method
-                                            .iter()
-                                            .map(|b| b.to_ascii_lowercase())
-                                            .collect();
-                                        if let Some(tn) = alias_trait {
-                                            let tl = match check_trait_ref(self, tn) {
-                                                Ok(t) => t,
-                                                Err(e) => {
-                                                    adapt_err = Some(e);
-                                                    break 'adapts;
-                                                }
-                                            };
-                                            let tdef = self.classes.get(&tl).unwrap();
-                                            if !tdef.methods.contains_key(&method_lower) {
-                                                adapt_err = Some(format!(
-                                                    "An alias was defined for {}::{} but this method does not exist",
-                                                    String::from_utf8_lossy(&tdef.name),
-                                                    String::from_utf8_lossy(alias_method)
-                                                ));
-                                                break 'adapts;
-                                            }
-                                        } else {
-                                            let found: Vec<Vec<u8>> = used_traits
-                                                .iter()
-                                                .filter_map(|tl| self.classes.get(tl))
-                                                .filter(|t| t.methods.contains_key(&method_lower))
-                                                .map(|t| t.name.clone())
-                                                .collect();
-                                            if found.len() > 1 {
-                                                let m = String::from_utf8_lossy(alias_method);
-                                                let a0 = String::from_utf8_lossy(&found[0]);
-                                                let a1 = String::from_utf8_lossy(&found[1]);
-                                                adapt_err = Some(format!(
-                                                    "An alias was defined for method {}(), which exists in both {} and {}. Use {}::{} or {}::{} to resolve the ambiguity",
-                                                    m, a0, a1, a0, m, a1, m
-                                                ));
-                                                break 'adapts;
-                                            }
-                                            if found.is_empty() {
-                                                adapt_err = Some(if let Some(nn) = new_name {
-                                                    format!(
-                                                        "An alias ({}) was defined for method {}(), but this method does not exist",
-                                                        String::from_utf8_lossy(nn),
-                                                        String::from_utf8_lossy(alias_method)
-                                                    )
-                                                } else {
-                                                    let _ = new_visibility;
-                                                    format!(
-                                                        "The modifiers of the trait method {}() are changed, but this method does not exist. Error",
-                                                        String::from_utf8_lossy(alias_method)
-                                                    )
-                                                });
-                                                break 'adapts;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(msg) = adapt_err {
-                                return Err(VmError {
-                                    message: msg,
-                                    line: op.line,
-                                });
-                            }
-                        }
-
-                        // Helper closure to patch __CLASS__ references in a method's literals
-                        fn patch_class_literals(
-                            m: &mut crate::object::MethodDef,
-                            trait_name_original: &[u8],
-                            class_name: &[u8],
-                        ) {
-                            for &lit_idx in &m.op_array.class_const_literals.clone() {
-                                if let Some(Value::String(s)) =
-                                    m.op_array.literals.get(lit_idx as usize)
-                                {
-                                    if s.as_bytes() == trait_name_original {
-                                        std::rc::Rc::make_mut(&mut m.op_array).literals
-                                            [lit_idx as usize] =
-                                            Value::String(PhpString::from_vec(class_name.to_vec()));
-                                    } else if s.as_bytes().len() > trait_name_original.len() + 2
-                                        && s.as_bytes()[..trait_name_original.len()]
-                                            .eq_ignore_ascii_case(trait_name_original)
-                                        && &s.as_bytes()[trait_name_original.len()
-                                            ..trait_name_original.len() + 2]
-                                            == b"::"
-                                    {
-                                        // self::method() call literal inside a trait method
-                                        let mut nv = class_name.to_vec();
-                                        nv.extend_from_slice(
-                                            &s.as_bytes()[trait_name_original.len()..],
-                                        );
-                                        std::rc::Rc::make_mut(&mut m.op_array).literals
-                                            [lit_idx as usize] =
-                                            Value::String(PhpString::from_vec(nv));
-                                    }
-                                }
-                            }
-                        }
-
-                        // Track which trait contributed each method name so we can detect
-                        // composition collisions between two traits with the same method.
-                        let mut method_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-                            std::collections::HashMap::new();
-                        // (the concrete trait methods, in binding order)
-                        let mut trait_bound_order: Vec<Vec<u8>> = Vec::new();
-                        let props_prebound = prebound_trait_props.is_some();
-                        let mut prop_from_trait: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-                            prebound_trait_props.unwrap_or_default();
-                        for trait_name in &trait_names {
-                            let trait_lower: Vec<u8> =
-                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
-                                // Copy trait methods
-                                // Trait methods override inherited parent methods, but NOT the class's own methods
-                                // (zend_traits_copy_functions / zend_add_trait_method)
-                                for (method_name, method) in &trait_def.methods {
-                                    // Abstract trait methods are bound in a second pass (after all
-                                    // concrete trait methods), like zend_do_traits_method_binding.
-                                    if method.is_abstract {
-                                        continue;
-                                    }
-                                    // Does an alias rule apply to this trait's method?
-                                    let mut final_warnings = 0usize;
-                                    let alias_applies = |alias_trait: &Option<Vec<u8>>| -> bool {
-                                        match alias_trait {
-                                            Some(t) => {
-                                                t.eq_ignore_ascii_case(&trait_def.name)
-                                                    || t.eq_ignore_ascii_case(&trait_lower)
-                                            }
-                                            None => {
-                                                // Unqualified alias: applies to the first used trait with the method.
-                                                let first = trait_names.iter().find(|tn| {
-                                                    let tl: Vec<u8> = tn
-                                                        .iter()
-                                                        .map(|b| b.to_ascii_lowercase())
-                                                        .collect();
-                                                    self.classes
-                                                        .get(&tl)
-                                                        .map(|t| {
-                                                            t.methods.contains_key(method_name)
-                                                        })
-                                                        .unwrap_or(false)
-                                                });
-                                                first
-                                                    .map(|f| f.eq_ignore_ascii_case(&trait_lower))
-                                                    .unwrap_or(false)
-                                            }
-                                        }
-                                    };
-                                    // Candidate copies: (key, display name, method copy)
-                                    let mut copies: Vec<(
-                                        Vec<u8>,
-                                        Vec<u8>,
-                                        crate::object::MethodDef,
-                                    )> = Vec::new();
-                                    for adapt in &trait_adaptations {
-                                        if let crate::object::TraitAdaptation::Alias {
-                                            trait_name: at,
-                                            method: am,
-                                            new_name: Some(nn),
-                                            new_visibility,
-                                            new_final,
-                                        } = adapt
-                                        {
-                                            if am.eq_ignore_ascii_case(method_name)
-                                                && alias_applies(at)
-                                            {
-                                                let mut m = method.clone();
-                                                if let Some(v) = new_visibility {
-                                                    m.visibility = *v;
-                                                }
-                                                if *new_final
-                                                    && Vm::trait_alias_make_final(&mut m, nn)
-                                                {
-                                                    final_warnings += 1;
-                                                }
-                                                copies.push((
-                                                    nn.iter()
-                                                        .map(|b| b.to_ascii_lowercase())
-                                                        .collect(),
-                                                    nn.clone(),
-                                                    m,
-                                                ));
-                                            }
-                                        }
-                                    }
-                                    // Check if this method is excluded by an insteadof rule
-                                    let mut excluded = false;
-                                    for adapt in &trait_adaptations {
-                                        if let crate::object::TraitAdaptation::Precedence {
-                                            trait_name: prec_trait,
-                                            method: prec_method,
-                                            instead_of,
-                                        } = adapt
-                                        {
-                                            let prec_method_lower: Vec<u8> = prec_method
-                                                .iter()
-                                                .map(|b| b.to_ascii_lowercase())
-                                                .collect();
-                                            let prec_trait_lower: Vec<u8> = prec_trait
-                                                .iter()
-                                                .map(|b| b.to_ascii_lowercase())
-                                                .collect();
-                                            if *method_name == prec_method_lower
-                                                && prec_trait_lower != trait_lower
-                                            {
-                                                // This trait's method is being overridden
-                                                let io_lower: Vec<Vec<u8>> = instead_of
-                                                    .iter()
-                                                    .map(|n| {
-                                                        n.iter()
-                                                            .map(|b| b.to_ascii_lowercase())
-                                                            .collect()
-                                                    })
-                                                    .collect();
-                                                if io_lower.contains(&trait_lower) {
-                                                    excluded = true;
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if !excluded {
-                                        let mut m = method.clone();
-                                        for adapt in &trait_adaptations {
-                                            if let crate::object::TraitAdaptation::Alias {
-                                                trait_name: at,
-                                                method: am,
-                                                new_name: None,
-                                                new_visibility,
-                                                new_final,
-                                            } = adapt
-                                            {
-                                                if am.eq_ignore_ascii_case(method_name)
-                                                    && alias_applies(at)
-                                                {
-                                                    if let Some(v) = new_visibility {
-                                                        m.visibility = *v;
-                                                    }
-                                                    if *new_final {
-                                                        let n = m.name.clone();
-                                                        if Vm::trait_alias_make_final(&mut m, &n) {
-                                                            final_warnings += 1;
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        copies.push((method_name.clone(), method.name.clone(), m));
-                                    }
-                                    for _ in 0..final_warnings {
-                                        let line = self.current_line;
-                                        self.emit_warning_at(
-                                            "Private methods cannot be final as they are never overridden by other classes",
-                                            line,
-                                        );
-                                    }
-                                    for (key, display, mut m) in copies {
-                                        if let Some(existing) = class.methods.get(&key) {
-                                            // Same function reached through different traits: no conflict.
-                                            let same_fn = existing.op_array.decl_line
-                                                == m.op_array.decl_line
-                                                && existing.op_array.end_line
-                                                    == m.op_array.end_line
-                                                && existing.op_array.filename
-                                                    == m.op_array.filename
-                                                && existing.name.eq_ignore_ascii_case(&m.name);
-                                            if same_fn
-                                                && existing.visibility == m.visibility
-                                                && method_from_trait.contains_key(&key)
-                                            {
-                                                continue;
-                                            }
-                                            // Members from the current class override trait methods
-                                            if own_method_names.contains(&key) {
-                                                continue;
-                                            }
-                                            if let Some(prev_trait) = method_from_trait.get(&key) {
-                                                if !existing.is_abstract {
-                                                    return Err(VmError {
-                                                        message: format!(
-                                                            "Trait method {}::{} has not been applied as {}::{}, because of collision with {}::{}",
-                                                            crate::string::msg_str(
-                                                                &trait_def.name
-                                                            ),
-                                                            crate::string::msg_str(&m.name),
-                                                            crate::string::msg_str(&class.name),
-                                                            crate::string::msg_str(&display),
-                                                            crate::string::msg_str(prev_trait),
-                                                            crate::string::msg_str(&existing.name)
-                                                        ),
-                                                        line: op.line,
-                                                    });
-                                                }
-                                            }
-                                        }
-                                        // Trait methods should have scope of the using class
-                                        m.declaring_class = class_name_lower.clone();
-                                        std::rc::Rc::make_mut(&mut m.op_array).scope_class =
-                                            Some(class_name_lower.clone());
-                                        // Patch __CLASS__ references in literals (only marked ones)
-                                        let trait_name_original = trait_def.name.clone();
-                                        patch_class_literals(
-                                            &mut m,
-                                            &trait_name_original,
-                                            &class.name,
-                                        );
-                                        // Each copy of the method (per class and alias)
-                                        // has its own static variables.
-                                        Self::rekey_trait_statics(
-                                            &mut m,
-                                            &class_name_lower,
-                                            &display.to_ascii_lowercase(),
-                                        );
-                                        m.name = display.clone();
-                                        // A trait method replacing an inherited parent method is
-                                        // checked against it like an own method would be.
-                                        if !method_from_trait.contains_key(&key) {
-                                            let inherited = class
-                                                .parent
-                                                .as_ref()
-                                                .map(|pn| {
-                                                    pn.iter()
-                                                        .map(|b| b.to_ascii_lowercase())
-                                                        .collect::<Vec<u8>>()
-                                                })
-                                                .and_then(|pl| self.classes.get(&pl))
-                                                .and_then(|pc| pc.methods.get(&key).cloned());
-                                            if let Some(pm) = inherited {
-                                                if pm.visibility != Visibility::Private {
-                                                    if pm.is_final {
-                                                        let pdecl = self
-                                                            .classes
-                                                            .get(&pm.declaring_class)
-                                                            .map(|c| c.name.clone())
-                                                            .unwrap_or_else(|| {
-                                                                pm.declaring_class.clone()
-                                                            });
-                                                        return Err(VmError {
-                                                            message: format!(
-                                                                "Cannot override final method {}::{}()",
-                                                                crate::string::msg_str(&pdecl),
-                                                                crate::string::msg_str(&pm.name)
-                                                            ),
-                                                            line: op.line,
-                                                        });
-                                                    }
-                                                    if pm.is_static != m.is_static {
-                                                        let pdecl = self
-                                                            .classes
-                                                            .get(&pm.declaring_class)
-                                                            .map(|c| c.name.clone())
-                                                            .unwrap_or_else(|| {
-                                                                pm.declaring_class.clone()
-                                                            });
-                                                        let (a, b) = if m.is_static {
-                                                            ("non static", "static")
-                                                        } else {
-                                                            ("static", "non static")
-                                                        };
-                                                        return Err(VmError {
-                                                            message: format!(
-                                                                "Cannot make {} method {}::{}() {} in class {}",
-                                                                a,
-                                                                crate::string::msg_str(&pdecl),
-                                                                crate::string::msg_str(&m.name),
-                                                                b,
-                                                                crate::string::msg_str(
-                                                                    &class.name
-                                                                )
-                                                            ),
-                                                            line: if m.op_array.decl_line > 0 {
-                                                                m.op_array.decl_line
-                                                            } else {
-                                                                op.line
-                                                            },
-                                                        });
-                                                    }
-                                                    if let Some(msg) =
-                                                        Self::trait_method_access_level_error(
-                                                            self, &class, &m, &pm,
-                                                        )
-                                                    {
-                                                        if !m.op_array.filename.is_empty() {
-                                                            self.current_file =
-                                                                String::from_utf8_lossy(
-                                                                    &m.op_array.filename,
-                                                                )
-                                                                .into_owned()
-                                                                .into();
-                                                        }
-                                                        return Err(VmError {
-                                                            message: msg,
-                                                            line: if m.op_array.decl_line > 0 {
-                                                                m.op_array.decl_line
-                                                            } else {
-                                                                op.line
-                                                            },
-                                                        });
-                                                    }
-                                                    if key.as_slice() != b"__construct"
-                                                        || pm.is_abstract
-                                                    {
-                                                        let pdecl = self
-                                                            .classes
-                                                            .get(&pm.declaring_class)
-                                                            .map(|c| c.name.clone())
-                                                            .unwrap_or_else(|| {
-                                                                pm.declaring_class.clone()
-                                                            });
-                                                        if let Some((err_msg, _)) = self
-                                                            .variance_check_method(
-                                                                &class, &m, &pdecl, &pm,
-                                                            )
-                                                        {
-                                                            let l = if m.op_array.decl_line > 0 {
-                                                                m.op_array.decl_line
-                                                            } else {
-                                                                op.line
-                                                            };
-                                                            // (reported where the trait
-                                                            // method is declared)
-                                                            if !m.op_array.filename.is_empty() {
-                                                                self.current_file =
-                                                                    String::from_utf8_lossy(
-                                                                        &m.op_array.filename,
-                                                                    )
-                                                                    .into_owned()
-                                                                    .into();
-                                                            }
-                                                            return Err(VmError {
-                                                                message: err_msg,
-                                                                line: l,
-                                                            });
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        class.methods.insert(key.clone(), m);
-                                        trait_bound_order.push(key.clone());
-                                        method_from_trait.insert(key, trait_def.name.clone());
-                                    }
-                                }
-                                // Copy trait properties (zend_do_traits_property_binding): a
-                                // property already declared by the class or an earlier trait must
-                                // be compatible; inherited private ones are shadowed, other
-                                // inherited ones replaced.
-                                for prop in &trait_def.properties {
-                                    if props_prebound {
-                                        break;
-                                    }
-                                    let prev_trait = prop_from_trait.get(&prop.name).cloned();
-                                    if own_prop_names.contains(&prop.name) || prev_trait.is_some() {
-                                        let first_def = prev_trait
-                                            .clone()
-                                            .unwrap_or_else(|| class.name.clone());
-                                        if let Some(message) = self.trait_prop_composition_error(
-                                            &class,
-                                            &first_def,
-                                            &trait_def.name,
-                                            prop,
-                                        ) {
-                                            return Err(VmError {
-                                                message,
-                                                line: op.line,
-                                            });
-                                        }
-                                        continue;
-                                    }
-                                    if class.is_readonly && !prop.is_readonly {
-                                        return Err(VmError {
-                                            message: format!(
-                                                "Readonly class {} cannot use trait with a non-readonly property {}::${}",
-                                                crate::string::msg_str(&class.name),
-                                                crate::string::msg_str(&trait_def.name),
-                                                crate::string::msg_str(&prop.name)
-                                            ),
-                                            line: op.line,
-                                        });
-                                    }
-                                    // Check if enum - enums cannot include properties from traits
-                                    if class.is_enum {
-                                        let class_display =
-                                            crate::string::msg_str(&class.name).to_string();
-                                        return Err(VmError {
-                                            message: format!(
-                                                "Enum {} cannot include properties",
-                                                class_display
-                                            ),
-                                            line: op.line,
-                                        });
-                                    }
-                                    let mut p = prop.clone();
-                                    p.declaring_class = class_name_lower.clone();
-                                    match class
-                                        .properties
-                                        .iter()
-                                        .position(|cp| cp.name == prop.name)
-                                    {
-                                        Some(idx)
-                                            if class.properties[idx].visibility
-                                                != Visibility::Private =>
-                                        {
-                                            if let Some(msg) = self
-                                                .trait_property_inheritance_error(
-                                                    &class,
-                                                    &p,
-                                                    &class.properties[idx],
-                                                )
-                                            {
-                                                return Err(VmError {
-                                                    message: msg,
-                                                    line: op.line,
-                                                });
-                                            }
-                                            class.properties[idx] = p;
-                                        }
-                                        _ => class.properties.push(p),
-                                    }
-                                    prop_from_trait
-                                        .insert(prop.name.clone(), trait_def.name.clone());
-                                }
-                                // Copy trait constants (zend_do_traits_constant_binding /
-                                // do_trait_constant_check): a constant already declared by the
-                                // class or an earlier trait must be identical.
-                                let cur_trait_idx = trait_names
-                                    .iter()
-                                    .position(|t| t.eq_ignore_ascii_case(trait_name))
-                                    .unwrap_or(0);
-                                for (const_name, const_val) in &trait_def.constants {
-                                    let t_meta = trait_def.constants_meta.get(const_name).cloned();
-                                    let existing_meta =
-                                        class.constants_meta.get(const_name).cloned();
-                                    let existing_is_own = class.constants.contains_key(const_name)
-                                        && existing_meta
-                                            .as_ref()
-                                            .map(|m| m.declaring_class == class_name_lower)
-                                            .unwrap_or(true);
-                                    if existing_is_own {
-                                        let ev = class
-                                            .constants
-                                            .get(const_name)
-                                            .cloned()
-                                            .unwrap_or(Value::Null);
-                                        let flags_differ = match (&t_meta, &existing_meta) {
-                                            (Some(a), Some(b)) => {
-                                                a.visibility != b.visibility
-                                                    || a.is_final != b.is_final
-                                            }
-                                            _ => false,
-                                        };
-                                        let tt =
-                                            t_meta.as_ref().and_then(|m| m.declared_type.clone());
-                                        let et = existing_meta
-                                            .as_ref()
-                                            .and_then(|m| m.declared_type.clone());
-                                        let types_differ = match (&tt, &et) {
-                                            (None, None) => false,
-                                            (Some(a), Some(b)) => {
-                                                let tl = trait_def.name.clone();
-                                                !(self
-                                                    .variance_property_types(
-                                                        &class,
-                                                        &tl.iter()
-                                                            .map(|c| c.to_ascii_lowercase())
-                                                            .collect::<Vec<u8>>(),
-                                                        &Some(a.clone()),
-                                                        &Some(b.clone()),
-                                                        0,
-                                                    )
-                                                    .0
-                                                    != variance::Status::Error)
-                                            }
-                                            _ => true,
-                                        };
-                                        let resolve_binop = |vm: &Self, v: &Value, cl: &[u8], c: &ClassEntry| -> Option<Value> {
-                                            if let Value::String(sv) = v {
-                                                if sv.as_bytes().starts_with(b"__deferred_binop__::") {
-                                                    return vm.resolve_deferred_binop(sv.as_bytes(), cl, c);
-                                                }
-                                            }
-                                            None
-                                        };
-                                        // Constant expressions are evaluated (in the
-                                        // composing class's scope) and their values
-                                        // compared; if that fails, their sources are.
-                                        let thunk_op = |v: &Value, c: &ClassEntry| {
-                                            static_props::thunk_marker_name(v).and_then(|n| {
-                                                c.const_closures
-                                                    .iter()
-                                                    .find(|op| op.name == n)
-                                                    .cloned()
-                                            })
-                                        };
-                                        let t1 = thunk_op(const_val, &trait_def);
-                                        let t2 = thunk_op(&ev, &class);
-                                        let thunks_same = if t1.is_none() && t2.is_none() {
-                                            None
-                                        } else {
-                                            let eval = |vm: &mut Self,
-                                                            op: &Option<OpArray>,
-                                                            v: &Value|
-                                             -> Option<Value> {
-                                                match op {
-                                                    Some(op) => {
-                                                        let r = vm.eval_const_thunk_op(
-                                                            op,
-                                                            &class_name_lower,
-                                                            &class.name,
-                                                            "",
-                                                        );
-                                                        if r.is_err() {
-                                                            vm.current_exception = None;
-                                                        }
-                                                        r.ok()
-                                                    }
-                                                    None => Some(vm.resolve_deferred_value(v)),
-                                                }
-                                            };
-                                            let e1 = eval(self, &t1, const_val);
-                                            let e2 = eval(self, &t2, &ev);
-                                            Some(match (e1, e2) {
-                                                (Some(a), Some(b)) => a.identical(&b),
-                                                _ => {
-                                                    t1.map(|o| o.display_name)
-                                                        == t2.map(|o| o.display_name)
-                                                }
-                                            })
-                                        };
-                                        let values_differ = match thunks_same {
-                                            Some(same) => !same,
-                                            None => {
-                                                let v1 = match resolve_binop(
-                                                    self,
-                                                    const_val,
-                                                    &trait_lower,
-                                                    &trait_def,
-                                                ) {
-                                                    Some(v) => v,
-                                                    None => self.resolve_deferred_value(const_val),
-                                                };
-                                                let v2 = match resolve_binop(
-                                                    self,
-                                                    &ev,
-                                                    &class_name_lower,
-                                                    &class,
-                                                ) {
-                                                    Some(v) => v,
-                                                    None => self.resolve_deferred_value(&ev),
-                                                };
-                                                !v1.identical(&v2)
-                                            }
-                                        };
-                                        if flags_differ || types_differ || values_differ {
-                                            // First definition: an earlier trait declaring it, else the class.
-                                            let first_def = trait_names[..cur_trait_idx]
-                                                .iter()
-                                                .find_map(|tn| {
-                                                    let tl: Vec<u8> = tn
-                                                        .iter()
-                                                        .map(|b| b.to_ascii_lowercase())
-                                                        .collect();
-                                                    self.classes
-                                                        .get(&tl)
-                                                        .filter(|t| {
-                                                            t.constants.contains_key(const_name)
-                                                        })
-                                                        .map(|t| t.name.clone())
-                                                })
-                                                .unwrap_or_else(|| class.name.clone());
-                                            return Err(VmError {
-                                                message: format!(
-                                                    "{} and {} define the same constant ({}) in the composition of {}. However, the definition differs and is considered incompatible. Class was composed",
-                                                    crate::string::msg_str(&first_def),
-                                                    crate::string::msg_str(&trait_def.name),
-                                                    crate::string::msg_str(const_name),
-                                                    crate::string::msg_str(&class.name)
-                                                ),
-                                                line: op.line,
-                                            });
-                                        }
-                                        continue;
-                                    }
-                                    if let Some(pm) = existing_meta.as_ref() {
-                                        // Replaces an inherited constant: final parent constants cannot be overridden.
-                                        if pm.is_final {
-                                            let pdecl = self
-                                                .classes
-                                                .get(&pm.declaring_class)
-                                                .map(|c| c.name.clone())
-                                                .unwrap_or_else(|| pm.declaring_class.clone());
-                                            return Err(VmError {
-                                                message: format!(
-                                                    "{}::{} cannot override final constant {}::{}",
-                                                    crate::string::msg_str(&class.name),
-                                                    crate::string::msg_str(const_name),
-                                                    crate::string::msg_str(&pdecl),
-                                                    crate::string::msg_str(const_name)
-                                                ),
-                                                line: op.line,
-                                            });
-                                        }
-                                    }
-                                    class
-                                        .constants
-                                        .insert(const_name.clone(), const_val.clone());
-                                    if let Some(mut m) = t_meta {
-                                        m.declaring_class = class_name_lower.clone();
-                                        class.constants_meta.insert(const_name.clone(), m);
-                                    }
-                                }
-                                // Copy trait static properties (class's own take precedence)
-                                for (prop_name, prop_val) in &trait_def.static_properties {
-                                    if !class.static_properties.contains_key(prop_name) {
-                                        class
-                                            .static_properties
-                                            .insert(prop_name.clone(), prop_val.clone());
-                                    }
-                                }
-
-                                // Check enum restrictions on trait methods
-                                if class.is_enum {
-                                    let forbidden_magic = [
-                                        b"__construct" as &[u8],
-                                        b"__destruct",
-                                        b"__clone",
-                                        b"__get",
-                                        b"__set",
-                                        b"__unset",
-                                        b"__isset",
-                                        b"__tostring",
-                                        b"__debuginfo",
-                                        b"__serialize",
-                                        b"__unserialize",
-                                        b"__sleep",
-                                        b"__wakeup",
-                                        b"__set_state",
-                                    ];
-                                    for (method_name, _) in &trait_def.methods {
-                                        if forbidden_magic.contains(&method_name.as_slice()) {
-                                            let class_display =
-                                                crate::string::msg_str(&class.name).to_string();
-                                            let method_display =
-                                                crate::string::msg_str(method_name).to_string();
-                                            return Err(VmError {
-                                                message: format!(
-                                                    "Enum {} cannot include magic method {}",
-                                                    class_display, method_display
-                                                ),
-                                                line: op.line,
-                                            });
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Second pass: bind abstract trait methods. An existing method (own,
-                        // inherited or from another trait) satisfies the requirement; its
-                        // signature is checked against the abstract one further below.
-                        for trait_name in &trait_names {
-                            let trait_lower: Vec<u8> =
-                                trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                            if let Some(trait_def) = self.classes.get(&trait_lower).cloned() {
-                                for (method_name, method) in &trait_def.methods {
-                                    if !method.is_abstract
-                                        || class.methods.contains_key(method_name)
-                                    {
-                                        continue;
-                                    }
-                                    let mut excluded = false;
-                                    for adapt in &trait_adaptations {
-                                        if let crate::object::TraitAdaptation::Precedence {
-                                            trait_name: prec_trait,
-                                            method: prec_method,
-                                            instead_of,
-                                        } = adapt
-                                        {
-                                            if prec_method.eq_ignore_ascii_case(method_name)
-                                                && !prec_trait.eq_ignore_ascii_case(&trait_lower)
-                                                && instead_of
-                                                    .iter()
-                                                    .any(|n| n.eq_ignore_ascii_case(&trait_lower))
-                                            {
-                                                excluded = true;
-                                            }
-                                        }
-                                    }
-                                    if excluded {
-                                        continue;
-                                    }
-                                    let mut m = method.clone();
-                                    m.declaring_class = class_name_lower.clone();
-                                    std::rc::Rc::make_mut(&mut m.op_array).scope_class =
-                                        Some(class_name_lower.clone());
-                                    class.methods.insert(method_name.clone(), m);
-                                }
-                            }
-                        }
-
                         // Apply trait aliases
                         for adapt in &trait_adaptations {
                             if let crate::object::TraitAdaptation::Alias {
@@ -53587,50 +53478,6 @@ impl Vm {
                         }
                         // Check class methods (own, inherited or from traits) against the
                         // interface methods they implement.
-                        // Methods imported from traits against the parent's
-                        // (do_inheritance_check_on_method): static-ness.
-                        if let Some(parent) = &class.parent {
-                            let pl = parent.to_ascii_lowercase();
-                            for mn in method_from_trait.keys() {
-                                let (Some(m), Some(pm)) = (
-                                    class.methods.get(mn),
-                                    self.classes.get(&pl).and_then(|p| p.get_method(mn)),
-                                ) else {
-                                    continue;
-                                };
-                                if pm.visibility == Visibility::Private
-                                    || pm.is_static == m.is_static
-                                {
-                                    continue;
-                                }
-                                let pdecl = self
-                                    .classes
-                                    .get(&pm.declaring_class.to_ascii_lowercase())
-                                    .map(|c| crate::value::display_class_name(&c.name))
-                                    .unwrap_or_else(|| crate::value::display_class_name(parent));
-                                let mname = String::from_utf8_lossy(&m.name).to_string();
-                                let cname = crate::value::display_class_name(&class.name);
-                                let message = if m.is_static {
-                                    format!(
-                                        "Cannot make non static method {}::{}() static in class {}",
-                                        pdecl, mname, cname
-                                    )
-                                } else {
-                                    format!(
-                                        "Cannot make static method {}::{}() non static in class {}",
-                                        pdecl, mname, cname
-                                    )
-                                };
-                                return Err(VmError {
-                                    message,
-                                    line: if m.op_array.decl_line > 0 {
-                                        m.op_array.decl_line
-                                    } else {
-                                        op.line
-                                    },
-                                });
-                            }
-                        }
                         for (iface_name_c, iface_method) in &deferred_iface_checks {
                             let mn_lower: Vec<u8> = iface_method
                                 .name
@@ -53664,7 +53511,10 @@ impl Vm {
                                         String::from_utf8_lossy(iface_name_c).to_string()
                                     });
                                 let mname = String::from_utf8_lossy(&existing.name).to_string();
-                                let cname = crate::value::display_class_name(&class.name);
+                                // (ZEND_FN_SCOPE_NAME(child): an inherited method's class)
+                                let cname = crate::value::display_class_name(
+                                    &self.declaring_class_name(&existing.declaring_class, &class.name),
+                                );
                                 if iface_method.is_static != existing.is_static {
                                     let message = if existing.is_static {
                                         format!(
@@ -53708,97 +53558,6 @@ impl Vm {
                                     message: err_msg,
                                     line: l,
                                 });
-                            }
-                        }
-
-                        // Check abstract trait method compatibility with class implementations
-                        // Trait abstract methods must be checked against the class's concrete implementations
-                        {
-                            let mut all_trait_abstract_methods: Vec<(
-                                Vec<u8>,
-                                crate::object::MethodDef,
-                                Vec<u8>,
-                            )> = Vec::new();
-                            for trait_name in &trait_names {
-                                let trait_lower: Vec<u8> =
-                                    trait_name.iter().map(|b| b.to_ascii_lowercase()).collect();
-                                if let Some(trait_def) = self.classes.get(&trait_lower) {
-                                    for (method_name, method) in &trait_def.methods {
-                                        if method.is_abstract {
-                                            all_trait_abstract_methods.push((
-                                                method_name.clone(),
-                                                method.clone(),
-                                                trait_def.name.clone(),
-                                            ));
-                                        }
-                                    }
-                                }
-                            }
-                            for (method_name, trait_method, trait_orig_name) in
-                                &all_trait_abstract_methods
-                            {
-                                if let Some(class_method) = class.methods.get(method_name) {
-                                    if !class_method.is_abstract {
-                                        // Check staticness compatibility
-                                        if trait_method.is_static && !class_method.is_static {
-                                            let trait_display =
-                                                crate::string::msg_str(trait_orig_name)
-                                                    .to_string();
-                                            let method_display =
-                                                crate::string::msg_str(&trait_method.name)
-                                                    .to_string();
-                                            let class_display =
-                                                crate::string::msg_str(&class.name).to_string();
-                                            return Err(VmError {
-                                                message: format!(
-                                                    "Cannot make static method {}::{}() non static in class {}",
-                                                    trait_display, method_display, class_display
-                                                ),
-                                                line: op.line,
-                                            });
-                                        }
-                                        if !trait_method.is_static && class_method.is_static {
-                                            let trait_display =
-                                                crate::string::msg_str(trait_orig_name)
-                                                    .to_string();
-                                            let method_display =
-                                                crate::string::msg_str(&trait_method.name)
-                                                    .to_string();
-                                            let class_display =
-                                                crate::string::msg_str(&class.name).to_string();
-                                            return Err(VmError {
-                                                message: format!(
-                                                    "Cannot make non static method {}::{}() static in class {}",
-                                                    trait_display, method_display, class_display
-                                                ),
-                                                line: op.line,
-                                            });
-                                        }
-                                        // Check method signature compatibility
-                                        if let Some((err_msg, unresolved)) = self
-                                            .variance_check_method(
-                                                &class,
-                                                class_method,
-                                                trait_orig_name,
-                                                trait_method,
-                                            )
-                                        {
-                                            if unresolved && is_early_attempt {
-                                                variance::defer(&class.name);
-                                                return Ok(Flow::Continue);
-                                            }
-                                            let l = if class_method.op_array.decl_line > 0 {
-                                                class_method.op_array.decl_line
-                                            } else {
-                                                op.line
-                                            };
-                                            return Err(VmError {
-                                                message: err_msg,
-                                                line: l,
-                                            });
-                                        }
-                                    }
-                                }
                             }
                         }
 
@@ -53999,9 +53758,17 @@ impl Vm {
                                 class.name.iter().map(|b| b.to_ascii_lowercase()).collect();
                             for (_, method) in &class.methods {
                                 if method.is_abstract {
-                                    // Find which interface this method belongs to
-                                    let mut iface_origin = String::new();
-                                    for iface_name in &iface_names {
+                                    // Find which interface this method belongs to: the
+                                    // one declaring it (an inherited interface's).
+                                    let mut iface_origin = self
+                                        .classes
+                                        .get(&method.declaring_class.to_ascii_lowercase())
+                                        .filter(|c| c.is_interface)
+                                        .map(|c| String::from_utf8_lossy(&c.name).to_string())
+                                        .unwrap_or_default();
+                                    for iface_name in
+                                        iface_names.iter().filter(|_| iface_origin.is_empty())
+                                    {
                                         let iface_lower: Vec<u8> = iface_name
                                             .iter()
                                             .map(|b| b.to_ascii_lowercase())
@@ -61084,63 +60851,94 @@ impl Vm {
         None
     }
 
-    /// Bind the trait properties before the parent's are inherited, as
-    /// zend_do_link_class() does (so those are checked against the parent's
-    /// like the class's own). Only when every used trait is already loaded
-    /// (and not deprecated): returns which trait each bound or matching
-    /// property came from; None leaves it to the trait binding below.
+    /// zend_add_trait_method() for an abstract trait method `abs` (of trait
+    /// `trait_name`) the class already has (`existing`):
+    /// do_inheritance_check_on_method() without the visibility check. The
+    /// error, its line and whether it is unresolved.
     #[inline(never)]
-    fn prebind_trait_properties(
+    fn abstract_trait_method_check(
         &mut self,
-        class: &mut ClassEntry,
-    ) -> Result<Option<std::collections::HashMap<Vec<u8>, Vec<u8>>>, String> {
-        let mut defs = Vec::with_capacity(class.traits.len());
-        for t in &class.traits {
-            match self.classes.get(&t.to_ascii_lowercase()).cloned() {
-                Some(d) if d.is_trait && self.get_deprecated_message(&d.attributes).is_none() => {
-                    defs.push(d)
-                }
-                _ => return Ok(None),
-            }
+        class: &ClassEntry,
+        existing: &crate::object::MethodDef,
+        trait_name: &[u8],
+        abs: &crate::object::MethodDef,
+        line: u32,
+    ) -> Option<(String, u32, bool)> {
+        let line = if existing.op_array.decl_line > 0 {
+            existing.op_array.decl_line
+        } else {
+            line
+        };
+        if abs.is_static != existing.is_static {
+            let cdecl = self.declaring_class_name(&existing.declaring_class, &class.name);
+            let (a, b) = if abs.is_static {
+                ("static", "non static")
+            } else {
+                ("non static", "static")
+            };
+            return Some((
+                format!(
+                    "Cannot make {} method {}::{}() {} in class {}",
+                    a,
+                    crate::string::msg_str(trait_name),
+                    crate::string::msg_str(&abs.name),
+                    b,
+                    crate::string::msg_str(&cdecl)
+                ),
+                line,
+                false,
+            ));
         }
-        let class_name_lower = class.name.to_ascii_lowercase();
-        let own: std::collections::HashSet<Vec<u8>> =
-            class.properties.iter().map(|p| p.name.clone()).collect();
-        let mut from: std::collections::HashMap<Vec<u8>, Vec<u8>> =
-            std::collections::HashMap::new();
-        for trait_def in &defs {
-            for prop in &trait_def.properties {
-                let prev_trait = from.get(&prop.name).cloned();
-                if own.contains(&prop.name) || prev_trait.is_some() {
-                    let first_def = prev_trait.unwrap_or_else(|| class.name.clone());
-                    if let Some(msg) =
-                        self.trait_prop_composition_error(class, &first_def, &trait_def.name, prop)
-                    {
-                        return Err(msg);
+        // (an abstract method bound from an earlier trait is shown as that
+        // trait's)
+        let shown_as = self
+            .classes
+            .get(&existing.declaring_class.to_ascii_lowercase())
+            .filter(|c| c.is_trait)
+            .map(|c| c.name.clone());
+        self.variance_check_method(class, existing, trait_name, abs)
+            .map(|(msg, unresolved)| {
+                let msg = match &shown_as {
+                    Some(t) => {
+                        let from = format!("{}::", crate::string::msg_str(&class.name));
+                        let to = format!("{}::", crate::string::msg_str(t));
+                        match msg.find(&from) {
+                            Some(i) => format!("{}{}{}", &msg[..i], to, &msg[i + from.len()..]),
+                            None => msg,
+                        }
                     }
-                    continue;
-                }
-                if class.is_readonly && !prop.is_readonly {
-                    return Err(format!(
-                        "Readonly class {} cannot use trait with a non-readonly property {}::${}",
-                        crate::string::msg_str(&class.name),
-                        crate::string::msg_str(&trait_def.name),
-                        crate::string::msg_str(&prop.name)
-                    ));
-                }
-                if class.is_enum {
-                    return Err(format!(
-                        "Enum {} cannot include properties",
-                        crate::string::msg_str(&class.name)
-                    ));
-                }
-                let mut p = prop.clone();
-                p.declaring_class = class_name_lower.clone();
-                class.properties.push(p);
-                from.insert(prop.name.clone(), trait_def.name.clone());
-            }
+                    None => msg,
+                };
+                (msg, line, unresolved)
+            })
+    }
+
+    /// "Cannot make non abstract method P::m() abstract in class C"
+    /// (do_inheritance_check_on_method()).
+    #[inline(never)]
+    fn inherited_made_abstract_error(
+        &self,
+        class: &ClassEntry,
+        child: &crate::object::MethodDef,
+        parent: &crate::object::MethodDef,
+        parent_name: &[u8],
+        line: u32,
+    ) -> VmError {
+        let pdecl = self.declaring_class_name(&parent.declaring_class, parent_name);
+        let cdecl = self.declaring_class_name(&child.declaring_class, &class.name);
+        VmError {
+            message: format!(
+                "Cannot make non abstract method {}::{}() abstract in class {}",
+                crate::string::msg_str(&pdecl),
+                crate::string::msg_str(&child.name),
+                crate::string::msg_str(&cdecl)
+            ),
+            line: if child.op_array.decl_line > 0 {
+                child.op_array.decl_line
+            } else {
+                line
+            },
         }
-        Ok(Some(from))
     }
 
     /// The name of the class that declared an inherited member (its
