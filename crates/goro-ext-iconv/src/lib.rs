@@ -18,6 +18,8 @@ mod mime;
 mod sbcs_tables;
 #[rustfmt::skip]
 mod big5_glibc;
+#[rustfmt::skip]
+mod translit_table;
 
 use conv::{Errno, Iconv};
 
