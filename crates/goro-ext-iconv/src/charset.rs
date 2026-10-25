@@ -235,19 +235,16 @@ pub fn lookup(name: &[u8]) -> Option<Kind> {
             return Some(k);
         }
     }
-    // ISO_8859-N / ISO8859-N / ISO88592 ...
-    let compact: Vec<u8> = up
+    // glibc's other aliases (glibc does not otherwise loosen names:
+    // "UTF_8" or "LATIN-1" are unknown)
+    let i = sbcs_tables::ALIASES
+        .binary_search_by(|(n, _)| n.as_bytes().cmp(up.as_slice()))
+        .ok()?;
+    let canonical = sbcs_tables::ALIASES[i].1.as_bytes();
+    table()
         .iter()
-        .copied()
-        .filter(|c| *c != b'-' && *c != b'_')
-        .collect();
-    for &(n, k) in table() {
-        let nc: Vec<u8> = n.bytes().filter(|c| *c != b'-' && *c != b'_').collect();
-        if nc == compact {
-            return Some(k);
-        }
-    }
-    None
+        .find(|(n, _)| n.as_bytes() == canonical)
+        .map(|&(_, k)| k)
 }
 
 /// The result of decoding from the start of a (non-empty) input.

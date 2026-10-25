@@ -57,5 +57,16 @@ o.append('pub static NAMES: [(&str, u16); %d] = [\n' % len(names))
 for n in sorted(names):
     o.append('    ("%s", %d),\n' % (n, names[n]))
 o.append('];\n')
+# aliases of the other (multi-byte, stateful) charsets, resolved by
+# charset::lookup() to the canonical names it knows
+others = {}
+for a, target in al.items():
+    if a.upper() not in names and target.upper() not in names:
+        others[a.upper()] = target.upper()
+o.append('\n/// glibc\'s aliases of the other charsets (upper case, sorted) to their\n/// canonical names.\n')
+o.append('pub static ALIASES: [(&str, &str); %d] = [\n' % len(others))
+for n in sorted(others):
+    o.append('    ("%s", "%s"),\n' % (n, others[n]))
+o.append('];\n')
 open(sys.argv[2], 'w').write(''.join(o))
 print(len(tables), len(names))

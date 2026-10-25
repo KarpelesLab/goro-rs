@@ -92,7 +92,7 @@ pub fn register(vm: &mut Vm) {
     }
     let s = |v: &str| Value::String(PhpString::from_string(v.to_string()));
     vm.constants.insert(b"ICONV_IMPL".to_vec(), s("glibc"));
-    vm.constants.insert(b"ICONV_VERSION".to_vec(), s("2.40"));
+    vm.constants.insert(b"ICONV_VERSION".to_vec(), s("2.43"));
     vm.constants
         .insert(b"ICONV_MIME_DECODE_STRICT".to_vec(), Value::Long(1));
     vm.constants.insert(
