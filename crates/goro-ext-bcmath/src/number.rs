@@ -975,6 +975,9 @@ fn calc_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[Va
     }
     let (n1, s1) = obj_num(obj);
     let prefix = m.prefix(0);
+    if matches!(op, Op::Pow) && n2.scale == 0 {
+        crate::raise_alloc_check(vm, &n1, num::num2long(&n2))?;
+    }
     match calc(
         op,
         &n1,
@@ -1143,6 +1146,9 @@ fn round_method(vm: &mut Vm, m: &Method, obj: &Rc<RefCell<PhpObject>>, list: &[V
         );
     }
     let (n, _) = obj_num(obj);
+    if let Some(size) = num::round_alloc_size(&n, precision, mode) {
+        vm.memory_check(usize::try_from(size).unwrap_or(usize::MAX))?;
+    }
     let (mut r, scale) = num::round(&n, precision, mode);
     r.rm_trailing_zeros();
     Ok(new_number(vm, &r, scale))

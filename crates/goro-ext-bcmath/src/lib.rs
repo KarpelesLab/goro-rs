@@ -116,6 +116,24 @@ fn check_alloc(vm: &mut Vm, scale: usize) -> Result<(), VmError> {
     vm.memory_check(scale.saturating_add(32))
 }
 
+/// bc_standard_raise()'s safe_emalloc(n, sizeof(BC_VECTOR) * 3, 0): the
+/// overflow and memory-limit fatal errors of a power too large to compute.
+pub(crate) fn raise_alloc_check(vm: &mut Vm, base: &num::Num, exponent: i64) -> Result<(), VmError> {
+    let Some(n) = num::raise_buffer_vectors(base, exponent) else {
+        return Ok(());
+    };
+    match n.checked_mul(24) {
+        Some(size) => vm.memory_check(usize::try_from(size).unwrap_or(usize::MAX)),
+        None => {
+            let line = vm.current_line;
+            Err(vm.emit_fatal_at(
+                &format!("Possible integer overflow in memory allocation ({} * 24 + 0)", n),
+                line,
+            ))
+        }
+    }
+}
+
 fn str_val(v: Vec<u8>) -> Value {
     Value::String(PhpString::from_vec(v))
 }
@@ -282,6 +300,7 @@ fn bcpow(vm: &mut Vm, args: &[Value]) -> R {
     if exponent < 0 {
         check_alloc(vm, scale)?;
     }
+    raise_alloc_check(vm, &base, exponent)?;
     match num::raise(&base, exponent, scale) {
         Ok(r) => ret_num(vm, &r, scale),
         Err(e) => pow_err(vm, e, Some(arg_prefix(f, 2))),
@@ -373,6 +392,9 @@ fn bcround(vm: &mut Vm, args: &[Value]) -> R {
         return value_error(vm, f, 3, "is an unsupported rounding mode");
     }
     let n = tri!(str_arg(vm, f, args, 0));
+    if let Some(size) = num::round_alloc_size(&n, precision, mode) {
+        vm.memory_check(usize::try_from(size).unwrap_or(usize::MAX))?;
+    }
     let (r, scale) = num::round(&n, precision, mode);
     ret_num(vm, &r, scale)
 }

@@ -739,6 +739,28 @@ pub const ROUND_TOWARD_ZERO: i64 = 7;
 pub const ROUND_AWAY_FROM_ZERO: i64 = 8;
 
 /// bc_round(): (result, scale of the result).
+/// The bc_new_num() size (sizeof(bc_struct) + digits) of bc_round()'s
+/// result when it is a padded copy or a power of ten, for the memory
+/// limit check before a huge precision is honoured.
+pub fn round_alloc_size(num: &Num, precision: i64, mode: i64) -> Option<u64> {
+    if precision < 0 && (num.len as u64) < precision.unsigned_abs() {
+        let ten_power = match mode {
+            ROUND_AWAY_FROM_ZERO => true,
+            ROUND_CEILING => !num.neg,
+            ROUND_FLOOR => num.neg,
+            _ => false,
+        };
+        if !ten_power || num.is_zero() {
+            return None;
+        }
+        return Some(32 + precision.unsigned_abs().saturating_add(1));
+    }
+    if precision >= 0 && (num.scale as u64) < precision as u64 {
+        return Some(32 + num.len as u64 + precision as u64);
+    }
+    None
+}
+
 pub fn round(num: &Num, precision: i64, mode: i64) -> (Num, usize) {
     if precision < 0 && (num.len as u64) < precision.unsigned_abs() {
         match mode {
@@ -867,6 +889,32 @@ pub enum RaiseError {
     ScaleOverflow,
     FullLenOverflow,
     DivideByZero,
+}
+
+/// The BC_VECTOR count of bc_standard_raise()'s work buffer (it allocates
+/// three times that many 8-byte vectors up front), or None when bc_raise()
+/// takes another path (zero exponent or base, overflow errors, the fast
+/// path for small results).
+pub fn raise_buffer_vectors(base: &Num, exponent: i64) -> Option<u64> {
+    if exponent == 0 || base.is_zero() {
+        return None;
+    }
+    let exp = exponent.unsigned_abs();
+    let expz = usize::try_from(exp).ok()?;
+    if base.len > usize::MAX / expz || base.scale > usize::MAX / expz {
+        return None;
+    }
+    let power_len = base.len * expz;
+    let power_scale = base.scale * expz;
+    let full = power_len.checked_add(power_scale)?;
+    let base_len = base.len + base.scale;
+    if base_len <= 8 && full <= 16 {
+        return None;
+    }
+    // (leading zeros of the base are not stored in its vectors)
+    let lz = base.v.iter().take_while(|&&d| d == 0).count();
+    let arr = (base_len - lz).div_ceil(8) as u64;
+    arr.checked_mul(exp)
 }
 
 /// bc_raise()
