@@ -25177,7 +25177,8 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                let cmp = cmp_fn(self, &a, &b);
+                                // `a > b` is `b < a`: the right operand is op1.
+                                let cmp = cmp_fn(self, &b, &a);
                                 if cmp.is_none() && self.current_exception.is_some() {
                                     if let Some((catch_target, _, _, _, saved_pc)) =
                                         exception_handlers.pop()
@@ -25194,7 +25195,7 @@ impl Vm {
                                 if let Some(ord) = cmp {
                                     self.write_operand(
                                         &op.result,
-                                        if ord == std::cmp::Ordering::Greater {
+                                        if ord == std::cmp::Ordering::Less {
                                             Value::True
                                         } else {
                                             Value::False
@@ -25289,7 +25290,8 @@ impl Vm {
                     if let Some(cmp_fn) = self.object_compare {
                         if let Some(is_type) = self.object_is_operator_type {
                             if is_type(&a) || is_type(&b) {
-                                let cmp = cmp_fn(self, &a, &b);
+                                // `a > b` is `b < a`: the right operand is op1.
+                                let cmp = cmp_fn(self, &b, &a);
                                 if cmp.is_none() && self.current_exception.is_some() {
                                     if let Some((catch_target, _, _, _, saved_pc)) =
                                         exception_handlers.pop()
@@ -25306,7 +25308,7 @@ impl Vm {
                                 if let Some(ord) = cmp {
                                     self.write_operand(
                                         &op.result,
-                                        if ord != std::cmp::Ordering::Less {
+                                        if ord != std::cmp::Ordering::Greater {
                                             Value::True
                                         } else {
                                             Value::False

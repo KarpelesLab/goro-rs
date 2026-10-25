@@ -2223,7 +2223,6 @@ impl<'a> Parser<'a> {
             throw(vm, b"Exception", "Could not unserialize number");
             return None;
         }
-        let num = obj.borrow().get_property(b"num");
         let tmp_idx = {
             let mut d = self.d.borrow_mut();
             d.tmps.push(Value::Null);
@@ -2254,18 +2253,13 @@ impl<'a> Parser<'a> {
             .collect();
         if !items.is_empty() {
             let mut ob = obj.borrow_mut();
-            ob.remove_property(b"num");
             for (k, v) in items {
                 let name: Vec<u8> = match k {
                     ArrayKey::String(s) => s.as_bytes().to_vec(),
                     ArrayKey::Int(n) => n.to_string().into_bytes(),
                 };
-                if name == b"num" {
-                    continue;
-                }
                 ob.set_property(name, v);
             }
-            ob.set_property(b"num".to_vec(), num);
         }
         Some(obj_val)
     }

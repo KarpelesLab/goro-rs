@@ -7,14 +7,129 @@ use goro_core::array::PhpArray;
 use goro_core::object::PhpObject;
 use goro_core::string::PhpString;
 use goro_core::value::Value;
-use goro_core::vm::{Vm, VmError};
+use goro_core::object::NativeData;
+use goro_core::vm::{NativeObjectHandlers, Vm, VmError};
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
-// Thread-local storage for GMP values keyed by object_id
-thread_local! {
-    static GMP_VALUES: RefCell<HashMap<u64, Int>> = RefCell::new(HashMap::new());
+/// The number of a GMP object (its native data).
+struct GmpNum(Int);
+
+static GMP_HANDLERS: NativeObjectHandlers = NativeObjectHandlers {
+    get_properties: Some(gmp_get_properties),
+    cast: Some(gmp_cast),
+    compare: Some(gmp_compare_handler),
+    clone_obj: Some(gmp_clone_obj),
+    ..NativeObjectHandlers::EMPTY
+};
+
+/// gmp_get_debug_info(): the properties plus `num` (debug purpose only;
+/// the number is no property).
+fn gmp_get_properties(
+    _vm: &mut Vm,
+    obj: &Rc<RefCell<PhpObject>>,
+    purpose: u8,
+) -> Option<PhpArray> {
+    if purpose != 0 {
+        return None;
+    }
+    let mut arr = PhpArray::new();
+    let n = obj_num(obj);
+    {
+        let ob = obj.borrow();
+        for (k, v) in ob.properties.iter() {
+            if matches!(v, Value::Undef) || k.starts_with(b"__") {
+                continue;
+            }
+            arr.set(
+                Vm::value_to_array_key(Value::String(PhpString::from_vec(k.clone()))),
+                v.clone(),
+            );
+        }
+    }
+    arr.set(
+        goro_core::array::ArrayKey::String(PhpString::from_bytes(b"num")),
+        Value::String(PhpString::from_string(n.to_string())),
+    );
+    Some(arr)
+}
+
+/// gmp_cast_object(): bool / int / float / string.
+fn gmp_cast(obj: &Rc<RefCell<PhpObject>>, kind: u8) -> Option<Value> {
+    let n = obj_num(obj);
+    Some(match kind {
+        0 => {
+            if n.is_zero() {
+                Value::False
+            } else {
+                Value::True
+            }
+        }
+        1 => Value::Long(mp::get_si(&n)),
+        2 => Value::Double(n.to_f64_trunc()),
+        _ => Value::String(PhpString::from_string(n.to_string())),
+    })
+}
+
+/// gmp_compare() for comparisons made outside the operators (sorting,
+/// in_array()...), without its diagnostics.
+fn gmp_compare_handler(a: &Value, b: &Value) -> Option<i64> {
+    fn num(v: &Value) -> Option<Int> {
+        match v.deref() {
+            v @ Value::Object(_) if is_gmp_object(&v) => get_gmp_value(&v),
+            Value::Long(n) => Some(Int::from(n)),
+            Value::String(s) => parse_bigint_str_strict(&s.to_string_lossy(), 0).ok(),
+            Value::Double(d)
+                if !d.is_nan()
+                    && (-9.223_372_036_854_776e18..9.223_372_036_854_776e18).contains(&d) =>
+            {
+                Some(Int::from(d as i64))
+            }
+            _ => None,
+        }
+    }
+    if matches!(a.deref(), Value::Object(_)) && !is_gmp_object(a) {
+        return None;
+    }
+    let bool_of = |v: &Value| match v.deref() {
+        Value::True => Some(true),
+        Value::False | Value::Null | Value::Undef => Some(false),
+        _ => None,
+    };
+    if let Some(o) = bool_of(b) {
+        let me = get_gmp_value(a).is_some_and(|n| !n.is_zero());
+        return Some(me.cmp(&o) as i64);
+    }
+    if let Some(o) = bool_of(a) {
+        let me = get_gmp_value(b).is_some_and(|n| !n.is_zero());
+        return Some(o.cmp(&me) as i64);
+    }
+    match (num(a), num(b)) {
+        (Some(x), Some(y)) => Some(x.cmp(&y) as i64),
+        _ => Some(2),
+    }
+}
+
+fn gmp_clone_obj(_vm: &mut Vm, src: &Rc<RefCell<PhpObject>>, dst: &Rc<RefCell<PhpObject>>) {
+    let n = obj_num(src);
+    attach_num(dst, n);
+}
+
+fn attach_num(obj: &Rc<RefCell<PhpObject>>, n: Int) {
+    obj.borrow_mut().native = Some(NativeData {
+        data: Rc::new(GmpNum(n)),
+        handlers: &GMP_HANDLERS,
+    });
+}
+
+/// The number of a GMP object; 0 for one never initialized.
+fn obj_num(obj: &Rc<RefCell<PhpObject>>) -> Int {
+    let ob = obj.borrow();
+    ob.native
+        .as_ref()
+        .and_then(|n| n.data.downcast_ref::<GmpNum>())
+        .map(|g| g.0.clone())
+        .unwrap_or(Int::ZERO)
 }
 
 /// Register all GMP extension functions and constants
@@ -110,26 +225,9 @@ pub fn register(vm: &mut Vm) {
     );
 
     // Register the GMP class as a final, non-instantiable-via-extends class.
+    // The number is native data (no property; `num` shows in debug output).
     let mut ce = goro_core::object::ClassEntry::new(b"GMP".to_vec());
     ce.is_final = true;
-    // `num` is an instance property (string repr of the stored bigint).
-    ce.properties.push(goro_core::object::PropertyDef {
-        name: b"num".to_vec(),
-        default: Value::String(PhpString::from_bytes(b"0")),
-        is_static: false,
-        is_readonly: false,
-        visibility: goro_core::object::Visibility::Public,
-        set_visibility: None,
-        declaring_class: b"gmp".to_vec(),
-        property_type: None,
-        has_get_hook: false,
-        has_set_hook: false,
-        is_virtual: false,
-        is_abstract: false,
-        is_final: false,
-        attributes: Vec::new(),
-        doc_comment: None,
-    });
     vm.classes.insert(b"gmp".to_vec(), ce);
 }
 
@@ -152,10 +250,7 @@ pub fn is_gmp_object(val: &Value) -> bool {
 /// Get the Int value from a GMP object
 pub fn get_gmp_value(val: &Value) -> Option<Int> {
     match val {
-        Value::Object(obj) => {
-            let id = obj.borrow().object_id;
-            GMP_VALUES.with(|m| m.borrow().get(&id).cloned())
-        }
+        Value::Object(obj) if is_gmp_object(val) => Some(obj_num(obj)),
         Value::Reference(r) => get_gmp_value(&r.borrow()),
         _ => None,
     }
@@ -355,6 +450,24 @@ pub fn gmp_compare(vm: &mut Vm, a: &Value, b: &Value) -> Option<std::cmp::Orderi
     if matches!(a.deref(), Value::Null | Value::Undef) {
         return Some(std::cmp::Ordering::Less);
     }
+    // zend_compare() uses op1's handler: another object compares by its own.
+    if matches!(a.deref(), Value::Object(_)) && !is_gmp_object(a) {
+        return None;
+    }
+    // ... and compares an object with a bool through the bool cast.
+    let as_bool = |v: &Value| match v.deref() {
+        Value::True => Some(true),
+        Value::False => Some(false),
+        _ => None,
+    };
+    if let Some(other) = as_bool(b) {
+        let me = get_gmp_value(a).is_some_and(|n| !n.is_zero());
+        return Some(me.cmp(&other));
+    }
+    if let Some(other) = as_bool(a) {
+        let me = get_gmp_value(b).is_some_and(|n| !n.is_zero());
+        return Some(other.cmp(&me));
+    }
     let get = |vm: &mut Vm, v: &Value| match op_arg_or_type_error(vm, v) {
         Ok(n) => Some(n),
         Err(e) => {
@@ -509,16 +622,8 @@ fn value_to_bigint_checked(
         Value::Object(obj) => {
             let b = obj.borrow();
             if b.class_name.eq_ignore_ascii_case(b"GMP") {
-                let id = b.object_id;
-                GMP_VALUES
-                    .with(|m| m.borrow().get(&id).cloned())
-                    .ok_or(GmpArgError::Type(format!(
-                        "{}(): Argument #{} (${}) must be of type GMP|string|int, {} given",
-                        func_name,
-                        arg_num,
-                        arg_name,
-                        String::from_utf8_lossy(&b.class_name)
-                    )))
+                drop(b);
+                Ok(obj_num(obj))
             } else {
                 Err(GmpArgError::Type(format!(
                     "{}(): Argument #{} (${}) must be of type GMP|string|int, {} given",
@@ -616,18 +721,9 @@ fn get_gmp_arg(
 /// Create a GMP object from a Int and return it as a Value
 fn bigint_to_gmp_value(vm: &mut Vm, n: Int) -> Value {
     let obj_id = vm.alloc_object_id();
-    // Drop any stale entry for this id (id was recycled by another object).
-    GMP_VALUES.with(|m| {
-        m.borrow_mut().remove(&obj_id);
-    });
-    let mut obj = PhpObject::new(b"GMP".to_vec(), obj_id);
-    let num_str = n.to_string();
-    obj.set_property(
-        b"num".to_vec(),
-        Value::String(PhpString::from_string(num_str)),
-    );
-    GMP_VALUES.with(|m| m.borrow_mut().insert(obj_id, n));
-    Value::Object(Rc::new(RefCell::new(obj)))
+    let obj = Rc::new(RefCell::new(PhpObject::new(b"GMP".to_vec(), obj_id)));
+    attach_num(&obj, n);
+    Value::Object(obj)
 }
 
 /// Generate the hex string representation used by GMP serialize.
@@ -647,12 +743,7 @@ fn set_gmp_value(val: &Value, n: Int) -> bool {
         },
         _ => return false,
     };
-    let oid = obj.borrow().object_id;
-    obj.borrow_mut().set_property(
-        b"num".to_vec(),
-        Value::String(PhpString::from_string(n.to_string())),
-    );
-    GMP_VALUES.with(|m| m.borrow_mut().insert(oid, n));
+    attach_num(&obj, n);
     true
 }
 
@@ -942,22 +1033,13 @@ pub fn gmp_construct_native(vm: &mut Vm, args: &[Value], line: u32) -> Result<()
         }
     };
 
-    // Store the Int against the new object's id and set the "num" property
-    let id = this_obj.borrow().object_id;
-    GMP_VALUES.with(|m| {
-        m.borrow_mut().insert(id, n.clone());
-    });
-    let num_str = n.to_string();
-    this_obj.borrow_mut().set_property(
-        b"num".to_vec(),
-        Value::String(PhpString::from_string(num_str)),
-    );
+    attach_num(&this_obj, n);
     Ok(())
 }
 
 fn gmp_strval(vm: &mut Vm, args: &[Value]) -> Result<Value, VmError> {
     let a = get_gmp_arg(vm, args, 0, "gmp_strval", "num")?;
-    let base = args.get(1).map(|v| v.to_long()).unwrap_or(10);
+    let base = int_arg_or(vm, args, 1, "gmp_strval", "base", 10)?;
 
     if base < -36 || (base > -2 && base < 2) || base > 62 {
         let msg =
@@ -1623,20 +1705,11 @@ fn gmp_setbit_or_clrbit(
         });
     }
 
-    GMP_VALUES.with(|m| {
-        let mut map = m.borrow_mut();
-        if let Some(n) = map.get(&obj_id) {
-            let new_val = mp::set_bit(n, index as u64, bit_val);
-            let num_str = new_val.to_string();
-            map.insert(obj_id, new_val);
-            if let Some(obj) = target_obj {
-                obj.borrow_mut().set_property(
-                    b"num".to_vec(),
-                    Value::String(PhpString::from_string(num_str)),
-                );
-            }
-        }
-    });
+    let _ = obj_id;
+    if let Some(obj) = target_obj {
+        let n = obj_num(&obj);
+        attach_num(&obj, mp::set_bit(&n, index as u64, bit_val));
+    }
 
     Ok(Value::Null)
 }
