@@ -12,6 +12,8 @@ use crate::rcstr::RcStr;
 use crate::string::PhpString;
 use crate::value::Value;
 
+#[path = "builtincall.rs"]
+mod builtincall;
 #[path = "fastcall.rs"]
 mod fastcall;
 #[path = "leancall.rs"]
@@ -1424,15 +1426,18 @@ pub struct Vm {
     pub(crate) cv_frame_hint: *const OpArray,
     /// Lean calls (see leancall.rs) handed over to the DO_FCALLs that made
     /// them, innermost last.
-    lean_resume: Vec<leancall::LeanResume>,
+    pub(crate) lean_resume: Vec<leancall::LeanResume>,
     /// What the next execute_op_array_inner() starts a resumed lean call's
     /// frame with (set by DO_FCALL right before the call).
     resume_frame: Option<leancall::ResumeFrame>,
     /// The variables and frame start of the lean call DO_FCALL is resuming
     /// (see Vm::resume_lean_call), until its frame is set up.
     lean_resumed: Option<(Vec<Value>, leancall::ResumeFrame)>,
+    /// A builtin call run_fast_ops() made failed (see builtincall.rs): the
+    /// DO_FCALL it stopped at dispatches what it raised.
+    fast_call_failed: Option<VmError>,
     /// Lean calls running (their callees' opcodes in run_fast_ops()).
-    lean_depth: u32,
+    pub(crate) lean_depth: u32,
     /// Emptied buffers of finished calls (locals, temporaries, backtrace
     /// frames), reused by the next ones.
     value_pool: Vec<Vec<Value>>,
@@ -2018,6 +2023,7 @@ impl Vm {
             lean_resume: Vec::new(),
             resume_frame: None,
             lean_resumed: None,
+            fast_call_failed: None,
             lean_depth: 0,
             value_pool: Vec::new(),
             foreach_pool: Vec::new(),
@@ -20246,7 +20252,7 @@ impl Vm {
     /// plain name, without named arguments, that the builtin fast path runs
     /// (see resolve_call_target); not while an observer watches calls.
     #[inline]
-    fn fast_builtin_target(&self) -> bool {
+    pub(crate) fn fast_builtin_target(&self) -> bool {
         self.observer.is_none()
             && self
                 .pending_calls
@@ -22291,6 +22297,9 @@ impl Vm {
         // (see OpArray::free_mask()).
         let free_mask = op_array.free_mask();
         let mut pending_free: usize = usize::MAX;
+        // A builtin call the last run of fast opcodes made at the DO_FCALL
+        // it stopped at failed (see builtincall.rs).
+        let mut fast_failure: Option<VmError> = None;
         'exec: loop {
             if pending_free != usize::MAX {
                 let p = std::mem::replace(&mut pending_free, usize::MAX);
@@ -22446,6 +22455,9 @@ impl Vm {
                         foreach_iter_handles.is_empty() && foreach_ref_arrays.is_empty(),
                         (bound || globals_cv.is_some()).then_some(globals_cv),
                     );
+                    if self.fast_call_failed.is_some() {
+                        fast_failure = self.fast_call_failed.take();
+                    }
                     if next != ip {
                         ip = next;
                         // (a lean call handed over to the DO_FCALL the run
@@ -28762,6 +28774,26 @@ impl Vm {
                     Flow::Continue => continue 'exec,
                     Flow::Return(v) => return Ok(v),
                 },
+                // The builtin call the run of fast opcodes made here failed
+                // (see builtincall.rs): what the builtin fast path below
+                // does then.
+                OpCode::DoFCall if fast_failure.is_some() => {
+                    let e = fast_failure.take().expect("fast call failure");
+                    if self.current_exception.is_some() {
+                        if let Some((catch_target, finally_target, _, _, saved_pc)) =
+                            exception_handlers.pop()
+                        {
+                            pending_calls_catch_depth = Some(saved_pc);
+                            ip = if catch_target > 0 {
+                                catch_target
+                            } else {
+                                finally_target
+                            } as usize;
+                            continue 'exec;
+                        }
+                    }
+                    return Err(e);
+                }
                 // A plain call of a user function or method (see
                 // fast_fcall_target): the general handler below, without its
                 // special cases.

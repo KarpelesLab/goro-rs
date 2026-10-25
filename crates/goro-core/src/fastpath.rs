@@ -1574,13 +1574,34 @@ impl crate::vm::Vm {
                 // A call of a plain user function: its callee's opcodes run
                 // here too, without a frame (see leancall.rs).
                 OpCode::DoFCall => {
-                    if !(no_release && self.lean_candidate()) {
-                        return ip;
-                    }
-                    if self.lean_call(op_array, ip, tmps) {
-                        Fast::Done
+                    if no_release && self.lean_candidate() {
+                        if self.lean_call(op_array, ip, tmps) {
+                            Fast::Done
+                        } else {
+                            break 'run ip;
+                        }
+                    } else if no_release
+                        && bound.is_none()
+                        && self.lean_depth == 0
+                        // (a lean call handed over here: it takes the
+                        // DO_FCALL, its pending call is not the top one)
+                        && self.lean_resume.is_empty()
+                        && self.fast_builtin_target()
+                    {
+                        // A builtin by its plain name (see builtincall.rs).
+                        match self.fast_builtin_dofcall(
+                            op_array,
+                            ip,
+                            tmps,
+                            internal_code,
+                            free_mask.get(),
+                        ) {
+                            Some(true) => Fast::Done,
+                            Some(false) => break 'run ip,
+                            None => return ip,
+                        }
                     } else {
-                        break 'run ip;
+                        return ip;
                     }
                 }
                 // (whether the next argument of the call is sent by reference)
